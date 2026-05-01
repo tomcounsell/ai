@@ -575,6 +575,59 @@ class TestIngest:
             assert result is False
             mock_memory_cls.safe_save.assert_not_called()
 
+    def test_ingest_strips_private_tag_from_saved_content(self):
+        """sdlc-1179: <private>...</private> regions are stripped before Memory.safe_save.
+
+        The user's wrapped content must not appear in the persisted Memory.content.
+        """
+        from hook_utils.memory_bridge import ingest
+
+        prompt = (
+            "What does this key mean for our auth flow? "
+            "<private>sk-redacted-secret-here</private> "
+            "Please explain the implications."
+        )
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=False)
+
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+        mock_memory_cls.safe_save.return_value = MagicMock()
+
+        with (
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("models.memory.SOURCE_HUMAN", "human"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            result = ingest(prompt)
+            assert result is True
+            mock_memory_cls.safe_save.assert_called_once()
+            saved_content = mock_memory_cls.safe_save.call_args.kwargs["content"]
+            assert "sk-redacted-secret-here" not in saved_content
+            assert "<private>" not in saved_content
+            assert "</private>" not in saved_content
+            # The non-wrapped portions must still be saved.
+            assert "auth flow" in saved_content
+            assert "implications" in saved_content
+
+    def test_ingest_full_strip_to_empty_returns_false(self):
+        """sdlc-1179: when wrapping the entire prompt, content drops below MIN_PROMPT_LENGTH.
+
+        The downstream length filter correctly rejects the now-empty record;
+        no Memory record is created.
+        """
+        from hook_utils.memory_bridge import ingest
+
+        # Wrap everything; after strip_private the content is empty.
+        prompt = "<private>this entire prompt is private content do not save</private>"
+
+        mock_memory_cls = MagicMock()
+        with patch("models.memory.Memory", mock_memory_cls):
+            result = ingest(prompt)
+            assert result is False
+            mock_memory_cls.safe_save.assert_not_called()
+
 
 class TestExtract:
     """Test the extract() function."""
@@ -1186,6 +1239,49 @@ class TestPrefetch:
         )
         # Trivial pattern (after lowercase + strip), padded with spaces to meet length
         assert prefetch("sess", "yes" + " " * 60) is None
+
+    def test_prefetch_strips_private_before_bm25_query(self, tmp_path, monkeypatch):
+        """sdlc-1179: prefetch wraps the prompt with strip_private before BM25 query.
+
+        Wrapped <private> content must not seed the lookup vector against past
+        memories. This is defense-in-depth: even though the wrapped content is
+        not persisted (ingest strips it too), letting it leak into the BM25
+        query would cause the bloom-hit set to skew toward past records that
+        happen to share trivial words with the secret.
+        """
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        captured_query = []
+
+        def mock_recall_with_query(query, project_key, **kwargs):
+            captured_query.append(query)
+            return []
+
+        with (
+            patch(
+                "hook_utils.memory_bridge._recall_with_query",
+                side_effect=mock_recall_with_query,
+            ),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            prompt = (
+                "What does this key mean for our auth flow? "
+                "<private>sk-redacted-secret-here</private> Please explain."
+            )
+            prefetch("sess", prompt)
+
+        assert len(captured_query) == 1
+        query = captured_query[0]
+        assert "sk-redacted-secret-here" not in query
+        assert "<private>" not in query
+        assert "</private>" not in query
+        # Non-wrapped tokens must still seed the query.
+        assert "auth flow" in query
 
     def test_prefetch_no_window_gate(self, tmp_path, monkeypatch):
         """Prefetch fires immediately -- no WINDOW_SIZE gating."""

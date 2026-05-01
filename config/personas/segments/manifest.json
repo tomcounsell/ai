@@ -3,6 +3,7 @@
   "segments": [
     "identity.md",
     "work-patterns.md",
-    "tools.md"
+    "tools.md",
+    "private-tag.md"
   ]
 }

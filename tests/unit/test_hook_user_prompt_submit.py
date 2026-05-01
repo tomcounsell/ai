@@ -680,3 +680,55 @@ class TestPrefetchWiring:
             hook.main()
 
         mock_prefetch.assert_not_called()
+
+
+class TestPrivateTagHookIngestion:
+    """sdlc-1179: a Claude Code prompt with <private>X</private> wrapping must
+    not result in a Memory record containing X.
+
+    The hook calls memory_bridge.ingest(prompt) on UserPromptSubmit; the
+    helper applies strip_private(content) before any Memory.safe_save call.
+    """
+
+    def test_ingest_called_via_hook_strips_private_before_save(self, monkeypatch):
+        """End-to-end via the live hook + live memory_bridge.ingest:
+
+        Patch only Memory.safe_save and bloom; let the actual ingest() run so
+        the strip_private path is exercised. Assert the saved content excludes
+        the wrapped region.
+        """
+        from hook_utils.memory_bridge import ingest
+
+        captured = {}
+
+        def fake_safe_save(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()  # Non-None = saved
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=False)
+
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+        mock_memory_cls.safe_save.side_effect = fake_safe_save
+
+        prompt = (
+            "Refactor the auth handler. The current key is "
+            "<private>sk-very-secret-redacted</private>. Should we rotate?"
+        )
+
+        with (
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("models.memory.SOURCE_HUMAN", "human"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            result = ingest(prompt)
+
+        assert result is True
+        saved_content = captured.get("content", "")
+        assert "sk-very-secret-redacted" not in saved_content
+        assert "<private>" not in saved_content
+        assert "</private>" not in saved_content
+        # Real (non-private) content survives.
+        assert "Refactor the auth handler" in saved_content
+        assert "rotate" in saved_content.lower()

@@ -73,6 +73,72 @@ Telegram messages are saved as Memory records immediately on receipt in `bridge/
 
 Empty text, bot messages, and media-only messages are skipped.
 
+#### Excluding content with `<private>` tags (issue #1179)
+
+A user can wrap any portion of a Telegram message or Claude Code prompt in `<private>...</private>` tags to exclude that region from every persistent surface — Memory, `TelegramMessage.content`, `AgentSession.message_text`, and bridge logs. The tag is a per-message escape hatch, not a global toggle: each invocation only affects the current message.
+
+**Syntax:**
+
+```
+the api key is <private>sk-abc123</private>, can you check it?
+```
+
+The tag is **case-sensitive** (`<private>` only, not `<PRIVATE>` or `<Private>`), **single-level** (no nesting), and matched by a non-greedy regex so multiple wrapped regions in one message are stripped independently. An unmatched opening `<private>` with no closing `</private>` is left as literal text — nothing gets greedily consumed to end-of-message.
+
+**Scope of stripping:**
+
+The helper `strip_private(text)` in `agent/private_tag.py` is invoked at every persistent-write call site that handles raw user input:
+
+- `bridge/telegram_bridge.py`:
+  - `store_message(content=safe_text, ...)` (TelegramMessage.content)
+  - `Memory.safe_save(content=safe_text[:500], ...)` (subconscious memory)
+  - `logger.info(... safe_text[:50] ...)` (bridge.log)
+  - `clean_message(safe_text, project)` → `safe_clean_text` → fed into `AgentSession.message_text` via `enqueued_message_text` and the directive splice
+  - Both reply-chain hydration paths (completed-resume at line ~1416, fresh-message prehydration at line ~1922) call `strip_private(reply_chain_context)` immediately after `format_reply_chain` returns, closing the leak channel where a stored chain could still carry `<private>` markers from messages persisted before this feature shipped (B1).
+
+- `.claude/hooks/hook_utils/memory_bridge.py`:
+  - `ingest()` — applied at the top before the length filter, so wrapped content never reaches `Memory.safe_save`.
+  - `prefetch()` — applied before BM25 query so wrapped content does not seed the lookup vector against past memories.
+
+**What the agent sees vs. what gets stored:**
+
+The wrapped content **stays visible to the live agent in the current turn** — the user is masking *future recall*, not hiding from Claude in the moment. This is intentional and contradicts the natural intuition "private = invisible to Claude":
+
+| Channel | Sees `<private>SECRET</private>`? | Why |
+|---------|-----------------------------------|-----|
+| Live agent prompt (this turn) | Yes — agent sees `SECRET` and the tags | The agent must be able to reason about what the user just asked. The `clean_text` variable (built from raw `text`) is what the worker spawns into the SDK. |
+| `Memory.content` (Telegram path) | No — stripped | `Memory.safe_save` receives `safe_text[:500]`. |
+| `Memory.content` (Claude Code path) | No — stripped | `ingest()` strips before the length filter. |
+| `TelegramMessage.content` | No — stripped | `store_message(content=safe_text, ...)`. Persisted text never carries the secret, so `valor-telegram read --search SECRET` returns nothing. |
+| `AgentSession.message_text` | No — stripped | Built from `safe_clean_text` (and `safe_chain` for reply-thread context). |
+| `logs/bridge.log` | No — stripped | The 50-char log prefix uses `safe_text[:50]`. |
+| Post-session memory extraction | Soft — depends on agent | The Haiku extractor runs on the **agent's response**, not the user's input. The persona segment `config/personas/segments/private-tag.md` instructs the agent to **not quote wrapped content back** — but compliance is behavioral, not enforced. Risk 3 in the plan covers this. |
+
+**Worked Telegram example:**
+
+```
+User: the api key is <private>sk-abc123</private>, can you check it?
+
+Agent (this turn): I see the key starts with sk- and is 11 chars long — looks like an OpenAI-style key.
+
+# Later — the secret is gone from every persistent surface:
+$ python -m tools.memory_search search sk-abc123
+(no results)
+
+$ valor-telegram read --search sk-abc123
+(no results)
+
+$ grep sk-abc123 logs/bridge.log
+(no hits)
+```
+
+**Limits and trade-offs:**
+
+- **Forward-only.** Existing records are unaffected. Use `python -m tools.memory_search forget --id <ID> --confirm` to remove an already-persisted secret one record at a time.
+- **Not a credential scanner.** Auto-detection of API keys, credit cards, addresses, etc. is out of scope (see No-Gos in plan `docs/plans/sdlc-1179.md`). Tagging is opt-in only.
+- **Search scrollback intentionally loses tagged content.** `valor-telegram read --search` will not find wrapped content. This is the trade-off the user opted into by tagging.
+- **Bloom fingerprint deploy boundary.** The `Memory` model uses an ExistenceFilter keyed on `content`. A near-duplicate message sent before AND after the deploy will have two different bloom fingerprints (unstripped vs. stripped) — neither dedupes the other. At most one extra record per crossover pair appears for in-flight messages around the deploy. Documented for operators so they don't chase a "duplicate Memory" anomaly in the first hour after shipping.
+
 ### Flow 2: Thought Injection
 
 The PostToolUse hook in `agent/health_check.py` checks for relevant memories on every tool call:
