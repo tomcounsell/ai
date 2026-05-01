@@ -385,29 +385,54 @@ class AgentSession(Model):
 
     # === Worker routing key ===
 
+    # Stages where slugged PM sessions operate in an isolated worktree.
+    # Uses an allowlist (not denylist) so unknown/future stages fail closed —
+    # they serialize on project_key rather than accidentally parallelizing.
+    # Matches the worktree-using stages in resolve_branch_for_stage().
+    _PM_WORKTREE_STAGES: frozenset[str] = frozenset({"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"})
+
     @property
     def worker_key(self) -> str:
         """Compute the worker loop routing key based on isolation level.
 
         Teammate sessions run in parallel across chats, keyed by chat_id.
-        PM sessions and slugless dev sessions share the main working tree,
-        keyed by project_key.  Slugged dev sessions have their own worktree
-        (.worktrees/{slug}/) and branch (session/{slug}), so they route by
-        slug — two slugged dev sessions with the same chat_id still land on
-        different worker loops and run in parallel.
+
+        PM sessions:
+        - Slugless PMs always serialize per project_key (PR #828 invariant).
+        - Slugged PMs at worktree-compatible stages (BUILD/TEST/PATCH/REVIEW/DOCS)
+          route by slug — two sibling PMs with distinct slugs run concurrently.
+        - Slugged PMs at main-checkout stages (PLAN/ISSUE/CRITIQUE/MERGE/None)
+          fall back to project_key to prevent git conflicts on main.
+
+        Dev sessions:
+        - Slugged devs route by slug (isolated worktree).
+        - Slugless devs serialize by project_key.
 
         Slugs are assumed unique across the active session keyspace.  If two
-        dev sessions in different projects share a slug, they will share a
-        worker loop and serialize.
+        sessions in different projects share a slug, they will share a worker
+        loop and serialize.
         """
         if self.session_type == SessionType.TEAMMATE:
             return self.chat_id or self.project_key
         if self.session_type == SessionType.PM:
+            # Slugged PMs at worktree stages route by slug (parallel-safe).
+            # Slugless PMs and PMs at main-checkout stages serialize by project_key.
+            if self.slug and self._pm_stage_is_worktree_compatible():
+                return self.slug
             return self.project_key
         # dev: isolated by slug (worktree) if present, serialized by project otherwise
         if self.slug:
             return self.slug
         return self.project_key
+
+    def _pm_stage_is_worktree_compatible(self) -> bool:
+        """Return True only for stages where a slugged PM uses an isolated worktree.
+
+        Uses an allowlist so unknown or future stages fail closed (serialize)
+        rather than accidentally parallelizing on an unaudited stage.
+        """
+        stage = getattr(self, "current_stage", None)
+        return stage in self._PM_WORKTREE_STAGES
 
     @property
     def is_project_keyed(self) -> bool:
