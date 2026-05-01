@@ -112,14 +112,14 @@ both waste listener attention, and the number isn't actionable in audio.
 Three layers enforce this:
 
 - **Layer 1 — Pass A prompt** explicitly forbids reciting issue numbers,
-  PR numbers, hash-prefixed identifiers, AND bare 4+ digit integers.
+  PR numbers, hash-prefixed identifiers, AND bare 3+ digit integers.
   It also forbids forward-looking commitments ("we will", "I'll push",
   etc.) since auto-confirm removes the human safety check, and requires
   the first sentence to be a decision/heads-up, not setup.
-- **Layer 2 — prefixed-form regex** `\b(?:issue|pr|#)\s*\d{2,}\b` (case
+- **Layer 2 — prefixed-form regex** `\b(?:issue|pr|#)[\s\-_]*\d{2,}\b` (case
   insensitive). Catches "issue 1197" and "PR 1197" but NOT "#1197"
   (because `#` is not a word char).
-- **Layer 3 — bare 4+ digit regex** `\b\d{4,}\b`. Catches bare `1197`
+- **Layer 3 — bare 3+ digit regex** `\b\d{3,}\b`. Catches bare `1197`
   alone AND the numeric portion of `#1197`. Allows `$500`, `250 users`,
   `v3.5.2`.
 

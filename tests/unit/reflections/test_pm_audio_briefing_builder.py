@@ -41,10 +41,10 @@ class TestPassAPrompt:
         assert "issue numbers" in p or "issue number" in p
         assert "pr number" in p or "pr numbers" in p
 
-    def test_prompt_forbids_bare_4_digit_integers(self):
+    def test_prompt_forbids_bare_3_digit_integers(self):
         p = builder._PASS_A_SYSTEM
-        # The plan requires explicit guidance against bare 4+ digit integers
-        assert "4 or more digits" in p or "four or more digits" in p
+        # The plan requires explicit guidance against bare 3+ digit integers
+        assert "3 or more digits" in p or "three or more digits" in p
 
     def test_prompt_requires_first_sentence_is_decision(self):
         p = builder._PASS_A_SYSTEM

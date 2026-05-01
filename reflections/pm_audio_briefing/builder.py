@@ -74,7 +74,7 @@ def _check_numbers(transcript: str) -> None:
     m3 = _NUMBERS_BARE_RE.search(transcript)
     if m3:
         raise BriefingNumbersDetectedError(
-            f"Numbers (bare 4+ digit) detected in transcript: {m3.group()!r}"
+            f"Numbers (bare 3+ digit) detected in transcript: {m3.group()!r}"
         )
 
 
@@ -90,7 +90,7 @@ _PASS_A_SYSTEM = (
     "- Never recite issue numbers, PR numbers, or hash-prefixed identifiers. Refer "
     "to work by substance, not by number ('the continuation-PM crash', not "
     "'issue 1195').\n"
-    "- Do not recite any standalone integer of 4 or more digits — those are "
+    "- Do not recite any standalone integer of 3 or more digits — those are "
     "likely issue or PR numbers stripped of their prefix. Use words like 'a few' "
     "or 'several' instead.\n"
     "- Do not invent decisions, commitments, or future actions. Only narrate work "
