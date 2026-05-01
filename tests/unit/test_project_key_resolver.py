@@ -10,15 +10,9 @@ Covers the full priority chain:
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
-
-from config.project_key_resolver import resolve_project_key, _load_projects
-
+from config.project_key_resolver import resolve_project_key
 
 # ---------------------------------------------------------------------------
 # Helpers
