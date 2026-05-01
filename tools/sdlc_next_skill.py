@@ -91,13 +91,7 @@ def _build_context(proposed_skill: str | None, issue_number: int | None) -> dict
         try:
             import subprocess
 
-            proc = subprocess.run(
-                ["git", "branch", "-a", "--list", f"*pipeline-routing*"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            # Use a more general check: session/ branches exist if any match
+            # Check for session/ branches
             proc2 = subprocess.run(
                 ["git", "branch", "-a"],
                 capture_output=True,
@@ -122,7 +116,8 @@ def decide(
     This is the programmatic interface; CLI consumers go through ``main()``.
 
     Returns:
-        On ``Dispatch``: ``{"skill": "/do-X", "reason": "...", "row_id": "...", "dispatched": True}``
+        On ``Dispatch``: ``{"skill": "/do-X", "reason": "...", "row_id": "...",
+        "dispatched": True}``
         On ``Blocked``: ``{"blocked": True, "reason": "...", "guard_id": "..."}``
         On error: ``{"error": "...", "dispatched": False}``
     """

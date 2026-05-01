@@ -17,9 +17,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from agent.sdlc_router import (
     Blocked,
@@ -70,7 +68,12 @@ def _core_decide(stage_states: dict, meta: dict | None = None) -> dict:
     m = meta or {}
     result = decide_next_dispatch(stage_states, m, {})
     if isinstance(result, Dispatch):
-        return {"skill": result.skill, "reason": result.reason, "row_id": result.row_id, "dispatched": True}
+        return {
+            "skill": result.skill,
+            "reason": result.reason,
+            "row_id": result.row_id,
+            "dispatched": True,
+        }
     elif isinstance(result, Blocked):
         return {"blocked": True, "reason": result.reason, "guard_id": result.guard_id}
     return {"error": "unknown", "dispatched": False}
@@ -159,10 +162,13 @@ class TestNextSkillParity:
             "REVIEW": "completed",
             "_verdicts": {"REVIEW": {"verdict": "APPROVED", "recorded_at": "2026-01-01"}},
         }
-        self._assert_parity(states, {
-            "pr_number": 42,
-            "latest_review_verdict": "APPROVED",
-        })
+        self._assert_parity(
+            states,
+            {
+                "pr_number": 42,
+                "latest_review_verdict": "APPROVED",
+            },
+        )
 
     def test_all_stages_complete_routes_to_merge(self):
         """Row 10: all stages complete → /do-merge."""
@@ -176,10 +182,13 @@ class TestNextSkillParity:
             "DOCS": "completed",
             "_verdicts": {"REVIEW": {"verdict": "APPROVED", "recorded_at": "2026-01-01"}},
         }
-        self._assert_parity(states, {
-            "pr_number": 42,
-            "latest_review_verdict": "APPROVED",
-        })
+        self._assert_parity(
+            states,
+            {
+                "pr_number": 42,
+                "latest_review_verdict": "APPROVED",
+            },
+        )
 
     def test_oscillation_guard_g4_fires(self):
         """G4: same-skill repeated 3+ times → Blocked."""
@@ -193,7 +202,10 @@ class TestNextSkillParity:
         ] * MAX_SAME_STAGE_DISPATCHES
         states["_sdlc_dispatches"] = history
 
-        meta = {"same_stage_dispatch_count": MAX_SAME_STAGE_DISPATCHES, "last_dispatched_skill": "/do-plan"}
+        meta = {
+            "same_stage_dispatch_count": MAX_SAME_STAGE_DISPATCHES,
+            "last_dispatched_skill": "/do-plan",
+        }
         self._assert_parity(states, meta)
 
 
@@ -224,7 +236,10 @@ class TestNextSkillOutputSchema:
         ] * MAX_SAME_STAGE_DISPATCHES
         states["_sdlc_dispatches"] = history
 
-        meta = {"same_stage_dispatch_count": MAX_SAME_STAGE_DISPATCHES, "last_dispatched_skill": "/do-plan"}
+        meta = {
+            "same_stage_dispatch_count": MAX_SAME_STAGE_DISPATCHES,
+            "last_dispatched_skill": "/do-plan",
+        }
         result = _decide_with_fixture(states, meta)
         assert result.get("blocked") is True, f"Expected blocked=True: {result}"
         assert "reason" in result, f"'reason' key missing from blocked result: {result}"
@@ -273,7 +288,15 @@ class TestNextSkillCLISubprocess:
         # We don't have a real session — use a fake session-id so the tool
         # falls through to default empty states (exit 0, /do-plan dispatch).
         proc = subprocess.run(
-            [sys.executable, "-m", "tools.sdlc_next_skill", "--session-id", "nonexistent-id-xyz", "--format", "pretty"],
+            [
+                sys.executable,
+                "-m",
+                "tools.sdlc_next_skill",
+                "--session-id",
+                "nonexistent-id-xyz",
+                "--format",
+                "pretty",
+            ],
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
