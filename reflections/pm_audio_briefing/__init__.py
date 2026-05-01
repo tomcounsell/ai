@@ -183,7 +183,7 @@ def _process_one_project(project: dict, this_machine: str, *, dry_run: bool) -> 
         )
 
         # If skip_when_empty fired and produced an empty transcript, record
-        # success-with-noop and release the lock for the day.
+        # success-with-noop; hold the lock for the day (expires at 25h TTL).
         if not transcript:
             reflection.mark_completed(
                 duration=time.time() - started_at,
@@ -192,10 +192,10 @@ def _process_one_project(project: dict, this_machine: str, *, dry_run: bool) -> 
             return {"status": "noop", "reason": "skip_when_empty"}
 
         # --- Side-effect phase begins inside delivery.send() ---
-        side_effect_started = True
         target_groups = list(pm.get("target_groups") or [])
         if not target_groups:
             raise RuntimeError("pm_briefing.target_groups is empty")
+        side_effect_started = True
 
         result = delivery.send(
             transcript,
