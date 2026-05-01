@@ -539,12 +539,7 @@ def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
             )
             return
 
-        session.append_chat_log(
-            direction="out",
-            sender="valor",
-            content=text,
-            message_id=msg_id,
-        )
+        session.append_chat_log("out", "valor", text, msg_id)
     except Exception as exc:
         logger.warning(
             "Relay: _append_outbound_chat_log failed (non-fatal): %s", exc

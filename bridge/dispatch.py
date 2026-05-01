@@ -51,12 +51,7 @@ def _append_inbound_chat_log(
             )
             return
         session = sessions[0]
-        session.append_chat_log(
-            direction="in",
-            sender=sender_name or "unknown",
-            content=message_text,
-            message_id=telegram_message_id,
-        )
+        session.append_chat_log("in", sender_name or "unknown", message_text, telegram_message_id)
     except Exception as exc:
         logger.warning(
             "append_inbound_chat_log failed for session %s (non-fatal): %s",

@@ -54,12 +54,7 @@ class TestAppendOutboundChatLogTierOne:
                     msg_id=42,
                 )
 
-        session.append_chat_log.assert_called_once_with(
-            direction="out",
-            sender="valor",
-            content="Hello world",
-            message_id=42,
-        )
+        session.append_chat_log.assert_called_once_with("out", "valor", "Hello world", 42)
 
 
 class TestAppendOutboundChatLogTierTwo:
@@ -89,12 +84,7 @@ class TestAppendOutboundChatLogTierTwo:
                 msg_id=55,
             )
 
-        session.append_chat_log.assert_called_once_with(
-            direction="out",
-            sender="valor",
-            content="From relay",
-            message_id=55,
-        )
+        session.append_chat_log.assert_called_once_with("out", "valor", "From relay", 55)
 
     def test_cli_prefixed_session_id_does_not_trigger_tier_two_lookup(self):
         """A session_id starting with 'cli-' is skipped in tier-2 and falls to tier-3."""
@@ -160,12 +150,7 @@ class TestAppendOutboundChatLogTierThree:
                 msg_id=88,
             )
 
-        fallback_session.append_chat_log.assert_called_once_with(
-            direction="out",
-            sender="valor",
-            content="Fallback path",
-            message_id=88,
-        )
+        fallback_session.append_chat_log.assert_called_once_with("out", "valor", "Fallback path", 88)
 
     def test_no_session_resolved_returns_without_crashing(self):
         """When no session is found via any tier, the function returns without crashing."""
