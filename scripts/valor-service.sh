@@ -426,7 +426,18 @@ install_service() {
     else
         host=$(scutil --get ComputerName 2>/dev/null || echo unknown)
         echo "Skipping bridge install (no projects assigned to '$host' in projects.json)"
-        echo "Use 'uninstall' first if a stale bridge plist exists from a previous install."
+        if [ -f "$PLIST_PATH" ]; then
+            echo "Removing stale bridge plist from non-bridge machine..."
+            launchctl unload "$PLIST_PATH" 2>/dev/null || true
+            rm -f "$PLIST_PATH"
+            echo "Stale bridge plist removed."
+        fi
+        if [ -f "$WATCHDOG_PLIST_PATH" ]; then
+            echo "Removing stale bridge-watchdog plist from non-bridge machine..."
+            launchctl unload "$WATCHDOG_PLIST_PATH" 2>/dev/null || true
+            rm -f "$WATCHDOG_PLIST_PATH"
+            echo "Stale bridge-watchdog plist removed."
+        fi
     fi
 
     install_update_polling
