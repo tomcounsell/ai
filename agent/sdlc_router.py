@@ -65,8 +65,9 @@ CRITIQUE_READY_TO_BUILD = "READY TO BUILD"
 CRITIQUE_NEEDS_REVISION = "NEEDS REVISION"
 CRITIQUE_MAJOR_REWORK = "MAJOR REWORK"
 
-# Skill command strings. Keep in sync with SKILL.md dispatch table and
-# ``agent/pipeline_graph.STAGE_TO_SKILL``.
+# Skill command strings. Keep in sync with ``agent/pipeline_graph.STAGE_TO_SKILL``
+# and the ``DISPATCH_RULES`` list below. The SKILL.md hand-authored dispatch table
+# no longer exists -- routing is now done via ``decide_next_dispatch()``.
 SKILL_DO_ISSUE = "/do-issue"
 SKILL_DO_PLAN = "/do-plan"
 SKILL_DO_PLAN_CRITIQUE = "/do-plan-critique"

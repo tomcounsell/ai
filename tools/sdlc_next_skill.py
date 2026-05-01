@@ -14,10 +14,9 @@ Usage::
     sdlc-tool next-skill --issue-number 1040 --format pretty
 
 Environment:
-    SDLC_ROUTER_SOURCE   ``tool`` (default, this module) or ``table``
-                         (legacy LLM table-match). Set ``table`` to keep
-                         the old behaviour during rollout; the flag is
-                         removed once the new path soaks for one cycle.
+    No rollout flags -- this module is the sole routing source of truth.
+    The legacy SKILL.md hand-authored dispatch table has been removed.
+    Setting ``SDLC_ROUTER_SOURCE`` has no effect.
 
 Exit codes:
     0 — decision produced (either ``dispatched`` or ``blocked``)
