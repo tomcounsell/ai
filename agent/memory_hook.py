@@ -19,6 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from config.memory_defaults import (
+    BLOOM_MIN_HITS,
+    NOVEL_TERRITORY_KEYWORD_THRESHOLD,
+    RRF_MIN_SCORE,
+)
+from config.memory_defaults import (
     INJECTION_BUFFER_SIZE as BUFFER_SIZE,
 )
 from config.memory_defaults import (
@@ -26,9 +31,6 @@ from config.memory_defaults import (
 )
 from config.memory_defaults import (
     MAX_THOUGHTS_PER_INJECTION as MAX_THOUGHTS,
-)
-from config.memory_defaults import (
-    NOVEL_TERRITORY_KEYWORD_THRESHOLD,
 )
 
 # Re-export keyword utilities from lightweight module (no agent deps).
@@ -178,7 +180,9 @@ def check_and_inject(
                 continue
 
         # Deja vu: no bloom hits but significant keyword count
-        # signals "novel territory" -- pay attention to what works here
+        # signals "novel territory" -- pay attention to what works here.
+        # PRESERVED unchanged: the new BLOOM_MIN_HITS gate only catches
+        # the 1 <= bloom_hits < BLOOM_MIN_HITS middle band.
         if bloom_hits == 0:
             if len(unique_keywords) >= NOVEL_TERRITORY_KEYWORD_THRESHOLD:
                 return (
@@ -187,7 +191,16 @@ def check_and_inject(
                 )
             return None
 
-        # Multi-query decomposition — cluster keywords and retrieve via BM25 + RRF
+        # Tightened bloom gate: a single token hit is high-noise -- require
+        # BLOOM_MIN_HITS distinct token hits before BM25 + RRF runs. No
+        # deja-vu emission for this band -- it's "weak signal," not
+        # "novel territory."
+        if bloom_hits < BLOOM_MIN_HITS:
+            return None
+
+        # Multi-query decomposition — cluster keywords and retrieve via BM25 + RRF.
+        # Pass min_rrf_score=RRF_MIN_SCORE so the recall path defaults the
+        # post-fusion relevance gate ON (CLI defaults it OFF for back-compat).
         import time
 
         from agent.memory_retrieval import retrieve_memories
@@ -203,6 +216,7 @@ def check_and_inject(
                 query_text=cluster_query,
                 project_key=project_key,
                 limit=MAX_THOUGHTS,
+                min_rrf_score=RRF_MIN_SCORE,
             )
             for record in records:
                 rid = str(getattr(record, "memory_id", "") or "")

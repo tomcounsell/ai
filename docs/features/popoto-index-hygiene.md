@@ -73,3 +73,14 @@ The defensive `srem` is non-fatal (wrapped in try/except) and depends on three P
 ## Verification
 
 After the cleanup reflection runs, `grep -rn "import redis" agent/` should return zero hits, and bridge logs should show no `"one or more redis keys points to missing objects"` warnings.
+
+## Related: Disk-Side Embedding Orphan Cleanup
+
+`redis-index-cleanup` reconciles **Redis-side** orphans (index entries pointing at missing hashes). A parallel mechanism reconciles **disk-side** orphans (`.npy` embedding files in `~/.popoto/content/.embeddings/Memory/` without a live Memory record):
+
+- **Reflection:** `embedding-orphan-sweep` (daily, dry-run by default) calls `EmbeddingField.garbage_collect(Memory)` + `EmbeddingField.sweep_stale_tempfiles(Memory)` from Popoto >= 1.6.0. Set `EMBEDDING_ORPHAN_SWEEP_APPLY=true` to enable deletion. Implemented in `reflections/memory_management.py::run_embedding_orphan_sweep`.
+- **Read-only count:** `_count_disk_orphans(model_class)` in `scripts/popoto_index_cleanup.py` walks the embedding directory and counts orphans via the shared `popoto.fields.embedding_field._compute_expected_keep` helper. Surfaced as `disk_orphan_count` in `python -m tools.memory_search status --deep`.
+- **One-shot reconciliation:** `python scripts/embedding_orphan_reconcile.py --dry-run` then `--apply`. Includes a positive-assertion safety check (refuses to apply if to-delete intersects expected-keep) and a pre-flight regression guard (refuses to apply if `$Class:Memory` is empty).
+- **Required marker:** `Memory.__embedding_garbage_collect__ = True` opts the model into garbage_collect; without it Popoto's helper is a no-op (defensive default for any future model that attaches `EmbeddingField`).
+
+The B1 fix in this PR also corrected `_count_orphans` to read the canonical `model_class._meta.db_class_set_key.redis_key` (= `$Class:{Name}`) instead of the legacy `{Name}:_all` key, which is empty in production. Issue #1214; see [Subconscious Memory § Embedding-File Lifecycle](subconscious-memory.md#embedding-file-lifecycle) for the full lifecycle.

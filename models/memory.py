@@ -45,6 +45,46 @@ SOURCE_SYSTEM = "system"
 SOURCE_KNOWLEDGE = "knowledge"
 
 
+def _warn_if_legacy_namespace(project_key: "str | None") -> None:
+    """Regression detector for retired/discouraged Memory project_key namespaces.
+
+    Logs a warning (with stack trace) on `project_key="dm"` — the retired namespace
+    from PR #820 (#811). Logs at DEBUG (with stack trace) on `project_key="default"`
+    — still legitimate during single-machine bootstrap and test fixtures, but we
+    want an audit trail that surfaces under LOG_LEVEL=DEBUG.
+
+    Other values (including None and "") are no-ops.
+
+    This guard sits inside `Memory.safe_save` and so only catches writers that go
+    through that classmethod. It is deliberately bypassable by direct
+    `Memory(...).save()` callers — those callsites are tracked under the follow-up
+    "Unify Memory writer project_key resolution" issue (#1173 Rabbit Holes). The
+    guard is a regression detector for the writers we are *not* editing in this PR
+    (extraction, hooks, indexer); the bridge-side patches at telegram_bridge.py
+    `:917`, `:1003-1040`, and `:2031` ARE the creation-site prevention for the
+    `dm` leak.
+
+    Never raises — wrapped in try/except so it can't crash the writer path even
+    if the logger config is broken.
+    """
+    try:
+        if project_key == "dm":
+            logger.warning(
+                "Memory write to retired 'dm' namespace (#811, #1173). "
+                "This should never happen on current main; investigate the caller.",
+                stack_info=True,
+            )
+        elif project_key == "default":
+            logger.debug(
+                "Memory write to 'default' namespace — legitimate during bootstrap "
+                "or test fixtures, but tracked for the unified-helper follow-up.",
+                stack_info=True,
+            )
+    except Exception:
+        # Never let logging crash the writer path
+        pass
+
+
 class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
     """Subconscious memory record.
 
@@ -106,6 +146,11 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
     confidence = ConfidenceField(initial_confidence=0.5)
     bm25 = BM25Field(source="content")
     embedding = EmbeddingField(source="content")
+
+    # Opt-in marker for EmbeddingField.garbage_collect (Popoto >= 1.6.0).
+    # Without this attribute, garbage_collect is a no-op for safety —
+    # see #1214 and the orphan-cleanup plan for the rationale.
+    __embedding_garbage_collect__ = True
     bloom = ExistenceFilter(
         error_rate=0.01,
         capacity=100_000,
@@ -143,6 +188,10 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
                     f"(importance={kwargs.get('importance', 1.0)})"
                 )
                 return None
+            # Legacy-namespace audit fires only AFTER save() succeeds (#1173 C2).
+            # We don't want to spam warnings on writes that ultimately got filtered
+            # out by WriteFilterMixin — only on writes that actually persisted.
+            _warn_if_legacy_namespace(kwargs.get("project_key"))
             logger.debug(
                 f"Memory saved: source={kwargs.get('source', 'agent')}, "
                 f"project={kwargs.get('project_key', 'unknown')}"

@@ -104,12 +104,12 @@ The `post_tool_use.py` hook calls `memory_bridge.recall()` after its existing SD
 1. Each tool call is appended to a JSON sidecar file at `data/sessions/{session_id}/memory_buffer.json`
 2. The buffer is capped at 9 entries (BUFFER_SIZE)
 3. Every 3rd tool call (WINDOW_SIZE), keywords are extracted from the buffer
-4. Keywords are checked against the Memory bloom filter
-5. On bloom hits, ContextAssembler queries Redis for relevant memories
+4. Keywords are checked against the Memory bloom filter; the gate requires at least `BLOOM_MIN_HITS = 2` distinct token hits before BM25 + RRF runs (the `bloom_hits == 0` deja-vu / novel-territory branch is preserved)
+5. On bloom-gate pass, ContextAssembler queries Redis for relevant memories with `min_rrf_score=RRF_MIN_SCORE` so post-fusion records below the relevance floor are dropped before hydration
 6. Up to 3 matching memories are formatted as `<thought>` blocks and returned via the hook's `additionalContext` response field
 7. Injected thought IDs are tracked in the sidecar for later outcome detection
 
-The PostToolUse hook has a 5-second timeout. Memory operations (Redis-only) complete in under 15ms.
+The PostToolUse hook has a 5-second timeout. Memory operations (Redis-only) complete in under 15ms. See [Subconscious Memory: Relevance Threshold](subconscious-memory.md#relevance-threshold) for the calibration math behind `RRF_MIN_SCORE` and `BLOOM_MIN_HITS`.
 
 ### Deja Vu Signals
 

@@ -109,7 +109,7 @@ def has_skip_justification(body: str) -> bool:
     for pattern in SKIP_PATTERNS:
         if re.search(pattern, body, re.IGNORECASE | re.MULTILINE):
             # Must have at least 30 chars of justification
-            match = re.search(pattern + r"(.{30,})", body, re.IGNORECASE | re.DOTALL)
+            match = re.search(pattern + r"(.{30,})", body, re.IGNORECASE | re.DOTALL | re.MULTILINE)
             if match:
                 return True
     return False

@@ -111,7 +111,11 @@ class TestStatusFunction:
         assert result["superseded"] == 2
 
     def test_deep_adds_orphan_count(self):
-        """status(deep=True) includes orphan_index_count in result."""
+        """status(deep=True) includes orphan_index_count AND disk_orphan_count.
+
+        Both fields are emitted side-by-side so dashboards can chart Redis-side
+        and disk-side orphan counts independently — see #1214.
+        """
         import sys
         import types
 
@@ -123,6 +127,7 @@ class TestStatusFunction:
         # real sys.path.insert + import inside status() finds it.
         fake_cleanup = types.ModuleType("popoto_index_cleanup")
         fake_cleanup._count_orphans = lambda model: 5
+        fake_cleanup._count_disk_orphans = lambda model: 17
 
         with (
             patch("tools.memory_search._fetch_all_records", return_value=records),
@@ -132,7 +137,12 @@ class TestStatusFunction:
             mock_redis.ping.return_value = True
             result = status(project_key="test-project", deep=True)
 
+        # Existing key preserved verbatim (B3 — do not rename)
         assert "orphan_index_count" in result
+        assert result["orphan_index_count"] == 5
+        # New parallel field
+        assert "disk_orphan_count" in result
+        assert result["disk_orphan_count"] == 17
         assert "by_category_confidence" in result
 
     def test_deep_per_category_confidence(self):
@@ -150,6 +160,7 @@ class TestStatusFunction:
 
         fake_cleanup = types.ModuleType("popoto_index_cleanup")
         fake_cleanup._count_orphans = lambda model: 0
+        fake_cleanup._count_disk_orphans = lambda model: 0
 
         with (
             patch("tools.memory_search._fetch_all_records", return_value=records),
@@ -311,6 +322,7 @@ class TestCmdStatus:
             "last_write": None,
             "embedding_field": "not_configured",
             "orphan_index_count": 0,
+            "disk_orphan_count": 0,
             "by_category_confidence": {},
         }
 
@@ -372,3 +384,154 @@ class TestStatusSubcommandE2E:
         if output:
             parsed = json.loads(output)
             assert "healthy" in parsed
+
+
+class TestSearchBloomTightening:
+    """Test the BLOOM_MIN_HITS gate inside tools.memory_search.search().
+
+    Search() takes a single query string and tokenizes it, probing the
+    bloom filter for each token. Per the new gate (BLOOM_MIN_HITS=2),
+    one bloom hit is no longer enough to proceed.
+    """
+
+    def test_one_bloom_hit_returns_empty(self):
+        """Single token bloom hit must NOT proceed to BM25."""
+        from tools.memory_search import search
+
+        # 4 tokens; first returns True from bloom -> 1 hit total
+        mock_bloom = MagicMock()
+        first_calls = {"n": 0}
+
+        def selective(model, kw):
+            first_calls["n"] += 1
+            return first_calls["n"] == 1
+
+        mock_bloom.might_exist = MagicMock(side_effect=selective)
+
+        rm_mock = MagicMock(return_value=[])
+
+        with (
+            patch("models.memory.Memory._meta") as mock_meta,
+            patch("agent.memory_retrieval.retrieve_memories", rm_mock),
+        ):
+            mock_meta.fields = {"bloom": mock_bloom}
+            result = search("alpha beta gamma delta")
+
+        assert result["results"] == []
+        # retrieve_memories MUST NOT have been called -- gate short-circuited
+        assert rm_mock.call_count == 0
+
+    def test_two_bloom_hits_proceed_to_retrieval(self):
+        """Two bloom hits proceed to retrieve_memories."""
+        from tools.memory_search import search
+
+        # 3 tokens, all return True -> 3 hits >= BLOOM_MIN_HITS=2
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+
+        rm_mock = MagicMock(return_value=[])
+
+        with (
+            patch("models.memory.Memory._meta") as mock_meta,
+            patch("agent.memory_retrieval.retrieve_memories", rm_mock),
+        ):
+            mock_meta.fields = {"bloom": mock_bloom}
+            search("alpha beta gamma")
+
+        assert rm_mock.call_count == 1
+
+    def test_bloom_error_falls_through_to_bm25(self):
+        """Bloom raising must not crash; treated as pass-through."""
+        from tools.memory_search import search
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(side_effect=RuntimeError("bloom down"))
+
+        rm_mock = MagicMock(return_value=[])
+
+        with (
+            patch("models.memory.Memory._meta") as mock_meta,
+            patch("agent.memory_retrieval.retrieve_memories", rm_mock),
+        ):
+            mock_meta.fields = {"bloom": mock_bloom}
+            result = search("alpha beta")
+
+        # Must not crash; result dict must have results key
+        assert "results" in result
+        # retrieve_memories WAS called because bloom error -> pass-through
+        assert rm_mock.call_count == 1
+
+
+class TestSearchMinScoreFlag:
+    """Test the search() min_rrf_score parameter and CLI --min-score flag."""
+
+    def test_search_default_min_rrf_score_is_none(self):
+        """search() must default min_rrf_score=None (CLI back-compat)."""
+        from tools.memory_search import search
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+
+        captured = {}
+
+        def fake_rm(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        with (
+            patch("models.memory.Memory._meta") as mock_meta,
+            patch("agent.memory_retrieval.retrieve_memories", side_effect=fake_rm),
+        ):
+            mock_meta.fields = {"bloom": mock_bloom}
+            search("alpha beta gamma")
+
+        assert captured.get("min_rrf_score") is None
+
+    def test_search_min_rrf_score_threaded_through(self):
+        """search(min_rrf_score=X) must pass X through to retrieve_memories."""
+        from tools.memory_search import search
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+
+        captured = {}
+
+        def fake_rm(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        with (
+            patch("models.memory.Memory._meta") as mock_meta,
+            patch("agent.memory_retrieval.retrieve_memories", side_effect=fake_rm),
+        ):
+            mock_meta.fields = {"bloom": mock_bloom}
+            search("alpha beta", min_rrf_score=0.0123)
+
+        assert captured.get("min_rrf_score") == 0.0123
+
+    def test_cli_min_score_flag_threads_to_search(self):
+        """The --min-score argparse flag must call search(min_rrf_score=X)."""
+        from tools.memory_search.cli import cmd_search
+
+        captured = {}
+
+        def fake_search(**kwargs):
+            captured.update(kwargs)
+            return {"results": [], "error": None}
+
+        args = argparse.Namespace(
+            query="alpha beta",
+            project=None,
+            limit=10,
+            json=False,
+            category=None,
+            tag=None,
+            act_rate=None,
+            min_score=0.009,
+        )
+
+        with patch("tools.memory_search.cli.search", side_effect=fake_search):
+            rc = cmd_search(args)
+
+        assert rc == 0
+        assert captured.get("min_rrf_score") == 0.009

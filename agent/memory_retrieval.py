@@ -237,6 +237,7 @@ def retrieve_memories(
     project_key: str,
     limit: int = 10,
     rrf_k: int | None = None,
+    min_rrf_score: float | None = None,
 ) -> list[Any]:
     """Retrieve memories using four-signal RRF fusion.
 
@@ -249,6 +250,12 @@ def retrieve_memories(
         project_key: Project partition key.
         limit: Maximum memories to return.
         rrf_k: RRF constant override. Uses config default if None.
+        min_rrf_score: Optional post-fusion relevance threshold. When numeric,
+            fused (key, score) tuples below this value are dropped BEFORE
+            Memory hydration -- this saves Redis round-trips on records
+            destined to be filtered. When None (default), no filtering is
+            applied. Recall hooks pass `config.memory_defaults.RRF_MIN_SCORE`
+            to enable the gate; the CLI defaults to None for back-compat.
 
     Returns:
         List of Memory instances with `score` attribute, sorted by
@@ -293,6 +300,26 @@ def retrieve_memories(
             k=rrf_k,
             limit=limit,
         )
+
+        # Post-fusion relevance gate (optional). When `min_rrf_score` is a
+        # numeric threshold, drop fused tuples below the floor BEFORE hydration
+        # so we save Redis round-trips on records destined to be filtered.
+        # `min_rrf_score = 0` is treated as "always pass" (equivalent to None).
+        # Malformed values (non-numeric) fall through unchanged -- the outer
+        # try/except catches any TypeError that would arise from comparison.
+        if min_rrf_score is not None:
+            try:
+                threshold = float(min_rrf_score)
+                if threshold > 0:
+                    fused = [(k, s) for (k, s) in fused if s >= threshold]
+            except (TypeError, ValueError):
+                # Malformed threshold -- treat as no-op; the outer except
+                # would otherwise return [] for the entire call which is too
+                # aggressive for a configuration glitch.
+                logger.warning(
+                    f"[memory_retrieval] invalid min_rrf_score={min_rrf_score!r}; "
+                    "skipping threshold filter"
+                )
 
         if not fused:
             # Analytics: record recall attempt with zero hits

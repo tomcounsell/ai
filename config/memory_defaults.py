@@ -50,6 +50,36 @@ DEFAULT_PROJECT_KEY = "default"
 # (Cormack et al., 2009). Lower k (e.g., 20) favors top-ranked items more aggressively.
 RRF_K = 60
 
+# Post-fusion relevance gate.
+# After rrf_fuse() returns a list of (key, score) tuples, drop entries whose
+# fused score is below this floor. The default value 1 / (RRF_K + 50) requires
+# a record to rank in the top-50 of at least one signal before surviving the
+# gate. Concretely with RRF_K=60: floor ≈ 0.00909.
+#
+# Calibration math (spike-1):
+#   - A record at rank 1 in 1 signal scores 1/(60+1) ≈ 0.01639 (passes)
+#   - A record at rank 50 in 1 signal scores 1/(60+50) ≈ 0.00909 (boundary)
+#   - A record at rank 51+ in only one signal scores below the floor (filtered)
+#
+# Set to None to disable the gate globally. The CLI defaults to None for
+# back-compat; the recall hooks (agent/memory_hook.py + memory_bridge.py)
+# pass this constant explicitly so the gate is ON by default for them.
+RRF_MIN_SCORE: float | None = 1 / (RRF_K + 50)
+
+# Bloom pre-check minimum unique-token hit count.
+# Recall paths tokenize the query, drop noise words, and probe the
+# ExistenceFilter bloom for each remaining token. Historically the gate
+# accepted any single hit; that surfaced records for low-precision queries
+# whose only overlap was a common token (e.g. "redis" inside an unrelated
+# multi-word query). BLOOM_MIN_HITS=2 requires at least two distinct tokens
+# to register as "definitely possibly present" before BM25 + RRF runs.
+#
+# The bloom_hits == 0 branch (deja-vu / novel-territory fallback) is
+# preserved unchanged at all sites that have it -- the new gate only kicks
+# in for 1 <= bloom_hits < BLOOM_MIN_HITS, returning empty without emitting
+# a deja-vu thought.
+BLOOM_MIN_HITS: int = 2
+
 # BM25 tuning parameters (passed through to popoto defaults)
 BM25_K1 = 1.2  # Term frequency saturation. Higher = more weight to repeated terms.
 BM25_B = 0.75  # Length normalization. 0 = no normalization, 1 = full normalization.

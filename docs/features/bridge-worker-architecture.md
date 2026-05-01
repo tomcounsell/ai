@@ -21,11 +21,15 @@ Telegram → Bridge (Telethon)
            Worker (_ensure_worker → _worker_loop)
               ↓ Claude Agent SDK
            TelegramRelayOutputHandler
-              ↓ rpush JSON to telegram:outbox:{session_id}
-              ↓ dual-write to FileOutputHandler (logs/worker/)
-           Redis outbox (polled by bridge relay)
-              ↓ bridge/telegram_relay.py
-           Telegram (delivered via Telethon)
+              ↓ branches on session.extra_context["transport"]:
+              ↓   transport == "email"  → rpush JSON to email:outbox:{session_id}
+              ↓   transport == "telegram" (or unset)
+              ↓                         → rpush JSON to telegram:outbox:{session_id}
+              ↓ dual-write to FileOutputHandler (logs/worker/) in either case
+           Redis outbox (polled by the matching bridge relay)
+              ↓ bridge/telegram_relay.py    (telegram:outbox:*)
+              ↓ bridge/email_relay.py       (email:outbox:*)
+           Delivered to the spawning medium
 ```
 
 ## Worker Output Delivery
@@ -38,15 +42,27 @@ The worker uses `TelegramRelayOutputHandler` to deliver session output to Telegr
 Agent calls tools/send_message.py or tools/react_with_emoji.py
     ↓ invokes OutputHandler.send() / OutputHandler.react()
 TelegramRelayOutputHandler.send() (agent/output_handler.py)
+    ↓ resolves transport via session.extra_context["transport"]
+    │   (defaults to "telegram" when missing or null — back-compat)
     ↓ runs bridge.message_drafter.draft_message (per-medium formatting, length guard)
-    ↓ runs bridge.read_the_room.read_the_room (issue #1193 — verdict: send|trim|suppress; opt-in via READ_THE_ROOM_ENABLED)
-    ↓ writes JSON payload to Redis (or queues a 👀 reaction on suppress)
+    ↓ [SDLC sessions] runs bridge.redundancy_filter.should_suppress (issue #1205 — bigram-Jaccard duplicate guard; suppress → 👀 reaction + return)
+    ↓ [All sessions] runs bridge.read_the_room.read_the_room (issue #1193 — verdict: send|trim|suppress; opt-in via READ_THE_ROOM_ENABLED)
+    ↓ writes JSON payload to the transport-appropriate Redis outbox:
+    │     transport == "telegram" → telegram:outbox:{session_id}
+    │     transport == "email"    → email:outbox:{session_id}
+    │   (or queues a 👀 reaction on suppress, telegram only — see "Reactions" below)
     ↓ also writes to FileOutputHandler (dual-write for audit/fallback)
-Redis key: telegram:outbox:{session_id}
-    ↓ polled by bridge relay
-bridge/telegram_relay.py
-    ↓ delivers via Telethon to Telegram
+Redis outbox  → polled by the matching bridge relay
+                  bridge/telegram_relay.py  for telegram:outbox:*
+                  bridge/email_relay.py     for email:outbox:*
+                ↓ delivers via Telethon (Telegram) or SMTP (email)
 ```
+
+**Reactions are telegram-only.** When `extra_context.transport == "email"` the
+handler logs once at INFO and skips the reaction (there is no email analog
+for an emoji reaction — SMTP has no out-of-band signal channel). This matches
+the `EmailOutputHandler.react()` no-op (`docs/features/email-bridge.md`,
+"Outbound Drafting" section).
 
 ### `TelegramRelayOutputHandler`
 
@@ -54,8 +70,10 @@ Defined in `agent/output_handler.py`. Implements the `OutputHandler` protocol.
 
 | Aspect | Detail |
 |--------|--------|
-| Redis key | `telegram:outbox:{session_id}` |
-| Payload format | `{"chat_id", "reply_to", "text", "session_id", "timestamp"}` -- same as `tools/send_telegram.py` |
+| Redis key (telegram) | `telegram:outbox:{session_id}` |
+| Redis key (email) | `email:outbox:{session_id}` (when `extra_context.transport == "email"`) |
+| Telegram payload | `{"chat_id", "reply_to", "text", "session_id", "timestamp"}` -- same as `tools/send_telegram.py` |
+| Email payload | `{"session_id", "to", "subject", "body", "in_reply_to", "references", "from_addr", "attachments", "timestamp"}` -- matches `tools/send_message.py::_send_via_email` and the `email_relay.py` contract (see [Email Bridge](email-bridge.md) "Send path"). The handler reads `email_subject`, `email_message_id`, `email_from` from `session.extra_context` to populate `subject`, `in_reply_to`, and `to`. |
 | TTL | 3600 seconds (1 hour) |
 | Redis operation | `RPUSH` (append to list) + `EXPIRE` |
 | Error handling | Caught and logged; never propagates to caller |
@@ -63,7 +81,11 @@ Defined in `agent/output_handler.py`. Implements the `OutputHandler` protocol.
 
 ### Registration
 
-At worker startup (`worker/__main__.py`), `TelegramRelayOutputHandler` is created with a `FileOutputHandler` as its inner handler, then registered for every project via `register_callbacks()`. This means all worker-executed sessions -- regardless of origin -- route output through the Redis outbox. The bridge relay picks up the messages and delivers them to Telegram.
+At worker startup (`worker/__main__.py`), `TelegramRelayOutputHandler` is created with a `FileOutputHandler` as its inner handler, then registered for every project via `register_callbacks()`. It serves as the **default** output path for any session whose project has not registered a transport-specific handler.
+
+The handler is itself transport-aware: on each `send()` it resolves `session.extra_context["transport"]` and writes to the matching outbox (`email:outbox:*` for email-spawned sessions, `telegram:outbox:*` otherwise). This means an email-spawned session reaches the SMTP relay correctly even when the project has no per-`(project_key, "email")` `EmailOutputHandler` registered — the default handler picks the right queue from the session's transport context.
+
+When a project does have an explicit `EmailOutputHandler` registered (via `register_callbacks(project_key, transport="email", handler=...)`), the worker resolves that handler instead and bypasses the outbox entirely (it sends directly via SMTP from the worker process). See [Email Bridge](email-bridge.md) "Worker Registration" and "Send path" for the registered-handler path.
 
 ### Relationship to `FileOutputHandler`
 

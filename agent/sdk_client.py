@@ -1776,6 +1776,79 @@ def _build_error_recovery_message(error_text: str) -> str:
     )
 
 
+def _load_persona_overlay_with_log(
+    persona: str,
+    request_id: str,
+    session_id: str | None,
+    fallback: str | None = None,
+) -> str | None:
+    """Load a persona overlay and emit one canonical log line.
+
+    Wraps :func:`load_persona_prompt` with structured per-session logging so
+    the test-cuttlefish-* skills (and any future test) can grep
+    ``Persona overlay`` filtered by ``session_id=<sid>`` and get exactly one
+    definitive answer per session. Without this funnel, the existing
+    ``Resolved persona:`` and harness ``Appending N-char system prompt`` lines
+    were not always emitted in worker.log, leaving the test unable to confirm
+    whether the requested persona had loaded.
+
+    Behavior:
+
+    - Success: emits ``Persona overlay loaded: name=<persona> prompt_chars=<N>
+      session_id=<sid>`` at INFO and returns the prompt.
+    - Missing overlay with successful fallback: emits a single
+      ``Persona overlay missing: requested=<persona> fell_back_to=<fallback>
+      session_id=<sid>`` at WARNING and returns the fallback prompt. The
+      ``Persona overlay loaded:`` line is intentionally NOT emitted in this
+      branch — the WARNING is the canonical signal.
+    - Missing overlay with no fallback (or fallback also missing): emits a
+      WARNING and returns ``None``.
+
+    Args:
+        persona: The persona name to load (e.g. "customer-service",
+            "teammate").
+        request_id: The per-call correlation/request id used as the log
+            prefix (matches sibling log lines like ``[{request_id}]``).
+        session_id: The session id (for grep correlation). May be ``None``
+            for callers that don't have one in scope.
+        fallback: Optional persona name to try when the requested overlay
+            file is missing. ``None`` means no fallback.
+
+    Returns:
+        The persona prompt string, or ``None`` if both the requested overlay
+        and the fallback are missing.
+    """
+    try:
+        prompt = load_persona_prompt(persona)
+        logger.info(
+            f"[{request_id}] Persona overlay loaded: name={persona} "
+            f"prompt_chars={len(prompt) if prompt else 0} "
+            f"session_id={session_id}"
+        )
+        return prompt
+    except FileNotFoundError:
+        if fallback:
+            try:
+                fallback_prompt = load_persona_prompt(fallback)
+                logger.warning(
+                    f"[{request_id}] Persona overlay missing: requested={persona} "
+                    f"fell_back_to={fallback} session_id={session_id}"
+                )
+                return fallback_prompt
+            except FileNotFoundError:
+                logger.warning(
+                    f"[{request_id}] Persona overlay missing: requested={persona} "
+                    f"fell_back_to={fallback} session_id={session_id} "
+                    "(fallback also missing, returning None)"
+                )
+                return None
+        logger.warning(
+            f"[{request_id}] Persona overlay missing: requested={persona} "
+            f"fell_back_to=None session_id={session_id}"
+        )
+        return None
+
+
 def _resolve_persona(
     project: dict | None,
     chat_title: str | None,
@@ -3104,26 +3177,35 @@ async def get_agent_response_sdk(
             # cat docs/, python -m tools.valor_session status, etc.).
             # Any mutation must be dispatched to a dev-session subagent.
             custom_system_prompt = load_pm_system_prompt(working_dir)
+            logger.info(
+                f"[{request_id}] Persona overlay loaded: name=project-manager "
+                f"prompt_chars={len(custom_system_prompt) if custom_system_prompt else 0} "
+                f"session_id={session_id}"
+            )
             logger.info(f"[{request_id}] PM session mode: PM persona, bypassPermissions")
         elif project_mode == "pm":
             # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
             custom_system_prompt = load_pm_system_prompt(working_dir)
+            logger.info(
+                f"[{request_id}] Persona overlay loaded: name=project-manager "
+                f"prompt_chars={len(custom_system_prompt) if custom_system_prompt else 0} "
+                f"session_id={session_id}"
+            )
         elif persona == PersonaType.CUSTOMER_SERVICE:
             # Customer-service persona: action-oriented, can run tools/skills, no code writes
-            try:
-                custom_system_prompt = load_persona_prompt("customer-service")
-            except FileNotFoundError:
-                logger.warning("Customer-service persona not available, falling back to teammate")
-                try:
-                    custom_system_prompt = load_persona_prompt("teammate")
-                except FileNotFoundError:
-                    pass
+            custom_system_prompt = _load_persona_overlay_with_log(
+                "customer-service",
+                request_id=request_id,
+                session_id=session_id,
+                fallback="teammate",
+            )
         elif persona == PersonaType.TEAMMATE:
             # Teammate persona: casual mode, no WORKER_RULES
-            try:
-                custom_system_prompt = load_persona_prompt("teammate")
-            except FileNotFoundError:
-                logger.warning("Teammate persona not available, falling back to default")
+            custom_system_prompt = _load_persona_overlay_with_log(
+                "teammate",
+                request_id=request_id,
+                session_id=session_id,
+            )
         # Developer persona uses default (load_system_prompt via ValorAgent.__init__)
 
         # Determine gh_repo for cross-repo SDLC requests (issue #375).

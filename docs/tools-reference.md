@@ -55,7 +55,7 @@ health = status()  # {"healthy": True, "total": 80, "superseded": 3, ...}
 # CLI
 python -m tools.memory_search status              # memory system health check
 python -m tools.memory_search status --json       # machine-readable JSON
-python -m tools.memory_search status --deep       # adds orphan count + per-category confidence
+python -m tools.memory_search status --deep       # adds Redis-side orphan_index_count, disk-side disk_orphan_count, per-category confidence
 python -m tools.memory_search search "deploy patterns"
 python -m tools.memory_search save "important note" --importance 6.0
 python -m tools.memory_search inspect --stats --project dm

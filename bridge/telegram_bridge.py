@@ -90,6 +90,7 @@ from telethon import TelegramClient, events  # noqa: E402
 from telethon.errors import FloodWaitError  # noqa: E402
 
 from agent import build_harness_turn_input  # noqa: F401, E402
+from agent.private_tag import strip_private  # noqa: E402
 from agent.steering import ABORT_KEYWORDS, push_steering_message  # noqa: E402
 from bridge.context import (  # noqa: E402
     REPLY_THREAD_CONTEXT_HEADER,  # noqa: F401
@@ -115,6 +116,7 @@ from bridge.media import (  # noqa: E402
     download_media,  # noqa: F401
     extract_document_text,  # noqa: F401
     get_media_type,
+    process_incoming_media,
     transcribe_voice,  # noqa: F401
     validate_media_file,  # noqa: F401
 )
@@ -607,6 +609,19 @@ for _entry in CONFIG.get("dms", {}).get("whitelist", []):
     _proj_cfg["_key"] = _proj_key
     DM_USER_TO_PROJECT[int(_entry["id"])] = _proj_cfg
 
+# Startup invariant (#1173 Risk 3): DM_WHITELIST and DM_USER_TO_PROJECT must stay
+# in lockstep. If they decouple in projects.json, a whitelisted sender_id could
+# pass should_respond_async (because it's in DM_WHITELIST) yet have no project
+# mapping (because it's missing from DM_USER_TO_PROJECT) — re-introducing the
+# class of leak we're fixing. Enforced at startup, not asserted (asserts are
+# stripped under python -O).
+if set(DM_WHITELIST) != set(DM_USER_TO_PROJECT.keys()):
+    raise RuntimeError(
+        "projects.json drift: DM_WHITELIST and DM_USER_TO_PROJECT.keys() must be equal "
+        f"(whitelist={DM_WHITELIST}, mapping_keys={set(DM_USER_TO_PROJECT.keys())}). "
+        "Every dms.whitelist[] entry must reference an active project."
+    )
+
 # Propagate config to routing module so imported functions work correctly
 _routing_module.CONFIG = CONFIG
 _routing_module.DEFAULTS = DEFAULTS
@@ -687,6 +702,64 @@ def _build_completed_resume_text(
     return f"{summary_block}\n\n{follow_up_text}"
 
 
+# Sentinel substituted upstream (bridge/telegram_bridge.py:1027) when a
+# media-only message arrives with no caption. The steering helper treats
+# this as "no real caption" and replaces it with the media description
+# rather than composing the two strings together.
+_FILE_ATTACHMENT_SENTINEL = "--file attachment only--"
+
+# Vault subdirectory for auto-ingested Telegram attachments. Created on
+# first use by _ingest_attachments. The KnowledgeWatcher monitors
+# ~/work-vault/ recursively (bridge/knowledge_watcher.py:201,
+# Observer.schedule(..., recursive=True)) so this subdir is picked up
+# automatically with no further wiring.
+_TELEGRAM_VAULT_SUBDIR = Path.home() / "work-vault" / "telegram-attachments"
+
+
+async def _ingest_attachments(files: list[Path], message, sender_name: str) -> None:
+    """Fire-and-forget copy of inbound Telegram attachments into the work-vault.
+
+    Never blocks message delivery and never crashes the bridge. Every
+    failure is caught and logged at warning level — the steering push
+    upstream has already succeeded by the time this task runs.
+
+    Filenames are disambiguated using the joint key
+    ``(YYYYMMDD_HHMMSS, sender_name, message.id)`` to bound collision
+    probability. The watcher's content-hash idempotency means a duplicate
+    write either no-ops (identical content) or overwrites the prior
+    sidecar — accepted as residual risk per plan Risk 3.
+    """
+    try:
+        import shutil
+
+        _TELEGRAM_VAULT_SUBDIR.mkdir(parents=True, exist_ok=True)
+        msg_date = getattr(message, "date", None) or datetime.now(UTC)
+        date_part = msg_date.strftime("%Y%m%d_%H%M%S")
+        # sender_name may contain characters that are awkward in filenames;
+        # collapse whitespace and strip path-traversal hazards.
+        safe_sender = (
+            "".join(
+                c if (c.isalnum() or c in ("-", "_")) else "_" for c in (sender_name or "unknown")
+            ).strip("_")
+            or "unknown"
+        )
+        msg_id = getattr(message, "id", "0")
+        for src in files:
+            try:
+                if not src or not src.exists():
+                    continue
+                target_name = f"{date_part}_{safe_sender}_{msg_id}_{src.name}"
+                target = _TELEGRAM_VAULT_SUBDIR / target_name
+                shutil.copy2(src, target)
+                logger.info(f"[steering-ingest] Copied {src.name} -> {target} (watcher will index)")
+            except Exception as inner_e:
+                # One bad file must not abort the rest of the batch.
+                logger.warning(f"[steering-ingest] Failed to copy {src} to vault: {inner_e}")
+    except Exception as e:
+        # Top-level safety net — fire-and-forget contract: never crash.
+        logger.warning(f"[steering-ingest] Vault ingest task failed: {e}")
+
+
 async def _ack_steering_routed(
     client: TelegramClient,
     event,
@@ -708,7 +781,61 @@ async def _ack_steering_routed(
     Caller is responsible for ``return`` after this call. ``log_context``
     must NOT include the trailing ``(steer|abort)`` suffix — the helper
     appends it from the resolved abort detection.
+
+    Media branch (issue #1215): when ``message.media`` is present, the
+    helper fires the user-facing reaction *before* downloading so the
+    user sees the eyes emoji immediately, then awaits
+    ``process_incoming_media`` and replaces the sentinel ``text`` with
+    the extracted description (or composes ``description + caption``
+    when a real caption was provided). The downloaded files are
+    additionally scheduled for fire-and-forget ingest into the work
+    vault via ``_ingest_attachments``; that task is appended to
+    ``_background_tasks`` to keep the GC from collecting it mid-flight.
+    Text-only steering (the common case) bypasses every new operation —
+    the existing reaction-after-push order is preserved byte-identical.
     """
+    if message.media:
+        # User-facing reaction fires FIRST on the media branch so the
+        # user gets immediate "I see you" feedback during the download
+        # window. Abort detection runs later against the enriched text.
+        try:
+            await set_reaction(
+                client,
+                event.chat_id,
+                message.id,
+                REACTION_RECEIVED,
+            )
+        except Exception:
+            pass
+
+        try:
+            description, files = await process_incoming_media(client, message)
+        except Exception as e:
+            logger.warning(
+                f"[steering] process_incoming_media failed; falling back to sentinel text: {e}"
+            )
+            description, files = "", []
+
+        if description:
+            stripped = (text or "").strip()
+            if stripped and stripped != _FILE_ATTACHMENT_SENTINEL:
+                # Real caption present — compose description + caption.
+                text = f"{description}\n\n{text}"
+            else:
+                # Sentinel or empty — replace outright.
+                text = description
+        # If process_incoming_media returned nothing, leave `text` as-is
+        # (typically the sentinel) — that is the defensive fallback.
+
+        if files:
+            try:
+                _background_tasks.append(
+                    asyncio.create_task(_ingest_attachments(files, message, sender_name))
+                )
+            except Exception as e:
+                # Even task creation failure must not gate steering.
+                logger.warning(f"[steering-ingest] Failed to schedule task: {e}")
+
     is_abort = text.strip().lower() in ABORT_KEYWORDS
     if agent_session is not None:
         # Dual-push: the durable PM-visible write goes to the Popoto model's
@@ -716,15 +843,31 @@ async def _ack_steering_routed(
         # session sees it even before the worker drains the queue.
         agent_session.push_steering_message(text)
     push_steering_message(session_id, text, sender_name, is_abort=is_abort)
-    try:
-        await set_reaction(
-            client,
-            event.chat_id,
-            message.id,
-            REACTION_ABORT if is_abort else REACTION_RECEIVED,
-        )
-    except Exception:
-        pass
+
+    if not message.media:
+        # Text-only path: existing reaction-after-push order preserved.
+        try:
+            await set_reaction(
+                client,
+                event.chat_id,
+                message.id,
+                REACTION_ABORT if is_abort else REACTION_RECEIVED,
+            )
+        except Exception:
+            pass
+    elif is_abort:
+        # Media branch already reacted with REACTION_RECEIVED above; if
+        # the enriched text turns out to be an abort keyword, overwrite
+        # the reaction so the user sees the salute.
+        try:
+            await set_reaction(
+                client,
+                event.chat_id,
+                message.id,
+                REACTION_ABORT,
+            )
+        except Exception:
+            pass
     action = "abort" if is_abort else "steer"
     logger.info(f"{log_context} ({action})")
     await record_telegram_message_handled(event.chat_id, message.id)
@@ -896,6 +1039,12 @@ async def main():
         # Get message details
         message = event.message
         text = message.text or ""
+        # sdlc-1179: compute the persistence-safe variant once. The original
+        # `text` stays in scope for live-agent inputs (the SDK prompt the worker
+        # spawns must see <private> wrapped content this turn so the agent can
+        # reason about it). `safe_text` is what flows into Memory, TelegramMessage,
+        # bridge logs, and AgentSession.message_text via `safe_clean_text` below.
+        safe_text = strip_private(text)
         is_dm = event.is_private
         chat = await event.get_chat()
         chat_title = getattr(chat, "title", None)
@@ -913,13 +1062,21 @@ async def main():
         else:
             project = find_project_for_chat(chat_title) if chat_title else None
 
-        # Store ALL incoming messages for history (regardless of whether we respond)
-        _early_project_key = project.get("_key", "dm") if project else "dm"
+        # Store ALL incoming messages for history (regardless of whether we respond).
+        # Conversation history (store_message / register_chat) is preserved for unowned
+        # chats by passing project_key=None — both functions accept str | None. Only the
+        # canonical Memory partition write below is gated on a resolved project, since
+        # that's the actual leak surface (#1173 — the retired "dm" namespace must never
+        # be written to again).
+        _early_project_key = project.get("_key") if project else None
         stored_msg_id = None  # Track for telegram_message_key cross-reference
         try:
+            # sdlc-1179: persist safe_text so wrapped <private> regions never
+            # land in TelegramMessage.content (and therefore never surface via
+            # `valor-telegram read --search` or the conversation-history prefetch).
             store_result = store_message(
                 chat_id=str(event.chat_id),
-                content=text,
+                content=safe_text,
                 sender=sender_name,
                 message_id=message.id,
                 timestamp=message.date,
@@ -946,22 +1103,27 @@ async def main():
         except Exception as e:
             logger.error(f"Error storing message: {e}")
 
-        # Save to subconscious memory (non-fatal, never crashes bridge)
-        try:
-            if text and text.strip() and not getattr(sender, "bot", False):
-                from popoto import InteractionWeight
+        # Save to subconscious memory (non-fatal, never crashes bridge).
+        # Gated on a resolved project_key — unowned messages don't belong to any
+        # memory partition and must not pollute the partition table (#1173).
+        if _early_project_key:
+            try:
+                if text and text.strip() and not getattr(sender, "bot", False):
+                    from popoto import InteractionWeight
 
-                from models.memory import Memory
+                    from models.memory import Memory
 
-                Memory.safe_save(
-                    agent_id=sender_name or "unknown",
-                    project_key=_early_project_key,
-                    content=text[:500],
-                    importance=InteractionWeight.HUMAN,
-                    source="human",
-                )
-        except Exception as e:
-            logger.warning(f"Memory save failed (non-fatal): {e}")
+                    # sdlc-1179: persist safe_text so wrapped <private> regions never
+                    # land in Memory.content (subconscious memory recall surface).
+                    Memory.safe_save(
+                        agent_id=sender_name or "unknown",
+                        project_key=_early_project_key,
+                        content=safe_text[:500],
+                        importance=InteractionWeight.HUMAN,
+                        source="human",
+                    )
+            except Exception as e:
+                logger.warning(f"Memory save failed (non-fatal): {e}")
 
         # Extract and store links from whitelisted senders
         if sender_username and sender_username.lower() in LINK_COLLECTORS:
@@ -1000,13 +1162,26 @@ async def main():
                 logger.debug(f"Ignoring DM from {sender_name} (id={sender_id}) - not in whitelist")
             return
 
+        # Hard project guard (#1173): if no project resolved, return before any
+        # session-routing or downstream project_key reference. This was already the
+        # de facto behavior — should_respond_async filters out unresolved chats —
+        # but the explicit guard prevents a future refactor from silently re-introducing
+        # the retired "dm" fallback at :1040 and the six downstream project_key uses.
+        if not project:
+            logger.info(
+                f"[routing] Skipping unowned message from {sender_name} "
+                f"(chat={chat_title or 'DM'}, sender_id={sender_id}): no project resolved"
+            )
+            return
+
         project_name = project.get("name", "DM") if project else "DM"
         message_id = message.id
+        # sdlc-1179: log safe_text so bridge.log never contains wrapped content.
         logger.info(
             f"[{project_name}] Message {message_id} from "
-            f"{sender_name} in {chat_title or 'DM'}: {text[:50]}..."
+            f"{sender_name} in {chat_title or 'DM'}: {safe_text[:50]}..."
         )
-        logger.debug(f"[{project_name}] Full message text: {text}")
+        logger.debug(f"[{project_name}] Full message text: {safe_text}")
 
         # Log incoming message event
         log_event(
@@ -1021,10 +1196,18 @@ async def main():
             has_media=bool(message.media),
         )
 
-        # Clean the message text (no media/YouTube/link enrichment here)
+        # Clean the message text (no media/YouTube/link enrichment here).
+        # sdlc-1179: derive both variants. `clean_text` (built from raw `text`)
+        # feeds the live-agent SDK prompt -- the agent must see <private> tags
+        # this turn to reason about wrapped content. `safe_clean_text`
+        # (built from `safe_text`) flows into AgentSession.message_text and
+        # any other persisted derivative.
         clean_text = clean_message(text, project)
         if not clean_text:
             clean_text = "--file attachment only--" if message.media else "--empty message--"
+        safe_clean_text = clean_message(safe_text, project)
+        if not safe_clean_text:
+            safe_clean_text = "--file attachment only--" if message.media else "--empty message--"
 
         # Extract YouTube URLs (lightweight -- no transcription yet)
         youtube_urls = extract_youtube_urls(text)
@@ -1037,7 +1220,8 @@ async def main():
         # Build session ID with reply-based continuity
         # - Reply to Valor's message → continue that session
         # - New message (no reply) → fresh session using message ID
-        project_key = project.get("_key", "dm") if project else "dm"
+        # project_key is guaranteed non-None by the `if not project: return` guard above (#1173)
+        project_key = project["_key"]
         telegram_chat_id = str(event.chat_id)  # For history lookup
 
         # Use the is_reply_to_valor flag from should_respond_async
@@ -1414,6 +1598,10 @@ async def main():
                                 )
                                 if chain:
                                     reply_chain_context = format_reply_chain(chain)
+                                    # sdlc-1179 B1: a legacy reply chain may contain
+                                    # <private> markers persisted before this PR.
+                                    # Strip before splicing into augmented_text.
+                                    reply_chain_context = strip_private(reply_chain_context)
                             except TimeoutError:
                                 logger.warning(
                                     "RESUME_REPLY_CHAIN_FAIL timeout "
@@ -1430,9 +1618,13 @@ async def main():
                                     f"error={rc_exc!r}"
                                 )
 
+                        # sdlc-1179 B1: both inputs to augmented_text are
+                        # pre-stripped (safe_clean_text is built from safe_text,
+                        # reply_chain_context was passed through strip_private
+                        # immediately after format_reply_chain returned).
                         augmented_text = _build_completed_resume_text(
                             completed,
-                            clean_text,
+                            safe_clean_text,
                             reply_chain_context=reply_chain_context,
                         )
                         # Compute working_dir inline (not yet defined at this point in the handler)
@@ -1838,7 +2030,12 @@ async def main():
         #
         # Honors env kill-switch REPLY_CONTEXT_DIRECTIVE_DISABLED (truthy = off)
         # so Change C can be disabled in-place without a code deploy (IN-5).
-        enqueued_message_text = clean_text
+        # sdlc-1179: enqueued_message_text persists into AgentSession.message_text
+        # via the dispatch_telegram_session call below; use safe_clean_text so
+        # wrapped <private> regions do not land there. Pattern detection
+        # (references_prior_context / matched_context_patterns) runs on the
+        # safe variant too -- a private region is irrelevant to the heuristic.
+        enqueued_message_text = safe_clean_text
         _directive_disabled = os.getenv("REPLY_CONTEXT_DIRECTIVE_DISABLED", "").strip().lower() in (
             "1",
             "true",
@@ -1848,9 +2045,9 @@ async def main():
         if (
             not _directive_disabled
             and not message.reply_to_msg_id
-            and references_prior_context(clean_text)
+            and references_prior_context(safe_clean_text)
         ):
-            matched_patterns = matched_context_patterns(clean_text)
+            matched_patterns = matched_context_patterns(safe_clean_text)
             context_directive = (
                 "[CONTEXT DIRECTIVE] This message references context not in "
                 "the current turn. If the auto-recalled memory below does not "
@@ -1861,13 +2058,13 @@ async def main():
                 "if an issue or PR is implied. Skip this directive entirely if "
                 "the prior context is obvious from the auto-recalled memory."
             )
-            enqueued_message_text = f"{context_directive}\n\n{clean_text}"
+            enqueued_message_text = f"{context_directive}\n\n{safe_clean_text}"
             logger.info(
                 "implicit_context_directive_injected "
                 f"session_id={session_id} "
                 f"chat_id={telegram_chat_id} "
                 f"matched_patterns={matched_patterns} "
-                f"text_preview={clean_text[:80]!r}"
+                f"text_preview={safe_clean_text[:80]!r}"
             )
 
         # === FRESH-SESSION NON-VALOR REPLY PRE-HYDRATION (Issue #1064) ===
@@ -1920,6 +2117,10 @@ async def main():
                 )
                 if chain:
                     reply_chain_context = format_reply_chain(chain)
+                    # sdlc-1179 B1: prehydrated reply-chain is stripped
+                    # before splice so a legacy <private> marker in upstream
+                    # messages does not leak into AgentSession.message_text.
+                    reply_chain_context = strip_private(reply_chain_context)
             except TimeoutError:
                 logger.warning(
                     "FRESH_REPLY_CHAIN_FAIL timeout "
@@ -2028,7 +2229,8 @@ async def main():
         if not project:
             return
 
-        project_key = project.get("_key", "dm")
+        # Subscript safe — guarded by `if not project: return` above (#1173)
+        project_key = project["_key"]
         edited_text = (message.text or "").strip()
         if not edited_text:
             return
@@ -2375,6 +2577,14 @@ async def main():
                     # after the actual Telethon send); stored as None and the
                     # relay's _record_sent_message fills the gap on the session
                     # record. This preserves sender/content/timestamp tracking.
+                    #
+                    # sdlc-1179 C4: outbound text is the agent's own utterance,
+                    # not user-tagged input. Persona segment (private-tag.md) +
+                    # Risk 3 cover quote-back leakage. Do not strip here; that
+                    # would blur the line between "user marked this private" and
+                    # "the system sometimes deletes agent text". If empirical
+                    # leak rate is non-zero post-ship, the right fix is a
+                    # follow-up scoped to agent/memory_extraction.py.
                     try:
                         store_message(
                             chat_id=chat_id,

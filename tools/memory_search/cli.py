@@ -32,6 +32,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         category=getattr(args, "category", None),
         tag=getattr(args, "tag", None),
         min_act_rate=getattr(args, "act_rate", None),
+        min_rrf_score=getattr(args, "min_score", None),
     )
 
     if result.get("error"):
@@ -443,6 +444,16 @@ def main() -> int:
         type=float,
         default=None,
         help="Filter to memories with act_rate >= threshold (0.0-1.0)",
+    )
+    search_parser.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+        help=(
+            "Post-fusion RRF relevance threshold. CLI default is OFF "
+            "(no filtering) for back-compat; pass a value (e.g. 0.009) to "
+            "drop fused results below the floor."
+        ),
     )
 
     # save command

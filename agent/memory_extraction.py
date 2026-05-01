@@ -42,6 +42,155 @@ logger = logging.getLogger(__name__)
 _EXTRACTION_SDK_TIMEOUT = 30.0
 _EXTRACTION_HARD_TIMEOUT = 35.0
 
+# -----------------------------------------------------------------------------
+# JSON-shrapnel + refusal-prose hardening (issue #1212).
+#
+# These constants are tuned against junk Memory records produced before the
+# parser was hardened. Each refusal pattern is annotated with the originating
+# Memory IDs so future readers can trace why the substring is here. When Haiku
+# rephrases its refusals over time, the response is to *append* a new pattern
+# to this tuple — not to re-architect. The failure mode is silent rejection of
+# refusal text only; a too-broad pattern would silently drop legitimate
+# observations, so additions must stay narrow (full phrases, not bare
+# keywords). The `memory-dedup` nightly reflection plus the on-demand
+# `cleanup_memory_extraction_junk.py` script provide the recurring safety net.
+# -----------------------------------------------------------------------------
+_REFUSAL_PATTERNS: tuple[str, ...] = (
+    "there is no agent session",  # 5be7da58 / 76dbd772 / 796e1429
+    "no agent session response",  # 76dbd772
+    "please provide the session",  # 1540c270
+    "**rationale:**",  # c219982fbf9746f9a3ff9b09b042faa6 (refusal-style preamble)
+    "contains no novel observations",  # c219982fbf9746f9a3ff9b09b042faa6
+    "no agent session was provided",  # 1540c270 / 796e1429
+    "session was initialized with empty input",  # 1540c270 (placeholder echo)
+    "no agent session response to analyze",  # 5be7da58 (canonical refusal opener)
+)
+
+# Single-line JSON-syntax fragment, e.g. '"tags": ["a", "b"]' or
+# '"category": "decision"'. Saved by the line-based fallback when the strict
+# json.loads() raised on a fenced/preamble-wrapped payload (root cause of the
+# JSON-shrapnel symptom in issue #1212).
+_JSON_SHRAPNEL_RE = re.compile(r'^"[a-z_]+"\s*:\s*.*,?\s*$')
+
+# Whitespace-dominance threshold for the pre-LLM substantive-content guard.
+# An input is considered whitespace-dominated when its non-whitespace ratio is
+# below this value — at which point we skip the Haiku call entirely. The 0.3
+# value is empirical (tested against terse-but-real inputs like "Done. PR #X
+# merged." which sit at ~80% non-whitespace). Tune from this single edit if
+# production data shows false positives. Locked in by
+# test_whitespace_dominant_input_skips_llm_call which exercises both sides of
+# the boundary (25% rejected, 35% accepted).
+_MIN_NON_WHITESPACE_RATIO = 0.3
+
+
+def _extract_json_payload(raw_text: str) -> str | None:
+    r"""Strip markdown code fences and slice to outermost JSON brackets.
+
+    Handles two common Haiku output shapes that broke strict ``json.loads``
+    before the issue #1212 fix:
+
+      1. Code-fenced output: ```json\n[...]\n``` (with or without the
+         ``json`` language tag, with or without surrounding whitespace).
+      2. Preamble + JSON: ``"Here are the observations:\n[...]"`` — prose
+         before the array that the model adds despite an explicit "return
+         only JSON" instruction.
+
+    Returns the cleaned JSON-shaped substring if found, else ``None``. Pure
+    function — no IO, no exceptions raised. Returning ``None`` means "fall
+    through to the existing line-based fallback"; returning a string means
+    "this is the JSON payload, try ``json.loads`` on it".
+
+    The slice is to the outermost ``[...]`` or ``{...}`` of matching type.
+    Nested content inside the brackets is preserved verbatim — the function
+    does NOT validate the JSON, only extracts it. ``json.loads`` downstream
+    is the validator.
+    """
+    if not raw_text:
+        return None
+
+    text = raw_text.strip()
+    if not text:
+        return None
+
+    # Strip markdown code fences if present (\`\`\`json...\`\`\` or \`\`\`...\`\`\`)
+    if text.startswith("```"):
+        # Drop the opening fence (and optional language tag like "json")
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1 :]
+        else:
+            # Single-line fence — strip the leading backticks and any tag word
+            text = text.lstrip("`").lstrip()
+            # Remove a leading lang tag (e.g. "json ") if present
+            if " " in text[:10]:
+                text = text.split(" ", 1)[1]
+
+        # Drop the closing fence if present
+        closing = text.rfind("```")
+        if closing != -1:
+            text = text[:closing]
+
+        text = text.strip()
+        if not text:
+            return None
+
+    # Slice to the outermost [...] or {...}. Prefer arrays since the
+    # extraction prompt asks for an array; fall back to bare objects.
+    first_bracket = text.find("[")
+    first_brace = text.find("{")
+
+    # Decide which bracket type comes first (outermost wins).
+    if first_bracket == -1 and first_brace == -1:
+        return None
+    if first_bracket == -1:
+        start, end_char = first_brace, "}"
+    elif first_brace == -1:
+        start, end_char = first_bracket, "]"
+    elif first_bracket < first_brace:
+        start, end_char = first_bracket, "]"
+    else:
+        start, end_char = first_brace, "}"
+
+    end = text.rfind(end_char)
+    if end == -1 or end <= start:
+        return None
+
+    sliced = text[start : end + 1].strip()
+    return sliced or None
+
+
+def _looks_like_refusal(text: str) -> bool:
+    """Return True if ``text`` matches a known refusal/JSON-shrapnel pattern.
+
+    Two checks, OR-combined:
+
+      1. Substring match against ``_REFUSAL_PATTERNS`` (case-insensitive).
+         These are narrow, full-phrase patterns — a substring like ``"session"``
+         alone would never appear here, only complete phrases like
+         ``"there is no agent session"``. This prevents legitimate
+         observations that mention "session" or "no novel" from being
+         mistakenly rejected.
+      2. Single-line JSON-syntax match against ``_JSON_SHRAPNEL_RE``. Catches
+         the exploded JSON lines (``"tags": [...]``) that the line-based
+         fallback used to persist as separate Memory records.
+
+    Empty/whitespace-only input returns ``False`` — the 50-char guard at the
+    callsite handles those, and treating empty as refusal would be confusing
+    (it's not refusal, it's just nothing).
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    lowered = stripped.lower()
+    for pattern in _REFUSAL_PATTERNS:
+        if pattern in lowered:
+            return True
+    if _JSON_SHRAPNEL_RE.match(stripped):
+        return True
+    return False
+
 
 async def _llm_call(
     model: str,
@@ -187,7 +336,33 @@ async def extract_observations_async(
 
     Returns list of dicts with keys: content, memory_id.
     """
+    # Guard order (issue #1212): the 50-char check is empirically working and
+    # MUST stay first — Tom verified it catches true empties in the issue
+    # comment IC_kwDOEYGa088AAAABAwQnJw. The new refusal-pattern + whitespace
+    # guards are ADDITIVE cost optimizations that skip the Haiku call when the
+    # input is obviously bad. They are NOT replacements for the post-LLM
+    # refusal check, which is the load-bearing defense — refusal can emerge
+    # from inputs that pass all three pre-LLM guards (length OK, no refusal
+    # substring, enough non-whitespace). Dual-filter is by design.
     if not response_text or len(response_text.strip()) < 50:
+        return []
+    if _looks_like_refusal(response_text):
+        logger.debug(
+            "[memory_extraction] Pre-LLM refusal-pattern match — skipping extraction "
+            "for session_id=%s",
+            session_id,
+        )
+        return []
+    # Whitespace-dominance ratio guard. len(response_text) > 0 is guaranteed by
+    # the 50-char check above, so the division is always safe.
+    non_ws_chars = len(re.sub(r"\s+", "", response_text))
+    if non_ws_chars / len(response_text) < _MIN_NON_WHITESPACE_RATIO:
+        logger.debug(
+            "[memory_extraction] Pre-LLM whitespace-dominance guard — skipping extraction "
+            "for session_id=%s (ratio=%.2f)",
+            session_id,
+            non_ws_chars / len(response_text),
+        )
         return []
 
     try:
@@ -227,6 +402,18 @@ async def extract_observations_async(
 
         if raw_text.upper() == "NONE" or not raw_text:
             logger.debug("[memory_extraction] No novel observations found")
+            return []
+
+        # Post-LLM refusal-pattern filter (issue #1212 PRIMARY defense).
+        # Even when input passed all three pre-LLM guards, Haiku can still
+        # return refusal prose ("There is no agent session response to
+        # analyze…"). Drop those before parsing — they'd otherwise explode
+        # into multiple Memory rows via the line-based fallback.
+        if _looks_like_refusal(raw_text):
+            logger.debug(
+                "[memory_extraction] Post-LLM refusal text — skipping save for session_id=%s",
+                session_id,
+            )
             return []
 
         # Parse observations with category-aware importance
@@ -288,41 +475,71 @@ async def extract_observations_async(
 def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dict]]:
     """Parse Haiku output into (content, importance, metadata) tuples.
 
-    Tries JSON parsing first (structured output). Falls back to line-based
-    CATEGORY: text format. Returns empty metadata dict for line-based results.
+    Tries tolerant JSON parsing first (strips markdown code fences and slices
+    to outermost brackets via ``_extract_json_payload``, then ``json.loads``).
+    On a successful JSON parse with ≥1 valid observation, short-circuits and
+    returns — the line-based fallback NEVER runs in that case (issue #1212).
+
+    Falls back to a line-based ``CATEGORY: text`` parser only when
+    ``_extract_json_payload`` finds no JSON-shaped substring AND the input
+    is not a refusal. Each fallback line is filtered through
+    ``_looks_like_refusal`` so refusal prose and JSON-syntax fragments
+    (``"tags": [...]``) never reach the Memory store.
 
     Returns list of (content_string, importance_float, metadata_dict) tuples.
     """
-    # Try JSON first
-    try:
-        data = json.loads(raw_text)
-        # Handle bare dict (single observation) — wrap in list
-        if isinstance(data, dict):
-            data = [data]
-        if isinstance(data, list):
-            results: list[tuple[str, float, dict]] = []
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                category = item.get("category", "").lower()
-                observation = item.get("observation", "")
-                if not observation or len(observation) < 10:
-                    continue
-                importance = CATEGORY_IMPORTANCE.get(category, DEFAULT_CATEGORY_IMPORTANCE)
-                metadata = {
-                    "category": category,
-                    "file_paths": item.get("file_paths", []),
-                    "tags": item.get("tags", []),
-                }
-                results.append((observation, importance, metadata))
-            if results:
-                return results
-    except (json.JSONDecodeError, TypeError):
-        pass  # Fall through to line-based parser
+    # Refusal short-circuit: if the LLM returned refusal prose, drop it
+    # immediately. Belt-and-suspenders alongside the post-LLM check in
+    # extract_observations_async — this defends call sites that invoke the
+    # parser directly (tests, future call sites).
+    if _looks_like_refusal(raw_text):
+        return []
 
-    # Fallback: line-based parser (returns empty metadata)
+    # Tolerant JSON path: strip code fences / preamble, then strict json.loads.
+    # If extraction yields a JSON-shaped substring but parsing fails, fall
+    # through to the line-based parser (worst case: same behavior as before
+    # the fix). If extraction yields no JSON-shaped substring, also fall
+    # through.
+    payload = _extract_json_payload(raw_text)
+    if payload is not None:
+        try:
+            data = json.loads(payload)
+            # Handle bare dict (single observation) — wrap in list
+            if isinstance(data, dict):
+                data = [data]
+            if isinstance(data, list):
+                results: list[tuple[str, float, dict]] = []
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    category = item.get("category", "").lower()
+                    observation = item.get("observation", "")
+                    if not observation or len(observation) < 10:
+                        continue
+                    importance = CATEGORY_IMPORTANCE.get(category, DEFAULT_CATEGORY_IMPORTANCE)
+                    metadata = {
+                        "category": category,
+                        "file_paths": item.get("file_paths", []),
+                        "tags": item.get("tags", []),
+                    }
+                    results.append((observation, importance, metadata))
+                if results:
+                    # Short-circuit: tolerant JSON path succeeded, do NOT run
+                    # the line-based fallback. This is the issue #1212 fix —
+                    # previously, fenced JSON would raise on the strict
+                    # json.loads, fall through to the fallback, and explode
+                    # one observation into 4-5 shrapnel rows.
+                    return results
+        except (json.JSONDecodeError, TypeError):
+            pass  # Fall through to line-based parser
+
+    # Fallback: line-based parser (returns empty metadata). Each line filtered
+    # through _looks_like_refusal so we never persist single-line JSON
+    # syntax fragments or refusal sentences as Memory records.
     lines = [
-        line.strip() for line in raw_text.split("\n") if line.strip() and len(line.strip()) > 10
+        line.strip()
+        for line in raw_text.split("\n")
+        if line.strip() and len(line.strip()) > 10 and not _looks_like_refusal(line)
     ]
     if not lines:
         return []

@@ -158,3 +158,49 @@ class TestFallbackBehavior:
             result = validate_workspace(broken, tmp_workspace)
         assert result == tmp_workspace
         assert "does not exist" in caplog.text
+
+
+class TestTildeExpansion:
+    """Invariant 4: Paths beginning with ~ must be expanded before resolution.
+
+    Regression guard for the cuttlefish hotfix: projects.json may store
+    working_directory as the literal string "~/src/cuttlefish" and pass it
+    untouched to the worker. Without expansion, Path.resolve() concatenates
+    the tilde under cwd ("/Users/<user>/src/ai/~/src/cuttlefish"), which
+    fails containment and falls back to allowed_root with a noisy warning.
+    """
+
+    def test_tilde_path_expanded_before_validation(self, tmp_path, monkeypatch):
+        """A "~/foo" string must resolve to <home>/foo, not cwd/~/foo."""
+        # Pretend HOME is tmp_path so we can construct a real "~/foo" target
+        monkeypatch.setenv("HOME", str(tmp_path))
+        target = tmp_path / "foo"
+        target.mkdir()
+        result = validate_workspace("~/foo", tmp_path)
+        # Must resolve under the expanded home, not cwd/~/foo
+        assert result == target.resolve()
+        assert "~" not in str(result)
+
+    def test_tilde_path_passed_as_path_object_expanded(self, tmp_path, monkeypatch):
+        """Path("~/foo") must also be expanded; Path() does not auto-expand."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        target = tmp_path / "foo"
+        target.mkdir()
+        result = validate_workspace(Path("~/foo"), tmp_path)
+        assert result == target.resolve()
+        assert "~" not in str(result)
+
+    def test_tilde_path_does_not_warn_about_missing_directory(self, tmp_path, monkeypatch, caplog):
+        """Project dict with working_directory="~/foo" must not produce a
+        'does not exist' warning concatenating ~ under cwd. This is the
+        regression scenario from the cuttlefish brief."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        target = tmp_path / "foo"
+        target.mkdir()
+        with caplog.at_level(logging.WARNING):
+            result = validate_workspace("~/foo", tmp_path)
+        assert result == target.resolve()
+        # The literal "~" must NOT appear in any warning text — that is the
+        # exact symptom from the cuttlefish run.
+        for record in caplog.records:
+            assert "~" not in record.getMessage(), f"Tilde leaked into log: {record.getMessage()}"

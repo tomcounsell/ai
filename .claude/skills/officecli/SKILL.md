@@ -254,9 +254,9 @@ officecli add <file> <parent> --from <path>                               # clon
 
 | Format | Types |
 |--------|-------|
-| **pptx** | slide (incl. hidden), shape (textbox — font.latin/ea/cs, direction=rtl), picture (SVG, brightness/contrast/glow/shadow), chart (direction=rtl), table (cell direction=rtl), row (tr), connector (connection/line), group, video (audio/media, trim), equation (formula/math), notes (direction=rtl, lang), comment (RTL via U+200F bidi mark; full CRUD via /slide[N]/comment[M]), paragraph (para), run, zoom (slidezoom), ole (oleobject/object/embed), placeholder (phType=title/body/subtitle/footer/...). slideLayout/slideMaster direction inheritance. |
-| **docx** | paragraph (para — direction/font.latin/ea/cs, bold.cs/italic.cs/size.cs for RTL/CJK; lang.latin/ea/cs BCP-47 tags on run; wordWrap toggle), run, table (direction=rtl → bidiVisual), row (tr), cell (td), image (picture/img — SVG supported), header (direction), footer (direction), section (pageNumFmt full ECMA-376 enum incl. Hindi/Arabic/Thai/CJK numerals; direction=rtl on Add/Set; rtlGutter; pgBorders=box shorthand), bookmark, comment, footnote, endnote, formfield (text/checkbox/dropdown), sdt (contentcontrol), chart, equation, field (28 types incl. mergefield/ref/seq/styleref/docproperty/if), hyperlink, style (direction round-trip), toc, watermark, break (pagebreak/columnbreak), ole, **num / abstractNum / lvl** (numbering/list system), **tab** (paragraph or paragraph/table style tab stops). docDefaults.rtl document-wide override; `get /` exposes `locale`. Document protection: `set / --prop protection=forms\|readOnly\|comments\|trackedChanges\|none` |
-| **xlsx** | sheet (visible/hidden/veryHidden, print margins, printTitleRows/Cols, rightToLeft sheetView, cascade-aware rename), row, cell (type=richtext+runs, merge=range/sweep, direction=rtl, phonetic guide on add), chart (direction=rtl on per-axis txPr / title; incl. pareto), image (picture — SVG), comment (direction=rtl), table (listobject), namedrange (definedname, volatile, `[@name=X]` selector), pivottable (pivot, calculatedField), sparkline, validation (datavalidation), autofilter, shape, textbox, databar/colorscale/iconset/formulacf/cellIs/topN/aboveAverage (conditional formatting), ole, csv (tsv). Query supports `merge`/`mergedrange` aliases for `mergeCell`. Workbook: password. `value="=SUM(...)"` auto-detects as formula. Chart/picture/shape/slicer accept `anchor=A1:E10`. |
+| **pptx** | slide (incl. hidden), shape (textbox — font.latin/ea/cs, direction=rtl), picture (SVG, brightness/contrast/glow/shadow), chart, table (cell direction=rtl), row (tr), connector (connection/line), group, video (audio/media, trim), equation (formula/math), notes, comment (full CRUD via /slide[N]/comment[M]), paragraph (para), run, zoom (slidezoom), ole (oleobject/object/embed), placeholder (phType=title/body/subtitle/footer/...) |
+| **docx** | paragraph (para — direction/font.latin/ea/cs, bold.cs/italic.cs/size.cs for RTL/CJK; wordWrap toggle), run, table, row (tr), cell (td), image (picture/img — SVG supported), header, footer, section (pageNumFmt full ECMA-376 enum incl. Hindi/Arabic/Thai/CJK numerals; direction=rtl), bookmark, comment, footnote, endnote, formfield (text/checkbox/dropdown), sdt (contentcontrol), chart, equation, field (28 types incl. mergefield/ref/seq/styleref/docproperty/if), hyperlink, style, toc, watermark, break (pagebreak/columnbreak), ole, **num / abstractNum / lvl** (numbering/list system), **tab** (paragraph or paragraph/table style tab stops). Document protection: `set / --prop protection=forms\|readOnly\|comments\|trackedChanges\|none` |
+| **xlsx** | sheet (visible/hidden/veryHidden, print margins, cascade-aware rename), row, cell (type=richtext+runs, merge=range/sweep, direction=rtl), chart (incl. pareto), image (picture — SVG), comment, table (listobject), namedrange (definedname, volatile, `[@name=X]` selector), pivottable (pivot, calculatedField), sparkline, validation (datavalidation), autofilter, shape, textbox, databar/colorscale/iconset/formulacf/cellIs/topN/aboveAverage (conditional formatting), ole, csv (tsv). Query supports `merge`/`mergedrange` aliases for `mergeCell`. Workbook: password. `value="=SUM(...)"` auto-detects as formula. Chart/picture/shape/slicer accept `anchor=A1:E10`. |
 
 ### Pivot tables (xlsx)
 
@@ -364,39 +364,31 @@ officecli add-part <file> <parent>                   # create new document part 
 
 ## Specialized Skills
 
-Load a specialized skill on demand:
-
-    officecli skill <name>
-
-That single command ensures the skill is installed (idempotent) and prints its full SKILL.md to stdout — read the output and follow its rules. No need to know on-disk paths.
-
-Skills are organized as **base layer + scene layer**: scene-layer skills inherit every rule from their base — pick the most specific one that fits the user's ask; if none fits, fall back to the base.
+Load the dedicated skill from `skills/<skill-name>/SKILL.md`. Skills are organized as **base layer + scene layer**: scene-layer skills inherit every rule from their base — pick the most specific one that fits the user's ask; if none fits, fall back to the base.
 
 ### Word (.docx)
 
-| Name | When to use | Layer |
-|------|-------------|-------|
-| `word` | Reports, letters, memos, proposals, generic documents | **base** |
-| `academic-paper` | Journal / conference / thesis: APA / Chicago / IEEE / MLA citations, equations, SEQ + PAGEREF cross-refs, multi-column journal layout, bibliography | scene (inherits word) |
+| Skill | When to use | Layer |
+|-------|-------------|-------|
+| `officecli-docx` | Reports, letters, memos, proposals, generic documents | **base** |
+| `officecli-academic-paper` | Journal / conference / thesis: APA / Chicago / IEEE / MLA citations, equations, SEQ + PAGEREF cross-refs, multi-column journal layout, bibliography | scene (inherits docx) |
 
 ### PowerPoint (.pptx)
 
-| Name | When to use | Layer |
-|------|-------------|-------|
-| `pptx` | Generic decks: board reviews, sales decks, all-hands, product launches | **base** |
-| `pitch-deck` | **Fundraising only** — seed / Series A-C / SAFE / convertible / strategic raise. NOT for sales / product / board decks (route those to `pptx`) | scene (inherits pptx) |
+| Skill | When to use | Layer |
+|-------|-------------|-------|
+| `officecli-pptx` | Generic decks: board reviews, sales decks, all-hands, product launches | **base** |
+| `officecli-pitch-deck` | **Fundraising only** — seed / Series A-C / SAFE / convertible / strategic raise. NOT for sales / product / board decks (route those to `officecli-pptx`) | scene (inherits pptx) |
 | `morph-ppt` | Cinematic Morph-animated presentations | scene (inherits pptx) |
 | `morph-ppt-3d` | 3D Morph: GLB models, camera moves, depth (extends `morph-ppt`) | scene (extends morph-ppt) |
 
 ### Excel (.xlsx)
 
-| Name | When to use | Layer |
-|------|-------------|-------|
-| `excel` | Generic workbooks, formulas, pivots, trackers | **base** |
-| `financial-model` | Financial models, scenarios, projections | scene (inherits excel) |
-| `data-dashboard` | CSV/tabular data → KPI / analytics / executive dashboards with charts and sparklines | scene (inherits excel) |
-
-Example: a fundraising deck task → `officecli skill pitch-deck` → use the printed rules.
+| Skill | When to use | Layer |
+|-------|-------------|-------|
+| `officecli-xlsx` | Generic workbooks, formulas, pivots, trackers | **base** |
+| `officecli-financial-model` | Financial models, scenarios, projections | scene (inherits xlsx) |
+| `officecli-data-dashboard` | CSV/tabular data → KPI / analytics / executive dashboards with charts and sparklines | scene (inherits xlsx) |
 
 ---
 

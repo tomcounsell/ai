@@ -194,7 +194,12 @@ The PM session owns all SDLC intelligence. The bridge just keeps it working.
 
 ## Queue Architecture
 
-Workers are keyed by `worker_key` — either `project_key` (for PM and dev-without-slug sessions that share the main working tree), `slug` (for slugged dev sessions with isolated worktrees), or `chat_id` (for teammate sessions). Sessions sharing a working tree serialize; isolated sessions can run in parallel across chats and across slugs.
+Workers are keyed by `worker_key` — either `project_key`, `slug`, or `chat_id`:
+- **PM sessions**: slugless PMs and PMs at main-checkout stages (PLAN/ISSUE/CRITIQUE/MERGE) use `project_key` and serialize per project. Slugged PMs at worktree stages (BUILD/TEST/PATCH/REVIEW/DOCS) use `slug` and can run concurrently with siblings (issue #1228).
+- **Dev sessions**: slugged devs use `slug` (isolated worktree); slugless devs use `project_key`.
+- **Teammate sessions**: always use `chat_id`.
+
+Sessions sharing a working tree serialize; isolated sessions (distinct slugs at worktree stages) can run in parallel.
 
 ### Per-Worker-Key Workers
 - `_ensure_worker(worker_key, is_project_keyed)` -- starts a worker per key

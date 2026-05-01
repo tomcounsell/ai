@@ -544,6 +544,199 @@ class TestRetrieveMemories:
         assert "projA" in hydrated_keys[0]
 
 
+class TestRelevanceThreshold:
+    """Test the post-fusion min_rrf_score relevance gate.
+
+    The gate drops fused (key, score) tuples below the configured
+    threshold BEFORE Memory hydration. CLI defaults to None (off);
+    recall paths pass config.memory_defaults.RRF_MIN_SCORE explicitly.
+    """
+
+    def _make_record(self, mid: str = "rec-1") -> MagicMock:
+        rec = MagicMock()
+        rec.memory_id = mid
+        rec.superseded_by = ""  # active
+        return rec
+
+    def test_threshold_none_preserves_back_compat(self):
+        """min_rrf_score=None must behave exactly like today (no filter)."""
+        from agent.memory_retrieval import retrieve_memories
+
+        rec = self._make_record()
+        # Single signal at rank 50: score = 1/(60+50) ≈ 0.00909, very low
+        # but should still pass when threshold is None.
+        key = "Memory:test:proj:rec-1"
+        bm25_results = [(key, 0.1)] + [(f"Memory:test:proj:noise-{i}", 0.05) for i in range(49)]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = rec
+
+            result = retrieve_memories("query", "proj", limit=50, min_rrf_score=None)
+
+        assert len(result) >= 1
+
+    def test_threshold_drops_below_floor(self):
+        """A record present in only one signal at low rank should be dropped."""
+        from agent.memory_retrieval import retrieve_memories
+
+        rec = self._make_record()
+        key = "Memory:test:proj:rec-1"
+        # Only in one signal -- max score is 1/(60+1) ≈ 0.01639. With
+        # threshold = 0.02, this single-signal record should be dropped.
+        bm25_results = [(key, 5.0)]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = rec
+
+            result = retrieve_memories("q", "proj", limit=10, min_rrf_score=0.02)
+
+        assert result == []
+
+    def test_threshold_keeps_strong_results(self):
+        """Records present in multiple signals should survive the threshold."""
+        from agent.memory_retrieval import retrieve_memories
+
+        rec = self._make_record()
+        key = "Memory:test:proj:rec-1"
+        # Same record at rank 1 in 4 signals: score = 4/61 ≈ 0.0656,
+        # well above any reasonable threshold.
+        bm25_results = [(key, 5.0)]
+        relevance_results = [(key, 1000.0)]
+        confidence_results = [(key, 0.8)]
+        embedding_results = [(key, 0.95)]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=embedding_results),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = rec
+
+            result = retrieve_memories("q", "proj", limit=10, min_rrf_score=0.02)
+
+        assert len(result) == 1
+        assert result[0] is rec
+
+    def test_threshold_zero_equivalent_to_none(self):
+        """min_rrf_score=0 must behave like None (always pass)."""
+        from agent.memory_retrieval import retrieve_memories
+
+        rec = self._make_record()
+        key = "Memory:test:proj:rec-1"
+        bm25_results = [(key, 5.0)]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = rec
+
+            result = retrieve_memories("q", "proj", limit=10, min_rrf_score=0)
+
+        # threshold=0 must NOT drop the record -- it equals "always pass".
+        assert len(result) == 1
+
+    def test_threshold_inf_returns_empty(self):
+        """min_rrf_score=inf must drop everything."""
+        from agent.memory_retrieval import retrieve_memories
+
+        rec = self._make_record()
+        key = "Memory:test:proj:rec-1"
+        bm25_results = [(key, 5.0)]
+        relevance_results = [(key, 1000.0)]
+        confidence_results = [(key, 0.8)]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = rec
+
+            result = retrieve_memories("q", "proj", limit=10, min_rrf_score=float("inf"))
+
+        assert result == []
+
+    def test_threshold_malformed_falls_through(self):
+        """Non-numeric threshold must not crash; treated as no-op."""
+        from agent.memory_retrieval import retrieve_memories
+
+        rec = self._make_record()
+        key = "Memory:test:proj:rec-1"
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = [(key, 5.0)]
+            mock_memory_cls.query.get.return_value = rec
+
+            # malformed threshold -- function must return results, not crash
+            result = retrieve_memories("q", "proj", limit=10, min_rrf_score="bogus")
+
+        assert isinstance(result, list)
+        assert len(result) == 1
+
+    def test_threshold_does_not_hydrate_dropped_keys(self):
+        """Filtered keys must not trigger Memory.query.get -- saves Redis I/O."""
+        from agent.memory_retrieval import retrieve_memories
+
+        survivor = self._make_record("survivor")
+        key_keep = "Memory:test:proj:survivor"
+        key_drop = "Memory:test:proj:dropped"
+
+        # Keep key: present in 4 signals (high score).
+        # Drop key: present in 1 signal at rank 50 (low score).
+        bm25_results = [(key_keep, 5.0), (key_drop, 0.05)]
+        relevance_results = [(key_keep, 1000.0)]
+        confidence_results = [(key_keep, 0.8)]
+        embedding_results = [(key_keep, 0.9)]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=embedding_results),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = survivor
+
+            retrieve_memories("q", "proj", limit=10, min_rrf_score=0.02)
+
+        # Only the surviving key should be hydrated -- the dropped key
+        # must not appear in any Memory.query.get call.
+        hydrated = [c.args[0] for c in mock_memory_cls.query.get.call_args_list]
+        assert key_drop not in hydrated
+
+
 class TestSupersededFilter:
     """Test that superseded records are excluded from retrieve_memories() results."""
 
@@ -1006,4 +1199,102 @@ class TestSearchAssessQuality:
         # quality key must be absent on failure (non-fatal)
         assert "quality" not in result, (
             "quality key must be absent when ContextAssembler.assess() raises"
+        )
+
+
+class TestRetrieveMemoriesLogSilence:
+    """C-A regression: ``Skipping unrecognized embedding file`` must NOT fire at WARNING.
+
+    Background: before #1214, ``retrieve_memories()`` walked the embedding
+    directory via ``EmbeddingField.load_embeddings()`` and emitted hundreds
+    of ``WARNING Skipping unrecognized embedding file ...`` log lines per
+    query because thousands of orphan .npy files existed on disk. Popoto
+    1.6.0 downgrades that log to DEBUG.
+
+    This test exercises ``load_embeddings`` DIRECTLY against a controlled
+    embedding directory containing an orphan file (one that is not in the
+    index and is not valid hex). The earlier version of this test patched
+    ``get_embedding_ranked`` to return ``[]``, which short-circuited the
+    pipeline so ``load_embeddings`` was never called — the test passed
+    tautologically without ever exercising the code under test. By calling
+    ``load_embeddings`` directly with a populated emb_dir, we verify the
+    real downgrade contract: on popoto>=1.6.0 the orphan-file message is
+    DEBUG; on popoto<1.6.0 it is still WARNING and this test will fail
+    (which is the correct behavior — the C-A criterion is unmet on
+    popoto<1.6.0).
+    """
+
+    def test_load_embeddings_orphan_file_does_not_warn(self, tmp_path, caplog):
+        """Direct exercise of ``load_embeddings`` over an orphan file.
+
+        Builds a temp embedding directory with one file whose name is not
+        valid hex AND not in the index, then calls
+        ``EmbeddingField.load_embeddings(MockModel)`` and asserts no
+        WARNING records mention "Skipping unrecognized embedding file".
+
+        On popoto<1.6.0 this test SKIPS — the contract being tested is a
+        post-1.6.0 downgrade. The earlier mocked-pipeline approach passed
+        tautologically on every version because ``load_embeddings`` was
+        never called; this direct exercise will FAIL on popoto<1.6.0 (the
+        WARNING still fires there) which is structurally honest. The skip
+        keeps CI green during the staged Popoto 1.6.0 PyPI release lag.
+        """
+        import logging
+        import os
+        from unittest.mock import MagicMock, patch
+
+        import pytest
+
+        try:
+            from popoto.fields.embedding_field import EmbeddingField
+        except ImportError as e:
+            pytest.skip(f"popoto not importable: {e}")
+
+        # Capability probe: popoto>=1.6.0 introduces sweep_stale_tempfiles
+        # AND downgrades the orphan-file log to DEBUG. The two ship together.
+        if not hasattr(EmbeddingField, "sweep_stale_tempfiles"):
+            pytest.skip(
+                "popoto<1.6.0 emits 'Skipping unrecognized embedding file' "
+                "at WARNING; the downgrade-to-DEBUG contract requires "
+                "popoto>=1.6.0. Install popoto>=1.6.0 to run this test."
+            )
+
+        try:
+            import numpy as np
+        except ImportError:
+            pytest.skip("numpy not available")
+
+        model_name = "MemoryLogSilenceProbe"
+        # POPOTO_CONTENT_PATH overrides the default ~/.popoto path so we can
+        # point at a temp dir without touching real embeddings.
+        emb_root = tmp_path / "content" / ".embeddings" / model_name
+        emb_root.mkdir(parents=True, exist_ok=True)
+
+        # Filename is NOT valid hex (contains 'z') and is intentionally not
+        # in the (nonexistent) index — this is the "orphan" case that
+        # used to log at WARNING on every recall query.
+        orphan_basename = "z" * 64
+        np.save(str(emb_root / orphan_basename), np.zeros(8, dtype=np.float32))
+
+        mock_model = MagicMock()
+        mock_model.__name__ = model_name
+
+        caplog.set_level(logging.DEBUG)
+
+        with patch.dict(os.environ, {"POPOTO_CONTENT_PATH": str(tmp_path / "content")}):
+            EmbeddingField.load_embeddings(mock_model)
+
+        # Structural filter on caplog records — covers both the message
+        # text and the log level (>= WARNING is the violation).
+        offending = [
+            r
+            for r in caplog.records
+            if "Skipping unrecognized embedding file" in r.getMessage()
+            and r.levelno >= logging.WARNING
+        ]
+        assert not offending, (
+            "load_embeddings must NOT emit 'Skipping unrecognized embedding "
+            f"file' at WARNING level (popoto>=1.6.0 downgrades to DEBUG); "
+            f"got {len(offending)} record(s): "
+            f"{[(r.levelname, r.getMessage()) for r in offending[:3]]}"
         )

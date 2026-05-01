@@ -8,6 +8,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) v1.1.0. 
 
 ## [Unreleased]
 
+### Added
+- **Memory embedding orphan cleanup:** new `embedding-orphan-sweep` daily reflection reconciles `~/.popoto/content/.embeddings/Memory/` `.npy` files against live records via Popoto 1.6.0's `EmbeddingField.garbage_collect` + `sweep_stale_tempfiles`; `tools.memory_search status --deep` now reports `disk_orphan_count` alongside `orphan_index_count`; one-shot operator script `scripts/embedding_orphan_reconcile.py` (dry-run default) for clearing existing backlogs (#1214)
+
+### Fixed
+- **`scripts/popoto_index_cleanup.py::_count_orphans` reads canonical class set:** previously read the legacy `{Name}:_all` key (empty in production), so `status --deep` reported `orphan_index_count: 0` regardless of true state. Now reads `model_class._meta.db_class_set_key.redis_key` (= `$Class:{Name}`) (#1214)
+
 ---
 
 ## [0.11.0] - 2026-04-15

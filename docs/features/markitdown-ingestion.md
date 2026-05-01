@@ -110,6 +110,14 @@ The reminder is gated by `~/.cache/valor/markitdown-backfill-reminded` so subseq
 
 Crash isolation is preserved — the converter call is wrapped in try/except and its exceptions are logged at WARNING without ever propagating out of the watcher thread.
 
+### Vault writers
+
+The vault is fed from several sources. Each writer drops files under `~/work-vault/`; the watcher coalesces them in its 2-second debounce window and runs the converter:
+
+- **Manual ingest CLI** — `valor-ingest <source>` (one-off) or `valor-ingest --scan <dir>` (backfill). Primary entry point for explicit user-driven imports.
+- **Telegram steering attachments** (issue #1215) — when a file lands in a chat with a live session, `bridge/telegram_bridge.py:_ack_steering_routed` schedules a fire-and-forget `_ingest_attachments` task that copies the downloaded file into `~/work-vault/telegram-attachments/` with the disambiguated name `{YYYYMMDD_HHMMSS}_{sender}_{message_id}_{basename}`. The copy runs **after** the steering push so a slow filesystem write never blocks delivery. See [Telegram Integration → Inbound attachments](telegram.md#inbound-attachments--steering-enrichment--auto-ingest).
+- **Telegram new-session deferred enrichment** — `bridge/enrichment.py:enrich_message` already downloads media for new sessions. The steering-side helper above closes the gap so live-session attachments get the same vault treatment.
+
 ## Loop Prevention
 
 The converter refuses to re-run on any `.md` input — the first line of `convert_to_sidecar()` checks `ext == ".md"` and short-circuits to `None`. This protects against:

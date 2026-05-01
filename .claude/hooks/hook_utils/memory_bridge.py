@@ -68,6 +68,18 @@ try:
 except Exception:
     NOVEL_TERRITORY_KEYWORD_THRESHOLD = 7
 
+# Bloom-gate threshold and post-fusion RRF floor. Both default to permissive
+# values if the import fails so the hook never crashes on a stale config.
+try:
+    from config.memory_defaults import BLOOM_MIN_HITS
+except Exception:
+    BLOOM_MIN_HITS = 2
+
+try:
+    from config.memory_defaults import RRF_MIN_SCORE
+except Exception:
+    RRF_MIN_SCORE = None
+
 # ---------------------------------------------------------------------------
 # Latency budget for the user-facing prefetch path. When prefetch() exceeds
 # this wall-clock budget, a warning is logged so operators can spot silent
@@ -274,6 +286,7 @@ def _recall_with_query(
     bloom_check: bool = True,
     bloom_check_emit_dejavu: bool = True,
     max_results: int = MAX_THOUGHTS,
+    min_rrf_score: float | None = None,
 ) -> list[Any] | str:
     """Pure retrieval: BM25 + RRF + category re-ranking against an explicit query.
 
@@ -345,6 +358,13 @@ def _recall_with_query(
                 )
             return []
 
+        # Tightened bloom gate: a single token hit is high-noise -- require
+        # BLOOM_MIN_HITS distinct token hits before BM25 + RRF runs. No
+        # deja-vu emission for this band -- it's "weak signal," not
+        # "novel territory."
+        if bloom_hits < BLOOM_MIN_HITS:
+            return []
+
     # BM25 + RRF retrieval against the prompt as a single query.
     try:
         from agent.memory_retrieval import retrieve_memories
@@ -353,6 +373,7 @@ def _recall_with_query(
             query_text=query,
             project_key=project_key,
             limit=max_results * 3,  # over-fetch to allow exclude filtering
+            min_rrf_score=min_rrf_score,
         )
     except Exception as e:
         logger.warning(f"[memory_bridge] _recall_with_query: retrieve_memories failed: {e}")
@@ -466,6 +487,14 @@ def recall(
                 )
             return None
 
+        # Tightened bloom gate: a single token hit is high-noise -- require
+        # BLOOM_MIN_HITS distinct token hits before clustering and BM25 + RRF
+        # run. No deja-vu emission for this band; persist sidecar so the
+        # window counter still advances.
+        if bloom_hits < BLOOM_MIN_HITS:
+            _save_sidecar(session_id, state)
+            return None
+
         # Multi-query decomposition -- cluster keywords and retrieve via
         # _recall_with_query() per cluster (bloom_check=False inside each
         # call since we already passed the multi-keyword bloom gate above).
@@ -493,6 +522,7 @@ def recall(
                 bloom_check=False,  # already gated above
                 bloom_check_emit_dejavu=False,
                 max_results=MAX_THOUGHTS,
+                min_rrf_score=RRF_MIN_SCORE,
             )
             if isinstance(cluster_records, str):
                 # Defensive: _recall_with_query never returns the deja vu
@@ -582,9 +612,13 @@ def prefetch(
         if not prompt or not isinstance(prompt, str):
             return None
 
+        # sdlc-1179: strip <private> regions before BM25 query so wrapped
+        # content does not seed the lookup vector against past memories.
+        from agent.private_tag import strip_private
+
         # Strip PM boilerplate first so length / triviality checks apply
         # to the actual user payload, not the routing template.
-        stripped = _strip_pm_boilerplate(prompt).strip()
+        stripped = _strip_pm_boilerplate(strip_private(prompt)).strip()
 
         if len(stripped) < MIN_PROMPT_LENGTH:
             return None
@@ -612,6 +646,7 @@ def prefetch(
             bloom_check=True,
             bloom_check_emit_dejavu=False,
             max_results=MAX_THOUGHTS,
+            min_rrf_score=RRF_MIN_SCORE,
         )
         elapsed_ms = (time.monotonic() - start) * 1000
 
@@ -678,6 +713,13 @@ def ingest(content: str, cwd: str | None = None) -> bool:
     try:
         if not content or not isinstance(content, str):
             return False
+
+        # sdlc-1179: strip <private> regions before any persistence so wrapped
+        # content never lands in Memory.content. Idempotent and safe on no-tag
+        # input (returns the original string bit-identically).
+        from agent.private_tag import strip_private
+
+        content = strip_private(content)
 
         # Quality filter: minimum length
         stripped = content.strip()

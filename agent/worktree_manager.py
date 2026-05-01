@@ -44,7 +44,14 @@ def validate_workspace(
         return allowed_root
 
     try:
-        resolved = Path(path).resolve()
+        # Expand ~ before resolve(): Path.resolve() does NOT expand ~ and would
+        # concatenate it under cwd, producing nonsense like
+        # "/Users/<user>/src/ai/~/src/cuttlefish". projects.json may store
+        # working_directory as the literal string "~/src/foo" (load_config()
+        # in bridge/routing.py expands it, but out-of-band session creators
+        # — test skills, manual valor_session calls — may bypass that funnel).
+        # Expanding here makes the worker chokepoint resilient.
+        resolved = Path(path).expanduser().resolve()
     except OSError as e:
         logger.warning(
             f"Workspace validation: failed to resolve '{path}': {e}, falling back to {allowed_root}"
