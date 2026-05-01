@@ -92,7 +92,6 @@ LAYER3_SAMPLE_SIZE = 20
 LAYER3_MIN_SIGNAL_CLUSTER = 3  # # records with same anomaly_signal needed to file an issue
 LAYER3_WALLCLOCK_BUDGET_S = 30  # hard cap; abort remaining records past this
 GEMMA_CALL_TIMEOUT_SEC = 10  # per-record asyncio.wait_for timeout (resolves critique C3)
-LAYER3_PER_CALL_TIMEOUT_S = GEMMA_CALL_TIMEOUT_SEC  # back-compat alias
 
 # Layer 3 — Gemma classification prompt (two-example few-shot, JSON output)
 GEMMA_AUDIT_PROMPT = """You are auditing memory records produced by an automated extraction pipeline. Each record is supposed to be a one-sentence observation about an agent session. Some are valid; some are extractor failures (raw JSON output, refusal prose, error text).
@@ -805,7 +804,6 @@ async def run_memory_quality_audit() -> dict:
     flagged_low_confidence = 0
     layer1_superseded = 0
     layer1_blocked = 0
-    layer1_skipped_already_superseded = 0
     layer2_anomalies = 0
     layer3_anomalies = 0
     issues_filed = 0
@@ -957,9 +955,8 @@ async def run_memory_quality_audit() -> dict:
         f"{layer2_anomalies + layer3_anomalies} anomalies, "
         f"{issues_filed} issues filed"
     )
-    # Reference unused locals for clarity in summary; Layer 0 + skipped counts
-    # surface in findings list, not summary.
-    _ = (flagged_zero_access, flagged_low_confidence, layer1_skipped_already_superseded)
+    # Layer 0 counts surface in findings list, not summary.
+    _ = (flagged_zero_access, flagged_low_confidence)
     logger.info(summary)
     return {"status": "ok", "findings": findings, "summary": summary}
 
