@@ -17,17 +17,21 @@ that the drafter alone cannot see:
 The drafter has no view of the *room state* at send time; the drafter only
 sees the agent's tool outputs. Read-the-Room (RTR) is the explicit catch-all.
 
-Sources: issue [#1193](https://github.com/tomcounsell/ai/issues/1193) and the
-plan at `docs/plans/sdlc-1193.md` (or `docs/plans/completed/` after merge).
+Sources:
+- Path A — issue [#1193](https://github.com/tomcounsell/ai/issues/1193), implementation in
+  PR [#1204](https://github.com/tomcounsell/ai/pull/1204) at commit `531e8f4e`.
+- Path B (`valor-telegram send`) — issue [#1203](https://github.com/tomcounsell/ai/issues/1203).
 
 ## Where it lives
 
 | File | Purpose |
 |------|---------|
 | `bridge/read_the_room.py` | The RTR module. `RoomVerdict` dataclass, `read_the_room()` entry point, system prompt, snapshot fetcher. |
-| `agent/output_handler.py` | Call site. `TelegramRelayOutputHandler.send` calls RTR between the drafter and the outbox `rpush`. |
+| `agent/output_handler.py` | **Path A** call site. `TelegramRelayOutputHandler.send` calls RTR between the drafter and the outbox `rpush`. |
+| `tools/valor_telegram.py` | **Path B** call site. `cmd_send` calls RTR after linkify+truncate, before the outbox `rpush` (issue #1203). Caller-type gate auto-detects agent vs. human invocations. |
 | `tests/unit/test_read_the_room.py` | Unit tests for verdict parsing, snapshot construction, fail-open paths. |
-| `tests/unit/test_output_handler.py::TestReadTheRoomWiring` | Handler-level wiring tests (trim coercion, queue alignment). |
+| `tests/unit/test_output_handler.py::TestReadTheRoomWiring` | Path A handler-level wiring tests (trim coercion, queue alignment). |
+| `tests/unit/test_valor_telegram.py::TestCmdSendRTR` | Path B CLI wiring tests (caller-type gate, flag overrides, verdict branching, fail-open). |
 | `tests/integration/test_message_drafter_integration.py` | End-to-end Path A integration tests with RTR enabled. |
 
 ## Verdicts
@@ -116,15 +120,66 @@ Event types:
 Inspect via `valor-session inspect --id <session_id>` or
 `/dashboard.json`.
 
-## Path B (`valor-telegram send`) coverage
+## Coverage (Path A + Path B)
 
-**Out of scope for this feature.** `valor-telegram send`
-(`tools/valor_telegram.py`) writes directly to the Redis outbox and does
-not pass through `agent/output_handler.py`. Adding RTR there requires a
-sync→async bridge and changes the CLI's latency profile for every
-invocation including human-invoked sends. The deferral is tracked in a
-follow-up issue filed against this feature; see `docs/plans/sdlc-1193.md`
-§ "Step by Step Tasks > Path B follow-up issue" for the rationale.
+RTR runs on **two** independent message paths into the Telegram outbox.
+Both share the same public `read_the_room()` entry point, the same
+`READ_THE_ROOM_ENABLED` machine-wide gate, and the same fail-open
+semantics. They differ only in *who is invoking the path* and therefore
+in the gating logic that decides whether to call RTR at all.
+
+| Path | Entry point | Default behavior |
+|------|-------------|------------------|
+| **Path A** | `agent/output_handler.py::TelegramRelayOutputHandler.send` (the worker's drafter→outbox flow) | Always agent-driven. RTR runs whenever `READ_THE_ROOM_ENABLED=true`. |
+| **Path B** | `tools/valor_telegram.py::cmd_send` (the `valor-telegram send` CLI registered in `pyproject.toml`) | RTR runs only for agent-invoked sends; human-invoked sends bypass RTR by default. |
+
+### Caller-type gate (Path B only)
+
+`cmd_send` distinguishes agent invocations from human invocations using
+`VALOR_SESSION_ID`, the canonical "we are inside an AgentSession" env
+var injected by the worker via
+`agent/sdk_client.py:_extract_sdlc_env_vars`. The decision rule:
+
+1. `--no-read-the-room` flag → **off**, regardless of env.
+2. `--read-the-room` flag → **on**, regardless of env.
+3. Otherwise: **on** iff `VALOR_SESSION_ID` is set + non-empty.
+
+The two flags are mutually exclusive at argparse level (passing both
+exits non-zero with a usage error).
+
+### Opt-in / opt-out matrix
+
+| Caller | `VALOR_SESSION_ID` | Flag | RTR runs? |
+|--------|--------------------|------|-----------|
+| Worker drafter (Path A) | (n/a) | (n/a) | **Yes** when `READ_THE_ROOM_ENABLED=true`. |
+| Agent Bash → `valor-telegram send` (Path B) | set | none | **Yes** when `READ_THE_ROOM_ENABLED=true`. |
+| Agent Bash → `valor-telegram send` (Path B) | set | `--no-read-the-room` | **No**. |
+| Human shell → `valor-telegram send` (Path B) | unset | none | **No**. |
+| Human shell → `valor-telegram send` (Path B) | unset | `--read-the-room` | **Yes** when `READ_THE_ROOM_ENABLED=true`. |
+| Human shell with inherited env (sub-shell, `tmux`, `claude --resume`) | set (inherited) | none | **Yes** (false positive). Use `--no-read-the-room` to opt out. |
+
+### Activation diagnostic (Path B)
+
+Immediately before the `asyncio.run(read_the_room(...))` call, `cmd_send`
+prints `(RTR active — running pre-send pass)` to stderr. This makes
+accidental env inheritance visible — a human who pops a fresh terminal
+*from inside* a running agent context will silently inherit
+`VALOR_SESSION_ID`, and the diagnostic gives them a chance to `Ctrl-C`
+and retry with `--no-read-the-room`.
+
+Path A doesn't need this signal because it's always agent-driven.
+
+### Why Path B has its own caller-type gate
+
+Path B is also used by humans (ad-hoc `valor-telegram send` invocations
+from a shell). RTR running on a deliberate human-authored message would
+be both wasteful (a Haiku call on every manual send) and surprising
+(suppressing a human's intentional send with a 👀 reaction). The
+auto-detection rule keeps the default sensible without plumbing a new
+flag through every agent prompt.
+
+Path A has no such concern — it only runs when the worker is drafting an
+outbound message, which is always agent-authored by definition.
 
 ## Cost
 

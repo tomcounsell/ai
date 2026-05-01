@@ -260,6 +260,35 @@ Precedence: explicit `--reply-to` always wins. Empty, missing, or non-numeric
 from outside an AgentSession (no env var set) preserve the original
 no-default behavior. Issue #1191.
 
+#### Read-the-Room Pre-Send Pass (Path B Coverage)
+
+Issue #1203 wires the existing Read-the-Room (RTR) guard into `cmd_send`
+so agent-invoked `valor-telegram send` calls get the same redundancy /
+crossing-streams protection that the worker drafter (Path A) gained in
+PR #1204. Human-invoked CLI runs bypass RTR by default — the human
+authored the message intentionally and shouldn't be second-guessed by
+Haiku.
+
+Caller-type detection uses `VALOR_SESSION_ID` (the canonical agent-
+context env var the worker injects). When set + non-empty, RTR runs
+(subject to the `READ_THE_ROOM_ENABLED` machine-wide gate). When unset,
+RTR skips. Two flags override the auto-detection (mutually exclusive):
+
+- `--read-the-room` forces RTR on (e.g., a human wants the conservative
+  guard for an ad-hoc send).
+- `--no-read-the-room` forces RTR off (e.g., an agent send must not be
+  filtered, or a human shell that inherited `VALOR_SESSION_ID` from a
+  parent agent context wants to opt out).
+
+When RTR runs, `cmd_send` prints `(RTR active — running pre-send pass)`
+to stderr immediately before invoking `read_the_room()`. This makes
+accidental env inheritance (sub-shells, `tmux`, `claude --resume` from
+inside an existing session) visible so a human can `Ctrl-C` and retry
+with `--no-read-the-room` if the activation surprises them.
+
+See [`docs/features/read-the-room.md`](read-the-room.md) for the verdict
+schema, observability events, and full coverage matrix.
+
 ### Listing Chats
 
 ```bash
