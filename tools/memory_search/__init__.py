@@ -170,6 +170,7 @@ def search(
             results.append(
                 {
                     "content": getattr(record, "content", ""),
+                    "title": getattr(record, "title", None),
                     "score": getattr(record, "score", 0.0),
                     "confidence": getattr(record, "confidence", 0.0),
                     "source": getattr(record, "source", ""),
