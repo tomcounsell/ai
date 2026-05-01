@@ -426,9 +426,16 @@ async def extract_observations_async(
         from models.memory import SOURCE_AGENT, Memory
 
         if not project_key:
-            from config.memory_defaults import DEFAULT_PROJECT_KEY
+            from config.project_key_resolver import resolve_project_key
 
-            project_key = os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)
+            project_key = resolve_project_key()
+            if project_key is None:
+                logger.warning(
+                    "[memory_extraction] extract_observations write skipped: "
+                    "resolve_project_key returned None (VALOR_PROJECT_KEY=%r)",
+                    os.environ.get("VALOR_PROJECT_KEY"),
+                )
+                return []
 
         saved = []
         for obs_content, importance, metadata in parsed[:10]:  # cap at 10 observations
@@ -637,9 +644,16 @@ async def extract_post_merge_learning(
         from models.memory import SOURCE_AGENT, Memory
 
         if not project_key:
-            from config.memory_defaults import DEFAULT_PROJECT_KEY
+            from config.project_key_resolver import resolve_project_key
 
-            project_key = os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)
+            project_key = resolve_project_key()
+            if project_key is None:
+                logger.warning(
+                    "[memory_extraction] post_merge write skipped: "
+                    "resolve_project_key returned None (VALOR_PROJECT_KEY=%r)",
+                    os.environ.get("VALOR_PROJECT_KEY"),
+                )
+                return None
 
         # Try to parse structured JSON response for metadata
         content_text = raw_text

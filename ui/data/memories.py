@@ -28,10 +28,13 @@ KNOWN_CATEGORIES = ("correction", "decision", "pattern", "surprise", "default")
 
 
 def _resolve_project_key(project_key: str | None) -> str:
-    """Resolve project_key, falling back to env / default.
+    """Resolve project_key for READ operations in this view module.
 
-    Empty string and None both fall back. Mirrors
-    `tools.memory_search._resolve_project_key`.
+    This module is read-only (never calls Memory.safe_save). Falls back to
+    DEFAULT_PROJECT_KEY so read paths always get a non-None key (an empty
+    result set is safe on a bad key, whereas write skips need None signaling).
+
+    Empty string and None both fall back.
     """
     if project_key:
         return project_key

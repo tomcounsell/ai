@@ -582,19 +582,25 @@ All Memory records carry a `project_key` that scopes them to a specific project.
 |-------|--------|-------------|
 | `"valor"` | projects.json match | The main `~/src/ai` project (matched by working directory) |
 | `"dm"` | retired — DO NOT WRITE | The original Telegram-DM partition. Retired in #811 (PR #820). The bridge no longer writes here at all (#1173): messages from chats that don't resolve to a declared project skip the canonical Memory partition write entirely. `Memory.safe_save` emits a WARNING with stack trace if any caller still attempts a `"dm"` write — see `_warn_if_legacy_namespace` in `models/memory.py`. |
-| `Path(cwd).name` | cwd basename fallback | Used when projects.json is missing or has no match for the current directory |
-| `"default"` | `DEFAULT_PROJECT_KEY` | Last-resort fallback in `config/memory_defaults.py`. Still legitimate during single-machine bootstrap and test fixtures. `Memory.safe_save` emits a DEBUG-level audit log with stack trace whenever `"default"` is written; tracked under follow-up issue #1232 (unify writer project_key resolution into a single helper). |
+| `"default"` | `DEFAULT_PROJECT_KEY` | Last-resort for read paths (recall/search/stats) when no project is resolved. `Memory.safe_save` emits a DEBUG-level audit log with stack trace whenever `"default"` is written by a write path; if `_warn_if_legacy_namespace` fires on `"default"` in normal operation, it means a write path resolved incorrectly — investigate the caller. |
+| `None` | unresolvable | Returned by `resolve_project_key()` when no env var and no cwd match. Writers must skip `Memory.safe_save` on `None` and log a WARNING. |
 
-### Resolution Chain
+### Resolution (Unified Helper)
 
-`_get_project_key(cwd)` in `memory_bridge.py` (Claude Code hooks path):
+All Memory write paths use `resolve_project_key()` from `config/project_key_resolver.py` (#1232). This single function encapsulates the full resolution chain:
 
-1. `VALOR_PROJECT_KEY` env var — highest priority, used by CI/SDK-spawned sessions
-2. `projects.json` cwd match — `~/Desktop/Valor/projects.json` entries matched by path prefix
-3. `Path(cwd).name` — directory basename when no projects.json match exists
-4. `DEFAULT_PROJECT_KEY` from `config/memory_defaults.py` — final fallback when cwd is None
+1. **Explicit kwarg** — `project_key=` arg if non-empty → return immediately (explicit override)
+2. **`VALOR_PROJECT_KEY` env var** — machine-scoped env var; highest auto-resolution priority
+3. **`projects.json` cwd match** — `~/Desktop/Valor/projects.json` `working_directory` prefix match against `cwd`
+4. **`None`** — unresolvable; callers must skip the write and log a WARNING
 
-The Telegram bridge path resolves `project_key` from the message's chat (`find_project_for_dm(sender_id)` for DMs, `find_project_for_chat(chat_title)` for groups). When neither resolver matches, the bridge writes conversation history (`store_message`, `register_chat`) with `project_key=None` so `valor-telegram read` keeps working, but **skips the canonical Memory partition write entirely** — unowned messages no longer pollute any partition (#1173). The retired `"dm"` literal has been removed from `bridge/telegram_bridge.py`; see `_warn_if_legacy_namespace` in `models/memory.py` for the regression detector.
+**Intentional omissions:**
+- No `Path(cwd).name` (dirname) fallback — directory basenames are not declared project keys; using them silently mislabeled records in the past
+- No `DEFAULT_PROJECT_KEY` fallback — `"default"` means misconfigured, not unknown-but-safe; writers that fall through must skip rather than pollute
+
+**Read paths** (`recall`, `search`, `stats`, `forget`) continue to use `DEFAULT_PROJECT_KEY` as a non-None fallback because an empty result set on a bad key is safe; the `_resolve_project_key` helper in `tools/memory_search/__init__.py` and `ui/data/memories.py` handles this independently.
+
+The Telegram bridge path resolves `project_key` from the message's chat (`find_project_for_dm(sender_id)` for DMs, `find_project_for_chat(chat_title)` for groups). When neither resolver matches, the bridge writes conversation history (`store_message`, `register_chat`) with `project_key=None` so `valor-telegram read` keeps working, but **skips the canonical Memory partition write entirely** — unowned messages no longer pollute any partition (#1173, #1234). The retired `"dm"` literal has been removed from `bridge/telegram_bridge.py`; see `_warn_if_legacy_namespace` in `models/memory.py` for the regression detector.
 
 ### Migration Helper
 
