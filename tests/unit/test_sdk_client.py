@@ -469,7 +469,9 @@ class TestGetResponseViaHarnessSystemPrompt:
         # Ordering: cache flag must precede --append-system-prompt
         exc_idx = cmd.index("--exclude-dynamic-system-prompt-sections")
         asp_idx = cmd.index("--append-system-prompt")
-        assert exc_idx < asp_idx, "--exclude-dynamic-system-prompt-sections must precede --append-system-prompt"
+        assert exc_idx < asp_idx, (
+            "--exclude-dynamic-system-prompt-sections must precede --append-system-prompt"
+        )
 
     @pytest.mark.asyncio
     async def test_exclude_dynamic_sections_absent_without_system_prompt(self):
@@ -531,7 +533,9 @@ class TestGetResponseViaHarnessSystemPrompt:
         # Persona must still be the value immediately after --append-system-prompt
         assert "--append-system-prompt" in cmd
         idx = cmd.index("--append-system-prompt")
-        assert cmd[idx + 1] == persona, "Persona content must be preserved verbatim (#1148 invariant)"
+        assert cmd[idx + 1] == persona, (
+            "Persona content must be preserved verbatim (#1148 invariant)"
+        )
 
     @pytest.mark.asyncio
     async def test_arg_max_guard_trips_with_oversized_prompt(self):
@@ -539,7 +543,6 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         Issue #1227 must NOT remove or raise this guard.
         """
-        import logging
         from unittest.mock import AsyncMock, patch
 
         from agent.sdk_client import get_response_via_harness
@@ -552,21 +555,13 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         oversize = "x" * 600_000
         with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
-            import logging as _logging
-
-            import pytest as _pytest
-
-            with _pytest.raises(Exception) if False else (
-                patch("agent.sdk_client.logger")
-            ) as mock_log:
-                # Use caplog-style approach; verify the guard drops the flag
-                await get_response_via_harness(
-                    message="hi",
-                    working_dir="/tmp",
-                    env={"AGENT_SESSION_ID": "x"},
-                    model="opus",
-                    system_prompt=oversize,
-                )
+            await get_response_via_harness(
+                message="hi",
+                working_dir="/tmp",
+                env={"AGENT_SESSION_ID": "x"},
+                model="opus",
+                system_prompt=oversize,
+            )
 
         # Neither --append-system-prompt nor the cache flag should appear when the
         # prompt exceeds the size cap — both are conditional on the else branch.
@@ -577,6 +572,76 @@ class TestGetResponseViaHarnessSystemPrompt:
 # ---------------------------------------------------------------------------
 # cold_start_metrics: TTFT instrumentation (issue #1227)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Standalone verification-table test anchors (issue #1227)
+# These thin wrappers are named exactly as the plan's verification table
+# commands require so that `pytest tests/unit/test_sdk_client.py::test_pm_persona_overlay_present`
+# and `::test_arg_max_guard_trips` resolve without failure.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pm_persona_overlay_present():
+    """Persona overlay from #1148 must survive Direction-A changes (#1227).
+
+    Verification anchor: pytest tests/unit/test_sdk_client.py::test_pm_persona_overlay_present
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from agent.sdk_client import get_response_via_harness
+
+    captured = {}
+    persona = "PM persona — CRITIQUE is Mandatory After PLAN. SDLC rules."
+
+    async def fake_run(cmd, working_dir, proc_env, **_kw):
+        captured["cmd"] = cmd
+        return ("done", None, 0, None, None, None)
+
+    with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+        await get_response_via_harness(
+            message="hi",
+            working_dir="/tmp",
+            env={"AGENT_SESSION_ID": "x"},
+            model="opus",
+            system_prompt=persona,
+        )
+
+    cmd = captured["cmd"]
+    assert "--append-system-prompt" in cmd
+    idx = cmd.index("--append-system-prompt")
+    assert cmd[idx + 1] == persona, "Persona content (#1148 invariant) must be verbatim"
+
+
+@pytest.mark.asyncio
+async def test_arg_max_guard_trips():
+    """512KB ARG_MAX guard at agent/sdk_client.py must still trip after Direction-A (#1227).
+
+    Verification anchor: pytest tests/unit/test_sdk_client.py::test_arg_max_guard_trips
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from agent.sdk_client import get_response_via_harness
+
+    captured = {}
+
+    async def fake_run(cmd, working_dir, proc_env, **_kw):
+        captured["cmd"] = cmd
+        return ("done", None, 0, None, None, None)
+
+    oversize = "x" * 600_000
+    with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+        await get_response_via_harness(
+            message="hi",
+            working_dir="/tmp",
+            env={"AGENT_SESSION_ID": "x"},
+            model="opus",
+            system_prompt=oversize,
+        )
+
+    assert "--append-system-prompt" not in captured["cmd"], "Guard must drop oversized prompt"
+    assert "--exclude-dynamic-system-prompt-sections" not in captured["cmd"]
 
 
 class TestColdStartMetrics:
@@ -639,7 +704,7 @@ class TestColdStartMetrics:
 
         lines = metrics_file.read_text().strip().splitlines()
         assert len(lines) == 2
-        entries = [json.loads(l) for l in lines]
+        entries = [json.loads(line) for line in lines]
         assert entries[0]["session_id"] == "s1"
         assert entries[1]["session_id"] == "s2"
 
