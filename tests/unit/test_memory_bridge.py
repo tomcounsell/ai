@@ -668,6 +668,8 @@ class TestExtract:
             "hook_utils.memory_bridge._get_sidecar_dir",
             lambda sid: tmp_path / "sidecar" / sid,
         )
+        # Provide a resolvable project_key via env var (required post-#1232)
+        monkeypatch.setenv("VALOR_PROJECT_KEY", "test-project")
 
         # Create a transcript with enough content
         transcript = tmp_path / "transcript.jsonl"
@@ -845,29 +847,31 @@ class TestGetProjectKey:
         result = _get_project_key(cwd="/some/other/path")
         assert result == "myproject"
 
-    def test_cwd_falls_back_to_dirname(self, monkeypatch):
-        """When no env var or projects.json match, returns cwd basename."""
+    def test_cwd_no_match_returns_none(self, monkeypatch):
+        """When no env var or projects.json match, returns None (no dirname fallback).
+
+        The dirname fallback (Path(cwd).name) was intentionally removed in #1232.
+        Writers that receive None must skip the Memory write rather than silently
+        using a directory name as a project key.
+        """
         from hook_utils.memory_bridge import _get_project_key
 
         monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)
-        # Patch projects.json path to nonexistent to skip that branch
-        import hook_utils.memory_bridge as mb
-
-        monkeypatch.setattr(mb, "_get_project_key", mb._get_project_key)
-
-        # Use a tmp path with no projects.json
+        # Use a path with no matching projects.json entry
         result = _get_project_key(cwd="/home/user/myrepo")
-        # Without a matching projects.json entry, returns basename
-        assert result == "myrepo"
+        assert result is None
 
-    def test_no_cwd_returns_default(self, monkeypatch):
-        """Without cwd and no env var, returns DEFAULT_PROJECT_KEY (not 'dm')."""
+    def test_no_cwd_returns_none(self, monkeypatch):
+        """Without cwd and no env var, returns None (not DEFAULT_PROJECT_KEY).
+
+        Write paths must handle None and skip the write.
+        Read paths use DEFAULT_PROJECT_KEY independently.
+        """
         from hook_utils.memory_bridge import _get_project_key
 
         monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)
         result = _get_project_key(cwd=None)
-        # Must not be "dm" -- that value is reserved for Telegram DMs
-        assert result != "dm"
+        assert result is None
 
     def test_default_project_key_not_dm(self):
         """DEFAULT_PROJECT_KEY in config/memory_defaults.py is not 'dm'."""

@@ -144,11 +144,20 @@ def check_and_inject(
         if count % WINDOW_SIZE != 0:
             return None
 
-        # Resolve project_key
+        # Resolve project_key using the canonical resolver.
+        # NOTE: check_and_inject() has no cwd parameter — it runs inside the SDK
+        # worker process where the filesystem path is not directly available.
+        # Resolution uses env-only (VALOR_PROJECT_KEY) and explicit kwarg only.
         if not project_key:
-            from config.memory_defaults import DEFAULT_PROJECT_KEY
+            from config.project_key_resolver import resolve_project_key
 
-            project_key = os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)
+            project_key = resolve_project_key(project_key=None)
+            if project_key is None:
+                logger.warning(
+                    "[memory_hook] check_and_inject write skipped: resolve_project_key "                    "returned None (VALOR_PROJECT_KEY=%r)",
+                    os.environ.get("VALOR_PROJECT_KEY"),
+                )
+                return None
 
         # Extract keywords from full buffer (last BUFFER_SIZE entries)
         all_keywords: list[str] = []

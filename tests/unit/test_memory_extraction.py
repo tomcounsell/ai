@@ -714,6 +714,7 @@ class TestPostMergeJsonParsing:
             patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
             patch("models.memory.Memory", mock_memory),
             patch("models.memory.SOURCE_AGENT", "agent"),
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
         ):
             result = await extract_post_merge_learning(
                 "Add recall weights", "Description", "agent/memory_hook.py"
@@ -748,6 +749,7 @@ class TestPostMergeJsonParsing:
             patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
             patch("models.memory.Memory", mock_memory),
             patch("models.memory.SOURCE_AGENT", "agent"),
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
         ):
             result = await extract_post_merge_learning(
                 "Add recall weights", "Description", "diff summary"
@@ -782,6 +784,7 @@ class TestPostMergeJsonParsing:
             patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
             patch("models.memory.Memory", mock_memory),
             patch("models.memory.SOURCE_AGENT", "agent"),
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
         ):
             result = await extract_post_merge_learning("Add recall weights", "Description", "diff")
 
