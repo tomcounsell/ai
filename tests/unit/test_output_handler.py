@@ -1557,8 +1557,7 @@ class TestRedundancyFilterWiring:
         mock_r.rpush.assert_called()
         # At least one call is the text message (not a reaction).
         text_calls = [
-            c for c in mock_r.rpush.call_args_list
-            if json.loads(c[0][1]).get("type") != "reaction"
+            c for c in mock_r.rpush.call_args_list if json.loads(c[0][1]).get("type") != "reaction"
         ]
         assert len(text_calls) >= 1
 
@@ -1603,7 +1602,59 @@ class TestRedundancyFilterWiring:
         # Text must have been sent (no anchor → fallthrough).
         mock_r.rpush.assert_called()
         text_calls = [
-            c for c in mock_r.rpush.call_args_list
-            if json.loads(c[0][1]).get("type") != "reaction"
+            c for c in mock_r.rpush.call_args_list if json.loads(c[0][1]).get("type") != "reaction"
         ]
         assert len(text_calls) >= 1
+
+    # ── Session event includes jaccard and matched_prior_preview ─────────────
+
+    def test_suppressed_redundant_event_includes_jaccard_and_preview(self):
+        """The drafter.suppressed_redundant session event must include both
+        ``jaccard`` and ``matched_prior_preview`` fields so that observers
+        can audit what triggered suppression (Success Criterion 6)."""
+        import time
+
+        from bridge.redundancy_filter import SuppressionVerdict
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_sdlc_session(
+            recent_drafts=[
+                {"ts": time.time(), "text": "previous status message here", "artifacts": {}}
+            ]
+        )
+
+        suppress_verdict = SuppressionVerdict(
+            action="suppress",
+            reason="jaccard=0.80>=threshold=0.65",
+            jaccard=0.80,
+            matched_index=0,
+        )
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ),
+            patch(
+                "bridge.redundancy_filter.should_suppress",
+                return_value=suppress_verdict,
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="previous status message here",
+                    reply_to_msg_id=42,
+                    session=session,
+                )
+            )
+
+        events = session.session_events or []
+        suppressed_events = [e for e in events if e.get("type") == "drafter.suppressed_redundant"]
+        assert len(suppressed_events) == 1, "Expected exactly one suppressed_redundant event"
+        ev = suppressed_events[0]
+        assert ev["jaccard"] == 0.80, "jaccard must be forwarded into the session event"
+        assert ev["matched_prior_preview"] == "previous status message here", (
+            "matched_prior_preview must be the text of the matched prior draft"
+        )

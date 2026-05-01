@@ -404,21 +404,33 @@ class TelegramRelayOutputHandler:
                 except Exception:
                     _draft_artifacts = {}
 
+                _recent_drafts: list = getattr(session, "recent_sent_drafts", None) or []
                 _redund_verdict: _SuppressionVerdict = should_suppress(
                     delivery_text,
                     _draft_artifacts,
-                    getattr(session, "recent_sent_drafts", None) or [],
+                    _recent_drafts,
                     getattr(draft, "expectations", None) if draft is not None else None,
                     getattr(session, "status", None),
                 )
 
                 if _redund_verdict.action == "suppress":
+                    # Build a short preview of the matched prior draft for the
+                    # session event so reviewers can see what triggered suppression.
+                    _matched_prior_preview: str | None = None
+                    if _redund_verdict.matched_index is not None:
+                        try:
+                            _matched_entry = _recent_drafts[_redund_verdict.matched_index]
+                            _matched_prior_preview = str(_matched_entry.get("text", ""))[:200]
+                        except (IndexError, AttributeError):
+                            pass
                     self._rtr_emit_event(
                         session,
                         "drafter.suppressed_redundant",
                         chat_id=chat_id,
                         draft_text=delivery_text,
                         reason=_redund_verdict.reason,
+                        jaccard=_redund_verdict.jaccard,
+                        matched_prior_preview=_matched_prior_preview,
                     )
                     if reply_to_msg_id is not None:
                         self._rtr_queue_reaction(
@@ -711,6 +723,7 @@ class TelegramRelayOutputHandler:
         draft_text: str,
         revised_text: str | None = None,
         reason: str = "",
+        **extra_fields: Any,
     ) -> None:
         """Append an ``rtr.*`` entry to ``session.session_events``.
 
@@ -718,6 +731,13 @@ class TelegramRelayOutputHandler:
         session_events append posture is read-modify-write with no lock;
         we match it here. Race 3 (concurrent appends) is documented and
         accepted -- the surrounding event log is best-effort.
+
+        ``**extra_fields`` allows callers to include event-type-specific
+        metadata (e.g. ``jaccard`` and ``matched_prior_preview`` for
+        ``drafter.suppressed_redundant`` events) without widening the fixed
+        signature. The extra fields are merged into the event dict after the
+        base fields are populated, so they can never shadow ``type``, ``ts``,
+        ``chat_id``, ``reason``, or ``draft_preview``.
         """
         if session is None:
             return
@@ -731,6 +751,7 @@ class TelegramRelayOutputHandler:
             }
             if revised_text is not None:
                 event["revised_preview"] = revised_text[:200]
+            event.update(extra_fields)
             events = list(getattr(session, "session_events", None) or [])
             events.append(event)
             session.session_events = events
