@@ -1570,16 +1570,6 @@ class ValorAgent:
                                         f"{duration}ms"
                                     )
                                     logger.info(summary)
-                                    # Analytics: record token cost and turn count
-                                    try:
-                                        from analytics.collector import record_metric
-
-                                        dims = {"session_id": session_id} if session_id else {}
-                                        record_metric("session.cost_usd", cost, dims)
-                                        if turns is not None:
-                                            record_metric("session.turns", float(turns), dims)
-                                    except Exception:
-                                        pass
 
                                 # Per-session token accumulation (issue #1128 —
                                 # SDK path). Harness path extracts the same
@@ -2196,7 +2186,9 @@ async def get_response_via_harness(
             "model": model or "default",
         }
 
-    # Call site 1 of 3 — primary harness invocation. 6-tuple unpack (issue #1099 Mode 1).
+    # Call site 1 of 3 — primary harness invocation. 8-tuple unpack
+    # (issue #1099 Mode 1 added stderr_snippet; issue #1245 added num_turns
+    # and tool_call_count).
     (
         result_text,
         session_id_from_harness,
@@ -2204,6 +2196,8 @@ async def get_response_via_harness(
         usage,
         cost_usd,
         stderr_snippet,
+        this_num_turns,
+        this_tool_call_count,
     ) = await _run_harness_subprocess(
         cmd,
         working_dir,
@@ -2212,6 +2206,12 @@ async def get_response_via_harness(
         on_stdout_event=on_stdout_event,
         ttft_metadata=_ttft_meta,
     )
+    # Issue #1245: accumulate counts across primary + fallback subprocess
+    # invocations (image-dimension fallback, stale-UUID fallback). Each
+    # call_site below adds its counts to these locals so the final values
+    # passed to the Popoto write reflect ALL subprocesses for this turn.
+    total_num_turns = this_num_turns
+    total_tool_call_count = this_tool_call_count
 
     # Image-dimension sentinel: Claude Code returns the image-dimension error with
     # exit code 0, so the returncode != 0 fallback below cannot catch it.  This
@@ -2225,7 +2225,8 @@ async def get_response_via_harness(
         if full_context_message is not None:
             fallback_msg = _apply_context_budget(full_context_message)
             fallback_cmd = harness_cmd + [fallback_msg]
-            # Call site 2 of 3 — image-dimension fallback. 6-tuple unpack (issue #1099 Mode 1).
+            # Call site 2 of 3 — image-dimension fallback. 8-tuple unpack
+            # (issue #1099 Mode 1 + issue #1245).
             (
                 result_text,
                 session_id_from_harness,
@@ -2233,6 +2234,8 @@ async def get_response_via_harness(
                 usage,
                 cost_usd,
                 stderr_snippet,
+                this_num_turns,
+                this_tool_call_count,
             ) = await _run_harness_subprocess(
                 fallback_cmd,
                 working_dir,
@@ -2240,6 +2243,8 @@ async def get_response_via_harness(
                 on_sdk_started=on_sdk_started,
                 on_stdout_event=on_stdout_event,
             )
+            total_num_turns += this_num_turns
+            total_tool_call_count += this_tool_call_count
         else:
             logger.error(
                 f"[harness] Image dimension error on --resume for session_id={session_id}, "
@@ -2268,7 +2273,8 @@ async def get_response_via_harness(
                     f"[harness] Fallback budget: {original_len} → {len(fallback_msg)} chars"
                 )
             fallback_cmd = harness_cmd + [fallback_msg]
-            # Call site 3 of 3 — stale-UUID fallback. 6-tuple unpack (issue #1099 Mode 1).
+            # Call site 3 of 3 — stale-UUID fallback. 8-tuple unpack
+            # (issue #1099 Mode 1 + issue #1245).
             # We now DO capture the final returncode + stderr_snippet because the
             # Mode 1 sentinel check below inspects the LAST subprocess call's
             # exit state (both primary and fallback must fail to declare
@@ -2280,6 +2286,8 @@ async def get_response_via_harness(
                 usage,
                 cost_usd,
                 stderr_snippet,
+                this_num_turns,
+                this_tool_call_count,
             ) = await _run_harness_subprocess(
                 fallback_cmd,
                 working_dir,
@@ -2287,6 +2295,8 @@ async def get_response_via_harness(
                 on_sdk_started=on_sdk_started,
                 on_stdout_event=on_stdout_event,
             )
+            total_num_turns += this_num_turns
+            total_tool_call_count += this_tool_call_count
         else:
             logger.error(
                 f"[harness] Stale UUID {prior_uuid} for session_id={session_id}, "
@@ -2312,6 +2322,36 @@ async def get_response_via_harness(
             _usage_field(usage, "cache_read_input_tokens"),
             cost_usd,
         )
+
+    # Issue #1245: persist turn_count + tool_call_count onto the AgentSession
+    # via Popoto. Accumulating (`+=`) so primary + fallback subprocess
+    # invocations sum across this single get_response_via_harness call.
+    # Wrapped in try/except — Popoto failure must never crash the harness path.
+    if session_id and (total_num_turns or total_tool_call_count):
+        try:
+            from models.agent_session import AgentSession
+
+            # session_id is a Field (not KeyField), so multiple records can share
+            # an id across resumes — pick the newest by created_at to avoid
+            # accumulating onto a stale record.
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            if sessions:
+                sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+                session = sessions[0]
+                if total_num_turns:
+                    session.turn_count = (session.turn_count or 0) + total_num_turns
+                if total_tool_call_count:
+                    session.tool_call_count = (session.tool_call_count or 0) + total_tool_call_count
+                # update_fields=[...] to avoid clobbering concurrent writes to
+                # other fields like status/updated_at (matches accumulate_session_tokens
+                # convention).
+                session.save(update_fields=["turn_count", "tool_call_count"])
+        except Exception as e:
+            logger.warning(
+                "Failed to persist turn/tool counts for session %s: %s",
+                session_id,
+                e,
+            )
 
     # Mode 2 (issue #1099) — emit a single WARNING if per-turn context usage
     # crosses 75%. Pure observability; no state change, no behavior change.
@@ -2359,10 +2399,20 @@ async def _run_harness_subprocess(
     on_sdk_started: Callable[[int], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
     ttft_metadata: dict | None = None,
-) -> tuple[str | None, str | None, int | None, dict | None, float | None, str | None]:
+) -> tuple[
+    str | None,
+    str | None,
+    int | None,
+    dict | None,
+    float | None,
+    str | None,
+    int,
+    int,
+]:
     """Execute a harness subprocess and parse stream-json output.
 
-    Returns ``(result_text, session_id_from_harness, returncode, usage, cost_usd, stderr_snippet)``.
+    Returns ``(result_text, session_id_from_harness, returncode, usage, cost_usd,
+    stderr_snippet, num_turns, tool_call_count)``.
 
     * ``result_text``: parsed result string from the final `result` event, or
       accumulated text from stream events when no result event fires, or
@@ -2384,9 +2434,16 @@ async def _run_harness_subprocess(
       for sentinel-based thinking-block corruption detection. Truncation
       bounds memory usage; sentinel matches reliably fall within this window
       per the amux report.
+    * ``num_turns``: integer pulled from the `result` event's ``num_turns``
+      field (issue #1245). Defaults to 0 when the field is absent. Caller
+      accumulates onto AgentSession.turn_count.
+    * ``tool_call_count``: count of ``tool_use`` content blocks observed
+      across `assistant` events during this subprocess (issue #1245).
+      Caller accumulates onto AgentSession.tool_call_count.
 
     On binary-not-found, returncode is None and result_text carries the
-    error message (usage, cost_usd, stderr_snippet are all None).
+    error message (usage, cost_usd, stderr_snippet are all None,
+    num_turns and tool_call_count are 0).
 
     Optional callbacks (issue #1036):
         on_sdk_started(pid): fires once, immediately after the subprocess is
@@ -2419,7 +2476,7 @@ async def _run_harness_subprocess(
         )
     except FileNotFoundError as e:
         logger.error(f"Harness binary not found: {e}")
-        return (f"Error: CLI harness not found — {e}", None, None, None, None, None)
+        return (f"Error: CLI harness not found — {e}", None, None, None, None, None, 0, 0)
 
     # Fire SDK-started callback once the pid is known (#1036).
     if on_sdk_started is not None and proc.pid is not None:
@@ -2437,6 +2494,11 @@ async def _run_harness_subprocess(
     # so `accumulate_session_tokens` can be fed from either path.
     usage: dict | None = None
     cost_usd: float | None = None
+    # Turn + tool-call counters (issue #1245). num_turns comes off the
+    # `result` event; tool_call_count is summed from `assistant` events'
+    # tool_use content blocks. Caller accumulates both onto AgentSession.
+    num_turns: int = 0
+    tool_call_count: int = 0
 
     async for raw_line in proc.stdout:
         line = raw_line.decode("utf-8", errors="replace").strip()
@@ -2498,9 +2560,37 @@ async def _run_harness_subprocess(
             raw_cost = data.get("total_cost_usd")
             if isinstance(raw_cost, (int, float)):
                 cost_usd = float(raw_cost)
+            # Issue #1245: extract per-call turn count off the result event.
+            # The `claude -p stream-json` protocol emits num_turns alongside
+            # cost/usage. Caller accumulates this onto AgentSession.turn_count
+            # so primary + fallback subprocess invocations sum correctly.
+            raw_turns = data.get("num_turns")
+            if raw_turns is None:
+                # Spike (issue #1245) confirmed num_turns is always present on the
+                # result event in real harness runs. If it's ever missing, log once
+                # at debug — the test fixture covers this path explicitly.
+                logger.debug("[harness] result event missing num_turns")
+            else:
+                try:
+                    num_turns = int(raw_turns)
+                except (TypeError, ValueError):
+                    logger.warning("[harness] result event num_turns not int: %r", raw_turns)
             if session_id_from_harness:
                 logger.debug(f"Harness session_id for resume: {session_id_from_harness}")
             break
+
+        if event_type == "assistant":
+            # Issue #1245: count tool_use blocks from assistant messages.
+            # Each tool invocation appears as a content block with
+            # type=="tool_use" inside data["message"]["content"]. The shape
+            # is the real `claude -p stream-json` protocol — top-level
+            # event.type=="tool_use" does NOT fire.
+            message = data.get("message", {}) or {}
+            content_blocks = message.get("content", []) or []
+            tool_call_count += sum(
+                1 for b in content_blocks if isinstance(b, dict) and b.get("type") == "tool_use"
+            )
+            continue
 
         if event_type == "stream_event":
             event = data.get("event", {})
@@ -2540,15 +2630,42 @@ async def _run_harness_subprocess(
         logger.warning(f"Harness exited with code {returncode}: {stderr_text[:500]}")
 
     if result_text is not None:
-        return (result_text, session_id_from_harness, returncode, usage, cost_usd, stderr_snippet)
+        return (
+            result_text,
+            session_id_from_harness,
+            returncode,
+            usage,
+            cost_usd,
+            stderr_snippet,
+            num_turns,
+            tool_call_count,
+        )
     if full_text:
         logger.warning(
             "Harness exited without result event, returning %d chars of accumulated text",
             len(full_text),
         )
-        return (full_text, session_id_from_harness, returncode, usage, cost_usd, stderr_snippet)
+        return (
+            full_text,
+            session_id_from_harness,
+            returncode,
+            usage,
+            cost_usd,
+            stderr_snippet,
+            num_turns,
+            tool_call_count,
+        )
     logger.error("Harness exited without a result event and no accumulated text")
-    return (None, session_id_from_harness, returncode, usage, cost_usd, stderr_snippet)
+    return (
+        None,
+        session_id_from_harness,
+        returncode,
+        usage,
+        cost_usd,
+        stderr_snippet,
+        num_turns,
+        tool_call_count,
+    )
 
 
 async def verify_harness_health(harness_name: str) -> bool:
