@@ -120,7 +120,18 @@ These findings confirm:
 - **Schema change**: `Memory` Popoto model gains a `title: str | None` field. Existing records have `title=None` until backfilled by `scripts/backfill_memory_titles.py` or written to by the async worker.
 - **Modified**: `_format_thought_blocks()` in `memory_bridge.py` and the inline formatting loop in `memory_hook.py` → replaced/wrapped with `_format_stub_blocks()`.
 - **New helper**: `_format_stub_blocks()` (or equivalent name) replaces `_format_thought_blocks()` for the injection path; `_format_thought_blocks()` is retained as a utility for any callers that explicitly need full-body output.
-- **Modified**: `models/memory.py::Memory.safe_save()` calls `generate_title_async()` after the underlying save returns. **Per critique B2**, this is the model-level chokepoint covering all 6 writer paths (telegram bridge, hook ingest, post-session extraction, post-merge learning, knowledge indexer, consolidation merges) — not the CLI-only `tools/memory_search/__init__.py::save()`. Hooking at the caller layer would leave ~90% of memories without titles in production.
+- **Modified — 7 writer call sites individually** (no model-layer hook; `Memory.safe_save` is a classmethod and cannot intercept `instance.save()` paths like consolidation merges, so a chokepoint there would be incomplete by construction — see Critique cycle-3 B1). Each writer path gets a direct `generate_title_async(memory.memory_id, content)` line immediately after the save returns, with `strip_private(content)` applied before passing to title-gen:
+  1. `tools/memory_search/__init__.py:248` — CLI save (`Memory.safe_save` for intentional saves)
+  2. `agent/memory_extraction.py:442` — post-session memory extraction (categorized observations, importance 1.0–4.0)
+  3. `agent/memory_extraction.py:676` — post-merge learning extraction (importance 7.0)
+  4. `bridge/telegram_bridge.py:1118` — Telegram bridge ingest (human messages → Memory, importance 6.0)
+  5. `.claude/hooks/hook_utils/memory_bridge.py:743` — Claude Code UserPromptSubmit hook ingest
+  6. `tools/knowledge/indexer.py:338` and `:355` — knowledge indexer (two `Memory.safe_save` sites: chunked + single-doc paths; treat as one writer path with two call sites)
+  7. `scripts/memory_consolidation.py:276` — memory-dedup consolidation merge writer (the `record.save()` at `:297` only updates `superseded_by` on existing records and is NOT a creation site — no title-gen call needed there)
+
+  **Real-memory semantics:** Every save calls `generate_title_async` unconditionally (no `if not self.title` guard). Real human memory updates labels as new context arrives — re-saves should refresh the title to reflect the latest content. This costs an extra local-LLM call per re-save; documented as graceful degradation under Risks.
+
+  **Forward-compat:** A future daily memory-cleanup reflection (out of scope for this plan) MAY refine titles in batch — e.g., consolidate semantic neighbors, re-title the merged record, or rewrite stale titles when content drifts. The writer-path hook is overwrite-only and does not preclude downstream batch refinement.
 - **Modified**: `config/settings.py` — adds `OLLAMA_HOST`, `MEMORY_TITLE_MODEL`, `MEMORY_TITLE_TIMEOUT_S`.
 - **Modified**: `config/personas/segments/work-patterns.md` — describe the new stub→fetch pattern.
 - **New optional system dependency**: Ollama runtime (`brew install ollama` + `ollama pull llama3.2:3b`). Absent → title-gen fails silently, stubs render as category-only.
@@ -172,12 +183,13 @@ Claude mid-task → `memory_search("redis deletion pattern")` → MCP server cal
 1. **`_format_stub_blocks()` in `memory_bridge.py`**: Mirror the signature of `_format_thought_blocks()`. For each record: extract `memory_id`, `metadata.get("category", "memory")`, and `memory.title` (populated by the async title-gen worker — see Title Generation below). Render the **agent-visible `<thought>` block** as `<thought id="{memory_id}">[{category}] {title}</thought>`, or `<thought id="{memory_id}">[{category}]</thought>` if `title` is null. **Critical (per critique B1):** the sidecar `injected[]` entry MUST keep the full `content` string — `{"memory_id": ..., "content": record.content}` — exactly as `_format_thought_blocks()` does today (`memory_bridge.py:251`). The agent-visible `<thought>` is the only thing that becomes a stub; the internal sidecar continues to store full content because `agent/memory_extraction.py::detect_outcomes_async` (called at session end) consumes `injected_thoughts` as `list[tuple[memory_id, full_content]]` and runs LLM-judged + bigram-overlap comparison against the response. Stripping content there would collapse the act/dismissed signal that drives `dismissal_count`, importance decay, and `act_rate` ranking. Leave `_format_thought_blocks()` intact for backward compat — just change the call site from `_format_thought_blocks` to `_format_stub_blocks` in `recall()`, `prefetch()`, and `check_and_inject()`. **No truncation, no string slicing in the hot path.**
 
 2. **Title Generation** (`tools/memory_search/title_generator.py`):
-   - `generate_title_async(memory_id: str, content: str) -> None`: fire-and-forget. Spawns a daemon thread (or asyncio task if running in an event loop) that calls the project's canonical local LLM via Ollama HTTP API (`http://localhost:11434/api/generate`) using `OLLAMA_LOCAL_MODEL` (currently `gemma4:e2b` per `config/models.py:112` — same model used by `bridge/routing.py` for work/ignore + terminus classification). Prompt: `"Generate a single descriptive title (max 12 words, no quotes, no period) for this memory: {content}"`. On success, loads the Memory record and saves `memory.title = result.strip()`. On failure (Ollama down, timeout >5s, model error), logs at DEBUG and returns silently — title stays null and stubs render as `[{category}]`.
-   - **Critique B2 fix:** Reuse `OLLAMA_LOCAL_MODEL` rather than introducing a forked `MEMORY_TITLE_MODEL` constant. `scripts/update/run.py:751-774` actively prunes superseded models, so a forked default would be uninstalled by the next `/update`. If a future plan needs a different model for titles specifically, add the override there — not here.
-   - **Critique C4 fix:** Backfill script must call `agent.memory_extraction.strip_private(content)` before sending to the local LLM, so legacy records that contain `<private>` segments don't leak via the local model invocation.
-   - **Critique C1 mitigation (write amplification):** `Memory.title` is a non-indexed scalar field. Writing `title` should NOT trigger BM25 or embedding re-indexing. The build step verifies this — if Popoto's default save behavior re-indexes on any field write, the title-gen worker must use a partial-update path (`Memory.query.filter(memory_id=mid).update(title=t)` if available) or an out-of-band Redis HSET on the model hash. Test: write title 1000× and assert no spike in `bm25:*` or embedding key writes.
-   - Hook point: `models.memory.Memory.safe_save()` calls `generate_title_async(memory.memory_id, content)` immediately after the underlying save returns. **B2 fix:** placing the hook at this single chokepoint covers ALL 6 production writer paths (telegram bridge ingest, claude-code hook ingest, post-session memory extraction, post-merge learning, knowledge indexer, memory-dedup consolidation merges) — hooking at `tools/memory_search/__init__.py::save()` would only cover CLI saves, leaving ~90% of memories without titles. The async hook MUST be guarded by `if not getattr(self, 'title', None) and self.content:` so re-saves of existing records (e.g., dedup merges, importance updates) don't re-trigger title generation. Save returns to caller without waiting.
-   - Backfill: one-time script `scripts/backfill_memory_titles.py` iterates all `Memory.query.all()` records with `title is None`, calls `strip_private()` then `generate_title_async` for each, sleeps briefly between batches to avoid swamping the local LLM. Run once after deploy; idempotent.
+   - `generate_title_async(memory_id: str, content: str) -> None`: fire-and-forget. The function call returns synchronously; internally it spawns a daemon thread (or asyncio task if running in an event loop) that calls the project's canonical local LLM via Ollama HTTP API (`http://localhost:11434/api/generate`) using `OLLAMA_LOCAL_MODEL` (currently `gemma4:e2b` per `config/models.py:112` — same model used by `bridge/routing.py` for work/ignore + terminus classification). Prompt: `"Generate a single descriptive title (max 12 words, no quotes, no period) for this memory: {content}"`. On success, loads the Memory record and saves `memory.title = result.strip()`. On failure (Ollama down, timeout >5s, model error), logs at DEBUG and returns silently — title stays unchanged from prior value (or null on first save) and stubs render as `[{category}]`.
+   - **Reuse `OLLAMA_LOCAL_MODEL`** rather than introducing a forked `MEMORY_TITLE_MODEL` constant. `scripts/update/run.py:751-774` actively prunes superseded models, so a forked default would be uninstalled by the next `/update`. If a future plan needs a different model for titles specifically, add the override there — not here.
+   - **Privacy-safe input (cycle-1 C4):** Before passing content to the local LLM, callers MUST apply `agent.private_tag.strip_private(content)`. This applies at every writer path call site AND in the backfill loop, so legacy records that contain `<private>` segments don't leak via the local model invocation. The strip is idempotent and stdlib-only — cheap to apply unconditionally.
+   - **Write amplification (cycle-2 C1):** `Memory.title` is a non-indexed scalar field. Writing `title` should NOT trigger BM25 or embedding re-indexing. The build step verifies this — if Popoto's default save behavior re-indexes on any field write, the title-gen worker must use a partial-update path (`Memory.query.filter(memory_id=mid).update(title=t)` if available) or an out-of-band Redis HSET on the model hash. Test: write title 1000× and assert no spike in `bm25:*` or embedding key writes.
+   - **No model-layer hook (cycle-3 B1):** `Memory.safe_save` is a `@classmethod` (`models/memory.py:173`) and cannot intercept `instance.save()` writers like the consolidation merge at `scripts/memory_consolidation.py:276`. Rather than refactor `safe_save` into an instance hook (which would still miss the `record.save()` paths and add model-layer magic), this plan wires `generate_title_async` at each of the 7 writer call sites individually. Direct, explicit, no chokepoint magic. The 7 sites are listed under Architectural Impact above.
+   - **Overwrite-on-every-save (real-memory semantics):** No `if not self.title` guard at any call site. Every save — first save, re-save, dedup merge, post-merge learning update — re-fires `generate_title_async`. Real human memory: the label evolves when new context arrives, so the most recent save reflects the latest understanding. The cost is an extra local-LLM call per re-save (typically <2s on `gemma4:e2b`); the worker is fire-and-forget so the writer never blocks. If Ollama is unreachable, the title silently retains its prior value — no regression vs. guarded behavior. A future daily memory-cleanup reflection MAY refine titles in batch (out of scope for this plan).
+   - Backfill: one-time script `scripts/backfill_memory_titles.py` iterates all `Memory.query.all()` records with `title is None`, calls `strip_private()` then `generate_title_async` for each, sleeps briefly between batches to avoid swamping the local LLM. Run once after deploy; idempotent (skips records that already have a title).
    - Configuration: `OLLAMA_HOST` (default `http://localhost:11434`), `MEMORY_TITLE_TIMEOUT_S` (default `5`) in `config/settings.py`. Model is `OLLAMA_LOCAL_MODEL` from `config/models.py` (no override).
    - The Memory model gains a `title: str | None = None` Popoto field. Existing records have `title=None` until backfilled or the async worker runs.
 
@@ -219,7 +231,8 @@ Claude mid-task → `memory_search("redis deletion pattern")` → MCP server cal
 - [ ] `tests/integration/test_memory_prefetch.py` — UPDATE: prefetch now returns stubs; update any assertions on thought content to check stub format.
 - [ ] `tests/integration/test_memory_stub_injection.py` — CREATE: new benchmark test asserting ≥5× token reduction.
 - [ ] `tests/unit/test_memory_title_generator.py` — CREATE: cover async Ollama call, silent failure on Ollama down, timeout, and empty content.
-- [ ] `tests/unit/test_memory_safe_save.py` (or equivalent for `models.memory.Memory.safe_save`) — UPDATE/CREATE: assert `generate_title_async` is invoked exactly once after `Memory.safe_save()` for new records, and NOT invoked for re-saves where `self.title` is already set or `self.content` is empty. Use a mock so the test does not actually hit Ollama. Verify the hook fires for at least 3 of the 6 writer paths (extraction, post-merge learning, hook ingest) via integration test.
+- [ ] `tests/unit/test_memory_title_writer_paths.py` (CREATE): assert `generate_title_async` is invoked at each of the 7 writer call sites with `(memory_id, stripped_content)`. Use a mock so the test does not actually hit Ollama. **No guard test** — assert title-gen IS called even on re-saves where `self.title` already has a value (overwrite-every-save semantics; cycle-3 architectural direction). Sites 1, 2, 3, 5, 7 are easy to exercise via direct function calls; sites 4 (telegram bridge) and 6 (knowledge indexer) may need integration-style harness or fixture bypass.
+- [ ] `tests/unit/test_memory_safe_save.py` — DELETE if it asserts title-gen behavior at the model layer (the cycle-2 `safe_save` hook is reverted in cycle-3). Keep any pre-existing tests that validate `safe_save` legacy-namespace warnings or WriteFilter behavior.
 - [ ] Existing tests of `scripts/update/run.py` (if any) — UPDATE: assert the new MCP-verification step is idempotent.
 
 ## Rabbit Holes
@@ -258,6 +271,10 @@ Claude mid-task → `memory_search("redis deletion pattern")` → MCP server cal
 **Impact:** Minor over-exposure; not a security risk on a local stdio server.
 **Mitigation:** Return only the useful fields: `{content, category, tags, importance, source, metadata}`. Exclude Popoto internals (`bm25`, `embedding`, `bloom`, `relevance`, `confidence`).
 
+### Risk 7: Overwrite-every-save means more local-LLM calls (no `if not self.title` guard)
+**Impact:** Every memory save — including re-saves for outcome metadata updates, dedup merges, importance changes — fires `generate_title_async`. Compared to a guarded "first-save-only" approach, this multiplies title-gen calls roughly by the average number of saves per record (rough estimate: 2–4×).
+**Mitigation:** Acceptable per cycle-3 architectural direction (real-memory semantics: titles evolve when context evolves). The worker is fire-and-forget so the writer never blocks. If Ollama is overloaded, individual title-gen calls fail silently and the title retains its prior value — graceful degradation, no functional regression. A future daily memory-cleanup reflection (out of scope for this plan) MAY refine titles in batch and absorb churn. Monitor: if Ollama queue depth becomes a bottleneck post-deploy, tighten via call-site debouncing or a coalescing worker — but design space is preserved without requiring changes here.
+
 ## Race Conditions
 
 No race conditions identified. The MCP server is a stdio singleton process per Claude Code session; all memory reads are read-only (no writes). The existing Popoto ORM Redis access patterns (thread-safe by construction) apply.
@@ -278,10 +295,11 @@ The MCP server registration in `~/.claude.json` is per-machine and per-user. **V
 
 `scripts/update/run.py` gains a new step (e.g., `Step 4.7: Verify memory MCP registration`). The script's existing CLI surface is `--full | --cron | --verify | --json | --quiet` (no `--dry-run` or `--only` flags exist). The new step runs in **all three modes** (`--full`, `--cron`, `--verify`) — `--verify` is read-only (reports drift without writing); `--full` and `--cron` write the corrected entry if missing.
 
-1. Read `~/.claude.json` (atomic: backup → parse → tmp → rename per **Critique C3** — that file is 5400+ lines of Claude Code state and a partial write would brick all sessions).
-2. Check `mcpServers.memory` exists with the correct shape: `{"type": "stdio", "command": "python", "args": ["-m", "mcp_servers.memory_server"], "env": {"PYTHONPATH": "<repo root resolved via git rev-parse --show-toplevel>"}}`.
-3. If missing or drifted: in `--full`/`--cron`, write the corrected entry atomically; in `--verify`, log the drift and return non-zero exit only when called via `--verify` directly.
-4. Idempotent — no-op if already correct. Failure is logged but does not block the rest of `/update` (memory MCP is convenience, not critical-path).
+1. **Acquire fcntl advisory lock** on `~/.claude.json` (`LOCK_EX` for write modes, `LOCK_SH` for `--verify`) before any read/write; retry up to 3× (50ms / 200ms / 800ms backoff) if held; skip the step if still held after retries (cycle-2 C4 — concurrent Claude Code sessions can be mid-write through their own file handles, and atomic rename without a lock will clobber in-flight changes).
+2. Read `~/.claude.json` (atomic: backup → parse → tmp → rename per cycle-1 C3 — that file is 5400+ lines of Claude Code state and a partial write would brick all sessions).
+3. Check `mcpServers.memory` exists with the correct shape: `{"type": "stdio", "command": "python", "args": ["-m", "mcp_servers.memory_server"], "env": {"PYTHONPATH": "<repo root resolved via git rev-parse --show-toplevel>"}}`.
+4. If missing or drifted: in `--full`/`--cron`, write the corrected entry atomically; in `--verify`, log the drift and return non-zero exit only when called via `--verify` directly.
+5. Release the lock in `try/finally`. Idempotent — no-op if already correct. Failure is logged but does not block the rest of `/update` (memory MCP is convenience, not critical-path).
 
 `scripts/remote-update.sh` calls `scripts/update/run.py`, so this is automatically covered on remote update runs.
 
@@ -318,7 +336,8 @@ All documentation updates are handled by the DOCS SDLC stage via `/do-docs` (whi
 - [ ] MCP server registered in `~/.claude.json` under key `"memory"` and **verified idempotently on every `/update` run** (re-installs if missing or drifted).
 - [ ] `config/mcp_library.json` has a `memory` entry documenting the tools.
 - [ ] `Memory` Popoto model has a `title: str | None` field.
-- [ ] `tools/memory_search/title_generator.py` exists and is invoked async by `tools.memory_search.save()` after every memory save (caller does not block).
+- [ ] `tools/memory_search/title_generator.py` exists and is invoked at all 7 writer call sites (CLI save, post-session extraction, post-merge learning, telegram bridge ingest, claude-code hook ingest, knowledge indexer x2 sites, consolidation merge) — no model-layer hook. Caller never blocks.
+- [ ] No `if not self.title` guard at any call site — every save unconditionally re-fires title-gen (real-memory semantics).
 - [ ] `scripts/backfill_memory_titles.py` exists and runs once to populate titles for pre-existing records (idempotent — skips records that already have a title).
 - [ ] Agent in a live Claude Code session can call `memory_search` and `memory_get` and receive correctly-shaped responses (verified manually post-restart).
 - [ ] `config/personas/segments/work-patterns.md` updated to describe stub → fetch pattern.
@@ -356,18 +375,26 @@ All documentation updates are handled by the DOCS SDLC stage via `/do-docs` (whi
 
 ### Step by Step Tasks
 
-### 1. Add `title` field to Memory model + async title generator
+### 1. Add `title` field to Memory model + async title generator + wire 7 writer paths
 - **Task ID**: build-title-gen
 - **Depends On**: none
-- **Validates**: `tests/unit/test_memory_title_generator.py` (create)
+- **Validates**: `tests/unit/test_memory_title_generator.py` (create), `tests/unit/test_memory_title_writer_paths.py` (create)
 - **Assigned To**: stub-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `title: str | None = None` field to `models.memory.Memory` Popoto model. **Confirm via test that writing `title` does NOT trigger BM25 or embedding re-indexing (Critique C1).** If it does, switch to a direct Redis HSET on the model hash or use Popoto's partial-update path.
-- Create `tools/memory_search/title_generator.py` with `generate_title_async(memory_id: str, content: str) -> None`. Spawns daemon thread (or asyncio task if loop present) calling Ollama HTTP `POST /api/generate` with `OLLAMA_LOCAL_MODEL` from `config/models.py` (currently `gemma4:e2b` — same canonical model used by `bridge/routing.py`). On success, loads Memory by id and saves `title`. On any exception/timeout, logs at DEBUG and returns silently.
-- Wire `models/memory.py::Memory.safe_save()` (the model-level chokepoint per B2) to call `generate_title_async(memory.memory_id, content)` after the underlying save. Guard with `if not self.title and self.content:` so re-saves of existing records don't re-trigger title generation. This catches all 6 writer paths automatically.
+- Add `title: str | None = None` field to `models.memory.Memory` Popoto model. **No `save()` override, no `safe_save` modification — keep the model layer free of title-gen magic.** Confirm via test that writing `title` does NOT trigger BM25 or embedding re-indexing (cycle-2 C1). If it does, switch to a direct Redis HSET on the model hash or use Popoto's partial-update path.
+- Create `tools/memory_search/title_generator.py` with `generate_title_async(memory_id: str, content: str) -> None`. The call returns synchronously; the implementation spawns a daemon thread (or asyncio task if a loop is present) calling Ollama HTTP `POST /api/generate` with `OLLAMA_LOCAL_MODEL` from `config/models.py` (currently `gemma4:e2b` — same canonical model used by `bridge/routing.py`). On success, loads Memory by id and saves `title`. On any exception/timeout, logs at DEBUG and returns silently.
+- **Wire `generate_title_async` at each of the 7 writer call sites** (no model-layer hook — see Architectural Impact and cycle-3 B1). For every site below, the pattern is identical: after the save returns the saved record `m`, call `generate_title_async(m.memory_id, strip_private(content))`. The strip is mandatory (cycle-1 C4 — privacy-safe input). No `if not self.title` guard — overwrite every save (real-memory semantics). If the save returns `None` (WriteFilter rejected), skip the title-gen call. Concrete sites:
+  1. `tools/memory_search/__init__.py:248` — after `record = Memory.safe_save(...)`
+  2. `agent/memory_extraction.py:442` — inside the `if m:` block of the post-session extraction loop
+  3. `agent/memory_extraction.py:676` — inside the `if m:` block of the post-merge learning save
+  4. `bridge/telegram_bridge.py:1118` — after the `Memory.safe_save(...)` call (capture the return value, currently discarded; check non-None before title-gen)
+  5. `.claude/hooks/hook_utils/memory_bridge.py:743` — after `m = Memory.safe_save(...)`
+  6. `tools/knowledge/indexer.py:338` and `:355` — after each of the two `Memory.safe_save(...)` calls (chunked + single-doc paths; capture return values currently discarded)
+  7. `scripts/memory_consolidation.py:276` — after `merged = Memory.safe_save(...)` succeeds (the `record.save()` at `:297` updates `superseded_by` on existing records and is NOT a creation site — do NOT add title-gen there)
 - Add `OLLAMA_HOST`, `MEMORY_TITLE_TIMEOUT_S` to `config/settings.py`. Do NOT add a `MEMORY_TITLE_MODEL` — reuse `OLLAMA_LOCAL_MODEL`.
-- Add `scripts/backfill_memory_titles.py` for one-time backfill (iterates `Memory.query.all()` filter `title is None`, calls `agent.memory_extraction.strip_private()` on content first, then calls `generate_title_async`, brief sleep between batches).
+- Add `scripts/backfill_memory_titles.py` for one-time backfill (iterates `Memory.query.all()` filter `title is None`, calls `agent.private_tag.strip_private()` on content first, then calls `generate_title_async`, brief sleep between batches; idempotent — skips records that already have a title).
+- **Test coverage:** `tests/unit/test_memory_title_writer_paths.py` must mock `generate_title_async` and verify it is called with the correct `(memory_id, stripped_content)` from at least 5 of the 7 sites (sites 1, 2, 3, 5, 7 are easiest to exercise via direct function calls; sites 4 and 6 may use higher-level integration tests).
 
 ### 2. Implement stub format helper and update injection call sites
 - **Task ID**: build-stub-format
@@ -379,7 +406,7 @@ All documentation updates are handled by the DOCS SDLC stage via `/do-docs` (whi
 - Add `_format_stub_blocks(records, exclude_ids, max_results)` to `.claude/hooks/hook_utils/memory_bridge.py` alongside `_format_thought_blocks()`. Reads `record.title` (no truncation/slicing). Renders `<thought id="{memory_id}">[{category}] {title}</thought>` if title is non-empty, else `<thought id="{memory_id}">[{category}]</thought>`.
 - Update `recall()` and `prefetch()` in `memory_bridge.py` to call `_format_stub_blocks` instead of `_format_thought_blocks`.
 - Update the inline thought-formatting loop in `agent/memory_hook.py:check_and_inject()` to emit stub format.
-- Sidecar `injected[]` entries: `{"memory_id": ..., "content": title or ""}` (empty string when title is null) so de-dup works.
+- **Sidecar `injected[]` entries keep the FULL record content (cycle-1 B1, re-affirmed in cycle-3 C2):** `{"memory_id": record.memory_id, "content": record.content}` — exactly as `_format_thought_blocks()` does today at `memory_bridge.py:251`. The agent-visible `<thought>` becomes a stub, but the internal sidecar continues to store full content because `agent/memory_extraction.py::detect_outcomes_async` consumes `injected_thoughts` as `list[tuple[memory_id, full_content]]` and runs LLM-judged + bigram-overlap comparison against the response. Stripping content from the sidecar would collapse the act/dismissed signal that drives `dismissal_count`, importance decay, and `act_rate` ranking. Do NOT change this to `title or ""` — that would break outcome detection.
 
 ### 3. Implement MCP memory server
 - **Task ID**: build-mcp-server
@@ -394,6 +421,7 @@ All documentation updates are handled by the DOCS SDLC stage via `/do-docs` (whi
 - Both tools wrapped in `try/except`, fail-silent returning `{"error": ...}`.
 - Register in `~/.claude.json` mcpServers: `"memory": {"type": "stdio", "command": "python", "args": ["-m", "mcp_servers.memory_server"], "env": {"PYTHONPATH": "<repo root>"}}`.
 - Add `memory` entry to `config/mcp_library.json`.
+- **Fresh-shell import-resolution smoke check (cycle-3 C5):** As an acceptance criterion for this task, run `env -i HOME=$HOME PATH=/usr/bin:/bin PYTHONPATH=<repo root> python -m mcp_servers.memory_server --help` (or equivalent dry-invocation that exits cleanly) from a clean shell. The stripped environment confirms the server can resolve `models.memory`, `tools.memory_search`, and the `mcp` SDK with only `PYTHONPATH` set — no inherited venv state, no `PYTHONSTARTUP`. Failures here mean the registered command will silently break in some Claude Code sessions where shell init differs.
 
 ### 4. Add update-script verification step
 - **Task ID**: build-update-step
@@ -403,9 +431,10 @@ All documentation updates are handled by the DOCS SDLC stage via `/do-docs` (whi
 - **Agent Type**: builder
 - **Parallel**: false
 - Extend `scripts/update/run.py` with a new step (e.g., `Step 4.7: Verify memory MCP registration`). Runs in `--full`, `--cron`, and `--verify` modes (no `--dry-run`/`--only` flags exist on this script — those flags must NOT be cited).
-- The step reads `~/.claude.json` **atomically (backup → parse → tmp → rename)** per Critique C3, checks `mcpServers.memory` exists with the correct shape (resolving `PYTHONPATH` via `git rev-parse --show-toplevel`), and writes the corrected entry if missing or drifted.
-- In `--verify` mode: read-only; report drift; exit non-zero only if drift found.
-- In `--full` / `--cron` modes: write the corrected entry atomically.
+- The step reads `~/.claude.json` **atomically (backup → parse → tmp → rename)** per cycle-1 C3, checks `mcpServers.memory` exists with the correct shape (resolving `PYTHONPATH` via `git rev-parse --show-toplevel`), and writes the corrected entry if missing or drifted.
+- **fcntl advisory lock (cycle-2 C4 — propagated into acceptance criteria here, not just the Critique table):** Before backup-parse-tmp-rename, acquire an `fcntl.flock(fd, LOCK_EX | LOCK_NB)` on `~/.claude.json`. If the lock is held (Claude Code is mid-write), retry up to 3× with exponential backoff (50ms / 200ms / 800ms) then log a warning and skip the update — never block indefinitely; the next `/update` run will retry. Release the lock on success/failure via `try/finally`. Without this, atomic rename can race a concurrent Claude Code session writing through its own file handle, and the rename clobbers in-flight changes.
+- In `--verify` mode: read-only; report drift; exit non-zero only if drift found. (Acquire LOCK_SH instead of LOCK_EX since no write occurs.)
+- In `--full` / `--cron` modes: write the corrected entry atomically under LOCK_EX.
 - Idempotent — no-op if already correct. Failure logged but does not block the rest of `/update`.
 - Optionally pings Ollama (`http://localhost:11434/api/tags`) and warns (non-fatal) if the canonical model `gemma4:e2b` is not pulled.
 
@@ -422,10 +451,11 @@ All documentation updates are handled by the DOCS SDLC stage via `/do-docs` (whi
 - Create `tests/unit/test_memory_title_generator.py`: mock Ollama HTTP endpoint; verify `generate_title_async` writes `memory.title`. Cover Ollama-down (silent fail), timeout, and empty-content cases.
 - Create `tests/integration/test_memory_stub_injection.py`: token benchmark comparing `_format_stub_blocks()` (with pre-set titles) vs `_format_thought_blocks()` on 3 mock records with ~300-token content each; assert ≥5× token reduction using `tiktoken`.
 - Create `tests/integration/test_memory_mcp_server.py`: spawn MCP server subprocess, call `memory_get` and `memory_search` via MCP stdio client, assert correct response shapes including `title` field.
+- **MCP cold-start benchmark (cycle-3 C4):** In the same integration test file, add a benchmark assertion: time the interval from subprocess spawn to first successful tool call response. Assert `< 500ms` on cold start. This catches regressions where adding heavy imports to `memory_server.py` would push every Claude Code session's startup over budget. Use `time.perf_counter()` around the spawn-and-first-call sequence; allow 1 retry to absorb CI jitter.
 
-### 4. Documentation (DOCS SDLC stage — not a BUILD task)
+#### Documentation (DOCS SDLC stage — not a BUILD task)
 
-Documentation updates (`docs/features/subconscious-memory.md`, `docs/features/claude-code-memory.md`, `docs/features/README.md`, `config/personas/segments/work-patterns.md`) are handled by the DOCS SDLC stage via `/do-docs` after BUILD completes. See the Documentation section above. No builder agent is assigned here — the unified substrate from #1247 (or the current `/do-docs` if #1247 hasn't shipped yet) covers this automatically.
+Documentation updates (`docs/features/subconscious-memory.md`, `docs/features/claude-code-memory.md`, `docs/features/README.md`, `config/personas/segments/work-patterns.md`) are handled by the DOCS SDLC stage via `/do-docs` after BUILD completes. See the Documentation section above. No builder agent is assigned here — the unified substrate from #1247 (or the current `/do-docs` if #1247 hasn't shipped yet) covers this automatically. Renumbered from `### 4.` to a non-numbered subhead in cycle-3 N1 (was duplicating BUILD task #4).
 
 ### 6. Final validation
 - **Task ID**: validate-all
@@ -453,11 +483,13 @@ Documentation updates (`docs/features/subconscious-memory.md`, `docs/features/cl
 | MCP entry present | `python -c "import json,os; assert 'memory' in json.load(open(os.path.expanduser('~/.claude.json')))['mcpServers']; print('ok')"` | output contains ok |
 | Token benchmark | `pytest tests/integration/test_memory_stub_injection.py -v` | exit code 0 |
 | MCP integration test | `pytest tests/integration/test_memory_mcp_server.py -v` | exit code 0 |
+| MCP cold-start benchmark | `pytest tests/integration/test_memory_mcp_server.py::test_cold_start_latency -v` | exit code 0; reports cold-start time `< 500ms` |
+| MCP fresh-shell import resolution | `env -i HOME=$HOME PATH=/usr/bin:/bin PYTHONPATH=$(git rev-parse --show-toplevel) python -m mcp_servers.memory_server --help` | exit code 0 (stripped env, no inherited venv state) |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 
 ## Critique Results
 
-**Verdict:** NEEDS-REVISION twice (cycle 1: 3 blockers + 4 concerns; cycle 2: 2 blockers + 5 concerns including 1 architectural). Both rounds of revisions applied below; ready for cycle-3 re-critique.
+**Verdict:** NEEDS-REVISION three times (cycle 1: 3 blockers + 4 concerns; cycle 2: 2 blockers + 5 concerns including 1 architectural; cycle 3: 1 blocker + 1 internal contradiction + 3 concerns + 1 nit, all addressed by reverting the cycle-2 model-layer hook and wiring 7 writer paths individually per user direction). All three rounds of revisions applied below; ready for cycle-4 re-critique.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
@@ -475,6 +507,12 @@ Documentation updates (`docs/features/subconscious-memory.md`, `docs/features/cl
 | CONCERN (cycle 2) | Operator | C3: MCP cold-start latency — every Claude Code session spawns the server fresh; document expected cold-start cost. | Verification + Risks | Implementation Note: add a benchmark assertion (`< 500ms` cold start to first tool call) to integration test. |
 | CONCERN (cycle 2) | Adversary | C4: `~/.claude.json` fcntl lock vs concurrent Claude Code session writes — atomic rename insufficient if Claude Code itself rewrites the file mid-update. | Update System | Implementation Note: acquire fcntl-style advisory lock before backup-parse-tmp-rename; release on success/failure. |
 | CONCERN (cycle 2) | Operator | C5: `update_fields=["title"]` may not be supported by Popoto — clarify wording: if not supported, fall back to direct Redis HSET on the model hash. | BUILD task #1 | Implementation Note: build step probes Popoto for partial-update support; HSET fallback documented. |
+| BLOCKER (cycle 3) | Architect | B1: Cycle-2 `Memory.safe_save` chokepoint is incomplete — `safe_save` is a `@classmethod` (`models/memory.py:173`) and cannot intercept `instance.save()` writers like the consolidation merge at `scripts/memory_consolidation.py:276`. ~10% of writes (consolidation merges, outcome-detection metadata updates at extraction.py:920) silently bypass title generation. | Architectural Impact + Title Generation + BUILD task #1 | **User direction:** No model-layer hook at all. Wire `generate_title_async` at each of the 7 writer call sites individually. Direct, explicit, no chokepoint magic. Sites enumerated in Architectural Impact. |
+| BLOCKER-ish (cycle 3) | Skeptic | C2: BUILD task #2 sidecar instruction (`"content": title or ""`) directly contradicts Technical Approach #1 (which mandates `record.content` per cycle-1 B1 to preserve outcome detection). Internal contradiction. | BUILD task #2 | Aligned to `record.content` (full string). The cycle-1 B1 resolution stands — sidecar keeps full content for bigram-overlap outcome detection. |
+| CONCERN (cycle 3) | Adversary | C3: fcntl lock for `~/.claude.json` was only mentioned in the cycle-2 Critique table — never propagated into the Update System narrative or BUILD task #4 acceptance criteria. Future builders would miss it. | Update System + BUILD task #4 | Lock acquisition now enumerated as Step 1 of the Update System procedure AND as a build-step acceptance criterion in BUILD task #4. |
+| CONCERN (cycle 3) | Operator | C4: MCP cold-start `<500ms` benchmark was mentioned as an "Implementation Note" in cycle-2 C3 but not added to the Verification table or BUILD task #5 acceptance criteria. | Verification table + BUILD task #5 | New row in Verification table; new bullet in BUILD task #5 calling for a `time.perf_counter()`-based test in `test_memory_mcp_server.py::test_cold_start_latency`. |
+| CONCERN (cycle 3) | Adversary | C5: Need explicit fresh-shell smoke check (`env -i HOME=$HOME PATH=/usr/bin:/bin PYTHONPATH=… python -m mcp_servers.memory_server`) to catch import-resolution issues that pass under the developer's venv but fail in stripped Claude Code subprocess environments. | BUILD task #3 + Verification table | Acceptance criterion added to BUILD task #3; Verification table row added. |
+| NIT (cycle 3) | Skeptic | N1: Duplicate `### 4.` heading — one for "Add update-script verification step" (BUILD task #4) and one for "Documentation (DOCS SDLC stage — not a BUILD task)". Markdown TOCs and cross-references break. | Step by Step Tasks | The Documentation subsection re-leveled to `####` and reframed as a non-numbered note (it is explicitly NOT a build task). |
 
 ---
 
