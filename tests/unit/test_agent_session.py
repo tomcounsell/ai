@@ -264,14 +264,14 @@ class TestWorkerKeyProperty:
         assert s.worker_key == "sdlc-1228"
 
     def test_pm_worktree_stages_allowlist_includes_patch(self):
-        """PATCH is in the _PM_WORKTREE_STAGES allowlist for completeness with resolve_branch_for_stage.
+        """PATCH is in _PM_WORKTREE_STAGES for parity with resolve_branch_for_stage.
 
         PATCH is not in SDLC_STAGES so current_stage never returns it in practice;
         this test documents the allowlist membership for architectural consistency.
         """
-        from models.agent_session import AgentSession as _AS
+        from models.agent_session import AgentSession
 
-        assert "PATCH" in _AS._PM_WORKTREE_STAGES
+        assert "PATCH" in AgentSession._PM_WORKTREE_STAGES
 
     def test_pm_session_with_slug_at_review_stage_uses_slug(self):
         """Slugged PM at REVIEW stage routes by slug."""
@@ -331,7 +331,9 @@ class TestWorkerKeyProperty:
     def test_pm_session_with_slug_no_stage_uses_project_key(self):
         """Slugged PM with no stage (None) serializes on project_key — safe allowlist behavior."""
         s = _make_session(
-            session_type=SessionType.PM, chat_id="chat-1", slug="sdlc-1228"
+            session_type=SessionType.PM,
+            chat_id="chat-1",
+            slug="sdlc-1228",
             # current_stage defaults to None (no stage_states set)
         )
         assert s.worker_key == "test-project"
@@ -439,7 +441,7 @@ class TestWorkerKeyTruthTable:
                         )
                     elif sl:
                         assert expected == sl, (
-                            f"Inline helper for DEV with slug failed (slug={sl!r}): got {expected!r}"
+                            f"Inline helper for DEV+slug failed (slug={sl!r}): got {expected!r}"
                         )
                     else:
                         assert expected == project_key, (
@@ -460,14 +462,13 @@ class TestWorkerKeyTruthTable:
         Both property and inline helper must agree for all NON-PM permutations
         and for PM at main-checkout stages — divergence there indicates a real bug.
         """
-        from models.agent_session import SDLC_STAGES, AgentSession as _AS
+        from models.agent_session import SDLC_STAGES, AgentSession
 
         project_key = "test-project"
         # Only test worktree stages that are in SDLC_STAGES — PATCH is in the allowlist
         # but not in SDLC_STAGES (it's a hard-PATCH resume concept), so current_stage
         # never returns it; see test_pm_worktree_stages_allowlist_includes_patch.
-        worktree_stages = [s for s in _AS._PM_WORKTREE_STAGES if s in SDLC_STAGES]
-        main_checkout_stages = ["PLAN", "ISSUE", "CRITIQUE", "MERGE", None, "UNKNOWN"]
+        worktree_stages = [s for s in AgentSession._PM_WORKTREE_STAGES if s in SDLC_STAGES]
 
         mismatches = []
 
@@ -480,9 +481,7 @@ class TestWorkerKeyTruthTable:
                 current_stage=stage,
             )
             if s.worker_key != "feat-X":
-                mismatches.append(
-                    f"PM+slug+{stage}: expected slug 'feat-X', got {s.worker_key!r}"
-                )
+                mismatches.append(f"PM+slug+{stage}: expected slug 'feat-X', got {s.worker_key!r}")
 
         # 2. PM + slug + main-checkout stages → project_key (serialized)
         # Note: None and "UNKNOWN_FUTURE_STAGE" cannot be passed as current_stage to _make_session
@@ -504,9 +503,8 @@ class TestWorkerKeyTruthTable:
             session_type=SessionType.PM, slug="feat-X", project_key=project_key
         )
         if s_none_stage.worker_key != project_key:
-            mismatches.append(
-                f"PM+slug+None: expected project_key {project_key!r}, got {s_none_stage.worker_key!r}"
-            )
+            got = s_none_stage.worker_key
+            mismatches.append(f"PM+slug+None: expected project_key {project_key!r}, got {got!r}")
 
         # 3. PM + no slug → project_key always
         for stage in worktree_stages:
@@ -518,9 +516,7 @@ class TestWorkerKeyTruthTable:
                 current_stage=stage,
             )
             if s.worker_key != project_key:
-                mismatches.append(
-                    f"PM+no-slug+{stage}: expected project_key, got {s.worker_key!r}"
-                )
+                mismatches.append(f"PM+no-slug+{stage}: expected project_key, got {s.worker_key!r}")
         # Also test no-slug with no stage
         s_noslug_nostage = _make_session(
             session_type=SessionType.PM, slug=None, project_key=project_key, chat_id="c"
@@ -544,6 +540,6 @@ class TestWorkerKeyTruthTable:
                             f"property={s.worker_key!r}, inline={inline!r}"
                         )
 
-        assert not mismatches, (
-            "worker_key property has unexpected values:\n" + "\n".join(mismatches)
+        assert not mismatches, "worker_key property has unexpected values:\n" + "\n".join(
+            mismatches
         )
