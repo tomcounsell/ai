@@ -97,9 +97,38 @@ Template structure:
 - `~/Desktop/Valor/projects.json`: PM project entries with `"mode": "pm"`
 - `tests/unit/test_pm_channels.py`: Unit tests for PM mode behavior
 
+## Cold-Start TTFT Mitigation (issue #1227)
+
+PM sessions historically experienced a **15–20 minute time-to-first-token (TTFT)** on fresh spawns. The root cause: the full persona + project CLAUDE.md (~74,769 chars / ~18,750 tokens) is passed as `--append-system-prompt` and Anthropic's server-side prompt cache cannot be reused when the prefix contains per-machine dynamic sections (cwd, env info, memory paths, git status).
+
+**Direction A fix (shipped):** The worker now injects `--exclude-dynamic-system-prompt-sections` into the harness argv for every PM session that carries a system prompt. This flag moves the dynamic per-machine sections into the first user message rather than the system prompt. The stable system-prompt prefix is then an exact match across consecutive PM sessions sharing the same `working_directory`, enabling Anthropic's server-side prompt cache to serve the prefix from cache (TTL ~5 minutes) rather than re-processing 18K tokens cold.
+
+**Observable wins:**
+- First PM session after a > 5-minute gap: still cold (~15–20 min) — cache is not yet populated.
+- Second PM session within 5 minutes: TTFT drops to < 90 seconds (cache hit on the stable prefix).
+- Repeat sessions in a busy SDLC pipeline: consistently sub-90s TTFT.
+
+**TTFT instrumentation:** Every first-turn harness invocation writes a JSON line to `logs/cold_start_metrics.jsonl`:
+```json
+{"timestamp":"...", "session_id":"...", "session_type":"pm", "prompt_chars":74769, "model":"opus", "ttft_seconds":12.3, "cache_read_input_tokens":0}
+```
+Cache hits are confirmed by `cache_read_input_tokens > 0` in the log.
+
+To check median TTFT for recent PM sessions:
+```bash
+python -c "
+import json, statistics
+ts = [json.loads(l)['ttft_seconds']
+      for l in open('logs/cold_start_metrics.jsonl')
+      if json.loads(l).get('session_type') == 'pm'][-10:]
+print(f'median: {statistics.median(ts):.1f}s') if ts else print('no data yet')
+"
+```
+
 ## Design Decisions
 
 1. **Persona preserved in PM mode**: The base persona (Valor's identity/style) is valuable even when operating as a PM. PM mode uses the `project-manager` overlay instead of `developer`, and WORKER_RULES are stripped.
 2. **Classification bypass, not a new classification**: PM mode forces `"question"` rather than adding a third classification type, keeping the routing logic simple.
 3. **No new tools**: PM behavior is driven entirely by routing and instructions, not new MCP tools or servers.
 4. **Work-vault CLAUDE.md is optional**: If a project folder lacks CLAUDE.md, the agent still works with just the persona segments.
+5. **Cold-start via cache stabilization, not prompt shrinkage**: CLAUDE.md is the developer source of truth and should not be mutilated for prompt-size optimization. The fix stabilises the prompt prefix so Anthropic's server-side cache covers it, rather than shrinking or splitting the prompt (Direction B would split; it's documented as available if Direction A alone is insufficient).
