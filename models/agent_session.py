@@ -27,6 +27,7 @@ Status lifecycle (see models/session_lifecycle.py for canonical mutation functio
 
 import json as _json
 import logging
+import time
 from datetime import UTC, datetime
 
 from popoto import (
@@ -47,6 +48,16 @@ from config.enums import ClassificationType, SessionType
 from models.session_event import SessionEvent
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of entries retained in AgentSession.chat_message_log.
+# Older entries are trimmed on every append so the field stays bounded.
+# 50 × ~200 bytes/entry ≈ 10 KB upper bound — well within Redis hash comfort.
+CHAT_LOG_MAX_ENTRIES = 50
+
+# Number of chat_message_log entries included in the drafter prompt.
+# Stored log is larger (CHAT_LOG_MAX_ENTRIES) to allow future read patterns;
+# the drafter caps display to the most recent CHAT_LOG_DISPLAY_ENTRIES.
+CHAT_LOG_DISPLAY_ENTRIES = 20
 
 HISTORY_MAX_ENTRIES = 20
 STEERING_QUEUE_MAX = 10  # Max buffered steering messages per session
@@ -205,6 +216,16 @@ class AgentSession(Model):
 
     # === PM self-messaging ===
     pm_sent_message_ids = ListField(null=True)
+
+    # === Drafter redundancy filter (issue #1205) ===
+    # Last N successfully-sent draft texts + metadata, stored as a list of
+    # dicts {ts: float, text: str, artifacts: dict}. Text entries are capped
+    # at 500 chars per entry (full drafts can be ~4 KB). The list is capped at
+    # RECENT_DRAFTS_N (default 3) by record_recent_sent_draft(). FIFO: oldest
+    # entry dropped when cap is exceeded. Written by the funnel helper below;
+    # read only inside TelegramRelayOutputHandler.send. See the precedent at
+    # _append_event_dict (models/agent_session.py) for the partial-save pattern.
+    recent_sent_drafts = ListField(null=True)
 
     # === Project config (full project dict from projects.json) ===
     # Carried through the pipeline so downstream code never needs to re-derive
@@ -370,34 +391,72 @@ class AgentSession(Model):
     # dev-child completion event firing, never by the detector.
     self_report_sent_at = DatetimeField(null=True)
 
+    # === Chat message log (issue #1192) ===
+    # Rolling, bounded log of inbound and outbound chat traffic for this session.
+    # Each entry is a dict: {direction, sender, content, message_id, ts}.
+    #   direction: "in" (from user/Telegram) or "out" (sent by Valor)
+    #   sender: display name of sender (e.g. "Tom", "valor", "unknown")
+    #   content: message text
+    #   message_id: Telegram message id (int or None)
+    #   ts: Unix timestamp (float)
+    # Bounded to CHAT_LOG_MAX_ENTRIES via append_chat_log(). Nullable; existing
+    # sessions that have never received a chat-log write return [] via default=list.
+    # The drafter reads the last CHAT_LOG_DISPLAY_ENTRIES entries for context.
+    chat_message_log = ListField(default=list)
+
     class Meta:
         ttl = 2592000  # 30 days — hard backstop for retain_for_resume BUILD sessions
 
     # === Worker routing key ===
+
+    # Stages where slugged PM sessions operate in an isolated worktree.
+    # Uses an allowlist (not denylist) so unknown/future stages fail closed —
+    # they serialize on project_key rather than accidentally parallelizing.
+    # Matches the worktree-using stages in resolve_branch_for_stage().
+    _PM_WORKTREE_STAGES: frozenset[str] = frozenset({"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"})
 
     @property
     def worker_key(self) -> str:
         """Compute the worker loop routing key based on isolation level.
 
         Teammate sessions run in parallel across chats, keyed by chat_id.
-        PM sessions and slugless dev sessions share the main working tree,
-        keyed by project_key.  Slugged dev sessions have their own worktree
-        (.worktrees/{slug}/) and branch (session/{slug}), so they route by
-        slug — two slugged dev sessions with the same chat_id still land on
-        different worker loops and run in parallel.
+
+        PM sessions:
+        - Slugless PMs always serialize per project_key (PR #828 invariant).
+        - Slugged PMs at worktree-compatible stages (BUILD/TEST/PATCH/REVIEW/DOCS)
+          route by slug — two sibling PMs with distinct slugs run concurrently.
+        - Slugged PMs at main-checkout stages (PLAN/ISSUE/CRITIQUE/MERGE/None)
+          fall back to project_key to prevent git conflicts on main.
+
+        Dev sessions:
+        - Slugged devs route by slug (isolated worktree).
+        - Slugless devs serialize by project_key.
 
         Slugs are assumed unique across the active session keyspace.  If two
-        dev sessions in different projects share a slug, they will share a
-        worker loop and serialize.
+        sessions in different projects share a slug, they will share a worker
+        loop and serialize.
         """
         if self.session_type == SessionType.TEAMMATE:
             return self.chat_id or self.project_key
         if self.session_type == SessionType.PM:
+            # Slugged PMs at worktree stages route by slug (parallel-safe).
+            # Slugless PMs and PMs at main-checkout stages serialize by project_key.
+            if self.slug and self._pm_stage_is_worktree_compatible():
+                return self.slug
             return self.project_key
         # dev: isolated by slug (worktree) if present, serialized by project otherwise
         if self.slug:
             return self.slug
         return self.project_key
+
+    def _pm_stage_is_worktree_compatible(self) -> bool:
+        """Return True only for stages where a slugged PM uses an isolated worktree.
+
+        Uses an allowlist so unknown or future stages fail closed (serialize)
+        rather than accidentally parallelizing on an unaudited stage.
+        """
+        stage = getattr(self, "current_stage", None)
+        return stage in self._PM_WORKTREE_STAGES
 
     @property
     def is_project_keyed(self) -> bool:
@@ -1423,6 +1482,61 @@ class AgentSession(Model):
         """
         return self.get_child_sessions()
 
+    # === Chat message log helpers (issue #1192) ===
+
+    def append_chat_log(
+        self,
+        direction: str,
+        sender: str,
+        content: str,
+        message_id: int | None = None,
+        ts: float | None = None,
+    ) -> None:
+        """Append one entry to chat_message_log, bounded to CHAT_LOG_MAX_ENTRIES.
+
+        Re-fetches the latest record from Popoto immediately before the
+        append-and-save to narrow the concurrent-write race window (Race 1 in the
+        plan). This costs one extra Redis read per call but prevents lost-update
+        when inbound and outbound writes collide.
+
+        Silently skips empty/whitespace-only content — no junk pollutes the log.
+        Substitutes "unknown" for None/empty sender so the drafter never renders
+        `sender=None`.
+
+        Wrapped in try/except so a save failure never crashes the caller — the
+        chat log is enrichment, not a critical path.
+        """
+        content = (content or "").strip()
+        if not content:
+            return
+        sender = (sender or "").strip() or "unknown"
+        entry = {
+            "direction": direction,
+            "sender": sender,
+            "content": content,
+            "message_id": message_id,
+            "ts": ts if ts is not None else time.time(),
+        }
+        try:
+            # Re-fetch the freshest version to minimize lost-update window.
+            # query.filter(session_id=...) is correct — session_id is a regular Field(),
+            # not the AutoKeyField. query.get() requires the AutoKey (id field).
+            rows = list(AgentSession.query.filter(session_id=self.session_id))
+            fresh = rows[0] if rows else None
+            if fresh is None:
+                # Session vanished — fall back to self to avoid losing the entry.
+                fresh = self
+            log = list(fresh.chat_message_log or [])
+            log.append(entry)
+            log = log[-CHAT_LOG_MAX_ENTRIES:]
+            fresh.chat_message_log = log
+            fresh.save(update_fields=["chat_message_log", "updated_at"])
+        except Exception as exc:
+            logger.warning(
+                f"append_chat_log failed for session {self.session_id} "
+                f"(direction={direction!r}, sender={sender!r}): {exc}"
+            )
+
     # === PM self-messaging helpers ===
 
     def record_pm_message(self, msg_id: int) -> None:
@@ -1444,6 +1558,61 @@ class AgentSession(Model):
         """Check whether the PM sent any self-authored messages during this session."""
         ids = self.pm_sent_message_ids
         return isinstance(ids, list) and len(ids) > 0
+
+    # === Drafter redundancy filter helpers (issue #1205) ===
+
+    def record_recent_sent_draft(
+        self,
+        text: str,
+        artifacts: dict,
+        *,
+        max_n: int = 3,
+        preview_chars: int = 500,
+    ) -> None:
+        """Append a successfully-sent draft to the session's recent_sent_drafts.
+
+        Caps the list to ``max_n`` entries (FIFO — oldest dropped). Each entry
+        stores a text preview of at most ``preview_chars`` characters, not the
+        full draft, to bound the AgentSession Redis hash size (3 × 500 chars
+        ≈ 1.5 KB upper bound, well within safe Redis write sizes).
+
+        Modelled on ``_append_event_dict`` (just above this method) which uses
+        ``self.save(update_fields=["session_events", "updated_at"])`` to defend
+        against stale-object callers clobbering concurrent field writes (see
+        #898). Never raises — a failed save logs a warning and continues so
+        the outbox ``rpush`` that already succeeded is not rolled back.
+
+        FIFO cap: after append, slice to last ``max_n`` entries.
+        Preview cap: ``text[:preview_chars]`` (full drafts can be ~4 KB).
+        Partial save: ``update_fields=["recent_sent_drafts", "updated_at"]``
+        so concurrent writes to ``context_summary`` or ``session_events`` by
+        the same ``send()`` flow are not clobbered. This is the right pattern;
+        the adjacent ``record_pm_message`` uses an unscoped save and is an
+        older helper that pre-dates the stale-object hazard documented in #898.
+        """
+        import time as _time
+
+        entry = {
+            "ts": _time.time(),
+            "text": text[:preview_chars],
+            "artifacts": artifacts or {},
+        }
+        current = self.recent_sent_drafts
+        if not isinstance(current, list):
+            current = []
+        current.append(entry)
+        # FIFO cap: drop oldest entry when over the limit.
+        if len(current) > max_n:
+            current = current[-max_n:]
+        self.recent_sent_drafts = current
+        try:
+            self.save(update_fields=["recent_sent_drafts", "updated_at"])
+        except Exception as e:
+            logger.warning(
+                "record_recent_sent_draft save failed for session %s: %s",
+                self.session_id,
+                e,
+            )
 
     # === Event log helpers ===
 

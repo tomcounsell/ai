@@ -575,6 +575,59 @@ class TestIngest:
             assert result is False
             mock_memory_cls.safe_save.assert_not_called()
 
+    def test_ingest_strips_private_tag_from_saved_content(self):
+        """sdlc-1179: <private>...</private> regions are stripped before Memory.safe_save.
+
+        The user's wrapped content must not appear in the persisted Memory.content.
+        """
+        from hook_utils.memory_bridge import ingest
+
+        prompt = (
+            "What does this key mean for our auth flow? "
+            "<private>sk-redacted-secret-here</private> "
+            "Please explain the implications."
+        )
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=False)
+
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+        mock_memory_cls.safe_save.return_value = MagicMock()
+
+        with (
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("models.memory.SOURCE_HUMAN", "human"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            result = ingest(prompt)
+            assert result is True
+            mock_memory_cls.safe_save.assert_called_once()
+            saved_content = mock_memory_cls.safe_save.call_args.kwargs["content"]
+            assert "sk-redacted-secret-here" not in saved_content
+            assert "<private>" not in saved_content
+            assert "</private>" not in saved_content
+            # The non-wrapped portions must still be saved.
+            assert "auth flow" in saved_content
+            assert "implications" in saved_content
+
+    def test_ingest_full_strip_to_empty_returns_false(self):
+        """sdlc-1179: when wrapping the entire prompt, content drops below MIN_PROMPT_LENGTH.
+
+        The downstream length filter correctly rejects the now-empty record;
+        no Memory record is created.
+        """
+        from hook_utils.memory_bridge import ingest
+
+        # Wrap everything; after strip_private the content is empty.
+        prompt = "<private>this entire prompt is private content do not save</private>"
+
+        mock_memory_cls = MagicMock()
+        with patch("models.memory.Memory", mock_memory_cls):
+            result = ingest(prompt)
+            assert result is False
+            mock_memory_cls.safe_save.assert_not_called()
+
 
 class TestExtract:
     """Test the extract() function."""
@@ -615,6 +668,8 @@ class TestExtract:
             "hook_utils.memory_bridge._get_sidecar_dir",
             lambda sid: tmp_path / "sidecar" / sid,
         )
+        # Provide a resolvable project_key via env var (required post-#1232)
+        monkeypatch.setenv("VALOR_PROJECT_KEY", "test-project")
 
         # Create a transcript with enough content
         transcript = tmp_path / "transcript.jsonl"
@@ -792,29 +847,31 @@ class TestGetProjectKey:
         result = _get_project_key(cwd="/some/other/path")
         assert result == "myproject"
 
-    def test_cwd_falls_back_to_dirname(self, monkeypatch):
-        """When no env var or projects.json match, returns cwd basename."""
+    def test_cwd_no_match_returns_none(self, monkeypatch):
+        """When no env var or projects.json match, returns None (no dirname fallback).
+
+        The dirname fallback (Path(cwd).name) was intentionally removed in #1232.
+        Writers that receive None must skip the Memory write rather than silently
+        using a directory name as a project key.
+        """
         from hook_utils.memory_bridge import _get_project_key
 
         monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)
-        # Patch projects.json path to nonexistent to skip that branch
-        import hook_utils.memory_bridge as mb
-
-        monkeypatch.setattr(mb, "_get_project_key", mb._get_project_key)
-
-        # Use a tmp path with no projects.json
+        # Use a path with no matching projects.json entry
         result = _get_project_key(cwd="/home/user/myrepo")
-        # Without a matching projects.json entry, returns basename
-        assert result == "myrepo"
+        assert result is None
 
-    def test_no_cwd_returns_default(self, monkeypatch):
-        """Without cwd and no env var, returns DEFAULT_PROJECT_KEY (not 'dm')."""
+    def test_no_cwd_returns_none(self, monkeypatch):
+        """Without cwd and no env var, returns None (not DEFAULT_PROJECT_KEY).
+
+        Write paths must handle None and skip the write.
+        Read paths use DEFAULT_PROJECT_KEY independently.
+        """
         from hook_utils.memory_bridge import _get_project_key
 
         monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)
         result = _get_project_key(cwd=None)
-        # Must not be "dm" -- that value is reserved for Telegram DMs
-        assert result != "dm"
+        assert result is None
 
     def test_default_project_key_not_dm(self):
         """DEFAULT_PROJECT_KEY in config/memory_defaults.py is not 'dm'."""
@@ -1186,6 +1243,49 @@ class TestPrefetch:
         )
         # Trivial pattern (after lowercase + strip), padded with spaces to meet length
         assert prefetch("sess", "yes" + " " * 60) is None
+
+    def test_prefetch_strips_private_before_bm25_query(self, tmp_path, monkeypatch):
+        """sdlc-1179: prefetch wraps the prompt with strip_private before BM25 query.
+
+        Wrapped <private> content must not seed the lookup vector against past
+        memories. This is defense-in-depth: even though the wrapped content is
+        not persisted (ingest strips it too), letting it leak into the BM25
+        query would cause the bloom-hit set to skew toward past records that
+        happen to share trivial words with the secret.
+        """
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        captured_query = []
+
+        def mock_recall_with_query(query, project_key, **kwargs):
+            captured_query.append(query)
+            return []
+
+        with (
+            patch(
+                "hook_utils.memory_bridge._recall_with_query",
+                side_effect=mock_recall_with_query,
+            ),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            prompt = (
+                "What does this key mean for our auth flow? "
+                "<private>sk-redacted-secret-here</private> Please explain."
+            )
+            prefetch("sess", prompt)
+
+        assert len(captured_query) == 1
+        query = captured_query[0]
+        assert "sk-redacted-secret-here" not in query
+        assert "<private>" not in query
+        assert "</private>" not in query
+        # Non-wrapped tokens must still seed the query.
+        assert "auth flow" in query
 
     def test_prefetch_no_window_gate(self, tmp_path, monkeypatch):
         """Prefetch fires immediately -- no WINDOW_SIZE gating."""

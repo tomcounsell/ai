@@ -111,6 +111,7 @@ each update run. This ensures the scheduler always reads the vault version.
 | `session-intelligence` | `reflections.session_intelligence.run` | Session Analysis → LLM Reflection → Bug Issue Filing **(disabled — calls gh CLI and spawns agent)** |
 | `behavioral-learning` | `reflections.behavioral_learning.run` | Episode Cycle-Close → Pattern Crystallization |
 | `daily-report-and-notify` | `reflections.daily_report.run` | Produce daily report → GitHub issues → Telegram notification (run last) **(disabled — spawns agent)** |
+| `pm-audio-briefing` | `reflections.pm_audio_briefing.run` | Daily per-project voice brief delivered to Telegram (numbers-free audio + numbered written follow-up). 5-minute registry tick; per-project schedule slot in `projects.json` is the once-per-day gate. See [PM Audio Briefing](pm-audio-briefing.md). |
 
 **Memory management:**
 

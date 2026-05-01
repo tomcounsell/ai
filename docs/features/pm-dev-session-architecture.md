@@ -127,6 +127,7 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `continuation_depth` (IntField, default 0) -- tracks how many continuation PM sessions have been chained from the original. Capped at `_CONTINUATION_PM_MAX_DEPTH` (3) to prevent runaway chains.
 - `project_key`, `created_at`, `history`, etc.
 - `project_config` (DictField) -- full project dict from `projects.json`, populated at enqueue time. Carries all project properties (name, working_directory, github, mode, telegram, etc.) through the pipeline so downstream code never re-derives from a parallel registry. Empty/None for older sessions created before this field existed; the worker falls back to loading from `projects.json` at execution time.
+- `chat_message_log` (ListField, default `[]`) -- rolling, bounded (50 entries) log of inbound and outbound Telegram chat traffic for this session. Each entry: `{direction, sender, content, message_id, ts}`. Written by the inbound dispatch hook (`bridge/dispatch.py`) and the relay outbound hook (`bridge/telegram_relay.py`). Read by the message drafter to avoid repeating prior outbound messages. See `docs/features/chat-message-log.md`.
 
 ### PM/Teammate session-specific fields
 - `chat_id`, `message_id`, `sender_name`, `message_text` -- Telegram context
@@ -194,7 +195,12 @@ The PM session owns all SDLC intelligence. The bridge just keeps it working.
 
 ## Queue Architecture
 
-Workers are keyed by `worker_key` — either `project_key` (for PM and dev-without-slug sessions that share the main working tree), `slug` (for slugged dev sessions with isolated worktrees), or `chat_id` (for teammate sessions). Sessions sharing a working tree serialize; isolated sessions can run in parallel across chats and across slugs.
+Workers are keyed by `worker_key` — either `project_key`, `slug`, or `chat_id`:
+- **PM sessions**: slugless PMs and PMs at main-checkout stages (PLAN/ISSUE/CRITIQUE/MERGE) use `project_key` and serialize per project. Slugged PMs at worktree stages (BUILD/TEST/PATCH/REVIEW/DOCS) use `slug` and can run concurrently with siblings (issue #1228).
+- **Dev sessions**: slugged devs use `slug` (isolated worktree); slugless devs use `project_key`.
+- **Teammate sessions**: always use `chat_id`.
+
+Sessions sharing a working tree serialize; isolated sessions (distinct slugs at worktree stages) can run in parallel.
 
 ### Per-Worker-Key Workers
 - `_ensure_worker(worker_key, is_project_keyed)` -- starts a worker per key

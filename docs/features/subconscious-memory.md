@@ -73,6 +73,72 @@ Telegram messages are saved as Memory records immediately on receipt in `bridge/
 
 Empty text, bot messages, and media-only messages are skipped.
 
+#### Excluding content with `<private>` tags (issue #1179)
+
+A user can wrap any portion of a Telegram message or Claude Code prompt in `<private>...</private>` tags to exclude that region from every persistent surface — Memory, `TelegramMessage.content`, `AgentSession.message_text`, and bridge logs. The tag is a per-message escape hatch, not a global toggle: each invocation only affects the current message.
+
+**Syntax:**
+
+```
+the api key is <private>sk-abc123</private>, can you check it?
+```
+
+The tag is **case-sensitive** (`<private>` only, not `<PRIVATE>` or `<Private>`), **single-level** (no nesting), and matched by a non-greedy regex so multiple wrapped regions in one message are stripped independently. An unmatched opening `<private>` with no closing `</private>` is left as literal text — nothing gets greedily consumed to end-of-message.
+
+**Scope of stripping:**
+
+The helper `strip_private(text)` in `agent/private_tag.py` is invoked at every persistent-write call site that handles raw user input:
+
+- `bridge/telegram_bridge.py`:
+  - `store_message(content=safe_text, ...)` (TelegramMessage.content)
+  - `Memory.safe_save(content=safe_text[:500], ...)` (subconscious memory)
+  - `logger.info(... safe_text[:50] ...)` (bridge.log)
+  - `clean_message(safe_text, project)` → `safe_clean_text` → fed into `AgentSession.message_text` via `enqueued_message_text` and the directive splice
+  - Both reply-chain hydration paths (completed-resume at line ~1416, fresh-message prehydration at line ~1922) call `strip_private(reply_chain_context)` immediately after `format_reply_chain` returns, closing the leak channel where a stored chain could still carry `<private>` markers from messages persisted before this feature shipped (B1).
+
+- `.claude/hooks/hook_utils/memory_bridge.py`:
+  - `ingest()` — applied at the top before the length filter, so wrapped content never reaches `Memory.safe_save`.
+  - `prefetch()` — applied before BM25 query so wrapped content does not seed the lookup vector against past memories.
+
+**What the agent sees vs. what gets stored:**
+
+The wrapped content **stays visible to the live agent in the current turn** — the user is masking *future recall*, not hiding from Claude in the moment. This is intentional and contradicts the natural intuition "private = invisible to Claude":
+
+| Channel | Sees `<private>SECRET</private>`? | Why |
+|---------|-----------------------------------|-----|
+| Live agent prompt (this turn) | Yes — agent sees `SECRET` and the tags | The agent must be able to reason about what the user just asked. The `clean_text` variable (built from raw `text`) is what the worker spawns into the SDK. |
+| `Memory.content` (Telegram path) | No — stripped | `Memory.safe_save` receives `safe_text[:500]`. |
+| `Memory.content` (Claude Code path) | No — stripped | `ingest()` strips before the length filter. |
+| `TelegramMessage.content` | No — stripped | `store_message(content=safe_text, ...)`. Persisted text never carries the secret, so `valor-telegram read --search SECRET` returns nothing. |
+| `AgentSession.message_text` | No — stripped | Built from `safe_clean_text` (and `safe_chain` for reply-thread context). |
+| `logs/bridge.log` | No — stripped | The 50-char log prefix uses `safe_text[:50]`. |
+| Post-session memory extraction | Soft — depends on agent | The Haiku extractor runs on the **agent's response**, not the user's input. The persona segment `config/personas/segments/private-tag.md` instructs the agent to **not quote wrapped content back** — but compliance is behavioral, not enforced. Risk 3 in the plan covers this. |
+
+**Worked Telegram example:**
+
+```
+User: the api key is <private>sk-abc123</private>, can you check it?
+
+Agent (this turn): I see the key starts with sk- and is 11 chars long — looks like an OpenAI-style key.
+
+# Later — the secret is gone from every persistent surface:
+$ python -m tools.memory_search search sk-abc123
+(no results)
+
+$ valor-telegram read --search sk-abc123
+(no results)
+
+$ grep sk-abc123 logs/bridge.log
+(no hits)
+```
+
+**Limits and trade-offs:**
+
+- **Forward-only.** Existing records are unaffected. Use `python -m tools.memory_search forget --id <ID> --confirm` to remove an already-persisted secret one record at a time.
+- **Not a credential scanner.** Auto-detection of API keys, credit cards, addresses, etc. is out of scope (see No-Gos in plan `docs/plans/sdlc-1179.md`). Tagging is opt-in only.
+- **Search scrollback intentionally loses tagged content.** `valor-telegram read --search` will not find wrapped content. This is the trade-off the user opted into by tagging.
+- **Bloom fingerprint deploy boundary.** The `Memory` model uses an ExistenceFilter keyed on `content`. A near-duplicate message sent before AND after the deploy will have two different bloom fingerprints (unstripped vs. stripped) — neither dedupes the other. At most one extra record per crossover pair appears for in-flight messages around the deploy. Documented for operators so they don't chase a "duplicate Memory" anomaly in the first hour after shipping.
+
 ### Flow 2: Thought Injection
 
 The PostToolUse hook in `agent/health_check.py` checks for relevant memories on every tool call:
@@ -515,20 +581,26 @@ All Memory records carry a `project_key` that scopes them to a specific project.
 | Value | Source | Description |
 |-------|--------|-------------|
 | `"valor"` | projects.json match | The main `~/src/ai` project (matched by working directory) |
-| `"dm"` | Telegram bridge | Genuine Telegram direct messages. Semantically reserved — must not be used as a fallback for non-DM contexts. |
-| `Path(cwd).name` | cwd basename fallback | Used when projects.json is missing or has no match for the current directory |
-| `"default"` | `DEFAULT_PROJECT_KEY` | Last-resort fallback in `config/memory_defaults.py`. Replaces the previous `"dm"` default to prevent silent mislabeling. |
+| `"dm"` | retired — DO NOT WRITE | The original Telegram-DM partition. Retired in #811 (PR #820). The bridge no longer writes here at all (#1173): messages from chats that don't resolve to a declared project skip the canonical Memory partition write entirely. `Memory.safe_save` emits a WARNING with stack trace if any caller still attempts a `"dm"` write — see `_warn_if_legacy_namespace` in `models/memory.py`. |
+| `"default"` | `DEFAULT_PROJECT_KEY` | Last-resort for read paths (recall/search/stats) when no project is resolved. `Memory.safe_save` emits a DEBUG-level audit log with stack trace whenever `"default"` is written by a write path; if `_warn_if_legacy_namespace` fires on `"default"` in normal operation, it means a write path resolved incorrectly — investigate the caller. |
+| `None` | unresolvable | Returned by `resolve_project_key()` when no env var and no cwd match. Writers must skip `Memory.safe_save` on `None` and log a WARNING. |
 
-### Resolution Chain
+### Resolution (Unified Helper)
 
-`_get_project_key(cwd)` in `memory_bridge.py` (Claude Code hooks path):
+All Memory write paths use `resolve_project_key()` from `config/project_key_resolver.py` (#1232). This single function encapsulates the full resolution chain:
 
-1. `VALOR_PROJECT_KEY` env var — highest priority, used by CI/SDK-spawned sessions
-2. `projects.json` cwd match — `~/Desktop/Valor/projects.json` entries matched by path prefix
-3. `Path(cwd).name` — directory basename when no projects.json match exists
-4. `DEFAULT_PROJECT_KEY` from `config/memory_defaults.py` — final fallback when cwd is None
+1. **Explicit kwarg** — `project_key=` arg if non-empty → return immediately (explicit override)
+2. **`VALOR_PROJECT_KEY` env var** — machine-scoped env var; highest auto-resolution priority
+3. **`projects.json` cwd match** — `~/Desktop/Valor/projects.json` `working_directory` prefix match against `cwd`
+4. **`None`** — unresolvable; callers must skip the write and log a WARNING
 
-The Telegram bridge path writes directly with `project_key="dm"` for human messages and uses `DEFAULT_PROJECT_KEY` from environment/config for agent-extracted observations.
+**Intentional omissions:**
+- No `Path(cwd).name` (dirname) fallback — directory basenames are not declared project keys; using them silently mislabeled records in the past
+- No `DEFAULT_PROJECT_KEY` fallback — `"default"` means misconfigured, not unknown-but-safe; writers that fall through must skip rather than pollute
+
+**Read paths** (`recall`, `search`, `stats`, `forget`) continue to use `DEFAULT_PROJECT_KEY` as a non-None fallback because an empty result set on a bad key is safe; the `_resolve_project_key` helper in `tools/memory_search/__init__.py` and `ui/data/memories.py` handles this independently.
+
+The Telegram bridge path resolves `project_key` from the message's chat (`find_project_for_dm(sender_id)` for DMs, `find_project_for_chat(chat_title)` for groups). When neither resolver matches, the bridge writes conversation history (`store_message`, `register_chat`) with `project_key=None` so `valor-telegram read` keeps working, but **skips the canonical Memory partition write entirely** — unowned messages no longer pollute any partition (#1173, #1234). The retired `"dm"` literal has been removed from `bridge/telegram_bridge.py`; see `_warn_if_legacy_namespace` in `models/memory.py` for the regression detector.
 
 ### Migration Helper
 
@@ -569,14 +641,16 @@ Memory records carry a `project_key` field that partitions memories by project. 
 
 | Value | Source | Meaning |
 |-------|--------|---------|
-| `"dm"` | Telegram bridge (`bridge/telegram_bridge.py`) | Genuine Telegram DM message |
+| `"dm"` | retired — DO NOT WRITE | Original Telegram-DM partition, retired in #811. The bridge no longer writes here at all (#1173). `Memory.safe_save` logs WARNING with stack trace if any caller still attempts a `"dm"` write. |
 | `"valor"` | `~/src/ai` cwd match against `projects.json` | Memory from the main ai project |
-| `"default"` | `DEFAULT_PROJECT_KEY` fallback | Memories created without a resolvable cwd |
+| `"default"` | `DEFAULT_PROJECT_KEY` fallback | Memories created without a resolvable cwd. Still legitimate during bootstrap; logged at DEBUG with stack trace by `Memory.safe_save` for audit. |
 | `<repo-name>` | Basename of unrecognized cwd | Memories from other local repos |
 
 Prior to PR #820, the Claude Code hooks always wrote `project_key="dm"` because the four bridge functions (`recall`, `ingest`, `extract`, `post_merge_extract`) called `_get_project_key()` with no `cwd` argument, falling through to `DEFAULT_PROJECT_KEY`. This caused hook-created memories to appear in Telegram DM retrieval queries and vice versa.
 
 The fix threads `cwd` from `hook_input["cwd"]` through all four functions. `DEFAULT_PROJECT_KEY` was changed from `"dm"` to `"default"` to prevent future silent mislabeling if cwd is ever unavailable.
+
+The Telegram bridge writer was patched in #1173: messages from chats that don't resolve to a declared project skip the canonical Memory partition write (conversation history is still preserved with `project_key=None`). The `"dm"` literal has been removed from `bridge/telegram_bridge.py`. The unification of all writer callsites onto a single resolver is tracked under follow-up issue #1232.
 
 See [Claude Code Memory — Project Key Resolution](claude-code-memory.md#project-key-resolution) for the cwd threading table and one-time migration instructions.
 

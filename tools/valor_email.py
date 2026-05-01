@@ -373,6 +373,13 @@ def cmd_send(args: argparse.Namespace) -> int:
     to_addrs = []
     for entry in args.to:
         to_addrs.extend(a.strip() for a in entry.split(",") if a.strip())
+
+    # Promise gate — see docs/features/promise-gate.md
+    # Synthetic cli-{epoch}-... session_id; gate routes to audit JSONL only.
+    from bridge.promise_gate import cli_check_or_exit
+
+    cli_check_or_exit(body, transport="email", session_id=session_id)
+
     payload: dict = {
         "session_id": session_id,
         "to": to_addrs,

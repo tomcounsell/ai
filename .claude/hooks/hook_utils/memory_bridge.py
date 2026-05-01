@@ -187,41 +187,20 @@ def _save_sidecar(session_id: str, data: dict) -> None:
         raise
 
 
-def _get_project_key(cwd: str | None = None) -> str:
-    """Resolve the project key from environment, cwd path match, or defaults.
+def _get_project_key(cwd: str | None = None) -> str | None:
+    """Resolve the project key from environment, cwd path match, or return None.
 
-    Priority: VALOR_PROJECT_KEY env var > cwd match against projects.json > default.
+    Thin wrapper around ``config.project_key_resolver.resolve_project_key``.
+    All new callsites should import and call ``resolve_project_key`` directly;
+    this wrapper exists so that existing test-patch targets
+    (``hook_utils.memory_bridge._get_project_key``) continue to work.
+
+    Returns ``str | None`` — callers that previously expected a non-None ``str``
+    must now guard against ``None`` and skip the Memory write on ``None``.
     """
-    env_key = os.environ.get("VALOR_PROJECT_KEY")
-    if env_key:
-        return env_key
+    from config.project_key_resolver import resolve_project_key
 
-    # Try to match cwd against projects.json working_directory entries
-    if cwd:
-        try:
-            projects_path = Path.home() / "Desktop" / "Valor" / "projects.json"
-            if projects_path.exists():
-                with open(projects_path) as f:
-                    data = json.load(f)
-                home = str(Path.home())
-                for key, proj in data.get("projects", {}).items():
-                    wd = proj.get("working_directory", "")
-                    if wd:
-                        wd = wd.replace("~", home)
-                        if cwd.startswith(wd):
-                            return key
-        except Exception:
-            pass
-
-        # No projects.json match -- derive from directory basename
-        return Path(cwd).name
-
-    try:
-        from config.memory_defaults import DEFAULT_PROJECT_KEY
-
-        return DEFAULT_PROJECT_KEY
-    except Exception:
-        return "default"
+    return resolve_project_key(cwd=cwd)
 
 
 def _strip_pm_boilerplate(prompt: str) -> str:
@@ -498,9 +477,11 @@ def recall(
         # Multi-query decomposition -- cluster keywords and retrieve via
         # _recall_with_query() per cluster (bloom_check=False inside each
         # call since we already passed the multi-keyword bloom gate above).
+        from config.memory_defaults import DEFAULT_PROJECT_KEY
         from utils.keyword_extraction import _cluster_keywords
 
-        project_key = _get_project_key(cwd)
+        _raw_pk = _get_project_key(cwd)
+        project_key = _raw_pk if _raw_pk is not None else DEFAULT_PROJECT_KEY
         existing_injected_ids = {
             str(item.get("memory_id", "") or "")
             for item in state.get("injected", [])
@@ -612,9 +593,13 @@ def prefetch(
         if not prompt or not isinstance(prompt, str):
             return None
 
+        # sdlc-1179: strip <private> regions before BM25 query so wrapped
+        # content does not seed the lookup vector against past memories.
+        from agent.private_tag import strip_private
+
         # Strip PM boilerplate first so length / triviality checks apply
         # to the actual user payload, not the routing template.
-        stripped = _strip_pm_boilerplate(prompt).strip()
+        stripped = _strip_pm_boilerplate(strip_private(prompt)).strip()
 
         if len(stripped) < MIN_PROMPT_LENGTH:
             return None
@@ -623,7 +608,10 @@ def prefetch(
         if normalized in TRIVIAL_PATTERNS:
             return None
 
-        project_key = _get_project_key(cwd)
+        from config.memory_defaults import DEFAULT_PROJECT_KEY
+
+        _raw_pk = _get_project_key(cwd)
+        project_key = _raw_pk if _raw_pk is not None else DEFAULT_PROJECT_KEY
 
         # Load sidecar to get current injected[] for de-dup.
         state = _load_sidecar(session_id)
@@ -710,6 +698,13 @@ def ingest(content: str, cwd: str | None = None) -> bool:
         if not content or not isinstance(content, str):
             return False
 
+        # sdlc-1179: strip <private> regions before any persistence so wrapped
+        # content never lands in Memory.content. Idempotent and safe on no-tag
+        # input (returns the original string bit-identically).
+        from agent.private_tag import strip_private
+
+        content = strip_private(content)
+
         # Quality filter: minimum length
         stripped = content.strip()
         if len(stripped) < MIN_PROMPT_LENGTH:
@@ -736,6 +731,14 @@ def ingest(content: str, cwd: str | None = None) -> bool:
         from models.memory import SOURCE_HUMAN
 
         project_key = _get_project_key(cwd)
+        if project_key is None:
+            logger.warning(
+                "[memory_bridge] ingest write skipped: resolve_project_key returned None "
+                "(cwd=%r, VALOR_PROJECT_KEY=%r)",
+                cwd,
+                os.environ.get("VALOR_PROJECT_KEY"),
+            )
+            return False
 
         m = Memory.safe_save(
             agent_id=project_key,
@@ -789,6 +792,14 @@ def extract(session_id: str, transcript_path: str | None, cwd: str | None = None
 
         # Run Haiku extraction
         project_key = _get_project_key(cwd)
+        if project_key is None:
+            logger.warning(
+                "[memory_bridge] extract write skipped: resolve_project_key returned None "
+                "(cwd=%r, VALOR_PROJECT_KEY=%r)",
+                cwd,
+                os.environ.get("VALOR_PROJECT_KEY"),
+            )
+            return
         asyncio.run(extract_observations_async(session_id, truncated_text, project_key=project_key))
 
         # Run outcome detection using injected thoughts from sidecar
@@ -880,6 +891,14 @@ def post_merge_extract(pr_number: str | int | None = None, cwd: str | None = Non
         from agent.memory_extraction import extract_post_merge_learning
 
         project_key = _get_project_key(cwd)
+        if project_key is None:
+            logger.warning(
+                "[memory_bridge] post_merge_extract write skipped: "
+                "resolve_project_key returned None (cwd=%r, VALOR_PROJECT_KEY=%r)",
+                cwd,
+                os.environ.get("VALOR_PROJECT_KEY"),
+            )
+            return
         asyncio.run(
             extract_post_merge_learning(
                 pr_title=pr_title,

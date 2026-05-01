@@ -31,8 +31,8 @@ All metric names use dotted notation.
 | `session.turns` | `agent/sdk_client.py` | Number of turns in a session |
 | `session.started` | `models/session_lifecycle.py` | Session start event (dimensions: session_type, project_key) |
 | `session.completed` | `models/session_lifecycle.py` | Session completion event (dimensions: session_type, status) |
-| `sdlc.stage_started` | `bridge/pipeline_state.py` | SDLC stage start (dimensions: stage) |
-| `sdlc.stage_completed` | `bridge/pipeline_state.py` | SDLC stage completion (dimensions: stage) |
+| `sdlc.stage_started` | `agent/pipeline_state.py` | SDLC stage start (dimensions: stage) |
+| `sdlc.stage_completed` | `agent/pipeline_state.py` | SDLC stage completion (dimensions: stage) |
 | `memory.recall_attempt` | `agent/memory_retrieval.py` | Memory recall attempt (dimensions: hits, project_key) |
 | `memory.extraction` | `agent/memory_extraction.py` | Post-session memory extraction (dimensions: count, project_key) |
 | `memory.extraction.error` | `agent/memory_extraction.py` | Extraction failure counter (dimensions: error_class, session_id, project_key). Emitted on every `except` branch except `CancelledError`. Introduced by hotfix #1055 to surface silent async extraction failures. |

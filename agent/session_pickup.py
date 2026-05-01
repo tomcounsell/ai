@@ -215,8 +215,42 @@ async def _pop_agent_session(
             pending = await AgentSession.query.async_filter(
                 project_key=worker_key, status="pending"
             )
-            # Only pop sessions that belong to project-keyed workers (pm, dev-without-slug)
-            pending = [s for s in pending if s.worker_key == worker_key]
+            # Split: sessions that belong to this project-keyed worker vs sessions
+            # that have advanced to a slug-keyed worker_key (slugged PM sessions
+            # that are now at a worktree stage like BUILD — issue #1228).
+            mine = [s for s in pending if s.worker_key == worker_key]
+            need_slug_worker = [s for s in pending if s.worker_key != worker_key]
+            if need_slug_worker:
+                # Lazily start a slug-keyed worker for each rejected session.
+                # This closes the gap between enqueue time (when inline sites conservatively
+                # use project_key for PM) and pop time (when worker_key property returns slug
+                # for worktree-stage PMs). Wrapped in try/except so a worker-start failure
+                # never blocks the pop loop.
+                try:
+                    from agent.agent_session_queue import _active_events, _ensure_worker
+
+                    for s in need_slug_worker:
+                        slug_wk = s.worker_key  # slug at worktree stage
+                        _ensure_worker(slug_wk, is_project_keyed=False)
+                        event = _active_events.get(slug_wk)
+                        if event is not None:
+                            event.set()
+                        logger.debug(
+                            "[worker:%s] Slugged PM session %s at worktree stage — "
+                            "started slug-keyed worker %s",
+                            worker_key,
+                            s.session_id,
+                            slug_wk,
+                        )
+                except Exception as _lazy_err:
+                    logger.warning(
+                        "[worker:%s] Failed to start slug-keyed worker for %d rejected "
+                        "session(s): %s",
+                        worker_key,
+                        len(need_slug_worker),
+                        _lazy_err,
+                    )
+            pending = mine
         else:
             # For non-project-keyed workers we attempt a slug=worker_key indexed
             # lookup first (captures slugged dev sessions — issue #1085), then

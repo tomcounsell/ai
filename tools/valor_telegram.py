@@ -15,14 +15,18 @@ Usage:
 import argparse
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from bridge.utc import utc_now
+
+logger = logging.getLogger(__name__)
 
 # Telegram message length limit (same constant as send_telegram.py)
 TELEGRAM_MAX_LENGTH = 4096
@@ -688,6 +692,74 @@ def _get_redis_connection():
     return redis.Redis.from_url(redis_url, decode_responses=True)
 
 
+def _should_run_rtr(args: argparse.Namespace) -> bool:
+    """Caller-type gate for the Read-the-Room (RTR) pre-send pass (issue #1203).
+
+    Decision rule:
+        1. ``--no-read-the-room`` flag → False (force off).
+        2. ``--read-the-room`` flag → True (force on).
+        3. Otherwise: True iff ``VALOR_SESSION_ID`` env var is set + non-empty.
+
+    The env-var check is the auto-detection signal for "this CLI invocation
+    came from inside an AgentSession" — the worker injects ``VALOR_SESSION_ID``
+    via ``agent/sdk_client.py:_extract_sdlc_env_vars``. Humans typing
+    ``valor-telegram send`` in a fresh terminal do not have it set, so RTR
+    skips by default for human invocations and runs by default for agent
+    invocations (subject to the ``READ_THE_ROOM_ENABLED`` machine-wide gate
+    inside ``read_the_room()`` itself).
+
+    Note: env vars inherit across nested shells, ``tmux``, and
+    ``claude --resume`` started from inside an existing session. The
+    stderr diagnostic in ``cmd_send`` makes accidental inheritance visible
+    so a human can ``Ctrl-C`` and retry with ``--no-read-the-room``.
+    """
+    if getattr(args, "no_read_the_room", False):
+        return False
+    if getattr(args, "read_the_room", False):
+        return True
+    return bool(os.environ.get("VALOR_SESSION_ID", "").strip())
+
+
+def _rtr_emit_event(
+    session: Any,
+    event_type: str,
+    *,
+    chat_id: str,
+    draft_text: str,
+    revised_text: str | None = None,
+    reason: str = "",
+) -> None:
+    """Append an ``rtr.*`` entry to ``session.session_events``.
+
+    Best-effort -- exceptions are swallowed. Mirrors
+    ``agent/output_handler.py::TelegramRelayOutputHandler._rtr_emit_event``
+    minus the ``self`` parameter so Path B's audit trail matches Path A's
+    schema byte-for-byte. Path A keeps the helper private to its handler
+    on purpose; Path B replicates the body locally rather than reaching
+    across the underscore boundary into ``bridge.read_the_room``'s private
+    ``_make_event`` / ``_append_event`` (issue #1203 critique C-R2-2).
+    """
+    if session is None:
+        return
+    try:
+        event: dict[str, Any] = {
+            "type": event_type,
+            "ts": time.time(),
+            "chat_id": str(chat_id),
+            "reason": reason,
+            "draft_preview": draft_text[:200],
+        }
+        if revised_text is not None:
+            event["revised_preview"] = revised_text[:200]
+        events = list(getattr(session, "session_events", None) or [])
+        events.append(event)
+        session.session_events = events
+        if hasattr(session, "save"):
+            session.save()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("RTR event append failed (non-fatal): %s", e)
+
+
 def cmd_send(args: argparse.Namespace) -> int:
     """Send a message to a chat via the Redis relay.
 
@@ -761,7 +833,157 @@ def cmd_send(args: argparse.Namespace) -> int:
     # Build relay-compatible payload
     # Use synthetic session_id with cli- prefix to avoid collision with bridge session IDs
     session_id = f"cli-{int(time.time())}"
+
+    # Promise gate — see docs/features/promise-gate.md
+    # Synthetic cli-{epoch} session_id; gate routes to audit JSONL only,
+    # session_events emission is silently skipped on synthetic IDs.
+    from bridge.promise_gate import cli_check_or_exit
+
+    cli_check_or_exit(text, transport="telegram", session_id=session_id)
     reply_to = getattr(args, "reply_to", None)
+
+    # ── Read-the-Room pre-send pass for Path B (issue #1203) ──
+    # Mirrors PR #1204 / commit 531e8f4e (Path A in agent/output_handler.py
+    # lines 361-455). Gated by:
+    #   1. _should_run_rtr(args): caller-type gate — agent vs. human (see
+    #      VALOR_SESSION_ID auto-detection + --read-the-room/--no-read-the-room).
+    #   2. READ_THE_ROOM_ENABLED env var (read fresh inside read_the_room()).
+    # Fail-open: any error path falls through to the original text rpush.
+    rtr_should_send = True  # default: rpush the original (possibly trimmed) text
+    rtr_suppress_reaction: dict | None = None  # optional suppress-with-anchor reaction payload
+    rtr_suppressed_reason: str | None = None  # set when fully suppressed (no rpush)
+    if _should_run_rtr(args) and text:
+        # Resolve reply_to env-var fallback BEFORE the suppress branch so
+        # the reaction-anchor decision uses the same int it would for the
+        # eventual rpush. The post-RTR block below runs the same fallback
+        # again for the rpush path; both paths land on the same value.
+        anchor_reply_to = reply_to
+        if anchor_reply_to is None:
+            env_reply_to = os.environ.get("TELEGRAM_REPLY_TO", "").strip()
+            if env_reply_to:
+                try:
+                    anchor_reply_to = int(env_reply_to)
+                except (TypeError, ValueError):
+                    anchor_reply_to = None
+
+        # Best-effort session lookup. VALOR_SESSION_ID carries the bridge
+        # session_id field (e.g. "tg_psyoptimal_-100123_456"), NOT the
+        # Popoto id PK. Use query.filter(session_id=...) — query.get()
+        # rejects positional strings (see models/agent_session.py:781-820).
+        # Empty result is the normal "session deleted between fork and
+        # rpush" path; only log on actual exceptions.
+        valor_session_id = os.environ.get("VALOR_SESSION_ID", "").strip()
+        session = None
+        if valor_session_id:
+            try:
+                from models.agent_session import AgentSession
+
+                matches = list(AgentSession.query.filter(session_id=valor_session_id))
+                session = matches[0] if matches else None
+            except Exception as e:
+                logger.warning(
+                    "Path B RTR: session lookup failed for %s: %s",
+                    valor_session_id,
+                    e,
+                )
+                session = None
+
+        # Diagnostic: env-var inheritance through nested shells / tmux /
+        # claude --resume can activate RTR on what the user perceives as
+        # a manual send. Print to stderr so an interactive human notices
+        # and can Ctrl-C + retry with --no-read-the-room.
+        print("(RTR active — running pre-send pass)", file=sys.stderr)
+
+        try:
+            from bridge.read_the_room import (
+                RTR_SUPPRESS_EMOJI,
+                TRIM_TOO_SHORT_THRESHOLD,
+                read_the_room,
+            )
+
+            verdict = asyncio.run(read_the_room(text, chat_id, session))
+
+            if verdict.action == "trim" and verdict.revised_text:
+                if len(verdict.revised_text) < TRIM_TOO_SHORT_THRESHOLD:
+                    # F4: too-short trim coerces to suppress (mirrors Path A).
+                    _rtr_emit_event(
+                        session,
+                        "rtr.suppressed",
+                        chat_id=chat_id,
+                        draft_text=text,
+                        revised_text=verdict.revised_text,
+                        reason="trim_too_short",
+                    )
+                    if anchor_reply_to is not None:
+                        # Suppress with reply anchor: queue the 👀 reaction.
+                        from agent.output_handler import TelegramRelayOutputHandler
+
+                        rtr_suppress_reaction = TelegramRelayOutputHandler._build_reaction_payload(
+                            chat_id,
+                            anchor_reply_to,
+                            RTR_SUPPRESS_EMOJI,
+                            session_id,
+                        )
+                        rtr_should_send = False
+                        rtr_suppressed_reason = "trim_too_short"
+                    else:
+                        # No anchor: F4 fall-through preserves the I-heard-you
+                        # contract by sending the original text + audit event.
+                        _rtr_emit_event(
+                            session,
+                            "rtr.suppress_fallthrough",
+                            chat_id=chat_id,
+                            draft_text=text,
+                            reason="no_reply_anchor",
+                        )
+                else:
+                    # Long-form trim: substitute the revised text.
+                    _rtr_emit_event(
+                        session,
+                        "rtr.trimmed",
+                        chat_id=chat_id,
+                        draft_text=text,
+                        revised_text=verdict.revised_text,
+                        reason=verdict.reason or "trim",
+                    )
+                    text = verdict.revised_text
+            elif verdict.action == "suppress":
+                _rtr_emit_event(
+                    session,
+                    "rtr.suppressed",
+                    chat_id=chat_id,
+                    draft_text=text,
+                    reason=verdict.reason or "suppress",
+                )
+                if anchor_reply_to is not None:
+                    from agent.output_handler import TelegramRelayOutputHandler
+
+                    rtr_suppress_reaction = TelegramRelayOutputHandler._build_reaction_payload(
+                        chat_id,
+                        anchor_reply_to,
+                        RTR_SUPPRESS_EMOJI,
+                        session_id,
+                    )
+                    rtr_should_send = False
+                    rtr_suppressed_reason = verdict.reason or "suppress"
+                else:
+                    # No anchor: F4 fall-through (send original + log).
+                    _rtr_emit_event(
+                        session,
+                        "rtr.suppress_fallthrough",
+                        chat_id=chat_id,
+                        draft_text=text,
+                        reason="no_reply_anchor",
+                    )
+            # else: action == "send" (or "trim" with no revised_text) —
+            # fall through with text unchanged.
+        except Exception as rtr_err:
+            # Fail-open: RTR errors NEVER block delivery. Mirrors Path A
+            # (agent/output_handler.py:446-455).
+            logger.warning(
+                "Path B RTR call failed (%s); falling back to original text",
+                rtr_err,
+            )
 
     # Issue #1191: When invoked from inside an AgentSession, default reply_to to
     # TELEGRAM_REPLY_TO injected by agent/sdk_client.py:_extract_sdlc_env_vars
@@ -808,11 +1030,31 @@ def cmd_send(args: argparse.Namespace) -> int:
         if getattr(args, "cleanup_after_send", False):
             payload["cleanup_file"] = True
 
-    # Push to Redis outbox queue
+    # Issue #1192: Inject owner_agent_session_id so the relay can attribute this
+    # outbound send to the correct AgentSession's chat_message_log (Path B).
+    # Read from AGENT_SESSION_ID ONLY (injected by agent/sdk_client.py as the
+    # Popoto primary key, e.g. agt_xxx). Do NOT fall back to VALOR_SESSION_ID —
+    # that env var holds a bridge session_id string (e.g. tg_project_-123456_789),
+    # not a Popoto agent_session_id primary key. Passing it to get_by_id() would
+    # silently return None and cause Tier 1 lookup to fail.
+    # If AGENT_SESSION_ID is unset (manual CLI invocation outside any agent
+    # session), omit the key entirely so the relay falls back to tier-2 resolution.
+    _agent_session_id = os.environ.get("AGENT_SESSION_ID")
+    if _agent_session_id:
+        payload["owner_agent_session_id"] = _agent_session_id
+
+    # Push to Redis outbox queue. RTR suppress (with reply anchor) replaces
+    # the message rpush with a reaction rpush; RTR fall-through and "send"
+    # verdicts proceed with the message rpush below.
     queue_key = f"telegram:outbox:{session_id}"
     try:
         r = _get_redis_connection()
-        r.rpush(queue_key, json.dumps(payload))
+        if rtr_should_send:
+            r.rpush(queue_key, json.dumps(payload))
+        else:
+            # rtr_suppress_reaction is set whenever rtr_should_send is False
+            # via the suppress-with-anchor branches above.
+            r.rpush(queue_key, json.dumps(rtr_suppress_reaction))
         r.expire(queue_key, 3600)
     except Exception as e:
         print(f"Error: Failed to queue message in Redis: {e}", file=sys.stderr)
@@ -822,17 +1064,20 @@ def cmd_send(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # Confirmation
-    parts = []
-    if text:
-        parts.append(f"{len(text)} chars")
-    if file_path:
-        parts.append(f"file: {Path(file_path).name}")
-    print(f"Message queued ({', '.join(parts)})")
-    print(
-        "Note: delivery requires the bridge relay to be running"
-        " (./scripts/valor-service.sh status)."
-    )
+    # Confirmation: differentiate "queued" vs. "suppressed by RTR".
+    if rtr_should_send:
+        parts = []
+        if text:
+            parts.append(f"{len(text)} chars")
+        if file_path:
+            parts.append(f"file: {Path(file_path).name}")
+        print(f"Message queued ({', '.join(parts)})")
+        print(
+            "Note: delivery requires the bridge relay to be running"
+            " (./scripts/valor-service.sh status)."
+        )
+    else:
+        print(f"Message suppressed by RTR (reason: {rtr_suppressed_reason})")
     return 0
 
 
@@ -1019,6 +1264,33 @@ def main() -> int:
             "Ask the relay to delete the attached file after a successful "
             "send (or after dead-letter placement on retry exhaustion). "
             "Use this for ephemeral temp files; the relay owns lifecycle."
+        ),
+    )
+
+    # Issue #1203: Read-the-Room (RTR) pre-send pass for Path B.
+    # Default behavior (no flag): RTR auto-runs for agent-invoked sends
+    # (VALOR_SESSION_ID env var set) when READ_THE_ROOM_ENABLED=true; human
+    # invocations bypass RTR. Use --read-the-room to force RTR on for human
+    # invocations or --no-read-the-room to opt out from inside an agent
+    # session. Mutually exclusive (argparse rejects both at parse time).
+    rtr_group = send_parser.add_mutually_exclusive_group()
+    rtr_group.add_argument(
+        "--read-the-room",
+        action="store_true",
+        help=(
+            "Force the Read-the-Room pre-send pass on (overrides "
+            "VALOR_SESSION_ID auto-detection). Useful for human invocations "
+            "where the operator wants the conservative pre-send guard."
+        ),
+    )
+    rtr_group.add_argument(
+        "--no-read-the-room",
+        action="store_true",
+        help=(
+            "Force the Read-the-Room pre-send pass off (overrides "
+            "VALOR_SESSION_ID auto-detection). Use when an agent-context "
+            "send must not be filtered (e.g., ad-hoc manual sends from a "
+            "shell that inherited VALOR_SESSION_ID)."
         ),
     )
 

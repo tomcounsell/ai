@@ -40,7 +40,13 @@ def _fetch_all_records(project_key: str) -> list:
 
 
 def _resolve_project_key(project_key: str | None = None) -> str:
-    """Resolve project_key from argument or environment."""
+    """Resolve project_key for READ paths (search, inspect, forget, status).
+
+    Returns a non-empty string — always falls back to DEFAULT_PROJECT_KEY so
+    read paths never receive None (an empty result set is safe on a bad key).
+
+    Write paths (save()) call resolve_project_key() directly and handle None.
+    """
     if project_key:
         return project_key
     from config.memory_defaults import DEFAULT_PROJECT_KEY
@@ -226,7 +232,16 @@ def save(
         if importance is None:
             importance = 6.0  # InteractionWeight.HUMAN
 
-        project_key = _resolve_project_key(project_key)
+        from config.project_key_resolver import resolve_project_key
+
+        project_key = resolve_project_key(project_key=project_key)
+        if project_key is None:
+            logger.warning(
+                "[memory_search] save write skipped: resolve_project_key returned None "
+                "(VALOR_PROJECT_KEY=%r)",
+                os.environ.get("VALOR_PROJECT_KEY"),
+            )
+            return None
 
         from models.memory import Memory
 

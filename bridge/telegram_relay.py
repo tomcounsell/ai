@@ -48,6 +48,10 @@ MAX_RELAY_RETRIES = 3
 # Known message types accepted by the relay dispatcher
 KNOWN_MESSAGE_TYPES = {None, "reaction", "custom_emoji_message"}
 
+# Maximum characters per chat_message_log entry (prevents Path A's multi-paragraph
+# drafter output from inflating Redis storage to ~200KB per session).
+MAX_CHAT_LOG_ENTRY_CHARS = 500
+
 
 def _safe_unlink(path: str) -> None:
     """Unlink a temp file the relay was asked to clean up.
@@ -463,6 +467,102 @@ def _record_sent_message(session_id: str, msg_id: int) -> None:
         logger.warning(f"Relay: failed to record msg_id on session {session_id}: {e}")
 
 
+def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
+    """Append an outbound entry to the owning AgentSession's chat_message_log.
+
+    Three-tier owning-session resolution (issue #1192):
+      1. payload["owner_agent_session_id"] — set by Path B (valor-telegram send)
+         when the agent invokes it via Bash inside an agent session.
+      2. payload["session_id"] without a "cli-" or "local-" prefix — real queue
+         session_id created by TelegramRelayOutputHandler (Path A).
+      3. Fallback: query AgentSession by chat_id+status="running" (covers manual CLI sends).
+         Replicates the core logic of get_active_session_for_chat() synchronously,
+         since this function runs in a thread (asyncio.to_thread) and cannot await.
+    If no session is resolved, the append is skipped silently (debug log).
+
+    NOTE: We append AFTER the successful send, so the drafter never sees the
+    current turn's outbound text (it produces that text). The drafter sees prior
+    turns and prior Path B sends. That is the desired behavior.
+
+    Wrapped in try/except so relay failures never break the send path.
+    """
+    try:
+        from models.agent_session import AgentSession
+
+        text = (message.get("text") or "").strip()
+        if not text:
+            # File-only send: produce a "[file: filename]" placeholder so the
+            # drafter sees mid-session file sends (plan §Technical Approach).
+            file_paths = message.get("file_paths") or (
+                [message["file_path"]] if message.get("file_path") else []
+            )
+            if not file_paths:
+                return  # No content at all (e.g. voice note with no file_paths)
+            import os
+
+            text = "[file: " + ", ".join(os.path.basename(fp) for fp in file_paths) + "]"
+
+        # Truncate to prevent verbose drafter output inflating Redis storage
+        # (~200KB per session without this bound).
+        if len(text) > MAX_CHAT_LOG_ENTRY_CHARS:
+            text = text[:MAX_CHAT_LOG_ENTRY_CHARS] + "…"
+
+        chat_id = message.get("chat_id")
+
+        # Tier 1: owner_agent_session_id injected by Path B (valor-telegram send).
+        # Use get_by_id() — it accepts the raw agent_session_id AutoKey string
+        # directly and is far more efficient than query.filter(session_id=...) or
+        # a full table scan via query.all(). query.filter(session_id=owner_id)
+        # would always fail silently because session_id is the bridge session_id
+        # field, not the Popoto AutoKey (agent_session_id). The full table scan
+        # fallback is equally wrong — both were dead code paths.
+        owner_id = message.get("owner_agent_session_id")
+        session = None
+        if owner_id:
+            session = AgentSession.get_by_id(owner_id)
+            if session is None:
+                logger.warning(
+                    "Relay: AGENT_SESSION_ID=%s set but not found in Redis; "
+                    "chat_log entry skipped for Path B send",
+                    owner_id,
+                )
+
+        # Tier 2: real queue session_id (no cli-/local- prefix) — Path A
+        if session is None:
+            queue_session_id = message.get("session_id") or ""
+            if queue_session_id and not queue_session_id.startswith(("cli-", "local-")):
+                rows = list(AgentSession.query.filter(session_id=queue_session_id))
+                if rows:
+                    session = rows[0]
+
+        # Tier 3: fallback by chat_id for manual CLI sends.
+        # NOTE: get_active_session_for_chat is async; we replicate its core query
+        # synchronously here since _append_outbound_chat_log runs in a thread
+        # (via asyncio.to_thread in the relay loop) and cannot await.
+        if session is None and chat_id:
+            try:
+                candidates = list(AgentSession.query.filter(chat_id=chat_id, status="running"))
+                if candidates:
+                    candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
+                    session = candidates[0]
+            except Exception:
+                pass
+
+        if session is None:
+            logger.debug(
+                "Relay: no owning session resolved for chat_log append "
+                "(chat_id=%s, owner_agent_session_id=%s, session_id=%s) — skipping",
+                chat_id,
+                message.get("owner_agent_session_id"),
+                message.get("session_id"),
+            )
+            return
+
+        session.append_chat_log("out", "valor", text, msg_id)
+    except Exception as exc:
+        logger.warning("Relay: _append_outbound_chat_log failed (non-fatal): %s", exc)
+
+
 async def _dead_letter_message(message: dict, reason: str) -> None:
     """Route a failed message to the dead letter queue or discard it.
 
@@ -591,6 +691,10 @@ async def process_outbox(telegram_client) -> int:
                         session_id = message.get("session_id")
                         if session_id:
                             await asyncio.to_thread(_record_sent_message, session_id, msg_id)
+                    # Append outbound entry to owning session's chat_message_log (issue #1192).
+                    # Three-tier resolution: owner_agent_session_id → real session_id → chat lookup.
+                    # Non-fatal — relay must never crash on chat-log bookkeeping.
+                    await asyncio.to_thread(_append_outbound_chat_log, message, msg_id)
 
                     # Store sent message for Redis history (text messages only)
                     if msg_type is None and msg_id is not None:

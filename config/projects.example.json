@@ -63,6 +63,20 @@
           "alice@example.com": {"name": "Alice", "persona": "teammate"},
           "bob@example.com": {"name": "Bob"}
         }
+      },
+      "pm_briefing": {
+        "_doc": "Optional. Daily PM voice briefing config (issue #1197). Set enabled:true to opt in. The reflection fans out per project: collects yesterday's merges + open bugs + upvote queue, drafts a numbers-free 30s voice note via Anthropic Haiku + Kokoro/OpenAI TTS, queues it to each target_groups group via the Telegram outbox, and posts a written follow-up with numbers + links right after. Schedule resolves in the project's local timezone. Hand-edit angles.include / angles.exclude to tune content. Remove this section if not needed.",
+        "enabled": false,
+        "schedule": "08:30",
+        "timezone": "America/Los_Angeles",
+        "target_groups": ["PM: My Project"],
+        "angles": {
+          "include": ["merges", "open-bugs", "upvote-queue"],
+          "exclude": ["plan-only-commits", "lockfile-bumps"]
+        },
+        "skip_when_empty": false,
+        "fallback_message": "Nothing shipped yesterday — three things queued for today.",
+        "voice": "am_michael"
       }
     }
   },

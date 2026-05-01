@@ -48,6 +48,7 @@ The wrapper has a hard-coded allowlist of subcommands. Unknown subcommands exit 
 |------------|-------------------|-------------|
 | `verdict` | `tools.sdlc_verdict` | **Loud** — exits 1 on failure |
 | `dispatch` | `tools.sdlc_dispatch` | **Loud** — exits 1 on failure |
+| `next-skill` | `tools.sdlc_next_skill` | **Loud** — exits 1 on error; 0 on dispatch or block |
 | `stage-marker` | `tools.sdlc_stage_marker` | Best-effort — always exits 0 |
 | `stage-query` | `tools.sdlc_stage_query` | Graceful — returns `unavailable` marker |
 | `session-ensure` | `tools.sdlc_session_ensure` | Best-effort — always exits 0 |

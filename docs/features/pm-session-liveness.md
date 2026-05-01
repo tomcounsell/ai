@@ -1,8 +1,8 @@
 # PM Session Liveness — See Progress or Stay Graceful
 
-**Issue:** [#1172](https://github.com/tomcounsell/ai/issues/1172)
+**Issue:** [#1172](https://github.com/tomcounsell/ai/issues/1172) (extended by [#1226](https://github.com/tomcounsell/ai/issues/1226))
 **Status:** Active
-**Last updated:** 2026-04-26
+**Last updated:** 2026-04-30
 
 This feature replaces inferred-from-staleness session kills with two
 complementary changes: the detector kills only on **evidence** of failure
@@ -44,6 +44,26 @@ Issue #1172 retires every inference path. Evidence-only signals stay:
 - **Absence of stdout within a deadline.** The deleted
   `FIRST_STDOUT_DEADLINE` killed sessions that had not yet produced
   stdout within 5 min — false-positive on long warmups.
+- **Watchdog-tick heartbeat alone.** `last_sdk_heartbeat_at` (written by
+  `BackgroundTask._watchdog` every 60s on subprocess existence) is no
+  longer a Tier 1 progress signal (#1226). A subprocess that exists but
+  produces no structured SDK output is not indistinguishable from a working
+  one — it is now correctly identified as hung.
+
+### Tier 1 signal reference (#1226)
+
+`_has_progress` evaluates two sub-checks. Any one passing → True (progress).
+
+| Sub-check | Field | Writer | Window | When active |
+|---|---|---|---|---|
+| **A: per-turn SDK activity** | `last_tool_use_at` | `agent/hooks/pre_tool_use.py`, `post_tool_use.py` | `SDK_PROGRESS_FRESHNESS_WINDOW` (1800s, env-tunable) | Always |
+| **A: per-turn SDK activity** | `last_turn_at` | `agent/sdk_client.py` `result` event | `SDK_PROGRESS_FRESHNESS_WINDOW` (1800s, env-tunable) | Always |
+| **B: startup-window executor-alive** | `last_heartbeat_at` | `_heartbeat_loop` in `session_executor.py` | `HEARTBEAT_FRESHNESS_WINDOW` (90s) | Only when `sdk_ever_output=False` (no tool/turn event yet) |
+| **Watchdog-alive (not Tier 1)** | `last_sdk_heartbeat_at` | `BackgroundTask._watchdog` every 60s | N/A — not a progress signal | Dashboard `last_evidence_at` only |
+
+Sub-check B preserves backward compatibility: sessions started before PR #1177
+(whose hooks did not write the per-turn fields) fall through to `last_heartbeat_at`
+and behave identically to the pre-#1226 behavior.
 
 ### Tier 2 reprieve gates (current)
 
@@ -54,6 +74,17 @@ Issue #1172 retires every inference path. Evidence-only signals stay:
 - **`alive`** — process status not in {zombie, dead, stopped}.
 
 The previous **`stdout`** gate was retired with the same rationale.
+
+**Reprieve escalation guard (#1226):** When a session has never produced
+any SDK tool or turn event (`sdk_ever_output=False`) and its `reprieve_count`
+reaches `MAX_NO_OUTPUT_REPRIEVES` (default 20 ticks ≈ 30 minutes), the
+"alive" gate is suppressed and recovery proceeds. Sessions that have
+produced output (`sdk_ever_output=True`) are never subject to this cap —
+their recovery depends solely on per-turn freshness in sub-check A.
+
+**Startup recovery reprieve reset:** `_recover_interrupted_agent_sessions_startup`
+resets `reprieve_count=0` when transitioning sessions back to pending, preventing
+the escalation guard from triggering immediately after a worker restart.
 
 ## PM self-report behavior
 
@@ -151,6 +182,14 @@ specific cost ceiling becomes operationally necessary.
   behavior + fail-closed + cooldown.
 - `tests/unit/test_dashboard_pillar_a_fields.py` — dashboard JSON shape.
 - `tests/unit/test_pm_self_report.py` — frequency cap + failure paths.
+- `tests/unit/test_health_check_recovery_finalization.py::TestHasProgressPerTurnSignal` — per-turn
+  SDK signal tests: sub-check A (`last_tool_use_at`/`last_turn_at`), sub-check B
+  (startup-window `last_heartbeat_at`), and `last_sdk_heartbeat_at` exclusion from Tier 1 (#1226).
+- `tests/unit/test_health_check_recovery_finalization.py::TestTier2ReprieveEscalation` — reprieve
+  escalation guard: suppresses "alive" when `sdk_ever_output=False` and
+  `reprieve_count >= MAX_NO_OUTPUT_REPRIEVES` (#1226).
+- `tests/unit/test_health_check_recovery_finalization.py::TestStartupRecoveryReprieveCountReset` —
+  startup recovery resets `reprieve_count=0` to prevent immediate escalation (#1226 Risk 4).
 - `tests/integration/test_pm_long_run_no_kill.py` — acceptance test for
   a 4+ hour PM with active tool use and no result event.
 - `tests/integration/test_pm_goldilocks_messaging.py` — acceptance test

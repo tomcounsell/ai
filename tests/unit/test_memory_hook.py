@@ -202,6 +202,7 @@ class TestDejaVuSignals:
         with (
             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
             patch("models.memory.Memory", mock_memory_cls),
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
         ):
             # Fill up to WINDOW_SIZE to trigger query
             for i in range(INJECTION_WINDOW_SIZE - 1):
@@ -323,6 +324,7 @@ class TestCheckAndInjectBloomGate:
         with (
             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
             patch("models.memory.Memory", mock_memory_cls),
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
         ):
             for i in range(INJECTION_WINDOW_SIZE - 1):
                 check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
@@ -402,6 +404,7 @@ class TestCheckAndInjectBloomGate:
             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
             patch("models.memory.Memory", mock_memory_cls),
             patch("agent.memory_retrieval.retrieve_memories", rm_mock),
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
         ):
             for i in range(INJECTION_WINDOW_SIZE - 1):
                 check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
@@ -443,6 +446,7 @@ class TestCheckAndInjectPassesMinScore:
             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
             patch("models.memory.Memory", mock_memory_cls),
             patch("agent.memory_retrieval.retrieve_memories", side_effect=fake_rm),
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
         ):
             for i in range(INJECTION_WINDOW_SIZE - 1):
                 check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
@@ -773,6 +777,7 @@ class TestCheckAndInjectClaudeUuidSidecar:
                 "agent.memory_retrieval.retrieve_memories",
                 return_value=[skip_me, keep_me],
             ),
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
         ):
             for i in range(INJECTION_WINDOW_SIZE - 1):
                 check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
@@ -821,6 +826,7 @@ class TestCheckAndInjectClaudeUuidSidecar:
             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
             patch("models.memory.Memory", mock_memory_cls),
             patch("agent.memory_retrieval.retrieve_memories", return_value=[record]),
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
         ):
             for i in range(INJECTION_WINDOW_SIZE - 1):
                 check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
@@ -866,6 +872,7 @@ class TestCheckAndInjectClaudeUuidSidecar:
                 "agent.memory_hook._load_hooks_sidecar_injected_ids",
                 return_value=set(),
             ) as mock_loader,
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
         ):
             for i in range(INJECTION_WINDOW_SIZE - 1):
                 check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
@@ -912,6 +919,7 @@ class TestCheckAndInjectClaudeUuidSidecar:
                 "agent.memory_hook._load_hooks_sidecar_injected_ids",
                 return_value=set(),
             ) as mock_loader,
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
         ):
             for i in range(INJECTION_WINDOW_SIZE - 1):
                 check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
@@ -956,6 +964,7 @@ class TestCheckAndInjectClaudeUuidSidecar:
                 "agent.memory_hook._load_hooks_sidecar_injected_ids",
                 return_value=set(),
             ) as mock_loader,
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
         ):
             for i in range(INJECTION_WINDOW_SIZE - 1):
                 check_and_inject(session, "Read", {"file_path": f"f{i}.py"})

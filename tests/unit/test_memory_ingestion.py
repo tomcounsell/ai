@@ -53,6 +53,60 @@ class TestMemoryIngestion:
         # depending on how popoto handles None keys
 
 
+class TestPrivateTagIngestion:
+    """sdlc-1179: <private>...</private> regions are excluded at the ingest layer.
+
+    This is the parallel coverage to test_memory_bridge.TestIngest's private-tag
+    cases, but at the ingestion entry point used by the Telegram bridge (via
+    Memory.safe_save direct invocation, not the hook).
+    """
+
+    def test_strip_private_excludes_wrapped_content(self):
+        """The strip_private helper removes wrapped regions before persistence."""
+        from agent.private_tag import strip_private
+
+        text = "Auth question: <private>sk-redacted</private> please advise"
+        out = strip_private(text)
+        assert "sk-redacted" not in out
+        assert "<private>" not in out
+        assert "Auth question" in out
+        assert "please advise" in out
+
+    def test_strip_private_no_op_on_no_tag(self):
+        """No-tag input must be returned bit-identically."""
+        from agent.private_tag import strip_private
+
+        text = "no private regions in this message"
+        assert strip_private(text) == text
+
+    def test_memory_safe_save_with_pre_stripped_content(self):
+        """Memory.safe_save persists exactly what the caller passes; the bridge's
+        responsibility is to pre-strip via strip_private before calling.
+
+        This documents the contract: Memory itself does NOT know about
+        <private> tags. The bridge / hook ingestion layer is the strip site.
+        """
+        from agent.private_tag import strip_private
+        from models.memory import Memory
+
+        raw = "Deploy plan: <private>internal-rocket-fuel-formula</private> stage"
+        safe = strip_private(raw)
+        m = Memory.safe_save(
+            agent_id="test-private-tag-user",
+            project_key="test-private-tag",
+            content=safe,
+            importance=6.0,
+            source="human",
+        )
+        if m is not None:
+            assert "internal-rocket-fuel-formula" not in m.content
+            assert "<private>" not in m.content
+            try:
+                m.delete()
+            except Exception:
+                pass
+
+
 class TestSystemPromptPriming:
     """Test that thought priming appears in work-patterns.md segment."""
 
