@@ -41,6 +41,10 @@ logger = logging.getLogger(__name__)
 # Timeout between IMAP polls (seconds)
 IMAP_POLL_INTERVAL = int(os.environ.get("IMAP_POLL_INTERVAL", "30"))
 
+# Socket timeout for IMAP connections (seconds) — prevents hung connections from
+# accumulating on the server side when the network drops mid-session.
+IMAP_SOCKET_TIMEOUT = int(os.environ.get("IMAP_SOCKET_TIMEOUT", "30"))
+
 # Max messages to fetch per poll cycle (prevents hanging on inboxes with many unseen messages)
 IMAP_MAX_BATCH = int(os.environ.get("IMAP_MAX_BATCH", "20"))
 
@@ -817,9 +821,9 @@ async def _poll_imap(imap_config: dict, known_senders: list[str]) -> list[bytes]
 
     def _fetch_unseen() -> list[bytes]:
         if use_ssl:
-            conn = imaplib.IMAP4_SSL(host, port)
+            conn = imaplib.IMAP4_SSL(host, port, timeout=IMAP_SOCKET_TIMEOUT)
         else:
-            conn = imaplib.IMAP4(host, port)
+            conn = imaplib.IMAP4(host, port, timeout=IMAP_SOCKET_TIMEOUT)
         try:
             conn.login(user, password)
             conn.select("INBOX")
@@ -906,8 +910,13 @@ async def _email_inbox_loop(imap_config: dict, config: dict) -> None:
             backoff = IMAP_POLL_INTERVAL
 
         except imaplib.IMAP4.error as e:
+            if "Too many simultaneous connections" in str(e):
+                # Ghost connections from prior network drops linger on Gmail's side.
+                # Jump straight to max backoff so they have time to expire.
+                backoff = max_backoff
+            else:
+                backoff = min(backoff * 2, max_backoff)
             logger.error(f"[email] IMAP error: {e}. Retrying in {backoff}s...")
-            backoff = min(backoff * 2, max_backoff)
 
         except OSError as e:
             logger.error(f"[email] Network error during IMAP poll: {e}. Retrying in {backoff}s...")
