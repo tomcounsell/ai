@@ -12,6 +12,8 @@ revision_applied: true
 
 # Memory Progressive Disclosure + MCP memory_get / memory_search Tools
 
+Tracks #1178.
+
 ## Problem
 
 **Current behavior:**
