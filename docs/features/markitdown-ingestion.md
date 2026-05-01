@@ -66,7 +66,7 @@ llm_model: none                            # or the resolved value of config.mod
 
 Downstream tooling can:
 
-- Use `generated_by: markitdown` as a skip-signal when auditing the vault's authoritative content (see [`do-xref-audit` SKILL.md](../../.claude/skills/do-xref-audit/SKILL.md)).
+- Use `generated_by: markitdown` as a skip-signal when auditing the vault's authoritative content (see [Docs Auditor substrate](docs-auditor.md)).
 - Use `regenerated_at` to detect content changes without re-reading the entire body.
 - Use `source_hash` to verify the sidecar is still in sync with its source.
 
@@ -170,6 +170,6 @@ The Haiku vision test is a **hard gate** when the key is present — a failure m
 ## See Also
 
 - [Plan document](../plans/markitdown-ingestion.md) — design decisions, spike results, risk analysis
-- [`do-xref-audit` SKILL.md](../../.claude/skills/do-xref-audit/SKILL.md) — consumes the `generated_by` sidecar skip-signal
+- [Docs Auditor substrate](docs-auditor.md) — consumes the `generated_by` sidecar skip-signal (replaced the deleted `/do-xref-audit` skill)
 - [`update` SKILL.md](../../.claude/skills/update/SKILL.md) — mirrors the Telegram summary backfill reminder for human invocations
 - [Subconscious Memory](subconscious-memory.md) — recall pipeline now covers converted binary formats

@@ -57,9 +57,7 @@ BACKGROUND_SKILLS = frozenset(
         "google-workspace",
     }
 )
-FORK_SKILLS = frozenset(
-    {"do-build", "do-pr-review", "do-docs-audit", "pthread", "do-design-audit", "sdlc"}
-)
+FORK_SKILLS = frozenset({"do-build", "do-pr-review", "pthread", "do-design-audit", "sdlc"})
 
 TRIGGER_PHRASES = re.compile(
     r"(?i)\b(use when|triggered by|also use when|invoke when|"

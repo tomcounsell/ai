@@ -24,11 +24,11 @@ Creates a new audit skill by guiding you through a structured interview, then pr
 | `audit-models` | Popoto Redis models | Prompt-only, 6 heuristic checks | Report only (human decides) | Low — exploratory |
 | `audit-tools` | Python tools in `tools/` | Prompt-only, 4-phase process | Report + implement fixes | Medium |
 | `do-design-audit` | Web UI quality | Prompt-only, 10-dimension rubric | Report only (findings + top 3 fixes) | Medium — opinionated |
-| `do-docs-audit` | Documentation files | Prompt + parallel agents | Auto-fix, commit, threshold router | High — mechanical |
+| `docs-auditor` (substrate) | Documentation files | Prompt + parallel agents | Auto-fix, commit, threshold router | High — mechanical |
 | `do-integration-audit` | Feature wiring | Prompt-only, 12 semantic checks | Report only (human decides) | High — exploratory |
 | `do-oop-audit` | Python classes | Prompt-only, 14 anti-pattern checks | Report only (human decides) | Medium — semantic |
 | `do-skills-audit` | Skill SKILL.md files | Script-backed, 12 rules | Auto-fix trivial, report complex | High — deterministic |
-| `do-xref-audit` | Doc cross-references | Prompt + parallel agents | Report gaps, add links | Medium — surgical |
+| `docs-auditor` (substrate) | Doc cross-references | Prompt + parallel agents | Report gaps, add links | Medium — surgical |
 
 ## Quick start
 
@@ -101,7 +101,7 @@ Two naming tiers based on portability:
 
 | Pattern | When to use | Examples |
 |---------|-------------|---------|
-| `do-{subject}-audit` | General-purpose, works in any repo | `do-docs-audit`, `do-skills-audit`, `do-deps-audit` |
+| `do-{subject}-audit` | General-purpose, works in any repo | `docs-auditor` (substrate), `do-skills-audit`, `do-deps-audit` |
 | `audit-{subject}` | Repo-specific, tied to this project's domain | `audit-models`, `audit-tools`, `audit-prompts` |
 
 **Decision rule**: Would this audit make sense in a different repo? If yes → `do-{subject}-audit`. If it audits something unique to this project → `audit-{subject}`.
