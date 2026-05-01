@@ -2328,13 +2328,21 @@ async def get_response_via_harness(
         try:
             from models.agent_session import AgentSession
 
-            session = AgentSession.query.filter(session_id=session_id).first()
-            if session is not None:
+            # session_id is a Field (not KeyField), so multiple records can share
+            # an id across resumes — pick the newest by created_at to avoid
+            # accumulating onto a stale record.
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            if sessions:
+                sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+                session = sessions[0]
                 if total_num_turns:
                     session.turn_count = (session.turn_count or 0) + total_num_turns
                 if total_tool_call_count:
                     session.tool_call_count = (session.tool_call_count or 0) + total_tool_call_count
-                session.save()
+                # update_fields=[...] to avoid clobbering concurrent writes to
+                # other fields like status/updated_at (matches accumulate_session_tokens
+                # convention).
+                session.save(update_fields=["turn_count", "tool_call_count"])
         except Exception as e:
             logger.warning(
                 "Failed to persist turn/tool counts for session %s: %s",
@@ -2555,7 +2563,10 @@ async def _run_harness_subprocess(
             # so primary + fallback subprocess invocations sum correctly.
             raw_turns = data.get("num_turns")
             if raw_turns is None:
-                logger.warning("[harness] result event missing num_turns")
+                # Spike (issue #1245) confirmed num_turns is always present on the
+                # result event in real harness runs. If it's ever missing, log once
+                # at debug — the test fixture covers this path explicitly.
+                logger.debug("[harness] result event missing num_turns")
             else:
                 try:
                     num_turns = int(raw_turns)
