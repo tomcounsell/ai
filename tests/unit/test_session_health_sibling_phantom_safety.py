@@ -80,7 +80,11 @@ class TestRecoverInterruptedStartup:
 
         # Pre-assertion: seeding produced a phantom.
         raw = list(AgentSession.query.filter(status="running"))
-        assert any(not isinstance(getattr(s, "agent_session_id", None), str) for s in raw)
+        # Phantom shape: empty hash → AutoKeyField auto-generates a string id,
+        # but session_id remains None (no auto-generation). The hydration check
+        # in agent.session_health relies on session_id presence, so the test
+        # pre-assertion uses the same canonical signal.
+        assert any(getattr(s, "session_id", None) is None for s in raw)
 
         # Must not raise.
         _recover_interrupted_agent_sessions_startup()
@@ -110,7 +114,11 @@ class TestAgentSessionHealthCheck:
         _seed_phantom(project_key="valor", status="running")
 
         raw = list(AgentSession.query.filter(status="running"))
-        assert any(not isinstance(getattr(s, "agent_session_id", None), str) for s in raw)
+        # Phantom shape: empty hash → AutoKeyField auto-generates a string id,
+        # but session_id remains None (no auto-generation). The hydration check
+        # in agent.session_health relies on session_id presence, so the test
+        # pre-assertion uses the same canonical signal.
+        assert any(getattr(s, "session_id", None) is None for s in raw)
 
         # _agent_session_health_check is async.
         asyncio.run(_agent_session_health_check())
@@ -142,7 +150,11 @@ class TestSessionRecoveryDrip:
         _seed_phantom(project_key="valor", status="paused_circuit")
 
         raw = list(AgentSession.query.filter(project_key="valor", status="paused_circuit"))
-        assert any(not isinstance(getattr(s, "agent_session_id", None), str) for s in raw)
+        # Phantom shape: empty hash → AutoKeyField auto-generates a string id,
+        # but session_id remains None (no auto-generation). The hydration check
+        # in agent.session_health relies on session_id presence, so the test
+        # pre-assertion uses the same canonical signal.
+        assert any(getattr(s, "session_id", None) is None for s in raw)
 
         # Must not raise.
         session_recovery_drip()
@@ -166,7 +178,11 @@ class TestSessionCountThrottle:
         _seed_phantom(project_key="valor", status="pending")
 
         raw = list(AgentSession.query.filter(project_key="valor"))
-        assert any(not isinstance(getattr(s, "agent_session_id", None), str) for s in raw)
+        # Phantom shape: empty hash → AutoKeyField auto-generates a string id,
+        # but session_id remains None (no auto-generation). The hydration check
+        # in agent.session_health relies on session_id presence, so the test
+        # pre-assertion uses the same canonical signal.
+        assert any(getattr(s, "session_id", None) is None for s in raw)
 
         # Must not raise.
         session_count_throttle()
@@ -184,7 +200,11 @@ class TestFailureLoopDetector:
         _seed_phantom(project_key="valor", status="failed")
 
         raw = list(AgentSession.query.filter(project_key="valor"))
-        assert any(not isinstance(getattr(s, "agent_session_id", None), str) for s in raw)
+        # Phantom shape: empty hash → AutoKeyField auto-generates a string id,
+        # but session_id remains None (no auto-generation). The hydration check
+        # in agent.session_health relies on session_id presence, so the test
+        # pre-assertion uses the same canonical signal.
+        assert any(getattr(s, "session_id", None) is None for s in raw)
 
         # Must not raise.
         failure_loop_detector()

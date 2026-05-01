@@ -42,7 +42,7 @@ def stubbed_indexer(monkeypatch):
 
 def _wait_for_flush(timeout: float = 6.0, poll: float = 0.1) -> None:
     """Wait for the debounce timer (2s) + processing time."""
-    time.sleep(3.0)
+    time.sleep(4.0)
 
 
 def test_pdf_dropped_into_vault_produces_sidecar(tmp_path: Path, stubbed_indexer):

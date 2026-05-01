@@ -251,20 +251,31 @@ class TestSDLCRouterMergeGate:
     """Tests that the SDLC router Row 10 has proper fallback language."""
 
     def test_sdlc_skill_row10_mentions_pr_state_fallback(self):
-        """Row 10 in SKILL.md should mention checking open PR as fallback."""
+        """Row 10 in SKILL.md should reference the merge gate.
+
+        After PR #1240 consolidated dispatch into ``sdlc-tool next-skill``,
+        the human-readable SKILL.md retains a 'Row 10 merge gate' reference
+        but no longer enumerates the open-PR fallback inline (the tool now
+        encodes it).
+        """
         import pathlib
 
         skill_path = pathlib.Path(".claude/skills/sdlc/SKILL.md")
         content = skill_path.read_text()
-        assert "open PR" in content.lower() or "pr exists" in content.lower()
+        assert "Row 10 merge gate" in content or "merge gate" in content.lower()
 
-    def test_sdlc_skill_has_row_10b_fallback(self):
-        """SKILL.md should have Row 10b for stage_states unavailable fallback."""
+    def test_sdlc_skill_delegates_dispatch_to_tool(self):
+        """After PR #1240, dispatch decisions flow through sdlc-tool next-skill.
+
+        The legacy Row 10b inline fallback was removed when the dispatch
+        table was consolidated into the routing tool. This test asserts the
+        new contract: SKILL.md must reference the routing tool.
+        """
         import pathlib
 
         skill_path = pathlib.Path(".claude/skills/sdlc/SKILL.md")
         content = skill_path.read_text()
-        assert "10b" in content
+        assert "sdlc-tool next-skill" in content
 
 
 class TestValorSessionCLI:

@@ -137,6 +137,20 @@ Each reflection gets a `Reflection` record in Redis tracking execution state:
 
 Note: `next_due` is computed as `ran_at + interval` in the dashboard data layer, not stored as a field.
 
+#### Run Record Shape
+
+Each entry appended to `run_history` by `Reflection.mark_completed()`:
+
+| Key | Type | Notes |
+|-----|------|-------|
+| `timestamp` | float | Unix epoch when the run completed |
+| `status` | str | `ok`, `error`, `disabled` (aggregate result) |
+| `duration` | float | Total wall-clock seconds |
+| `error` | str \| None | Top-level error message (capped at 500 chars) |
+| `projects` | list[dict] | Per-project breakdown (empty `[]` for non-audit reflections) |
+
+Each entry in `projects` has shape `{slug, status, duration, findings_count, error}` where `status ∈ {"ok", "error", "skipped", "disabled"}`. See [Per-Project Audit Iteration](#per-project-audit-iteration) below.
+
 ### Skip-if-Running Guard
 
 Before enqueuing a reflection, the scheduler checks if it's already running. If a reflection with the same name has `last_status == "running"`, it's skipped. If a reflection has been running for more than 2x its interval, it's considered stuck and reset to `error` status.
@@ -376,6 +390,47 @@ Each project entry in `~/Desktop/Valor/projects.json`:
 - `github` key missing — `task_management` and `daily_report` log a warning and skip
 - `telegram.groups` missing or empty — `daily_report` logs and skips
 - `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` not set — `daily_report` skips silently
+
+### Per-Project Audit Iteration
+
+Three audit reflections (`tech-debt-scan`, `skills-audit`, `hooks-audit`) run once per project on the current machine, aggregating findings into a single run record with a per-project breakdown. (Documentation/feature-doc audits were consolidated into the `docs-auditor` substrate — see [Docs Auditor](docs-auditor.md).) The shared helper `reflections.utils.run_per_project_audit(audit_one, *, skip_if=None, name)` handles the iteration:
+
+1. Loads `load_local_projects()` (filtered to repos present on disk)
+2. For each project, evaluates `skip_if(repo_root)` first; silently skipped projects are recorded with `status="skipped"` and excluded from `findings`
+3. Calls `audit_one(project)` for qualifying projects, prefixing each finding with `[{slug}]`
+4. Both `skip_if` and `audit_one` are wrapped in the same `try/except Exception` per project — a failure (e.g. `OSError` on a network mount) is captured as `status="error"` for that project and the loop continues
+5. Returns `{status, findings, summary, projects: [...]}` where aggregate `status` follows: any error → `error`; all `disabled` → `disabled`; otherwise `ok`
+
+**Skip predicates (silent no-op when missing):**
+
+| Audit | Skipped when |
+|-------|--------------|
+| `tech-debt-scan` | Never — always runs |
+| `skills-audit` | `.claude/skills/do-skills-audit/scripts/audit_skills.py` absent |
+| `hooks-audit` | Both `logs/hooks.log` and `.claude/settings.json` absent |
+
+**Timeout budgets** (per-project iteration linearly scales wall-clock; YAML overrides in `~/Desktop/Valor/reflections.yaml` sized for an N=20-project worst case):
+
+| Reflection | YAML `timeout:` |
+|------------|-----------------|
+| `tech-debt-scan` | 2700s (45 min) |
+| `skills-audit` | 600s (10 min) |
+| `hooks-audit` | 600s (10 min) |
+
+**Async dispatch:** `run_per_project_audit` is sync; the audits above are sync end-to-end.
+
+### Dashboard
+
+The reflection modal at `localhost:8500` renders a per-project sub-table when `run.projects` is non-empty. Each project gets an indented row with: status badge, `[slug]` tag, duration, error cell. Status badges visually distinguish all four states:
+
+| Badge | Status | Meaning |
+|-------|--------|---------|
+| `badge-ok` (green) | `ok` | Project ran successfully |
+| `badge-error` (red) | `error` | Project body raised |
+| `badge-skipped` (gray) | `skipped` | Skip predicate matched silently |
+| `badge-disabled` (amber) | `disabled` | Cost cap exhausted (e.g. global API cap) |
+
+The sparkline color is driven by the aggregate `run.status`, independent of per-project badges. Run records without a `projects` field (older entries or non-audit reflections) render as before — the per-project block is gated by `{% if run.projects %}`.
 
 ## Redis TTL Cleanup (`redis-ttl-cleanup`)
 

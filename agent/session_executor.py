@@ -685,8 +685,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 try:
                     session.status = "failed"
                     session.save(update_fields=["status", "updated_at"])
-                except Exception:
-                    pass
+                except Exception as last_resort_err:
+                    logger.debug(
+                        "[executor-guard] last-resort status save failed (non-fatal): %s",
+                        last_resort_err,
+                    )
             return
 
         working_dir = Path(session.working_dir)

@@ -17,7 +17,12 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from reflections.utils import PROJECT_ROOT, extract_structured_errors, load_local_projects
+from reflections.utils import (
+    PROJECT_ROOT,
+    extract_structured_errors,
+    load_local_projects,
+    run_per_project_audit,
+)
 
 logger = logging.getLogger("reflections.auditing")
 
@@ -451,22 +456,32 @@ def run_log_review() -> dict:
     return {"status": "ok", "findings": findings, "summary": summary}
 
 
-def run_skills_audit() -> dict:
-    """Run skills audit to validate all SKILL.md files."""
-    audit_script = (
-        PROJECT_ROOT / ".claude" / "skills" / "do-skills-audit" / "scripts" / "audit_skills.py"
-    )
-    if not audit_script.exists():
-        logger.warning("Skills audit script not found, skipping")
-        return {"status": "ok", "findings": [], "summary": "Skills audit script not found, skipped"}
+def _skills_audit_script_path(repo_root: Path) -> Path:
+    """Return the path to a repo's `audit_skills.py` (does not check existence)."""
+    return repo_root / ".claude" / "skills" / "do-skills-audit" / "scripts" / "audit_skills.py"
 
+
+def _skills_audit_for_project(project: dict) -> dict:
+    """Per-project body for skills-audit.
+
+    Invokes the TARGET repo's copy of ``audit_skills.py`` (NOT the AI repo's
+    copy) so each repo audits its own skills. The script self-derives
+    REPO_ROOT from its own file location.
+    """
+    import time as _time
+
+    wd = project.get("working_directory", "")
+    repo_root = Path(wd) if wd else PROJECT_ROOT
+    audit_script = _skills_audit_script_path(repo_root)
+
+    t0 = _time.time()
     try:
         result = subprocess.run(
             [sys.executable, str(audit_script), "--no-sync", "--json"],
             capture_output=True,
             text=True,
             timeout=60,
-            cwd=str(PROJECT_ROOT),
+            cwd=str(repo_root),
         )
         audit_data = json.loads(result.stdout) if result.stdout else {}
         sub_summary = audit_data.get("summary", {})
@@ -474,41 +489,64 @@ def run_skills_audit() -> dict:
         warns = sub_summary.get("warn", 0)
         total = sub_summary.get("total_skills", 0)
 
-        findings = []
+        findings: list[str] = []
         if fails > 0:
             findings.append(f"{fails} skill(s) have FAIL findings")
             for f in audit_data.get("findings", []):
                 if f.get("severity") == "FAIL":
                     findings.append(f"  {f.get('skill')}: {f.get('message')}")
 
-        summary = f"Skills audit: {total} skills, {fails} fails, {warns} warns"
-        logger.info(summary)
-        return {"status": "ok", "findings": findings, "summary": summary}
-
+        return {
+            "status": "ok",
+            "findings": findings,
+            "summary": f"Skills audit: {total} skills, {fails} fails, {warns} warns",
+            "duration": _time.time() - t0,
+        }
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
-        logger.error(f"Skills audit failed: {e}")
-        return {"status": "error", "findings": [], "summary": f"Skills audit error: {e}"}
+        logger.error(f"Skills audit failed for {project.get('slug')}: {e}")
+        return {
+            "status": "error",
+            "findings": [],
+            "summary": f"Skills audit error: {e}",
+            "duration": _time.time() - t0,
+            "error": str(e),
+        }
 
 
-def run_hooks_audit() -> dict:
-    """Audit Claude Code hooks for safety and configuration issues.
+def run_skills_audit() -> dict:
+    """Run skills audit per project.
 
-    Checks: hooks.log for recent errors, settings.json hook configuration.
-
-    Hotfix (sibling of PR #1056): converted from ``async def`` to plain
-    ``def`` so the reflection scheduler runs it via ``run_in_executor``
-    instead of inline on the event loop. The body does only sync I/O
-    (``extract_structured_errors``, ``json.loads``, ``Path.read_text``,
-    ``Path.exists``) with no awaits.
+    Iterates every local project that has its own
+    ``.claude/skills/do-skills-audit/scripts/audit_skills.py`` script and
+    runs the audit there. Projects without the script are silently skipped.
     """
-    findings: list[str] = []
-    error_count = 0
-    settings_issues = 0
+
+    def skip_if(repo_root: Path) -> bool:
+        return not _skills_audit_script_path(repo_root).exists()
+
+    return run_per_project_audit(_skills_audit_for_project, skip_if=skip_if, name="skills-audit")
+
+
+def _hooks_audit_for_project(project: dict) -> dict:
+    """Per-project body for hooks-audit.
+
+    Scans the project's ``logs/hooks.log`` for recent errors AND validates
+    its ``.claude/settings.json`` hook configuration. Both file paths are
+    rooted at the project's working_directory.
+    """
+    import time as _time
 
     from bridge.utc import utc_now
 
-    # 1. Scan hooks.log for recent errors
-    hooks_log = PROJECT_ROOT / "logs" / "hooks.log"
+    wd = project.get("working_directory", "")
+    repo_root = Path(wd) if wd else PROJECT_ROOT
+
+    findings: list[str] = []
+    error_count = 0
+    settings_issues = 0
+    t0 = _time.time()
+
+    hooks_log = repo_root / "logs" / "hooks.log"
     if hooks_log.exists():
         try:
             errors = extract_structured_errors(hooks_log)
@@ -527,8 +565,7 @@ def run_hooks_audit() -> dict:
         except Exception as e:
             logger.warning(f"Failed to scan hooks.log: {e}")
 
-    # 2. Validate settings.json hook configuration
-    settings_path = PROJECT_ROOT / ".claude" / "settings.json"
+    settings_path = repo_root / ".claude" / "settings.json"
     if settings_path.exists():
         try:
             settings = json.loads(settings_path.read_text())
@@ -549,7 +586,7 @@ def run_hooks_audit() -> dict:
                                 script_path = part.replace('"$CLAUDE_PROJECT_DIR"/', "").replace(
                                     "$CLAUDE_PROJECT_DIR/", ""
                                 )
-                                full_path = PROJECT_ROOT / script_path
+                                full_path = repo_root / script_path
                                 if not full_path.exists():
                                     findings.append(f"WARN: Hook script not found: {script_path}")
                                     settings_issues += 1
@@ -558,9 +595,32 @@ def run_hooks_audit() -> dict:
             logger.warning(f"Failed to parse settings.json: {e}")
             settings_issues += 1
 
-    summary = f"Hooks audit: {error_count} log errors, {settings_issues} settings issues"
-    logger.info(summary)
-    return {"status": "ok", "findings": findings, "summary": summary}
+    return {
+        "status": "ok",
+        "findings": findings,
+        "summary": f"Hooks audit: {error_count} log errors, {settings_issues} settings issues",
+        "duration": _time.time() - t0,
+    }
+
+
+def run_hooks_audit() -> dict:
+    """Audit Claude Code hooks per project.
+
+    Iterates every local project with EITHER ``logs/hooks.log`` OR
+    ``.claude/settings.json`` present (skips projects with neither).
+
+    Hotfix (sibling of PR #1056): the per-project body does only sync I/O
+    (``extract_structured_errors``, ``json.loads``, ``Path.read_text``,
+    ``Path.exists``) with no awaits — see ``test_event_loop_safe_callables_are_sync``.
+    """
+
+    def skip_if(repo_root: Path) -> bool:
+        return not (
+            (repo_root / "logs" / "hooks.log").exists()
+            or (repo_root / ".claude" / "settings.json").exists()
+        )
+
+    return run_per_project_audit(_hooks_audit_for_project, skip_if=skip_if, name="hooks-audit")
 
 
 def run_pr_review_audit() -> dict:

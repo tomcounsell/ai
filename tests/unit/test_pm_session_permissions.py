@@ -625,8 +625,13 @@ class TestPMSessionEnvInjection:
 
         assert "SESSION_TYPE" not in options.env
 
-    def test_sentry_token_injected_for_pm_session(self, tmp_path):
+    def test_sentry_token_injected_for_pm_session(self, tmp_path, monkeypatch):
         """PM sessions get SENTRY_AUTH_TOKEN from ~/Desktop/Valor/.env."""
+        # Make sure ambient env vars don't short-circuit the file read.
+        monkeypatch.delenv("SENTRY_PERSONAL_TOKEN", raising=False)
+        monkeypatch.delenv("SENTRY_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("VALOR_LAUNCHD", raising=False)
+
         # Create a fake ~/Desktop/Valor/.env
         valor_dir = tmp_path / "Desktop" / "Valor"
         valor_dir.mkdir(parents=True)

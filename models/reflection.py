@@ -82,16 +82,24 @@ class Reflection(Model):
         self._normalize_run_history()
         self.save()
 
-    def mark_completed(self, duration: float, error: str | None = None) -> None:
+    def mark_completed(
+        self,
+        duration: float,
+        error: str | None = None,
+        projects: list[dict] | None = None,
+    ) -> None:
         """Mark this reflection as completed (success or error).
 
         Internally appends a run record to run_history (capped at 200 entries).
-        The method signature is unchanged -- existing callers in
-        agent/reflection_scheduler.py require no modifications.
+        Backward-compatible: callers omitting ``projects`` see ``projects=[]``
+        on the run record, identical to pre-#1187 behavior.
 
         Args:
             duration: How long the run took in seconds
             error: Error message if the run failed, None for success
+            projects: optional per-project breakdown for per-project audits
+                (``[{slug, status, duration, findings_count, error}, ...]``).
+                When omitted (default), stored as ``[]``.
         """
         self.last_duration = duration
         self.run_count = (self.run_count or 0) + 1
@@ -109,6 +117,7 @@ class Reflection(Model):
             "status": status,
             "duration": duration,
             "error": error[:500] if error else None,
+            "projects": projects or [],
         }
         self._normalize_run_history()
         history = self.run_history

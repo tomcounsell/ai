@@ -34,7 +34,7 @@ def r(monkeypatch, redis_test_url):
 
 def _send_args(**overrides):
     defaults = {
-        "to": "alice@example.com",
+        "to": ["alice@example.com"],
         "subject": None,
         "message": "Hello",
         "file": None,
@@ -62,7 +62,7 @@ class TestCliSendDrainsViaRelayToSmtp:
             sent = await process_outbox()
 
         assert sent == 1
-        assert captured["to"] == "alice@example.com"
+        assert captured["to"] == ["alice@example.com"]
         # New non-reply sends must NOT prepend "Re:" (PR #1094 blocker).
         # Strict equality catches the previous bug where "Hi" -> "Re: Hi".
         assert captured["subject"] == "Hi"

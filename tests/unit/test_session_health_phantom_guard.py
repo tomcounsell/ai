@@ -82,9 +82,11 @@ class TestFilterHydratedSessions:
 
         _seed_phantom_record()
 
-        # Pre-assertion: seeding produced at least one phantom.
+        # Pre-assertion: seeding produced at least one phantom. Popoto's
+        # AutoKeyField auto-generates a string ``id`` for empty hashes, so we
+        # detect phantoms by the absence of ``session_id`` instead.
         raw = _all_sessions_raw()
-        has_phantom = any(not isinstance(getattr(s, "agent_session_id", None), str) for s in raw)
+        has_phantom = any(getattr(s, "session_id", None) is None for s in raw)
         assert has_phantom, "Seeding did not produce a phantom — test would pass vacuously"
 
         with caplog.at_level(logging.DEBUG, logger="agent.session_health"):
@@ -158,9 +160,12 @@ class TestCleanupCorruptedAgentSessions:
 
         _seed_phantom_record(project_key="test", status="pending")
 
-        # Pre-assertion: confirm seeding produced a phantom.
+        # Pre-assertion: confirm seeding produced a phantom. Popoto's
+        # AutoKeyField auto-generates a string ``id`` when constructing from
+        # an empty hash, so the canonical phantom signal is "no session_id"
+        # (real records always set session_id; phantoms never do).
         raw = _all_sessions_raw()
-        assert any(not isinstance(getattr(s, "agent_session_id", None), str) for s in raw)
+        assert any(getattr(s, "session_id", None) is None for s in raw)
 
         with caplog.at_level(logging.INFO, logger="agent.session_health"):
             cleaned = cleanup_corrupted_agent_sessions()

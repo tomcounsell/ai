@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Medium
 owner: Valor
@@ -323,9 +323,10 @@ No agent integration required — this is a reflections/dashboard-internal chang
 
 ## Documentation
 
-- [ ] Update `docs/features/reflections.md` to describe the per-project iteration pattern, the `run_per_project_audit()` helper, and the dashboard per-project breakdown.
-- [ ] Add a note to the `## Dashboard` section of `docs/features/reflections.md` documenting the `projects` field in run records and the per-project sub-table in the modal.
-- [ ] If `docs/features/reflections.md` does not exist, create it with the above content.
+- [x] Update `docs/features/reflections.md` to describe the per-project iteration pattern, the `run_per_project_audit()` helper, and the dashboard per-project breakdown.
+- [x] Add a note to the `## Dashboard` section of `docs/features/reflections.md` documenting the `projects` field in run records and the per-project sub-table in the modal.
+- [x] If `docs/features/reflections.md` does not exist, create it with the above content.
+- [x] Cascade: refresh `docs/features/reflections-dashboard.md` (run record shape: added `projects` field, status values updated to `ok | error | disabled`, `mark_completed()` signature change documented); `docs/features/documentation-audit.md` (per-project iteration, per-repo Redis state key `docs_auditor:last_audit_date:{repo_name}`, global `DOCS_AUDIT_MAX_TOTAL_API_CALLS` cap, dropped dead `scripts/reflections.py` reference); `docs/features/do-skills-audit.md` (dropped `step 12` numbering, documented `[slug]` aggregation); `docs/features/hooks-best-practices.md` (per-project iteration with skip predicate).
 
 ## Success Criteria
 

@@ -79,20 +79,31 @@ def _filter_hydrated_sessions(sessions: Iterable) -> list[AgentSession]:
             )
             phantom_count += 1
             continue
-        if isinstance(aid, str):
+        # Hydration heuristic: a real record always has BOTH a string
+        # ``agent_session_id`` AND a string ``session_id``. Popoto's
+        # ``AutoKeyField`` auto-generates a fresh uuid when an instance is
+        # constructed from a hash that lacks an ``id`` field (the phantom
+        # case), so ``isinstance(aid, str)`` alone is no longer sufficient.
+        # ``session_id`` is a plain ``Field()`` with no auto-generation and
+        # is set by every legitimate caller (bridge, CLI, recovery), so its
+        # absence reliably distinguishes phantoms from hydrated records.
+        if isinstance(aid, str) and isinstance(getattr(s, "session_id", None), str):
             hydrated.append(s)
             continue
-        # Phantom: aid is a Popoto Field descriptor (or other non-string).
-        # Surface anomalies where other fields ARE populated — that suggests
-        # the hydration check itself may be miscalibrated.
+        # Phantom: either aid is non-string OR session_id is missing.
+        # Surface anomalies where aid IS a string but session_id is absent —
+        # that's the canonical phantom shape. If aid is non-string AND other
+        # fields ARE populated, log at WARNING (hydration check may have
+        # become unreliable, e.g., a Popoto version bump).
         suspicious = False
-        for f in ("status", "session_id", "created_at"):
-            try:
-                if isinstance(getattr(s, f, None), str):
-                    suspicious = True
-                    break
-            except Exception:
-                pass
+        if not isinstance(aid, str):
+            for f in ("status", "session_id", "created_at"):
+                try:
+                    if isinstance(getattr(s, f, None), str):
+                        suspicious = True
+                        break
+                except Exception:
+                    pass
         if suspicious:
             logger.warning(
                 "[phantom-filter] Suspicious phantom: agent_session_id not hydrated "

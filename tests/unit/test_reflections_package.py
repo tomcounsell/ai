@@ -124,14 +124,42 @@ class TestReflectionsUtils:
 class TestMaintenanceCallables:
     """Smoke tests for reflections/maintenance.py."""
 
-    def test_run_legacy_code_scan_returns_valid(self):
-        """run_legacy_code_scan() returns valid dict."""
+    def test_run_legacy_code_scan_returns_valid(self, tmp_path):
+        """run_legacy_code_scan() returns valid dict with [slug] prefixed findings."""
         from reflections.maintenance import run_legacy_code_scan
 
-        with patch("subprocess.run") as mock_run:
+        with (
+            patch(
+                "reflections.utils.load_local_projects",
+                return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
+            ),
+            patch("subprocess.run") as mock_run,
+        ):
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = run_async(run_legacy_code_scan())
         assert_valid_result(result)
+        assert "projects" in result
+        assert len(result["projects"]) == 1
+        assert result["projects"][0]["slug"] == "ai"
+
+    def test_grep_returncode_2_recorded_as_error(self, tmp_path):
+        """grep returncode=2 (target removed mid-run) is recorded as per-project error."""
+        from reflections.maintenance import run_legacy_code_scan
+
+        with (
+            patch(
+                "reflections.utils.load_local_projects",
+                return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
+            ),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(
+                returncode=2, stdout="", stderr="grep: target: No such file or directory"
+            )
+            result = run_async(run_legacy_code_scan())
+        assert result["status"] == "error"
+        assert result["projects"][0]["status"] == "error"
+        assert "grep returned 2" in result["projects"][0]["error"]
 
     def test_run_redis_ttl_cleanup_returns_valid(self):
         """run_redis_ttl_cleanup() returns valid dict with mocked models."""
@@ -240,23 +268,31 @@ class TestAuditingCallables:
             result = run_async(run_log_review())
         assert_valid_result(result)
 
-    def test_run_skills_audit_no_script(self):
-        """run_skills_audit() returns ok when script not found."""
+    def test_run_skills_audit_no_script(self, tmp_path):
+        """run_skills_audit() returns ok when script not found in any project."""
         from reflections.auditing import run_skills_audit
 
-        with patch("reflections.auditing.PROJECT_ROOT", MagicMock()):
-            # Patch audit_script.exists() to return False
-            with patch("pathlib.Path.exists", return_value=False):
-                result = run_async(run_skills_audit())
+        # tmp_path has no .claude/skills/.../audit_skills.py — skip_if hits, no findings
+        with patch(
+            "reflections.utils.load_local_projects",
+            return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
+        ):
+            result = run_async(run_skills_audit())
         assert_valid_result(result)
+        assert result["status"] == "ok"
+        assert result["projects"][0]["status"] == "skipped"
 
     def test_run_hooks_audit_no_log(self, tmp_path):
-        """run_hooks_audit() returns valid dict when hooks.log doesn't exist."""
+        """run_hooks_audit() skips projects with neither hooks.log nor settings.json."""
         from reflections.auditing import run_hooks_audit
 
-        with patch("reflections.auditing.PROJECT_ROOT", tmp_path):
+        with patch(
+            "reflections.utils.load_local_projects",
+            return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
+        ):
             result = run_async(run_hooks_audit())
         assert_valid_result(result)
+        assert result["projects"][0]["status"] == "skipped"
 
     def test_event_loop_safe_callables_are_sync(self):
         """Regression canary (sibling of PR #1056).

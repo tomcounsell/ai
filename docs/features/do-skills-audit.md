@@ -39,7 +39,7 @@ Fetches Anthropic's official skill documentation and compares against our templa
 
 ### Reflections Integration
 
-Added as step 12 in the reflections daily maintenance system. Runs `--no-sync --json` mode during automated maintenance and reports FAIL findings to the reflections state for GitHub issue creation.
+Registered as the `skills-audit` reflection (`reflections.auditing.run_skills_audit`). The wrapper iterates `load_local_projects()` and invokes each project's local copy of `.claude/skills/do-skills-audit/scripts/audit_skills.py` via `--no-sync --json` mode. Projects without that script are skipped silently. Each project's FAIL findings are prefixed with `[{slug}]` and aggregated into a single run record with a per-project breakdown — see [reflections.md → Per-Project Audit Iteration](reflections.md#per-project-audit-iteration).
 
 ## Usage
 

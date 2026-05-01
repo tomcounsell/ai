@@ -18,13 +18,14 @@ from agent.pipeline_graph import (
 
 @pytest.mark.e2e
 class TestHappyPathRouting:
-    """Test the linear happy path: ISSUE → PLAN → BUILD → TEST → REVIEW → DOCS → MERGE."""
+    """Linear happy path: ISSUE → PLAN → CRITIQUE → BUILD → TEST → REVIEW → DOCS → MERGE."""
 
     @pytest.mark.parametrize(
         "current,expected_next",
         [
             ("ISSUE", "PLAN"),
-            ("PLAN", "BUILD"),
+            ("PLAN", "CRITIQUE"),
+            ("CRITIQUE", "BUILD"),
             ("BUILD", "TEST"),
             ("TEST", "REVIEW"),
             ("REVIEW", "DOCS"),
@@ -147,5 +148,5 @@ class TestEdgeCases:
 
     def test_display_stages_are_ordered(self):
         """Display stages should follow pipeline order."""
-        expected = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
+        expected = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
         assert DISPLAY_STAGES == expected

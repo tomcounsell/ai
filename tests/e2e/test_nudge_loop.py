@@ -66,7 +66,7 @@ class TestNudgeLoopOutcomes:
                     chat_state.completion_sent = True
                     chat_state.defer_reaction = True
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
         # Outcome: nudge was called, send was NOT
         enqueue_nudge.assert_called_once()
@@ -101,7 +101,7 @@ class TestNudgeLoopOutcomes:
                 await send_cb("tc", msg, 1, session)
                 chat_state.completion_sent = True
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
         send_cb.assert_called_once()
         assert chat_state.completion_sent is True
@@ -119,7 +119,7 @@ class TestNudgeLoopOutcomes:
                 chat_state.completion_sent = True
                 chat_state.defer_reaction = True
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
         enqueue_nudge.assert_called_once()
         assert chat_state.defer_reaction is True
@@ -136,7 +136,7 @@ class TestNudgeLoopOutcomes:
                 await send_cb("tc", msg, 1, None)
                 chat_state.completion_sent = True
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
         send_cb.assert_called_once()
         assert chat_state.completion_sent is True
@@ -162,7 +162,7 @@ class TestNudgeLoopOutcomes:
                     )
                     chat_state.completion_sent = True
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
         send_cb.assert_called_once()
         assert "no output" in send_cb.call_args[0][1]
@@ -195,7 +195,7 @@ class TestNudgeLoopOutcomes:
                 chat_state.completion_sent = True
                 return
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
         send_cb.assert_called_once()
         assert chat_state.completion_sent is True

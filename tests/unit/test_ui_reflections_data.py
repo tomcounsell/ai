@@ -208,6 +208,9 @@ class TestReflectionModelExtension:
             assert latest["status"] == "success"
             assert latest["duration"] == 1.5
             assert latest["error"] is None
+            # #1187: projects key always present, defaults to []
+            assert "projects" in latest
+            assert latest["projects"] == []
         finally:
             ref.delete()
 
@@ -229,7 +232,11 @@ class TestReflectionModelExtension:
             ref.delete()
 
     def test_mark_completed_signature_unchanged(self):
-        """Existing callers pass (duration) and (duration, error=msg)."""
+        """Existing callers pass (duration) and (duration, error=msg).
+
+        Backward compat: positional ``mark_completed(1.0)`` keeps working
+        without ``projects=`` after #1187 added the new optional kwarg.
+        """
         from models.reflection import Reflection
 
         ref = Reflection.get_or_create("_test_ui_compat")
@@ -239,6 +246,10 @@ class TestReflectionModelExtension:
             # Keyword error arg (like scheduler does)
             ref.mark_completed(2.0, error="some error")
             assert ref.run_count >= 2
+            # #1187: every record gets projects=[] when omitted by caller
+            history = ref.run_history if isinstance(ref.run_history, list) else []
+            for record in history[-2:]:
+                assert record.get("projects") == []
         finally:
             ref.delete()
 

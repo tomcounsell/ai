@@ -245,22 +245,29 @@ def is_reflection_running(state: Reflection) -> bool:
     return state.last_status == "running"
 
 
-async def execute_function_reflection(entry: ReflectionEntry) -> None:
+async def execute_function_reflection(entry: ReflectionEntry) -> Any:
     """Execute a function-type reflection by calling its Python callable.
 
-    Handles both sync and async callables.
+    Handles both sync and async callables. Captures and returns the callable's
+    return value so per-project audits can surface their {projects: [...]}
+    breakdown to ``run_reflection`` for ``mark_completed(projects=...)``.
 
     Args:
         entry: The registry entry with the callable path.
+
+    Returns:
+        Whatever the underlying callable returns. For per-project audits
+        this is a dict with a ``"projects"`` key; for legacy single-repo
+        callables that return ``None`` it is ``None`` (safely ignored).
     """
     func = _resolve_callable(entry.callable)
 
     if inspect.iscoroutinefunction(func):
-        await func()
+        return await func()
     else:
         # Run sync functions in a thread to avoid blocking the event loop
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, func)
+        return await loop.run_in_executor(None, func)
 
 
 def _get_memory_rss() -> int | None:
@@ -303,20 +310,24 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
             # Note: for sync callables in run_in_executor, wait_for raises
             # TimeoutError but cannot cancel the thread (detection-only).
             # For async callables, cancellation works correctly.
-            await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 execute_function_reflection(entry),
                 timeout=timeout,
             )
         else:
             # Agent-type reflections are enqueued to the session queue
             # instead of executed directly
-            await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 _enqueue_agent_reflection(entry),
                 timeout=timeout,
             )
 
         duration = time.time() - start_time
-        state.mark_completed(duration)
+        # Per-project audits return {projects: [...]}; non-audit callables
+        # return None (or non-dict). Guard with isinstance to keep legacy
+        # callables fully backward-compatible.
+        projects_list = result.get("projects") if isinstance(result, dict) else None
+        state.mark_completed(duration, projects=projects_list)
         logger.info(
             "[reflection] Completed: %s (%.1fs)",
             entry.name,

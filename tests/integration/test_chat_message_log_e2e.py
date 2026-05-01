@@ -48,11 +48,13 @@ class TestChatMessageLogE2E:
         """After a simulated Path B relay send, the session's chat_message_log contains it."""
         # Simulate: relay successfully sends a Path B message for this session.
         # The payload includes owner_agent_session_id pointing to our session.
+        # NOTE: owner_agent_session_id must be the Popoto AutoKey (agent_session_id),
+        # not the bridge session_id field. _append_outbound_chat_log calls get_by_id().
         payload = {
             "text": "Working on the deployment — checking the pods now.",
             "chat_id": "12345",
             "session_id": "cli-9999",  # synthetic Path B session_id
-            "owner_agent_session_id": session.session_id,
+            "owner_agent_session_id": session.agent_session_id,
         }
         _append_outbound_chat_log(payload, msg_id=777)
 
@@ -82,7 +84,7 @@ class TestChatMessageLogE2E:
             "text": path_b_text,
             "chat_id": "12345",
             "session_id": "cli-8888",
-            "owner_agent_session_id": session.session_id,
+            "owner_agent_session_id": session.agent_session_id,
         }
         _append_outbound_chat_log(payload, msg_id=888)
 

@@ -11,6 +11,8 @@ import logging
 import os
 import re
 import subprocess
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +65,141 @@ def load_local_projects() -> list[dict]:
         if wd.exists():
             projects.append({"slug": slug, **cfg, "working_directory": str(wd)})
     return projects
+
+
+def run_per_project_audit(
+    audit_one: Callable[[dict], dict],
+    *,
+    skip_if: Callable[[Path], bool] | None = None,
+    name: str,
+) -> dict:
+    """Iterate `load_local_projects()` and run a per-project audit body.
+
+    Aggregates findings across all qualifying projects, prefixing each with
+    ``[slug] ``. Both the ``skip_if(repo_root)`` predicate AND the
+    ``audit_one(project)`` call are wrapped in a single ``try/except`` per
+    project, so a network-mount race or permission error on one project
+    cannot abort the whole audit.
+
+    Args:
+        audit_one: sync callable taking the full project dict and returning
+            ``{status, findings, summary, duration}``. Must NOT be a coroutine.
+        skip_if: optional sync predicate taking the project's working dir as
+            ``Path``; return ``True`` to silently skip.
+        name: stable audit identifier (matches ``name:`` in the registry YAML).
+            Used in the aggregate ``summary`` string and log lines — not decorative.
+
+    Returns:
+        ``{status, findings, summary, projects: [{slug, status, duration,
+        findings_count, error}]}``. Per-project ``status`` is one of
+        ``"ok" | "error" | "skipped" | "disabled"``.
+
+        Aggregate ``status`` rules:
+        - any ``error`` → ``"error"``
+        - all ``disabled`` (and at least one project) → ``"disabled"``
+        - otherwise → ``"ok"`` (covers all-ok, all-skipped, ok+skipped,
+          ok+disabled, no-projects)
+    """
+    projects = load_local_projects()
+    if not projects:
+        return {
+            "status": "ok",
+            "findings": [],
+            "summary": f"{name}: no qualifying projects",
+            "projects": [],
+        }
+
+    findings: list[str] = []
+    project_records: list[dict] = []
+    scanned = 0
+    skipped = 0
+    errored = 0
+    disabled = 0
+
+    for project in projects:
+        slug = project.get("slug", "?")
+        wd = project.get("working_directory", "")
+        repo_root = Path(wd) if wd else Path()
+
+        try:
+            if skip_if is not None and skip_if(repo_root):
+                project_records.append(
+                    {
+                        "slug": slug,
+                        "status": "skipped",
+                        "duration": 0.0,
+                        "findings_count": 0,
+                        "error": None,
+                    }
+                )
+                skipped += 1
+                continue
+
+            t0 = time.time()
+            result = audit_one(project)
+            elapsed = time.time() - t0
+
+            if not isinstance(result, dict):
+                raise TypeError(f"audit_one returned {type(result).__name__}, expected dict")
+
+            per_status = result.get("status", "ok")
+            per_findings = result.get("findings", []) or []
+            per_duration = float(result.get("duration", elapsed))
+            per_error = result.get("error")
+            if per_error is not None:
+                per_error = str(per_error)[:500]
+
+            if per_status == "disabled":
+                disabled += 1
+            elif per_status == "error":
+                errored += 1
+            else:
+                scanned += 1
+
+            if per_status != "skipped":
+                for f in per_findings:
+                    findings.append(f"[{slug}] {f}")
+
+            project_records.append(
+                {
+                    "slug": slug,
+                    "status": per_status,
+                    "duration": per_duration,
+                    "findings_count": len(per_findings),
+                    "error": per_error,
+                }
+            )
+        except Exception as exc:
+            err_str = f"{type(exc).__name__}: {exc}"
+            logger.warning("[%s] per-project audit failed for %s: %s", name, slug, err_str)
+            project_records.append(
+                {
+                    "slug": slug,
+                    "status": "error",
+                    "duration": 0.0,
+                    "findings_count": 0,
+                    "error": err_str[:500],
+                }
+            )
+            errored += 1
+
+    if errored > 0:
+        agg_status = "error"
+    elif disabled > 0 and scanned == 0 and skipped == 0:
+        agg_status = "disabled"
+    else:
+        agg_status = "ok"
+
+    summary = f"{name}: {scanned} project(s) scanned, {skipped} skipped, {errored} error(s)"
+    if disabled:
+        summary += f", {disabled} disabled"
+
+    return {
+        "status": agg_status,
+        "findings": findings,
+        "summary": summary,
+        "projects": project_records,
+    }
 
 
 def is_ignored(pattern: str, ignore_entries: list[dict]) -> bool:

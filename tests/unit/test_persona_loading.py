@@ -202,14 +202,14 @@ class TestLoadPersonaPrompt:
 
     def test_segment_files_exist_in_repo(self):
         """All segment files should exist in config/personas/segments/."""
-        for name in ["identity.md", "work-patterns.md", "tools.md"]:
+        for name in ["identity.md", "work-patterns.md", "tools.md", "private-tag.md"]:
             seg_path = PERSONAS_SEGMENTS_DIR / name
             assert seg_path.exists(), f"Segment {name} not found at {seg_path}"
             content = seg_path.read_text()
             assert len(content) > 100, f"{name} is too short ({len(content)} chars)"
 
     def test_manifest_exists_and_valid(self):
-        """manifest.json should exist and contain all 3 segments."""
+        """manifest.json should exist and contain all 4 segments."""
         manifest_path = PERSONAS_SEGMENTS_DIR / "manifest.json"
         assert manifest_path.exists()
         manifest = json.loads(manifest_path.read_text())
@@ -218,6 +218,7 @@ class TestLoadPersonaPrompt:
             "identity.md",
             "work-patterns.md",
             "tools.md",
+            "private-tag.md",
         ]
 
     def test_identity_fields_injected(self):
