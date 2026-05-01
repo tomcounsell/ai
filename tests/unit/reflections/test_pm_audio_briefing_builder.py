@@ -211,7 +211,8 @@ class TestBuildWithSignals:
         signals = {"merges": [{"subject": "Fix auth flow", "pr_number": 1}]}
 
         clean_transcript = (
-            "Shipped the auth fix yesterday and the rollout is looking clean across all environments. "
+            "Shipped the auth fix yesterday and the rollout is looking clean across all "
+            "environments. "
             "The login session persistence bug is now fully resolved with no regressions. "
             "A few quick FYIs: the memory dedup pass ran overnight successfully, "
             "a small dashboard polish landed in staging, and the nightly test suite is green. "
