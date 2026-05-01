@@ -271,10 +271,12 @@ def _ago(seconds: int):
 
 
 class TestHasProgressDualHeartbeat:
-    """Tests for dual-heartbeat OR semantics in _has_progress (#1036).
+    """Tests for Tier 1 heartbeat semantics in _has_progress (#1036, updated by #1226).
 
-    Tier 1 freshness: either `last_heartbeat_at` OR `last_sdk_heartbeat_at`
-    within HEARTBEAT_FRESHNESS_WINDOW (90s) → progress=True.
+    After #1226:
+    - Sub-check B: only last_heartbeat_at (queue-layer) counts as Tier 1, and only
+      when sdk_ever_output=False (no last_tool_use_at / last_turn_at ever set).
+    - last_sdk_heartbeat_at is a watchdog-alive signal only — NOT a progress signal.
     """
 
     @staticmethod
@@ -285,6 +287,8 @@ class TestHasProgressDualHeartbeat:
             "claude_session_uuid": None,
             "last_heartbeat_at": None,
             "last_sdk_heartbeat_at": None,
+            "last_tool_use_at": None,
+            "last_turn_at": None,
         }
         defaults.update(overrides)
         entry = SimpleNamespace(**defaults)
@@ -292,29 +296,35 @@ class TestHasProgressDualHeartbeat:
         return entry
 
     def test_queue_heartbeat_within_window_returns_true(self):
+        """last_heartbeat_at fresh + no per-turn output → True (startup-window sub-check B)."""
         entry = self._make_entry(last_heartbeat_at=_ago(30))
         from agent.agent_session_queue import _has_progress
 
         assert _has_progress(entry) is True
 
-    def test_sdk_heartbeat_within_window_returns_true(self):
+    def test_sdk_heartbeat_alone_not_progress(self):
+        """last_sdk_heartbeat_at fresh alone → False (watchdog-tick is NOT a progress signal).
+
+        This replaces test_sdk_heartbeat_within_window_returns_true which tested
+        the buggy behavior (#1226 fix: last_sdk_heartbeat_at removed from Tier 1).
+        """
         entry = self._make_entry(last_sdk_heartbeat_at=_ago(30))
         from agent.agent_session_queue import _has_progress
 
-        assert _has_progress(entry) is True
+        assert _has_progress(entry) is False
 
-    def test_either_heartbeat_fresh_returns_true(self):
-        # One fresh, one stale → True (OR semantics)
+    def test_either_per_turn_signal_fresh_returns_true(self):
+        """Fresh last_tool_use_at → True (sub-check A OR semantics, #1226)."""
         entry = self._make_entry(
-            last_heartbeat_at=_ago(30),
-            last_sdk_heartbeat_at=_ago(300),
+            last_tool_use_at=_ago(30),
+            last_sdk_heartbeat_at=_ago(300),  # stale watchdog tick: irrelevant
         )
         from agent.agent_session_queue import _has_progress
 
         assert _has_progress(entry) is True
 
-    def test_both_heartbeats_stale_returns_false(self):
-        # Both stale, other fields empty → False
+    def test_both_heartbeats_stale_no_per_turn_output_returns_false(self):
+        """Both heartbeats stale + no per-turn output + other fields empty → False."""
         entry = self._make_entry(
             last_heartbeat_at=_ago(300),
             last_sdk_heartbeat_at=_ago(300),
@@ -323,18 +333,15 @@ class TestHasProgressDualHeartbeat:
 
         assert _has_progress(entry) is False
 
-    def test_heartbeats_at_boundary_returns_true(self):
-        # At age=89s (just inside 90s window) → True
-        entry = self._make_entry(
-            last_heartbeat_at=_ago(89),
-            last_sdk_heartbeat_at=_ago(89),
-        )
+    def test_queue_heartbeat_at_boundary_returns_true(self):
+        """last_heartbeat_at at age=89s (just inside 90s window) + sdk_ever_output=False → True."""
+        entry = self._make_entry(last_heartbeat_at=_ago(89))
         from agent.agent_session_queue import _has_progress
 
         assert _has_progress(entry) is True
 
-    def test_both_heartbeats_none_falls_through_to_other_checks(self):
-        # Both None, turn_count=5 → True (unchanged behavior, #944)
+    def test_per_turn_fields_none_turn_count_set_returns_true(self):
+        """No per-turn fields + turn_count=5 → True (own-progress, sdk_ever_output=False, #944)."""
         entry = self._make_entry(turn_count=5)
         from agent.agent_session_queue import _has_progress
 
@@ -822,4 +829,293 @@ class TestReprieveScopedToNoProgress:
         src = inspect.getsource(q._agent_session_health_check)
         assert "Tier 2 reprieve will only see compaction state" in src, (
             "Expected a degraded-Tier-2 debug log when handle is None"
+        )
+
+
+# ==========================================================================
+# Per-turn SDK progress signal tests (issue #1226)
+# ==========================================================================
+
+
+class TestHasProgressPerTurnSignal:
+    """Tests for the new per-turn SDK progress signals in _has_progress (#1226).
+
+    Sub-check A: last_tool_use_at / last_turn_at freshness within
+    SDK_PROGRESS_FRESHNESS_WINDOW (1800s) → progress=True.
+    Sub-check B: last_heartbeat_at freshness only when sdk_ever_output=False.
+    last_sdk_heartbeat_at alone is NOT a progress signal (watchdog-tick only).
+    """
+
+    @staticmethod
+    def _make_entry(**overrides):
+        """Minimal AgentSession-like object with all relevant fields."""
+        defaults = {
+            "turn_count": 0,
+            "log_path": "",
+            "claude_session_uuid": None,
+            "last_heartbeat_at": None,
+            "last_sdk_heartbeat_at": None,
+            "last_tool_use_at": None,
+            "last_turn_at": None,
+        }
+        defaults.update(overrides)
+        entry = SimpleNamespace(**defaults)
+        entry.get_children = lambda: []
+        return entry
+
+    def test_fresh_last_tool_use_at_returns_true(self):
+        """Fresh last_tool_use_at (age < 1800s) → progress=True (sub-check A)."""
+        entry = self._make_entry(last_tool_use_at=_ago(30))
+        from agent.session_health import _has_progress
+
+        assert _has_progress(entry) is True
+
+    def test_fresh_last_turn_at_returns_true(self):
+        """Fresh last_turn_at (age < 1800s) → progress=True (sub-check A)."""
+        entry = self._make_entry(last_turn_at=_ago(30))
+        from agent.session_health import _has_progress
+
+        assert _has_progress(entry) is True
+
+    def test_stale_last_tool_use_at_with_fresh_sdk_heartbeat_returns_false(self):
+        """Stale last_tool_use_at (>1800s) + fresh last_sdk_heartbeat_at → False.
+
+        This is the key regression: watchdog-tick alone must NOT signal progress.
+        """
+        entry = self._make_entry(
+            last_tool_use_at=_ago(1860),  # > SDK_PROGRESS_FRESHNESS_WINDOW (1800s)
+            last_sdk_heartbeat_at=_ago(30),  # fresh watchdog tick — not a progress signal
+        )
+        from agent.session_health import _has_progress
+
+        assert _has_progress(entry) is False
+
+    def test_fresh_last_heartbeat_with_both_turn_fields_none_returns_true(self):
+        """fresh last_heartbeat_at + both per-turn fields None → True (startup window).
+
+        Sub-check B: before any SDK output (sdk_ever_output=False), the queue-layer
+        heartbeat still passes Tier 1 (startup window preserved).
+        """
+        entry = self._make_entry(
+            last_heartbeat_at=_ago(30),  # executor is alive
+            last_tool_use_at=None,
+            last_turn_at=None,
+        )
+        from agent.session_health import _has_progress
+
+        assert _has_progress(entry) is True
+
+    def test_all_fields_none_returns_false(self):
+        """All Tier 1 fields None + no children → progress=False."""
+        entry = self._make_entry()
+        from agent.session_health import _has_progress
+
+        assert _has_progress(entry) is False
+
+    def test_fresh_tool_use_stale_turn_at_returns_true(self):
+        """Fresh last_tool_use_at + stale last_turn_at → True (OR semantics)."""
+        entry = self._make_entry(
+            last_tool_use_at=_ago(30),
+            last_turn_at=_ago(1860),  # stale beyond window
+        )
+        from agent.session_health import _has_progress
+
+        assert _has_progress(entry) is True
+
+    def test_sdk_heartbeat_only_no_progress(self):
+        """Only last_sdk_heartbeat_at fresh (watchdog-tick); all per-turn fields None
+        and no last_heartbeat_at → False (watchdog-tick alone is not progress).
+        """
+        entry = self._make_entry(
+            last_sdk_heartbeat_at=_ago(30),
+            last_heartbeat_at=None,  # no executor heartbeat
+            last_tool_use_at=None,
+            last_turn_at=None,
+        )
+        from agent.session_health import _has_progress
+
+        assert _has_progress(entry) is False
+
+    def test_own_progress_fields_gated_on_no_sdk_output(self):
+        """turn_count>0 with sdk_ever_output=True → own-progress fields skipped.
+
+        When last_tool_use_at or last_turn_at has been set (sdk_ever_output=True),
+        a stale per-turn signal with fresh own-progress fields should NOT pass Tier 1
+        unless the per-turn signal itself is fresh.
+        """
+        entry = self._make_entry(
+            turn_count=5,
+            log_path="/tmp/log.txt",
+            claude_session_uuid="some-uuid",
+            last_tool_use_at=_ago(1860),  # stale beyond window
+            last_turn_at=_ago(1860),  # stale beyond window
+            last_heartbeat_at=_ago(30),  # executor alive, but sdk output exists
+        )
+        from agent.session_health import _has_progress
+
+        assert _has_progress(entry) is False
+
+    def test_sdk_heartbeat_constant_removed_from_tier1(self):
+        """Structural: last_sdk_heartbeat_at is NOT in the Tier 1 dual-heartbeat check.
+
+        The fix removes last_sdk_heartbeat_at from _has_progress's Tier 1 loop.
+        Verify the source does not pair 'last_sdk_heartbeat_at' with
+        HEARTBEAT_FRESHNESS_WINDOW in _has_progress.
+        """
+        import inspect
+
+        from agent import session_health as sh
+
+        src = inspect.getsource(sh._has_progress)
+        # The old pattern was: for hb_attr in ("last_heartbeat_at", "last_sdk_heartbeat_at")
+        # which paired both with HEARTBEAT_FRESHNESS_WINDOW. That must be gone.
+        assert (
+            '"last_sdk_heartbeat_at"' not in src
+            or "SDK_PROGRESS_FRESHNESS_WINDOW"
+            not in src.split('"last_sdk_heartbeat_at"')[0].split("HEARTBEAT_FRESHNESS_WINDOW")[-1]
+        ), (
+            "last_sdk_heartbeat_at must NOT be checked against HEARTBEAT_FRESHNESS_WINDOW in _has_progress"
+        )
+
+    def test_sdk_progress_freshness_window_constant_exists(self):
+        """SDK_PROGRESS_FRESHNESS_WINDOW constant must exist in session_health."""
+        from agent import session_health as sh
+
+        assert hasattr(sh, "SDK_PROGRESS_FRESHNESS_WINDOW"), (
+            "SDK_PROGRESS_FRESHNESS_WINDOW constant missing from session_health"
+        )
+        assert sh.SDK_PROGRESS_FRESHNESS_WINDOW == 1800, (
+            f"Expected 1800s default; got {sh.SDK_PROGRESS_FRESHNESS_WINDOW}"
+        )
+
+    def test_max_no_output_reprieves_constant_exists(self):
+        """MAX_NO_OUTPUT_REPRIEVES constant must exist in session_health."""
+        from agent import session_health as sh
+
+        assert hasattr(sh, "MAX_NO_OUTPUT_REPRIEVES"), (
+            "MAX_NO_OUTPUT_REPRIEVES constant missing from session_health"
+        )
+        # Default: SDK_PROGRESS_FRESHNESS_WINDOW // HEARTBEAT_FRESHNESS_WINDOW = 1800 // 90 = 20
+        assert sh.MAX_NO_OUTPUT_REPRIEVES == 20, f"Expected 20; got {sh.MAX_NO_OUTPUT_REPRIEVES}"
+
+
+class TestTier2ReprieveEscalation:
+    """Tests for the reprieve escalation guard in _tier2_reprieve_signal (#1226).
+
+    When sdk_ever_output=False AND reprieve_count >= MAX_NO_OUTPUT_REPRIEVES,
+    _tier2_reprieve_signal must return None (suppress all reprieves).
+    Sessions with sdk_ever_output=True are NOT subject to the cap.
+    """
+
+    @staticmethod
+    def _make_entry(**overrides):
+        defaults = {
+            "last_tool_use_at": None,
+            "last_turn_at": None,
+            "last_stdout_at": None,
+            "reprieve_count": 0,
+            "last_compaction_ts": None,
+        }
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def _make_handle(self, pid=None):
+        from agent.agent_session_queue import SessionHandle
+
+        fake_task = MagicMock()
+        return SessionHandle(task=fake_task, pid=pid)
+
+    def test_escalation_guard_suppresses_alive_when_no_output_and_at_cap(self, monkeypatch):
+        """sdk_ever_output=False + reprieve_count >= MAX_NO_OUTPUT_REPRIEVES → None."""
+        import psutil as _psutil
+
+        from agent.session_health import MAX_NO_OUTPUT_REPRIEVES
+
+        class _Proc:
+            def status(self):
+                return _psutil.STATUS_RUNNING
+
+            def children(self):
+                return []
+
+        monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
+
+        from agent.session_health import _tier2_reprieve_signal
+
+        entry = self._make_entry(reprieve_count=MAX_NO_OUTPUT_REPRIEVES)
+        handle = self._make_handle(pid=12345)
+        result = _tier2_reprieve_signal(handle, entry)
+        assert result is None, (
+            f"Expected None when reprieve_count={MAX_NO_OUTPUT_REPRIEVES} and "
+            f"sdk_ever_output=False; got {result!r}"
+        )
+
+    def test_escalation_guard_does_not_apply_when_sdk_has_output(self, monkeypatch):
+        """sdk_ever_output=True → escalation guard does NOT suppress 'alive'."""
+        import psutil as _psutil
+
+        from agent.session_health import MAX_NO_OUTPUT_REPRIEVES
+
+        class _Proc:
+            def status(self):
+                return _psutil.STATUS_RUNNING
+
+            def children(self):
+                return []
+
+        monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
+
+        from agent.session_health import _tier2_reprieve_signal
+
+        # sdk_ever_output=True: last_tool_use_at is set (stale, but not None)
+        entry = self._make_entry(
+            last_tool_use_at=_ago(1860),  # stale but present → sdk_ever_output=True
+            reprieve_count=MAX_NO_OUTPUT_REPRIEVES + 5,  # well over the cap
+        )
+        handle = self._make_handle(pid=12345)
+        result = _tier2_reprieve_signal(handle, entry)
+        assert result == "alive", (
+            f"Expected 'alive' when sdk_ever_output=True even at high reprieve_count; got {result!r}"
+        )
+
+    def test_escalation_guard_below_cap_still_reprieves(self, monkeypatch):
+        """sdk_ever_output=False + reprieve_count < MAX_NO_OUTPUT_REPRIEVES → 'alive'."""
+        import psutil as _psutil
+
+        from agent.session_health import MAX_NO_OUTPUT_REPRIEVES
+
+        class _Proc:
+            def status(self):
+                return _psutil.STATUS_RUNNING
+
+            def children(self):
+                return []
+
+        monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
+
+        from agent.session_health import _tier2_reprieve_signal
+
+        entry = self._make_entry(reprieve_count=MAX_NO_OUTPUT_REPRIEVES - 1)
+        handle = self._make_handle(pid=12345)
+        result = _tier2_reprieve_signal(handle, entry)
+        assert result == "alive", f"Expected 'alive' below cap; got {result!r}"
+
+
+class TestStartupRecoveryReprieveCountReset:
+    """Structural test: startup recovery resets reprieve_count to 0.
+
+    Risk 4 from plan: if reprieve_count is not reset on recovery, a recovered
+    session may immediately hit MAX_NO_OUTPUT_REPRIEVES on the first health tick.
+    """
+
+    def test_startup_recovery_resets_reprieve_count(self):
+        """_recover_interrupted_agent_sessions_startup must reset reprieve_count=0."""
+        import inspect
+
+        from agent import session_health as sh
+
+        src = inspect.getsource(sh._recover_interrupted_agent_sessions_startup)
+        assert "reprieve_count" in src, (
+            "_recover_interrupted_agent_sessions_startup must reset reprieve_count=0 "
+            "on recovery to prevent escalation guard triggering immediately post-recovery"
         )

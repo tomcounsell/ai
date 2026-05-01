@@ -158,6 +158,20 @@ MAX_RECOVERY_ATTEMPTS = 2
 # health-check tick budget tight while still giving the cancellation a
 # moment to complete.
 TASK_CANCEL_TIMEOUT = 0.25
+# Freshness window (seconds) for per-turn SDK progress signals
+# (last_tool_use_at, last_turn_at) in Tier 1 sub-check A (issue #1226).
+# 1800s (30 minutes) accommodates the longest observed extended-thinking turns.
+# A session that produces a tool boundary or result event within this window is
+# considered actively progressing. Env-tunable via SDK_PROGRESS_FRESHNESS_WINDOW_SECS
+# for operators who observe edge cases in production.
+SDK_PROGRESS_FRESHNESS_WINDOW = int(os.environ.get("SDK_PROGRESS_FRESHNESS_WINDOW_SECS", 1800))
+# Max consecutive Tier 2 reprieves allowed for sessions that have NEVER produced
+# any SDK output (sdk_ever_output=False). After this many reprieves the "alive"
+# gate is suppressed and recovery proceeds. Derived from the SDK progress window
+# divided by the heartbeat write interval: 1800 // 90 = 20 ticks (~30 minutes).
+# Sessions that have produced output (sdk_ever_output=True) are never subject to
+# this cap — their recovery depends solely on per-turn freshness in sub-check A.
+MAX_NO_OUTPUT_REPRIEVES = SDK_PROGRESS_FRESHNESS_WINDOW // HEARTBEAT_FRESHNESS_WINDOW  # 20
 
 
 # In-process cache for ``_is_memory_tight()`` (issue #1099 Mode 4). Tuple of
@@ -327,7 +341,10 @@ def _recover_interrupted_agent_sessions_startup() -> int:
                 update_session(
                     entry.session_id,
                     new_status="pending",
-                    fields={"priority": "high", "started_at": None},
+                    # reprieve_count reset to 0: prevents escalation guard firing
+                    # immediately after recovery if the session had accumulated
+                    # reprieves before startup (issue #1226 Risk 4).
+                    fields={"priority": "high", "started_at": None, "reprieve_count": 0},
                     expected_status="running",
                     reason="startup recovery: local dev session",
                 )
@@ -403,7 +420,10 @@ def _recover_interrupted_agent_sessions_startup() -> int:
                 update_session(
                     entry.session_id,
                     new_status="pending",
-                    fields={"priority": "high", "started_at": None},
+                    # reprieve_count reset to 0: prevents escalation guard firing
+                    # immediately after recovery if the session had accumulated
+                    # reprieves before startup (issue #1226 Risk 4).
+                    fields={"priority": "high", "started_at": None, "reprieve_count": 0},
                     expected_status="running",
                     reason="startup recovery",
                 )
@@ -441,43 +461,84 @@ def _has_progress(entry: AgentSession) -> bool:
     silence is no longer a kill signal — long-thinking turns and large tool
     outputs produce legitimate stdout silence.
 
-    Signals (any one is sufficient):
+    Tier 1 is evaluated in two sub-checks (A and B). Any one passing → return True.
 
-    1. **Dual-heartbeat OR (#1036, retained verbatim).** Either
-       ``last_heartbeat_at`` (queue-layer, written by ``_heartbeat_loop``)
-       OR ``last_sdk_heartbeat_at`` (messenger-sourced, written by
-       ``BackgroundTask._watchdog``) fresher than
-       ``HEARTBEAT_FRESHNESS_WINDOW`` (90s) ⇒ progress.
-    2. **Own-progress fields (#944 / #963, retained).**
-       - ``turn_count > 0`` — at least one turn boundary observed.
-       - ``log_path`` non-empty — first log entry written.
-       - ``claude_session_uuid`` non-empty — SDK authenticated.
-    3. **Child-progress check (#944, retained).** A PM session with at
-       least one non-terminal child is not stuck. ``get_children()``
-       returns ``[]`` on failure with a WARNING log; no outer try/except
-       needed.
+    **Sub-check A: Per-turn SDK progress (#1226).**
+    ``last_tool_use_at`` (written by PreToolUse/PostToolUse hooks) and
+    ``last_turn_at`` (written by sdk_client on ``result`` event) are evidence
+    of actual structured SDK output. Either field fresher than
+    ``SDK_PROGRESS_FRESHNESS_WINDOW`` (1800s, 30 min) ⇒ progress.
+    ``last_sdk_heartbeat_at`` is written by ``BackgroundTask._watchdog`` on
+    subprocess existence — it is a watchdog-alive signal, NOT a progress signal.
+    It is intentionally excluded from sub-check A (issue #1226).
 
-    Returns ``False`` only when EVERY signal is absent (both heartbeats
-    stale, all own-progress fields empty, no live children). The caller
+    **Sub-check B: Startup-window executor-alive fallback (#1036 narrowed).**
+    When ``sdk_ever_output`` is False (neither per-turn field has ever been set),
+    ``last_heartbeat_at`` (queue-layer, written by ``_heartbeat_loop``) fresher
+    than ``HEARTBEAT_FRESHNESS_WINDOW`` (90s) ⇒ progress. This preserves the
+    pre-#1226 behavior for sessions in their startup window before the first SDK
+    tool or turn event fires, and for sessions predating PR #1177 (whose hooks
+    did not write the per-turn fields).
+
+    **Own-progress fields (#944 / #963, narrowed by #1226).**
+    - ``turn_count > 0`` — at least one turn boundary observed.
+    - ``log_path`` non-empty — first log entry written.
+    - ``claude_session_uuid`` non-empty — SDK authenticated.
+    These are sticky once set and cannot detect mid-run hangs. They are only
+    evaluated when ``sdk_ever_output`` is False — once the SDK has produced a
+    tool or turn event, sub-check A is the authoritative Tier 1 signal.
+
+    **Child-progress check (#944, retained).**
+    A PM session with at least one non-terminal child is not stuck.
+    ``get_children()`` returns ``[]`` on failure with a WARNING log; no outer
+    try/except needed.
+
+    Returns ``False`` only when EVERY signal is absent. The caller
     (``_agent_session_health_check``) then evaluates ``_tier2_reprieve_signal``
     before deciding to recover.
     """
-    # Tier 1: dual-heartbeat OR check (#1036). Fresh on either signal → progress.
     now_utc = datetime.now(tz=UTC)
-    for hb_attr in ("last_heartbeat_at", "last_sdk_heartbeat_at"):
-        hb = getattr(entry, hb_attr, None)
+
+    # Compute sdk_ever_output once — used by both sub-check A and the own-progress
+    # field guard. True iff last_tool_use_at or last_turn_at has ever been written.
+    sdk_ever_output = bool(
+        getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
+    )
+
+    # Sub-check A: per-turn SDK activity (issue #1226).
+    # last_tool_use_at (PreToolUse/PostToolUse hooks) and last_turn_at (result event)
+    # are evidence of actual structured SDK output. Fresh within
+    # SDK_PROGRESS_FRESHNESS_WINDOW → real progress.
+    for progress_attr in ("last_tool_use_at", "last_turn_at"):
+        ts = getattr(entry, progress_attr, None)
+        if isinstance(ts, datetime):
+            ts_aware = ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+            if (now_utc - ts_aware).total_seconds() < SDK_PROGRESS_FRESHNESS_WINDOW:
+                return True
+
+    # Sub-check B: startup-window executor-alive fallback (#1036 retained, narrowed).
+    # Use last_heartbeat_at as a Tier 1 signal ONLY before the SDK has produced any
+    # tool or turn output. Once sdk_ever_output is True, sub-check A is authoritative.
+    # Backward-compatible: sessions from before PR #1177 (no tool/turn fields) fall
+    # here and behave identically to the pre-#1226 behavior.
+    if not sdk_ever_output:
+        hb = getattr(entry, "last_heartbeat_at", None)
         if isinstance(hb, datetime):
             hb_aware = hb if hb.tzinfo else hb.replace(tzinfo=UTC)
             if (now_utc - hb_aware).total_seconds() < HEARTBEAT_FRESHNESS_WINDOW:
                 return True
 
-    # Own-progress fields (preserves #944 / #963 invariants).
-    if (entry.turn_count or 0) > 0:
-        return True
-    if bool((entry.log_path or "").strip()):
-        return True
-    if bool(entry.claude_session_uuid):
-        return True
+    # Own-progress fields (#944 / #963, narrowed by #1226).
+    # Only evaluated when sdk_ever_output is False — once the SDK has produced
+    # a tool or turn event, per-turn freshness (sub-check A) is authoritative.
+    if not sdk_ever_output:
+        if (entry.turn_count or 0) > 0:
+            return True
+        if bool((entry.log_path or "").strip()):
+            return True
+        if bool(entry.claude_session_uuid):
+            return True
+
     # Child-progress check: a PM session with active children is not stuck.
     # get_children() queries via Popoto parent_agent_session_id index and
     # returns [] on failure with a WARNING log — no outer try/except needed.
@@ -514,6 +575,15 @@ def _tier2_reprieve_signal(
     Returns the name of the first passing gate ("compacting", "children", or
     "alive"), or ``None`` if every gate fails.
 
+    **Reprieve escalation guard (issue #1226):** When ``sdk_ever_output`` is
+    False (the session has never produced a tool or turn event) AND
+    ``reprieve_count >= MAX_NO_OUTPUT_REPRIEVES``, all gates are suppressed
+    and ``None`` is returned immediately. This prevents indefinite alive-but-
+    silent sessions from being reprieved forever. Sessions with
+    ``sdk_ever_output=True`` (have produced output) are never subject to this
+    cap — their recovery depends solely on per-turn freshness in
+    ``_has_progress`` sub-check A.
+
     The previous "stdout" gate (and its ``STDOUT_FRESHNESS_WINDOW`` constant)
     was retired by issue #1172. Recent stdout is no longer evidence the
     subprocess is making progress — long-thinking turns and large tool
@@ -528,6 +598,18 @@ def _tier2_reprieve_signal(
     This helper NEVER raises. A genuinely dead session where every gate
     fails is preferable to crashing the health-check loop.
     """
+    # Reprieve escalation guard (issue #1226): suppress all Tier 2 reprieves
+    # for sessions that have NEVER produced any SDK output once reprieve_count
+    # reaches MAX_NO_OUTPUT_REPRIEVES. This ensures sessions that hang from
+    # the very first turn are eventually recovered rather than being reprieved
+    # forever. Sessions with sdk_ever_output=True are NOT subject to this cap.
+    sdk_ever_output = bool(
+        getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
+    )
+    reprieve_count = getattr(entry, "reprieve_count", 0) or 0
+    if not sdk_ever_output and reprieve_count >= MAX_NO_OUTPUT_REPRIEVES:
+        return None  # escalate: suppress all Tier 2 reprieves, allow recovery
+
     # "compacting" — reprieve when a compaction completed within
     # COMPACT_REPRIEVE_WINDOW_SEC seconds. Evaluated FIRST so the telemetry
     # counter (``tier2_reprieve_total:compacting``) distinguishes this case
