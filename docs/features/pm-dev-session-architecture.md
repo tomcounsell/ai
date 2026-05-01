@@ -127,6 +127,7 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `continuation_depth` (IntField, default 0) -- tracks how many continuation PM sessions have been chained from the original. Capped at `_CONTINUATION_PM_MAX_DEPTH` (3) to prevent runaway chains.
 - `project_key`, `created_at`, `history`, etc.
 - `project_config` (DictField) -- full project dict from `projects.json`, populated at enqueue time. Carries all project properties (name, working_directory, github, mode, telegram, etc.) through the pipeline so downstream code never re-derives from a parallel registry. Empty/None for older sessions created before this field existed; the worker falls back to loading from `projects.json` at execution time.
+- `chat_message_log` (ListField, default `[]`) -- rolling, bounded (50 entries) log of inbound and outbound Telegram chat traffic for this session. Each entry: `{direction, sender, content, message_id, ts}`. Written by the inbound dispatch hook (`bridge/dispatch.py`) and the relay outbound hook (`bridge/telegram_relay.py`). Read by the message drafter to avoid repeating prior outbound messages. See `docs/features/chat-message-log.md`.
 
 ### PM/Teammate session-specific fields
 - `chat_id`, `message_id`, `sender_name`, `message_text` -- Telegram context

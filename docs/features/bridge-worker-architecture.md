@@ -54,9 +54,14 @@ TelegramRelayOutputHandler.send() (agent/output_handler.py)
     ↓ also writes to FileOutputHandler (dual-write for audit/fallback)
 Redis outbox  → polled by the matching bridge relay
                   bridge/telegram_relay.py  for telegram:outbox:*
+                    ↓ after successful send: appends outbound entry to
+                      AgentSession.chat_message_log (three-tier session resolution:
+                      owner_agent_session_id → real session_id → chat_id lookup)
                   bridge/email_relay.py     for email:outbox:*
                 ↓ delivers via Telethon (Telegram) or SMTP (email)
 ```
+
+**Inbound chat log write:** `bridge/dispatch.py::dispatch_telegram_session` appends an inbound entry to the new session's `chat_message_log` immediately after `enqueue_agent_session` completes. This is the single chokepoint for all Telegram-originating session enqueues. See `docs/features/chat-message-log.md` for the full write/read contract.
 
 **Reactions are telegram-only.** When `extra_context.transport == "email"` the
 handler logs once at INFO and skips the reaction (there is no email analog
