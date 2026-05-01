@@ -6,8 +6,6 @@ None/empty-sender handling, and empty-content skipping (issue #1192).
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from models.agent_session import (
     CHAT_LOG_DISPLAY_ENTRIES,
     CHAT_LOG_MAX_ENTRIES,
@@ -96,7 +94,13 @@ class TestAppendChatLog:
         """After exceeding CHAT_LOG_MAX_ENTRIES, only the last N are kept."""
         # Pre-populate with MAX_ENTRIES entries
         existing = [
-            {"direction": "in", "sender": "Tom", "content": f"msg-{i}", "message_id": i, "ts": float(i)}
+            {
+                "direction": "in",
+                "sender": "Tom",
+                "content": f"msg-{i}",
+                "message_id": i,
+                "ts": float(i),
+            }
             for i in range(CHAT_LOG_MAX_ENTRIES)
         ]
         session = self._make_session(existing_log=list(existing))
@@ -184,9 +188,7 @@ class TestAppendChatLog:
             patch.object(AgentSession.query, "filter", return_value=[session]),
             patch.object(AgentSession, "save", MagicMock()),
         ):
-            session.append_chat_log(
-                direction="in", sender="Tom", content="Hey", ts=fixed_ts
-            )
+            session.append_chat_log(direction="in", sender="Tom", content="Hey", ts=fixed_ts)
         assert session.chat_message_log[0]["ts"] == fixed_ts
 
     def test_message_id_none_is_stored(self):

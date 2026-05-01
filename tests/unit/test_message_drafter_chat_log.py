@@ -10,8 +10,6 @@ Verifies that:
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from bridge.message_drafter import _build_draft_prompt
 from models.agent_session import CHAT_LOG_DISPLAY_ENTRIES, CHAT_LOG_MAX_ENTRIES
 
@@ -36,8 +34,20 @@ class TestBuildDraftPromptChatLog:
     def test_chat_log_block_present_when_populated(self):
         """Populated chat_message_log produces a 'Recent chat' block in the prompt."""
         log = [
-            {"direction": "in", "sender": "Tom", "content": "What's the status?", "message_id": 1, "ts": 1.0},
-            {"direction": "out", "sender": "valor", "content": "Working on it.", "message_id": 2, "ts": 2.0},
+            {
+                "direction": "in",
+                "sender": "Tom",
+                "content": "What's the status?",
+                "message_id": 1,
+                "ts": 1.0,
+            },
+            {
+                "direction": "out",
+                "sender": "valor",
+                "content": "Working on it.",
+                "message_id": 2,
+                "ts": 2.0,
+            },
         ]
         session = _make_session(chat_log=log)
         prompt = _build_draft_prompt("Agent output text", {}, session=session)

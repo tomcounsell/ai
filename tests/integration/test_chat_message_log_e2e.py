@@ -11,9 +11,7 @@ Does NOT use real Telegram — the relay send is mocked at the Telethon layer.
 Marker: sdlc (tagged for the sdlc test suite)
 """
 
-import json
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -47,7 +45,7 @@ class TestChatMessageLogE2E:
     """End-to-end acceptance test: Path B send → drafter sees the prior message."""
 
     def test_path_b_outbound_entry_is_recorded_in_chat_log(self, session):
-        """After a simulated Path B relay send, the session's chat_message_log contains the entry."""
+        """After a simulated Path B relay send, the session's chat_message_log contains it."""
         # Simulate: relay successfully sends a Path B message for this session.
         # The payload includes owner_agent_session_id pointing to our session.
         payload = {
@@ -126,7 +124,9 @@ class TestChatMessageLogE2E:
         """A mix of in and out entries all appear in the drafter prompt."""
         session.append_chat_log(direction="in", sender="Tom", content="Status?", message_id=10)
         session.append_chat_log(direction="out", sender="valor", content="Checking.", message_id=11)
-        session.append_chat_log(direction="in", sender="Tom", content="Any blockers?", message_id=12)
+        session.append_chat_log(
+            direction="in", sender="Tom", content="Any blockers?", message_id=12
+        )
 
         rows = list(AgentSession.query.filter(session_id=session.session_id))
         fresh = rows[0] if rows else session

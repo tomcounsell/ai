@@ -1215,10 +1215,11 @@ def _build_draft_prompt(
         except Exception:
             pass  # Chat log is enrichment — never crash the drafter
 
-    return f"""/no_think
-Draft a message from this developer session output:{artifact_section}{context_section}{chat_log_section}
-
-{text}"""
+    header = (
+        f"/no_think\nDraft a message from this developer session output:"
+        f"{artifact_section}{context_section}{chat_log_section}"
+    )
+    return f"{header}\n\n{text}"
 
 
 def _write_full_output_file(text: str) -> Path:

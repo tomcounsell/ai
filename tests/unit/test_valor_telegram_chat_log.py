@@ -9,8 +9,6 @@ import argparse
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 def _make_send_args(chat="-100123456", message="test message", reply_to=None):
     return argparse.Namespace(
@@ -28,9 +26,7 @@ class TestCmdSendOwnerAgentSessionId:
 
     @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
     @patch("tools.valor_telegram._get_redis_connection")
-    def test_agent_session_id_injected_when_set(
-        self, mock_redis_fn, mock_resolve, monkeypatch
-    ):
+    def test_agent_session_id_injected_when_set(self, mock_redis_fn, mock_resolve, monkeypatch):
         """When AGENT_SESSION_ID is set, payload contains owner_agent_session_id."""
         from tools.valor_telegram import cmd_send
 
@@ -72,9 +68,7 @@ class TestCmdSendOwnerAgentSessionId:
 
     @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
     @patch("tools.valor_telegram._get_redis_connection")
-    def test_owner_key_absent_when_no_env_vars(
-        self, mock_redis_fn, mock_resolve, monkeypatch
-    ):
+    def test_owner_key_absent_when_no_env_vars(self, mock_redis_fn, mock_resolve, monkeypatch):
         """When neither env var is set, owner_agent_session_id is absent from payload."""
         from tools.valor_telegram import cmd_send
 

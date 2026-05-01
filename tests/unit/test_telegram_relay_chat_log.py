@@ -12,8 +12,6 @@ Also tests:
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from bridge.telegram_relay import _append_outbound_chat_log
 
 
@@ -35,13 +33,8 @@ class TestAppendOutboundChatLogTierOne:
         mock_agent_session_cls = MagicMock()
         mock_agent_session_cls.query = mock_qs
 
-        with patch.dict("sys.modules", {"models.agent_session": MagicMock(AgentSession=mock_agent_session_cls)}):
-            # Re-import inside the patch so the lazy import in _append_outbound_chat_log
-            # gets our mock. Since the function uses a local import, we patch the module.
-            import importlib
-            import bridge.telegram_relay as relay_mod
-            original = relay_mod._append_outbound_chat_log
-
+        patched_module = MagicMock(AgentSession=mock_agent_session_cls)
+        with patch.dict("sys.modules", {"models.agent_session": patched_module}):
             # Call with a known mock path: patch at the models level
             with patch("models.agent_session.AgentSession", mock_agent_session_cls):
                 _append_outbound_chat_log(
@@ -150,7 +143,9 @@ class TestAppendOutboundChatLogTierThree:
                 msg_id=88,
             )
 
-        fallback_session.append_chat_log.assert_called_once_with("out", "valor", "Fallback path", 88)
+        fallback_session.append_chat_log.assert_called_once_with(
+            "out", "valor", "Fallback path", 88
+        )
 
     def test_no_session_resolved_returns_without_crashing(self):
         """When no session is found via any tier, the function returns without crashing."""
