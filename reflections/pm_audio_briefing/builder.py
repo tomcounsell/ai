@@ -10,8 +10,9 @@ Implements the deterministic phases of /do-debrief: Categorize -> Pass A draft
 - requires the first sentence to be a decision or heads-up, not setup
 
 Post-LLM regex guard catches anything that slipped through:
-- Layer 2: prefixed forms via `\\b(?:issue|pr|#)\\s*\\d{2,}\\b`
-- Layer 3: bare 4+ digit integers via `\\b\\d{4,}\\b`
+- Layer 2: prefixed forms via `\\b(?:issue|pr|#)[\\s\\-_]*\\d{2,}\\b`
+- Layer 3: bare 3+ digit integers via `(?<!\\$)(?<![\\d.])\\b\\d{3,}\\b`
+  with lookahead excluding unit suffixes (users, ms, seconds, %, etc.)
 
 Either layer matching raises BriefingNumbersDetectedError.
 """

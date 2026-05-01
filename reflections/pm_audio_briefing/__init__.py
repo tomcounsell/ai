@@ -159,13 +159,6 @@ def _process_one_project(project: dict, this_machine: str, *, dry_run: bool) -> 
         return {"status": "skipped", "reason": "already_succeeded_today"}
 
     # Acquire SETNX lock (the within-tick atomic gate).
-    try:
-        from delivery import _get_redis_connection  # type: ignore
-
-        # The above import is a deliberate no-op except in tests; the real
-        # import path is below.
-    except Exception:  # swallow-ok: deliberate no-op test-stub hook; real import follows below
-        pass
     from reflections.pm_audio_briefing.delivery import _get_redis_connection
 
     redis_conn = _get_redis_connection()
