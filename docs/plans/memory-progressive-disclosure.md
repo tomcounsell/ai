@@ -5,6 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-05-01
 tracking: https://github.com/tomcounsell/ai/issues/1178
+related: https://github.com/tomcounsell/ai/issues/1247
 last_comment_id:
 ---
 
@@ -60,6 +61,7 @@ running Claude sessions because no MCP server wraps it.
 **Active plans in `docs/plans/` overlapping this area:**
 - `memory-hook-performance.md` (status: Ready, tracking #627) — already merged as PR #864. Plan status is stale but the underlying work is done. No overlap with this plan.
 - `memory-project-key-isolation.md` (status: Planning, tracking #811) — issue #811 was closed 2026-04-07. Plan is orphaned/stale. No overlap.
+- `sdlc-1247.md` (status: Planning, tracking #1247) — **directly relevant**. Consolidates all docs hygiene into a single `reflections/docs_auditor.py` substrate. Three consequences for this plan: (1) the separate "persona-builder" BUILD step for feature docs is eliminated — docs updates are the DOCS SDLC stage's job, and `/do-docs` will use the unified substrate after #1247 ships; (2) `documentation-audit` (currently commits docs directly to main) is removed in Phase 3 of #1247, eliminating the seesaw risk where that reflection could overwrite docs created by this plan; (3) new docs created by this plan (`docs/features/subconscious-memory.md`, `docs/features/claude-code-memory.md`) will be picked up and validated by the unified auditor's rotation once #1247 ships. No hard ordering dependency — the DOCS SDLC stage will work correctly whether #1247 has shipped or not; it just uses a more capable substrate if it has.
 
 **Notes:**
 - The prefetch path (PR #1201) added a NEW call site for `_format_thought_blocks()` in `memory_bridge.prefetch()`. The plan must update that call site too — the issue body did not call it out because #1201 post-dated the issue.
@@ -257,10 +259,12 @@ This feature IS the agent integration. Specifically:
 
 ## Documentation
 
-- [ ] Update `docs/features/subconscious-memory.md` with the new stub injection format, `memory_get` and `memory_search` tool descriptions, and the progressive disclosure pattern.
-- [ ] Update `docs/features/claude-code-memory.md` with the new stub format and MCP tool integration.
-- [ ] Add entry to `docs/features/README.md` index table for the MCP tools if not already present.
-- [ ] Update `config/personas/segments/work-patterns.md` Subconscious Memory section to describe stub→fetch pattern and when to call `memory_get` vs `memory_search`.
+All documentation updates are handled by the DOCS SDLC stage via `/do-docs` (which uses the unified substrate from #1247 when available). The builder does NOT write these docs directly.
+
+- [ ] `docs/features/subconscious-memory.md` — add stub injection format, `memory_get`/`memory_search` tool descriptions, progressive disclosure pattern.
+- [ ] `docs/features/claude-code-memory.md` — update injection format section, add MCP tool section.
+- [ ] `docs/features/README.md` — add/verify index entry for MCP memory tools.
+- [ ] `config/personas/segments/work-patterns.md` — extend Subconscious Memory section: stub injection, when to call `memory_get(id)` vs `memory_search(query)`.
 
 ## Success Criteria
 
@@ -288,12 +292,6 @@ This feature IS the agent integration. Specifically:
   - Name: mcp-builder
   - Role: Implement `mcp_servers/memory_server.py` FastMCP server, register in `~/.claude.json`, add to `config/mcp_library.json`.
   - Agent Type: mcp-specialist
-  - Resume: true
-
-- **Builder (persona+docs)**
-  - Name: persona-builder
-  - Role: Update `config/personas/segments/work-patterns.md` and `config/mcp_library.json` entry.
-  - Agent Type: documentarian
   - Resume: true
 
 - **Test Engineer**
@@ -349,20 +347,13 @@ This feature IS the agent integration. Specifically:
 - Create `tests/integration/test_memory_stub_injection.py`: token benchmark comparing `_format_stub_blocks()` vs `_format_thought_blocks()` on 3 mock records with ~300-token content each; assert ≥5× token reduction using `tiktoken`.
 - Create `tests/integration/test_memory_mcp_server.py`: spawn MCP server subprocess, call `memory_get` and `memory_search` via MCP stdio client, assert correct response shapes.
 
-### 4. Update persona and documentation
-- **Task ID**: build-docs
-- **Depends On**: build-stub-format, build-mcp-server
-- **Assigned To**: persona-builder
-- **Agent Type**: documentarian
-- **Parallel**: true
-- Update `config/personas/segments/work-patterns.md` Subconscious Memory section: describe stub injection, when to call `memory_get(id)`, when to call `memory_search(query)`.
-- Update `docs/features/subconscious-memory.md`: add stub format description, MCP tools section.
-- Update `docs/features/claude-code-memory.md`: update injection format section and add MCP tool section.
-- Add/verify entry in `docs/features/README.md` index.
+### 4. Documentation (DOCS SDLC stage — not a BUILD task)
+
+Documentation updates (`docs/features/subconscious-memory.md`, `docs/features/claude-code-memory.md`, `docs/features/README.md`, `config/personas/segments/work-patterns.md`) are handled by the DOCS SDLC stage via `/do-docs` after BUILD completes. See the Documentation section above. No builder agent is assigned here — the unified substrate from #1247 (or the current `/do-docs` if #1247 hasn't shipped yet) covers this automatically.
 
 ### 5. Final validation
 - **Task ID**: validate-all
-- **Depends On**: build-tests, build-docs
+- **Depends On**: build-tests
 - **Assigned To**: final-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -392,6 +383,9 @@ This feature IS the agent integration. Specifically:
 ---
 
 ## Open Questions
+
+~~0. **Docs consolidation impact (#1247)**: Plan needed to be updated in light of #1247's unified auditor substrate.~~
+**Resolved:** persona-builder BUILD step removed; docs work deferred to DOCS SDLC stage. No hard ordering dependency on #1247.
 
 1. **MCP registration location**: The issue body says "register in `config/mcp_library.json`" but that file is a reference catalogue, not a live registration. Actual Claude Code MCP registration is in `~/.claude.json`. Should the MCP server also be registered in a project-level `.mcp.json` so it automatically activates for all contributors, or should it remain user-level only? (Recommendation: user-level in `~/.claude.json` since it requires local Redis — the build step will add it there.)
 
