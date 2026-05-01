@@ -430,10 +430,6 @@ Flags memories with quality issues for human review:
 - Zero-access memories older than 30 days
 - Memories with confidence consistently below 0.2
 
-### `knowledge-reindex`
-
-Re-indexes `~/src/work-vault/` documents into `KnowledgeDocument` Redis records. Gracefully stubs if `tools.knowledge.indexer` is unavailable or the vault directory doesn't exist.
-
 ### `embedding-orphan-sweep`
 
 Reconciles the on-disk Memory embedding store (`~/.popoto/content/.embeddings/Memory/`) against live Memory records (issue #1214). Calls Popoto's `EmbeddingField.garbage_collect(Memory)` to remove `.npy` files whose SHA-256-hashed names are no longer in `$Class:Memory`, plus `EmbeddingField.sweep_stale_tempfiles(Memory)` to remove leaked `tmp*.npy` atomic-write tempfiles older than 1 hour.
@@ -498,7 +494,7 @@ The reflection scheduler starts automatically as part of the standalone worker p
 | Redis (Popoto ORM) | All reflections | Yes — state persistence |
 | PyYAML | Registry loader | Yes — reads `config/reflections.yaml` |
 | psutil | Memory instrumentation | Optional — memory snapshots degrade gracefully if missing |
-| `ANTHROPIC_API_KEY` | `documentation-audit`, `session-intelligence` | Conditional — LLM reflection and docs audit |
+| `ANTHROPIC_API_KEY` | `docs-auditor`, `session-intelligence` | Conditional — LLM reflection and docs auditor substrate |
 | `gh` CLI (authenticated) | `task-backlog-check`, `session-intelligence`, `daily-report-and-notify`, `merged-branch-cleanup`, `pr-review-audit` | Conditional |
 | `telethon` | `daily-report-and-notify` | Conditional — Telegram notifications |
 | `~/Desktop/Valor/projects.json` | Multi-repo reflections | Optional — defaults to AI repo only |
@@ -518,7 +514,7 @@ The reflection scheduler starts automatically as part of the standalone worker p
 
 ## See Also
 
-- [Documentation Audit](documentation-audit.md) — `documentation-audit` unit deep dive
+- [Docs Auditor](docs-auditor.md) — unified `docs-auditor` substrate (replaces the prior `documentation-audit`, `feature-docs-audit`, and `knowledge-reindex` reflections)
 - [Hooks Best Practices & Audit](hooks-best-practices.md) — `hooks-audit` unit deep dive
 - [Skills Audit](do-skills-audit.md) — `skills-audit` unit deep dive
 - [Subconscious Memory](subconscious-memory.md#memory-consolidation) — `memory-dedup` consolidation
