@@ -113,8 +113,11 @@ def _make_entry(execution_type: str = "function") -> ReflectionEntry:
         name="fake",
         description="fake",
         execution_type=execution_type,
-        callable=("tests.unit.test_scheduler_result_forwarding._noop_target"
-                  if execution_type == "function" else None),
+        callable=(
+            "tests.unit.test_scheduler_result_forwarding._noop_target"
+            if execution_type == "function"
+            else None
+        ),
         command="fake-agent" if execution_type == "agent" else None,
         interval=86400,
         priority="low",
@@ -152,6 +155,7 @@ async def test_run_reflection_forwards_projects_from_dict_result():
         # Make the patched coroutine awaitable: wrap in an async-returning fn
         async def _awaitable_returning(_entry):
             return fake_result
+
         mock_exec.side_effect = _awaitable_returning
 
         await run_reflection(entry, state)
@@ -170,8 +174,10 @@ async def test_run_reflection_passes_none_for_legacy_none_result():
     with patch(
         "agent.reflection_scheduler.execute_function_reflection",
     ) as mock_exec:
+
         async def _none(_entry):
             return None
+
         mock_exec.side_effect = _none
 
         await run_reflection(entry, state)
@@ -189,8 +195,10 @@ async def test_run_reflection_passes_none_for_dict_without_projects_key():
     with patch(
         "agent.reflection_scheduler.execute_function_reflection",
     ) as mock_exec:
+
         async def _dict_no_projects(_entry):
             return {"status": "ok", "findings": [], "summary": "no per-project data"}
+
         mock_exec.side_effect = _dict_no_projects
 
         await run_reflection(entry, state)
@@ -213,8 +221,10 @@ async def test_run_reflection_passes_none_for_non_dict_return():
     with patch(
         "agent.reflection_scheduler.execute_function_reflection",
     ) as mock_exec:
+
         async def _str_result(_entry):
             return "not a dict"
+
         mock_exec.side_effect = _str_result
 
         await run_reflection(entry, state)

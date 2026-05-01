@@ -83,7 +83,7 @@ class TestModalPerProjectRendering:
         ]
         html = _render_modal(env, runs)
         # CSS class definition still appears in <style>, but no <tr> uses it.
-        assert "<tr class=\"project-sub-row\">" not in html
+        assert '<tr class="project-sub-row">' not in html
 
     def test_missing_projects_key_omits_sub_rows(self, env: Environment) -> None:
         """Legacy run records (no `projects` key at all) render cleanly."""
@@ -96,7 +96,7 @@ class TestModalPerProjectRendering:
             }
         ]
         html = _render_modal(env, runs)
-        assert "<tr class=\"project-sub-row\">" not in html
+        assert '<tr class="project-sub-row">' not in html
 
     def test_two_projects_render_two_sub_rows_with_slug(self, env: Environment) -> None:
         """Two qualifying projects → two indented sub-rows tagged `[ai]`/`[popoto]`."""
@@ -125,7 +125,7 @@ class TestModalPerProjectRendering:
             }
         ]
         html = _render_modal(env, runs)
-        assert html.count("<tr class=\"project-sub-row\">") == 2
+        assert html.count('<tr class="project-sub-row">') == 2
         assert "[ai]" in html
         assert "[popoto]" in html
 
