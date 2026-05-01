@@ -5,6 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-05-01
 revised: 2026-05-01
+revision_count: 2
 tracking: https://github.com/tomcounsell/ai/issues/1245
 last_comment_id:
 ---
@@ -953,6 +954,22 @@ entry points, no bridge changes, no MCP servers affected.
 | Concern | Adversary | `completed_at` is a `DatetimeField` per the model — assigning a float may serialize oddly | Spike Finding 4 + Step 4 | Popoto auto-conversion is an existing, documented behavior at `models/agent_session.py:459-465, 710-711`. The model field's auto-conversion is irrelevant to the ZADD index because the index uses the locally-computed numeric `ts`, not the model field value. |
 | Concern | Archaeologist | `accumulate_session_tokens` race is a known issue but unfixed here | Race Conditions section + No-Gos | Explicitly out of scope. Risk acknowledged; future plan can revisit. |
 
+## Plan Revision History
+
+| Iteration | Date | Trigger | Summary |
+|-----------|------|---------|---------|
+| Initial | 2026-05-01 | New plan | First draft based on issue #1245 recon. Proposed `message_stop` turn-counter subsystem and `atomic_increment_session_field` helper. |
+| Revision 1 | 2026-05-01 (commit `17a826d8`) | Critique verdict: NEEDS REVISION (B1–B4) | Spike findings replaced earlier assumptions: `num_turns` is in the `result` event (no subsystem); `assistant`-event handler must be ADDED (none exists); `session_id_from_harness` is the Claude UUID, NOT the AgentSession ID — persist in `get_response_via_harness` (Spike Finding 5). Atomic helper deleted (Decision post-spike). New blockers B5/B6 surfaced and addressed in same revision. |
+| Revision 2 | 2026-05-01 (this commit) | Stale verdict; PM re-dispatched `/do-plan` | No structural changes — adds revision metadata (`revision_count: 2`), this Plan Revision History table, and minor doc tightening. All B1–B6 fixes from Revision 1 stand. Ready for re-critique. |
+
+**Files changed across revisions:**
+- `agent/sdk_client.py` — `_run_harness_subprocess` return shape, new `assistant`-event handler, four new fields extracted from `result` event
+- `agent/sdk_client.py` — `get_response_via_harness` AgentSession persist block (NEW location, post-Revision 1)
+- `agent/sdk_client.py` — `get_response_via_sdk` dead emit deletion
+- `models/session_lifecycle.py` — additive ZADD in `finalize_session()` (no model field change)
+- `ui/data/analytics.py` — new `_query_session_sums` helper, replaces two `query_metric_total` calls
+- 5 test files — return-shape updates (3+ production call sites, 25+ mock fixtures)
+
 ---
 
 ## Open Questions
@@ -971,4 +988,4 @@ The three original planning decisions from the issue remain resolved:
 - Turn counter → `result.num_turns` direct extraction (no `message_stop` accumulation)
 - Atomic helper → **deleted from plan** (num_turns is final-not-delta; helper was unneeded)
 
-No human input needed before re-critique.
+**No human input needed before re-critique.** All planning decisions are resolved; the deferred follow-up above is explicitly out of scope and not a blocker for this plan.
