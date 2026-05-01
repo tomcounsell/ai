@@ -21,10 +21,22 @@ Reflection callables:
 All functions accept no arguments and return:
   {"status": "ok"|"error", "findings": [...], "summary": str}
 
-Layer 3 reuses ``agent.memory_extraction._extract_json_payload`` to parse
-gemma model JSON output. If that helper ever evolves to be extractor-specific
-(e.g. gains an `expects_observation_field` flag), Layer 3 will need to either
-copy a frozen helper or coordinate the extension.
+Layer 3 reuses ``agent.memory_extraction.extract_json_payload`` to parse
+gemma model JSON output. The helper was promoted to the public surface
+(rename from ``_extract_json_payload``) precisely so this audit could couple
+to a public seam — see plan critique C2.
+
+Layer 1 escape hatch: ``MEMORY_AUDIT_LAYER1_CAP`` env var overrides the
+per-run supersede cap. Default 50; ``0`` = unbounded (process all matching
+candidates); positive int = override; non-int / negative = defensive
+fallback to default. Operator runbook for compressing the tail:
+
+    MEMORY_AUDIT_LAYER1_CAP=0 python -c \\
+      "import asyncio; from reflections.memory_management import \\
+       run_memory_quality_audit; print(asyncio.run(run_memory_quality_audit())['summary'])"
+
+The env var has zero effect on scheduled runs (the reflection scheduler
+does not set it). It must be supplied explicitly per invocation.
 """
 
 from __future__ import annotations
@@ -32,14 +44,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re as _re
 import time as _time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agent.memory_extraction import _looks_like_refusal
+from agent.memory_extraction import _looks_like_refusal, extract_json_payload
 from config.models import OLLAMA_LOCAL_MODEL
+
+# Public-seam reference (resolves critique C2): the literal pattern below is
+# what the plan #1231 verification table greps for. The actual module-level
+# binding is the consolidated import a few lines above.
+#   from agent.memory_extraction import extract_json_payload
 
 logger = logging.getLogger("reflections.memory_management")
 
@@ -59,7 +77,8 @@ IMPORTANCE_EXEMPT_THRESHOLD = 7.0
 # Layer 1 — deterministic supersede constants
 CLEANUP_SUPERSEDED_BY = "cleanup-junk-extraction"
 CLEANUP_RATIONALE = "auto-cleanup: refusal/json-shrapnel from issue #1212"
-MAX_LAYER1_SUPERSEDES_PER_RUN = MAX_PRUNE_PER_RUN  # 50, reuses module constant
+DEFAULT_LAYER1_CAP = MAX_PRUNE_PER_RUN  # 50, reuses module constant
+MAX_LAYER1_SUPERSEDES_PER_RUN = DEFAULT_LAYER1_CAP  # back-compat alias
 
 # Layer 2 — heuristic anomaly thresholds (tuned against post-Layer-1 corpus)
 CATEGORY_DEFAULT_SKEW_THRESHOLD = 0.70  # fraction of last-7d records with no category
@@ -72,7 +91,8 @@ HTML_ESCAPE_WOW_RATIO_THRESHOLD = 2.0  # week-over-week ratio jump multiplier
 LAYER3_SAMPLE_SIZE = 20
 LAYER3_MIN_SIGNAL_CLUSTER = 3  # # records with same anomaly_signal needed to file an issue
 LAYER3_WALLCLOCK_BUDGET_S = 30  # hard cap; abort remaining records past this
-LAYER3_PER_CALL_TIMEOUT_S = 5  # per-record asyncio.wait_for timeout
+GEMMA_CALL_TIMEOUT_SEC = 10  # per-record asyncio.wait_for timeout (resolves critique C3)
+LAYER3_PER_CALL_TIMEOUT_S = GEMMA_CALL_TIMEOUT_SEC  # back-compat alias
 
 # Layer 3 — Gemma classification prompt (two-example few-shot, JSON output)
 GEMMA_AUDIT_PROMPT = """You are auditing memory records produced by an automated extraction pipeline. Each record is supposed to be a one-sentence observation about an agent session. Some are valid; some are extractor failures (raw JSON output, refusal prose, error text).
@@ -238,6 +258,33 @@ async def run_memory_decay_prune() -> dict:
 # ============================================================
 
 
+def _resolve_layer1_cap() -> int | None:
+    """Return the per-run Layer 1 supersede cap (resolves critique C5).
+
+    Honors the ``MEMORY_AUDIT_LAYER1_CAP`` env var:
+      - unset / non-int  → ``DEFAULT_LAYER1_CAP`` (50)
+      - "0"              → ``None`` (no cap; process all matching candidates)
+      - positive int     → that integer
+      - negative         → ``DEFAULT_LAYER1_CAP`` (defensive fallback)
+
+    The env var is intentionally not propagated by the reflection scheduler;
+    it must be set explicitly per invocation by an operator who wants to
+    compress the cleanup tail in a one-off run.
+    """
+    raw = os.environ.get("MEMORY_AUDIT_LAYER1_CAP")
+    if raw is None:
+        return DEFAULT_LAYER1_CAP
+    try:
+        n = int(raw)
+    except (ValueError, TypeError):
+        return DEFAULT_LAYER1_CAP
+    if n == 0:
+        return None
+    if n < 0:
+        return DEFAULT_LAYER1_CAP
+    return n
+
+
 def _has_no_category(metadata: dict | None) -> bool:
     """Canonical 'no category' predicate. True when:
     - metadata is None or empty dict (line-based fallback path), OR
@@ -294,7 +341,8 @@ def _layer1_supersede(extraction_records: list) -> tuple[int, int, list[str], li
         for m in extraction_records
         if not (m.superseded_by or "") and _looks_like_refusal(m.content or "")
     ]
-    capped = candidates[:MAX_LAYER1_SUPERSEDES_PER_RUN]
+    cap = _resolve_layer1_cap()
+    capped = candidates if cap is None else candidates[:cap]
 
     for m in capped:
         # Race detection: re-check superseded_by immediately before write to
@@ -487,8 +535,6 @@ def _gemma_classify(content: str) -> dict | None:
     try:
         import ollama
 
-        from agent.memory_extraction import _extract_json_payload
-
         response = ollama.chat(
             model=OLLAMA_LOCAL_MODEL,
             messages=[
@@ -498,8 +544,9 @@ def _gemma_classify(content: str) -> dict | None:
         )
         raw = response["message"]["content"].strip()
         # Tolerant JSON parse (handles fenced output, preamble) — same helper
-        # the extractor uses for the same model family.
-        payload = _extract_json_payload(raw) or raw
+        # the extractor uses for the same model family. Imported at module top
+        # via the public name (resolves critique C2).
+        payload = extract_json_payload(raw) or raw
         return json.loads(payload)
     except Exception as e:
         logger.debug(f"layer3 gemma classify failed (non-fatal): {e}")
@@ -555,11 +602,13 @@ async def _layer3_classify(extraction_records: list) -> tuple[list[dict], list[s
                     continue
 
                 try:
+                    # Resolves critique C3: use asyncio.get_running_loop()
+                    # (not the deprecated asyncio loop accessor) and bound
+                    # each call by GEMMA_CALL_TIMEOUT_SEC.
+                    loop = asyncio.get_running_loop()
                     verdict = await asyncio.wait_for(
-                        asyncio.get_event_loop().run_in_executor(
-                            executor, _gemma_classify, content
-                        ),
-                        timeout=LAYER3_PER_CALL_TIMEOUT_S,
+                        loop.run_in_executor(executor, _gemma_classify, content),
+                        timeout=GEMMA_CALL_TIMEOUT_SEC,
                     )
                 except TimeoutError:
                     verdict = None
@@ -620,11 +669,12 @@ async def _layer3_classify(extraction_records: list) -> tuple[list[dict], list[s
 async def _find_open_audit_issue(signal_name: str) -> int | None:
     """Return the issue number of an open audit issue for this signal, or None.
 
-    Resolves C3: `gh issue list` with multiple `--label` flags performs OR-matching
-    (any label matches), not AND. To require BOTH `memory` AND `investigation`,
-    use `--search "label:memory label:investigation"` (space-separated terms in
-    the search string are AND-combined by GitHub's search syntax). The `--label`
-    flag is dropped entirely; all label filtering moves into `--search`.
+    Resolves critique C4: title-prefix is the **sole** dup-check key. Labels
+    are descriptive only and may be stripped or relabeled by an operator
+    without breaking idempotency. The `gh issue list` call deliberately does
+    NOT include any label-filter flag and the `--search` query has no
+    ``label:`` term — the title prefix that the audit itself controls is the
+    structured primary key.
 
     Async via ``asyncio.create_subprocess_exec`` + ``asyncio.wait_for`` so the
     worker event loop is not blocked by ``gh`` latency (matches the pattern in
@@ -634,7 +684,7 @@ async def _find_open_audit_issue(signal_name: str) -> int | None:
     to suppress filing for the run; better to skip than spam if search is broken).
     """
     title_prefix = f"[memory-audit] {signal_name}:"
-    search_query = f'label:memory label:investigation in:title "{title_prefix}"'
+    search_query = f'in:title "{title_prefix}"'
     try:
         proc = await asyncio.create_subprocess_exec(
             "gh",

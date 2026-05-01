@@ -1184,8 +1184,12 @@ class TestDuplicateIssueDetection:
 
         assert filed is False
 
-    def test_find_open_audit_issue_uses_search_not_label_flags(self):
-        """_find_open_audit_issue uses --search with label: terms (resolves C3 OR-vs-AND)."""
+    def test_find_open_audit_issue_uses_title_prefix_only_no_label_filter(self):
+        """_find_open_audit_issue dup-checks on title prefix only (resolves critique C4).
+
+        Labels are descriptive but not part of the dup key — an operator who
+        relabels (or strips labels from) an open issue must not cause re-filing.
+        """
         from reflections.memory_management import _find_open_audit_issue
 
         fake_proc = _make_fake_subproc(stdout=b"[]", returncode=0)
@@ -1197,14 +1201,15 @@ class TestDuplicateIssueDetection:
             run_async(_find_open_audit_issue("category-default-skew"))
 
             cmd = list(mock_exec.call_args.args)
-            # Verify the labels are inside the --search string, not as standalone --label flags
+            # The --label flag must not appear at all
+            assert "--label" not in cmd
+            # And the search query must not include any label: term either
             assert "--search" in cmd
             search_idx = cmd.index("--search")
             search_query = cmd[search_idx + 1]
-            assert "label:memory" in search_query
-            assert "label:investigation" in search_query
-            # The whole label-as-flag pattern should NOT appear
-            assert "--label" not in cmd
+            assert "label:" not in search_query
+            # The structured title prefix is the sole dup-check key
+            assert "[memory-audit] category-default-skew:" in search_query
 
 
 # ----------- Quiescence + result shape -----------
@@ -1310,6 +1315,77 @@ def test_run_memory_quality_audit_imports_looks_like_refusal_directly():
 
     # Module-level import, not just a function-local reuse.
     assert mm._looks_like_refusal is _looks_like_refusal
+
+
+# ============================================================
+# Public-seam rename: extract_json_payload (resolves critique C2)
+# ============================================================
+
+
+class TestPublicSeam:
+    """Locks the agent.memory_extraction.extract_json_payload public surface."""
+
+    def test_extract_json_payload_is_public(self):
+        """The public name resolves and is callable."""
+        import agent.memory_extraction as mm
+        from agent.memory_extraction import extract_json_payload
+
+        assert callable(extract_json_payload)
+        assert hasattr(mm, "extract_json_payload")
+
+    def test_underscore_name_retired(self):
+        """The legacy underscore name no longer exists (no legacy code tolerance)."""
+        import agent.memory_extraction as mm
+
+        assert not hasattr(mm, "_extract_json_payload"), (
+            "Legacy underscore name still present — public-seam rename incomplete"
+        )
+
+    def test_reflections_imports_public_name(self):
+        """reflections.memory_management imports extract_json_payload from the public seam."""
+        import reflections.memory_management as mm
+        from agent.memory_extraction import extract_json_payload
+
+        assert mm.extract_json_payload is extract_json_payload
+
+
+# ============================================================
+# Layer 1 escape hatch: MEMORY_AUDIT_LAYER1_CAP env var (resolves critique C5)
+# ============================================================
+
+
+class TestLayer1EscapeHatch:
+    """Tests _resolve_layer1_cap() env-var resolver."""
+
+    def test_unset_returns_default(self, monkeypatch):
+        from reflections.memory_management import DEFAULT_LAYER1_CAP, _resolve_layer1_cap
+
+        monkeypatch.delenv("MEMORY_AUDIT_LAYER1_CAP", raising=False)
+        assert _resolve_layer1_cap() == DEFAULT_LAYER1_CAP == 50
+
+    def test_zero_returns_none_uncapped(self, monkeypatch):
+        from reflections.memory_management import _resolve_layer1_cap
+
+        monkeypatch.setenv("MEMORY_AUDIT_LAYER1_CAP", "0")
+        assert _resolve_layer1_cap() is None
+
+    def test_positive_int_overrides(self, monkeypatch):
+        from reflections.memory_management import _resolve_layer1_cap
+
+        monkeypatch.setenv("MEMORY_AUDIT_LAYER1_CAP", "200")
+        assert _resolve_layer1_cap() == 200
+
+    def test_garbage_falls_back_to_default(self, monkeypatch):
+        from reflections.memory_management import DEFAULT_LAYER1_CAP, _resolve_layer1_cap
+
+        monkeypatch.setenv("MEMORY_AUDIT_LAYER1_CAP", "not-an-int")
+        assert _resolve_layer1_cap() == DEFAULT_LAYER1_CAP
+
+    def test_negative_falls_back_to_default(self, monkeypatch):
+        from reflections.memory_management import DEFAULT_LAYER1_CAP, _resolve_layer1_cap
+
+        monkeypatch.setenv("MEMORY_AUDIT_LAYER1_CAP", "-5")
+        assert _resolve_layer1_cap() == DEFAULT_LAYER1_CAP
 
 
 # ============================================================

@@ -534,57 +534,57 @@ class TestParseCategorizedObservations:
 
 
 class TestExtractJsonPayload:
-    """Test agent/memory_extraction.py _extract_json_payload() (issue #1212)."""
+    """Test agent/memory_extraction.py extract_json_payload() (issue #1212)."""
 
     def test_empty_returns_none(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
-        assert _extract_json_payload("") is None
+        assert extract_json_payload("") is None
 
     def test_whitespace_returns_none(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
-        assert _extract_json_payload("   \n\t  ") is None
+        assert extract_json_payload("   \n\t  ") is None
 
     def test_garbage_returns_none(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
-        assert _extract_json_payload("not json at all, just prose") is None
+        assert extract_json_payload("not json at all, just prose") is None
 
     def test_extracts_array_from_fence(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
         raw = '```json\n[{"a": 1}]\n```'
-        assert _extract_json_payload(raw) == '[{"a": 1}]'
+        assert extract_json_payload(raw) == '[{"a": 1}]'
 
     def test_extracts_array_from_unlabeled_fence(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
         raw = '```\n[{"a": 1}]\n```'
-        assert _extract_json_payload(raw) == '[{"a": 1}]'
+        assert extract_json_payload(raw) == '[{"a": 1}]'
 
     def test_extracts_array_with_preamble(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
         raw = 'Here is the result:\n[{"a": 1}]'
-        assert _extract_json_payload(raw) == '[{"a": 1}]'
+        assert extract_json_payload(raw) == '[{"a": 1}]'
 
     def test_extracts_bare_object(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
         raw = '{"a": 1}'
-        assert _extract_json_payload(raw) == '{"a": 1}'
+        assert extract_json_payload(raw) == '{"a": 1}'
 
     def test_pure_function_no_exceptions(self):
-        """_extract_json_payload is a pure function — never raises."""
-        from agent.memory_extraction import _extract_json_payload
+        """extract_json_payload is a pure function — never raises."""
+        from agent.memory_extraction import extract_json_payload
 
         # Various corner cases that should all return None, not raise.
         for bad in ["[", "}", "[{", "{[", "```", "```json"]:
             try:
-                result = _extract_json_payload(bad)
+                result = extract_json_payload(bad)
             except Exception as e:
-                raise AssertionError(f"_extract_json_payload({bad!r}) raised: {e}") from e
+                raise AssertionError(f"extract_json_payload({bad!r}) raised: {e}") from e
             assert result is None or isinstance(result, str)
 
 

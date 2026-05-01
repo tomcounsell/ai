@@ -20,6 +20,7 @@ Executive bandwidth is the scarce resource. A brief earns its 30 seconds only wh
 - **--chat** (required) — Target chat name (e.g. `"Dev: Valor"`) or numeric chat ID.
 - **--voice** (optional) — Voice name; defaults to `am_michael` (Kokoro). `bf_alice` is the female alternative. See `tools/tts/README.md`.
 - **--reply-to** (optional) — Telegram message ID to reply to (required for forum-group topics).
+- **--no-preface** (optional) — Suppress the one-line text preface that normally precedes the voice note. Default is to send the preface; pass this flag for pure-audio delivery.
 
 ## The brief shape (target: ~30s, ~70 words spoken)
 
@@ -82,9 +83,21 @@ Write the brief in the shape above. Apply these rules verbatim:
 - Verify nothing in the brief is something you're handling yourself.
 - Read it through once mentally — first pass at filler-word removal almost always frees ~10s for what matters.
 
-### 6. Review gate
+### 6. Preface line
 
-Show the final transcript to the user with one line: `Final transcript (~Xs, Y words). Synthesize and send?` Only proceed on explicit confirmation. This is the cheap moment to catch a bad default-and-confirm before it lands as audio in someone's chat.
+Build a one-line text preface that lands in the chat right before the voice bubble. It exists so the recipient can glance at the chat and decide whether to tap play, and so the message is searchable later by something other than waveform.
+
+Format: `Brief update as of <H:MM AM/PM> · <N> items · <Q> questions`
+
+- **items** — total things mentioned in the brief (Decisions + Critical heads-up + FYIs). Already-handled and Noise are dropped during categorization and don't count.
+- **questions** — number of Decision items (each one is a default-and-confirm the recipient can veto).
+- **timestamp** — the recipient's local hour:minute with am/pm. Use `date +"%-I:%M %p"` (machine localtime is fine for a same-day brief).
+
+If the user passed `--no-preface`, skip this entirely.
+
+### 7. Review gate
+
+Show the final transcript and preface to the user with one line: `Final transcript (~Xs, Y words). Preface: "<preface>". Synthesize and send?` Only proceed on explicit confirmation. This is the cheap moment to catch a bad default-and-confirm before it lands as audio in someone's chat.
 
 ## Delivery (only after confirmation)
 
@@ -97,14 +110,19 @@ valor-tts --text "$TRANSCRIPT" --output "$OUT" || {
     exit 1
 }
 
+# Preface (skippable). Send before the voice note so it lands first in the chat.
+if [ -z "$NO_PREFACE" ]; then
+    valor-telegram send --chat "$CHAT" "$PREFACE"
+fi
+
 valor-telegram send \
-    --chat "Dev: Valor" \
+    --chat "$CHAT" \
     --voice-note \
     --cleanup-after-send \
     --audio "$OUT"
 ```
 
-The relay owns the file from the moment the payload is pushed — it deletes on successful send OR after dead-letter placement on retry exhaustion. Synchronous deletion races the relay's retry loop.
+The relay owns the audio file from the moment the payload is pushed — it deletes on successful send OR after dead-letter placement on retry exhaustion. Synchronous deletion races the relay's retry loop.
 
 ## Anti-patterns
 

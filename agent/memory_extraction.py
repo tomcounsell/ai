@@ -84,7 +84,7 @@ _JSON_SHRAPNEL_RE = re.compile(r'^"[a-z_]+"\s*:\s*.*,?\s*$')
 _MIN_NON_WHITESPACE_RATIO = 0.3
 
 
-def _extract_json_payload(raw_text: str) -> str | None:
+def extract_json_payload(raw_text: str) -> str | None:
     r"""Strip markdown code fences and slice to outermost JSON brackets.
 
     Handles two common Haiku output shapes that broke strict ``json.loads``
@@ -484,12 +484,12 @@ def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dic
     """Parse Haiku output into (content, importance, metadata) tuples.
 
     Tries tolerant JSON parsing first (strips markdown code fences and slices
-    to outermost brackets via ``_extract_json_payload``, then ``json.loads``).
+    to outermost brackets via ``extract_json_payload``, then ``json.loads``).
     On a successful JSON parse with ≥1 valid observation, short-circuits and
     returns — the line-based fallback NEVER runs in that case (issue #1212).
 
     Falls back to a line-based ``CATEGORY: text`` parser only when
-    ``_extract_json_payload`` finds no JSON-shaped substring AND the input
+    ``extract_json_payload`` finds no JSON-shaped substring AND the input
     is not a refusal. Each fallback line is filtered through
     ``_looks_like_refusal`` so refusal prose and JSON-syntax fragments
     (``"tags": [...]``) never reach the Memory store.
@@ -508,7 +508,7 @@ def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dic
     # through to the line-based parser (worst case: same behavior as before
     # the fix). If extraction yields no JSON-shaped substring, also fall
     # through.
-    payload = _extract_json_payload(raw_text)
+    payload = extract_json_payload(raw_text)
     if payload is not None:
         try:
             data = json.loads(payload)

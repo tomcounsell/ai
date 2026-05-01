@@ -2026,15 +2026,15 @@ wheels = [
 
 [[package]]
 name = "popoto"
-version = "1.6.0"
+version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "msgpack" },
     { name = "redis" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fb/4c/483dde1cb125cb0f6feebc259c71d360da4c317ad8a8fae22026a6cec5d4/popoto-1.6.0.tar.gz", hash = "sha256:53aa17815e202eb9a0aa13271346f1c7e907298e6e03b6caa5890eb488afcb24", size = 443518 }
+sdist = { url = "https://files.pythonhosted.org/packages/fe/f3/bef5eb8eeab33c170eacdd1abb0c1d95d6183d72e0fb7a5c060891c773f4/popoto-1.6.1.tar.gz", hash = "sha256:131b22c01e70ada6a0da19eff9a8cef6dd3ab96fc1238d62c6b63e416cf4697c", size = 445382 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5b/a6/c284240937ad0241fe29de4ed7190e4b958285e1f19601099aa20d385d9c/popoto-1.6.0-py3-none-any.whl", hash = "sha256:240fee432e1e6a62456c4e4d1c5c66e8797154e641c10ff650c0dcd71e330288", size = 274266 },
+    { url = "https://files.pythonhosted.org/packages/54/aa/110309612a01f8cbb81c7dc43382dab29e66dec4f801ad5463e4789cbbe7/popoto-1.6.1-py3-none-any.whl", hash = "sha256:171e6564870ae7411fd23e8e3b1427b46c26946930bc33159c1bb5a887766bd2", size = 274703 },
 ]
 
 [[package]]
@@ -3364,7 +3364,7 @@ requires-dist = [
     { name = "onnxruntime", marker = "extra == 'tts'", specifier = ">=1.25.0" },
     { name = "openai", specifier = ">=1.0.0" },
     { name = "pillow", specifier = ">=10.0.0" },
-    { name = "popoto", specifier = ">=1.6.0" },
+    { name = "popoto", specifier = ">=1.6.1" },
     { name = "psutil", specifier = ">=5.9.0" },
     { name = "pypdf", specifier = ">=6.10.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
