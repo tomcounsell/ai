@@ -41,18 +41,29 @@ import pytest
 def _seed_phantom_record(project_key: str = "test", status: str = "pending") -> str:
     """Seed a Redis hash that will materialize as a phantom on query.all().
 
-    Creates a minimal hash with no real field data (just a placeholder key)
-    and registers it in the class membership set so ``query.all()`` tries to
-    hydrate it. The resulting AgentSession instance will have ``id`` /
-    ``agent_session_id`` as a Popoto ``Field`` descriptor instead of a string.
+    Creates a minimal hash with an explicit msgpack-encoded ``id=None`` field
+    (so Popoto's lazy decoder reads ``id`` from the hash and lands on
+    ``None`` rather than falling back to ``AutoKeyField.default``, which is
+    contaminated by the most recently constructed real instance) plus a
+    placeholder field. Registers the hash in the class membership set so
+    ``query.all()`` tries to hydrate it. The resulting AgentSession instance
+    will have ``id`` / ``agent_session_id`` as ``None`` (non-string),
+    triggering the phantom guard in ``_filter_hydrated_sessions``.
 
     Returns the fake hash id used.
     """
+    import msgpack
     from popoto.redis_db import POPOTO_REDIS_DB
 
     fake_id = "ghostidx00000000000000000000000a"
     hash_key = f"AgentSession:None:{fake_id}:None:{project_key}:None"
-    POPOTO_REDIS_DB.hset(hash_key, "placeholder", "")
+    POPOTO_REDIS_DB.hset(
+        hash_key,
+        mapping={
+            "id": msgpack.packb(None),
+            "placeholder": msgpack.packb(""),
+        },
+    )
     POPOTO_REDIS_DB.sadd("$Class:AgentSession", hash_key)
     # Also seed the status index to simulate an orphan filter result.
     POPOTO_REDIS_DB.sadd(f"$IndexF:AgentSession:status:{status}", hash_key)

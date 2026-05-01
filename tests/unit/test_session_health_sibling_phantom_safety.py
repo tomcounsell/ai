@@ -34,16 +34,30 @@ def _seed_phantom(project_key: str = "valor", status: str = "pending") -> str:
     also register the hash in the ``$KeyF:AgentSession:project_key:*`` set so
     filter queries with ``project_key=...`` pick up the phantom, matching the
     real production failure mode where all indexes diverge together.
+
+    Writes an explicit msgpack-encoded ``id=None`` field so Popoto's lazy
+    decoder lands on ``None`` for ``id`` / ``agent_session_id`` rather than
+    falling back to ``AutoKeyField.default`` (which is contaminated by the
+    most recently constructed real instance). This makes the phantom's
+    ``agent_session_id`` non-string, matching the production failure mode
+    that ``_filter_hydrated_sessions`` is designed to detect.
     """
     import hashlib
 
+    import msgpack
     from popoto.redis_db import POPOTO_REDIS_DB
 
     # 32-char id unique per (project_key, status) so multiple seeds don't collide.
     digest = hashlib.md5(f"{project_key}:{status}".encode()).hexdigest()
     fake_id = f"ghost{digest}"[:32].ljust(32, "0")
     hash_key = f"AgentSession:None:{fake_id}:None:{project_key}:None"
-    POPOTO_REDIS_DB.hset(hash_key, "placeholder", "")
+    POPOTO_REDIS_DB.hset(
+        hash_key,
+        mapping={
+            "id": msgpack.packb(None),
+            "placeholder": msgpack.packb(""),
+        },
+    )
     POPOTO_REDIS_DB.sadd("$Class:AgentSession", hash_key)
     POPOTO_REDIS_DB.sadd(f"$IndexF:AgentSession:status:{status}", hash_key)
     POPOTO_REDIS_DB.sadd(f"$KeyF:AgentSession:project_key:{project_key}", hash_key)
