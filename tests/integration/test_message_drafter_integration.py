@@ -246,3 +246,171 @@ async def test_rtr_failure_writes_original_text(rtr_handler_setup):
     payload = json.loads(mock_redis.rpush.call_args[0][1])
     assert payload["text"] == long_text
     assert payload.get("type") != "reaction"
+
+
+# === Drafter redundancy suppression (issue #1205) integration tests ===========
+
+
+@pytest.fixture
+def redundancy_handler_setup(monkeypatch):
+    """Fixture for redundancy-filter integration tests.
+
+    Yields ``(handler, mock_redis, sdlc_session)``. The drafter is patched
+    to bypass cleanly (delivery_text == text). The SDLC session has is_sdlc=True
+    and recent_sent_drafts starts empty.
+    """
+    monkeypatch.setenv("DRAFTER_REDUNDANCY_SUPPRESSION_ENABLED", "true")
+    from agent.output_handler import TelegramRelayOutputHandler
+    from bridge.message_drafter import MessageDraft
+
+    handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+    mock_redis = MagicMock()
+    mock_redis.rpush = MagicMock(return_value=1)
+    mock_redis.expire = MagicMock()
+    handler._redis = mock_redis
+
+    sdlc_session = MagicMock()
+    sdlc_session.session_id = "sdlc-int-abc"
+    sdlc_session.is_sdlc = True
+    sdlc_session.status = "active"
+    sdlc_session.recent_sent_drafts = []
+    sdlc_session.session_events = None
+    sdlc_session.extra_context = {}
+    sdlc_session.record_recent_sent_draft = MagicMock()
+
+    def bypass_drafter(text, *, session=None, medium="telegram"):
+        return MessageDraft(text=text, was_drafted=False, artifacts={})
+
+    monkeypatch.setattr(
+        "bridge.message_drafter.draft_message",
+        AsyncMock(side_effect=bypass_drafter),
+    )
+    return handler, mock_redis, sdlc_session
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_redundancy_three_identical_drafts_produce_one_text_two_reactions(
+    redundancy_handler_setup,
+):
+    """SDLC session: three near-identical drafts within the window produce
+    exactly one text message and two 👀 reactions.
+
+    This is the regression test for the issue #1205 scenario: PM session in
+    waiting_for_children drafts the same status message N times. Only the first
+    send should produce a text; subsequent near-duplicates within the window
+    should each queue a 👀 reaction.
+    """
+    import time
+
+    from bridge.redundancy_filter import RTR_SUPPRESS_EMOJI, SuppressionVerdict
+
+    handler, mock_redis, sdlc_session = redundancy_handler_setup
+
+    # Repeated PM status text (realistic near-verbatim repeat).
+    status_text = (
+        "Still waiting for child sessions to complete. "
+        "I will confirm merge-readiness once all children report back. "
+        "No action required from you at this time."
+    ) * 5  # repeat to build up enough bigrams
+
+    # First send: no prior → send_verdict (no_baseline).
+    # Simulate this by having should_suppress return send for the first call.
+    call_count = 0
+
+    def mock_suppress(
+        draft_text, draft_artifacts, recent_sent_drafts, expectations, session_status
+    ):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return SuppressionVerdict(action="send", reason="no_baseline")
+        # Subsequent calls: simulate finding a match.
+        return SuppressionVerdict(
+            action="suppress",
+            reason="jaccard=0.95>=threshold=0.65",
+            jaccard=0.95,
+            matched_index=0,
+        )
+
+    with patch("bridge.redundancy_filter.should_suppress", side_effect=mock_suppress):
+        # First send: delivers text.
+        await handler.send(
+            chat_id="-100123",
+            text=status_text,
+            reply_to_msg_id=42,
+            session=sdlc_session,
+        )
+        # Second send: suppressed → 👀 reaction.
+        sdlc_session.recent_sent_drafts = [
+            {"ts": time.time(), "text": status_text[:500], "artifacts": {}}
+        ]
+        await handler.send(
+            chat_id="-100123",
+            text=status_text,
+            reply_to_msg_id=42,
+            session=sdlc_session,
+        )
+        # Third send: suppressed → 👀 reaction.
+        await handler.send(
+            chat_id="-100123",
+            text=status_text,
+            reply_to_msg_id=42,
+            session=sdlc_session,
+        )
+
+    calls = mock_redis.rpush.call_args_list
+    text_payloads = []
+    reaction_payloads = []
+    for c in calls:
+        p = json.loads(c[0][1])
+        if p.get("type") == "reaction":
+            reaction_payloads.append(p)
+        else:
+            text_payloads.append(p)
+
+    assert len(text_payloads) == 1, (
+        f"Expected 1 text message, got {len(text_payloads)}: {text_payloads}"
+    )
+    assert len(reaction_payloads) == 2, (
+        f"Expected 2 👀 reactions, got {len(reaction_payloads)}: {reaction_payloads}"
+    )
+    for rp in reaction_payloads:
+        assert rp["emoji"] == RTR_SUPPRESS_EMOJI
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_redundancy_new_artifact_prevents_suppression(redundancy_handler_setup):
+    """When the second draft adds a new PR URL artifact, suppression is bypassed
+    and the text is delivered (new_artifact termination fires)."""
+    import time
+
+    handler, mock_redis, sdlc_session = redundancy_handler_setup
+
+    base_text = (
+        "Review complete. Checking the final merge state. Children sessions have reported back. "
+    ) * 10
+
+    # First send (no prior → sends).
+    sdlc_session.recent_sent_drafts = []
+    await handler.send("-100123", base_text, 42, session=sdlc_session)
+
+    # Simulate a recorded prior draft.
+    sdlc_session.recent_sent_drafts = [
+        {"ts": time.time(), "text": base_text[:500], "artifacts": {}}
+    ]
+
+    # Second send with a new PR URL in the text — extract_artifacts should pick it up.
+    new_text = base_text + " PR: https://github.com/tomcounsell/ai/pull/9999"
+
+    await handler.send("-100123", new_text, 42, session=sdlc_session)
+
+    # Both should be text messages (not reactions).
+    calls = mock_redis.rpush.call_args_list
+    text_payloads = [
+        json.loads(c[0][1]) for c in calls if json.loads(c[0][1]).get("type") != "reaction"
+    ]
+    assert len(text_payloads) == 2, (
+        f"Expected 2 text messages (both sends), got {len(text_payloads)}"
+    )

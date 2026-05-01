@@ -179,6 +179,7 @@ _AGENT_SESSION_FIELDS = [
     "session_type",
     "slug",
     "pm_sent_message_ids",
+    "recent_sent_drafts",
     "last_heartbeat_at",
     "last_sdk_heartbeat_at",
     "last_stdout_at",

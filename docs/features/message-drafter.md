@@ -160,9 +160,19 @@ The stop hook classifies each turn's outcome by scanning `tool_use` blocks for t
 
 Recorded as **Resolved Decision RD-1** in `docs/plans/message-drafter-followup.md` (2026-04-20 follow-up).
 
+## Adjacent suppression layers
+
+After the drafter finalises `delivery_text`, two optional suppression layers may intercept the message before it reaches the outbox:
+
+1. **Redundancy filter** (`bridge/redundancy_filter.py`, issue #1205) — deterministic bigram-Jaccard guard for SDLC sessions. Runs first. Suppresses near-verbatim PM status repeats within a time window. See [Drafter Redundancy Suppression](drafter-redundancy-suppression.md).
+2. **Read-the-Room** (`bridge/read_the_room.py`, issue #1193) — opt-in Haiku verdict for non-SDLC sessions (`send` / `trim` / `suppress`). See [Read-the-Room Pre-Send Pass](read-the-room.md).
+
+Both layers queue a 👀 reaction on suppress (with an anchor) and emit `session_events` entries for observability.
+
 ## Files
 
 - `bridge/message_drafter.py` — the drafter module (replaces `bridge/summarizer.py`). Includes `_truncate_at_sentence_boundary` since the #1074 follow-up.
+- `bridge/redundancy_filter.py` — deterministic redundancy filter for SDLC sessions (issue #1205).
 - `agent/output_handler.py::TelegramRelayOutputHandler` — canonical delivery entry point. Drafter runs here; payload is written to the Redis outbox. Used by both the worker `send_cb` and (since the #1074 follow-up) the bridge's handler-event send callback.
 - `bridge/email_bridge.py::EmailOutputHandler` — drafter-in-handler wiring for email.
 - `bridge/telegram_relay.py::_send_queued_message` — belt-and-suspenders length guard.

@@ -197,8 +197,19 @@ observable; if RTR is firing on >90% of sends, the heuristic is wrong.
 4. If false-positive rate > 10%, tighten the system prompt or raise the
    suppression bar. Otherwise flip the flag in production.
 
+## Adjacent layers
+
+**Drafter Redundancy Suppression** (`bridge/redundancy_filter.py`, issue #1205) runs before RTR in the Path A funnel, but only for SDLC sessions. It uses deterministic bigram-Jaccard similarity (no LLM call) to suppress near-verbatim PM status repeats within a configurable time window. When it suppresses, RTR is not called (early return). When it passes, RTR runs as normal.
+
+The two layers compose cleanly:
+- SDLC sessions: redundancy filter first → RTR after (though RTR's SDLC bypass means RTR is effectively a no-op for SDLC sessions today).
+- Non-SDLC sessions: redundancy filter skipped → RTR runs.
+
+See [Drafter Redundancy Suppression](drafter-redundancy-suppression.md) for full details.
+
 ## Related documentation
 
 * [`docs/features/bridge-worker-architecture.md`](bridge-worker-architecture.md) — Path A flow showing where RTR sits.
+* [`docs/features/drafter-redundancy-suppression.md`](drafter-redundancy-suppression.md) — the deterministic SDLC-specific guard that runs before RTR.
 * [`docs/features/message-drafter.md`](message-drafter.md) — the upstream drafter whose output RTR inspects.
 * [`docs/features/single-machine-ownership.md`](single-machine-ownership.md) — bridge ownership model RTR runs inside.
