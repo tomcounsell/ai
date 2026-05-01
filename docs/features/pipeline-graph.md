@@ -99,7 +99,7 @@ SDLC sessions have `stage_states` initialized eagerly at session creation (ISSUE
 
 ### Dashboard Stage Routing
 
-The dashboard (`ui/data/sdlc.py`) routes stage reads through `PipelineStateMachine(session).get_display_progress()` (PR #747, issue #735). This ensures the dashboard is a direct consumer of the canonical `DISPLAY_STAGES` stored-state path — the same path used by the merge gate. `get_display_progress()` takes no arguments and returns stored state only. Artifact inference was removed in PR #733 (issue #729).
+The dashboard (`ui/data/sdlc.py`) routes stage reads through `PipelineStateMachine(session).get_display_progress()`. This ensures the dashboard is a direct consumer of the canonical `DISPLAY_STAGES` stored-state path — the same path used by the merge gate. `get_display_progress()` takes no arguments and returns stored state only.
 
 ## Integration
 
