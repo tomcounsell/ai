@@ -4,7 +4,10 @@ Tests for create_local() behavior, including the chat_id defaulting logic,
 and worker_key property behavior.
 """
 
+import uuid
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from config.enums import SessionType
 from models.agent_session import AgentSession
@@ -385,3 +388,77 @@ class TestRecentSentDraftsField:
         s.record_recent_sent_draft("some draft", {})
         # The in-memory list was still updated.
         assert len(s.recent_sent_drafts) == 1
+
+
+@pytest.mark.integration
+class TestRecentSentDraftsRoundtrip:
+    """Popoto serialize/deserialize roundtrip for recent_sent_drafts.
+
+    Validates that the ListField encoding/decoding cycle preserves the
+    structure of each entry ({text, ts, artifacts}). Requires a live Redis
+    connection; automatically skipped when Redis is unavailable.
+
+    The plan (docs/plans/sdlc-1205.md §Test Impact) explicitly required:
+    "The roundtrip test MUST call save() then AgentSession.query.get(session_id)
+    (or equivalent Popoto reload) to cover the ListField serialize/deserialize
+    cycle — a test that only checks the in-memory value is insufficient."
+    """
+
+    @pytest.fixture(autouse=True)
+    def skip_without_redis(self):
+        """Skip the entire class when Redis is not reachable."""
+        try:
+            import redis as redis_mod
+
+            r = redis_mod.Redis.from_url("redis://localhost:6379/0")
+            r.ping()
+        except Exception:
+            pytest.skip("Redis not available — skipping Popoto roundtrip test")
+
+    def test_recent_sent_drafts_roundtrip(self):
+        """record_recent_sent_draft() entries survive a Popoto save/reload cycle.
+
+        Creates a real AgentSession, calls record_recent_sent_draft(), then
+        reloads the session from Redis via AgentSession.get_by_id() and asserts
+        that text, ts, and artifacts are all preserved through the ListField
+        serialize/deserialize path.
+
+        Uses AgentSession.get_by_id(session.id) — the canonical reload helper
+        that wraps query.filter(id=...) as documented at models/agent_session.py.
+        """
+        session = None
+        try:
+            session = AgentSession(
+                session_id=f"test-roundtrip-{uuid.uuid4().hex[:8]}",
+                project_key="test-roundtrip",
+                chat_id=f"chat-roundtrip-{uuid.uuid4().hex[:8]}",
+                working_dir="/tmp/test",
+                session_type=SessionType.PM,
+            )
+            session.save()
+            agent_session_id = session.id  # AutoKeyField — assigned after save()
+
+            # Write an entry via the helper (uses scoped save internally).
+            artifacts = {"urls": ["https://github.com/example/pull/42"]}
+            session.record_recent_sent_draft("Status update with PR link.", artifacts)
+
+            # Reload from Redis — this exercises ListField deserialization.
+            reloaded = AgentSession.get_by_id(agent_session_id)
+            assert reloaded is not None, "Session not found after save"
+
+            drafts = reloaded.recent_sent_drafts
+            assert isinstance(drafts, list), f"Expected list, got {type(drafts)}"
+            assert len(drafts) == 1, f"Expected 1 entry, got {len(drafts)}"
+
+            entry = drafts[0]
+            assert entry["text"] == "Status update with PR link."
+            assert "ts" in entry
+            assert isinstance(entry["ts"], (int, float)), "ts must be numeric"
+            assert entry["artifacts"] == artifacts
+        finally:
+            # Clean up the test session so it doesn't linger in Redis.
+            if session is not None:
+                try:
+                    session.delete()
+                except Exception:
+                    pass

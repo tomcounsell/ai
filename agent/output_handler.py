@@ -300,6 +300,7 @@ class TelegramRelayOutputHandler:
         delivery_text = text
         file_paths: list[str] | None = None
         steering_deferred = False
+        draft = None  # initialized before try so it is always defined for the redundancy filter
         try:
             from bridge.message_drafter import draft_message
 
@@ -367,6 +368,7 @@ class TelegramRelayOutputHandler:
         # unchanged — the guard must never block delivery.
         #
         # Sequencing: redundancy filter → RTR → outbox rpush → record_recent_sent_draft
+        _draft_artifacts: dict = {}  # initialized here so record_sent section always has it
         try:
             from bridge.redundancy_filter import (
                 RTR_SUPPRESS_EMOJI as _REDUND_EMOJI,
@@ -406,7 +408,7 @@ class TelegramRelayOutputHandler:
                     delivery_text,
                     _draft_artifacts,
                     getattr(session, "recent_sent_drafts", None) or [],
-                    getattr(draft, "expectations", None) if "draft" in dir() else None,
+                    getattr(draft, "expectations", None) if draft is not None else None,
                     getattr(session, "status", None),
                 )
 
@@ -569,12 +571,7 @@ class TelegramRelayOutputHandler:
         # concurrent writes to other session fields (context_summary, expectations).
         if _rpush_succeeded and session is not None and getattr(session, "is_sdlc", False):
             try:
-                _record_artifacts = {}
-                try:
-                    _record_artifacts = _draft_artifacts or {}  # type: ignore[name-defined]
-                except NameError:
-                    pass
-                session.record_recent_sent_draft(delivery_text, _record_artifacts)
+                session.record_recent_sent_draft(delivery_text, _draft_artifacts)
             except Exception as _rec_err:
                 logger.warning(
                     "record_recent_sent_draft failed (non-fatal) for session %s: %s",
