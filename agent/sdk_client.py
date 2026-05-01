@@ -2160,6 +2160,9 @@ async def get_response_via_harness(
     if env:
         proc_env.update(env)
         proc_env.pop("ANTHROPIC_API_KEY", None)
+    # Force wide COLUMNS so Claude Code CLI doesn't narrow-wrap result text
+    # (mid-hyphen breaks observed in drafted messages when launched without a TTY).
+    proc_env["COLUMNS"] = "999"
 
     # Apply context budget unconditionally. On resumed turns with a typical
     # small message this is a no-op (one length comparison). On first turns
