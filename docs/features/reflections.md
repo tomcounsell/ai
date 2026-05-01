@@ -118,7 +118,7 @@ each update run. This ensures the scheduler always reads the vault version.
 | Name | Callable | Description |
 |------|----------|-------------|
 | `memory-decay-prune` | `reflections.memory_management.run_memory_decay_prune` | Delete below-threshold memories with zero access (dry-run default) |
-| `memory-quality-audit` | `reflections.memory_management.run_memory_quality_audit` | Flag memories with quality issues (zero-access, chronically low confidence) |
+| `memory-quality-audit` | `reflections.memory_management.run_memory_quality_audit` | 4-layer audit: legacy quality flags (Layer 0) + deterministic supersede of refusal/JSON-shrapnel (Layer 1) + heuristic anomaly detection (Layer 2) + Gemma classification fail-soft (Layer 3); files investigation issues for Layer-2/3 candidates |
 | `embedding-orphan-sweep` | `reflections.memory_management.run_embedding_orphan_sweep` | Reconcile Memory `.npy` embedding files against live records via Popoto `garbage_collect` + `sweep_stale_tempfiles` (dry-run default; opt-in via `EMBEDDING_ORPHAN_SWEEP_APPLY=true`; requires popoto >= 1.6.0) |
 
 ### State Model (`models/reflection.py`)
@@ -481,9 +481,13 @@ Prunes zero-access memories below the weak-forgetting threshold:
 
 ### `memory-quality-audit`
 
-Flags memories with quality issues for human review:
-- Zero-access memories older than 30 days
-- Memories with confidence consistently below 0.2
+4-layer always-apply audit (see [`docs/features/subconscious-memory.md`](./subconscious-memory.md#memory-health-audit) for full design):
+
+- **Layer 0** — legacy zero-access (>30d) + low-confidence (<0.2) flags. Read-only; no issues filed.
+- **Layer 1** — deterministic supersede via `_looks_like_refusal` predicate. Sets `superseded_by="cleanup-junk-extraction"` on `extraction-*` records matching refusal/JSON-shrapnel patterns. Capped at `MAX_LAYER1_SUPERSEDES_PER_RUN=50` (operator-tunable via `MEMORY_AUDIT_LAYER1_CAP`). Subsumes the retired `scripts/cleanup_memory_extraction_junk.py` one-shot.
+- **Layer 2** — heuristic anomaly detection (no model). Four signals: `category-default-skew`, `importance-1.0-skew`, `agent-id-cluster`, `html-escape-rate`. Cross-threshold signals become candidates.
+- **Layer 3** — Gemma classification (`gemma4:e2b`, fail-soft). Samples up to 20 last-24h records; 30s wallclock budget; 10s `GEMMA_CALL_TIMEOUT_SEC` per call. Verdicts grouped by anomaly_signal; signals with ≥3 matches become candidates. Fails soft if Ollama is unavailable.
+- **Issue surfacing** — Layer-2/3 candidates → `gh issue create --label memory --label investigation`, deduped via title-prefix search. Layer 0/1 never file issues.
 
 ### `embedding-orphan-sweep`
 

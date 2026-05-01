@@ -169,7 +169,7 @@ Haiku occasionally wraps its JSON in markdown code fences (` ```json ... ``` `),
 
 Two coordinated parser changes in `agent/memory_extraction.py` close the gap:
 
-- **Tolerant JSON extraction** (`_extract_json_payload`): strips ` ```json ... ``` ` (or bare ` ``` ... ``` `) fences and slices to the outermost `[...]` or `{...}` substring before `json.loads`. When the JSON path yields ≥1 valid `{observation, category, ...}` item, the function returns immediately — the line-based fallback is short-circuited. The line fallback only runs when no JSON-shaped substring exists in the response.
+- **Tolerant JSON extraction** (`extract_json_payload`): strips ` ```json ... ``` ` (or bare ` ``` ... ``` `) fences and slices to the outermost `[...]` or `{...}` substring before `json.loads`. When the JSON path yields ≥1 valid `{observation, category, ...}` item, the function returns immediately — the line-based fallback is short-circuited. The line fallback only runs when no JSON-shaped substring exists in the response.
 - **Refusal-pattern filter** (`_REFUSAL_PATTERNS` + `_looks_like_refusal`): a module-scope tuple of canonical refusal substrings (each commented with the originating Memory ID from issue #1212, e.g. `"there is no agent session"  # 5be7da58 / 76dbd772 / 796e1429`) plus a `_JSON_SHRAPNEL_RE` regex matching single-line `"key": "value",` JSON syntax. Applied at three points: (a) **post-LLM** — before parsing, if the raw response is refusal-shaped, return `[]` immediately (PRIMARY defense; load-bearing for refusal-prose handling); (b) **per-line** inside the line-based fallback — drop refusal/shrapnel lines so the fallback never persists them; (c) **pre-LLM** — after the existing 50-char check, additionally reject input matching refusal patterns or dominated by whitespace (non-whitespace ratio < `_MIN_NON_WHITESPACE_RATIO = 0.3`). The 50-char check is unchanged — empirical data showed it was already firing correctly; the new guards are additive supporting layers.
 
 Per the comment-fold revisions on issue #1212, the post-LLM filter is the primary defense (option c) because the failure mode that produced the original junk was input that **passed** the 50-char check yet still elicited refusal prose from the LLM. The pre-LLM guards save Haiku calls but cannot catch every refusal — only the post-LLM filter does. The dual-layer design is deliberate: refusal can emerge from inputs the pre-check missed (above 50 chars, above 30% non-whitespace, no refusal substring), so the post-parse filter is the load-bearing one.
@@ -512,38 +512,44 @@ To disable consolidation: remove the `memory-dedup` entry from `config/reflectio
 
 Pruning of superseded records is delegated to the future `memory-decay-prune` reflection slot from issue #748.
 
-### One-shot cleanup: `cleanup_memory_extraction_junk.py`
+### Memory Health Audit (3-layer reflection)
 
-`scripts/cleanup_memory_extraction_junk.py` is a one-shot operator script that reuses the consolidation conventions to remove **already-saved** junk records produced by pre-fix extraction (issue #1212). It is **not** a recurring reflection — once the parser fix lands, no new junk should be created, so a recurring guard is unnecessary. If post-merge metrics ever show new junk creeping in, the script can be promoted to a `memory-dedup`-style nightly reflection in a follow-up.
+The `memory-quality-audit` reflection (`reflections/memory_management.py::run_memory_quality_audit`, registered at `config/reflections.yaml:298`) runs on a daily cadence and performs three layers of work in a single invocation. It subsumes the prior one-shot `scripts/cleanup_memory_extraction_junk.py` and adds continuous detection of new memory-extraction misconfiguration symptoms (issue #1231).
 
-**When to run:** after merging the issue #1212 parser fix, run once with `--dry-run` to inspect the candidate count, then once with `--apply` to mark them superseded.
+**Layer 0 — legacy zero-access + low-confidence flag (read-only).** Preserves the prior audit behavior verbatim: walks the full `Memory` corpus, flags records with `access_count == 0 AND age > 30d` and `confidence < 0.2`, appends summaries to `findings`. Files no issues. Operates on all memories (not just extractions) so it provides orthogonal observability for human-saved, post-merge, and Telegram memories.
 
-**What it does:** iterates `Memory.query.filter(...)` for records where `agent_id` starts with `extraction-` (the prefix written by `extract_observations_async` — narrow blast radius, never touches human-saved or post-merge Memory records) AND content matches `_looks_like_refusal()` — the same predicate the parser uses, so detection logic stays in lockstep with the prevention logic. Default `--dry-run` mode prints the IDs and content samples it would supersede; `--apply` mode sets `superseded_by="cleanup-junk-extraction"` and `superseded_by_rationale="auto-cleanup: refusal/json-shrapnel from issue #1212"`.
+**Layer 1 — deterministic supersede.** Imports `_looks_like_refusal` directly from `agent.memory_extraction` so detection cannot drift from the upstream prevention predicate. Filters to `agent_id.startswith("extraction-")` blast-radius — human saves, post-merge learnings, and Telegram memories are never touched. Records that pass the predicate get `superseded_by="cleanup-junk-extraction"` and `superseded_by_rationale="auto-cleanup: refusal/json-shrapnel from issue #1212"`. Capped at **50 supersedes per run** (`MAX_LAYER1_SUPERSEDES_PER_RUN`; the cap is operator-configurable via `MEMORY_AUDIT_LAYER1_CAP` env var — the audit itself is always-apply, but the cap value can be tuned without code changes). False-positive risk is bounded by the same predicate that already gates new writes.
 
-**Why `superseded_by` instead of deletion:** matches the `memory-dedup` reflection's convention (see "Memory Consolidation" above) — records are marked superseded but never deleted, so the cleanup is fully reversible by clearing the `superseded_by` field. The recall pipeline already filters superseded records via the one-line filter in `retrieve_memories()`, so the records disappear from agent context without any other code changes.
+**Layer 2 — heuristic anomaly detection (no model).** Computes four signals against the post-Layer-1 non-superseded `extraction-*` corpus:
 
-**Safety rails:**
+| Signal | Threshold | What it catches |
+|--------|-----------|-----------------|
+| `category-default-skew` | last-7d no-category fraction > 0.70 | extractor regressed to uncategorized fallback |
+| `importance-1.0-skew` | last-7d importance==1.0 fraction > 0.85 | corrections/decisions are no longer being produced |
+| `agent-id-cluster` | > 10 junk records superseded *this run* from one `agent_id` | one stuck session looping on malformed extractor output |
+| `html-escape-rate` | last-7d ratio > 0.10 AND week-over-week ratio > 2x | new HTML-escape bug in upstream extractor |
 
-| Rail | Value |
-|------|-------|
-| Default mode | `--dry-run` (no writes); `--apply` is opt-in |
-| Blast-radius limit | Only `agent_id.startswith("extraction-")` records are considered |
-| Idempotency | Records with `superseded_by != ""` are skipped on re-runs |
-| Per-record isolation | Each save wrapped in try/except — one failure doesn't abort the run |
-| Popoto-only | No raw Redis (verified by `grep -E '\bredis\.|r\.delete|r\.hget|r\.scan_iter'` returning no matches in the script) |
-| Reuses parser predicate | `_looks_like_refusal` from `agent.memory_extraction` — detection cannot drift from prevention |
+Each cross-threshold signal becomes an "anomaly candidate" carrying observed/threshold values, 3-5 sample memory_ids, and an evidence string.
 
-**Manual invocation:**
+**Layer 3 — Gemma classification (`gemma4:e2b`, fail-soft).** Samples up to 20 last-24h non-superseded `extraction-*` records and classifies them via a few-shot prompt at `temperature=0`. Wallclock-budgeted at 30s with a 10s `asyncio.wait_for` timeout per call (`GEMMA_CALL_TIMEOUT_SEC`; bumped from 5s — cold-start was too tight); runs sequentially in a dedicated single-thread `ThreadPoolExecutor` so the worker event loop stays unblocked. Verdicts grouped by `anomaly_signal`; signals with **≥ 3** matching records become candidates. Top-level `try/except` so any failure (Ollama daemon down, model missing, network error) cannot break the audit return contract — the audit completes layers 0+1+2 successfully without Layer 3.
+
+**Issue surfacing.** For each Layer-2 or Layer-3 candidate (Layer 0 flags and Layer 1 supersedes never produce candidates), the audit calls `_file_anomaly_issue` which:
+
+1. Searches via async `gh issue list --search 'in:title "[memory-audit] {signal}:"'` for an existing open issue with the matching title prefix. The title prefix that the audit itself controls is the sole dup-check key (resolves critique C4) — labels are descriptive only and may be stripped or relabeled by an operator without breaking idempotency.
+2. If a dup exists, skips filing. If `gh` itself fails, returns a `-1` sentinel that suppresses filing for the run rather than risking spam.
+3. Otherwise files via async `gh issue create --label memory --label investigation --title ... --body ...` with the body template documenting signal, observed/threshold, sample memory_ids, and suggested investigation commands.
+
+Both `_find_open_audit_issue` and `_file_anomaly_issue` use `asyncio.create_subprocess_exec` + `asyncio.wait_for` to keep the worker event loop responsive.
+
+**Quiescence.** On a clean corpus with a healthy extractor, a single audit run reports `0 superseded, 0 anomalies, 0 issues filed` and stays quiet until something breaks again.
+
+**Verification.**
 
 ```bash
-# Inspect what would be marked superseded (safe, no writes)
-python scripts/cleanup_memory_extraction_junk.py --dry-run
-
-# Apply the supersede mark (after dry-run review)
-python scripts/cleanup_memory_extraction_junk.py --apply
+python -c "import asyncio; from reflections.memory_management import run_memory_quality_audit; print(asyncio.run(run_memory_quality_audit()))"
 ```
 
-The script prints a three-count summary per run: total candidates considered, records superseded, records blocked (already superseded or save-failed).
+Returns `{"status": "ok", "findings": [...], "summary": "Memory health audit: N superseded, M anomalies, K issues filed"}`.
 
 ## Key Files
 
@@ -555,8 +561,7 @@ The script prints a three-count summary per run: total candidates considered, re
 | `agent/memory_retrieval.py` | 4-signal RRF fusion retrieval: `retrieve_memories()`, `rrf_fuse()`, `get_embedding_ranked()`, ranked signal accessors. Includes superseded-by filter to exclude archived records from recall. |
 | `agent/embedding_provider.py` | `OllamaEmbeddingProvider` adapter for local Ollama embedding, plus `configure_embedding_provider()` for global provider setup. |
 | `scripts/memory_consolidation.py` | Nightly `memory-dedup` reflection callable: `run_consolidation(project_key=None, dry_run=True, max_merges=10)`. Haiku-based semantic dedup with dry-run/apply modes, rate cap, importance exemption, and contradiction flagging. |
-| `scripts/cleanup_memory_extraction_junk.py` | One-shot operator script (issue #1212): marks pre-fix extraction junk records (refusal prose, JSON shrapnel) as `superseded_by="cleanup-junk-extraction"`. Default `--dry-run`, `--apply` opt-in; `agent_id.startswith("extraction-")` blast-radius limit; reuses `_looks_like_refusal` from `agent.memory_extraction`. |
-| `agent/memory_extraction.py` | Post-session JSON extraction with tolerant JSON parsing (`_extract_json_payload` strips fences and slices to brackets) and refusal-pattern filter (`_REFUSAL_PATTERNS` + `_looks_like_refusal` applied pre-LLM, post-LLM, and per-line in the line-based fallback — issue #1212). LLM-judged outcome detection (with bigram fallback), outcome history persistence, dismissal tracking via `_persist_outcome_metadata()`, post-merge learning extraction |
+| `agent/memory_extraction.py` | Post-session JSON extraction with tolerant JSON parsing (`extract_json_payload` strips fences and slices to brackets) and refusal-pattern filter (`_REFUSAL_PATTERNS` + `_looks_like_refusal` applied pre-LLM, post-LLM, and per-line in the line-based fallback — issue #1212). LLM-judged outcome detection (with bigram fallback), outcome history persistence, dismissal tracking via `_persist_outcome_metadata()`, post-merge learning extraction |
 | `agent/health_check.py` | Integration point: `watchdog_hook()` calls `check_and_inject()` |
 | `agent/session_executor.py` | Integration point: `_schedule_post_session_extraction()` fires `run_post_session_extraction()` as a background task AFTER `complete_transcript()` (hotfix #1055); `drain_pending_extractions()` drains pending tasks on worker shutdown |
 | `bridge/telegram_bridge.py` | Integration point: `Memory.safe_save()` after `store_message()` |

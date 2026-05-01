@@ -534,57 +534,57 @@ class TestParseCategorizedObservations:
 
 
 class TestExtractJsonPayload:
-    """Test agent/memory_extraction.py _extract_json_payload() (issue #1212)."""
+    """Test agent/memory_extraction.py extract_json_payload() (issue #1212)."""
 
     def test_empty_returns_none(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
-        assert _extract_json_payload("") is None
+        assert extract_json_payload("") is None
 
     def test_whitespace_returns_none(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
-        assert _extract_json_payload("   \n\t  ") is None
+        assert extract_json_payload("   \n\t  ") is None
 
     def test_garbage_returns_none(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
-        assert _extract_json_payload("not json at all, just prose") is None
+        assert extract_json_payload("not json at all, just prose") is None
 
     def test_extracts_array_from_fence(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
         raw = '```json\n[{"a": 1}]\n```'
-        assert _extract_json_payload(raw) == '[{"a": 1}]'
+        assert extract_json_payload(raw) == '[{"a": 1}]'
 
     def test_extracts_array_from_unlabeled_fence(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
         raw = '```\n[{"a": 1}]\n```'
-        assert _extract_json_payload(raw) == '[{"a": 1}]'
+        assert extract_json_payload(raw) == '[{"a": 1}]'
 
     def test_extracts_array_with_preamble(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
         raw = 'Here is the result:\n[{"a": 1}]'
-        assert _extract_json_payload(raw) == '[{"a": 1}]'
+        assert extract_json_payload(raw) == '[{"a": 1}]'
 
     def test_extracts_bare_object(self):
-        from agent.memory_extraction import _extract_json_payload
+        from agent.memory_extraction import extract_json_payload
 
         raw = '{"a": 1}'
-        assert _extract_json_payload(raw) == '{"a": 1}'
+        assert extract_json_payload(raw) == '{"a": 1}'
 
     def test_pure_function_no_exceptions(self):
-        """_extract_json_payload is a pure function — never raises."""
-        from agent.memory_extraction import _extract_json_payload
+        """extract_json_payload is a pure function — never raises."""
+        from agent.memory_extraction import extract_json_payload
 
         # Various corner cases that should all return None, not raise.
         for bad in ["[", "}", "[{", "{[", "```", "```json"]:
             try:
-                result = _extract_json_payload(bad)
+                result = extract_json_payload(bad)
             except Exception as e:
-                raise AssertionError(f"_extract_json_payload({bad!r}) raised: {e}") from e
+                raise AssertionError(f"extract_json_payload({bad!r}) raised: {e}") from e
             assert result is None or isinstance(result, str)
 
 
@@ -631,6 +631,103 @@ class TestLooksLikeRefusal:
         from agent.memory_extraction import _looks_like_refusal
 
         assert _looks_like_refusal("THERE IS NO AGENT SESSION available") is True
+
+
+class TestRefusalPatternsNarrowness:
+    """Regression test for the upstream/downstream predicate-narrowness invariant.
+
+    ``_looks_like_refusal`` is shared by the extractor (write gate) and the
+    memory-quality audit Layer 1 (cleanup gate via direct import — see issue
+    #1231 plan). A pattern broadening that quietly rejected legitimate
+    observations resembling refusal phrases would silently drop real memory
+    content.
+
+    Each case below is a real-shape observation that mentions refusal-adjacent
+    phrasing without being a refusal. All must return False.
+    """
+
+    def test_observation_about_no_novel_observations_is_not_refusal(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert (
+            _looks_like_refusal(
+                "Session ended with no novel observations to flag — extractor "
+                "ran cleanly and Haiku returned an empty array."
+            )
+            is False
+        )
+
+    def test_observation_mentioning_session_word_is_not_refusal(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert (
+            _looks_like_refusal(
+                "The session lifecycle has 13 states defined in docs/features/session-lifecycle.md."
+            )
+            is False
+        )
+
+    def test_observation_about_agent_session_field_is_not_refusal(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert (
+            _looks_like_refusal(
+                "AgentSession.session_type='dev' triggers worktree creation "
+                "via worktree_manager.py during enqueue."
+            )
+            is False
+        )
+
+    def test_observation_describing_rationale_field_is_not_refusal(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert (
+            _looks_like_refusal(
+                "memory-dedup writes superseded_by_rationale alongside "
+                "superseded_by so future readers know why a record was merged."
+            )
+            is False
+        )
+
+    def test_observation_about_provided_session_input_is_not_refusal(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert (
+            _looks_like_refusal(
+                "When the user provides the session ID via reply-to, the "
+                "bridge resumes the original session context."
+            )
+            is False
+        )
+
+    def test_quoted_key_in_prose_is_not_refusal(self):
+        """Quoted JSON-style key inside English prose must not trip _JSON_SHRAPNEL_RE.
+
+        The regex anchors on ``^"key": ...$`` (full single line). Embedding
+        the same text mid-sentence breaks the anchor.
+        """
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert (
+            _looks_like_refusal(
+                'The metadata dict carries "category": "correction" alongside '
+                "the file_paths list, written by the JSON-path extractor."
+            )
+            is False
+        )
+
+    def test_multi_line_block_starting_with_quoted_key_is_not_refusal(self):
+        """Multi-line content where line 1 looks like JSON shrapnel — overall
+        block is not a single anchored line and must not match.
+        """
+        from agent.memory_extraction import _looks_like_refusal
+
+        text = (
+            '"category": "correction"\n'
+            "This was the recorded category for the post-merge learning record "
+            "captured during the #1231 build."
+        )
+        assert _looks_like_refusal(text) is False
 
 
 class TestExtractPostMergeLearning:
