@@ -259,8 +259,6 @@ def redundancy_handler_setup(monkeypatch):
     to bypass cleanly (delivery_text == text). The SDLC session has is_sdlc=True
     and recent_sent_drafts starts empty.
     """
-    import time
-
     monkeypatch.setenv("DRAFTER_REDUNDANCY_SUPPRESSION_ENABLED", "true")
     from agent.output_handler import TelegramRelayOutputHandler
     from bridge.message_drafter import MessageDraft
@@ -319,9 +317,10 @@ async def test_redundancy_three_identical_drafts_produce_one_text_two_reactions(
     # First send: no prior → send_verdict (no_baseline).
     # Simulate this by having should_suppress return send for the first call.
     call_count = 0
-    original_recent: list = []
 
-    def mock_suppress(draft_text, draft_artifacts, recent_sent_drafts, expectations, session_status):
+    def mock_suppress(
+        draft_text, draft_artifacts, recent_sent_drafts, expectations, session_status
+    ):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -390,8 +389,7 @@ async def test_redundancy_new_artifact_prevents_suppression(redundancy_handler_s
     handler, mock_redis, sdlc_session = redundancy_handler_setup
 
     base_text = (
-        "Review complete. Checking the final merge state. "
-        "Children sessions have reported back. "
+        "Review complete. Checking the final merge state. Children sessions have reported back. "
     ) * 10
 
     # First send (no prior → sends).
@@ -410,7 +408,9 @@ async def test_redundancy_new_artifact_prevents_suppression(redundancy_handler_s
 
     # Both should be text messages (not reactions).
     calls = mock_redis.rpush.call_args_list
-    text_payloads = [json.loads(c[0][1]) for c in calls if json.loads(c[0][1]).get("type") != "reaction"]
+    text_payloads = [
+        json.loads(c[0][1]) for c in calls if json.loads(c[0][1]).get("type") != "reaction"
+    ]
     assert len(text_payloads) == 2, (
         f"Expected 2 text messages (both sends), got {len(text_payloads)}"
     )

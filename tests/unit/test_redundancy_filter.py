@@ -18,7 +18,6 @@ from bridge.redundancy_filter import (
     should_suppress,
 )
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -216,12 +215,13 @@ class TestBigramJaccard:
         # new_bigrams: items 0..62 (63 items)
         # prior_bigrams: items 0..62 (shared) + items 100..136 (37 prior-only)
         new_bigrams = frozenset([(f"w{i}",) for i in range(63)])
-        prior_bigrams = frozenset(
-            [(f"w{i}",) for i in range(63)] + [(f"x{i}",) for i in range(37)]
-        )
+        prior_bigrams = frozenset([(f"w{i}",) for i in range(63)] + [(f"x{i}",) for i in range(37)])
         # J = 63 / (63 + 0 + 37) = 63/100 = 0.63 < 0.65 → send
 
-        with _patch("agent.memory_extraction._extract_bigrams", side_effect=[new_bigrams, prior_bigrams]):
+        with _patch(
+            "agent.memory_extraction._extract_bigrams",
+            side_effect=[new_bigrams, prior_bigrams],
+        ):
             v = should_suppress(text, {}, [prior], None, None)
 
         assert v.action == "send"
@@ -241,12 +241,13 @@ class TestBigramJaccard:
         # new_bigrams: items 0..65 (66 items)
         # prior_bigrams: items 0..65 (shared) + items 100..133 (34 prior-only)
         new_bigrams = frozenset([(f"w{i}",) for i in range(66)])
-        prior_bigrams = frozenset(
-            [(f"w{i}",) for i in range(66)] + [(f"x{i}",) for i in range(34)]
-        )
+        prior_bigrams = frozenset([(f"w{i}",) for i in range(66)] + [(f"x{i}",) for i in range(34)])
         # J = 66 / (66 + 0 + 34) = 66/100 = 0.66 > 0.65 → suppress
 
-        with _patch("agent.memory_extraction._extract_bigrams", side_effect=[new_bigrams, prior_bigrams]):
+        with _patch(
+            "agent.memory_extraction._extract_bigrams",
+            side_effect=[new_bigrams, prior_bigrams],
+        ):
             v = should_suppress(text, {}, [prior], None, None)
 
         assert v.action == "suppress"
