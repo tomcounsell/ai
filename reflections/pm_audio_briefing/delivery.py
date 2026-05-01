@@ -234,7 +234,7 @@ def _dry_run_dump(transcript: str, written_followup: str, project: dict) -> dict
     tz_name = pm.get("timezone") or "UTC"
     try:
         tz = ZoneInfo(tz_name)
-    except Exception:
+    except Exception:  # swallow-ok: bad/missing tz name falls back to UTC; not a fatal config error
         tz = ZoneInfo("UTC")
     today = datetime.now(tz=tz).date().isoformat()
     slug = project.get("slug") or "unknown"

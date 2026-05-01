@@ -64,7 +64,7 @@ def _today_in_project_tz(project: dict) -> tuple[Any, str]:
     tz_name = (project.get("pm_briefing") or {}).get("timezone") or "UTC"
     try:
         tz = ZoneInfo(tz_name)
-    except Exception:
+    except Exception:  # swallow-ok: bad/missing tz name falls back to UTC; not a fatal config error
         tz = ZoneInfo("UTC")
     today = datetime.fromtimestamp(time.time(), tz=tz).date()
     return today, today.isoformat()
@@ -74,7 +74,7 @@ def _now_in_project_tz(project: dict) -> datetime:
     tz_name = (project.get("pm_briefing") or {}).get("timezone") or "UTC"
     try:
         tz = ZoneInfo(tz_name)
-    except Exception:
+    except Exception:  # swallow-ok: bad/missing tz name falls back to UTC; not a fatal config error
         tz = ZoneInfo("UTC")
     return datetime.now(tz=tz)
 
@@ -91,7 +91,7 @@ def _last_run_date_in_project_tz(reflection, project: dict):
     tz_name = (project.get("pm_briefing") or {}).get("timezone") or "UTC"
     try:
         tz = ZoneInfo(tz_name)
-    except Exception:
+    except Exception:  # swallow-ok: bad/missing tz name falls back to UTC; not a fatal config error
         tz = ZoneInfo("UTC")
     try:
         return datetime.fromtimestamp(float(reflection.ran_at), tz=tz).date()
@@ -164,7 +164,7 @@ def _process_one_project(project: dict, this_machine: str, *, dry_run: bool) -> 
 
         # The above import is a deliberate no-op except in tests; the real
         # import path is below.
-    except Exception:
+    except Exception:  # swallow-ok: deliberate no-op test-stub hook; real import follows below
         pass
     from reflections.pm_audio_briefing.delivery import _get_redis_connection
 
