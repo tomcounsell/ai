@@ -439,7 +439,7 @@ The reflection modal at `localhost:8500` renders a per-project sub-table when `r
 | `badge-skipped` (gray) | `skipped` | Skip predicate matched silently |
 | `badge-disabled` (amber) | `disabled` | Cost cap exhausted (e.g. global API cap) |
 
-The sparkline color is driven by the aggregate `run.status`, independent of per-project badges. Run records without a `projects` field (legacy entries or non-audit reflections) render as before — the per-project block is gated by `{% if run.projects %}`.
+The sparkline color is driven by the aggregate `run.status`, independent of per-project badges. Run records without a `projects` field (older entries or non-audit reflections) render as before — the per-project block is gated by `{% if run.projects %}`.
 
 ## Redis TTL Cleanup (`redis-ttl-cleanup`)
 
