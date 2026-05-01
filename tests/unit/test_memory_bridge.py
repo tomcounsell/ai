@@ -486,9 +486,10 @@ class TestRecallCategoryReranking:
 
         # Verify _apply_category_weights was called
         mock_rerank.assert_called_once()
-        # Verify we got thought output
+        # Verify we got compact stub output (progressive disclosure)
         assert result is not None
-        assert "<thought>" in result
+        assert '<thought id="rec-1">' in result
+        assert "[correction]" in result
 
 
 class TestIngest:
@@ -1075,6 +1076,104 @@ class TestFormatThoughtBlocks:
         assert thoughts == ["<thought>valid</thought>"]
 
 
+class TestFormatStubBlocks:
+    """Test _format_stub_blocks() helper — progressive disclosure stub format."""
+
+    def _make_record(self, mid, content, title="", category=None):
+        rec = MagicMock()
+        rec.memory_id = mid
+        rec.content = content
+        rec.title = title
+        rec.metadata = {"category": category} if category else {}
+        return rec
+
+    def test_empty_records(self):
+        from hook_utils.memory_bridge import _format_stub_blocks
+
+        stubs, entries = _format_stub_blocks([])
+        assert stubs == []
+        assert entries == []
+
+    def test_renders_stub_with_title_and_category(self):
+        from hook_utils.memory_bridge import _format_stub_blocks
+
+        r = self._make_record(
+            "m1", "full body content here", title="One-line label", category="correction"
+        )
+        stubs, entries = _format_stub_blocks([r])
+        assert stubs == ['<thought id="m1">[correction] One-line label</thought>']
+
+    def test_renders_stub_with_empty_title_falls_back_to_category(self):
+        from hook_utils.memory_bridge import _format_stub_blocks
+
+        r = self._make_record("m1", "body", title="", category="decision")
+        stubs, entries = _format_stub_blocks([r])
+        assert stubs == ['<thought id="m1">[decision]</thought>']
+
+    def test_default_category_when_metadata_missing(self):
+        from hook_utils.memory_bridge import _format_stub_blocks
+
+        r = self._make_record("m1", "body", title="some label")
+        stubs, entries = _format_stub_blocks([r])
+        assert stubs == ['<thought id="m1">[memory] some label</thought>']
+
+    def test_metadata_none_safe(self):
+        from hook_utils.memory_bridge import _format_stub_blocks
+
+        r = MagicMock()
+        r.memory_id = "m1"
+        r.content = "body"
+        r.title = ""
+        r.metadata = None
+        stubs, _entries = _format_stub_blocks([r])
+        assert stubs == ['<thought id="m1">[memory]</thought>']
+
+    def test_sidecar_keeps_full_content_not_title(self):
+        """Outcome detection (cycle-1 B1) needs full content; sidecar must not be a stub."""
+        from hook_utils.memory_bridge import _format_stub_blocks
+
+        full = "This is the full-length body, including details for outcome bigram overlap."
+        r = self._make_record("m1", full, title="brief label", category="pattern")
+        stubs, entries = _format_stub_blocks([r])
+        assert entries == [{"memory_id": "m1", "content": full}]
+        # Stub itself is short; sidecar carries the long string.
+        assert "details for outcome" not in stubs[0]
+
+    def test_excludes_ids(self):
+        from hook_utils.memory_bridge import _format_stub_blocks
+
+        r1 = self._make_record("m1", "first", title="t1", category="correction")
+        r2 = self._make_record("m2", "second", title="t2", category="decision")
+        stubs, entries = _format_stub_blocks([r1, r2], exclude_ids={"m1"})
+        assert stubs == ['<thought id="m2">[decision] t2</thought>']
+        assert entries == [{"memory_id": "m2", "content": "second"}]
+
+    def test_max_results_caps_output(self):
+        from hook_utils.memory_bridge import _format_stub_blocks
+
+        records = [
+            self._make_record(f"m{i}", f"body{i}", title=f"t{i}", category="pattern")
+            for i in range(5)
+        ]
+        stubs, _entries = _format_stub_blocks(records, max_results=2)
+        assert len(stubs) == 2
+
+    def test_skips_empty_content(self):
+        from hook_utils.memory_bridge import _format_stub_blocks
+
+        r1 = self._make_record("m1", "", title="t", category="pattern")
+        r2 = self._make_record("m2", "ok", title="t", category="pattern")
+        stubs, _entries = _format_stub_blocks([r1, r2])
+        assert stubs == ['<thought id="m2">[pattern] t</thought>']
+
+    def test_title_whitespace_stripped(self):
+        from hook_utils.memory_bridge import _format_stub_blocks
+
+        r = self._make_record("m1", "body", title="  padded  ", category="surprise")
+        stubs, _entries = _format_stub_blocks([r])
+        assert stubs == ['<thought id="m1">[surprise] padded</thought>']
+
+
 class TestRecallWithQuery:
     """Test the pure-retrieval _recall_with_query() helper."""
 
@@ -1380,6 +1479,8 @@ class TestPrefetch:
         record = MagicMock()
         record.memory_id = "m1"
         record.content = "auth flow notes from PR 800"
+        record.title = "Auth flow notes"
+        record.metadata = {"category": "decision"}
 
         with (
             patch("hook_utils.memory_bridge._recall_with_query", return_value=[record]),
@@ -1390,7 +1491,8 @@ class TestPrefetch:
                 "investigate auth bug that broke after PR 800 deployment",
             )
         assert result is not None
-        assert "<thought>auth flow notes from PR 800</thought>" in result
+        # Stub format — body is fetched on demand via memory_get MCP tool.
+        assert '<thought id="m1">[decision] Auth flow notes</thought>' in result
 
     def test_prefetch_strips_pm_boilerplate(self, tmp_path, monkeypatch):
         """Prefetch strips FROM:/SCOPE:/MESSAGE: prefix before querying."""
@@ -1510,9 +1612,11 @@ class TestPrefetch:
         record = MagicMock()
         record.memory_id = "m1"
         record.content = "valid thought"
+        record.title = ""
+        record.metadata = {}
 
         # Make the second _save_sidecar call (the one inside prefetch)
-        # raise; the prefetch should still return the formatted thought.
+        # raise; the prefetch should still return the formatted stub.
         with (
             patch("hook_utils.memory_bridge._recall_with_query", return_value=[record]),
             patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
@@ -1526,7 +1630,8 @@ class TestPrefetch:
                 "investigate auth bug that broke after PR 800 deployment",
             )
         assert result is not None
-        assert "<thought>valid thought</thought>" in result
+        # Empty title falls back to category-only stub.
+        assert '<thought id="m1">[memory]</thought>' in result
 
     def test_prefetch_logs_warning_when_slow(self, tmp_path, monkeypatch, caplog):
         """When elapsed exceeds PREFETCH_LATENCY_WARN_MS, a warning is logged."""
@@ -1634,9 +1739,13 @@ class TestRecallSidecarExclude:
         skip_me = MagicMock()
         skip_me.memory_id = "skip-me"
         skip_me.content = "should be excluded"
+        skip_me.title = "skip title"
+        skip_me.metadata = {"category": "pattern"}
         keep_me = MagicMock()
         keep_me.memory_id = "keep-me"
         keep_me.content = "should be kept"
+        keep_me.title = "keep title"
+        keep_me.metadata = {"category": "decision"}
 
         with (
             patch("utils.keyword_extraction.extract_topic_keywords", return_value=keywords),
@@ -1650,6 +1759,6 @@ class TestRecallSidecarExclude:
             result = recall("sess", "Read", {"file_path": "final.py"})
 
         assert result is not None
-        # The prefetched (skip-me) record must NOT appear; only keep-me
-        assert "should be kept" in result
-        assert "should be excluded" not in result
+        # Stub format — kept record's id appears, skipped record's id does not.
+        assert 'id="keep-me"' in result
+        assert 'id="skip-me"' not in result

@@ -335,7 +335,7 @@ def _create_companion_memories(file_path: str, project_key: str, scope: str, con
             summary = _summarize_content(section_content, file_path)
             memory_content = f"Knowledge doc: {filename}{section_label} - {summary}"
 
-            Memory.safe_save(
+            chunk_record = Memory.safe_save(
                 project_key=project_key,
                 content=memory_content[:500],
                 importance=KNOWLEDGE_IMPORTANCE,
@@ -347,12 +347,26 @@ def _create_companion_memories(file_path: str, project_key: str, scope: str, con
                     "file_path": file_path,
                 },
             )
+            # Fire-and-forget async title generation
+            # (writer path #6a: knowledge indexer chunked save).
+            if chunk_record is not None:
+                try:
+                    from agent.private_tag import strip_private
+                    from tools.memory_search.title_generator import (
+                        generate_title_async,
+                    )
+
+                    generate_title_async(
+                        chunk_record.memory_id, strip_private(memory_content[:500])
+                    )
+                except Exception:
+                    pass
     else:
         # Single memory for small documents
         summary = _summarize_content(content, file_path)
         memory_content = f"Knowledge doc: {filename} - {summary}"
 
-        Memory.safe_save(
+        single_record = Memory.safe_save(
             project_key=project_key,
             content=memory_content[:500],
             importance=KNOWLEDGE_IMPORTANCE,
@@ -364,6 +378,18 @@ def _create_companion_memories(file_path: str, project_key: str, scope: str, con
                 "file_path": file_path,
             },
         )
+        # Fire-and-forget async title generation
+        # (writer path #6b: knowledge indexer single-doc save).
+        if single_record is not None:
+            try:
+                from agent.private_tag import strip_private
+                from tools.memory_search.title_generator import (
+                    generate_title_async,
+                )
+
+                generate_title_async(single_record.memory_id, strip_private(memory_content[:500]))
+            except Exception:
+                pass
 
     logger.debug(f"Created companion memories for: {file_path}")
 

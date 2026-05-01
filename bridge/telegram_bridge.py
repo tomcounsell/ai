@@ -1115,13 +1115,25 @@ async def main():
 
                     # sdlc-1179: persist safe_text so wrapped <private> regions never
                     # land in Memory.content (subconscious memory recall surface).
-                    Memory.safe_save(
+                    _mem_record = Memory.safe_save(
                         agent_id=sender_name or "unknown",
                         project_key=_early_project_key,
                         content=safe_text[:500],
                         importance=InteractionWeight.HUMAN,
                         source="human",
                     )
+                    # Fire-and-forget async title generation
+                    # (writer path #4: telegram bridge ingest).
+                    if _mem_record is not None:
+                        try:
+                            from tools.memory_search.title_generator import (
+                                generate_title_async,
+                            )
+
+                            # safe_text is already strip_private()'d above (line ~1047).
+                            generate_title_async(_mem_record.memory_id, safe_text[:500])
+                        except Exception:
+                            pass
             except Exception as e:
                 logger.warning(f"Memory save failed (non-fatal): {e}")
 

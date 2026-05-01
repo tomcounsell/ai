@@ -287,6 +287,18 @@ def _apply_merge(action: dict, record_map: dict, project_key: str) -> bool:
 
     new_id = merged.memory_id
 
+    # Fire-and-forget async title generation
+    # (writer path #7: memory-dedup consolidation merge).
+    # NOTE: the record.save() below at the superseded_by update is NOT a
+    # creation site — no title-gen call there.
+    try:
+        from agent.private_tag import strip_private
+        from tools.memory_search.title_generator import generate_title_async
+
+        generate_title_async(new_id, strip_private(merged_content[:500]))
+    except Exception:
+        pass
+
     # Mark originals as superseded
     for id_ in ids:
         record = record_map.get(id_)
