@@ -55,6 +55,8 @@ REFLECTION_GROUPS: dict[str, str] = {
     "skills-audit": GROUP_AUDITS,
     "hooks-audit": GROUP_AUDITS,
     "feature-docs-audit": GROUP_AUDITS,
+    "docs-auditor": GROUP_AUDITS,
+    "do-docs-branch-sweeper": GROUP_HOUSEKEEPING,
     "pr-review-audit": GROUP_AUDITS,
     "task-backlog-check": GROUP_AUDITS,
     "principal-staleness": GROUP_AUDITS,
@@ -63,7 +65,6 @@ REFLECTION_GROUPS: dict[str, str] = {
     "memory-dedup": GROUP_MEMORY,
     "memory-decay-prune": GROUP_MEMORY,
     "memory-quality-audit": GROUP_MEMORY,
-    "knowledge-reindex": GROUP_MEMORY,
 }
 
 # Prefix-expanded reflections render per-project rows on the dashboard.
