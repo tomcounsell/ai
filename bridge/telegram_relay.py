@@ -471,7 +471,9 @@ def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
          when the agent invokes it via Bash inside an agent session.
       2. payload["session_id"] without a "cli-" or "local-" prefix — real queue
          session_id created by TelegramRelayOutputHandler (Path A).
-      3. Fallback: get_active_session_for_chat(chat_id) — covers manual CLI sends.
+      3. Fallback: query AgentSession by chat_id+status="running" (covers manual CLI sends).
+         Replicates the core logic of get_active_session_for_chat() synchronously,
+         since this function runs in a thread (asyncio.to_thread) and cannot await.
     If no session is resolved, the append is skipped silently (debug log).
 
     NOTE: We append AFTER the successful send, so the drafter never sees the
@@ -512,12 +514,18 @@ def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
                 if rows:
                     session = rows[0]
 
-        # Tier 3: fallback by chat_id for manual CLI sends
+        # Tier 3: fallback by chat_id for manual CLI sends.
+        # NOTE: get_active_session_for_chat is async; we replicate its core query
+        # synchronously here since _append_outbound_chat_log runs in a thread
+        # (via asyncio.to_thread in the relay loop) and cannot await.
         if session is None and chat_id:
             try:
-                from agent.agent_session_queue import get_active_session_for_chat
-
-                session = get_active_session_for_chat(chat_id)
+                candidates = list(
+                    AgentSession.query.filter(chat_id=chat_id, status="running")
+                )
+                if candidates:
+                    candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
+                    session = candidates[0]
             except Exception:
                 pass
 

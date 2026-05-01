@@ -1484,7 +1484,10 @@ class AgentSession(Model):
         }
         try:
             # Re-fetch the freshest version to minimize lost-update window.
-            fresh = AgentSession.query.get(self.session_id)
+            # query.filter(session_id=...) is correct — session_id is a regular Field(),
+            # not the AutoKeyField. query.get() requires the AutoKey (id field).
+            rows = list(AgentSession.query.filter(session_id=self.session_id))
+            fresh = rows[0] if rows else None
             if fresh is None:
                 # Session vanished — fall back to self to avoid losing the entry.
                 fresh = self
