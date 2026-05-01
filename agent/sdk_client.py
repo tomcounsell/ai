@@ -2495,7 +2495,7 @@ async def _run_harness_subprocess(
     # `result` event; tool_call_count is summed from `assistant` events'
     # tool_use content blocks. Caller accumulates both onto AgentSession.
     num_turns: int = 0
-    _tool_call_count: int = 0
+    tool_call_count: int = 0
 
     async for raw_line in proc.stdout:
         line = raw_line.decode("utf-8", errors="replace").strip()
@@ -2584,7 +2584,7 @@ async def _run_harness_subprocess(
             # event.type=="tool_use" does NOT fire.
             message = data.get("message", {}) or {}
             content_blocks = message.get("content", []) or []
-            _tool_call_count += sum(
+            tool_call_count += sum(
                 1 for b in content_blocks if isinstance(b, dict) and b.get("type") == "tool_use"
             )
             continue
@@ -2635,7 +2635,7 @@ async def _run_harness_subprocess(
             cost_usd,
             stderr_snippet,
             num_turns,
-            _tool_call_count,
+            tool_call_count,
         )
     if full_text:
         logger.warning(
@@ -2650,7 +2650,7 @@ async def _run_harness_subprocess(
             cost_usd,
             stderr_snippet,
             num_turns,
-            _tool_call_count,
+            tool_call_count,
         )
     logger.error("Harness exited without a result event and no accumulated text")
     return (
@@ -2661,7 +2661,7 @@ async def _run_harness_subprocess(
         cost_usd,
         stderr_snippet,
         num_turns,
-        _tool_call_count,
+        tool_call_count,
     )
 
 
