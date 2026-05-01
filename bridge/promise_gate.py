@@ -63,7 +63,7 @@ Two channels with documented asymmetry:
    fields (``action``, ``reason``, ``class_``, ``transport``,
    ``session_id``, ``source``, ``kind="promise_gate"``).
 2. **session_events** — conditional. Fires only when
-   ``AgentSession.query.get(session_id)`` returns a real session
+   ``AgentSession.get_by_id(session_id)`` returns a real session
    (real ``VALOR_SESSION_ID`` from the worker harness). Synthetic
    ``cli-{epoch}`` IDs silently skip session_events emission.
 
@@ -440,10 +440,11 @@ def _emit_session_event_if_real(
 ) -> None:
     """Best-effort session_events emission, conditional on real AgentSession.
 
-    Calls ``AgentSession.query.get(session_id)`` (Popoto ORM, never
-    raw Redis per CLAUDE.md). On real-session hit, appends ``event`` to
-    ``session.session_events`` and saves. On miss (synthetic
-    ``cli-{epoch}`` ID, stale ID, lookup error), silently no-ops.
+    Calls ``AgentSession.get_by_id(session_id)`` (Popoto ORM via the
+    canonical raw-string lookup helper, never raw Redis per CLAUDE.md).
+    On real-session hit, appends ``event`` to ``session.session_events``
+    and saves. On miss (synthetic ``cli-{epoch}`` ID, stale ID, lookup
+    error), silently no-ops.
 
     This honors Concern C6 — the gate makes no AgentSession state-driven
     decision; the existence check on the explicit input is for
@@ -454,7 +455,7 @@ def _emit_session_event_if_real(
     try:
         from models.agent_session import AgentSession
 
-        session = AgentSession.query.get(session_id)
+        session = AgentSession.get_by_id(session_id)
         if session is None:
             return
         events = list(getattr(session, "session_events", None) or [])

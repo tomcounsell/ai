@@ -95,9 +95,14 @@ def _filter_hydrated_sessions(sessions: Iterable) -> list[AgentSession]:
         # that's the canonical phantom shape. If aid is non-string AND other
         # fields ARE populated, log at WARNING (hydration check may have
         # become unreliable, e.g., a Popoto version bump).
+        # NOTE: ``status`` is NOT in the suspicious-fields list because it
+        # has a class-level default ("pending") and is therefore populated on
+        # every phantom — including pure phantoms that should log at DEBUG.
+        # ``session_id`` and ``created_at`` are written by every legitimate
+        # caller and are absent on phantoms.
         suspicious = False
         if not isinstance(aid, str):
-            for f in ("status", "session_id", "created_at"):
+            for f in ("session_id", "created_at"):
                 try:
                     if isinstance(getattr(s, f, None), str):
                         suspicious = True

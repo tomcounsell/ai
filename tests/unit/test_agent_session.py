@@ -664,7 +664,7 @@ class TestRecentSentDraftsRoundtrip:
     connection; automatically skipped when Redis is unavailable.
 
     The plan (docs/plans/sdlc-1205.md §Test Impact) explicitly required:
-    "The roundtrip test MUST call save() then AgentSession.query.get(session_id)
+    "The roundtrip test MUST call save() then AgentSession.get_by_id(session_id)
     (or equivalent Popoto reload) to cover the ListField serialize/deserialize
     cycle — a test that only checks the in-memory value is insufficient."
     """

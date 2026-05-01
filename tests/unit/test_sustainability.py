@@ -414,9 +414,12 @@ class TestSessionCountThrottle(unittest.TestCase):
         import time as _time
 
         s = MagicMock()
-        # agent_session_id must be a string for _filter_hydrated_sessions to
-        # treat this test double as hydrated (issue #1069).
+        # Both agent_session_id AND session_id must be strings for
+        # _filter_hydrated_sessions to treat this test double as hydrated:
+        # phantoms can have a uuid in agent_session_id (AutoKeyField default)
+        # but never have session_id, so the guard checks both (issue #1069).
         s.agent_session_id = "agent-test-fake"
+        s.session_id = "test-session-fake"
         s.started_at = _time.time() + started_at_offset
         return s
 
