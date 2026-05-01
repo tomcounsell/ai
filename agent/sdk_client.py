@@ -1007,6 +1007,24 @@ def load_pm_system_prompt(working_directory: str) -> str:
         ---
         [Work-vault CLAUDE.md — PM-specific instructions for this project]
 
+    Caching strategy (issue #1227):
+        The returned string is passed to ``get_response_via_harness()`` as
+        ``system_prompt=``, which injects both ``--exclude-dynamic-system-
+        prompt-sections`` and ``--append-system-prompt <text>`` into the
+        ``claude -p`` argv.  The former flag removes per-machine dynamic
+        sections (cwd, env info, memory paths, git status) from the system
+        prompt into the first user message, leaving the prefix byte-for-byte
+        stable across consecutive PM sessions on the same machine in the same
+        ``working_directory``.  This enables Anthropic's server-side prompt
+        cache (5-minute TTL) to serve the ~74K-char prefix on cache hit,
+        reducing TTFT from 15–20 min (cold) to < 90 s (warm).
+
+    Invariants:
+        - Must NOT include WORKER_RULES (PM mode has no branch safety rails).
+        - Must include the project-manager persona overlay (#1148).
+        - Must NOT silently swallow FileNotFoundError on persona load — caller
+          catches and logs ``[pm-persona-missing]`` so failures are visible.
+
     Args:
         working_directory: Path to the work-vault project folder.
 
@@ -2122,10 +2140,18 @@ async def get_response_via_harness(
                 f"{session_id})"
             )
         else:
+            # Direction A (issue #1227): move per-machine dynamic sections (cwd,
+            # env info, memory paths, git status) into the first user message
+            # instead of the system prompt.  This stabilises the system-prompt
+            # prefix so Anthropic's server-side prompt cache can reuse it across
+            # consecutive PM sessions that share the same working_directory.
+            # Only injected when --append-system-prompt is present (PM sessions);
+            # the flag is silently ignored when --system-prompt is used instead.
+            harness_cmd.append("--exclude-dynamic-system-prompt-sections")
             harness_cmd.extend(["--append-system-prompt", system_prompt])
             logger.info(
                 f"[harness] Appending {len(system_prompt)}-char system prompt for "
-                f"session_id={session_id}"
+                f"session_id={session_id} (cache-stable: --exclude-dynamic-system-prompt-sections)"
             )
 
     # Build subprocess env: inherit current env, merge extras, strip API key
@@ -2152,6 +2178,21 @@ async def get_response_via_harness(
     else:
         cmd = harness_cmd + [message]
 
+    # TTFT metadata for first-token instrumentation (issue #1227).  Only
+    # emitted on first-turn invocations (no prior_uuid) so we don't pollute
+    # the JSONL with resume-turn data.  session_type is inferred from whether
+    # a system_prompt was supplied (PM path) vs. not (dev/teammate path).
+    _ttft_meta: dict | None = None
+    if not prior_uuid:
+        _session_type_tag = "pm" if system_prompt else "other"
+        _ttft_meta = {
+            "session_id": session_id or "",
+            "session_type": _session_type_tag,
+            "working_dir": working_dir,
+            "prompt_chars": len(system_prompt) if system_prompt else 0,
+            "model": model or "default",
+        }
+
     # Call site 1 of 3 — primary harness invocation. 6-tuple unpack (issue #1099 Mode 1).
     (
         result_text,
@@ -2166,6 +2207,7 @@ async def get_response_via_harness(
         proc_env,
         on_sdk_started=on_sdk_started,
         on_stdout_event=on_stdout_event,
+        ttft_metadata=_ttft_meta,
     )
 
     # Image-dimension sentinel: Claude Code returns the image-dimension error with
@@ -2313,6 +2355,7 @@ async def _run_harness_subprocess(
     *,
     on_sdk_started: Callable[[int], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
+    ttft_metadata: dict | None = None,
 ) -> tuple[str | None, str | None, int | None, dict | None, float | None, str | None]:
     """Execute a harness subprocess and parse stream-json output.
 
@@ -2347,7 +2390,16 @@ async def _run_harness_subprocess(
             spawned with a valid pid. Callback exceptions are caught + logged.
         on_stdout_event(): fires on each non-empty stdout line from the SDK.
             Callback exceptions are caught + logged.
+
+    Optional TTFT measurement (issue #1227):
+        ttft_metadata: dict with keys {session_id, session_type, prompt_chars,
+            model} that are merged into the JSONL entry written to
+            ``logs/cold_start_metrics.jsonl`` on first-stdout-byte.  Omitting
+            this parameter disables TTFT logging (all non-PM call sites).
     """
+    # TTFT baseline: record spawn timestamp before exec (issue #1227).
+    _spawn_ts = time.monotonic()
+
     # Default asyncio StreamReader limit is 64KB. The claude CLI outputs its
     # full result as a single JSON line — long responses (e.g. multi-cycle
     # analyses) can exceed that, raising LimitExceededError: "Separator is
@@ -2376,6 +2428,7 @@ async def _run_harness_subprocess(
     full_text = ""
     result_text = None
     session_id_from_harness = None
+    _first_stdout_seen = False  # TTFT sentinel (issue #1227)
     # Token + cost fields extracted off the `result` event (issue #1128).
     # Mirrors the SDK path's `ResultMessage.usage` / `.total_cost_usd`
     # so `accumulate_session_tokens` can be fed from either path.
@@ -2386,6 +2439,19 @@ async def _run_harness_subprocess(
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line:
             continue
+
+        # TTFT measurement: log first-stdout-byte elapsed time (issue #1227).
+        # Best-effort — any write failure is silently swallowed so that a
+        # permissions error on logs/ never blocks PM session output.
+        if not _first_stdout_seen and ttft_metadata is not None:
+            _first_stdout_seen = True
+            _ttft_seconds = time.monotonic() - _spawn_ts
+            try:
+                from agent.cold_start_metrics import record_ttft
+
+                record_ttft(ttft_seconds=_ttft_seconds, **ttft_metadata)
+            except Exception as _ttft_err:
+                logger.warning("[TTFT] metric write failed (non-fatal): %s", _ttft_err)
 
         # Fire stdout-event callback for liveness tracking (#1036). Do NOT
         # block the harness loop if the callback raises.

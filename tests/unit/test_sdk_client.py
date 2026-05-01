@@ -432,3 +432,243 @@ class TestGetResponseViaHarnessSystemPrompt:
         assert "--append-system-prompt" not in captured["cmd"]
         warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert any("exceeds 512KB soft cap" in m for m in warnings), warnings
+
+    @pytest.mark.asyncio
+    async def test_exclude_dynamic_sections_present_when_system_prompt(self):
+        """PM sessions must inject --exclude-dynamic-system-prompt-sections for cache stability.
+
+        Issue #1227: this flag stabilises the system-prompt prefix so that
+        Anthropic's server-side prompt cache can reuse it across consecutive PM
+        sessions with the same working_directory.  It must be present whenever
+        --append-system-prompt is used.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from agent.sdk_client import get_response_via_harness
+
+        captured = {}
+        persona = "PM persona body — project-manager overlay"
+
+        async def fake_run(cmd, working_dir, proc_env, **_kw):
+            captured["cmd"] = cmd
+            return ("done", None, 0, None, None, None)
+
+        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+            await get_response_via_harness(
+                message="hi",
+                working_dir="/tmp",
+                env={"AGENT_SESSION_ID": "x"},
+                model="opus",
+                system_prompt=persona,
+            )
+
+        cmd = captured["cmd"]
+        assert "--exclude-dynamic-system-prompt-sections" in cmd, (
+            "--exclude-dynamic-system-prompt-sections must be in argv for PM sessions"
+        )
+        # Ordering: cache flag must precede --append-system-prompt
+        exc_idx = cmd.index("--exclude-dynamic-system-prompt-sections")
+        asp_idx = cmd.index("--append-system-prompt")
+        assert exc_idx < asp_idx, "--exclude-dynamic-system-prompt-sections must precede --append-system-prompt"
+
+    @pytest.mark.asyncio
+    async def test_exclude_dynamic_sections_absent_without_system_prompt(self):
+        """Non-PM sessions must NOT get --exclude-dynamic-system-prompt-sections.
+
+        The flag only helps when --append-system-prompt is in play (PM sessions).
+        Injecting it for dev/teammate sessions would needlessly change the
+        default system-prompt composition for those session types.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from agent.sdk_client import get_response_via_harness
+
+        captured = {}
+
+        async def fake_run(cmd, working_dir, proc_env, **_kw):
+            captured["cmd"] = cmd
+            return ("done", None, 0, None, None, None)
+
+        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+            await get_response_via_harness(
+                message="hi",
+                working_dir="/tmp",
+                env={"AGENT_SESSION_ID": "x"},
+                model="opus",
+                # system_prompt intentionally omitted — dev/teammate session
+            )
+
+        assert "--exclude-dynamic-system-prompt-sections" not in captured["cmd"]
+
+    @pytest.mark.asyncio
+    async def test_pm_persona_overlay_preserved_with_caching_flag(self):
+        """Persona overlay from #1148 must survive the Direction-A changes (#1227).
+
+        Verifies that the system-prompt text is still injected verbatim even
+        after --exclude-dynamic-system-prompt-sections was added alongside it.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from agent.sdk_client import get_response_via_harness
+
+        captured = {}
+        persona = "PM persona body — CRITIQUE is Mandatory After PLAN\nSDLC rules here."
+
+        async def fake_run(cmd, working_dir, proc_env, **_kw):
+            captured["cmd"] = cmd
+            return ("done", None, 0, None, None, None)
+
+        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+            await get_response_via_harness(
+                message="hi",
+                working_dir="/tmp",
+                env={"AGENT_SESSION_ID": "x"},
+                model="opus",
+                system_prompt=persona,
+            )
+
+        cmd = captured["cmd"]
+        # Persona must still be the value immediately after --append-system-prompt
+        assert "--append-system-prompt" in cmd
+        idx = cmd.index("--append-system-prompt")
+        assert cmd[idx + 1] == persona, "Persona content must be preserved verbatim (#1148 invariant)"
+
+    @pytest.mark.asyncio
+    async def test_arg_max_guard_trips_with_oversized_prompt(self):
+        """512KB ARG_MAX guard (agent/sdk_client.py:2118) must still trip after Direction-A changes.
+
+        Issue #1227 must NOT remove or raise this guard.
+        """
+        import logging
+        from unittest.mock import AsyncMock, patch
+
+        from agent.sdk_client import get_response_via_harness
+
+        captured = {}
+
+        async def fake_run(cmd, working_dir, proc_env, **_kw):
+            captured["cmd"] = cmd
+            return ("done", None, 0, None, None, None)
+
+        oversize = "x" * 600_000
+        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+            import logging as _logging
+
+            import pytest as _pytest
+
+            with _pytest.raises(Exception) if False else (
+                patch("agent.sdk_client.logger")
+            ) as mock_log:
+                # Use caplog-style approach; verify the guard drops the flag
+                await get_response_via_harness(
+                    message="hi",
+                    working_dir="/tmp",
+                    env={"AGENT_SESSION_ID": "x"},
+                    model="opus",
+                    system_prompt=oversize,
+                )
+
+        # Neither --append-system-prompt nor the cache flag should appear when the
+        # prompt exceeds the size cap — both are conditional on the else branch.
+        assert "--append-system-prompt" not in captured["cmd"]
+        assert "--exclude-dynamic-system-prompt-sections" not in captured["cmd"]
+
+
+# ---------------------------------------------------------------------------
+# cold_start_metrics: TTFT instrumentation (issue #1227)
+# ---------------------------------------------------------------------------
+
+
+class TestColdStartMetrics:
+    """Verify the TTFT (time-to-first-token) measurement module."""
+
+    def test_record_ttft_writes_jsonl(self, tmp_path, monkeypatch):
+        """record_ttft() must append a valid JSON line to the metrics file."""
+        import json
+
+        import agent.cold_start_metrics as csm
+
+        metrics_file = tmp_path / "cold_start_metrics.jsonl"
+        monkeypatch.setattr(csm, "_METRICS_FILE", metrics_file)
+
+        csm.record_ttft(
+            ttft_seconds=12.345,
+            session_id="test-session-1",
+            session_type="pm",
+            working_dir="/tmp/project",
+            prompt_chars=74769,
+            model="opus",
+        )
+
+        assert metrics_file.exists()
+        lines = metrics_file.read_text().strip().splitlines()
+        assert len(lines) == 1
+        entry = json.loads(lines[0])
+        assert entry["session_id"] == "test-session-1"
+        assert entry["session_type"] == "pm"
+        assert entry["ttft_seconds"] == 12.345
+        assert entry["prompt_chars"] == 74769
+        assert entry["model"] == "opus"
+        assert "timestamp" in entry
+
+    def test_record_ttft_appends_multiple_entries(self, tmp_path, monkeypatch):
+        """Successive calls must append, not overwrite."""
+        import json
+
+        import agent.cold_start_metrics as csm
+
+        metrics_file = tmp_path / "cold_start_metrics.jsonl"
+        monkeypatch.setattr(csm, "_METRICS_FILE", metrics_file)
+
+        csm.record_ttft(
+            ttft_seconds=10.0,
+            session_id="s1",
+            session_type="pm",
+            working_dir="/tmp",
+            prompt_chars=1000,
+            model="opus",
+        )
+        csm.record_ttft(
+            ttft_seconds=5.0,
+            session_id="s2",
+            session_type="other",
+            working_dir="/tmp",
+            prompt_chars=0,
+            model="sonnet",
+        )
+
+        lines = metrics_file.read_text().strip().splitlines()
+        assert len(lines) == 2
+        entries = [json.loads(l) for l in lines]
+        assert entries[0]["session_id"] == "s1"
+        assert entries[1]["session_id"] == "s2"
+
+    def test_record_ttft_swallows_write_failure(self, tmp_path, monkeypatch):
+        """record_ttft() must not raise even when the log directory is unwritable."""
+        import agent.cold_start_metrics as csm
+
+        # Point metrics file at a path whose parent cannot be created
+        bad_file = tmp_path / "nonexistent_dir" / "subdir" / "metrics.jsonl"
+        # Make tmp_path read-only so mkdir fails
+        monkeypatch.setattr(csm, "_METRICS_FILE", bad_file)
+        # Simulate permission error by monkeypatching open
+        import builtins
+
+        real_open = builtins.open
+
+        def failing_open(path, *args, **kwargs):
+            if "metrics" in str(path):
+                raise PermissionError("disk full")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", failing_open)
+
+        # Must NOT raise — instrumentation is best-effort
+        csm.record_ttft(
+            ttft_seconds=1.0,
+            session_id="s",
+            session_type="pm",
+            working_dir="/tmp",
+            prompt_chars=0,
+            model="opus",
+        )

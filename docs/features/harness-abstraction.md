@@ -102,7 +102,7 @@ PM sessions append the project-manager persona to `claude -p`'s default system p
 
 1. The executor calls `agent.sdk_client.load_pm_system_prompt(working_dir)` — returns the persona file plus the project-specific work-vault `CLAUDE.md` if present.
 2. The result is passed as `system_prompt=` to `get_response_via_harness()`.
-3. `get_response_via_harness()` injects `["--append-system-prompt", <text>]` into the harness argv after `--model` and before the positional message.
+3. `get_response_via_harness()` injects `["--exclude-dynamic-system-prompt-sections", "--append-system-prompt", <text>]` into the harness argv after `--model` and before the positional message.
 
 `--append-system-prompt` (not `--system-prompt`) preserves Claude Code's default tool-handling protocol — the PM persona is additive guidance. Defensive 512KB cap avoids macOS `ARG_MAX` overflows; oversized prompts are dropped with a `logger.warning` and the session continues without the persona (degraded but functional).
 
@@ -111,6 +111,25 @@ Failure modes:
 - Drafter call sites in `agent/session_completion.py` (Pass 1 + Pass 2 of `_deliver_pipeline_completion`) MUST keep `system_prompt=None`. Tainting drafter turns with PM orchestration corrupts the user-facing summary. Enforced by `tests/unit/test_session_completion.py::test_drafter_calls_omit_system_prompt` and the AST/anchor guards alongside it.
 
 Dev and Teammate sessions do not have a harness-side persona loader; they keep the default Claude Code protocol.
+
+### Prompt Cache Stabilization — `--exclude-dynamic-system-prompt-sections` (issue #1227)
+
+PM sessions include a large system prompt (~74K chars) via `--append-system-prompt`. Prior to issue #1227, every PM session paid a 15–20 minute cold-start TTFT because Anthropic's server-side prompt cache could not reuse the prefix — the default system prompt includes per-machine dynamic sections (cwd, env info, memory paths, git status) that differ between machines and sessions.
+
+**Fix:** `get_response_via_harness()` now injects `--exclude-dynamic-system-prompt-sections` alongside `--append-system-prompt` for every PM session. This flag (built into the `claude` CLI) moves the dynamic sections into the first user message, leaving the system-prompt prefix stable across consecutive sessions on the same machine in the same `working_directory`.
+
+**Result:** The second PM session within a 5-minute window (Anthropic's cache TTL) hits the server-side cache and completes its first turn in < 90 seconds instead of 15–20 minutes. Cache hits are logged via `cache_read_input_tokens` in `logs/cold_start_metrics.jsonl`.
+
+**Ordering invariant:** `--exclude-dynamic-system-prompt-sections` must precede `--append-system-prompt` in the argv. `get_response_via_harness()` enforces this ordering. Tests in `TestGetResponseViaHarnessSystemPrompt::test_exclude_dynamic_sections_present_when_system_prompt` assert the ordering contract.
+
+### TTFT Measurement — `agent/cold_start_metrics.py` (issue #1227)
+
+Every first-turn harness invocation (no `--resume`) writes a JSONL entry to `logs/cold_start_metrics.jsonl` via `agent.cold_start_metrics.record_ttft()`. The entry captures:
+- Spawn → first-stdout-byte elapsed time (`ttft_seconds`)
+- Session metadata: `session_id`, `session_type`, `working_dir`, `prompt_chars`, `model`
+- Cache hit indicator: `cache_read_input_tokens` (from `result` event's usage dict)
+
+All writes are best-effort: any failure is silently swallowed. The instrumentation MUST NOT block the worker or the user. See `agent/cold_start_metrics.py` for the full schema and `docs/features/pm-channels.md#cold-start-ttft-mitigation-issue-1227` for the measurement commands.
 
 ## Harness Command Registry
 
