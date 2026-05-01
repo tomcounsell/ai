@@ -62,10 +62,10 @@ class TestRegistryLoading:
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         entries = {r["name"]: r for r in data["reflections"]}
-        # The vault may have not yet picked up the entry on every machine, so
-        # this test is opt-in: it asserts shape ONLY when the entry exists.
-        if "pm-audio-briefing" not in entries:
-            pytest.skip("pm-audio-briefing entry not present in this machine's vault")
+        assert "pm-audio-briefing" in entries, (
+            "pm-audio-briefing entry missing from config/reflections.yaml -- "
+            "the feature is dead code without it (Blocker 1 from PR #1237 review)"
+        )
         entry = entries["pm-audio-briefing"]
         assert entry["interval"] == 300
         assert entry["timeout"] == 1500

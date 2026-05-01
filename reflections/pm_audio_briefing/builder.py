@@ -6,7 +6,7 @@ Implements the deterministic phases of /do-debrief: Categorize -> Pass A draft
 "no numbers" guard. The Pass A prompt encodes ALL semantic constraints:
 - forbids issue/PR numbers
 - forbids forward-looking commitments ("we will", "I'll push", etc.)
-- forbids bare 4+ digit integers ("1195" stripped of its prefix)
+- forbids bare 3+ digit integers ("363", "1195" stripped of their prefix)
 - requires the first sentence to be a decision or heads-up, not setup
 
 Post-LLM regex guard catches anything that slipped through:
@@ -34,15 +34,29 @@ class BriefingNumbersDetectedError(RuntimeError):
     """
 
 
-# Layer 2: prefixed forms ("issue 1197", "PR 1197"). NOTE: does NOT catch
-# "#1197" because `#` is not a word char so the `\b` before it never
-# anchors -- those are handled by Layer 3.
-_NUMBERS_PREFIXED_RE = re.compile(r"\b(?:issue|pr|#)\s*\d{2,}\b", re.IGNORECASE)
+class BriefingWordCountError(RuntimeError):
+    """Raised when Pass A transcript is under the minimum word count.
 
-# Layer 3: bare 4+ digit integers ("1197" alone, "1195" alone). Catches the
-# numeric part of "#1197" too. Allows "$500" (3 digits), "250 users" (3
-# digits), and "v3.5.2" (digits separated by dots, not bare integers).
-_NUMBERS_BARE_RE = re.compile(r"\b\d{4,}\b")
+    Declared at module top (per plan C1-R5) so the post-check guard never
+    raises NameError. Signals a too-short Pass A regression to the dashboard
+    last_status field.
+    """
+
+
+# Layer 2: prefixed forms ("issue 1197", "PR 1197", "pr-363", "issue_1197").
+# Uses [\s\-_]* (whitespace, hyphen, underscore) per plan B1-R5 canonical spec
+# so that hyphen/underscore-separated forms like `pr-363` and `issue_1197` are
+# caught. NOTE: does NOT catch "#1197" because `#` is not a word char so the
+# `\b` before it never anchors -- those are handled by Layer 3.
+_NUMBERS_PREFIXED_RE = re.compile(r"\b(?:issue|pr|#)[\s\-_]*\d{2,}\b", re.IGNORECASE)
+
+# Layer 3: bare 3+ digit integers ("363", "1197", "1195"). Uses lookbehind to
+# exclude dollar amounts and decimal fractions, and lookahead to exclude common
+# measurement units. Per plan B1-R5 canonical spec: catches bare 3+ digit
+# issue/PR numbers like "363", "1195", "1197" that slip through Layer 2.
+_NUMBERS_BARE_RE = re.compile(
+    r"(?<!\$)(?<![\d.])\b\d{3,}\b(?!\s*(?:users?|requests?|lines?|ms|seconds?|minutes?|hours?|days?|%|percent))"
+)
 
 # Word-count target (Pass B).
 _WORD_COUNT_MIN = 55
@@ -288,7 +302,9 @@ def build(
     # Word-count post-check.
     wc = _word_count(transcript)
     if wc < _WORD_COUNT_MIN:
-        logger.warning("Pass A transcript is under min word count (%d < %d)", wc, _WORD_COUNT_MIN)
+        raise BriefingWordCountError(
+            f"Pass A transcript is under minimum word count: {wc} < {_WORD_COUNT_MIN}"
+        )
     if wc > _WORD_COUNT_MAX:
         # Pass B should have cut this; if it still over, raise.
         raise RuntimeError(f"Pass B failed to cut transcript to <= {_WORD_COUNT_MAX} words ({wc})")

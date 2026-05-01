@@ -65,13 +65,24 @@ class TestBriefingNumbersDetectedError:
 
 
 class TestLayer2Prefixed:
-    """Layer 2 catches `issue 1197` and `PR 1197` but NOT `#1197`."""
+    """Layer 2 catches `issue 1197`, `PR 1197`, `pr-363`, `issue_1197` but NOT `#1197`.
+
+    Per plan B1-R5: separator changed from \\s* to [\\s\\-_]* to catch hyphen/underscore forms.
+    """
 
     def test_layer2_catches_issue_prefix(self):
         assert re.search(builder._NUMBERS_PREFIXED_RE, "issue 1197 was fixed")
 
     def test_layer2_catches_pr_prefix(self):
         assert re.search(builder._NUMBERS_PREFIXED_RE, "PR 1197 merged")
+
+    def test_layer2_catches_hyphen_separator(self):
+        # Per plan B1-R5: pr-363 is caught by Layer 2 (was previously slipping through)
+        assert re.search(builder._NUMBERS_PREFIXED_RE, "pr-363 was merged")
+
+    def test_layer2_catches_underscore_separator(self):
+        # Per plan B1-R5: issue_1197 is caught by Layer 2
+        assert re.search(builder._NUMBERS_PREFIXED_RE, "issue_1197 closed")
 
     def test_layer2_does_not_catch_pound_only(self):
         # `#` is not a word char so `\b` before it never anchors
@@ -85,20 +96,30 @@ class TestLayer2Prefixed:
 
 
 class TestLayer3Bare:
-    """Layer 3 catches bare 4+ digit integers including the numeric part of `#1197`."""
+    """Layer 3 catches bare 3+ digit integers including the numeric part of `#1197`.
+
+    Per plan B1-R5: floor changed from 4+ to 3+ with lookbehind/lookahead guards.
+    """
 
     def test_layer3_catches_bare_4_digit(self):
         assert re.search(builder._NUMBERS_BARE_RE, "1197")
+
+    def test_layer3_catches_bare_3_digit(self):
+        # Per plan B1-R5: bare 3-digit numbers like 363 are now caught.
+        assert re.search(builder._NUMBERS_BARE_RE, "bare 363 in transcript")
 
     def test_layer3_catches_pound_form_via_digit(self):
         # `#1197` has 1197 as a bare token Layer 3 catches
         assert re.search(builder._NUMBERS_BARE_RE, "#1197 fixed")
 
-    def test_layer3_allows_3_digit(self):
-        assert not re.search(builder._NUMBERS_BARE_RE, "$500 raised, 250 users")
+    def test_layer3_allows_dollar_prefixed_3_digit(self):
+        assert not re.search(builder._NUMBERS_BARE_RE, "$500 raised")
+
+    def test_layer3_allows_user_counts(self):
+        assert not re.search(builder._NUMBERS_BARE_RE, "250 users active")
 
     def test_layer3_allows_version_strings(self):
-        # v3.5.2 -- digits separated by dots, no individual segment >= 4 digits
+        # v3.5.2 -- digits separated by dots, no individual segment >= 3 digits
         assert not re.search(builder._NUMBERS_BARE_RE, "v3.5.2 release")
 
 
@@ -190,8 +211,11 @@ class TestBuildWithSignals:
         signals = {"merges": [{"subject": "Fix auth flow", "pr_number": 1}]}
 
         clean_transcript = (
-            "Shipped the auth fix yesterday. Two FYIs queued for today: the "
-            "memory dedup pass and a small dashboard polish. I've got the rest."
+            "Shipped the auth fix yesterday and the rollout is looking clean across all environments. "
+            "The login session persistence bug is now fully resolved with no regressions. "
+            "A few quick FYIs: the memory dedup pass ran overnight successfully, "
+            "a small dashboard polish landed in staging, and the nightly test suite is green. "
+            "I've got the rest."
         )
         with patch.object(builder, "_draft_pass_a", return_value=clean_transcript):
             audio, follow = builder.build(signals, fallback_message="x", skip_when_empty=False)
@@ -205,11 +229,23 @@ class TestBuildWithSignals:
             with pytest.raises(builder.BriefingNumbersDetectedError):
                 builder.build(signals, fallback_message="x", skip_when_empty=False)
 
+    def test_pass_a_under_min_word_count_raises(self):
+        """Pass A transcript under 55 words raises BriefingWordCountError (Tech Debt 1 fix)."""
+        signals = {"merges": [{"subject": "Auth", "pr_number": 1}]}
+        short_transcript = "Shipped the auth fix. I've got the rest."
+        with patch.object(builder, "_draft_pass_a", return_value=short_transcript):
+            with pytest.raises(builder.BriefingWordCountError) as exc_info:
+                builder.build(signals, fallback_message="x", skip_when_empty=False)
+        assert "minimum word count" in str(exc_info.value)
+
     def test_followup_includes_links_when_url_present(self):
         signals = {"merges": [{"subject": "Auth", "pr_number": 42, "url": "https://gh/x/42"}]}
         clean_transcript = (
-            "We shipped a meaningful auth update. A few quick FYIs: deploy is "
-            "ready and the dashboard has fresh data. I've got the rest."
+            "We shipped a meaningful auth update that resolves the login session persistence bug. "
+            "The fix went out cleanly and the error rate dropped to zero in all environments. "
+            "A few quick FYIs: the deploy queue is clear, the dashboard now shows fresh data, "
+            "and the nightly regression suite passed without issues. "
+            "I've got the rest."
         )
         with patch.object(builder, "_draft_pass_a", return_value=clean_transcript):
             _, follow = builder.build(signals, fallback_message="x", skip_when_empty=False)

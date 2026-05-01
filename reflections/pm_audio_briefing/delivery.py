@@ -32,6 +32,14 @@ class BriefingTtsFailedError(RuntimeError):
     """Raised when tools.tts.synthesize() returns a truthy `error` field."""
 
 
+class BriefingConfigError(RuntimeError):
+    """Raised for hard configuration failures detected at startup.
+
+    Declared at module top alongside BriefingTtsFailedError per plan N1-R4.
+    Reserved for startup config-validation and future hard config failures.
+    """
+
+
 def _resolve_chat_id(project: dict, group_name: str) -> int | None:
     """Resolve the chat_id for a target group from project.telegram.groups.
 
