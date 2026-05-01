@@ -2,9 +2,9 @@
 
 > **Business context:** See [Cognitive Memory Design](~/work-vault/AI Valor Engels System/Harness/Cognitive Memory Design.md) in the work vault for the original design rationale, MuninnDB analysis, and episodic memory architecture vision.
 
-Automatic memory injection and extraction system that gives agents persistent context across sessions. Human instructions and agent observations are stored as Memory records in Redis, surfaced as `<thought>` blocks during tool calls, and reinforced by outcome detection.
+Automatic memory injection and extraction system that gives agents persistent context across sessions. Human instructions and agent observations are stored as Memory records in Redis, surfaced as compact `<thought>` stubs during tool calls (full bodies on demand via the `memory_get` / `memory_search` MCP tools), and reinforced by outcome detection.
 
-Memories carry structured metadata (category, file paths, tags) from extraction, track effectiveness via dismissal counting with importance decay, and use multi-query decomposition for broader retrieval coverage.
+Memories carry structured metadata (category, file paths, tags) from extraction, track effectiveness via dismissal counting with importance decay, and use multi-query decomposition for broader retrieval coverage. A `title` field — populated asynchronously by a local LLM (Ollama) — drives the stub label so the agent can decide whether to pull the full body without spending tokens on the body itself.
 
 ## Architecture
 
@@ -149,9 +149,9 @@ The PostToolUse hook in `agent/health_check.py` checks for relevant memories on 
 4. `ExistenceFilter.might_exist()` does an O(1) bloom check
 5. If positive and >5 unique keywords: `_cluster_keywords()` splits keywords into topical clusters (max 3 clusters of ~3-5 keywords each); otherwise uses a single query
 6. `retrieve_memories()` runs per cluster using 4-signal RRF fusion (keyword match, temporal relevance, confidence, semantic similarity), results are merged and deduplicated by `memory_id`
-7. Results are formatted as `<thought>content</thought>` blocks (max 3)
+7. Results are formatted as compact stub blocks `<thought id="mem_xyz">[category] title</thought>` (max 3) — see [Progressive Disclosure](#progressive-disclosure-stub-injection)
 8. Returned via `additionalContext` in the hook response
-9. Injected thoughts are tracked for later outcome detection
+9. Injected thoughts are tracked for later outcome detection — the in-process injection list (and the Claude Code sidecar `injected[]`) keeps the **full content**, not just the stub, so bigram-overlap outcome detection still works
 10. Latency is monitored with a 15ms warning threshold for multi-query paths
 
 ### Flow 3: Post-Session Extraction
@@ -430,6 +430,106 @@ Both `check_and_inject()` (SDK/Telegram path) and `recall()` (Claude Code hooks 
 
 A latency guard logs a WARNING if multi-query retrieval exceeds 15ms.
 
+## Progressive Disclosure (Stub Injection)
+
+Memory recall used to inject full memory bodies into every tool-call cycle: `<thought>{full content}</thought>`. With ~300-token bodies and three thoughts per cycle, recall could cost ~1k tokens per turn for context the agent often never used. Issue [#1178](https://github.com/tomcounsell/ai/issues/1178) replaced the full-body injection with a compact stub format and added an MCP server so the agent can pull the body on demand. The benchmark in `tests/integration/test_memory_stub_injection.py::test_stub_format_at_least_5x_token_reduction` enforces a ≥5× token-reduction floor (measured via `tiktoken.get_encoding("cl100k_base")`).
+
+### Stub format
+
+```
+<thought id="mem_a3f9c7b2">[decision] Telegram ingestion moved to Redis queue with watchdog and per-chat sequence guard</thought>
+```
+
+Format string (from `_format_stub_blocks` in `.claude/hooks/hook_utils/memory_bridge.py` and inline in `agent/memory_hook.check_and_inject`):
+
+| When | Format |
+|------|--------|
+| `record.title` populated | `<thought id="{memory_id}">[{category}] {title}</thought>` |
+| `record.title` empty (race or Ollama down) | `<thought id="{memory_id}">[{category}]</thought>` |
+| `metadata.category` missing | category defaults to `"memory"` |
+
+Both recall paths — SDK `check_and_inject()` (Telegram agent) and `recall()` / `prefetch()` (Claude Code hooks) — emit the same shape.
+
+### Sidecar / in-process injection list keeps full content
+
+This is a load-bearing invariant (B1 from the plan's cycle-1 critique). The agent-visible `<thought>` block is short, but the Claude Code hook sidecar's `injected[]` array and the SDK-side `agent.memory_hook._injected_thoughts` list both keep `(memory_id, full_content)` tuples. `agent/memory_extraction.detect_outcomes_async()` runs LLM-judged outcome detection plus a bigram-overlap fallback against the response text — stripping `injected[]` to titles would collapse the act / used / dismissed signal that drives `dismissal_count`, importance decay, `outcome_history`, and `ObservationProtocol.on_context_used`.
+
+### `memory_get` and `memory_search` MCP tools
+
+`mcp_servers/memory_server.py` is a stdio FastMCP server that Claude Code spawns per session via the entry registered in `~/.claude.json`. It exposes two tools:
+
+```python
+memory_get(memory_id: str) -> dict
+# {memory_id, content, title, category, tags, importance, source}
+# or {"error": "memory not found: <id>"} / {"error": "memory_id required"}
+
+memory_search(query: str, category: str | None = None, tag: str | None = None, limit: int = 5) -> dict
+# {"results": [{"id", "category", "title", "score"}, ...], "error": None}
+# limit is clamped to [1, 50]; empty query returns empty results without raising.
+```
+
+`memory_search` returns more stubs (the same id/category/title triples used in injection); the agent calls `memory_get(id)` to pull the body for any stub it actually wants to read. This is the progressive-disclosure pattern: stub-by-default, full body on demand.
+
+**Cold-start budget:** the module is structured to import lazily — `from models.memory import Memory` happens inside the tool body, not at module top — and `tests/integration/test_memory_mcp_server.py::test_cold_start_latency` asserts a per-machine startup budget. A separate fresh-shell smoke test runs `MCP_MEMORY_DRY_RUN=1 python -m mcp_servers.memory_server` under a stripped environment to catch import-resolution issues before they reach a real Claude Code subprocess.
+
+### Title generation
+
+`tools/memory_search/title_generator.generate_title_async(memory_id, content)` returns synchronously and spawns a daemon thread that calls Ollama out-of-band. The writer path never blocks. The thread:
+
+1. Reads `settings.models.ollama_host` and `settings.models.memory_title_timeout_s` (5s default).
+2. Uses `OLLAMA_LOCAL_MODEL` (currently `gemma4:e2b`) — there is no separate `MEMORY_TITLE_MODEL` setting; the title generator deliberately reuses the project's canonical local model.
+3. Prompts `"Generate a single descriptive title (max 12 words, no quotes, no period) for this memory:\n\n{content}"` (content truncated to 1000 chars).
+4. Normalizes the result (trims wrapping quotes, collapses whitespace, caps at 200 chars) and writes back via `record.save()`.
+5. Fails silently — Ollama unreachable / model not pulled → no title written → stub renders as `[category]` only on next recall.
+
+**Wired at 7 writer call sites individually — no model-layer hook.** The cycle-3 architectural reversal in the plan rejected a `Memory.save()` override in favor of explicit `generate_title_async(...)` calls at each writer site. Sites:
+
+1. `tools/memory_search/__init__.py::save` (CLI save)
+2. `agent/memory_extraction.py::extract_observations_async` (post-session Haiku extraction)
+3. `agent/memory_extraction.py::extract_post_merge_learning` (post-merge PR learning)
+4. `bridge/telegram_bridge.py` (Telegram message ingest; `safe_text` is already `strip_private`'d)
+5. `.claude/hooks/hook_utils/memory_bridge.py::ingest` (UserPromptSubmit hook ingest)
+6. `tools/knowledge/indexer.py` × 2 (chunked path + single-doc path)
+7. `scripts/memory_consolidation.py` (memory-dedup merge writer)
+
+`tests/unit/test_memory_title_writer_paths.py` inspects each site to assert the wiring exists *and* the absence of any `if not self.title` guard — the contract is overwrite-every-save: titles evolve as new context arrives.
+
+**`strip_private` discipline:** every site applies `agent.private_tag.strip_private(content)` before passing to the title generator, so `<private>...</private>` segments never reach the local LLM. The Telegram bridge site relies on `safe_text` already being stripped earlier in the message-handling pipeline.
+
+### MCP registration in `~/.claude.json`
+
+`scripts/update/mcp_memory.py` writes (and self-heals) the canonical entry under `mcpServers.memory`:
+
+```json
+{
+  "type": "stdio",
+  "command": "python3",
+  "args": ["-m", "mcp_servers.memory_server"],
+  "env": {"PYTHONPATH": "<repo_root>"}
+}
+```
+
+PYTHONPATH is resolved per-machine via `git rev-parse --show-toplevel`. Concurrency safety:
+
+- Acquires `fcntl.flock` (`LOCK_EX` for write, `LOCK_SH` for `--verify` read-only) on `~/.claude.json.lock` with `(50, 200, 800)` ms exponential backoff. On contention, the step is skipped with a "next /update run will retry" message rather than blocking.
+- Atomic write: `shutil.copy2` to `~/.claude.json.bak`, write to `.tmp`, `os.rename` (atomic on POSIX).
+- Idempotent: if the existing entry already matches all four fields (`type`/`command`/`args`/`env.PYTHONPATH`), the action returns `"ok"` without rewriting.
+
+Wired into `scripts/update/run.py` Step 4.8. Runs in `--full` and `--cron` (write modes that repair drift) and `--verify` (read-only — reports drift without writing). Every `/update` invocation rechecks the registration and fixes missing entries, drifted PYTHONPATH (after a repo move), and corrupt JSON. Step 4.8 also calls `mcp_memory.check_ollama_for_titles()` for an informational ping — non-fatal log line indicating whether `gemma4:e2b` is available for title generation.
+
+### Backfill for pre-existing records
+
+`scripts/backfill_memory_titles.py` populates titles on records that predate this change:
+
+```bash
+python scripts/backfill_memory_titles.py            # all records
+python scripts/backfill_memory_titles.py --dry-run  # count only
+python scripts/backfill_memory_titles.py --limit 100
+python scripts/backfill_memory_titles.py --batch-sleep-ms 50  # default
+```
+
+Idempotent — skips records that already have a non-empty `title`. Applies `strip_private(content)` before dispatching the daemon thread. Default 50ms sleep between dispatches keeps local Ollama responsive.
+
 ## Parity Requirement
 
 The memory system MUST work equally across all agent session types — SDK/Telegram sessions and local Claude Code CLI sessions. Any memory capability added to one path must be implemented in the other. The shared Redis Memory model ensures data-level parity; the gaps below are at the integration layer.
@@ -549,8 +649,12 @@ The script prints a three-count summary per run: total candidates considered, re
 
 | File | Purpose |
 |------|---------|
-| `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, BM25, write filter, access tracker, bloom, DictField metadata, reference pointer) |
+| `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, BM25, write filter, access tracker, bloom, DictField metadata, reference pointer, `title` StringField for stub injection) |
 | `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants, RRF tuning, and dismissal tracking thresholds |
+| `mcp_servers/memory_server.py` | Stdio FastMCP server exposing `memory_get(memory_id)` and `memory_search(query, ...)`. Lazy imports for cold-start budget; `MCP_MEMORY_DRY_RUN=1` env enables fresh-shell smoke check. |
+| `tools/memory_search/title_generator.py` | `generate_title_async(memory_id, content)` — fire-and-forget Ollama call (uses `OLLAMA_LOCAL_MODEL`, 5s timeout) that writes `record.title` from a daemon thread. Fail-silent on Ollama down. |
+| `scripts/update/mcp_memory.py` | Idempotent `~/.claude.json` registration under `fcntl.flock` with atomic backup→tmp→rename. Wired into `scripts/update/run.py` Step 4.8 (write in `--full`/`--cron`, read-only in `--verify`). |
+| `scripts/backfill_memory_titles.py` | One-shot backfill for pre-existing records (idempotent — skips records with non-empty `title`). |
 | `agent/memory_hook.py` | PostToolUse thought injection with sliding window rate limiting, multi-query decomposition via `_cluster_keywords()` (Telegram agent path) |
 | `agent/memory_retrieval.py` | 4-signal RRF fusion retrieval: `retrieve_memories()`, `rrf_fuse()`, `get_embedding_ranked()`, ranked signal accessors. Includes superseded-by filter to exclude archived records from recall. |
 | `agent/embedding_provider.py` | `OllamaEmbeddingProvider` adapter for local Ollama embedding, plus `configure_embedding_provider()` for global provider setup. |
@@ -632,6 +736,15 @@ All tuning constants are in `config/memory_defaults.py`. Call `apply_defaults()`
 | `MIN_IMPORTANCE_FLOOR` | 0.2 | Minimum importance after decay (never drops below this) |
 | `CATEGORY_RECALL_WEIGHTS` | `{correction: 1.5, decision: 1.3, pattern: 1.0, surprise: 1.0, default: 1.0}` | Post-query re-ranking multipliers by category |
 | `DEFAULT_PROJECT_KEY` | `"default"` | Fallback project partition when cwd is unavailable (was `"dm"` before #811) |
+
+Title-generation settings live on `settings.models` (in `config/settings.py`) rather than `memory_defaults`:
+
+| Setting | Default | Env var | Description |
+|---------|---------|---------|-------------|
+| `models.ollama_host` | `http://localhost:11434` | `MODELS__OLLAMA_HOST` | Ollama base URL used by the memory title generator |
+| `models.memory_title_timeout_s` | `5.0` | `MODELS__MEMORY_TITLE_TIMEOUT_S` | HTTP timeout for the title-gen Ollama call. Title generation is fire-and-forget — exceeding the timeout logs at DEBUG and leaves `title` unchanged; stubs fall back to category-only rendering. |
+
+The model is `OLLAMA_LOCAL_MODEL` (`config/models.py`, currently `gemma4:e2b`) — there is no separate `MEMORY_TITLE_MODEL` setting.
 
 ## Project Key Partitioning
 
@@ -760,3 +873,4 @@ No schema migrations are involved. Redis keys can be flushed without side effect
 - Memory consolidation: [#795](https://github.com/tomcounsell/ai/issues/795) -- `memory-dedup` reflection, `superseded_by` fields, recall filter, semantic dedup via Haiku
 - Memory status CLI: [#964](https://github.com/tomcounsell/ai/issues/964) -- `python -m tools.memory_search status` health subcommand
 - Event-loop unblock (Layers 1+2): [#1055](https://github.com/tomcounsell/ai/issues/1055) -- `AsyncAnthropic` with double-timeout, fire-and-forget scheduler decoupled from finalization, shutdown drain, `memory.extraction.error` analytics counter
+- Progressive disclosure + memory MCP server: [#1178](https://github.com/tomcounsell/ai/issues/1178) (PR [#1255](https://github.com/tomcounsell/ai/pull/1255)) -- compact stub injection (`<thought id="...">[category] title</thought>`), `Memory.title` field with async Ollama title generator wired at 7 writer call sites, `memory_get` and `memory_search` MCP tools, idempotent `~/.claude.json` registration via `scripts/update/mcp_memory.py`
