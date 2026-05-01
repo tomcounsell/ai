@@ -76,7 +76,7 @@ Live counters use `HINCRBYFLOAT` for atomic increments. Daily keys store both to
 from analytics.collector import record_metric
 
 # Record a metric with dimensions
-record_metric("session.cost_usd", 0.05, {"session_id": "abc123"})
+record_metric("memory.recall_attempt", 1, {"hits": 3, "project_key": "ai"})
 
 # Record a simple counter
 record_metric("session.started", 1)
@@ -154,11 +154,11 @@ The `export` command produces JSON with the structure:
   "exported_at": "2026-04-11T12:00:00Z",
   "days": 30,
   "metrics": {
-    "session.cost_usd": {
-      "total": 12.5,
-      "count": 250,
+    "memory.recall_attempt": {
+      "total": 1280,
+      "count": 1280,
       "daily": [
-        {"date": "2026-04-11", "count": 8, "total": 0.42, "avg": 0.0525}
+        {"date": "2026-04-11", "count": 42, "total": 42.0, "avg": 1.0}
       ]
     }
   }

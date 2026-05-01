@@ -205,7 +205,7 @@ The `claude -p stream-json` subprocess is the execution engine for every Dev / P
 
 When extended-thinking interacts pathologically with compaction, both the primary harness call AND the stale-UUID fallback exit non-zero with stderr containing the substring `redacted_thinking`. The harness now:
 
-1. Captures the first 2000 chars of stderr (`stderr_snippet`) from `_run_harness_subprocess` (widened from a 5-tuple to a 6-tuple return).
+1. Captures the first 2000 chars of stderr (`stderr_snippet`) from `_run_harness_subprocess`.
 2. After the stale-UUID fallback completes, checks `stderr_snippet` against `THINKING_BLOCK_SENTINEL = "redacted_thinking"` AND `returncode != 0`. When BOTH conditions are met, raises `HarnessThinkingBlockCorruption` with the user-facing message "Session context corrupted — please start a new thread".
 3. `agent/session_executor.py` catches the exception so `BackgroundTask` finalizes the session as `failed` — the user sees the specific error message, not silence.
 
