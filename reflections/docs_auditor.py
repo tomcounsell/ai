@@ -457,16 +457,20 @@ def _apply_fixes_to_file(path: Path, repo_root: Path, fixes: list[tuple[str, str
         if not old:
             continue
         if new == "":
-            # Delete the entire line containing `old`
+            # Delete the entire line that exactly equals `old` (after stripping trailing newline).
+            # Substring match would risk collateral deletion when `old` happens to appear
+            # inside an unrelated line.
             lines = new_text.splitlines(keepends=True)
-            kept = [ln for ln in lines if old not in ln]
-            if len(kept) != len(lines):
+            kept = [ln for ln in lines if ln.rstrip("\n\r") != old.rstrip("\n\r")]
+            removed = len(lines) - len(kept)
+            if removed > 0:
                 new_text = "".join(kept)
-                applied += 1
+                applied += removed
         else:
             if old in new_text:
+                count = new_text.count(old)
                 new_text = new_text.replace(old, new)
-                applied += 1
+                applied += count
 
     if new_text != text:
         try:
@@ -569,15 +573,17 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
         return False
     title_hash = hashlib.sha256(title.encode("utf-8")).hexdigest()[:16]
     dedup_key = f"{REDIS_ISSUE_DEDUP_PREFIX}:{title_hash}"
+    redis_client = None
     try:
-        r = _get_redis()
-        if not r.set(dedup_key, "1", nx=True, ex=86400 * 30):
+        redis_client = _get_redis()
+        # Pre-check existence without writing — only commit dedup key after gh succeeds.
+        if redis_client.exists(dedup_key):
             return False  # already filed
     except Exception:
-        pass  # If Redis is unavailable, fall through and attempt to file
+        redis_client = None  # If Redis is unavailable, attempt to file without dedup
 
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 "gh",
                 "issue",
@@ -595,6 +601,18 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
             check=False,
             cwd=str(repo_root),
         )
+        if result.returncode != 0:
+            logger.warning(
+                f"docs_auditor: gh issue create failed for '{title}' "
+                f"(rc={result.returncode}): {result.stderr.strip()[:200]}"
+            )
+            return False
+        # Only set dedup key after successful gh issue create — transient failures retry next run.
+        if redis_client is not None:
+            try:
+                redis_client.set(dedup_key, "1", ex=86400 * 30)
+            except Exception:
+                pass
         return True
     except Exception as e:
         logger.warning(f"docs_auditor: gh issue create failed for '{title}': {e}")
