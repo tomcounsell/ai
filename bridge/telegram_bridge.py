@@ -608,6 +608,19 @@ for _entry in CONFIG.get("dms", {}).get("whitelist", []):
     _proj_cfg["_key"] = _proj_key
     DM_USER_TO_PROJECT[int(_entry["id"])] = _proj_cfg
 
+# Startup invariant (#1173 Risk 3): DM_WHITELIST and DM_USER_TO_PROJECT must stay
+# in lockstep. If they decouple in projects.json, a whitelisted sender_id could
+# pass should_respond_async (because it's in DM_WHITELIST) yet have no project
+# mapping (because it's missing from DM_USER_TO_PROJECT) — re-introducing the
+# class of leak we're fixing. Enforced at startup, not asserted (asserts are
+# stripped under python -O).
+if set(DM_WHITELIST) != set(DM_USER_TO_PROJECT.keys()):
+    raise RuntimeError(
+        "projects.json drift: DM_WHITELIST and DM_USER_TO_PROJECT.keys() must be equal "
+        f"(whitelist={DM_WHITELIST}, mapping_keys={set(DM_USER_TO_PROJECT.keys())}). "
+        "Every dms.whitelist[] entry must reference an active project."
+    )
+
 # Propagate config to routing module so imported functions work correctly
 _routing_module.CONFIG = CONFIG
 _routing_module.DEFAULTS = DEFAULTS
@@ -1042,8 +1055,13 @@ async def main():
         else:
             project = find_project_for_chat(chat_title) if chat_title else None
 
-        # Store ALL incoming messages for history (regardless of whether we respond)
-        _early_project_key = project.get("_key", "dm") if project else "dm"
+        # Store ALL incoming messages for history (regardless of whether we respond).
+        # Conversation history (store_message / register_chat) is preserved for unowned
+        # chats by passing project_key=None — both functions accept str | None. Only the
+        # canonical Memory partition write below is gated on a resolved project, since
+        # that's the actual leak surface (#1173 — the retired "dm" namespace must never
+        # be written to again).
+        _early_project_key = project.get("_key") if project else None
         stored_msg_id = None  # Track for telegram_message_key cross-reference
         try:
             store_result = store_message(
@@ -1075,22 +1093,25 @@ async def main():
         except Exception as e:
             logger.error(f"Error storing message: {e}")
 
-        # Save to subconscious memory (non-fatal, never crashes bridge)
-        try:
-            if text and text.strip() and not getattr(sender, "bot", False):
-                from popoto import InteractionWeight
+        # Save to subconscious memory (non-fatal, never crashes bridge).
+        # Gated on a resolved project_key — unowned messages don't belong to any
+        # memory partition and must not pollute the partition table (#1173).
+        if _early_project_key:
+            try:
+                if text and text.strip() and not getattr(sender, "bot", False):
+                    from popoto import InteractionWeight
 
-                from models.memory import Memory
+                    from models.memory import Memory
 
-                Memory.safe_save(
-                    agent_id=sender_name or "unknown",
-                    project_key=_early_project_key,
-                    content=text[:500],
-                    importance=InteractionWeight.HUMAN,
-                    source="human",
-                )
-        except Exception as e:
-            logger.warning(f"Memory save failed (non-fatal): {e}")
+                    Memory.safe_save(
+                        agent_id=sender_name or "unknown",
+                        project_key=_early_project_key,
+                        content=text[:500],
+                        importance=InteractionWeight.HUMAN,
+                        source="human",
+                    )
+            except Exception as e:
+                logger.warning(f"Memory save failed (non-fatal): {e}")
 
         # Extract and store links from whitelisted senders
         if sender_username and sender_username.lower() in LINK_COLLECTORS:
@@ -1127,6 +1148,18 @@ async def main():
         if not should_reply:
             if is_dm and DM_WHITELIST:
                 logger.debug(f"Ignoring DM from {sender_name} (id={sender_id}) - not in whitelist")
+            return
+
+        # Hard project guard (#1173): if no project resolved, return before any
+        # session-routing or downstream project_key reference. This was already the
+        # de facto behavior — should_respond_async filters out unresolved chats —
+        # but the explicit guard prevents a future refactor from silently re-introducing
+        # the retired "dm" fallback at :1040 and the six downstream project_key uses.
+        if not project:
+            logger.info(
+                f"[routing] Skipping unowned message from {sender_name} "
+                f"(chat={chat_title or 'DM'}, sender_id={sender_id}): no project resolved"
+            )
             return
 
         project_name = project.get("name", "DM") if project else "DM"
@@ -1166,7 +1199,8 @@ async def main():
         # Build session ID with reply-based continuity
         # - Reply to Valor's message → continue that session
         # - New message (no reply) → fresh session using message ID
-        project_key = project.get("_key", "dm") if project else "dm"
+        # project_key is guaranteed non-None by the `if not project: return` guard above (#1173)
+        project_key = project["_key"]
         telegram_chat_id = str(event.chat_id)  # For history lookup
 
         # Use the is_reply_to_valor flag from should_respond_async
@@ -2157,7 +2191,8 @@ async def main():
         if not project:
             return
 
-        project_key = project.get("_key", "dm")
+        # Subscript safe — guarded by `if not project: return` above (#1173)
+        project_key = project["_key"]
         edited_text = (message.text or "").strip()
         if not edited_text:
             return

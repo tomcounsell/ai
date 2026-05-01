@@ -195,14 +195,6 @@ class TestMessageRoutingIntegration:
 
         assert session_id == "tg_valor_123456789"
 
-    def test_dm_session_id_uses_dm_key(self):
-        """DM sessions should use 'dm' as project key."""
-        project_key = None  # No project for DMs
-        chat_id = 987654321
-        session_id = f"tg_{project_key or 'dm'}_{chat_id}"
-
-        assert session_id == "tg_dm_987654321"
-
 
 class TestResponseDecisionIntegration:
     """Integration tests for response decision logic."""

@@ -515,9 +515,9 @@ All Memory records carry a `project_key` that scopes them to a specific project.
 | Value | Source | Description |
 |-------|--------|-------------|
 | `"valor"` | projects.json match | The main `~/src/ai` project (matched by working directory) |
-| `"dm"` | Telegram bridge | Genuine Telegram direct messages. Semantically reserved — must not be used as a fallback for non-DM contexts. |
+| `"dm"` | retired — DO NOT WRITE | The original Telegram-DM partition. Retired in #811 (PR #820). The bridge no longer writes here at all (#1173): messages from chats that don't resolve to a declared project skip the canonical Memory partition write entirely. `Memory.safe_save` emits a WARNING with stack trace if any caller still attempts a `"dm"` write — see `_warn_if_legacy_namespace` in `models/memory.py`. |
 | `Path(cwd).name` | cwd basename fallback | Used when projects.json is missing or has no match for the current directory |
-| `"default"` | `DEFAULT_PROJECT_KEY` | Last-resort fallback in `config/memory_defaults.py`. Replaces the previous `"dm"` default to prevent silent mislabeling. |
+| `"default"` | `DEFAULT_PROJECT_KEY` | Last-resort fallback in `config/memory_defaults.py`. Still legitimate during single-machine bootstrap and test fixtures. `Memory.safe_save` emits a DEBUG-level audit log with stack trace whenever `"default"` is written; tracked under follow-up issue #1232 (unify writer project_key resolution into a single helper). |
 
 ### Resolution Chain
 
@@ -528,7 +528,7 @@ All Memory records carry a `project_key` that scopes them to a specific project.
 3. `Path(cwd).name` — directory basename when no projects.json match exists
 4. `DEFAULT_PROJECT_KEY` from `config/memory_defaults.py` — final fallback when cwd is None
 
-The Telegram bridge path writes directly with `project_key="dm"` for human messages and uses `DEFAULT_PROJECT_KEY` from environment/config for agent-extracted observations.
+The Telegram bridge path resolves `project_key` from the message's chat (`find_project_for_dm(sender_id)` for DMs, `find_project_for_chat(chat_title)` for groups). When neither resolver matches, the bridge writes conversation history (`store_message`, `register_chat`) with `project_key=None` so `valor-telegram read` keeps working, but **skips the canonical Memory partition write entirely** — unowned messages no longer pollute any partition (#1173). The retired `"dm"` literal has been removed from `bridge/telegram_bridge.py`; see `_warn_if_legacy_namespace` in `models/memory.py` for the regression detector.
 
 ### Migration Helper
 
@@ -569,14 +569,16 @@ Memory records carry a `project_key` field that partitions memories by project. 
 
 | Value | Source | Meaning |
 |-------|--------|---------|
-| `"dm"` | Telegram bridge (`bridge/telegram_bridge.py`) | Genuine Telegram DM message |
+| `"dm"` | retired — DO NOT WRITE | Original Telegram-DM partition, retired in #811. The bridge no longer writes here at all (#1173). `Memory.safe_save` logs WARNING with stack trace if any caller still attempts a `"dm"` write. |
 | `"valor"` | `~/src/ai` cwd match against `projects.json` | Memory from the main ai project |
-| `"default"` | `DEFAULT_PROJECT_KEY` fallback | Memories created without a resolvable cwd |
+| `"default"` | `DEFAULT_PROJECT_KEY` fallback | Memories created without a resolvable cwd. Still legitimate during bootstrap; logged at DEBUG with stack trace by `Memory.safe_save` for audit. |
 | `<repo-name>` | Basename of unrecognized cwd | Memories from other local repos |
 
 Prior to PR #820, the Claude Code hooks always wrote `project_key="dm"` because the four bridge functions (`recall`, `ingest`, `extract`, `post_merge_extract`) called `_get_project_key()` with no `cwd` argument, falling through to `DEFAULT_PROJECT_KEY`. This caused hook-created memories to appear in Telegram DM retrieval queries and vice versa.
 
 The fix threads `cwd` from `hook_input["cwd"]` through all four functions. `DEFAULT_PROJECT_KEY` was changed from `"dm"` to `"default"` to prevent future silent mislabeling if cwd is ever unavailable.
+
+The Telegram bridge writer was patched in #1173: messages from chats that don't resolve to a declared project skip the canonical Memory partition write (conversation history is still preserved with `project_key=None`). The `"dm"` literal has been removed from `bridge/telegram_bridge.py`. The unification of all writer callsites onto a single resolver is tracked under follow-up issue #1232.
 
 See [Claude Code Memory — Project Key Resolution](claude-code-memory.md#project-key-resolution) for the cwd threading table and one-time migration instructions.
 
