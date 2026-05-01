@@ -27,6 +27,7 @@ Status lifecycle (see models/session_lifecycle.py for canonical mutation functio
 
 import json as _json
 import logging
+import time
 from datetime import UTC, datetime
 
 from popoto import (
@@ -47,6 +48,16 @@ from config.enums import ClassificationType, SessionType
 from models.session_event import SessionEvent
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of entries retained in AgentSession.chat_message_log.
+# Older entries are trimmed on every append so the field stays bounded.
+# 50 × ~200 bytes/entry ≈ 10 KB upper bound — well within Redis hash comfort.
+CHAT_LOG_MAX_ENTRIES = 50
+
+# Number of chat_message_log entries included in the drafter prompt.
+# Stored log is larger (CHAT_LOG_MAX_ENTRIES) to allow future read patterns;
+# the drafter caps display to the most recent CHAT_LOG_DISPLAY_ENTRIES.
+CHAT_LOG_DISPLAY_ENTRIES = 20
 
 HISTORY_MAX_ENTRIES = 20
 STEERING_QUEUE_MAX = 10  # Max buffered steering messages per session
@@ -369,6 +380,19 @@ class AgentSession(Model):
     # Failure to send leaves this None — retry is bounded by the next
     # dev-child completion event firing, never by the detector.
     self_report_sent_at = DatetimeField(null=True)
+
+    # === Chat message log (issue #1192) ===
+    # Rolling, bounded log of inbound and outbound chat traffic for this session.
+    # Each entry is a dict: {direction, sender, content, message_id, ts}.
+    #   direction: "in" (from user/Telegram) or "out" (sent by Valor)
+    #   sender: display name of sender (e.g. "Tom", "valor", "unknown")
+    #   content: message text
+    #   message_id: Telegram message id (int or None)
+    #   ts: Unix timestamp (float)
+    # Bounded to CHAT_LOG_MAX_ENTRIES via append_chat_log(). Nullable; existing
+    # sessions that have never received a chat-log write return [] via default=list.
+    # The drafter reads the last CHAT_LOG_DISPLAY_ENTRIES entries for context.
+    chat_message_log = ListField(default=list)
 
     class Meta:
         ttl = 2592000  # 30 days — hard backstop for retain_for_resume BUILD sessions
@@ -1422,6 +1446,58 @@ class AgentSession(Model):
         Deprecated: Use get_child_sessions() instead.
         """
         return self.get_child_sessions()
+
+    # === Chat message log helpers (issue #1192) ===
+
+    def append_chat_log(
+        self,
+        direction: str,
+        sender: str,
+        content: str,
+        message_id: int | None = None,
+        ts: float | None = None,
+    ) -> None:
+        """Append one entry to chat_message_log, bounded to CHAT_LOG_MAX_ENTRIES.
+
+        Re-fetches the latest record from Popoto immediately before the
+        append-and-save to narrow the concurrent-write race window (Race 1 in the
+        plan). This costs one extra Redis read per call but prevents lost-update
+        when inbound and outbound writes collide.
+
+        Silently skips empty/whitespace-only content — no junk pollutes the log.
+        Substitutes "unknown" for None/empty sender so the drafter never renders
+        `sender=None`.
+
+        Wrapped in try/except so a save failure never crashes the caller — the
+        chat log is enrichment, not a critical path.
+        """
+        content = (content or "").strip()
+        if not content:
+            return
+        sender = (sender or "").strip() or "unknown"
+        entry = {
+            "direction": direction,
+            "sender": sender,
+            "content": content,
+            "message_id": message_id,
+            "ts": ts if ts is not None else time.time(),
+        }
+        try:
+            # Re-fetch the freshest version to minimize lost-update window.
+            fresh = AgentSession.query.get(self.session_id)
+            if fresh is None:
+                # Session vanished — fall back to self to avoid losing the entry.
+                fresh = self
+            log = list(fresh.chat_message_log or [])
+            log.append(entry)
+            log = log[-CHAT_LOG_MAX_ENTRIES:]
+            fresh.chat_message_log = log
+            fresh.save()
+        except Exception as exc:
+            logger.warning(
+                f"append_chat_log failed for session {self.session_id} "
+                f"(direction={direction!r}, sender={sender!r}): {exc}"
+            )
 
     # === PM self-messaging helpers ===
 
