@@ -96,6 +96,11 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
         agent_id: Who created this memory (sender name or agent identifier).
         project_key: Project partition key for isolation.
         content: The memory content text (max ~500 chars for efficiency).
+        title: One-line descriptive label generated asynchronously by a local
+            LLM (Ollama). Used for compact stub injection in the recall path
+            (progressive disclosure). Empty string until the async title
+            generator writes back; stub renders as `[category]` only on
+            empty title (graceful degradation when Ollama unreachable).
         importance: Numeric importance score. Human=6.0, Agent=1.0.
         source: Origin type — "human", "agent", "system", or "knowledge".
         reference: Generic JSON pointer for actionable next steps. Used by
@@ -124,6 +129,7 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
     agent_id = KeyField()
     project_key = KeyField()
     content = StringField(default="")
+    title = StringField(default="")
     importance = FloatField(default=1.0)
     source = StringField(
         default=SOURCE_AGENT

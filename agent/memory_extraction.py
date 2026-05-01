@@ -449,6 +449,18 @@ async def extract_observations_async(
                 metadata=metadata,
             )
             if m:
+                # Fire-and-forget async title generation
+                # (writer path #2: post-session extraction).
+                try:
+                    from agent.private_tag import strip_private
+                    from tools.memory_search.title_generator import (
+                        generate_title_async,
+                    )
+
+                    generate_title_async(m.memory_id, strip_private(obs_content[:500]))
+                except Exception:
+                    pass
+
                 saved.append(
                     {
                         "content": obs_content[:500],
@@ -684,6 +696,18 @@ async def extract_post_merge_learning(
         )
 
         if m:
+            # Fire-and-forget async title generation
+            # (writer path #3: post-merge learning extraction).
+            try:
+                from agent.private_tag import strip_private
+                from tools.memory_search.title_generator import (
+                    generate_title_async,
+                )
+
+                generate_title_async(m.memory_id, strip_private(content_text[:500]))
+            except Exception:
+                pass
+
             logger.info(f"[memory_extraction] Post-merge learning saved: {content_text[:100]}")
             return {
                 "content": content_text[:500],

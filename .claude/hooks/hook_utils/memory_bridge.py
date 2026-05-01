@@ -226,6 +226,10 @@ def _format_thought_blocks(
 ) -> tuple[list[str], list[dict]]:
     """Format Memory records as <thought>{content}</thought> blocks.
 
+    Retained for callers that explicitly need full-body output (e.g.
+    legacy code paths and tests). The recall / prefetch / SDK injection
+    sites now use ``_format_stub_blocks`` for progressive disclosure.
+
     Skips records whose memory_id is in exclude_ids. Returns a tuple of
     (thought_strings, injected_entries) where injected_entries is the
     list of {"memory_id": str, "content": str} dicts to append to the
@@ -255,6 +259,70 @@ def _format_thought_blocks(
             pass
 
     return thoughts, new_entries
+
+
+def _format_stub_blocks(
+    records: list[Any],
+    exclude_ids: set[str] | None = None,
+    max_results: int = MAX_THOUGHTS,
+) -> tuple[list[str], list[dict]]:
+    """Format Memory records as compact stub `<thought>` blocks.
+
+    Renders agent-visible blocks as
+    ``<thought id="{memory_id}">[{category}] {title}</thought>``
+    when ``record.title`` is non-empty, or
+    ``<thought id="{memory_id}">[{category}]</thought>`` when title is
+    empty (graceful degradation when async title-gen has not yet run
+    or Ollama is unreachable).
+
+    The agent fetches full content on demand via the ``memory_get`` MCP
+    tool when a stub looks relevant.
+
+    Sidecar `injected[]` entries STILL carry full ``record.content`` (not
+    title) — outcome detection in ``agent.memory_extraction.detect_outcomes_async``
+    runs LLM-judged + bigram-overlap comparison against the response and
+    needs the full string. Stripping content there would collapse the
+    act/dismissed signal that drives ``dismissal_count`` and importance
+    decay.
+
+    Skips records whose memory_id is in exclude_ids. Returns a tuple of
+    (stub_strings, injected_entries).
+
+    Calls record.confirm_access() best-effort to mark memories as
+    accessed for outcome tracking.
+    """
+    exclude_ids = exclude_ids or set()
+    stubs: list[str] = []
+    new_entries: list[dict] = []
+
+    for record in records:
+        if len(stubs) >= max_results:
+            break
+        memory_id = str(getattr(record, "memory_id", "") or "")
+        if memory_id and memory_id in exclude_ids:
+            continue
+        content = getattr(record, "content", "")
+        if not content:
+            continue
+
+        meta = getattr(record, "metadata", None) or {}
+        category = (meta.get("category") if isinstance(meta, dict) else None) or "memory"
+        title = (getattr(record, "title", "") or "").strip()
+
+        if title:
+            stub = f'<thought id="{memory_id}">[{category}] {title}</thought>'
+        else:
+            stub = f'<thought id="{memory_id}">[{category}]</thought>'
+
+        stubs.append(stub)
+        # Sidecar keeps FULL content for outcome detection (cycle-1 B1).
+        new_entries.append({"memory_id": memory_id, "content": content})
+        try:
+            record.confirm_access()
+        except Exception:
+            pass
+
+    return stubs, new_entries
 
 
 def _recall_with_query(
@@ -528,10 +596,12 @@ def recall(
             _save_sidecar(session_id, state)
             return None
 
-        # Format as thought blocks via shared helper. exclude_ids was
-        # already applied inside _recall_with_query, but pass again as
-        # belt-and-suspenders against accidental duplicates.
-        thoughts, new_entries = _format_thought_blocks(
+        # Format as compact stub blocks via shared helper (progressive
+        # disclosure — agent fetches full body via `memory_get` MCP tool
+        # when relevant). exclude_ids was already applied inside
+        # _recall_with_query, but pass again as belt-and-suspenders
+        # against accidental duplicates.
+        thoughts, new_entries = _format_stub_blocks(
             all_records,
             exclude_ids=existing_injected_ids,
             max_results=MAX_THOUGHTS,
@@ -649,7 +719,7 @@ def prefetch(
         if not records:
             return None
 
-        thoughts, new_entries = _format_thought_blocks(
+        thoughts, new_entries = _format_stub_blocks(
             records,
             exclude_ids=existing_injected_ids,
             max_results=MAX_THOUGHTS,
@@ -747,6 +817,17 @@ def ingest(content: str, cwd: str | None = None) -> bool:
             importance=6.0,
             source=SOURCE_HUMAN,
         )
+
+        # Fire-and-forget async title generation
+        # (writer path #5: claude-code UserPromptSubmit ingest).
+        if m is not None:
+            try:
+                from tools.memory_search.title_generator import generate_title_async
+
+                # `stripped` was already strip_private()'d above before bloom check.
+                generate_title_async(m.memory_id, stripped[:500])
+            except Exception:
+                pass
 
         return m is not None
 

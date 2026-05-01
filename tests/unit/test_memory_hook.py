@@ -579,6 +579,102 @@ class TestApplyCategoryWeights:
         assert set(id(r) for r in result) == set(id(r) for r in records)
 
 
+class TestCheckAndInjectStubFormat:
+    """check_and_inject() emits compact stub format (progressive disclosure)."""
+
+    def test_records_with_title_render_as_stubs(self):
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import (
+            _injected_thoughts,
+            _tool_buffers,
+            _tool_counts,
+            check_and_inject,
+        )
+        from config.memory_defaults import INJECTION_WINDOW_SIZE
+
+        session = "stub-fmt-with-title"
+        for state in (_tool_counts, _tool_buffers, _injected_thoughts):
+            state.pop(session, None)
+
+        keywords = ["alpha", "beta", "gamma", "delta"]
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        record = MagicMock()
+        record.memory_id = "rec-stub"
+        record.content = "Full content body that should not appear in stub."
+        record.title = "Auth flow notes"
+        record.metadata = {"category": "decision"}
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[record]),
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
+        ):
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            result = check_and_inject(session, "Read", {"file_path": "x.py"})
+
+        assert result is not None
+        assert '<thought id="rec-stub">[decision] Auth flow notes</thought>' in result
+        # Sidecar / session_thoughts must keep FULL content for outcome detection.
+        assert _injected_thoughts.get(session) == [
+            ("rec-stub", "Full content body that should not appear in stub.")
+        ]
+
+        for state in (_tool_counts, _tool_buffers, _injected_thoughts):
+            state.pop(session, None)
+
+    def test_records_without_title_render_as_category_only(self):
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import (
+            _injected_thoughts,
+            _tool_buffers,
+            _tool_counts,
+            check_and_inject,
+        )
+        from config.memory_defaults import INJECTION_WINDOW_SIZE
+
+        session = "stub-fmt-no-title"
+        for state in (_tool_counts, _tool_buffers, _injected_thoughts):
+            state.pop(session, None)
+
+        keywords = ["alpha", "beta", "gamma", "delta"]
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        record = MagicMock()
+        record.memory_id = "rec-bare"
+        record.content = "body"
+        record.title = ""
+        record.metadata = {}  # no category, falls back to "memory"
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[record]),
+            patch("config.project_key_resolver.resolve_project_key", return_value="test"),
+        ):
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            result = check_and_inject(session, "Read", {"file_path": "x.py"})
+
+        assert result is not None
+        assert '<thought id="rec-bare">[memory]</thought>' in result
+
+        for state in (_tool_counts, _tool_buffers, _injected_thoughts):
+            state.pop(session, None)
+
+
 class TestGetInjectedThoughts:
     """Test agent/memory_hook.py get_injected_thoughts()."""
 
@@ -766,9 +862,13 @@ class TestCheckAndInjectClaudeUuidSidecar:
         skip_me = MagicMock()
         skip_me.memory_id = "skip-me"
         skip_me.content = "skip me"
+        skip_me.title = "skip"
+        skip_me.metadata = {"category": "pattern"}
         keep_me = MagicMock()
         keep_me.memory_id = "keep-me"
         keep_me.content = "keep me"
+        keep_me.title = "keep"
+        keep_me.metadata = {"category": "decision"}
 
         with (
             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
@@ -789,8 +889,9 @@ class TestCheckAndInjectClaudeUuidSidecar:
             )
 
         assert result is not None
-        assert "keep me" in result
-        assert "skip me" not in result
+        # Stub format: id="..." carries the memory_id.
+        assert 'id="keep-me"' in result
+        assert 'id="skip-me"' not in result
 
         # Cleanup
         _tool_counts.pop(session, None)
@@ -821,6 +922,8 @@ class TestCheckAndInjectClaudeUuidSidecar:
         record = MagicMock()
         record.memory_id = "rec-1"
         record.content = "valid record"
+        record.title = "valid"
+        record.metadata = {"category": "decision"}
 
         with (
             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
@@ -838,7 +941,8 @@ class TestCheckAndInjectClaudeUuidSidecar:
             )
 
         assert result is not None
-        assert "valid record" in result
+        # Stub format carries memory_id, not full content.
+        assert 'id="rec-1"' in result
 
         _tool_counts.pop(session, None)
         _tool_buffers.pop(session, None)
@@ -955,6 +1059,8 @@ class TestCheckAndInjectClaudeUuidSidecar:
         record = MagicMock()
         record.memory_id = "rec-1"
         record.content = "valid"
+        record.title = "valid label"
+        record.metadata = {"category": "pattern"}
 
         with (
             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
@@ -978,7 +1084,7 @@ class TestCheckAndInjectClaudeUuidSidecar:
         # Loader was called with None
         mock_loader.assert_called_once_with(None)
         assert result is not None
-        assert "valid" in result
+        assert 'id="rec-1"' in result
 
         _tool_counts.pop(session, None)
         _tool_buffers.pop(session, None)

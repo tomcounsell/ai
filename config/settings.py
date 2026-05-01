@@ -177,6 +177,23 @@ class ModelSettings(BaseModel):
             "Ollama pull serves both text and vision paths."
         ),
     )
+    ollama_host: str = Field(
+        default="http://localhost:11434",
+        description=(
+            "Base URL of the local Ollama HTTP API. Used by the memory title "
+            "generator for async title creation on memory save (env: "
+            "MODELS__OLLAMA_HOST). Default points at the standard Ollama port."
+        ),
+    )
+    memory_title_timeout_s: float = Field(
+        default=5.0,
+        description=(
+            "HTTP timeout (seconds) for the memory title generator's Ollama "
+            "call. Title generation is fire-and-forget — exceeding the timeout "
+            "logs at DEBUG and leaves title unchanged. Stubs fall back to "
+            "category-only rendering. Env: MODELS__MEMORY_TITLE_TIMEOUT_S."
+        ),
+    )
     session_default_model: str = Field(
         default="opus",
         description=(

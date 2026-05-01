@@ -170,6 +170,7 @@ def search(
             results.append(
                 {
                     "content": getattr(record, "content", ""),
+                    "title": getattr(record, "title", None),
                     "score": getattr(record, "score", 0.0),
                     "confidence": getattr(record, "confidence", 0.0),
                     "source": getattr(record, "source", ""),
@@ -255,6 +256,16 @@ def save(
 
         if record is None:
             return None
+
+        # Fire-and-forget async title generation (writer path #1: CLI save).
+        # Overwrite-every-save semantics: no `if not self.title` guard.
+        try:
+            from agent.private_tag import strip_private
+            from tools.memory_search.title_generator import generate_title_async
+
+            generate_title_async(record.memory_id, strip_private(content))
+        except Exception:
+            pass  # Title-gen never blocks or crashes the writer.
 
         return {
             "memory_id": getattr(record, "memory_id", ""),

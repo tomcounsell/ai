@@ -160,7 +160,11 @@ This escape hatch bypasses auto-continue logic. Use sparingly — every invocati
 
 ## Subconscious Memory
 
-You may see `<thought>` blocks appear in your context. These are memories from past sessions — observations, patterns, and human instructions that surfaced because they are relevant to your current work. Treat them as background context: consider them but do not reference them explicitly in your responses. They help you make better decisions without the human needing to repeat themselves.
+You may see `<thought>` blocks appear in your context. These are stubs of memories from past sessions — observations, patterns, and human instructions surfaced because they look relevant to your current work. The format is `<thought id="mem_xyz">[category] one-line title</thought>` (or `<thought id="mem_xyz">[category]</thought>` when no title has been generated yet). Treat them as background context: consider them but do not reference them explicitly in your responses.
+
+When a stub looks worth reading in full — the title hints at a correction or decision that bears on what you're doing — call the `memory_get(memory_id)` MCP tool with the stub's id to pull the full content, title, category, tags, importance, and source. Don't pull bodies "just in case"; the stub-first design exists to keep tokens cheap.
+
+When you need memories the auto-injection didn't surface — e.g. mid-task you realize you need prior context on a topic that wasn't in the latest tool calls — call `memory_search(query, category=None, tag=None, limit=5)`. It returns more stubs (id / category / title / score) which you can then `memory_get` selectively.
 
 ## Intentional Memory
 

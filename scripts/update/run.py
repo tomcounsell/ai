@@ -29,6 +29,7 @@ from scripts.update import (  # noqa: E402
     hardlinks,
     hooks,
     kokoro,
+    mcp_memory,
     migrations,
     npm_tools,
     officecli,
@@ -856,6 +857,32 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 f"sdlc-tool invalid; bridge restart skipped: {result.sdlc_tool_check.error}"
             )
             config = replace(config, do_service_restart=False)
+
+    # Step 4.8: Verify memory MCP registration in ~/.claude.json (idempotent).
+    # Self-heals drift, fresh-machine setup, and manual edits. Runs in all
+    # modes; --verify is read-only (LOCK_SH, no write), --full/--cron repair
+    # under LOCK_EX. Failure is logged but non-fatal — memory MCP is a
+    # convenience surface, not critical-path. Falls back gracefully when
+    # Ollama is absent: stubs render as category-only, agent can still
+    # call memory_get / memory_search via MCP tools.
+    log("Verifying memory MCP registration...", v)
+    _mcp_memory_write = config.do_service_restart  # full/cron only
+    mcp_memory_result = mcp_memory.verify_memory_mcp(write=_mcp_memory_write)
+    log(f"  {mcp_memory_result.message}", v)
+    if not mcp_memory_result.ok:
+        if _mcp_memory_write:
+            result.warnings.append(f"memory MCP: {mcp_memory_result.message}")
+        else:
+            # --verify mode: report drift but do not warn aggressively
+            result.warnings.append(f"memory MCP drift: {mcp_memory_result.message}")
+
+    # Optional Ollama ping for the title-gen worker — non-fatal.
+    if config.do_ollama:
+        _ollama_ok, _ollama_msg = mcp_memory.check_ollama_for_titles()
+        log(f"  {_ollama_msg}", v)
+        if not _ollama_ok:
+            # Title-gen falls back to category-only stubs — informational only.
+            pass
 
     # Step 5: Service management
     if config.do_service_restart:

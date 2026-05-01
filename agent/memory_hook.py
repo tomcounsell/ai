@@ -258,7 +258,11 @@ def check_and_inject(
         sidecar_exclude = _load_hooks_sidecar_injected_ids(claude_uuid)
         exclude_ids = process_local_exclude | sidecar_exclude
 
-        # Format as <thought> blocks (skip records already shown).
+        # Format as compact stub blocks (progressive disclosure — agent
+        # fetches full body via `memory_get` MCP tool when relevant).
+        # Sidecar / session_thoughts MUST keep full content (cycle-1 B1):
+        # outcome detection (LLM-judged + bigram overlap) needs the full
+        # string to distinguish acted vs dismissed.
         thoughts: list[str] = []
         session_thoughts = _injected_thoughts.setdefault(session_id, [])
 
@@ -270,8 +274,15 @@ def check_and_inject(
                 continue
             content = getattr(record, "content", "")
             if content:
-                thoughts.append(f"<thought>{content}</thought>")
-                # Track for outcome detection
+                meta = getattr(record, "metadata", None) or {}
+                category = (meta.get("category") if isinstance(meta, dict) else None) or "memory"
+                title = (getattr(record, "title", "") or "").strip()
+                if title:
+                    stub = f'<thought id="{memory_id}">[{category}] {title}</thought>'
+                else:
+                    stub = f'<thought id="{memory_id}">[{category}]</thought>'
+                thoughts.append(stub)
+                # Track for outcome detection — keep FULL content (not stub).
                 session_thoughts.append((memory_id, content))
                 # Mark as accessed
                 try:

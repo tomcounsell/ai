@@ -176,7 +176,9 @@ class TestPrefetchEndToEnd:
 
         hso = hook_output["hookSpecificOutput"]
         assert hso["hookEventName"] == "UserPromptSubmit"
-        assert "<thought>" in hso["additionalContext"]
+        # Stub format (progressive disclosure): `<thought id="...">[category] ...</thought>`.
+        # Both empty-title (no async title-gen yet) and title-present cases include `id="`.
+        assert '<thought id="' in hso["additionalContext"]
 
     def test_prefetch_writes_sidecar_injected_ids(
         self, isolated_project_key, isolated_session_id, redis_test_url
@@ -242,11 +244,15 @@ class TestPrefetchStripsBoilerplate:
         assert hook_output is not None, "Expected hookSpecificOutput JSON on stdout"
         body = hook_output["hookSpecificOutput"]["additionalContext"]
 
-        # The MESSAGE-matching memory's content must appear; the boilerplate-
-        # matching memory's content must not be the *primary* surface. We
-        # accept either "only msg memory" or "msg memory before boiler".
-        assert "auth flow investigation" in body, (
-            f"MESSAGE: payload-matching memory missing from prefetch output: {body!r}"
+        # Stub format (progressive disclosure): the body contains compact
+        # `<thought id="...">` blocks rather than full content. Assert the
+        # MESSAGE-matching memory's id is present in the output (the original
+        # full-content assertion `"auth flow investigation" in body` was not
+        # ordering-strict — it only required the memory to surface at all,
+        # since BM25 ranking can return either order).
+        msg_id = msg_memory.memory_id
+        assert f'id="{msg_id}"' in body, (
+            f"MESSAGE: payload-matching memory id missing from prefetch output: {body!r}"
         )
 
 
