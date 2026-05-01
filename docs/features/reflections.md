@@ -91,10 +91,10 @@ each update run. This ensures the scheduler always reads the vault version.
 | Name | Callable | Description |
 |------|----------|-------------|
 | `daily-log-review` | `reflections.auditing.run_log_review` | Review previous day's logs per project; sends summary to `Dev: Valor` Telegram (with optional Sentry counts) |
-| `documentation-audit` | `reflections.auditing.run_documentation_audit` | LLM-powered docs accuracy audit (see [Documentation Audit](documentation-audit.md)) |
+| `docs-auditor` | `reflections.docs_auditor.run_docs_auditor` | Unified docs auditor: rotates least-recently-audited primary doc, applies auto-fixes, opens `docs-audit/*` PR (see [Docs Auditor](docs-auditor.md)) |
+| `do-docs-branch-sweeper` | `reflections.docs_auditor.run_docs_branch_sweeper` | Delete stale `docs-audit/*` branches >7d with no PR; close open `docs-audit/*` PRs >14d |
 | `skills-audit` | `reflections.auditing.run_skills_audit` | Validate all SKILL.md files (see [Skills Audit](do-skills-audit.md)) |
 | `hooks-audit` | `reflections.auditing.run_hooks_audit` | Audit Claude Code hooks and settings (see [Hooks Best Practices](hooks-best-practices.md)) |
-| `feature-docs-audit` | `reflections.auditing.run_feature_docs_audit` | Audit docs/features/ for stale terms, stub docs, dead code refs |
 | `pr-review-audit` | `reflections.auditing.run_pr_review_audit` | Scan merged PRs for unaddressed review findings; file GitHub issues **(disabled — calls gh CLI)** |
 
 **Task management:**
@@ -119,7 +119,6 @@ each update run. This ensures the scheduler always reads the vault version.
 |------|----------|-------------|
 | `memory-decay-prune` | `reflections.memory_management.run_memory_decay_prune` | Delete below-threshold memories with zero access (dry-run default) |
 | `memory-quality-audit` | `reflections.memory_management.run_memory_quality_audit` | Flag memories with quality issues (zero-access, chronically low confidence) |
-| `knowledge-reindex` | `reflections.memory_management.run_knowledge_reindex` | Re-index ~/src/work-vault/ docs into KnowledgeDocument records |
 | `embedding-orphan-sweep` | `reflections.memory_management.run_embedding_orphan_sweep` | Reconcile Memory `.npy` embedding files against live records via Popoto `garbage_collect` + `sweep_stale_tempfiles` (dry-run default; opt-in via `EMBEDDING_ORPHAN_SWEEP_APPLY=true`; requires popoto >= 1.6.0) |
 
 ### State Model (`models/reflection.py`)
@@ -154,7 +153,7 @@ Every reflection execution includes resource monitoring:
 
 **Timeout enforcement**: Each reflection has a configurable timeout (via `timeout` field in YAML, or type-based defaults: 30 min for function, 60 min for agent). Function-type reflections are wrapped in `asyncio.wait_for()`. For async callables, this provides true cancellation. For sync callables running via `run_in_executor()`, the `TimeoutError` is raised but the thread cannot be cancelled (detection-only). Timeout errors are logged and the reflection is marked with error status.
 
-**API call cap (DocsAuditor)**: The `DocsAuditor` class (used by `documentation_audit`) accepts a `max_api_calls` parameter (default: 50). Each Anthropic API call increments a counter. When the cap is reached, processing stops gracefully -- remaining files are skipped, partial results are returned, and a WARNING is logged. This prevents unbounded API consumption.
+**Auth probe (docs auditor)**: The `docs-auditor` substrate runs a startup auth probe against the Anthropic API. On invalid keys it returns `status="disabled"` and skips the run; on transient network errors it logs a warning and proceeds. Optional embedding auth (`OPENAI_API_KEY`) is probed separately — when unavailable, the substrate degrades gracefully to lexical-only matching. See [Docs Auditor](docs-auditor.md).
 
 ### Log Rotation
 
