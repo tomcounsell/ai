@@ -792,7 +792,7 @@ async def run_memory_quality_audit() -> dict:
         (deduped via title-prefix search).
     Layer 3 (Gemma classification, fail-soft): Sample up to 20 last-24h
         records and classify via gemma4:e2b. Wallclock-budgeted at 30s
-        with 5s per-call timeout. Files issues for clusters of >=3 records
+        with 10s per-call timeout. Files issues for clusters of >=3 records
         sharing an anomaly_signal.
 
     Returns: {"status": "ok"|"error", "findings": [...], "summary": str}
