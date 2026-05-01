@@ -278,3 +278,110 @@ class TestWorkerKeyTruthTable:
             "AgentSession.worker_key drifted from inline computation sites in "
             "agent/agent_session_queue.py. Mismatched permutations:\n" + "\n".join(mismatches)
         )
+
+
+class TestRecentSentDraftsField:
+    """Tests for AgentSession.recent_sent_drafts field and record_recent_sent_draft()
+    helper (issue #1205).
+
+    These tests use a stub session (no Redis) to verify field mutation logic
+    and the scoped-save contract without requiring a live database.
+    """
+
+    def _make_session(self):
+        """Create a minimal AgentSession stub with the new field."""
+        s = AgentSession.__new__(AgentSession)
+        s.recent_sent_drafts = None
+        s.session_id = "test-session-drafts"
+        s.save = MagicMock()
+        return s
+
+    # ── Field declared and in allow-list ──────────────────────────────────────
+
+    def test_field_declared_on_model(self):
+        assert hasattr(AgentSession, "recent_sent_drafts")
+
+    def test_field_in_agent_session_fields_allow_list(self):
+        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
+
+        assert "recent_sent_drafts" in _AGENT_SESSION_FIELDS
+
+    # ── record_recent_sent_draft: basic append ────────────────────────────────
+
+    def test_record_appends_entry_to_none_field(self):
+        """Starting from None, the first call initialises the list."""
+        s = self._make_session()
+        s.record_recent_sent_draft("Hello world status", {"urls": ["https://example.com"]})
+        assert isinstance(s.recent_sent_drafts, list)
+        assert len(s.recent_sent_drafts) == 1
+        entry = s.recent_sent_drafts[0]
+        assert entry["text"] == "Hello world status"
+        assert "ts" in entry
+        assert "artifacts" in entry
+
+    def test_record_appends_to_existing_list(self):
+        s = self._make_session()
+        s.recent_sent_drafts = [{"ts": 1.0, "text": "first", "artifacts": {}}]
+        s.record_recent_sent_draft("second message", {})
+        assert len(s.recent_sent_drafts) == 2
+        assert s.recent_sent_drafts[1]["text"] == "second message"
+
+    # ── FIFO cap ──────────────────────────────────────────────────────────────
+
+    def test_fifo_cap_enforced_at_max_n(self):
+        """After max_n appends the list never exceeds max_n entries."""
+        s = self._make_session()
+        s.recent_sent_drafts = []
+        for i in range(5):
+            s.record_recent_sent_draft(f"message {i}", {})
+        assert len(s.recent_sent_drafts) == 3  # default max_n=3
+
+    def test_fifo_drops_oldest_entry(self):
+        """The oldest entry is dropped, not the newest."""
+        s = self._make_session()
+        s.recent_sent_drafts = [
+            {"ts": 1.0, "text": "oldest", "artifacts": {}},
+            {"ts": 2.0, "text": "middle", "artifacts": {}},
+            {"ts": 3.0, "text": "newest", "artifacts": {}},
+        ]
+        s.record_recent_sent_draft("very new", {})
+        texts = [e["text"] for e in s.recent_sent_drafts]
+        assert "oldest" not in texts
+        assert "very new" in texts
+
+    def test_custom_max_n_respected(self):
+        s = self._make_session()
+        s.recent_sent_drafts = []
+        for i in range(10):
+            s.record_recent_sent_draft(f"msg {i}", {}, max_n=5)
+        assert len(s.recent_sent_drafts) == 5
+
+    # ── Preview-length cap ────────────────────────────────────────────────────
+
+    def test_text_capped_at_preview_chars(self):
+        s = self._make_session()
+        long_text = "x" * 1000
+        s.record_recent_sent_draft(long_text, {}, preview_chars=500)
+        assert len(s.recent_sent_drafts[0]["text"]) == 500
+
+    def test_short_text_not_padded(self):
+        s = self._make_session()
+        s.record_recent_sent_draft("short", {})
+        assert s.recent_sent_drafts[0]["text"] == "short"
+
+    # ── Scoped save contract ──────────────────────────────────────────────────
+
+    def test_save_uses_update_fields(self):
+        """save() must be called with update_fields=[recent_sent_drafts, updated_at]."""
+        s = self._make_session()
+        s.record_recent_sent_draft("test", {})
+        s.save.assert_called_once_with(update_fields=["recent_sent_drafts", "updated_at"])
+
+    def test_save_failure_does_not_raise(self):
+        """A save() failure must be swallowed — never propagated."""
+        s = self._make_session()
+        s.save.side_effect = RuntimeError("Redis write failed")
+        # Must not raise.
+        s.record_recent_sent_draft("some draft", {})
+        # The in-memory list was still updated.
+        assert len(s.recent_sent_drafts) == 1

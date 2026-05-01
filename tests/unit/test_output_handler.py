@@ -1304,3 +1304,306 @@ class TestTransportAwareRouting:
 
         payload = json.loads(handler._redis.rpush.call_args[0][1])
         assert payload["from_addr"] == "valor@yuda.me"
+
+
+class TestRedundancyFilterWiring:
+    """Tests for the redundancy filter wiring in TelegramRelayOutputHandler.send
+    (issue #1205).
+
+    These exercise the handler-level integration of should_suppress(): that SDLC
+    sessions with redundant drafts get a 👀 reaction instead of a text message,
+    that non-SDLC sessions bypass the filter, and that recent_sent_drafts is
+    appended after a successful outbox write.
+
+    Filter internals (bigram Jaccard, termination conditions) are tested
+    separately in test_redundancy_filter.py.
+    """
+
+    def _make_handler(self, mock_redis=None):
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        h = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        if mock_redis is not None:
+            h._redis = mock_redis
+        return h
+
+    def _mock_redis(self):
+        r = MagicMock()
+        r.rpush = MagicMock(return_value=1)
+        r.expire = MagicMock()
+        return r
+
+    def _bypass_drafter(self, _input, *, session=None, medium="telegram"):
+        """Pass-through drafter so delivery_text == text."""
+        from bridge.message_drafter import MessageDraft
+
+        return MessageDraft(text=_input, was_drafted=False, artifacts={})
+
+    def _make_sdlc_session(self, *, recent_drafts=None, status="active"):
+        s = MagicMock()
+        s.session_id = "sdlc-sess-001"
+        s.is_sdlc = True
+        s.status = status
+        s.recent_sent_drafts = recent_drafts or []
+        s.session_events = None
+        s.record_recent_sent_draft = MagicMock()
+        s.extra_context = {}
+        return s
+
+    def _make_non_sdlc_session(self):
+        s = MagicMock()
+        s.session_id = "conv-sess-001"
+        s.is_sdlc = False
+        s.status = "active"
+        s.recent_sent_drafts = []
+        s.session_events = None
+        s.extra_context = {}
+        return s
+
+    # ── SDLC session with redundant draft → 👀 reaction, no text ─────────────
+
+    def test_sdlc_redundant_draft_queues_reaction_not_text(self):
+        """An SDLC session whose draft is near-identical to a prior send must
+        queue a 👀 reaction and skip the text outbox write."""
+        import time
+
+        from bridge.redundancy_filter import RTR_SUPPRESS_EMOJI, SuppressionVerdict
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_sdlc_session(
+            recent_drafts=[{"ts": time.time(), "text": "checking status", "artifacts": {}}]
+        )
+
+        suppress_verdict = SuppressionVerdict(
+            action="suppress", reason="jaccard=0.80>=threshold=0.65", jaccard=0.80, matched_index=0
+        )
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ),
+            patch(
+                "bridge.redundancy_filter.should_suppress",
+                return_value=suppress_verdict,
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="checking status",
+                    reply_to_msg_id=42,
+                    session=session,
+                )
+            )
+
+        # The outbox should have received only the 👀 reaction (no text message).
+        calls = mock_r.rpush.call_args_list
+        assert len(calls) >= 1, "Expected at least one rpush call (for the reaction)"
+        # Check at least one payload is a reaction
+        has_reaction = False
+        has_text_message = False
+        for call in calls:
+            payload = json.loads(call[0][1])
+            if payload.get("type") == "reaction":
+                has_reaction = True
+                assert payload["emoji"] == RTR_SUPPRESS_EMOJI
+            else:
+                has_text_message = True
+        assert has_reaction, "Expected a 👀 reaction in the outbox"
+        assert not has_text_message, "Text message should have been suppressed"
+
+    # ── Non-SDLC session → filter bypassed, RTR runs as before ──────────────
+
+    def test_non_sdlc_session_bypasses_filter(self):
+        """A non-SDLC session must skip the redundancy filter entirely.
+        The text message goes through the normal RTR + outbox path."""
+        from bridge.redundancy_filter import should_suppress as _should_suppress
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_non_sdlc_session()
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ),
+            patch(
+                "bridge.redundancy_filter.should_suppress",
+                wraps=_should_suppress,
+            ) as mock_filter,
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="hello world",
+                    reply_to_msg_id=1,
+                    session=session,
+                )
+            )
+
+        # The filter must NOT have been called for a non-SDLC session.
+        mock_filter.assert_not_called()
+
+        # Text message delivered normally.
+        mock_r.rpush.assert_called_once()
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload.get("type") != "reaction"
+        assert payload["text"] == "hello world"
+
+    # ── Successful send appends to recent_sent_drafts ────────────────────────
+
+    def test_successful_send_records_draft(self):
+        """After a successful outbox rpush, record_recent_sent_draft is called."""
+        from bridge.redundancy_filter import SuppressionVerdict
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_sdlc_session()
+
+        send_verdict = SuppressionVerdict(action="send", reason="no_baseline")
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ),
+            patch(
+                "bridge.redundancy_filter.should_suppress",
+                return_value=send_verdict,
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="status update",
+                    reply_to_msg_id=1,
+                    session=session,
+                )
+            )
+
+        session.record_recent_sent_draft.assert_called_once()
+
+    # ── Failed save does not block rpush ─────────────────────────────────────
+
+    def test_record_draft_failure_does_not_block_outbox_write(self):
+        """If record_recent_sent_draft raises, the outbox rpush already happened
+        and the error is swallowed — delivery is not reversed."""
+        from bridge.redundancy_filter import SuppressionVerdict
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_sdlc_session()
+        session.record_recent_sent_draft.side_effect = RuntimeError("save failed")
+
+        send_verdict = SuppressionVerdict(action="send", reason="no_baseline")
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ),
+            patch(
+                "bridge.redundancy_filter.should_suppress",
+                return_value=send_verdict,
+            ),
+        ):
+            # Must not raise.
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="some message",
+                    reply_to_msg_id=1,
+                    session=session,
+                )
+            )
+
+        # Text was delivered.
+        mock_r.rpush.assert_called_once()
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload["text"] == "some message"
+
+    # ── Filter exception falls through to RTR + outbox ────────────────────────
+
+    def test_filter_exception_falls_through_to_send(self):
+        """An exception inside the redundancy filter branch must not block
+        delivery — the text goes to the outbox as if the filter didn't exist."""
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_sdlc_session()
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ),
+            patch(
+                "bridge.redundancy_filter.should_suppress",
+                side_effect=RuntimeError("filter exploded"),
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="some important message",
+                    reply_to_msg_id=1,
+                    session=session,
+                )
+            )
+
+        # Delivery still happened.
+        mock_r.rpush.assert_called()
+        # At least one call is the text message (not a reaction).
+        text_calls = [
+            c for c in mock_r.rpush.call_args_list
+            if json.loads(c[0][1]).get("type") != "reaction"
+        ]
+        assert len(text_calls) >= 1
+
+    # ── No anchor → fallthrough (matches RTR contract) ───────────────────────
+
+    def test_suppress_with_no_anchor_falls_through_to_send(self):
+        """When suppress is returned but reply_to_msg_id is None, the filter
+        falls through and sends the text (mirrors RTR's no-anchor contract)."""
+        import time
+
+        from bridge.redundancy_filter import SuppressionVerdict
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_sdlc_session(
+            recent_drafts=[{"ts": time.time(), "text": "status", "artifacts": {}}]
+        )
+
+        suppress_verdict = SuppressionVerdict(
+            action="suppress", reason="jaccard=0.90>=threshold=0.65", jaccard=0.90, matched_index=0
+        )
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ),
+            patch(
+                "bridge.redundancy_filter.should_suppress",
+                return_value=suppress_verdict,
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="status",
+                    reply_to_msg_id=None,  # No anchor
+                    session=session,
+                )
+            )
+
+        # Text must have been sent (no anchor → fallthrough).
+        mock_r.rpush.assert_called()
+        text_calls = [
+            c for c in mock_r.rpush.call_args_list
+            if json.loads(c[0][1]).get("type") != "reaction"
+        ]
+        assert len(text_calls) >= 1
