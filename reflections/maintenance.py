@@ -16,50 +16,114 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from reflections.utils import PROJECT_ROOT, load_local_projects
+from reflections.utils import PROJECT_ROOT, load_local_projects, run_per_project_audit
 
 logger = logging.getLogger("reflections.maintenance")
 
 
-def run_legacy_code_scan() -> dict:
-    """Scan for legacy code patterns: TODO comments, deprecated typing imports."""
-    findings = []
+def _legacy_scan_for_project(project: dict) -> dict:
+    """Per-project body for tech-debt-scan.
+
+    Greps the project's working_directory for TODO comments and deprecated
+    typing imports. ``grep -r`` returncode disambiguation:
+
+    - 0  → matches found
+    - 1  → no matches found (NOT an error)
+    - 2  → error (target removed mid-run, permission denied, broken symlink)
+
+    A returncode==2 surfaces as ``status="error"`` with stderr captured
+    (first 200 chars).
+    """
+    import time as _time
+
+    findings: list[str] = []
+    wd = project.get("working_directory", "")
+    if not wd:
+        return {
+            "status": "error",
+            "findings": [],
+            "summary": "missing working_directory",
+            "duration": 0.0,
+            "error": "missing working_directory",
+        }
+
+    t0 = _time.time()
+    error_msg: str | None = None
 
     try:
         result = subprocess.run(
-            ["grep", "-r", "TODO:", "--include=*.py", str(PROJECT_ROOT)],
+            ["grep", "-r", "TODO:", "--include=*.py", wd],
             capture_output=True,
             text=True,
             timeout=30,
         )
-        todo_count = len(result.stdout.strip().split("\n")) if result.stdout.strip() else 0
-        if todo_count > 0:
-            findings.append(f"Found {todo_count} TODO comments to review")
-    except Exception as e:
-        logger.warning(f"TODO scan failed: {e}")
-
-    deprecated_patterns = [
-        "from typing import Optional",
-        "from typing import List",
-        "from typing import Dict",
-    ]
-    for pattern in deprecated_patterns:
-        try:
-            result = subprocess.run(
-                ["grep", "-r", pattern, "--include=*.py", str(PROJECT_ROOT)],
-                capture_output=True,
-                text=True,
-                timeout=30,
+        if result.returncode == 2:
+            error_msg = (
+                f"grep returned 2 (target may have been removed): stderr={result.stderr[:200]}"
             )
-            if result.stdout.strip():
-                count = len(result.stdout.strip().split("\n"))
-                findings.append(f"Found {count} instances of deprecated typing import: {pattern}")
-        except Exception as e:
-            logger.warning(f"Deprecated import scan failed for {pattern}: {e}")
+        elif result.returncode in (0, 1):
+            todo_count = len(result.stdout.strip().split("\n")) if result.stdout.strip() else 0
+            if todo_count > 0:
+                findings.append(f"Found {todo_count} TODO comments to review")
+    except Exception as e:
+        error_msg = f"TODO scan failed: {e}"
+        logger.warning(error_msg)
 
-    summary = f"Legacy code scan: {len(findings)} finding(s)"
-    logger.info(summary)
-    return {"status": "ok", "findings": findings, "summary": summary}
+    if error_msg is None:
+        deprecated_patterns = [
+            "from typing import Optional",
+            "from typing import List",
+            "from typing import Dict",
+        ]
+        for pattern in deprecated_patterns:
+            try:
+                result = subprocess.run(
+                    ["grep", "-r", pattern, "--include=*.py", wd],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if result.returncode == 2:
+                    error_msg = (
+                        f"grep returned 2 (target may have been removed): "
+                        f"stderr={result.stderr[:200]}"
+                    )
+                    break
+                if result.returncode in (0, 1) and result.stdout.strip():
+                    count = len(result.stdout.strip().split("\n"))
+                    findings.append(
+                        f"Found {count} instances of deprecated typing import: {pattern}"
+                    )
+            except Exception as e:
+                error_msg = f"Deprecated import scan failed for {pattern}: {e}"
+                logger.warning(error_msg)
+                break
+
+    duration = _time.time() - t0
+    if error_msg:
+        return {
+            "status": "error",
+            "findings": findings,
+            "summary": "tech-debt scan error",
+            "duration": duration,
+            "error": error_msg,
+        }
+    return {
+        "status": "ok",
+        "findings": findings,
+        "summary": f"Legacy code scan: {len(findings)} finding(s)",
+        "duration": duration,
+    }
+
+
+def run_legacy_code_scan() -> dict:
+    """Scan for legacy code patterns across all local projects.
+
+    Iterates every project from ``load_local_projects()`` (no skip predicate
+    — TODO/deprecated-typing checks apply to any Python repo) and aggregates
+    findings with ``[slug]`` prefixes via :func:`run_per_project_audit`.
+    """
+    return run_per_project_audit(_legacy_scan_for_project, name="tech-debt-scan")
 
 
 async def run_redis_ttl_cleanup() -> dict:

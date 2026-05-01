@@ -306,6 +306,8 @@ class DocsAuditor:
         "docs/features/README.md",
         "CLAUDE.md",
     ]
+    # 2026-05: keyed per-repo for per-project iteration; old global key is dead.
+    _STATE_KEY_PREFIX = "docs_auditor:last_audit_date"
 
     def __init__(self, repo_root: Path, dry_run: bool = False, max_api_calls: int = 50) -> None:
         self.repo_root = repo_root.resolve()
@@ -1009,19 +1011,25 @@ CORRECTIONS:
         except ValueError:
             return False
 
-    def _load_state(self) -> dict[str, Any]:
-        """Load audit state from Redis using a plain key.
+    def _state_key(self) -> str:
+        """Per-repo Redis key for last_audit_date.
 
-        Stores last_audit_date as a plain Redis string at
-        key 'docs_auditor:last_audit_date' to avoid dependency on ReflectionRun.
+        Scoped per repo (`<prefix>:<repo_name>`) so per-project iteration
+        does not let one project's write suppress another's frequency gate
+        for 7 days. The old global key (`docs_auditor:last_audit_date`) is
+        orphaned and will fall out of use.
         """
+        return f"{self._STATE_KEY_PREFIX}:{self.repo_root.name}"
+
+    def _load_state(self) -> dict[str, Any]:
+        """Load audit state from Redis using a per-repo plain key."""
         try:
             import redis as _redis
 
             from config.settings import settings
 
-            r = _redis.Redis.from_url(settings.REDIS_URL)
-            raw = r.get("docs_auditor:last_audit_date")
+            r = _redis.Redis.from_url(settings.redis.url)
+            raw = r.get(self._state_key())
             if raw:
                 return {"last_audit_date": raw.decode()}
             return {}
@@ -1029,17 +1037,14 @@ CORRECTIONS:
             return {}
 
     def _record_audit_date(self) -> None:
-        """Write today's date as last_audit_date to a plain Redis key.
-
-        Stores at 'docs_auditor:last_audit_date' (global, not per-project).
-        """
+        """Write today's date as last_audit_date to a per-repo plain Redis key."""
         try:
             import redis as _redis
 
             from config.settings import settings
 
-            r = _redis.Redis.from_url(settings.REDIS_URL)
-            r.set("docs_auditor:last_audit_date", utc_now().isoformat())
+            r = _redis.Redis.from_url(settings.redis.url)
+            r.set(self._state_key(), utc_now().isoformat())
         except Exception:
             logger.warning("Failed to record audit date to Redis", exc_info=True)
 

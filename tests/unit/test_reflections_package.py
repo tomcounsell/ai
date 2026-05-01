@@ -124,14 +124,42 @@ class TestReflectionsUtils:
 class TestMaintenanceCallables:
     """Smoke tests for reflections/maintenance.py."""
 
-    def test_run_legacy_code_scan_returns_valid(self):
-        """run_legacy_code_scan() returns valid dict."""
+    def test_run_legacy_code_scan_returns_valid(self, tmp_path):
+        """run_legacy_code_scan() returns valid dict with [slug] prefixed findings."""
         from reflections.maintenance import run_legacy_code_scan
 
-        with patch("subprocess.run") as mock_run:
+        with (
+            patch(
+                "reflections.utils.load_local_projects",
+                return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
+            ),
+            patch("subprocess.run") as mock_run,
+        ):
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = run_async(run_legacy_code_scan())
         assert_valid_result(result)
+        assert "projects" in result
+        assert len(result["projects"]) == 1
+        assert result["projects"][0]["slug"] == "ai"
+
+    def test_grep_returncode_2_recorded_as_error(self, tmp_path):
+        """grep returncode=2 (target removed mid-run) is recorded as per-project error."""
+        from reflections.maintenance import run_legacy_code_scan
+
+        with (
+            patch(
+                "reflections.utils.load_local_projects",
+                return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
+            ),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(
+                returncode=2, stdout="", stderr="grep: target: No such file or directory"
+            )
+            result = run_async(run_legacy_code_scan())
+        assert result["status"] == "error"
+        assert result["projects"][0]["status"] == "error"
+        assert "grep returned 2" in result["projects"][0]["error"]
 
     def test_run_redis_ttl_cleanup_returns_valid(self):
         """run_redis_ttl_cleanup() returns valid dict with mocked models."""
@@ -240,9 +268,12 @@ class TestAuditingCallables:
             result = run_async(run_log_review())
         assert_valid_result(result)
 
-    def test_run_documentation_audit_returns_valid(self):
-        """run_documentation_audit() returns valid dict."""
+    def test_run_documentation_audit_returns_valid(self, tmp_path):
+        """run_documentation_audit() returns valid dict with per-project breakdown."""
         from reflections.auditing import run_documentation_audit
+
+        # Project must have a docs/ directory to pass skip_if
+        (tmp_path / "docs").mkdir()
 
         mock_summary = MagicMock()
         mock_summary.skipped = False
@@ -252,16 +283,26 @@ class TestAuditingCallables:
         mock_summary.updated = []
         mock_summary.deleted = []
 
-        with patch("scripts.docs_auditor.DocsAuditor") as mock_da:
+        with (
+            patch(
+                "reflections.utils.load_local_projects",
+                return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
+            ),
+            patch("scripts.docs_auditor.DocsAuditor") as mock_da,
+        ):
             mock_instance = MagicMock()
             mock_instance.run.return_value = mock_summary
+            mock_instance._api_call_count = 5
             mock_da.return_value = mock_instance
             result = run_async(run_documentation_audit())
         assert_valid_result(result)
+        assert "projects" in result
 
-    def test_run_documentation_audit_auth_skip_returns_disabled(self):
-        """When DocsAuditor skips due to auth, wrapper returns status='disabled'."""
+    def test_run_documentation_audit_auth_skip_returns_disabled(self, tmp_path):
+        """When all projects skip due to auth, aggregate returns status='disabled'."""
         from reflections.auditing import run_documentation_audit
+
+        (tmp_path / "docs").mkdir()
 
         mock_summary = MagicMock()
         mock_summary.skipped = True
@@ -271,9 +312,16 @@ class TestAuditingCallables:
         mock_summary.updated = []
         mock_summary.deleted = []
 
-        with patch("scripts.docs_auditor.DocsAuditor") as mock_da:
+        with (
+            patch(
+                "reflections.utils.load_local_projects",
+                return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
+            ),
+            patch("scripts.docs_auditor.DocsAuditor") as mock_da,
+        ):
             mock_instance = MagicMock()
             mock_instance.run.return_value = mock_summary
+            mock_instance._api_call_count = 0
             mock_da.return_value = mock_instance
             result = run_async(run_documentation_audit())
 
@@ -281,9 +329,11 @@ class TestAuditingCallables:
         assert result["status"] == "disabled"
         assert any("disabled" in f.lower() for f in result["findings"])
 
-    def test_run_documentation_audit_schedule_skip_returns_ok(self):
+    def test_run_documentation_audit_schedule_skip_returns_ok(self, tmp_path):
         """When DocsAuditor skips due to frequency gate, wrapper returns status='ok'."""
         from reflections.auditing import run_documentation_audit
+
+        (tmp_path / "docs").mkdir()
 
         mock_summary = MagicMock()
         mock_summary.skipped = True
@@ -293,40 +343,59 @@ class TestAuditingCallables:
         mock_summary.updated = []
         mock_summary.deleted = []
 
-        with patch("scripts.docs_auditor.DocsAuditor") as mock_da:
+        with (
+            patch(
+                "reflections.utils.load_local_projects",
+                return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
+            ),
+            patch("scripts.docs_auditor.DocsAuditor") as mock_da,
+        ):
             mock_instance = MagicMock()
             mock_instance.run.return_value = mock_summary
+            mock_instance._api_call_count = 0
             mock_da.return_value = mock_instance
             result = run_async(run_documentation_audit())
 
         assert_valid_result(result)
         assert result["status"] == "ok"
 
-    def test_run_skills_audit_no_script(self):
-        """run_skills_audit() returns ok when script not found."""
+    def test_run_skills_audit_no_script(self, tmp_path):
+        """run_skills_audit() returns ok when script not found in any project."""
         from reflections.auditing import run_skills_audit
 
-        with patch("reflections.auditing.PROJECT_ROOT", MagicMock()):
-            # Patch audit_script.exists() to return False
-            with patch("pathlib.Path.exists", return_value=False):
-                result = run_async(run_skills_audit())
+        # tmp_path has no .claude/skills/.../audit_skills.py — skip_if hits, no findings
+        with patch(
+            "reflections.utils.load_local_projects",
+            return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
+        ):
+            result = run_async(run_skills_audit())
         assert_valid_result(result)
+        assert result["status"] == "ok"
+        assert result["projects"][0]["status"] == "skipped"
 
     def test_run_hooks_audit_no_log(self, tmp_path):
-        """run_hooks_audit() returns valid dict when hooks.log doesn't exist."""
+        """run_hooks_audit() skips projects with neither hooks.log nor settings.json."""
         from reflections.auditing import run_hooks_audit
 
-        with patch("reflections.auditing.PROJECT_ROOT", tmp_path):
+        with patch(
+            "reflections.utils.load_local_projects",
+            return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
+        ):
             result = run_async(run_hooks_audit())
         assert_valid_result(result)
+        assert result["projects"][0]["status"] == "skipped"
 
     def test_run_feature_docs_audit_no_dir(self, tmp_path):
-        """run_feature_docs_audit() returns valid dict when docs/features doesn't exist."""
+        """run_feature_docs_audit() skips projects without docs/features dir."""
         from reflections.auditing import run_feature_docs_audit
 
-        with patch("reflections.auditing.PROJECT_ROOT", tmp_path):
+        with patch(
+            "reflections.utils.load_local_projects",
+            return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
+        ):
             result = run_async(run_feature_docs_audit())
         assert_valid_result(result)
+        assert result["projects"][0]["status"] == "skipped"
 
     def test_event_loop_safe_callables_are_sync(self):
         """Regression canary (sibling of PR #1056).
