@@ -20,23 +20,23 @@ The `--dry-run` flag prints verdicts and reasons to stdout without writing, dele
 
 ## Automatic Execution via Reflections
 
-The audit is integrated into reflections as step 5 (`step_audit_docs`) in `scripts/reflections.py:L644`. It replaces the older `step_update_docs` approach, which used a 30-day timestamp check — a mechanism that was actively harmful (a freshly-written doc describing an unbuilt feature would pass; an accurate 60-day-old doc would be flagged).
+The audit is integrated into reflections as the `documentation-audit` callable (`reflections.auditing.run_documentation_audit`). It replaces an older 30-day-timestamp approach, which was actively harmful (a freshly-written doc describing an unbuilt feature would pass; an accurate 60-day-old doc would be flagged).
 
-**Frequency gating.** The step reads `last_audit_date` from the Redis ReflectionRun model. If that date is fewer than 7 days ago, the step is skipped (`DocsAuditor._should_skip()`, `scripts/docs_auditor.py:L901`). This prevents redundant full-corpus scans during daily reflections runs while ensuring the audit runs at least weekly.
+**Per-project iteration.** `run_documentation_audit` iterates `load_local_projects()` and runs `DocsAuditor(repo_root=...)` once per project with a `docs/` directory on disk. Findings are prefixed with `[{slug}]`. The async outer wrapper offloads the sync per-project work via `await asyncio.to_thread(run_per_project_audit, ...)` so the scheduler event loop stays responsive. See [reflections.md → Per-Project Audit Iteration](reflections.md#per-project-audit-iteration).
 
-After a successful run, reflections records findings and writes back to state:
+**Frequency gating.** Each `DocsAuditor` reads its repo's last audit date from a per-repo Redis key `docs_auditor:last_audit_date:{repo_name}` (`DocsAuditor._load_state()`). If that date is fewer than 7 days ago, that project is skipped — without suppressing audits for other projects on the same machine. This prevents redundant full-corpus scans while ensuring each repo audits at least weekly.
+
+**Cost controls.** `run_documentation_audit` honors a per-project cap (`max_api_calls=50`, default in `DocsAuditor.__init__`) plus an aggregate ceiling `DOCS_AUDIT_MAX_TOTAL_API_CALLS=500` per scheduled run. Once the global cap exhausts, remaining projects are recorded with `status="disabled"` and the loop exits cleanly.
+
+After a successful run, the per-project record forwarded to `Reflection.mark_completed(projects=...)` looks like:
 
 ```json
 {
-  "last_audit_date": "2026-02-18T09:15:00",
-  "audit_docs": {
-    "kept": 12,
-    "updated": 3,
-    "deleted": 1,
-    "renamed": 2,
-    "relocated": 1,
-    "skipped": false
-  }
+  "slug": "ai",
+  "status": "ok",
+  "duration": 4.2,
+  "findings_count": 3,
+  "error": null
 }
 ```
 
@@ -168,6 +168,6 @@ API calls use the `ANTHROPIC_API_KEY` environment variable. In dry-run mode with
 ## See Also
 
 - `scripts/docs_auditor.py` — full implementation
-- `scripts/reflections.py` — reflections pipeline including `step_audit_docs`
-- `docs/features/reflections.md` — reflections system overview with step table
+- `reflections/auditing.py::run_documentation_audit` — reflection wrapper that iterates `load_local_projects()`
+- `docs/features/reflections.md` — reflections system overview, including [Per-Project Audit Iteration](reflections.md#per-project-audit-iteration)
 - `docs/features/README.md` — feature index

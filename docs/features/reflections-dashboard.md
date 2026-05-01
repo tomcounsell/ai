@@ -47,13 +47,14 @@ The `Reflection` model was extended with a `run_history` ListField that stores s
 ```python
 {
     "timestamp": 1711000000.0,  # Unix timestamp
-    "status": "success",         # success | error
+    "status": "ok",              # ok | error | disabled (aggregate)
     "duration": 1.5,             # seconds
-    "error": None,               # error message or None
+    "error": None,               # error message or None (capped at 500 chars)
+    "projects": [],              # per-project breakdown (empty for non-audit reflections)
 }
 ```
 
-`mark_completed()` internally appends to `run_history` on each call. The list is capped at 200 entries (oldest trimmed). The method signature is unchanged -- existing callers require no modification.
+`mark_completed()` internally appends to `run_history` on each call. The list is capped at 200 entries (oldest trimmed). The method accepts an optional `projects: list[dict] | None = None` kwarg for per-project audits — existing callers omitting the kwarg get an empty `projects: []` on the run record with no behavior change. See [Per-Project Audit Iteration](reflections.md#per-project-audit-iteration) for the full breakdown.
 
 ## HTMX Endpoints
 

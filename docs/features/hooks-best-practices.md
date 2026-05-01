@@ -29,10 +29,10 @@ See `.claude/skills/audit-hooks/BEST_PRACTICES.md` for full rules with examples.
 
 ## Reflections Integration
 
-The daily reflections run includes a `hooks_audit` step that:
-- Scans `logs/hooks.log` for errors in the last 24 hours
-- Validates settings.json hook configuration consistency
-- Reports findings in the daily maintenance summary
+The reflection scheduler registers `hooks-audit` (`reflections.auditing.run_hooks_audit`), which iterates `load_local_projects()` and runs once per project that has either `logs/hooks.log` or `.claude/settings.json` on disk (projects with neither are skipped silently). For each qualifying project the audit:
+- Scans the project's `logs/hooks.log` for errors in the last 24 hours
+- Validates the project's `.claude/settings.json` hook configuration consistency
+- Returns findings prefixed with `[{slug}]`, aggregated into a single run record with a per-project breakdown — see [reflections.md → Per-Project Audit Iteration](reflections.md#per-project-audit-iteration)
 
 ## Hook Classification
 
