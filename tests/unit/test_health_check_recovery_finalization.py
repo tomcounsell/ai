@@ -974,7 +974,8 @@ class TestHasProgressPerTurnSignal:
             or "SDK_PROGRESS_FRESHNESS_WINDOW"
             not in src.split('"last_sdk_heartbeat_at"')[0].split("HEARTBEAT_FRESHNESS_WINDOW")[-1]
         ), (
-            "last_sdk_heartbeat_at must NOT be checked against HEARTBEAT_FRESHNESS_WINDOW in _has_progress"
+            "last_sdk_heartbeat_at must NOT be checked against "
+            "HEARTBEAT_FRESHNESS_WINDOW in _has_progress"
         )
 
     def test_sdk_progress_freshness_window_constant_exists(self):
@@ -1075,7 +1076,8 @@ class TestTier2ReprieveEscalation:
         handle = self._make_handle(pid=12345)
         result = _tier2_reprieve_signal(handle, entry)
         assert result == "alive", (
-            f"Expected 'alive' when sdk_ever_output=True even at high reprieve_count; got {result!r}"
+            f"Expected 'alive' when sdk_ever_output=True even at high "
+            f"reprieve_count; got {result!r}"
         )
 
     def test_escalation_guard_below_cap_still_reprieves(self, monkeypatch):
