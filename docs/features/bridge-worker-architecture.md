@@ -45,7 +45,8 @@ TelegramRelayOutputHandler.send() (agent/output_handler.py)
     ↓ resolves transport via session.extra_context["transport"]
     │   (defaults to "telegram" when missing or null — back-compat)
     ↓ runs bridge.message_drafter.draft_message (per-medium formatting, length guard)
-    ↓ runs bridge.read_the_room.read_the_room (issue #1193 — verdict: send|trim|suppress; opt-in via READ_THE_ROOM_ENABLED)
+    ↓ [SDLC sessions] runs bridge.redundancy_filter.should_suppress (issue #1205 — bigram-Jaccard duplicate guard; suppress → 👀 reaction + return)
+    ↓ [All sessions] runs bridge.read_the_room.read_the_room (issue #1193 — verdict: send|trim|suppress; opt-in via READ_THE_ROOM_ENABLED)
     ↓ writes JSON payload to the transport-appropriate Redis outbox:
     │     transport == "telegram" → telegram:outbox:{session_id}
     │     transport == "email"    → email:outbox:{session_id}
