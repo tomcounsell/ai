@@ -174,36 +174,37 @@ The CLI wraps `agent.sdlc_router.record_dispatch()` and `tools.stage_states_help
 
 ## Step 4: Dispatch ONE Sub-Skill
 
-Based on the assessment, invoke exactly ONE sub-skill and return.
+**Do not pattern-match against a hand-edited table.** Instead, call the routing tool and dispatch whatever skill it returns. The tool evaluates all guards (G1–G6) and dispatch rules (14 rows) against live state.
 
-| # | State | Invoke | Reason |
-|---|-------|--------|--------|
-| 1 | No plan exists | `/do-plan {slug}` | Cannot build without a plan |
-| 2 | Plan exists, not yet critiqued | `/do-plan-critique` with plan path | Plan must pass critique before build |
-| 3 | Plan critiqued (NEEDS REVISION) | `/do-plan {slug}` | Revise plan based on critique findings |
-| 4a | Plan critiqued (READY TO BUILD, zero concerns), no branch/PR | `/do-build` with plan path | No revision needed — critique passed cleanly |
-| 4b | Plan critiqued (READY TO BUILD, concerns present), `revision_applied` not set in plan frontmatter | `/do-plan {slug}` with directive to apply concern findings | Revision pass before build — embed Implementation Notes into plan text |
-| 4c | Plan critiqued (READY TO BUILD, concerns present), `revision_applied: true` in plan frontmatter | `/do-build` with plan path | Revision pass already complete — proceed to build |
-| 5 | Branch exists, no PR | `/do-build` with plan path | Build must create the PR — resume build |
-| 6 | Tests failing | `/do-patch` then `/do-test` | Fix what is broken |
-| 7 | PR exists, no review | `/do-pr-review {pr_number}` | Code is ready for review |
-| 8 | PR review has findings (blockers, nits, OR tech debt) | `/do-patch` | ALL findings must be addressed |
-| 8b | Patch applied after review findings | `/do-pr-review {pr_number}` | Re-review is REQUIRED after every patch |
-| 9 | Review APPROVED with zero findings, docs NOT done (see Step 3) | `/do-docs` | Docs are required before merge |
-| 10 | Review APPROVED with zero findings, docs done, AND all display stages show `completed` in stage_states (or stage_states unavailable), ready to merge | `/do-merge {pr_number}` | Execute programmatic merge gate |
-| 10b | stage_states unavailable AND an open PR exists for this issue | `/do-merge {pr_number}` | Fallback: if stage_states cannot confirm stages but an open PR exists after DOCS, dispatch merge |
+```bash
+# Get the next dispatch decision
+sdlc-tool next-skill --issue-number {issue_number}
+```
 
-**Row 10 merge gate**: ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) must show `completed` in stage_states before dispatching Row 10. This prevents stages from being silently skipped when artifacts happen to exist from a different stage's work (e.g., build creating docs does not satisfy the DOCS stage). If stage_states is unavailable, use conversation dispatch history — if DOCS was never dispatched in this session, dispatch it. **Fallback**: When stage_states is unavailable AND an open PR exists for this issue (`gh pr list --search "#{issue_number}" --state open`), dispatch `/do-merge` — an open PR after DOCS means the pipeline reached the merge gate but the PM exited prematurely.
+The tool outputs JSON:
+```json
+{"skill": "/do-build", "reason": "...", "row_id": "4a", "dispatched": true}
+```
 
-**Row 4b/4c is the concern-triggered revision path**: When the critique verdict is "READY TO BUILD (with concerns)", the SDLC router dispatches `/do-plan` with a directive to apply the concern findings — specifically, to embed each concern's Implementation Note into the plan text. This is a plan clarity step, not a defect fix. CONCERNs are not reclassified as blockers; they remain acknowledged risks. After the revision pass, the plan's frontmatter is updated with `revision_applied: true`. The next SDLC invocation then detects this flag and routes to Row 4c (`/do-build`). Detection logic:
-- Row 4b: critique verdict contains "with concerns" AND plan frontmatter does NOT contain `revision_applied: true`
-- Row 4a or 4c: critique verdict contains "no concerns" OR plan frontmatter contains `revision_applied: true`
+Or when blocked:
+```json
+{"blocked": true, "reason": "G4: stage oscillation ...", "guard_id": "G4"}
+```
 
-**Row 8/8b is the patch-review cycle**: A "minimum approve" with unresolved nits or tech debt is NOT sufficient. Every finding from the review — blockers, nits, suggestions, and tech debt — must be patched or explicitly annotated with inline comments explaining why the finding was left in place. After patching, a fresh `/do-pr-review` is mandatory to verify all findings were addressed. This cycle repeats until the review returns zero unresolved findings.
+**How to use the output:**
+1. If `dispatched` is `true`: record the dispatch via `sdlc-tool dispatch record` (see Step 3.5), then invoke the returned `skill`.
+2. If `blocked` is `true`: surface the `reason` to the human and wait. Do NOT loop or guess an alternative skill.
+3. If neither key is present (error): log the `error` field and escalate to the human.
 
-**Row 9 is the docs gate**: A clean review does NOT mean "all stages complete." You MUST run Step 3's docs check before dispatching row 10. If you cannot confirm docs are done, dispatch `/do-docs`.
+**Before recording and dispatching**, also supply `--proposed-skill` when you already know what skill you intend to invoke (enables G3 PR-lock detection):
+```bash
+sdlc-tool next-skill --issue-number {issue_number} --proposed-skill /do-build
+```
 
-**CRITICAL**: Before dispatching `/do-pr-review`, verify a PR actually exists by checking the output of `gh pr list`. If no PR exists for this branch, dispatch `/do-build` instead — it handles PR creation. Never send `/do-pr-review` without a real PR number.
+**Context notes for specific rows** (for human reference — the tool encodes these internally):
+- *Row 4b/4c concern path*: When critique verdict is "READY TO BUILD (with concerns)", the tool routes to `/do-plan` if `revision_applied` is not yet set in plan frontmatter, else `/do-build`.
+- *Row 8/8b patch-review cycle*: Every review finding (blockers, nits, tech debt) must be patched; re-review is mandatory after each patch.
+- *Row 10 merge gate*: ALL display stages must show `completed` before merge. The tool enforces this internally.
 
 Do NOT restart from scratch if prior stages are already complete.
 

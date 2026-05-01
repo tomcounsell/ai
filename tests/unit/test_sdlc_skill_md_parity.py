@@ -1,18 +1,20 @@
-"""Parity test: SKILL.md dispatch table must match agent.sdlc_router.DISPATCH_RULES.
+"""Parity test: SKILL.md Step 4 must delegate to the routing tool; DISPATCH_RULES
+must have documented predicates; guard table must match Python GUARDS list.
 
-This test prevents drift between the human-readable runbook in
-``.claude/skills/sdlc/SKILL.md`` and the Python reference implementation in
-``agent/sdlc_router.py``. Each row in the markdown table is cross-checked
-with a ``DispatchRule`` of the matching ``row_id``.
+After Phase 2 (issue #1216), the SKILL.md Step 4 dispatch table was replaced by
+a single ``sdlc-tool next-skill`` call.  The hand-edited table no longer exists,
+so the old row-by-row comparison is gone.
 
-Checked per row:
-  - ``skill`` — must match exactly.
-  - ``state_predicate.__doc__`` — must match the markdown State cell after
-    whitespace / case normalization.
+This rewrite asserts:
 
-NOT checked per row:
-  - The "Reason" column. It is descriptive only and can evolve freely for
-    human readability without breaking CI.
+1. SKILL.md Step 4 no longer contains a hand-authored dispatch table (no rows
+   like ``| 1 | ... |``).
+2. SKILL.md Step 4 references ``sdlc-tool next-skill`` as the routing entry point.
+3. Every ``DispatchRule`` in ``DISPATCH_RULES`` has a non-empty ``__doc__`` on its
+   ``state_predicate`` (quality gate — predicates must remain documented even
+   though they are no longer cross-checked against markdown).
+4. Guard table parity: every guard ID in SKILL.md Step 3.5 has a matching
+   callable in the exported ``GUARDS`` list.
 """
 
 from __future__ import annotations
@@ -27,53 +29,12 @@ SKILL_MD = REPO_ROOT / ".claude" / "skills" / "sdlc" / "SKILL.md"
 
 
 # ---------------------------------------------------------------------------
-# Markdown table parser
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-_ROW_NUMBER_RE = re.compile(r"^\d+[a-z]?$")
-
-
-def _split_cells(row_text: str) -> list[str]:
-    """Split a single-line markdown table row on unescaped pipes.
-
-    Tolerates ``\\|`` as an escaped pipe (kept literal in the cell). Strips
-    leading/trailing whitespace from each cell.
-    """
-    # Replace escaped pipes with a placeholder, then split on real pipes.
-    placeholder = "\x00PIPE\x00"
-    safe = row_text.replace(r"\|", placeholder)
-    parts = safe.split("|")
-    # First and last entries are empty (row starts/ends with |)
-    cells = [p.strip().replace(placeholder, "|") for p in parts]
-    # Strip leading/trailing empty cells
-    if cells and cells[0] == "":
-        cells = cells[1:]
-    if cells and cells[-1] == "":
-        cells = cells[:-1]
-    return cells
-
-
-def _is_separator_row(cells: list[str]) -> bool:
-    """Markdown table separator row: ``| --- | --- | ...``"""
-    if not cells:
-        return False
-    return all(re.fullmatch(r":?-{3,}:?", c) for c in cells)
-
-
-def parse_dispatch_rows(md: str) -> list[dict]:
-    """Parse the Step 4 dispatch table into a list of row dicts.
-
-    Each dict has keys ``row_id``, ``state``, ``skill``. Only rows whose first
-    cell is a row number (``1``, ``4a``, ``10b``, ...) are returned — the
-    header row and separator row are dropped.
-
-    The parser:
-      - Finds the start of Step 4's dispatch table by header anchor.
-      - Reads consecutive lines beginning with ``|``.
-      - Splits on unescaped pipes, tolerates ``<br>`` as an intra-cell
-        line break (kept as a space).
-    """
+def _extract_step4_section(md: str) -> str:
+    """Return the text of the Step 4 section (up to the next ## heading)."""
     lines = md.splitlines()
     start = None
     for i, line in enumerate(lines):
@@ -81,48 +42,19 @@ def parse_dispatch_rows(md: str) -> list[dict]:
             start = i
             break
     if start is None:
-        raise AssertionError("Could not locate '## Step 4: Dispatch ONE Sub-Skill' in SKILL.md")
+        return ""
 
-    rows: list[dict] = []
-    in_table = False
-    for line in lines[start:]:
-        if not line.startswith("|"):
-            if in_table:
-                break
-            continue
-        in_table = True
-        cells = _split_cells(line)
-        if len(cells) < 3:
-            continue
-        if _is_separator_row(cells):
-            continue
-        row_id_cell = cells[0]
-        if not _ROW_NUMBER_RE.fullmatch(row_id_cell):
-            # skip header row "| # | State | Invoke | Reason |"
-            continue
-        state = cells[1].replace("<br>", " ")
-        skill_cell = cells[2]
-        # Skills in markdown are wrapped in backticks, e.g. `/do-plan {slug}`
-        skill_match = re.search(r"`(/do-[a-z-]+)", skill_cell)
-        skill = skill_match.group(1) if skill_match else skill_cell.strip("`")
-        rows.append({"row_id": row_id_cell, "state": state, "skill": skill})
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith("## ") and i > start:
+            end = i
+            break
 
-    return rows
-
-
-def _normalize(text: str) -> str:
-    r"""Lowercase, drop backticks, collapse whitespace, strip punctuation.
-
-    Backticks are markdown formatting — the Python docstring uses plain text.
-    Dropping them lets a markdown cell like ``\`revision_applied\` not set``
-    match the docstring ``revision_applied not set``.
-    """
-    text = text.replace("`", "")
-    return re.sub(r"\s+", " ", text.lower().strip())
+    return "\n".join(lines[start:end])
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Tests: SKILL.md Step 4 uses the tool (no hand-authored table)
 # ---------------------------------------------------------------------------
 
 
@@ -130,104 +62,79 @@ def test_skill_md_exists():
     assert SKILL_MD.is_file(), f"SKILL.md not found at {SKILL_MD}"
 
 
-def test_parser_finds_expected_row_numbers():
+def test_step4_references_next_skill_tool():
+    """SKILL.md Step 4 must reference ``sdlc-tool next-skill`` as the routing entry point."""
     md = SKILL_MD.read_text(encoding="utf-8")
-    rows = parse_dispatch_rows(md)
-    row_ids = [r["row_id"] for r in rows]
-    # Canonical row_ids from SKILL.md
-    expected = ["1", "2", "3", "4a", "4b", "4c", "5", "6", "7", "8", "8b", "9", "10", "10b"]
-    assert row_ids == expected, f"Unexpected row_ids: {row_ids}"
+    section = _extract_step4_section(md)
+    assert section, "Could not locate '## Step 4: Dispatch ONE Sub-Skill' in SKILL.md"
+    assert "sdlc-tool next-skill" in section, (
+        "SKILL.md Step 4 must reference 'sdlc-tool next-skill' as the routing tool.\n"
+        "Found section:\n" + section[:500]
+    )
 
 
-def test_every_markdown_row_has_matching_dispatch_rule():
+def test_step4_has_no_hand_authored_dispatch_table():
+    """SKILL.md Step 4 must NOT contain a hand-authored dispatch table (rows like ``| 1 | ...``).
+
+    The table was replaced by a ``sdlc-tool next-skill`` call in issue #1216.
+    If this test fails, someone re-introduced the manual table — revert and use
+    the tool instead.
+    """
     md = SKILL_MD.read_text(encoding="utf-8")
-    rows = parse_dispatch_rows(md)
-    rules_by_row = {r.row_id: r for r in DISPATCH_RULES}
-    missing = [row["row_id"] for row in rows if row["row_id"] not in rules_by_row]
-    assert not missing, f"SKILL.md rows missing from DISPATCH_RULES: {missing}"
+    section = _extract_step4_section(md)
+    assert section, "Could not locate '## Step 4: Dispatch ONE Sub-Skill' in SKILL.md"
+
+    # Row-number pattern: lines like "| 1 |", "| 4a |", "| 10b |"
+    row_number_re = re.compile(r"^\|\s*\d+[a-z]?\s*\|", re.MULTILINE)
+    matches = row_number_re.findall(section)
+    assert not matches, (
+        f"SKILL.md Step 4 contains {len(matches)} hand-authored dispatch table row(s). "
+        "These should be removed — routing is now delegated to 'sdlc-tool next-skill'.\n"
+        "Offending lines: " + str(matches[:5])
+    )
 
 
-def test_every_dispatch_rule_has_matching_markdown_row():
+def test_step4_references_blocked_output_contract():
+    """SKILL.md Step 4 must document the ``blocked`` JSON key output contract."""
     md = SKILL_MD.read_text(encoding="utf-8")
-    rows = parse_dispatch_rows(md)
-    row_ids_in_md = {r["row_id"] for r in rows}
-    missing = [rule.row_id for rule in DISPATCH_RULES if rule.row_id not in row_ids_in_md]
-    assert not missing, f"DISPATCH_RULES rows missing from SKILL.md: {missing}"
+    section = _extract_step4_section(md)
+    assert section, "Could not locate '## Step 4: Dispatch ONE Sub-Skill' in SKILL.md"
+    assert '"blocked"' in section or "blocked" in section, (
+        "SKILL.md Step 4 must document what to do when the tool returns a blocked decision.\n"
+        "Add instructions for handling {'blocked': true, 'reason': '...', 'guard_id': '...'}."
+    )
 
 
-def test_skill_strings_match():
-    md = SKILL_MD.read_text(encoding="utf-8")
-    rows = parse_dispatch_rows(md)
-    rules_by_row = {r.row_id: r for r in DISPATCH_RULES}
-    mismatches = []
-    for row in rows:
-        rule = rules_by_row.get(row["row_id"])
-        if rule is None:
-            continue
-        if rule.skill != row["skill"]:
-            mismatches.append(f"row {row['row_id']}: md={row['skill']!r} py={rule.skill!r}")
-    assert not mismatches, "Skill mismatches:\n" + "\n".join(mismatches)
+# ---------------------------------------------------------------------------
+# Tests: DISPATCH_RULES predicate quality
+# ---------------------------------------------------------------------------
 
 
-def test_state_cell_matches_predicate_docstring():
-    """For each row, the state predicate's __doc__ must match the markdown
-    State cell after normalization."""
-    md = SKILL_MD.read_text(encoding="utf-8")
-    rows = parse_dispatch_rows(md)
-    rules_by_row = {r.row_id: r for r in DISPATCH_RULES}
-    mismatches = []
-    for row in rows:
-        rule = rules_by_row.get(row["row_id"])
-        if rule is None:
-            continue
+def test_every_dispatch_rule_has_documented_predicate():
+    """Every DispatchRule's state_predicate must have a non-empty __doc__.
+
+    Predicates are no longer compared against SKILL.md row-by-row, but they
+    must remain self-documenting for maintainability and test traceability.
+    """
+    undocumented = []
+    for rule in DISPATCH_RULES:
         doc = rule.state_predicate.__doc__ or ""
-        if _normalize(doc) != _normalize(row["state"]):
-            mismatches.append(
-                f"row {row['row_id']}:\n  md state: {row['state']!r}\n  py __doc__: {doc!r}"
-            )
-    assert not mismatches, "State mismatches:\n\n" + "\n\n".join(mismatches)
-
-
-# ---------------------------------------------------------------------------
-# Negative tests: verify the parity catches drift
-# ---------------------------------------------------------------------------
-
-
-def test_parity_detects_skill_mutation():
-    """Inject a bad row into an in-memory copy of SKILL.md and verify the
-    parity logic produces a readable row-level diff rather than silently
-    passing."""
-    md = SKILL_MD.read_text(encoding="utf-8")
-    mutated = md.replace(
-        "| 1 | No plan exists | `/do-plan {slug}`",
-        "| 1 | No plan exists | `/do-bogus {slug}`",
-    )
-    rows = parse_dispatch_rows(mutated)
-    row_1 = next(r for r in rows if r["row_id"] == "1")
-    rules_by_row = {r.row_id: r for r in DISPATCH_RULES}
-    assert rules_by_row["1"].skill != row_1["skill"], (
-        "Parity test would silently pass on real skill drift"
+        if not doc.strip():
+            undocumented.append(rule.row_id)
+    assert not undocumented, (
+        f"DispatchRules with undocumented state_predicate: {undocumented}\n"
+        "Add a docstring to each predicate function."
     )
 
 
-def test_parity_detects_state_cell_mutation():
-    """Mutation to the state cell should produce a detectable mismatch."""
-    md = SKILL_MD.read_text(encoding="utf-8")
-    mutated = md.replace(
-        "| 1 | No plan exists |",
-        "| 1 | Completely different wording |",
-    )
-    rows = parse_dispatch_rows(mutated)
-    row_1 = next(r for r in rows if r["row_id"] == "1")
-    rules_by_row = {r.row_id: r for r in DISPATCH_RULES}
-    rule_1 = rules_by_row["1"]
-    assert _normalize(row_1["state"]) != _normalize(rule_1.state_predicate.__doc__ or "")
-
-
-def test_escaped_pipe_in_cell_is_preserved():
-    """Escaped pipe ``\\|`` must not split a cell."""
-    cells = _split_cells(r"| row | cell with \| escaped pipe | skill |")
-    assert cells == ["row", "cell with | escaped pipe", "skill"]
+def test_dispatch_rules_cover_expected_row_ids():
+    """DISPATCH_RULES must cover the canonical row set (1–10b)."""
+    expected = {"1", "2", "3", "4a", "4b", "4c", "5", "6", "7", "8", "8b", "9", "10", "10b"}
+    actual = {r.row_id for r in DISPATCH_RULES}
+    missing = expected - actual
+    extra = actual - expected
+    assert not missing, f"DISPATCH_RULES missing expected rows: {missing}"
+    assert not extra, f"DISPATCH_RULES has unexpected rows: {extra}"
 
 
 # ---------------------------------------------------------------------------
@@ -238,14 +145,27 @@ def test_escaped_pipe_in_cell_is_preserved():
 _GUARD_ROW_RE = re.compile(r"^G\d+")
 
 
-def parse_guard_rows(md: str) -> list[dict]:
-    """Parse the Step 3.5 guard table from SKILL.md.
+def _split_cells(row_text: str) -> list[str]:
+    """Split a single-line markdown table row on unescaped pipes."""
+    placeholder = "\x00PIPE\x00"
+    safe = row_text.replace(r"\|", placeholder)
+    parts = safe.split("|")
+    cells = [p.strip().replace(placeholder, "|") for p in parts]
+    if cells and cells[0] == "":
+        cells = cells[1:]
+    if cells and cells[-1] == "":
+        cells = cells[:-1]
+    return cells
 
-    Finds the "## Step 3.5: Legal Dispatch Guards" heading and reads the
-    consecutive markdown table rows. Returns a list of dicts with keys
-    ``guard_id``, ``condition``, and ``forced_dispatch``. Only rows whose
-    first cell matches the pattern ``G\\d+`` (e.g. "G1", "G6") are returned.
-    """
+
+def _is_separator_row(cells: list[str]) -> bool:
+    if not cells:
+        return False
+    return all(re.fullmatch(r":?-{3,}:?", c) for c in cells)
+
+
+def parse_guard_rows(md: str) -> list[dict]:
+    """Parse the Step 3.5 guard table from SKILL.md."""
     lines = md.splitlines()
     start = None
     for i, line in enumerate(lines):
@@ -269,10 +189,9 @@ def parse_guard_rows(md: str) -> list[dict]:
         if _is_separator_row(cells):
             continue
         guard_id_cell = cells[0]
-        # Extract guard ID like "G1", "G6" from "G1: Critique loop"
         match = _GUARD_ROW_RE.match(guard_id_cell.strip())
         if not match:
-            continue  # header row or non-guard row
+            continue
         guard_id = match.group(0)
         rows.append(
             {
@@ -285,22 +204,16 @@ def parse_guard_rows(md: str) -> list[dict]:
 
 
 def test_guard_row_ids_in_python():
-    """Every guard_id found by parse_guard_rows has a matching callable in GUARDS.
-
-    For each row with guard_id="GN", there must be a function named ``guard_gN_*``
-    in the GUARDS list exported by agent/sdlc_router.py.
-    """
+    """Every guard_id found by parse_guard_rows has a matching callable in GUARDS."""
     md = SKILL_MD.read_text(encoding="utf-8")
     guard_rows = parse_guard_rows(md)
     assert guard_rows, "No guard rows found — parse_guard_rows returned empty list"
 
-    # Build a set of guard function names from the GUARDS list
     guard_names = {g.__name__.lower() for g in GUARDS}
 
     missing = []
     for row in guard_rows:
-        guard_id = row["guard_id"].lower()  # e.g. "g6"
-        # Match functions like guard_g6_terminal_merge_ready
+        guard_id = row["guard_id"].lower()
         if not any(name.startswith(f"guard_{guard_id}_") for name in guard_names):
             missing.append(row["guard_id"])
 
@@ -318,3 +231,9 @@ def test_g6_guard_row_present_in_skill_md():
     assert "G6" in guard_ids, (
         f"G6 guard row not found in SKILL.md guard table. Found guard IDs: {guard_ids}"
     )
+
+
+def test_escaped_pipe_in_cell_is_preserved():
+    """Escaped pipe ``\\|`` must not split a cell."""
+    cells = _split_cells(r"| row | cell with \| escaped pipe | skill |")
+    assert cells == ["row", "cell with | escaped pipe", "skill"]
