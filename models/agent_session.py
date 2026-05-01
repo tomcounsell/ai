@@ -206,6 +206,16 @@ class AgentSession(Model):
     # === PM self-messaging ===
     pm_sent_message_ids = ListField(null=True)
 
+    # === Drafter redundancy filter (issue #1205) ===
+    # Last N successfully-sent draft texts + metadata, stored as a list of
+    # dicts {ts: float, text: str, artifacts: dict}. Text entries are capped
+    # at 500 chars per entry (full drafts can be ~4 KB). The list is capped at
+    # RECENT_DRAFTS_N (default 3) by record_recent_sent_draft(). FIFO: oldest
+    # entry dropped when cap is exceeded. Written by the funnel helper below;
+    # read only inside TelegramRelayOutputHandler.send. See the precedent at
+    # _append_event_dict (models/agent_session.py) for the partial-save pattern.
+    recent_sent_drafts = ListField(null=True)
+
     # === Project config (full project dict from projects.json) ===
     # Carried through the pipeline so downstream code never needs to re-derive
     # project properties. Populated at enqueue time; empty dict for legacy sessions.
@@ -1444,6 +1454,61 @@ class AgentSession(Model):
         """Check whether the PM sent any self-authored messages during this session."""
         ids = self.pm_sent_message_ids
         return isinstance(ids, list) and len(ids) > 0
+
+    # === Drafter redundancy filter helpers (issue #1205) ===
+
+    def record_recent_sent_draft(
+        self,
+        text: str,
+        artifacts: dict,
+        *,
+        max_n: int = 3,
+        preview_chars: int = 500,
+    ) -> None:
+        """Append a successfully-sent draft to the session's recent_sent_drafts.
+
+        Caps the list to ``max_n`` entries (FIFO — oldest dropped). Each entry
+        stores a text preview of at most ``preview_chars`` characters, not the
+        full draft, to bound the AgentSession Redis hash size (3 × 500 chars
+        ≈ 1.5 KB upper bound, well within safe Redis write sizes).
+
+        Modelled on ``_append_event_dict`` (just above this method) which uses
+        ``self.save(update_fields=["session_events", "updated_at"])`` to defend
+        against stale-object callers clobbering concurrent field writes (see
+        #898). Never raises — a failed save logs a warning and continues so
+        the outbox ``rpush`` that already succeeded is not rolled back.
+
+        FIFO cap: after append, slice to last ``max_n`` entries.
+        Preview cap: ``text[:preview_chars]`` (full drafts can be ~4 KB).
+        Partial save: ``update_fields=["recent_sent_drafts", "updated_at"]``
+        so concurrent writes to ``context_summary`` or ``session_events`` by
+        the same ``send()`` flow are not clobbered. This is the right pattern;
+        the adjacent ``record_pm_message`` uses an unscoped save and is an
+        older helper that pre-dates the stale-object hazard documented in #898.
+        """
+        import time as _time
+
+        entry = {
+            "ts": _time.time(),
+            "text": text[:preview_chars],
+            "artifacts": artifacts or {},
+        }
+        current = self.recent_sent_drafts
+        if not isinstance(current, list):
+            current = []
+        current.append(entry)
+        # FIFO cap: drop oldest entry when over the limit.
+        if len(current) > max_n:
+            current = current[-max_n:]
+        self.recent_sent_drafts = current
+        try:
+            self.save(update_fields=["recent_sent_drafts", "updated_at"])
+        except Exception as e:
+            logger.warning(
+                "record_recent_sent_draft save failed for session %s: %s",
+                self.session_id,
+                e,
+            )
 
     # === Event log helpers ===
 

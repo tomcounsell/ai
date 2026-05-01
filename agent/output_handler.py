@@ -358,6 +358,81 @@ class TelegramRelayOutputHandler:
                 await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
             return
 
+        # ── Drafter redundancy filter (issue #1205) ──────────────────────────
+        # Deterministic bigram-Jaccard guard for SDLC sessions. Runs AFTER the
+        # drafter finalises delivery_text (so we compare what the user actually
+        # sees) and BEFORE RTR (which bypasses SDLC sessions by design). On
+        # ``suppress``, queues a 👀 reaction and returns without an outbox write.
+        # On any error the filter returns ``send`` and delivery falls through
+        # unchanged — the guard must never block delivery.
+        #
+        # Sequencing: redundancy filter → RTR → outbox rpush → record_recent_sent_draft
+        try:
+            from bridge.redundancy_filter import (
+                RTR_SUPPRESS_EMOJI as _REDUND_EMOJI,
+                SUPPRESSION_ENABLED as _SUPPRESSION_ENABLED,
+                SuppressionVerdict as _SuppressionVerdict,
+                should_suppress,
+            )
+
+            _skip_filter = (
+                not _SUPPRESSION_ENABLED
+                or session is None
+                or not getattr(session, "is_sdlc", False)
+            )
+            if not _skip_filter:
+                # Use the drafter's already-computed artifacts when available;
+                # fall back to extracting from delivery_text on drafter failure.
+                _draft_artifacts = getattr(draft, "artifacts", None) if "draft" in dir() else None
+                if _draft_artifacts is None:
+                    try:
+                        from bridge.message_drafter import extract_artifacts
+
+                        _draft_artifacts = extract_artifacts(delivery_text)
+                    except Exception:
+                        _draft_artifacts = {}
+
+                _redund_verdict: _SuppressionVerdict = should_suppress(
+                    delivery_text,
+                    _draft_artifacts,
+                    getattr(session, "recent_sent_drafts", None) or [],
+                    getattr(draft, "expectations", None) if "draft" in dir() else None,
+                    getattr(session, "status", None),
+                )
+
+                if _redund_verdict.action == "suppress":
+                    self._rtr_emit_event(
+                        session,
+                        "drafter.suppressed_redundant",
+                        chat_id=chat_id,
+                        draft_text=delivery_text,
+                        reason=_redund_verdict.reason,
+                    )
+                    if reply_to_msg_id is not None:
+                        self._rtr_queue_reaction(
+                            chat_id, reply_to_msg_id, _REDUND_EMOJI, session_id
+                        )
+                        if self._file_handler is not None:
+                            await self._file_handler.send(
+                                chat_id, text, reply_to_msg_id, session
+                            )
+                        return
+                    # No anchor for the reaction — fall through and send.
+                    # Mirrors RTR's no-anchor contract (lines 437-443 below).
+                    self._rtr_emit_event(
+                        session,
+                        "drafter.suppress_fallthrough",
+                        chat_id=chat_id,
+                        draft_text=delivery_text,
+                        reason="no_reply_anchor",
+                    )
+        except Exception as _redund_err:
+            logger.warning(
+                "Redundancy filter failed in TelegramRelayOutputHandler.send "
+                "(%s); falling through to RTR + outbox",
+                _redund_err,
+            )
+
         # ── Read-the-Room pre-send pass (issue #1193) ──
         # Lightweight Haiku call inspects the chat snapshot + the drafted
         # message and returns one of {send, trim, suppress}. RTR is a
@@ -465,10 +540,12 @@ class TelegramRelayOutputHandler:
             payload["file_paths"] = file_paths
 
         queue_key = f"telegram:outbox:{session_id}"
+        _rpush_succeeded = False
         try:
             r = self._get_redis()
             r.rpush(queue_key, json.dumps(payload))
             r.expire(queue_key, self.OUTBOX_TTL)
+            _rpush_succeeded = True
             logger.info(
                 "Queued output to %s (%d chars, files=%d)",
                 queue_key,
@@ -477,6 +554,25 @@ class TelegramRelayOutputHandler:
             )
         except Exception as e:
             logger.error(f"Failed to write to Redis outbox {queue_key}: {e}")
+
+        # ── Record the sent draft for future redundancy checks ────────────────
+        # Append AFTER a successful rpush so a Redis failure does not pollute
+        # the dedup baseline. The helper uses update_fields= to avoid clobbering
+        # concurrent writes to other session fields (context_summary, expectations).
+        if _rpush_succeeded and session is not None and getattr(session, "is_sdlc", False):
+            try:
+                _record_artifacts = {}
+                try:
+                    _record_artifacts = _draft_artifacts or {}  # type: ignore[name-defined]
+                except NameError:
+                    pass
+                session.record_recent_sent_draft(delivery_text, _record_artifacts)
+            except Exception as _rec_err:
+                logger.warning(
+                    "record_recent_sent_draft failed (non-fatal) for session %s: %s",
+                    session_id,
+                    _rec_err,
+                )
 
         # Dual-write to file handler for audit/debugging
         if self._file_handler is not None:
