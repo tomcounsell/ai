@@ -79,6 +79,22 @@
                     <td class="mono">{{ format_dur(run.duration) }}</td>
                     <td style="font-size: 11px; color: var(--red); font-family: var(--font-mono); word-break: break-word;">{{ run.error or '' }}</td>
                 </tr>
+                {% if run.projects %}
+                {% for proj in run.projects %}
+                <tr class="project-sub-row">
+                    <td>
+                        {% if proj.status == 'ok' %}<span class="badge badge-ok">ok</span>
+                        {% elif proj.status == 'error' %}<span class="badge badge-error">error</span>
+                        {% elif proj.status == 'disabled' %}<span class="badge badge-disabled">disabled</span>
+                        {% elif proj.status == 'skipped' %}<span class="badge badge-skipped">skipped</span>
+                        {% else %}<span class="badge">{{ proj.status }}</span>{% endif %}
+                    </td>
+                    <td class="mono project-slug">[{{ proj.slug }}]</td>
+                    <td class="mono">{{ format_dur(proj.duration) }}</td>
+                    <td style="font-size: 11px; color: var(--red); font-family: var(--font-mono); word-break: break-word;">{{ proj.error or '' }}</td>
+                </tr>
+                {% endfor %}
+                {% endif %}
                 {% endfor %}
             </tbody>
         </table>
@@ -101,6 +117,23 @@
 }
 .resume-chip:hover { background: var(--bg-hover, #2a2a3e); }
 .resume-chip.copied { color: var(--success, #4caf50); border-color: var(--success, #4caf50); }
+
+/* Per-project sub-row in the reflection History table.
+   Indented and dimmer to visually nest under the aggregate run row. */
+.project-sub-row td {
+    padding-left: 20px;
+    font-size: 11px;
+    color: var(--text-secondary, #aaa);
+    background: var(--bg-tertiary, rgba(255,255,255,0.02));
+}
+.project-sub-row .project-slug { font-weight: 600; }
+
+/* Per-project status badges. Distinct color per status so cost-cap
+   exhaustion (`disabled`) is legible vs. `ok` / `error` / `skipped`. */
+.badge-ok       { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
+.badge-error    { background: rgba(239, 68, 68, 0.15); color: var(--red, #ef4444); }
+.badge-skipped  { background: rgba(156, 163, 175, 0.15); color: #9ca3af; }
+.badge-disabled { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
 </style>
 <script>
 function copyReflectionCommand(el) {
