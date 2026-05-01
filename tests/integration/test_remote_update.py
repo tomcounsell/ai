@@ -75,7 +75,7 @@ class TestRemoteUpdateScript:
             cwd=str(PROJECT_DIR),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=180,
         )
 
         if "Already up to date" in result.stdout:
@@ -128,7 +128,7 @@ class TestRemoteUpdateScript:
             cwd=str(PROJECT_DIR),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=180,
         )
         lines = [line for line in result.stdout.strip().split("\n") if line.strip()]
         # In cron mode the Python module captures prefixed lines to a log

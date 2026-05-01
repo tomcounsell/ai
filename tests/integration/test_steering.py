@@ -100,7 +100,7 @@ class TestSteeringQueue:
         assert msg["is_abort"] is True
         assert msg["text"] == "stop everything"
 
-    @pytest.mark.parametrize("keyword", list(ABORT_KEYWORDS))
+    @pytest.mark.parametrize("keyword", sorted(ABORT_KEYWORDS))
     def test_auto_detect_abort_keywords(self, keyword):
         session_id = f"test_session_abort_{keyword}"
         push_steering_message(session_id, keyword, "Tom")
