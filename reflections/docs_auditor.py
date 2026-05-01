@@ -129,10 +129,10 @@ def _release_lock(key: str = REDIS_RUNNING_KEY) -> None:
 
 
 def _check_auth() -> tuple[bool, str]:
-    """Probe Anthropic auth. Mirrors scripts.docs_auditor.DocsAuditor._check_auth.
+    """Probe Anthropic auth. Returns (ok, reason).
 
-    Returns (ok, reason). On non-auth network errors, returns (True, "") so
-    transient failures do not disable the substrate; only invalid keys do.
+    On non-auth network errors, returns (True, "") so transient failures do
+    not disable the substrate; only invalid keys do.
     """
     try:
         import anthropic as _anth
