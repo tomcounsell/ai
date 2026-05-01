@@ -28,6 +28,13 @@ PYTEST_JSON_TMP = "/tmp/nightly_pytest_report.json"
 
 PYTEST_TIMEOUT_SECONDS = 1800  # 30 minutes max
 
+# TTFT regression gate (issue #1227).
+# Plan target: production 90s, nightly CI 120s (allowing slack for run-to-run noise).
+TTFT_LOG_FILE = PROJECT_DIR / "logs" / "cold_start_metrics.jsonl"
+TTFT_SESSION_TYPE = "pm"
+TTFT_LAST_N = 10
+TTFT_THRESHOLD_SECONDS = 120.0
+
 
 def log(msg: str) -> None:
     """Write timestamp-prefixed message to stdout and LOG_FILE."""
@@ -132,6 +139,86 @@ def send_telegram(msg: str, dry_run: bool = False) -> None:
         log(f"WARNING: Failed to send Telegram: {exc}")
 
 
+def _invoke_check_ttft(
+    *,
+    log_file: Path,
+    session_type: str,
+    last: int,
+    threshold: float,
+) -> tuple[int, str]:
+    """Invoke ``scripts/check_ttft.py`` as a subprocess and return (rc, stdout).
+
+    Subprocess invocation (not direct import) keeps the nightly runner
+    decoupled from the gate's internal API and matches the plan's wording
+    "post-run call to ``python scripts/check_ttft.py ...``".
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_DIR / "scripts" / "check_ttft.py"),
+            "--session-type",
+            session_type,
+            "--last",
+            str(last),
+            "--threshold",
+            str(threshold),
+            "--log-file",
+            str(log_file),
+        ],
+        cwd=PROJECT_DIR,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return result.returncode, (result.stdout or "").strip()
+
+
+def run_ttft_gate(
+    *,
+    log_file: Path,
+    session_type: str,
+    last: int,
+    threshold: float,
+) -> str | None:
+    """Run the TTFT regression gate as a post-test check.
+
+    Returns:
+        ``None`` on PASS or when no data is available yet (first deploy /
+        no PM sessions logged); a Telegram-ready alert string on FAIL.
+        Per the plan, a TTFT regression is reported as a regression
+        (Telegram alert), not a test failure — the caller does not change
+        its return code based on this gate.
+
+    All exceptions are swallowed: the TTFT gate must never crash the
+    nightly run.
+    """
+    if not log_file.exists():
+        log(f"TTFT gate skipped: {log_file} not present (no data yet)")
+        return None
+
+    try:
+        rc, stdout = _invoke_check_ttft(
+            log_file=log_file,
+            session_type=session_type,
+            last=last,
+            threshold=threshold,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"TTFT gate error (non-fatal): {exc}")
+        return None
+
+    log(f"TTFT gate result: rc={rc} stdout={stdout!r}")
+    if rc == 0:
+        return None
+
+    # Failure path — surface as a regression alert, not a test failure.
+    detail = stdout if stdout else "no detail"
+    return (
+        f"TTFT regression (issue #1227): {detail} "
+        f"[session_type={session_type} last={last} threshold={threshold:g}s]"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Nightly regression test runner")
     parser.add_argument("--dry-run", action="store_true", help="Preview without sending Telegram")
@@ -192,6 +279,21 @@ def main() -> int:
     # Save state
     save_last_run(current)
     log(f"State saved to {LAST_RUN_FILE}")
+
+    # Post-run TTFT gate (issue #1227). A TTFT regression is reported as a
+    # regression (Telegram alert), not a test failure — return code unchanged.
+    try:
+        ttft_alert = run_ttft_gate(
+            log_file=TTFT_LOG_FILE,
+            session_type=TTFT_SESSION_TYPE,
+            last=TTFT_LAST_N,
+            threshold=TTFT_THRESHOLD_SECONDS,
+        )
+        if ttft_alert:
+            send_telegram(ttft_alert, dry_run=args.dry_run)
+    except Exception as exc:  # noqa: BLE001
+        log(f"TTFT gate hook error (non-fatal): {exc}")
+
     log("=== Nightly regression test run complete ===")
     return 0
 
