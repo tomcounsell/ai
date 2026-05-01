@@ -396,10 +396,9 @@ class TestDoDocsContract:
         mock_push.assert_not_called()
 
     def test_hook_invocation_under_pr_mode(self, repo: Path, auth_ok, patch_redis):
-        # The hook is invoked from /do-docs Caller B (Step 5.5), not from inside
-        # audit() itself — the substrate returns touched files and the caller
-        # decides when to fire the hook. This test verifies the substrate
-        # exposes touched paths needed by the caller.
+        # In pr-changed-files mode the substrate fires the memory refresh hook
+        # itself, so the /do-docs skill is a true thin caller (no skill-level
+        # work needed per Task 4 acceptance criteria).
         primary = repo / "docs" / "features" / "foo.md"
         primary.write_text("# Foo\n\nThe SessionLog tracks state.\n" + "Padding line.\n" * 6)
 
@@ -409,6 +408,8 @@ class TestDoDocsContract:
                 return_value=[Path("docs/features/foo.md")],
             ),
             patch.object(docs_auditor, "_file_issue_if_new", return_value=False),
+            patch.object(docs_auditor, "_commit_current_branch") as mock_commit,
+            patch.object(docs_auditor, "refresh_docs_in_memory") as mock_hook,
         ):
             result = docs_auditor.audit(
                 primary_path=None,
@@ -419,6 +420,28 @@ class TestDoDocsContract:
             )
 
         assert "docs/features/foo.md" in result["files_touched"]
+        mock_commit.assert_called_once()
+        mock_hook.assert_called_once_with(["docs/features/foo.md"])
+
+    def test_rotation_mode_does_not_fire_hook_inside_audit(self, repo: Path, auth_ok, patch_redis):
+        # In rotation mode, the hook is fired by run_docs_auditor (Caller A),
+        # not by audit() directly. Avoid double-firing.
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n\nThe SessionLog tracks state.\n" + "Padding line.\n" * 6)
+
+        with (
+            patch.object(docs_auditor, "_file_issue_if_new", return_value=False),
+            patch.object(docs_auditor, "refresh_docs_in_memory") as mock_hook,
+        ):
+            docs_auditor.audit(
+                primary_path="docs/features/foo.md",
+                scope_mode="rotation",
+                apply_mode="apply",
+                project_key="test",
+                repo_root=repo,
+            )
+
+        mock_hook.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

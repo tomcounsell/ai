@@ -731,12 +731,48 @@ def audit(
             if _file_issue_if_new(finding, root):
                 issues_filed += 1
 
+    # Caller B (pr-changed-files): commit to current branch and fire memory
+    # refresh hook here so the /do-docs skill stays a thin caller. Caller A
+    # (rotation) handles its own commit/push/hook in run_docs_auditor.
+    if scope_mode == "pr-changed-files" and apply_mode == "apply" and touched:
+        _commit_current_branch(root, touched)
+        try:
+            refresh_docs_in_memory(touched)
+        except Exception as e:
+            logger.warning(f"docs_auditor: refresh_docs_in_memory hook failed: {e}")
+
     return _ok_result(
         "ok",
         files_touched=touched,
         fixes_applied=total_fixes,
         issues_filed=issues_filed,
     )
+
+
+def _commit_current_branch(repo_root: Path, touched: list[str]) -> None:
+    """Stage and commit substrate-applied changes on the current branch.
+
+    Best-effort: errors are logged not raised. Used by Caller B (/do-docs)
+    so the skill itself does not need to invoke git after the substrate.
+    """
+    try:
+        subprocess.run(
+            ["git", "add"] + touched,
+            capture_output=True,
+            timeout=10,
+            cwd=str(repo_root),
+            check=False,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", f"Docs: cascade fixes ({len(touched)} files)"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=str(repo_root),
+            check=False,
+        )
+    except Exception as e:
+        logger.warning(f"docs_auditor: current-branch commit failed: {e}")
 
 
 # ---------------------------------------------------------------------------
