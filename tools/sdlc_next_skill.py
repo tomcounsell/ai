@@ -86,12 +86,14 @@ def _build_context(proposed_skill: str | None, issue_number: int | None) -> dict
     if proposed_skill:
         context["proposed_skill"] = proposed_skill
 
-    # Check whether the session branch already exists (informs Row 5).
+    # Check whether the issue-specific session branch already exists (informs Row 5).
+    # Uses `session/sdlc-{issue_number}` — the canonical branch name for SDLC work.
+    # Checking just "session/" would always be True in this repo due to many active
+    # session/ branches; we must check for the issue-specific pattern.
     if issue_number:
         try:
             import subprocess
 
-            # Check for session/ branches
             proc2 = subprocess.run(
                 ["git", "branch", "-a"],
                 capture_output=True,
@@ -99,7 +101,7 @@ def _build_context(proposed_skill: str | None, issue_number: int | None) -> dict
                 timeout=5,
             )
             branch_names = proc2.stdout if proc2.returncode == 0 else ""
-            context["branch_exists"] = "session/" in branch_names
+            context["branch_exists"] = f"session/sdlc-{issue_number}" in branch_names
         except Exception:
             context["branch_exists"] = False
 
