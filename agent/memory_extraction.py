@@ -431,7 +431,8 @@ async def extract_observations_async(
             project_key = resolve_project_key()
             if project_key is None:
                 logger.warning(
-                    "[memory_extraction] extract_observations write skipped: "                    "resolve_project_key returned None (VALOR_PROJECT_KEY=%r)",
+                    "[memory_extraction] extract_observations write skipped: "
+                    "resolve_project_key returned None (VALOR_PROJECT_KEY=%r)",
                     os.environ.get("VALOR_PROJECT_KEY"),
                 )
                 return []
@@ -648,7 +649,8 @@ async def extract_post_merge_learning(
             project_key = resolve_project_key()
             if project_key is None:
                 logger.warning(
-                    "[memory_extraction] post_merge write skipped: "                    "resolve_project_key returned None (VALOR_PROJECT_KEY=%r)",
+                    "[memory_extraction] post_merge write skipped: "
+                    "resolve_project_key returned None (VALOR_PROJECT_KEY=%r)",
                     os.environ.get("VALOR_PROJECT_KEY"),
                 )
                 return None

@@ -477,8 +477,8 @@ def recall(
         # Multi-query decomposition -- cluster keywords and retrieve via
         # _recall_with_query() per cluster (bloom_check=False inside each
         # call since we already passed the multi-keyword bloom gate above).
-        from utils.keyword_extraction import _cluster_keywords
         from config.memory_defaults import DEFAULT_PROJECT_KEY
+        from utils.keyword_extraction import _cluster_keywords
 
         _raw_pk = _get_project_key(cwd)
         project_key = _raw_pk if _raw_pk is not None else DEFAULT_PROJECT_KEY
@@ -733,7 +733,8 @@ def ingest(content: str, cwd: str | None = None) -> bool:
         project_key = _get_project_key(cwd)
         if project_key is None:
             logger.warning(
-                "[memory_bridge] ingest write skipped: resolve_project_key returned None "                "(cwd=%r, VALOR_PROJECT_KEY=%r)",
+                "[memory_bridge] ingest write skipped: resolve_project_key returned None "
+                "(cwd=%r, VALOR_PROJECT_KEY=%r)",
                 cwd,
                 os.environ.get("VALOR_PROJECT_KEY"),
             )
@@ -793,7 +794,8 @@ def extract(session_id: str, transcript_path: str | None, cwd: str | None = None
         project_key = _get_project_key(cwd)
         if project_key is None:
             logger.warning(
-                "[memory_bridge] extract write skipped: resolve_project_key returned None "                "(cwd=%r, VALOR_PROJECT_KEY=%r)",
+                "[memory_bridge] extract write skipped: resolve_project_key returned None "
+                "(cwd=%r, VALOR_PROJECT_KEY=%r)",
                 cwd,
                 os.environ.get("VALOR_PROJECT_KEY"),
             )
@@ -891,7 +893,8 @@ def post_merge_extract(pr_number: str | int | None = None, cwd: str | None = Non
         project_key = _get_project_key(cwd)
         if project_key is None:
             logger.warning(
-                "[memory_bridge] post_merge_extract write skipped: resolve_project_key returned None "                "(cwd=%r, VALOR_PROJECT_KEY=%r)",
+                "[memory_bridge] post_merge_extract write skipped: "
+                "resolve_project_key returned None (cwd=%r, VALOR_PROJECT_KEY=%r)",
                 cwd,
                 os.environ.get("VALOR_PROJECT_KEY"),
             )

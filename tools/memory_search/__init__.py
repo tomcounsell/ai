@@ -233,12 +233,12 @@ def save(
             importance = 6.0  # InteractionWeight.HUMAN
 
         from config.project_key_resolver import resolve_project_key
-        from config.memory_defaults import DEFAULT_PROJECT_KEY
 
         project_key = resolve_project_key(project_key=project_key)
         if project_key is None:
             logger.warning(
-                "[memory_search] save write skipped: resolve_project_key returned None "                "(VALOR_PROJECT_KEY=%r)",
+                "[memory_search] save write skipped: resolve_project_key returned None "
+                "(VALOR_PROJECT_KEY=%r)",
                 os.environ.get("VALOR_PROJECT_KEY"),
             )
             return None

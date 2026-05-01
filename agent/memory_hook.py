@@ -154,7 +154,8 @@ def check_and_inject(
             project_key = resolve_project_key(project_key=None)
             if project_key is None:
                 logger.warning(
-                    "[memory_hook] check_and_inject write skipped: resolve_project_key "                    "returned None (VALOR_PROJECT_KEY=%r)",
+                    "[memory_hook] check_and_inject write skipped: resolve_project_key "
+                    "returned None (VALOR_PROJECT_KEY=%r)",
                     os.environ.get("VALOR_PROJECT_KEY"),
                 )
                 return None
