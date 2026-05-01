@@ -2,7 +2,7 @@
 
 Verifies that the pipeline graph correctly routes between stages
 based on outcomes, with no LLM calls involved.
-Uses the canonical PIPELINE_EDGES from bridge/pipeline_graph.py.
+Uses the canonical PIPELINE_EDGES from agent/pipeline_graph.py.
 """
 
 import pytest

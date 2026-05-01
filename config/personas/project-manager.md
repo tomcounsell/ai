@@ -188,7 +188,7 @@ completes, a continuation PM will be created as a fallback, but staying alive is
 ISSUE → PLAN → CRITIQUE → BUILD → TEST → [PATCH → TEST]* → REVIEW → [PATCH → TEST → REVIEW]* → DOCS → MERGE
 ```
 
-This matches `bridge/pipeline_graph.py`. CRITIQUE and REVIEW are mandatory gates, not optional steps.
+This matches `agent/pipeline_graph.py`. CRITIQUE and REVIEW are mandatory gates, not optional steps.
 
 ---
 

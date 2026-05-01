@@ -1,20 +1,16 @@
-"""Python reference implementation of the SDLC router dispatch algorithm.
+"""Production SDLC router dispatch algorithm.
 
-The canonical human-readable router runbook lives in
-``.claude/skills/sdlc/SKILL.md``. That markdown document is parsed by an LLM at
-runtime to decide which sub-skill to dispatch. This module is the **Python
-reference implementation of the same algorithm** — a pure function that takes
-structured state (stage statuses + metadata) and returns the next dispatch.
+This module is the **canonical dispatch source of truth** for the SDLC pipeline.
+The PM session (via ``.claude/skills/sdlc/SKILL.md``) calls the CLI wrapper
+``sdlc-tool next-skill`` (implemented in ``tools/sdlc_next_skill.py``) which
+delegates to ``decide_next_dispatch()`` in this module.
 
-Having a pure-Python version serves three purposes:
-
-1. It lets a regression test replay the 12-step sequence from issue #1036 and
-   assert the router terminates cleanly.
-2. It lets a parity test (``tests/unit/test_sdlc_skill_md_parity.py``) cross-
-   check the SKILL.md dispatch rows against this module's ``DISPATCH_RULES``
-   list. Drift between the two is caught at CI time.
-3. It provides a testable surface for the Legal Dispatch Guards (G1–G5)
-   without requiring a live LLM invocation.
+Two sources of truth in the pipeline:
+- **Dispatch decisions**: ``agent/sdlc_router.py`` — ``DISPATCH_RULES`` + guards
+  G1–G6. This module. The PM calls ``sdlc-tool next-skill`` to get the decision.
+- **State-machine bookkeeping**: ``agent/pipeline_graph.py`` — ``PIPELINE_EDGES``,
+  ``get_next_stage()``. Used by ``PipelineStateMachine`` to mark the next stage
+  'ready' when one completes. Never consulted for dispatch decisions.
 
 The algorithm:
 
@@ -27,9 +23,9 @@ The algorithm:
        context)``.
     3. If no rule matches, return ``Blocked(reason="no matching rule")``.
 
-The ``DISPATCH_RULES`` ordering mirrors the row numbers in SKILL.md's dispatch
-table (1, 2, 3, 4a, 4b, 4c, 5, 6, 7, 8, 8b, 9, 10, 10b). Each rule carries a
-``row_id`` string so the parity test can key rows between the two formats.
+The ``DISPATCH_RULES`` ordering mirrors the documented row numbers
+(1, 2, 3, 4a, 4b, 4c, 5, 6, 7, 8, 8b, 9, 10, 10b). Each rule carries a
+``row_id`` string for traceability in parity tests.
 """
 
 from __future__ import annotations
@@ -69,8 +65,9 @@ CRITIQUE_READY_TO_BUILD = "READY TO BUILD"
 CRITIQUE_NEEDS_REVISION = "NEEDS REVISION"
 CRITIQUE_MAJOR_REWORK = "MAJOR REWORK"
 
-# Skill command strings. Keep in sync with SKILL.md dispatch table and
-# ``agent/pipeline_graph.STAGE_TO_SKILL``.
+# Skill command strings. Keep in sync with ``agent/pipeline_graph.STAGE_TO_SKILL``
+# and the ``DISPATCH_RULES`` list below. The SKILL.md hand-authored dispatch table
+# no longer exists -- routing is now done via ``decide_next_dispatch()``.
 SKILL_DO_ISSUE = "/do-issue"
 SKILL_DO_PLAN = "/do-plan"
 SKILL_DO_PLAN_CRITIQUE = "/do-plan-critique"

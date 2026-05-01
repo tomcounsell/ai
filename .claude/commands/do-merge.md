@@ -15,12 +15,12 @@ BRANCH=$(gh pr view $ARGUMENTS --json headRefName -q .headRefName)
 SLUG=$(echo "$BRANCH" | sed 's|^session/||')
 
 python3 -c "
-from bridge.pipeline_graph import DISPLAY_STAGES
+from agent.pipeline_graph import DISPLAY_STAGES
 
 # Try programmatic state machine first
 derived = False
 try:
-    from bridge.pipeline_state import PipelineStateMachine
+    from agent.pipeline_state import PipelineStateMachine
     from models.agent_session import AgentSession
     session = next((s for s in AgentSession.query.all() if s.slug == '$SLUG'), None)
     if session:
@@ -99,7 +99,7 @@ SLUG=$(echo "$BRANCH" | sed 's|^session/||')
 
 # Run programmatic gate checks via PipelineStateMachine
 python -c "
-from bridge.pipeline_state import PipelineStateMachine
+from agent.pipeline_state import PipelineStateMachine
 from models.agent_session import AgentSession
 
 try:

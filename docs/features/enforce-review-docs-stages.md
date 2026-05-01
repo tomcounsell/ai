@@ -12,11 +12,11 @@ The pipeline graph defined correct edges (TEST -> REVIEW -> DOCS -> MERGE), but 
 
 > **Note**: The Observer Agent (`bridge/observer.py`) was removed as part of the PM/Dev session architecture redesign. Mandatory gate enforcement is now handled by PM session orchestration and the output router (`agent/output_router.py`, called via `agent/agent_session_queue.py`). The gate check functions in `agent/goal_gates.py` remain the source of truth for deterministic stage validation.
 
-### State Machine Stage Transitions (`bridge/pipeline_state.py`)
+### State Machine Stage Transitions (`agent/pipeline_state.py`)
 
 Stage completion is now managed by the `PipelineStateMachine`. Stages can only complete via explicit `complete_stage()` calls at session completion time — no transcript parsing or pattern matching. This eliminates false completions entirely.
 
-### `has_remaining_stages()` (`bridge/pipeline_state.py`)
+### `has_remaining_stages()` (`agent/pipeline_state.py`)
 
 The `PipelineStateMachine.has_remaining_stages()` method walks the pipeline graph from the current stage forward, checking if any reachable stage is not yet completed.
 

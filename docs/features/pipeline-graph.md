@@ -4,19 +4,13 @@ Canonical directed graph defining SDLC pipeline stage transitions with cycle sup
 
 ## Overview
 
-The pipeline graph (`agent/pipeline_graph.py`) is the single source of truth for how the SDLC pipeline routes between stages. It replaces three previously duplicated and inconsistent pipeline definitions with one canonical graph that all routing code derives from.
+The pipeline graph (`agent/pipeline_graph.py`) is the canonical source for **state-machine bookkeeping** — it defines which stage becomes `ready` when another stage completes. Dispatch decisions (which `/do-*` skill to invoke) are made by `agent/sdlc_router.py` via the `sdlc-tool next-skill` CLI.
 
-## Problem Solved
+## Problem Solved (Historical)
 
-Before this feature, pipeline routing was defined in three places that disagreed:
+Before PR #601, pipeline routing was defined in three places that disagreed. After PR #601, the two surfaces were: (1)  for state-machine bookkeeping and (2) the SKILL.md Step 4 hand-edited dispatch table as the runtime routing surface.
 
-| Location | Definition |
-|----------|-----------|
-| SDLC `SKILL.md` dispatch table | 10 numbered rows covering all stages including PATCH |
-| Observer `_STAGE_TO_SKILL` | 6 stages without PATCH |
-| `build_pipeline.py` stage tracking | 6 stages without PATCH |
-
-The Observer's `_next_sdlc_skill()` walked stages linearly and could not model cycles (TEST fail -> PATCH -> TEST). Cycles happened via ad-hoc LLM decisions rather than being encoded in the routing logic.
+As of issue #1216, the SKILL.md hand-edited dispatch table is eliminated. The canonical dispatch surface is now  ( + guards G1–G6), accessed at runtime via . The graph remains for state-machine bookkeeping only.
 
 ## Architecture
 
@@ -105,7 +99,7 @@ SDLC sessions have `stage_states` initialized eagerly at session creation (ISSUE
 
 ### Dashboard Stage Routing
 
-The dashboard (`ui/data/sdlc.py`) routes stage reads through `PipelineStateMachine(session).get_display_progress()` (PR #747, issue #735). This ensures the dashboard is a direct consumer of the canonical `DISPLAY_STAGES` stored-state path — the same path used by the merge gate. `get_display_progress()` takes no arguments and returns stored state only. Artifact inference was removed in PR #733 (issue #729).
+The dashboard (`ui/data/sdlc.py`) routes stage reads through `PipelineStateMachine(session).get_display_progress()`. This ensures the dashboard is a direct consumer of the canonical `DISPLAY_STAGES` stored-state path — the same path used by the merge gate. `get_display_progress()` takes no arguments and returns stored state only.
 
 ## Integration
 
@@ -148,7 +142,7 @@ For PATCH failures that need deep context, PM resumes the original BUILD session
 
 | File | Role |
 |------|------|
-| `agent/pipeline_graph.py` | Canonical graph definition (moved from `bridge/` in Phase 3; `bridge/pipeline_graph.py` is now a shim) |
+| `agent/pipeline_graph.py` | Canonical graph definition. State-machine bookkeeping only — not consulted for dispatch decisions. |
 | `agent/agent_session_queue.py` | `_handle_dev_session_completion()` calls `classify_outcome()` and routes to `complete_stage()`/`fail_stage()`; initializes `stage_states` for SDLC sessions |
-| `agent/pipeline_state.py` | `PipelineStateMachine` -- stage tracking, outcome classification, and transitions using the graph (moved from `bridge/` in Phase 3; `bridge/pipeline_state.py` is now a shim) |
+| `agent/pipeline_state.py` | `PipelineStateMachine` -- stage tracking, outcome classification, and transitions using the graph. Canonical location. |
 | `tests/unit/test_pipeline_graph.py` | 27 tests covering all routing scenarios |

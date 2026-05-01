@@ -199,6 +199,7 @@ PM_BASH_ALLOWED_PREFIXES: tuple[str, ...] = (
     "sdlc-tool verdict",
     "sdlc-tool stage-marker",
     "sdlc-tool session-ensure",
+    "sdlc-tool next-skill",
     "python -m tools.code_impact_finder",
     # scripts (read-only checks invoked by the SDLC skills)
     "python scripts/check_plan_freshness.py",

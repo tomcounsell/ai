@@ -40,8 +40,8 @@ Invalid URLs (no extractable number, non-GitHub URLs, empty/None) are logged at 
 - `.claude/hooks/validators/validate_merge_guard.py` - PreToolUse hook
 - `.claude/settings.json` - Hook registration
 - `.claude/commands/do-merge.md` - Gated merge skill
-- `bridge/pipeline_state.py` - PipelineStateMachine manages stage transitions
-- `bridge/pipeline_graph.py` - MERGE in DISPLAY_STAGES, STAGE_TO_SKILL, routing
+- `agent/pipeline_state.py` - PipelineStateMachine manages stage transitions
+- `agent/pipeline_graph.py` - MERGE in DISPLAY_STAGES, STAGE_TO_SKILL, routing
 - `models/agent_session.py` - MERGE in SDLC_STAGES
 
 The merge guard is a PreToolUse hook that regex-matches `\bgh\s+pr\s+merge\b` in Bash commands and blocks with a message directing to `/do-merge`. It allows `gh pr merge --help` and doesn't trigger on echo/printf commands.
