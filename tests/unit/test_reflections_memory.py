@@ -685,6 +685,65 @@ class TestMemoryHealthAuditLayer2:
         # IN THIS RUN, not the cumulative backlog.
         assert len(cluster_signals) == 0
 
+    def test_agent_id_cluster_sample_ids_filtered_to_cluster(self):
+        """Sample memory_ids reported for an agent-id-cluster signal must be
+        filtered to that cluster's agent_id, not drawn from the global pool of
+        records superseded in this run (resolves review nit on PR #1252)."""
+        from reflections.memory_management import run_memory_quality_audit
+
+        # Two distinct agent_ids both cross the cluster threshold (>10).
+        # Aggregate the call_args for each cluster signal and verify each
+        # carries sample_ids drawn ONLY from its own agent_id's records.
+        records_a = [
+            _make_memory(
+                memory_id=f"mem_clust_A_{i}",
+                agent_id="extraction-stuck-AAAA",
+                content="There is no agent session response to analyze.",
+            )
+            for i in range(12)
+        ]
+        records_b = [
+            _make_memory(
+                memory_id=f"mem_clust_B_{i}",
+                agent_id="extraction-stuck-BBBB",
+                content="There is no agent session response to analyze.",
+            )
+            for i in range(12)
+        ]
+
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch(
+                "reflections.memory_management._file_anomaly_issue",
+                new_callable=AsyncMock,
+            ) as mock_file,
+        ):
+            mock_file.return_value = True
+            mock_model.query.all.return_value = records_a + records_b
+            run_async(run_memory_quality_audit())
+
+        # Pull each cluster signal's sample_ids and assert they belong to the
+        # correct agent_id (matched by mem-id substring).
+        seen_signals: dict[str, list[str]] = {}
+        for call in mock_file.call_args_list:
+            sig = call.kwargs.get("signal_name", "")
+            if sig.startswith("agent-id-cluster-"):
+                seen_signals[sig] = call.kwargs.get("sample_ids") or []
+
+        assert len(seen_signals) >= 2, (
+            f"expected both clusters to file issues, got: {list(seen_signals.keys())}"
+        )
+        for sig, sample_ids in seen_signals.items():
+            assert sample_ids, f"signal {sig} has empty sample_ids"
+            if "AAAA" in sig:
+                assert all("clust_A" in mid for mid in sample_ids), (
+                    f"AAAA cluster has cross-contaminated samples: {sample_ids}"
+                )
+            elif "BBBB" in sig:
+                assert all("clust_B" in mid for mid in sample_ids), (
+                    f"BBBB cluster has cross-contaminated samples: {sample_ids}"
+                )
+
     def test_html_escape_rate_jump_files_issue(self):
         """When HTML escapes appear in >10% AND WoW jump >2x, file an issue."""
         from reflections.memory_management import run_memory_quality_audit

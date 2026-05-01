@@ -468,17 +468,24 @@ def _layer2_signals(
     if just_superseded_agent_ids:
         from collections import Counter
 
+        # Zip the parallel lists from _layer1_supersede so each (memory_id,
+        # agent_id) pair stays together. This lets us draw `sample_ids`
+        # filtered to the specific cluster's agent_id rather than the global
+        # pool — important when two distinct agent_ids both cross the
+        # cluster threshold in one run (resolves review nit).
+        id_pairs = list(zip(just_superseded_ids, just_superseded_agent_ids))
         cluster_counts = Counter(just_superseded_agent_ids)
         for aid, count in cluster_counts.items():
             if count > AGENT_ID_CLUSTER_THRESHOLD:
                 # Truncate suffix for issue title specificity (resolves C5 belt-and-suspenders)
                 aid_suffix = aid[-40:] if len(aid) > 40 else aid
+                cluster_samples = [mid for mid, a in id_pairs if a == aid][:5]
                 candidates.append(
                     {
                         "signal_name": f"agent-id-cluster-{aid_suffix}",
                         "observed": f"{count} junk records from agent_id={aid}",
                         "threshold": f"> {AGENT_ID_CLUSTER_THRESHOLD}",
-                        "sample_ids": just_superseded_ids[:5],  # representative sample
+                        "sample_ids": cluster_samples,
                         "evidence": (
                             f"agent_id={aid} produced {count} refusal/shrapnel records "
                             f"that were superseded in this audit run. Strong signal "
@@ -864,6 +871,13 @@ async def run_memory_quality_audit() -> dict:
         # ---- Layer 1: deterministic supersede ---------------------------------
         extraction_records = [m for m in all_memories if _is_extraction_record(m)]
 
+        # Resolve the per-run cap ONCE so both the supersede call and the
+        # finding label agree on what cap actually applied (resolves review
+        # tech-debt: hardcoded cap=50 didn't reflect MEMORY_AUDIT_LAYER1_CAP
+        # operator overrides).
+        resolved_cap = _resolve_layer1_cap()
+        cap_label = "unbounded" if resolved_cap is None else str(resolved_cap)
+
         (
             layer1_superseded,
             layer1_blocked,
@@ -871,15 +885,21 @@ async def run_memory_quality_audit() -> dict:
             just_superseded_agent_ids,
         ) = _layer1_supersede(extraction_records)
 
-        layer1_candidates_total = sum(
+        # Count records that STILL match the refusal predicate after Layer 1
+        # ran. Layer 1 mutates `superseded_by` in-place on records it claims,
+        # so this filter excludes just_superseded ones — the finding makes
+        # that explicit by labeling the value as "remaining" rather than
+        # "candidates" (resolves review tech-debt: the prior label "of M
+        # candidates" misled operators into reading M as the original pool).
+        layer1_remaining = sum(
             1
             for m in extraction_records
             if not (m.superseded_by or "") and _looks_like_refusal(m.content or "")
         )
 
         findings.append(
-            f"Layer 1: superseded {layer1_superseded} of {layer1_candidates_total} "
-            f"candidates (cap={MAX_LAYER1_SUPERSEDES_PER_RUN}, blocked={layer1_blocked})"
+            f"Layer 1: superseded {layer1_superseded}, remaining {layer1_remaining} "
+            f"candidates (cap={cap_label}, blocked={layer1_blocked})"
         )
 
         # ---- Layer 2: heuristic anomaly detection -----------------------------
