@@ -633,6 +633,103 @@ class TestLooksLikeRefusal:
         assert _looks_like_refusal("THERE IS NO AGENT SESSION available") is True
 
 
+class TestRefusalPatternsNarrowness:
+    """Regression test for the upstream/downstream predicate-narrowness invariant.
+
+    ``_looks_like_refusal`` is shared by the extractor (write gate) and the
+    memory-quality audit Layer 1 (cleanup gate via direct import — see issue
+    #1231 plan). A pattern broadening that quietly rejected legitimate
+    observations resembling refusal phrases would silently drop real memory
+    content.
+
+    Each case below is a real-shape observation that mentions refusal-adjacent
+    phrasing without being a refusal. All must return False.
+    """
+
+    def test_observation_about_no_novel_observations_is_not_refusal(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert (
+            _looks_like_refusal(
+                "Session ended with no novel observations to flag — extractor "
+                "ran cleanly and Haiku returned an empty array."
+            )
+            is False
+        )
+
+    def test_observation_mentioning_session_word_is_not_refusal(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert (
+            _looks_like_refusal(
+                "The session lifecycle has 13 states defined in docs/features/session-lifecycle.md."
+            )
+            is False
+        )
+
+    def test_observation_about_agent_session_field_is_not_refusal(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert (
+            _looks_like_refusal(
+                "AgentSession.session_type='dev' triggers worktree creation "
+                "via worktree_manager.py during enqueue."
+            )
+            is False
+        )
+
+    def test_observation_describing_rationale_field_is_not_refusal(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert (
+            _looks_like_refusal(
+                "memory-dedup writes superseded_by_rationale alongside "
+                "superseded_by so future readers know why a record was merged."
+            )
+            is False
+        )
+
+    def test_observation_about_provided_session_input_is_not_refusal(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert (
+            _looks_like_refusal(
+                "When the user provides the session ID via reply-to, the "
+                "bridge resumes the original session context."
+            )
+            is False
+        )
+
+    def test_quoted_key_in_prose_is_not_refusal(self):
+        """Quoted JSON-style key inside English prose must not trip _JSON_SHRAPNEL_RE.
+
+        The regex anchors on ``^"key": ...$`` (full single line). Embedding
+        the same text mid-sentence breaks the anchor.
+        """
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert (
+            _looks_like_refusal(
+                'The metadata dict carries "category": "correction" alongside '
+                "the file_paths list, written by the JSON-path extractor."
+            )
+            is False
+        )
+
+    def test_multi_line_block_starting_with_quoted_key_is_not_refusal(self):
+        """Multi-line content where line 1 looks like JSON shrapnel — overall
+        block is not a single anchored line and must not match.
+        """
+        from agent.memory_extraction import _looks_like_refusal
+
+        text = (
+            '"category": "correction"\n'
+            "This was the recorded category for the post-merge learning record "
+            "captured during the #1231 build."
+        )
+        assert _looks_like_refusal(text) is False
+
+
 class TestExtractPostMergeLearning:
     """Test agent/memory_extraction.py extract_post_merge_learning()."""
 

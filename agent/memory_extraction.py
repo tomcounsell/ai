@@ -52,8 +52,9 @@ _EXTRACTION_HARD_TIMEOUT = 35.0
 # to this tuple — not to re-architect. The failure mode is silent rejection of
 # refusal text only; a too-broad pattern would silently drop legitimate
 # observations, so additions must stay narrow (full phrases, not bare
-# keywords). The `memory-dedup` nightly reflection plus the on-demand
-# `cleanup_memory_extraction_junk.py` script provide the recurring safety net.
+# keywords). The `memory-dedup` and `memory-quality-audit` nightly reflections
+# (the latter imports `_looks_like_refusal` directly — see issue #1231) provide
+# the recurring safety net.
 # -----------------------------------------------------------------------------
 _REFUSAL_PATTERNS: tuple[str, ...] = (
     "there is no agent session",  # 5be7da58 / 76dbd772 / 796e1429
