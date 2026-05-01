@@ -71,42 +71,52 @@ class TestGetResponseViaHarness:
         assert result == "Hello world"
 
     @pytest.mark.asyncio
-    async def test_skips_tool_use_events(self):
-        """Tool use stream events are silently skipped."""
-        from agent.sdk_client import get_response_via_harness
+    async def test_counts_assistant_tool_use_blocks(self):
+        """Issue #1245: tool_use blocks inside assistant messages are counted.
+
+        The real `claude -p stream-json` protocol emits tool invocations as
+        content blocks of type "tool_use" inside top-level `assistant`
+        events: ``data["message"]["content"][i]["type"] == "tool_use"``.
+        Top-level event.type == "tool_use" does NOT fire — the prior
+        fixture for this test was fictitious and has been replaced.
+
+        This test exercises `_run_harness_subprocess` directly so the
+        returned `tool_call_count` slot can be asserted.
+        """
+        from agent.sdk_client import _run_harness_subprocess
 
         lines = [
+            # Two tool_use blocks across two assistant events, plus a text
+            # block (which must NOT be counted) — total tool_call_count == 2.
             json.dumps(
                 {
-                    "type": "stream_event",
-                    "event": {"type": "content_block_start", "index": 0},
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "stream_event",
-                    "event": {
-                        "type": "content_block_delta",
-                        "delta": {"type": "input_json_delta", "partial_json": '{"foo":'},
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Let me check that file."},
+                            {"type": "tool_use", "name": "Read", "id": "t1", "input": {}},
+                        ]
                     },
                 }
             ),
             json.dumps(
                 {
-                    "type": "stream_event",
-                    "event": {"type": "tool_use", "name": "Read"},
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "name": "Grep", "id": "t2", "input": {}},
+                        ]
+                    },
                 }
             ),
             json.dumps(
                 {
-                    "type": "stream_event",
-                    "event": {
-                        "type": "content_block_delta",
-                        "delta": {"type": "text_delta", "text": "Only text"},
-                    },
+                    "type": "result",
+                    "result": "Done.",
+                    "session_id": "s1",
+                    "num_turns": 2,
                 }
             ),
-            json.dumps({"type": "result", "result": "Only text", "session_id": "s1"}),
         ]
         stdout_data = "\n".join(lines) + "\n"
 
@@ -117,9 +127,20 @@ class TestGetResponseViaHarness:
             mock_proc.returncode = 0
             mock_exec.return_value = mock_proc
 
-            result = await get_response_via_harness(message="test", working_dir="/tmp")
+            (
+                result_text,
+                _session_id,
+                _returncode,
+                _usage,
+                _cost,
+                _stderr,
+                num_turns,
+                tool_call_count,
+            ) = await _run_harness_subprocess(["claude", "-p"], "/tmp", {})
 
-        assert result == "Only text"
+        assert result_text == "Done."
+        assert num_turns == 2
+        assert tool_call_count == 2
 
     @pytest.mark.asyncio
     async def test_handles_malformed_json_lines(self):

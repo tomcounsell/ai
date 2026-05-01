@@ -27,8 +27,6 @@ All metric names use dotted notation.
 
 | Metric | Source | Description |
 |--------|--------|-------------|
-| `session.cost_usd` | `agent/sdk_client.py` | Token cost per session from `msg.total_cost_usd` |
-| `session.turns` | `agent/sdk_client.py` | Number of turns in a session |
 | `session.started` | `models/session_lifecycle.py` | Session start event (dimensions: session_type, project_key) |
 | `session.completed` | `models/session_lifecycle.py` | Session completion event (dimensions: session_type, status) |
 | `sdlc.stage_started` | `agent/pipeline_state.py` | SDLC stage start (dimensions: stage) |
@@ -98,13 +96,13 @@ from analytics.query import (
 )
 
 # Raw events for a metric in a time range
-events = query_metrics("session.cost_usd", start_time=t0, end_time=t1)
+events = query_metrics("memory.recall_attempt", start_time=t0, end_time=t1)
 
 # Daily aggregates (count, total, avg per day)
 daily = query_daily_summary("session.started", days=30)
 
-# Scalar aggregates
-total_cost = query_metric_total("session.cost_usd", days=7)
+# Scalar aggregates (use a non-session metric — see note below)
+total_recalls = query_metric_total("memory.recall_attempt", days=7)
 session_count = query_metric_count("session.started", days=1)
 
 # List all known metrics
@@ -112,6 +110,18 @@ names = list_metric_names()
 ```
 
 All query functions return sensible defaults (empty lists, zero) when the database is missing or empty.
+
+> **Note (issue #1245):** Session-attributed sums (cost, turns) are now
+> derived from the Popoto `AgentSession` model — `total_cost_usd` and
+> `turn_count` fields — rather than the metrics ledger. The legacy
+> `session.cost_usd` and `session.turns` emit sites lived inside the
+> in-process SDK path, which is unreachable in production (the worker
+> uses the harness path). The `query_metric_total` API itself is
+> unchanged and still useful for non-session metrics like memory recall
+> counts; the session-attributed totals on the dashboard come from
+> `ui/data/analytics.py::_query_completed_sessions_in_window` +
+> `_sum_cost_and_turns` instead. Session-count metrics (`session.started`,
+> `session.completed`) continue to use the ledger via `query_metric_count`.
 
 ### Rollup (`analytics/rollup.py`)
 
