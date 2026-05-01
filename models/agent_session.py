@@ -1495,7 +1495,7 @@ class AgentSession(Model):
             log.append(entry)
             log = log[-CHAT_LOG_MAX_ENTRIES:]
             fresh.chat_message_log = log
-            fresh.save()
+            fresh.save(update_fields=["chat_message_log", "updated_at"])
         except Exception as exc:
             logger.warning(
                 f"append_chat_log failed for session {self.session_id} "

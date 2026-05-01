@@ -491,18 +491,23 @@ def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
 
         chat_id = message.get("chat_id")
 
-        # Tier 1: owner_agent_session_id injected by Path B (valor-telegram send)
+        # Tier 1: owner_agent_session_id injected by Path B (valor-telegram send).
+        # Use get_by_id() — it accepts the raw agent_session_id AutoKey string
+        # directly and is far more efficient than query.filter(session_id=...) or
+        # a full table scan via query.all(). query.filter(session_id=owner_id)
+        # would always fail silently because session_id is the bridge session_id
+        # field, not the Popoto AutoKey (agent_session_id). The full table scan
+        # fallback is equally wrong — both were dead code paths.
         owner_id = message.get("owner_agent_session_id")
         session = None
         if owner_id:
-            rows = list(AgentSession.query.filter(session_id=owner_id))
-            if not rows:
-                # owner_agent_session_id may be an agent_session_id AutoKey
-                rows = [
-                    s for s in AgentSession.query.all() if s.agent_session_id == owner_id
-                ]
-            if rows:
-                session = rows[0]
+            session = AgentSession.get_by_id(owner_id)
+            if session is None:
+                logger.warning(
+                    "Relay: AGENT_SESSION_ID=%s set but not found in Redis; "
+                    "chat_log entry skipped for Path B send",
+                    owner_id,
+                )
 
         # Tier 2: real queue session_id (no cli-/local- prefix) — Path A
         if session is None:

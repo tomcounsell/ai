@@ -22,31 +22,34 @@ def _make_session(session_id="sess-abc"):
 
 
 class TestAppendOutboundChatLogTierOne:
-    """Tier 1: owner_agent_session_id resolves the owning session."""
+    """Tier 1: owner_agent_session_id resolves the owning session via get_by_id().
+
+    Fix #1244 Blocker 3: The old implementation used query.filter(session_id=owner_id)
+    which always silently fails (session_id is the bridge session_id field, not the
+    Popoto AutoKey), then fell back to a full table scan via query.all(). Both paths
+    were dead code. The fix uses AgentSession.get_by_id(owner_id) directly.
+    """
 
     def test_owner_agent_session_id_is_used_when_present(self):
-        """When payload has owner_agent_session_id, that session gets the log entry."""
+        """When payload has owner_agent_session_id, get_by_id() resolves the session."""
         session = _make_session("owner-session-123")
-        mock_qs = MagicMock()
-        mock_qs.filter.return_value = [session]
-
         mock_agent_session_cls = MagicMock()
-        mock_agent_session_cls.query = mock_qs
+        # get_by_id returns the session directly for Tier 1 (PR #1244 fix)
+        mock_agent_session_cls.get_by_id.return_value = session
 
-        patched_module = MagicMock(AgentSession=mock_agent_session_cls)
-        with patch.dict("sys.modules", {"models.agent_session": patched_module}):
-            # Call with a known mock path: patch at the models level
-            with patch("models.agent_session.AgentSession", mock_agent_session_cls):
-                _append_outbound_chat_log(
-                    {
-                        "text": "Hello world",
-                        "chat_id": "12345",
-                        "session_id": "cli-9999",
-                        "owner_agent_session_id": "owner-session-123",
-                    },
-                    msg_id=42,
-                )
+        with patch("models.agent_session.AgentSession", mock_agent_session_cls):
+            _append_outbound_chat_log(
+                {
+                    "text": "Hello world",
+                    "chat_id": "12345",
+                    "session_id": "cli-9999",
+                    "owner_agent_session_id": "owner-session-123",
+                },
+                msg_id=42,
+            )
 
+        # Verify get_by_id was called (not the dead query.filter path)
+        mock_agent_session_cls.get_by_id.assert_called_once_with("owner-session-123")
         session.append_chat_log.assert_called_once_with("out", "valor", "Hello world", 42)
 
 

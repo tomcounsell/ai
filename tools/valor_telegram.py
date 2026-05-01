@@ -1025,12 +1025,14 @@ def cmd_send(args: argparse.Namespace) -> int:
 
     # Issue #1192: Inject owner_agent_session_id so the relay can attribute this
     # outbound send to the correct AgentSession's chat_message_log (Path B).
-    # Read from AGENT_SESSION_ID (injected by agent/sdk_client.py for dev sessions)
-    # or VALOR_SESSION_ID (fallback). If neither is set (manual CLI invocation
-    # outside any agent session), the key is omitted and the relay falls back to
-    # its three-tier resolution. The cli- prefix on session_id is intentionally
-    # NOT the owning session — that's why this separate key exists.
-    _agent_session_id = os.environ.get("AGENT_SESSION_ID") or os.environ.get("VALOR_SESSION_ID")
+    # Read from AGENT_SESSION_ID ONLY (injected by agent/sdk_client.py as the
+    # Popoto primary key, e.g. agt_xxx). Do NOT fall back to VALOR_SESSION_ID —
+    # that env var holds a bridge session_id string (e.g. tg_project_-123456_789),
+    # not a Popoto agent_session_id primary key. Passing it to get_by_id() would
+    # silently return None and cause Tier 1 lookup to fail.
+    # If AGENT_SESSION_ID is unset (manual CLI invocation outside any agent
+    # session), omit the key entirely so the relay falls back to tier-2 resolution.
+    _agent_session_id = os.environ.get("AGENT_SESSION_ID")
     if _agent_session_id:
         payload["owner_agent_session_id"] = _agent_session_id
 

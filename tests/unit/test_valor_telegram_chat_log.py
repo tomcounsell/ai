@@ -46,14 +46,19 @@ class TestCmdSendOwnerAgentSessionId:
 
     @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
     @patch("tools.valor_telegram._get_redis_connection")
-    def test_valor_session_id_fallback_when_agent_session_id_unset(
+    def test_valor_session_id_never_used_as_fallback(
         self, mock_redis_fn, mock_resolve, monkeypatch
     ):
-        """When AGENT_SESSION_ID is absent, VALOR_SESSION_ID is used as fallback."""
+        """When AGENT_SESSION_ID is absent, VALOR_SESSION_ID must NOT set owner_agent_session_id.
+
+        VALOR_SESSION_ID holds a bridge session_id string (e.g. tg_project_-123456_789),
+        NOT a Popoto agent_session_id primary key. Using it would cause get_by_id() to
+        silently return None and the Tier 1 relay lookup to fail.
+        """
         from tools.valor_telegram import cmd_send
 
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
-        monkeypatch.setenv("VALOR_SESSION_ID", "valor-session-xyz789")
+        monkeypatch.setenv("VALOR_SESSION_ID", "tg_project_-123456_789")
         monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
 
         mock_redis = MagicMock()
@@ -64,7 +69,8 @@ class TestCmdSendOwnerAgentSessionId:
 
         assert result == 0
         payload = json.loads(mock_redis.rpush.call_args[0][1])
-        assert payload.get("owner_agent_session_id") == "valor-session-xyz789"
+        # VALOR_SESSION_ID is not a valid Popoto primary key — must be absent
+        assert "owner_agent_session_id" not in payload
 
     @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
     @patch("tools.valor_telegram._get_redis_connection")
