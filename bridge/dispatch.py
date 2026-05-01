@@ -29,6 +29,42 @@ from config.enums import SessionType
 logger = logging.getLogger(__name__)
 
 
+def _append_inbound_chat_log(
+    session_id: str,
+    sender_name: str,
+    message_text: str,
+    telegram_message_id: int,
+) -> None:
+    """Append an inbound entry to the resolved AgentSession's chat_message_log.
+
+    Called immediately after enqueue so the session record exists in Redis.
+    Fails silently — the chat log is enrichment, not a critical path.
+    """
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            logger.debug(
+                "append_inbound_chat_log: session %s not found after enqueue (non-fatal)",
+                session_id,
+            )
+            return
+        session = sessions[0]
+        session.append_chat_log(
+            direction="in",
+            sender=sender_name or "unknown",
+            content=message_text,
+            message_id=telegram_message_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "append_inbound_chat_log failed for session %s (non-fatal): %s",
+            session_id,
+            exc,
+        )
+
+
 async def dispatch_telegram_session(
     *,
     project_key: str,
@@ -96,6 +132,15 @@ async def dispatch_telegram_session(
         scheduling_depth=scheduling_depth,
         project_config=project_config,
         extra_context_overrides=extra_context_overrides,
+    )
+    # Record inbound message in the session's chat_message_log (issue #1192).
+    # Called after enqueue so the AgentSession record exists in Redis.
+    # Failures are non-fatal — the chat log is enrichment, not a critical path.
+    _append_inbound_chat_log(
+        session_id=session_id,
+        sender_name=sender_name,
+        message_text=message_text,
+        telegram_message_id=telegram_message_id,
     )
     await record_message_processed(chat_id, telegram_message_id)
     return depth

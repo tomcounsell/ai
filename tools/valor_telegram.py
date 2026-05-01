@@ -1023,6 +1023,17 @@ def cmd_send(args: argparse.Namespace) -> int:
         if getattr(args, "cleanup_after_send", False):
             payload["cleanup_file"] = True
 
+    # Issue #1192: Inject owner_agent_session_id so the relay can attribute this
+    # outbound send to the correct AgentSession's chat_message_log (Path B).
+    # Read from AGENT_SESSION_ID (injected by agent/sdk_client.py for dev sessions)
+    # or VALOR_SESSION_ID (fallback). If neither is set (manual CLI invocation
+    # outside any agent session), the key is omitted and the relay falls back to
+    # its three-tier resolution. The cli- prefix on session_id is intentionally
+    # NOT the owning session — that's why this separate key exists.
+    _agent_session_id = os.environ.get("AGENT_SESSION_ID") or os.environ.get("VALOR_SESSION_ID")
+    if _agent_session_id:
+        payload["owner_agent_session_id"] = _agent_session_id
+
     # Push to Redis outbox queue. RTR suppress (with reply anchor) replaces
     # the message rpush with a reaction rpush; RTR fall-through and "send"
     # verdicts proceed with the message rpush below.

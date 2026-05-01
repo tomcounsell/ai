@@ -463,6 +463,86 @@ def _record_sent_message(session_id: str, msg_id: int) -> None:
         logger.warning(f"Relay: failed to record msg_id on session {session_id}: {e}")
 
 
+def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
+    """Append an outbound entry to the owning AgentSession's chat_message_log.
+
+    Three-tier owning-session resolution (issue #1192):
+      1. payload["owner_agent_session_id"] — set by Path B (valor-telegram send)
+         when the agent invokes it via Bash inside an agent session.
+      2. payload["session_id"] without a "cli-" or "local-" prefix — real queue
+         session_id created by TelegramRelayOutputHandler (Path A).
+      3. Fallback: get_active_session_for_chat(chat_id) — covers manual CLI sends.
+    If no session is resolved, the append is skipped silently (debug log).
+
+    NOTE: We append AFTER the successful send, so the drafter never sees the
+    current turn's outbound text (it produces that text). The drafter sees prior
+    turns and prior Path B sends. That is the desired behavior.
+
+    Wrapped in try/except so relay failures never break the send path.
+    """
+    try:
+        from models.agent_session import AgentSession
+
+        text = (message.get("text") or "").strip()
+        if not text:
+            return  # No content to log (voice note or file-only)
+
+        chat_id = message.get("chat_id")
+
+        # Tier 1: owner_agent_session_id injected by Path B (valor-telegram send)
+        owner_id = message.get("owner_agent_session_id")
+        session = None
+        if owner_id:
+            rows = list(AgentSession.query.filter(session_id=owner_id))
+            if not rows:
+                # owner_agent_session_id may be an agent_session_id AutoKey
+                rows = [
+                    s for s in AgentSession.query.all() if s.agent_session_id == owner_id
+                ]
+            if rows:
+                session = rows[0]
+
+        # Tier 2: real queue session_id (no cli-/local- prefix) — Path A
+        if session is None:
+            queue_session_id = message.get("session_id") or ""
+            if queue_session_id and not queue_session_id.startswith(
+                ("cli-", "local-")
+            ):
+                rows = list(AgentSession.query.filter(session_id=queue_session_id))
+                if rows:
+                    session = rows[0]
+
+        # Tier 3: fallback by chat_id for manual CLI sends
+        if session is None and chat_id:
+            try:
+                from agent.agent_session_queue import get_active_session_for_chat
+
+                session = get_active_session_for_chat(chat_id)
+            except Exception:
+                pass
+
+        if session is None:
+            logger.debug(
+                "Relay: no owning session resolved for chat_log append "
+                "(chat_id=%s, owner_agent_session_id=%s, session_id=%s) — skipping",
+                chat_id,
+                message.get("owner_agent_session_id"),
+                message.get("session_id"),
+            )
+            return
+
+        session.append_chat_log(
+            direction="out",
+            sender="valor",
+            content=text,
+            message_id=msg_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Relay: _append_outbound_chat_log failed (non-fatal): %s", exc
+        )
+
+
 async def _dead_letter_message(message: dict, reason: str) -> None:
     """Route a failed message to the dead letter queue or discard it.
 
@@ -591,6 +671,10 @@ async def process_outbox(telegram_client) -> int:
                         session_id = message.get("session_id")
                         if session_id:
                             await asyncio.to_thread(_record_sent_message, session_id, msg_id)
+                    # Append outbound entry to owning session's chat_message_log (issue #1192).
+                    # Three-tier resolution: owner_agent_session_id → real session_id → chat lookup.
+                    # Non-fatal — relay must never crash on chat-log bookkeeping.
+                    await asyncio.to_thread(_append_outbound_chat_log, message, msg_id)
 
                     # Store sent message for Redis history (text messages only)
                     if msg_type is None and msg_id is not None:

@@ -1181,8 +1181,42 @@ def _build_draft_prompt(
         if context_parts:
             context_section = "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
 
+    # Build the chat-log block from session.chat_message_log (issue #1192).
+    # Cap at CHAT_LOG_DISPLAY_ENTRIES most-recent entries so the prompt stays bounded.
+    # The drafter seeing "out" entries from prior turns prevents self-duplication.
+    # Tolerates missing keys, None log, and empty list — all degrade gracefully.
+    # NOTE: We do NOT see the CURRENT turn's outbound text here — the relay appends
+    # AFTER the successful send, which happens after the drafter produces the text.
+    chat_log_section = ""
+    if session is not None:
+        try:
+            from models.agent_session import CHAT_LOG_DISPLAY_ENTRIES
+
+            raw_log = getattr(session, "chat_message_log", None) or []
+            if isinstance(raw_log, list) and raw_log:
+                display_entries = raw_log[-CHAT_LOG_DISPLAY_ENTRIES:]
+                lines = []
+                for entry in display_entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    direction = entry.get("direction", "?")
+                    sender = entry.get("sender") or "unknown"
+                    content = (entry.get("content") or "").strip()
+                    if not content:
+                        continue
+                    lines.append(f"[{direction}] {sender}: {content}")
+                if lines:
+                    chat_log_section = (
+                        "\n\nRecent chat in this thread"
+                        " (you have already said the 'out' lines — avoid repeating them):\n"
+                        + "\n".join(lines)
+                        + "\n"
+                    )
+        except Exception:
+            pass  # Chat log is enrichment — never crash the drafter
+
     return f"""/no_think
-Draft a message from this developer session output:{artifact_section}{context_section}
+Draft a message from this developer session output:{artifact_section}{context_section}{chat_log_section}
 
 {text}"""
 
