@@ -1326,6 +1326,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         from agent.sdk_client import (
             HarnessThinkingBlockCorruptionError,
             _get_prior_session_uuid,
+            _load_persona_overlay_with_log,
             _resolve_sentry_auth_token,
             build_harness_turn_input,
             get_response_via_harness,
@@ -1408,19 +1409,87 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # D1 precedence cascade: session.model > settings > codebase default.
         _effective_model = _resolve_session_model(agent_session)
 
-        # PM sessions get persona-level SDLC orchestration rules via
-        # --append-system-prompt (issue #1148). Dev and Teammate sessions have
-        # no harness-side persona loader; they keep the default Claude Code
-        # protocol. Drafter call sites in session_completion.py MUST also leave
-        # system_prompt at the default None — see Risk 4 in docs/plans/sdlc-1148.md.
+        # Persona overlay resolution for the harness path.
+        #
+        # PM sessions get the SDLC orchestration overlay (issue #1148). Email-
+        # spawned sessions get the persona named in `project.email.persona`
+        # (default "teammate"), with `teammate` as the fallback overlay if the
+        # requested file is missing. Telegram TEAMMATE sessions get the
+        # `teammate` overlay. Dev sessions still keep the default Claude Code
+        # protocol (no overlay). Drafter call sites in session_completion.py
+        # MUST continue to leave system_prompt at None — see Risk 4 in
+        # docs/plans/sdlc-1148.md.
+        #
+        # Without this branch, email-spawned customer-service sessions ran with
+        # NO system prompt and the harness replied in the default voice — see
+        # docs/features/email-bridge.md "Persona resolution for email-spawned
+        # sessions".
         _pm_system_prompt: str | None = None
+        _resolved_persona: str | None = None
+        _persona_source: str = "none"
+        _email_persona_requested: str | None = None
+        _email_persona_fallback: str | None = None
+
+        _email_cfg = (project_config or {}).get("email") or {}
+        if isinstance(_email_cfg, dict) and _email_cfg.get("persona"):
+            _email_persona_requested = str(_email_cfg["persona"])
+
         if _session_type == SessionType.PM:
+            _resolved_persona = "project-manager"
+            _persona_source = "session_type=pm"
+        elif _transport == "email" or _email_persona_requested:
+            # Email-spawned sessions: trust project.email.persona, default to
+            # "teammate" when unset (mirrors bridge/email_bridge.py:709).
+            if _email_persona_requested:
+                _resolved_persona = _email_persona_requested
+                _persona_source = "project.email.persona"
+                _email_persona_fallback = "teammate"
+            else:
+                _resolved_persona = "teammate"
+                _persona_source = "email-default"
+        elif _session_type == SessionType.TEAMMATE:
+            _resolved_persona = "teammate"
+            _persona_source = "session_type=teammate"
+
+        # Canonical pre-load resolution log line. Emitted before any file I/O
+        # so absence-vs-fallback is visible without triangulating against the
+        # downstream "Persona overlay loaded" / "Appending N-char system
+        # prompt" lines from sdk_client.
+        logger.info(
+            f"{log_prefix} Resolved persona for session={session.session_id}: "
+            f"{_resolved_persona or '<none>'} (source={_persona_source})"
+        )
+
+        if _resolved_persona == "project-manager":
             try:
                 _pm_system_prompt = load_pm_system_prompt(str(working_dir))
             except Exception as e:
                 logger.warning(
                     f"{log_prefix} [pm-persona-missing] Failed to load PM persona: {e}; "
                     "session will run without SDLC orchestration rules"
+                )
+        elif _resolved_persona:
+            _pm_system_prompt = _load_persona_overlay_with_log(
+                _resolved_persona,
+                request_id=cid or session.project_key,
+                session_id=session.session_id,
+                fallback=_email_persona_fallback,
+            )
+            # Louder failure mode: if email.persona was explicitly set on the
+            # project dict but neither the requested overlay nor the fallback
+            # could be loaded, the harness will run in the default voice. The
+            # outbound email reply may answer the customer in the wrong voice
+            # — this surfaces it at ERROR before the email:outbox: payload is
+            # relayed.
+            if _pm_system_prompt is None and _email_persona_requested:
+                logger.error(
+                    f"{log_prefix} [persona-load-failed] "
+                    f"project.email.persona='{_email_persona_requested}' is set, "
+                    f"but neither the requested overlay nor fallback="
+                    f"'{_email_persona_fallback}' could be loaded. Session "
+                    f"{session.session_id} will run with NO system prompt and the "
+                    "harness will respond in default voice. Outbound email reply "
+                    "may be wrong-voice — review email:outbox: payload before relay."
                 )
 
         async def do_work() -> str:

@@ -181,6 +181,23 @@ PM and teammate sessions skip the post-completion SDLC handler. See [Harness Abs
 
 At runtime, the worker processes sessions via `_worker_loop(worker_key)` until the queue is empty, then waits for new enqueue events.
 
+### Persona Overlay Resolution (harness `--append-system-prompt`)
+
+`agent/session_executor.py` resolves which persona overlay to pass as the harness `system_prompt` (`--append-system-prompt`) for each session. The order is:
+
+1. `session_type=PM` → `project-manager` overlay (loaded via `load_pm_system_prompt`)
+2. `transport=email` or `project["email"]["persona"]` set → that persona, with `teammate` as fallback when the requested overlay file is missing
+3. `session_type=TEAMMATE` (Telegram DM/teammate) → `teammate` overlay
+4. Otherwise (dev sessions) → no overlay; the harness keeps the default Claude Code protocol
+
+The resolution emits a single canonical INFO line BEFORE any disk read so absence-vs-fallback is visible in `logs/worker.log` without triangulating against the downstream "Persona overlay loaded" or "Appending N-char system prompt" lines:
+
+```
+agent.session_executor INFO [<cid|project>] Resolved persona for session=<sid>: <name|<none>> (source=<source>)
+```
+
+If `project["email"]["persona"]` is set but neither the requested overlay nor the fallback can be loaded, the resolver emits an `ERROR [persona-load-failed]` line — the harness will run with no system prompt and reply in the default voice, so the operator should review the queued `email:outbox:` payload before SMTP relay. See [email-bridge.md](email-bridge.md#persona-resolution-for-email-spawned-sessions) for the full rule.
+
 ### Worker-Internal Idle Sweeper (issue #1128)
 
 The **worker process** owns the `_active_clients` registry at

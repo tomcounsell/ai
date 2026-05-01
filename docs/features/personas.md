@@ -38,14 +38,24 @@ At load time, `load_persona_prompt(persona)` reads `config/identity.json`, assem
 
 ### Persona Selection
 
-The bridge resolves which persona to use based on:
+There are two resolution sites — they cover different transports.
 
-1. **DMs**: Uses `dm_persona` from project config (default: `"teammate"`)
-2. **PM mode projects**: Always `"project-manager"`
-3. **Group chats**: Looks up `persona` field in `telegram.groups[chat_title]` config
-4. **Default**: `"developer"`
+**Harness path (the live one)** — `agent/session_executor.py` resolves the persona for every harness invocation in this order:
 
-Resolution is handled by `_resolve_persona()` in `agent/sdk_client.py`.
+1. `session_type=PM` → `"project-manager"` (source = `session_type=pm`)
+2. `transport=email` or `project["email"]["persona"]` set → that persona, with `teammate` as the fallback (source = `project.email.persona` or `email-default`)
+3. `session_type=TEAMMATE` (Telegram DM/teammate) → `"teammate"` (source = `session_type=teammate`)
+4. Otherwise (dev sessions) → no overlay (source = `none`)
+
+The chosen name is logged at INFO BEFORE any disk read:
+
+```
+agent.session_executor INFO [<cid|project>] Resolved persona for session=<sid>: <name|<none>> (source=<source>)
+```
+
+If `project.email.persona` is set but neither the requested overlay nor the fallback can be loaded, the resolver emits an `ERROR [persona-load-failed]` line so the operator can review the queued `email:outbox:` payload before SMTP relay. See [bridge-worker-architecture.md](bridge-worker-architecture.md#persona-overlay-resolution-harness---append-system-prompt) and [email-bridge.md](email-bridge.md#persona-resolution-for-email-spawned-sessions) for the full rule.
+
+**SDK path** — `_resolve_persona()` in `agent/sdk_client.py` covered Telegram DMs and group chats by reading `dm_persona` and `telegram.groups[chat_title].persona`. The SDK execution branch was removed in issue #912 (the `DEV_SESSION_HARNESS` flag deletion); `_resolve_persona()` is still imported by drafter call sites but is no longer the live persona-selection path for agent sessions.
 
 ### System Prompt Composition
 
