@@ -51,7 +51,10 @@ def _append_inbound_chat_log(
             )
             return
         session = sessions[0]
-        session.append_chat_log("in", sender_name or "unknown", message_text, telegram_message_id)
+        from bridge.telegram_relay import MAX_CHAT_LOG_ENTRY_CHARS
+
+        truncated = message_text[:MAX_CHAT_LOG_ENTRY_CHARS] if message_text else message_text
+        session.append_chat_log("in", sender_name or "unknown", truncated, telegram_message_id)
     except Exception as exc:
         logger.warning(
             "append_inbound_chat_log failed for session %s (non-fatal): %s",

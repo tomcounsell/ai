@@ -81,6 +81,8 @@ When neither env var is set (manual CLI invocation outside any agent), the key i
 
 Every Telegram message dispatched to a session via `dispatch_telegram_session` records an inbound entry after the session is enqueued. This is the single chokepoint for all Telegram-originating session enqueues, so the inbound log stays consistent with the actual sessions created.
 
+> **Dispatch gap:** Follow-up steering messages and interjection messages to already-running sessions (dispatched via `bridge/dispatch.py` steering path) are not captured in the chat log — only new-session dispatch is logged.
+
 ## Read Path: Message Drafter
 
 **Location:** `bridge/message_drafter.py::_build_draft_prompt`

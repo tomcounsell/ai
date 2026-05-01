@@ -48,6 +48,10 @@ MAX_RELAY_RETRIES = 3
 # Known message types accepted by the relay dispatcher
 KNOWN_MESSAGE_TYPES = {None, "reaction", "custom_emoji_message"}
 
+# Maximum characters per chat_message_log entry (prevents Path A's multi-paragraph
+# drafter output from inflating Redis storage to ~200KB per session).
+MAX_CHAT_LOG_ENTRY_CHARS = 500
+
 
 def _safe_unlink(path: str) -> None:
     """Unlink a temp file the relay was asked to clean up.
@@ -487,7 +491,21 @@ def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
 
         text = (message.get("text") or "").strip()
         if not text:
-            return  # No content to log (voice note or file-only)
+            # File-only send: produce a "[file: filename]" placeholder so the
+            # drafter sees mid-session file sends (plan §Technical Approach).
+            file_paths = message.get("file_paths") or (
+                [message["file_path"]] if message.get("file_path") else []
+            )
+            if not file_paths:
+                return  # No content at all (e.g. voice note with no file_paths)
+            import os
+
+            text = "[file: " + ", ".join(os.path.basename(fp) for fp in file_paths) + "]"
+
+        # Truncate to prevent verbose drafter output inflating Redis storage
+        # (~200KB per session without this bound).
+        if len(text) > MAX_CHAT_LOG_ENTRY_CHARS:
+            text = text[:MAX_CHAT_LOG_ENTRY_CHARS] + "…"
 
         chat_id = message.get("chat_id")
 
@@ -512,9 +530,7 @@ def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
         # Tier 2: real queue session_id (no cli-/local- prefix) — Path A
         if session is None:
             queue_session_id = message.get("session_id") or ""
-            if queue_session_id and not queue_session_id.startswith(
-                ("cli-", "local-")
-            ):
+            if queue_session_id and not queue_session_id.startswith(("cli-", "local-")):
                 rows = list(AgentSession.query.filter(session_id=queue_session_id))
                 if rows:
                     session = rows[0]
@@ -525,9 +541,7 @@ def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
         # (via asyncio.to_thread in the relay loop) and cannot await.
         if session is None and chat_id:
             try:
-                candidates = list(
-                    AgentSession.query.filter(chat_id=chat_id, status="running")
-                )
+                candidates = list(AgentSession.query.filter(chat_id=chat_id, status="running"))
                 if candidates:
                     candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
                     session = candidates[0]
@@ -546,9 +560,7 @@ def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
 
         session.append_chat_log("out", "valor", text, msg_id)
     except Exception as exc:
-        logger.warning(
-            "Relay: _append_outbound_chat_log failed (non-fatal): %s", exc
-        )
+        logger.warning("Relay: _append_outbound_chat_log failed (non-fatal): %s", exc)
 
 
 async def _dead_letter_message(message: dict, reason: str) -> None:
