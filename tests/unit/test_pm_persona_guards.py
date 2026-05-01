@@ -87,8 +87,13 @@ class TestPipelineStageAssertion:
         assert "Exit Validation" in pm_persona_text
 
     def test_sdlc_stage_query_referenced(self, pm_persona_text):
-        """PM must be instructed to query sdlc_stage_query on exit."""
-        assert "sdlc_stage_query" in pm_persona_text
+        """PM must be instructed to query the SDLC stage state on exit.
+
+        The CLI was renamed from `python -m tools.sdlc_stage_query` to the
+        cwd-independent `sdlc-tool stage-query` wrapper in PR #1202; the
+        assertion below covers either spelling.
+        """
+        assert "sdlc-tool stage-query" in pm_persona_text or "sdlc_stage_query" in pm_persona_text
 
     def test_display_stages_referenced(self, pm_persona_text):
         """PM must reference the canonical display stages list."""

@@ -557,7 +557,7 @@ class TestBuildReplyMimeHeaderRegression:
     def test_build_reply_mime_header_regression(self):
         import email as email_lib
 
-        to_addr = "alice@example.com"
+        to_addrs = "alice@example.com"
         subject = "Test subject"
         body = "Reply body with unicode: café ☕"
         in_reply_to = "<orig-123@example.com>"
@@ -575,7 +575,7 @@ class TestBuildReplyMimeHeaderRegression:
             }
         )
         old_mime = handler._build_reply(
-            to_addr=to_addr,
+            to_addrs=to_addrs,
             subject=subject,
             body=body,
             in_reply_to=in_reply_to,
@@ -585,7 +585,7 @@ class TestBuildReplyMimeHeaderRegression:
 
         # New module-level helper with attachments=None
         new_mime = _build_reply_mime(
-            to_addr=to_addr,
+            to_addrs=to_addrs,
             subject=subject,
             body=body,
             in_reply_to=in_reply_to,
@@ -626,7 +626,7 @@ class TestBuildReplyMimeAttachments:
         f.write_text("payload bytes")
 
         mime = _build_reply_mime(
-            to_addr="alice@example.com",
+            to_addrs="alice@example.com",
             subject="Report",
             body="See attached",
             in_reply_to=None,
@@ -646,7 +646,7 @@ class TestBuildReplyMimeAttachments:
         import email.mime.text
 
         mime = _build_reply_mime(
-            to_addr="alice@example.com",
+            to_addrs="alice@example.com",
             subject="Hi",
             body="Body",
             in_reply_to=None,
@@ -661,7 +661,7 @@ class TestBuildReplyMimeAttachments:
         import email.mime.text
 
         mime = _build_reply_mime(
-            to_addr="alice@example.com",
+            to_addrs="alice@example.com",
             subject="Hi",
             body="Body",
             in_reply_to=None,
@@ -689,7 +689,7 @@ class TestBuildReplyMimeSubjectPrefix:
     def test_new_send_subject_unchanged(self):
         # CLI/relay contract: force_reply_prefix=False
         mime = _build_reply_mime(
-            to_addr="alice@example.com",
+            to_addrs="alice@example.com",
             subject="New meeting",
             body="Body",
             in_reply_to=None,
@@ -702,7 +702,7 @@ class TestBuildReplyMimeSubjectPrefix:
     def test_new_send_with_existing_re_prefix_unchanged(self):
         # User deliberately typed "Re: ..." on a new send — don't touch it.
         mime = _build_reply_mime(
-            to_addr="alice@example.com",
+            to_addrs="alice@example.com",
             subject="Re: existing thread",
             body="Body",
             in_reply_to=None,
@@ -714,7 +714,7 @@ class TestBuildReplyMimeSubjectPrefix:
 
     def test_reply_prepends_re(self):
         mime = _build_reply_mime(
-            to_addr="alice@example.com",
+            to_addrs="alice@example.com",
             subject="Meeting tomorrow",
             body="ack",
             in_reply_to="<orig@host>",
@@ -726,7 +726,7 @@ class TestBuildReplyMimeSubjectPrefix:
 
     def test_reply_with_existing_re_prefix_not_doubled(self):
         mime = _build_reply_mime(
-            to_addr="alice@example.com",
+            to_addrs="alice@example.com",
             subject="Re: Meeting tomorrow",
             body="ack",
             in_reply_to="<orig@host>",
@@ -739,7 +739,7 @@ class TestBuildReplyMimeSubjectPrefix:
     def test_empty_subject_new_send_uses_no_subject_placeholder(self):
         # CLI/relay contract: force_reply_prefix=False
         mime = _build_reply_mime(
-            to_addr="alice@example.com",
+            to_addrs="alice@example.com",
             subject="",
             body="Body",
             in_reply_to=None,
@@ -751,7 +751,7 @@ class TestBuildReplyMimeSubjectPrefix:
 
     def test_empty_subject_reply_uses_re_no_subject(self):
         mime = _build_reply_mime(
-            to_addr="alice@example.com",
+            to_addrs="alice@example.com",
             subject="",
             body="Body",
             in_reply_to="<orig@host>",
@@ -766,7 +766,7 @@ class TestBuildReplyMimeSubjectPrefix:
         # "Re:" even when in_reply_to is empty — preserves pre-#1094 behavior
         # for inbound emails that lacked a Message-ID header.
         mime = _build_reply_mime(
-            to_addr="alice@example.com",
+            to_addrs="alice@example.com",
             subject="Meeting tomorrow",
             body="ack",
             in_reply_to=None,
@@ -780,7 +780,7 @@ class TestBuildReplyMimeSubjectPrefix:
         # Worker reply path with empty subject and no in_reply_to still uses
         # the "Re: (no subject)" placeholder.
         mime = _build_reply_mime(
-            to_addr="alice@example.com",
+            to_addrs="alice@example.com",
             subject="",
             body="Body",
             in_reply_to=None,
@@ -793,7 +793,7 @@ class TestBuildReplyMimeSubjectPrefix:
         # Even with force_reply_prefix=True, an existing "Re:" prefix is
         # not doubled (case-insensitive check).
         mime = _build_reply_mime(
-            to_addr="alice@example.com",
+            to_addrs="alice@example.com",
             subject="Re: Original",
             body="Body",
             in_reply_to=None,

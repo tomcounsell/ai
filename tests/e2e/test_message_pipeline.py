@@ -179,8 +179,10 @@ class TestWorkRequestClassification:
         assert classify_work_request("issue 123") == "sdlc"
         assert classify_work_request("pr 42") == "sdlc"
 
-    def test_bare_hash_is_question(self):
-        assert classify_work_request("#123") == "question"
+    def test_bare_hash_is_sdlc(self):
+        # A bare "#123" is treated as an issue reference (SDLC), matching
+        # the issue/PR reference fast-path in classify_work_request.
+        assert classify_work_request("#123") == "sdlc"
 
 
 @pytest.mark.e2e

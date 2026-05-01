@@ -45,12 +45,13 @@ class TestRemoteUpdateScript:
         if lock_dir.is_dir():
             lock_dir.rmdir()
         # Ensure we're on main and up to date
+        # Timeout is generous: pull + npm + uv sync can take >30s on a cold cache.
         result = subprocess.run(
             ["bash", self.SCRIPT],
             cwd=str(PROJECT_DIR),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=180,
         )
         # Since we just pulled (or are current), expect "Already up to date"
         assert result.returncode == 0
@@ -104,12 +105,13 @@ class TestRemoteUpdateScript:
         if lock_dir.exists():
             lock_dir.rmdir()
 
+        # Timeout is generous: pull + npm + uv sync can take >30s on a cold cache.
         subprocess.run(
             ["bash", self.SCRIPT],
             cwd=str(PROJECT_DIR),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=180,
         )
         assert not lock_dir.exists(), "Lock directory should be cleaned up"
 

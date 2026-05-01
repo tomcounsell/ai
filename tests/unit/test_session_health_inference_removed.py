@@ -86,7 +86,19 @@ def test_source_does_not_reference_deleted_symbols_outside_docstrings():
 
 
 def test_dual_heartbeat_or_check_still_holds():
-    """#1036 OR semantics: either heartbeat fresh ⇒ progress."""
+    """#1036 OR semantics narrowed by #1226: queue heartbeat is the Tier 1 fallback.
+
+    Sub-check B uses ``last_heartbeat_at`` as the executor-alive fallback
+    when ``sdk_ever_output`` is False. ``last_sdk_heartbeat_at`` is a
+    subprocess-watchdog signal (BackgroundTask._watchdog), NOT a progress
+    signal — #1226 intentionally excluded it from the progress check
+    because subprocess-alive without per-turn output is the very signature
+    of a hung session.
+
+    A queue heartbeat fresh within ``HEARTBEAT_FRESHNESS_WINDOW`` ⇒ progress.
+    SDK-watchdog heartbeat alone ⇒ NOT progress (must be paired with
+    per-turn evidence in sub-check A or the queue heartbeat in sub-check B).
+    """
     now = datetime.now(tz=UTC)
 
     class _S:
@@ -115,7 +127,8 @@ def test_dual_heartbeat_or_check_still_holds():
         def get_children(self):
             return []
 
-    assert session_health._has_progress(_S2()) is True
+    # #1226: SDK watchdog heartbeat is NOT a progress signal on its own.
+    assert session_health._has_progress(_S2()) is False
 
 
 def test_fresh_heartbeat_with_long_stdout_silence_is_progress():

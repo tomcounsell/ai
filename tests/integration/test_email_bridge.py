@@ -353,7 +353,7 @@ class TestDomainRoutedEmailHandlerDirect:
 
         assert len(sent_calls) == 1, "Expected exactly one SMTP send"
         call = sent_calls[0]
-        assert call["to"] == "tcounsell@psyoptimal.com"
+        assert call["to"] == ["tcounsell@psyoptimal.com"]
         assert call["msg"]["To"] == "tcounsell@psyoptimal.com"
         assert call["msg"]["In-Reply-To"] == "<original-msg@psyoptimal.com>"
         assert call["msg"]["Subject"].startswith("Re:")
