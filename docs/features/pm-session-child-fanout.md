@@ -59,9 +59,9 @@ The in-repo PM persona overlay includes a `## Multi-Issue Fan-out` section with 
 
 Unchanged by this feature. When each child session reaches a terminal state, `_finalize_parent_sync()` at line 518 checks whether all children are terminal and transitions the parent accordingly. The parent's `waiting_for_children` status is the signal that finalization should propagate.
 
-## Sequential Execution
+## Execution Model
 
-Children run one at a time via existing project-keyed serialization (introduced in PR #831). No additional scheduling logic is needed — the queue naturally serializes children with the same `project_key` as the parent.
+Children execute via `worker_key`-based routing (issue #1228 extended this for PM sessions). At PLAN/CRITIQUE stages, children with the same `project_key` serialize naturally via the project-keyed worker loop (introduced in PR #831). At BUILD/TEST/REVIEW/DOCS stages, children with distinct slugs each get their own slug-keyed worker loop and can execute in parallel, reducing total wall time from `sum(child_runtimes)` to `max(child_runtimes)` for worktree-stage work. No additional scheduling logic is needed — `AgentSession.worker_key` determines the routing automatically based on the child's current stage.
 
 ## Race Condition Safety
 

@@ -93,7 +93,7 @@ python -m agent.agent_session_queue --flush-session <SESSION_ID>
 
 ### Example `--status` output
 
-Sessions are grouped by `worker_key` (the canonical routing key — `project_key`, `chat_id`, or `slug` depending on session type and whether a slug is set). Each header shows the session's `project_key` followed by the actual `worker_key` in parentheses, so slug-keyed dev sessions are visibly distinct from the project-keyed PM loop.
+Sessions are grouped by `worker_key` (the canonical routing key — `project_key`, `chat_id`, or `slug` depending on session type, slug, and current stage). Each header shows the session's `project_key` followed by the actual `worker_key` in parentheses, so slug-keyed sessions (dev sessions, and PM sessions at worktree stages) are visibly distinct from the project-keyed loop.
 
 ```
 === valor (worker: valor) ===
