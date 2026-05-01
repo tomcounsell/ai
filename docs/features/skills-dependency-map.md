@@ -69,7 +69,7 @@ add-feature ....(references)...> prime, pthread, sdlc, do-pr-review
 | do-test | test-engineer, validator, frontend-tester |
 | do-patch | builder |
 | do-docs | 4 parallel explorers: Change Explorer, Doc Inventory, Semantic Impact, Issue Impact Scanner |
-| do-docs-audit | unnamed parallel auditors (not agent definitions) |
+| docs-auditor (substrate) | unnamed parallel auditors (not agent definitions) |
 
 **Agents actually referenced by skills (7):** builder, validator, code-reviewer, test-engineer, documentarian, frontend-tester, plan-maker
 
@@ -113,7 +113,7 @@ These 6 skills form the autonomous development loop. Everything else is support.
 | reclassify | Change plan type |
 | audit-tools | Tool quality check |
 | do-skills-audit | Skills quality check |
-| do-docs-audit | Docs accuracy check |
+| docs-auditor (substrate) | Docs accuracy check |
 | do-design-audit | UI quality review |
 | frontend-design | Design reference |
 | pthread | Parallel execution pattern |
@@ -145,7 +145,7 @@ new-skill (generic) <--- new-valor-skill (wraps with Valor patterns)
 
 ### Potential Redundancies
 - **sdlc** vs **do-build**: sdlc describes the pattern that do-build executes. sdlc adds Plan + Review phases around do-build. Consider whether sdlc should be folded into CLAUDE.md workflow docs instead of being a skill.
-- **do-docs** vs **do-docs-audit**: different purposes (cascade updates vs. accuracy audit) but similar names. Not redundant, just confusingly similar.
+- **do-docs** vs **docs-auditor (substrate)**: different purposes (cascade updates vs. accuracy audit) but similar names. Not redundant, just confusingly similar.
 - **add-feature** vs **new-valor-skill** vs **new-skill**: three skills about "adding things". add-feature is a guide, new-skill is generic, new-valor-skill is project-specific. Clear separation but worth noting.
 - **audit-tools** vs **do-skills-audit**: tool audit vs skill audit. Different targets, reasonable separation.
 - **do-design-audit** vs **frontend-design**: review vs. reference. Different purposes.

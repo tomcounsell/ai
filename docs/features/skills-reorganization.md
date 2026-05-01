@@ -14,7 +14,7 @@ Oversized SKILL.md files were split into a concise navigator + sub-files:
 Every skill now has proper frontmatter fields:
 - `disable-model-invocation: true` on infrastructure skills (update, setup, reclassify)
 - `user-invocable: false` on background reference skills (agent-browser, telegram, reading-sms, checking-system-logs, google-workspace)
-- `context: fork` on skills that spawn parallel work (do-build, do-pr-review, do-docs-audit)
+- `context: fork` on skills that spawn parallel work (do-build, do-pr-review, docs-auditor (substrate))
 
 ### Commands Consolidated
 - **Thin wrapper commands deleted**: `do-build.md`, `do-plan.md`, `do-test.md`, `do-docs.md`, `do-pr-review.md`, `update.md` — skills handle `replace with concrete examples like `/do-plan`, `/do-build`, etc. or clarify as a pattern placeholder` invocation directly

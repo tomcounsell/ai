@@ -240,68 +240,6 @@ class TestAuditingCallables:
             result = run_async(run_log_review())
         assert_valid_result(result)
 
-    def test_run_documentation_audit_returns_valid(self):
-        """run_documentation_audit() returns valid dict."""
-        from reflections.auditing import run_documentation_audit
-
-        mock_summary = MagicMock()
-        mock_summary.skipped = False
-        mock_summary.skip_reason = ""
-        mock_summary.skip_type = ""
-        mock_summary.kept = ["doc.md"]
-        mock_summary.updated = []
-        mock_summary.deleted = []
-
-        with patch("scripts.docs_auditor.DocsAuditor") as mock_da:
-            mock_instance = MagicMock()
-            mock_instance.run.return_value = mock_summary
-            mock_da.return_value = mock_instance
-            result = run_async(run_documentation_audit())
-        assert_valid_result(result)
-
-    def test_run_documentation_audit_auth_skip_returns_disabled(self):
-        """When DocsAuditor skips due to auth, wrapper returns status='disabled'."""
-        from reflections.auditing import run_documentation_audit
-
-        mock_summary = MagicMock()
-        mock_summary.skipped = True
-        mock_summary.skip_reason = "ANTHROPIC_API_KEY not set"
-        mock_summary.skip_type = "auth"
-        mock_summary.kept = []
-        mock_summary.updated = []
-        mock_summary.deleted = []
-
-        with patch("scripts.docs_auditor.DocsAuditor") as mock_da:
-            mock_instance = MagicMock()
-            mock_instance.run.return_value = mock_summary
-            mock_da.return_value = mock_instance
-            result = run_async(run_documentation_audit())
-
-        assert_valid_result(result)
-        assert result["status"] == "disabled"
-        assert any("disabled" in f.lower() for f in result["findings"])
-
-    def test_run_documentation_audit_schedule_skip_returns_ok(self):
-        """When DocsAuditor skips due to frequency gate, wrapper returns status='ok'."""
-        from reflections.auditing import run_documentation_audit
-
-        mock_summary = MagicMock()
-        mock_summary.skipped = True
-        mock_summary.skip_reason = "last run: 2026-04-12"
-        mock_summary.skip_type = "schedule"
-        mock_summary.kept = []
-        mock_summary.updated = []
-        mock_summary.deleted = []
-
-        with patch("scripts.docs_auditor.DocsAuditor") as mock_da:
-            mock_instance = MagicMock()
-            mock_instance.run.return_value = mock_summary
-            mock_da.return_value = mock_instance
-            result = run_async(run_documentation_audit())
-
-        assert_valid_result(result)
-        assert result["status"] == "ok"
-
     def test_run_skills_audit_no_script(self):
         """run_skills_audit() returns ok when script not found."""
         from reflections.auditing import run_skills_audit
@@ -320,18 +258,10 @@ class TestAuditingCallables:
             result = run_async(run_hooks_audit())
         assert_valid_result(result)
 
-    def test_run_feature_docs_audit_no_dir(self, tmp_path):
-        """run_feature_docs_audit() returns valid dict when docs/features doesn't exist."""
-        from reflections.auditing import run_feature_docs_audit
-
-        with patch("reflections.auditing.PROJECT_ROOT", tmp_path):
-            result = run_async(run_feature_docs_audit())
-        assert_valid_result(result)
-
     def test_event_loop_safe_callables_are_sync(self):
         """Regression canary (sibling of PR #1056).
 
-        These three callables did synchronous file I/O on unbounded log
+        These two callables did synchronous file I/O on unbounded log
         files while being declared ``async def``. That froze the reflection
         scheduler's event loop. They are now plain ``def`` so
         ``ReflectionScheduler.execute_function_reflection`` dispatches them
@@ -344,12 +274,11 @@ class TestAuditingCallables:
         import inspect
 
         from reflections.auditing import (
-            run_feature_docs_audit,
             run_hooks_audit,
             run_log_review,
         )
 
-        for fn in (run_log_review, run_hooks_audit, run_feature_docs_audit):
+        for fn in (run_log_review, run_hooks_audit):
             assert not inspect.iscoroutinefunction(fn), (
                 f"{fn.__name__} must stay sync `def` — it does blocking file I/O "
                 "that would freeze the reflection scheduler's event loop if "

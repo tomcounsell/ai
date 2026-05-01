@@ -30,6 +30,9 @@ def populated_db(tmp_path, monkeypatch):
     conn.execute("CREATE INDEX idx_metrics_name_ts ON metrics (name, timestamp)")
 
     now = time.time()
+    # NOTE (#1245): `session.cost_usd` validates the analytics CLI itself —
+    # production no longer writes this metric (see ui/data/analytics.py for
+    # the Popoto-based aggregation that replaced it).
     test_data = [
         (now - 3600, "session.started", 1.0, None),
         (now - 7200, "session.cost_usd", 0.05, None),
