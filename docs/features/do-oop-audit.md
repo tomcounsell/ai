@@ -50,6 +50,6 @@ Findings are grouped by severity (CRITICAL, WARNING, INFO) with a summary line s
 ## Related
 
 - `/audit-models`: Popoto Redis model-specific audit (different scope)
-- `/do-docs-audit`: Documentation accuracy audit (same pattern)
+- `/docs-auditor (substrate)`: Documentation accuracy audit (same pattern)
 - `/do-skills-audit`: Skill file quality audit (same pattern)
 - `.claude/skills/new-audit-skill/AUDIT_TEMPLATE.md`: Template this skill follows

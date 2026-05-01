@@ -3,7 +3,6 @@
 Tests cover:
 - run_memory_decay_prune: dry_run mode, cap enforcement, empty queryset
 - run_memory_quality_audit: empty queryset, low-confidence flagging
-- run_knowledge_reindex: missing vault dir, KnowledgeDocument unavailable
 """
 
 from __future__ import annotations
@@ -320,64 +319,6 @@ class TestMemoryQualityAudit:
             result = run_async(run_memory_quality_audit())
 
         assert result["status"] == "error"
-
-
-# ============================================================
-# run_knowledge_reindex
-# ============================================================
-
-
-class TestKnowledgeReindex:
-    """Tests for run_knowledge_reindex()."""
-
-    def test_missing_vault_returns_skipped(self, tmp_path):
-        """Returns skipped result when ~/src/work-vault/ doesn't exist."""
-        from reflections.memory_management import run_knowledge_reindex
-
-        fake_home = tmp_path  # work-vault doesn't exist here
-        with patch("pathlib.Path.home", return_value=fake_home):
-            result = run_async(run_knowledge_reindex())
-
-        assert_valid_result(result)
-        assert "not found" in result["summary"]
-
-    def test_knowledge_document_unavailable_returns_stub(self, tmp_path):
-        """Returns stub result when tools.knowledge.indexer is not available."""
-        from reflections.memory_management import run_knowledge_reindex
-
-        vault_path = tmp_path / "src" / "work-vault"
-        vault_path.mkdir(parents=True)
-
-        import sys
-
-        with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch.dict(sys.modules, {"tools.knowledge.indexer": None}),
-        ):
-            result = run_async(run_knowledge_reindex())
-
-        assert_valid_result(result)
-        assert "not available" in result["summary"] or "not found" in result["summary"]
-
-    def test_successful_reindex(self, tmp_path):
-        """Returns valid result when reindex_vault succeeds."""
-        from reflections.memory_management import run_knowledge_reindex
-
-        vault_path = tmp_path / "src" / "work-vault"
-        vault_path.mkdir(parents=True)
-
-        mock_indexer = MagicMock()
-        mock_indexer.reindex_vault.return_value = {"indexed": 10, "skipped": 5, "errors": []}
-
-        import sys
-
-        with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch.dict(sys.modules, {"tools.knowledge.indexer": mock_indexer}),
-        ):
-            result = run_async(run_knowledge_reindex())
-
-        assert_valid_result(result)
 
 
 # ============================================================

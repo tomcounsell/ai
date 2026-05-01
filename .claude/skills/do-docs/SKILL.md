@@ -266,9 +266,53 @@ After identifying docs that need updating, ask what docs *should exist but don't
 
 If something is missing, add a task to create it (not just update existing docs).
 
+## Step 2d: Run Auto-Fix Substrate (PR-changed files)
+
+Before doing manual edits, run the unified docs-auditor substrate against the
+PR-changed files. The substrate handles four classes of mechanical fix
+automatically — renamed markdown links, renamed paths/symbols, README index
+entries pointing at deleted files, and stale-term renames — so manual editing
+in Step 3 only handles cases the substrate can't auto-detect.
+
+```bash
+python -c "
+from reflections.docs_auditor import audit
+import json, sys, os
+result = audit(
+    primary_path=None,
+    scope_mode='pr-changed-files',
+    apply_mode='apply',
+    project_key=os.environ.get('VALOR_PROJECT_KEY', 'valor'),
+)
+print(json.dumps(result))
+sys.exit(0 if result['status'] != 'error' else 1)
+"
+```
+
+The substrate:
+- Applies fixes directly to the working tree (or no-ops if nothing to fix)
+- Commits the fixes to the **current branch** (not a new branch)
+- Fires the memory-refresh hook after the commit (forward-compat with #1249)
+- Files GitHub issues (deduped) for cases requiring human judgment (deleted
+  targets, stub docs, orphan plans)
+
+Parse the JSON output:
+- `status: "ok"` — proceed to Step 3 for any remaining manual edits
+- `status: "error"` — abort and report; do NOT proceed to stage marker
+- `status: "disabled"` — auth probe failed; proceed in skill-only mode (no auto-fixes)
+
+Do not re-commit the substrate's changes — they are already committed by the
+substrate itself.
+
 ## Step 3: Make Surgical Edits
 
-For each affected document, in dependency order:
+The substrate from Step 2d handled mechanical fixes (renamed links/symbols,
+README index, stale-term renames). Step 3 handles the cases that require
+human judgment — behavioral descriptions, workflow steps, code examples that
+need rewording rather than mechanical rename, and any docs the substrate
+flagged but couldn't auto-fix.
+
+For each affected document still needing edits, in dependency order:
 
 1. **Read** the full file first
 2. **Identify** the specific lines/sections that reference the changed area

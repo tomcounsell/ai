@@ -76,7 +76,7 @@ Add commented placeholder to `.env.example`.
 
 ### Sidecar conventions
 - Generated sidecars use `{original_filename}.md` naming — e.g., `report.pdf` → `report.pdf.md`.
-- Sidecars carry YAML frontmatter identifying them as generated (`generated_by: markitdown`), enabling downstream filtering by tools like `do-xref-audit`.
+- Sidecars carry YAML frontmatter identifying them as generated (`generated_by: markitdown`), enabling downstream filtering by the unified `docs-auditor` substrate.
 - Atomic writes via `os.replace()` on POSIX.
 
 ### Rate limits / API quotas

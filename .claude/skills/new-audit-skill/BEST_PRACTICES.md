@@ -1,6 +1,6 @@
 # Audit Skill Best Practices
 
-Extracted from the 8 existing audit skills in this repo: `audit-models`, `audit-tools`, `do-docs-audit`, `do-skills-audit`.
+Extracted from the 8 existing audit skills in this repo: `audit-models`, `audit-tools`, `docs-auditor` (substrate), `do-skills-audit`.
 
 ## Anatomy of a Good Audit Skill
 
@@ -18,7 +18,7 @@ Every audit skill answers five questions:
 | Approach | When to use | Examples |
 |----------|-------------|---------|
 | **Script-backed** | Checks are deterministic, regex-based, or structural. Benefits from caching, CLI flags, JSON output. | `do-skills-audit` (Python script with 12 rules) |
-| **Prompt-only** | Checks require semantic understanding, cross-referencing, or judgment calls. | `audit-models` (relationship analysis), `do-docs-audit` (reference verification) |
+| **Prompt-only** | Checks require semantic understanding, cross-referencing, or judgment calls. | `audit-models` (relationship analysis), `docs-auditor` (substrate) (reference verification) |
 | **Hybrid** | Some checks are deterministic, others need LLM reasoning. | `audit-tools` (structure checks + quality judgment) |
 
 **Rule of thumb**: If you can write the check as a regex or AST walk, make it a script. If it requires "does this make sense?", keep it in the prompt.
@@ -29,7 +29,7 @@ Every audit skill answers five questions:
 |-------------|-------------|---------|
 | **Report only** | Domain expert (human) must decide. Audit surfaces info they can't easily see themselves. | `audit-models` — pauses for architect review |
 | **Auto-fix trivial** | Some findings have obvious mechanical fixes (rename, add field). Complex ones need human. | `do-skills-audit --fix` — fixes missing name fields |
-| **Full apply** | All corrections are safe and reversible. Skill commits results. | `do-docs-audit` — applies UPDATE/DELETE verdicts, commits |
+| **Full apply** | All corrections are safe and reversible. Skill commits results. | `docs-auditor` (substrate) — applies UPDATE/DELETE verdicts, commits |
 
 **Rule of thumb**: Auto-fix only when the fix is unambiguous and the blast radius is contained to the audited files.
 
@@ -46,7 +46,7 @@ Use exactly three levels, consistently:
 ### 4. Parallelization
 
 For audits scanning many items (10+), batch and parallelize:
-- `do-docs-audit`: batches of 12 files, spawns parallel Task agents per batch
+- `docs-auditor` (substrate): batches of 12 files, spawns parallel Task agents per batch
 - `do-skills-audit`: sequential (usually <15 skills, fast enough single-threaded)
 
 **Rule of thumb**: Parallelize when items are independent and count > 10. Use Task tool for batched parallelism.
@@ -57,7 +57,7 @@ Three tiers based on portability:
 
 | Pattern | When | Portable? | Examples |
 |---------|------|-----------|---------|
-| `do-{subject}-audit` | General-purpose audits usable in any repo (docs, skills, deps, env vars) | Yes — works anywhere | `do-docs-audit`, `do-skills-audit` |
+| `do-{subject}-audit` | General-purpose audits usable in any repo (docs, skills, deps, env vars) | Yes — works anywhere | `docs-auditor` (substrate), `do-skills-audit` |
 | `audit-{subject}` | Repo-specific feature audits tied to this project's domain | No — project-specific | `audit-models` (Popoto), `audit-tools` (Valor tools) |
 
 **Decision rule**:
@@ -65,7 +65,7 @@ Three tiers based on portability:
 - Does it audit something unique to this project's architecture? → `audit-{subject}`
 
 **Slash command ergonomics**:
-- General: `/do-docs-audit`, `/do-skills-audit`, `/do-deps-audit`
+- General: `/docs-auditor (substrate)`, `/do-skills-audit`, `/do-deps-audit`
 - Feature-specific: `/audit-models`, `/audit-tools`, `/audit-prompts`
 
 The `do-` prefix groups general audits together in autocomplete. Feature-specific audits cluster under `audit-` and are clearly project-local.
@@ -82,7 +82,7 @@ The `do-` prefix groups general audits together in autocomplete. Feature-specifi
 
 ### When to set `disable-model-invocation: true`
 
-Set this flag when the audit is domain-specific enough that the model should not auto-invoke it based on conversation context alone. Audits tied to a specific project domain (`audit-models`, `audit-tools`, `do-skills-audit`) typically set it because they only make sense when explicitly requested. General-purpose audits that should trigger from natural conversation (`do-docs-audit`, `do-integration-audit`, `do-design-audit`) leave it unset so the model can offer them proactively.
+Set this flag when the audit is domain-specific enough that the model should not auto-invoke it based on conversation context alone. Audits tied to a specific project domain (`audit-models`, `audit-tools`, `do-skills-audit`) typically set it because they only make sense when explicitly requested. General-purpose audits that should trigger from natural conversation (`docs-auditor` (substrate), `do-integration-audit`, `do-design-audit`) leave it unset so the model can offer them proactively.
 
 **Decision rule**: Would a false-positive invocation waste significant time or produce confusing output? If yes, set `disable-model-invocation: true`. If the audit is lightweight and broadly useful, leave it unset.
 
