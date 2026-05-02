@@ -352,12 +352,14 @@ health_check() {
     return 0
 }
 
-# Returns 0 if this machine is assigned a bridge role: any project in
-# projects.json has a `machine` field that case-insensitively equals the
-# current ComputerName. Returns 1 if no project matches.
+# Returns 0 if this machine is assigned a Telegram bridge role: at least one
+# project in projects.json has a `machine` field case-insensitively equal to
+# the current ComputerName AND a `telegram` config block. Returns 1 otherwise.
 # Apostrophe encoding (straight ASCII vs curly U+2019) is significant — that
 # is the intentional gating signal between two machines that share a display
 # name but only one of which runs the bridge.
+# A project assigned to this machine without a `telegram` block (e.g. an
+# email-only project like cuttlefish) does NOT trigger bridge install.
 # Falls back to "true" (return 0) on any error (no python venv, no config,
 # etc.) so existing bridge machines keep working without disruption.
 # Writes plist content and reloads in launchd. If the file already matches
@@ -414,7 +416,9 @@ except Exception:
 
 target = host.lower()
 for proj in cfg.get("projects", {}).values():
-    if (proj.get("machine") or "").lower() == target:
+    if (proj.get("machine") or "").lower() != target:
+        continue
+    if proj.get("telegram"):
         sys.exit(0)
 sys.exit(1)
 PYEOF
@@ -425,7 +429,7 @@ install_service() {
         install_bridge_components
     else
         host=$(scutil --get ComputerName 2>/dev/null || echo unknown)
-        echo "Skipping bridge install (no projects assigned to '$host' in projects.json)"
+        echo "Skipping bridge install (no Telegram-configured projects assigned to '$host' in projects.json)"
         if [ -f "$PLIST_PATH" ]; then
             echo "Removing stale bridge plist from non-bridge machine..."
             launchctl unload "$PLIST_PATH" 2>/dev/null || true

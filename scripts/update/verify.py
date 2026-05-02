@@ -1166,13 +1166,17 @@ def check_machine_identity(project_dir: Path) -> dict:
     # Match projects by machine field
     hostname_lower = hostname.lower()
     matched = []
+    bridge_projects = []
     for key, project in config.get("projects", {}).items():
         machine = project.get("machine", "")
         if machine.lower() == hostname_lower:
             matched.append(key)
+            if project.get("telegram"):
+                bridge_projects.append(key)
 
     return {
         "hostname": hostname,
         "projects": matched,
+        "bridge_projects": bridge_projects,
         "config_path": str(config_path),
     }

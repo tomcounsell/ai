@@ -799,8 +799,8 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         )
 
     # Step 4.5: Telegram auth check (warn only — bridge is optional, worker runs without it)
-    # Skipped on machines with no projects assigned (no bridge to authorize).
-    if config.do_service_restart and machine_check.get("projects"):
+    # Skipped on machines with no Telegram-configured projects (no bridge to authorize).
+    if config.do_service_restart and machine_check.get("bridge_projects"):
         log("Checking Telegram session...", v)
         telegram_check = verify.check_telegram_session(project_dir)
         if telegram_check.available:
@@ -906,9 +906,9 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         # Wait for bridge to start after launchctl unload+load cycle.
         # Polling window: 10 x 2s = 20s covers ThrottleInterval (10s)
         # + bridge startup (~5s) + safety margin (~5s).
-        # Skipped on machines with no projects assigned (valor-service.sh
-        # install gates bridge install on the same signal).
-        has_bridge = bool(machine_check.get("projects"))
+        # Skipped on machines with no Telegram-configured projects
+        # (valor-service.sh install gates bridge install on the same signal).
+        has_bridge = bool(machine_check.get("bridge_projects"))
         if has_bridge:
             import time
 
