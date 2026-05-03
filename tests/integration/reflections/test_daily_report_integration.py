@@ -216,3 +216,72 @@ def test_run_enqueues_voice_note_when_transcript_built(yesterday_utc, temp_vault
     # Session id includes the prefix and the date
     assert enqueued[0][1].startswith("daily-report-and-notify-")
     assert enqueued[0][2] == 9.0
+
+
+def test_send_audio_brief_picks_single_chat_across_many_projects():
+    """Regression for PR #1264 review: the brief is system-wide, so we
+    enqueue once to the first project that resolves to a PM chat. Fan-out
+    across N projects would race the relay's `cleanup_file: True` unlink
+    and silently drop sends 2..N.
+    """
+
+    enqueued = []
+
+    def fake_select_chat(project):
+        return {"alpha": -1, "bravo": -2, "charlie": -3}.get(project.get("slug"))
+
+    def fake_enqueue(chat_id, audio_path, duration, session_id):
+        enqueued.append((chat_id, audio_path, duration, session_id))
+
+    def fake_tts(text, output_path, **kwargs):
+        return {
+            "path": output_path,
+            "duration": 7.0,
+            "backend": "kokoro",
+            "voice": "af_bella",
+            "format": "opus",
+            "error": None,
+        }
+
+    projects = [
+        {"slug": "alpha", "telegram": {"groups": {"PM: alpha": {"chat_id": -1}}}},
+        {"slug": "bravo", "telegram": {"groups": {"PM: bravo": {"chat_id": -2}}}},
+        {"slug": "charlie", "telegram": {"groups": {"PM: charlie": {"chat_id": -3}}}},
+    ]
+
+    with (
+        patch.object(dr, "_select_target_chat_id", side_effect=fake_select_chat),
+        patch.object(dr, "_enqueue_voice_note", side_effect=fake_enqueue),
+        patch("tools.tts.synthesize", side_effect=fake_tts),
+    ):
+        target_date = datetime(2026, 5, 2, tzinfo=UTC)
+        findings = asyncio.run(dr._send_audio_brief("Brief transcript", target_date, projects))
+
+    assert len(enqueued) == 1, f"expected one enqueue, got {len(enqueued)}: {enqueued}"
+    assert enqueued[0][0] == -1, "should pick the first project with a PM chat"
+    success_findings = [f for f in findings if "Voice note enqueued" in f]
+    assert len(success_findings) == 1, f"findings should claim one delivery, got {findings}"
+    assert "alpha" in success_findings[0]
+
+
+def test_send_audio_brief_no_pm_chat_skips_tts():
+    """When no project has a PM chat, skip TTS entirely — no temp file, no
+    silently-failed enqueue. The vault log remains the authoritative record.
+    """
+    tts_calls = []
+
+    def fake_tts(text, output_path, **kwargs):
+        tts_calls.append(output_path)
+        return {"path": output_path, "duration": 5.0, "error": None}
+
+    projects = [
+        {"slug": "alpha", "telegram": {"groups": {}}},  # no chat_id
+        {"slug": "bravo", "telegram": {}},
+    ]
+
+    with patch("tools.tts.synthesize", side_effect=fake_tts):
+        target_date = datetime(2026, 5, 2, tzinfo=UTC)
+        findings = asyncio.run(dr._send_audio_brief("Brief transcript", target_date, projects))
+
+    assert tts_calls == [], "TTS should not run when no PM chat is configured"
+    assert any("No PM chat configured" in f for f in findings), findings

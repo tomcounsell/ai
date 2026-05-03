@@ -978,7 +978,17 @@ def _enqueue_voice_note(chat_id: int, audio_path: str, duration: float, session_
 async def _send_audio_brief(
     transcript: str, target_date: datetime, projects: list[dict]
 ) -> list[str]:
-    """Synthesize the brief and enqueue voice-note payloads to project PMs.
+    """Synthesize the brief and enqueue a single voice-note payload to one PM chat.
+
+    The brief is system-wide (not per-project), so a single chat is the
+    correct destination per the plan's "chosen project chat" Flow. We pick the
+    first project that resolves to a PM chat id; the rest are skipped silently.
+
+    Fan-out across multiple chats is unsafe with the current relay contract:
+    payloads share `audio_path` with `cleanup_file: True`, and the relay
+    unlinks the file after the first successful send. Subsequent sends would
+    see an empty `available` list, no text, and silently drop the message
+    while this method falsely reported success. See PR #1264 review feedback.
 
     Returns a list of human-readable findings strings for the run record.
     On TTS failure, logs and skips delivery (no plaintext fallback per scope).
@@ -986,6 +996,21 @@ async def _send_audio_brief(
     findings: list[str] = []
     if not transcript:
         findings.append("Audio brief skipped (no signals)")
+        return findings
+
+    # Pick the single chosen project chat before paying for TTS — if no chat
+    # is configured, there is nothing to deliver.
+    chosen_slug: str | None = None
+    chosen_chat_id: int | None = None
+    for project in projects:
+        chat_id = _select_target_chat_id(project)
+        if chat_id is not None:
+            chosen_slug = project.get("slug")
+            chosen_chat_id = chat_id
+            break
+
+    if chosen_chat_id is None:
+        findings.append("No PM chat configured — audio not delivered")
         return findings
 
     from tools.tts import synthesize
@@ -1005,27 +1030,19 @@ async def _send_audio_brief(
     duration = float(result.get("duration") or 0.0)
     session_id = f"{AUDIO_SESSION_ID_PREFIX}-{_date_str(target_date)}"
 
-    enqueued = 0
-    for project in projects:
-        chat_id = _select_target_chat_id(project)
-        if chat_id is None:
-            continue
-        try:
-            await asyncio.to_thread(_enqueue_voice_note, chat_id, audio_path, duration, session_id)
-            enqueued += 1
-            findings.append(f"Voice note enqueued for {project.get('slug')} (chat `{chat_id}`)")
-        except Exception as e:
-            logger.warning("Voice-note enqueue failed for %s: %s", project.get("slug"), e)
-            findings.append(f"Enqueue failed for {project.get('slug')}: {e}")
-
-    if enqueued == 0:
-        # No project picked up the audio — clean up the file the bridge would
-        # have removed.
+    try:
+        await asyncio.to_thread(
+            _enqueue_voice_note, chosen_chat_id, audio_path, duration, session_id
+        )
+        findings.append(f"Voice note enqueued for {chosen_slug} (chat `{chosen_chat_id}`)")
+    except Exception as e:
+        logger.warning("Voice-note enqueue failed for %s: %s", chosen_slug, e)
+        findings.append(f"Enqueue failed for {chosen_slug}: {e}")
+        # Enqueue failed — the relay never saw the file, so clean it up here.
         try:
             os.unlink(audio_path)
         except OSError:
             pass
-        findings.append("No PM chat configured — audio not delivered")
 
     return findings
 
