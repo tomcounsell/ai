@@ -110,7 +110,7 @@ each update run. This ensures the scheduler always reads the vault version.
 |------|----------|-------------|
 | `session-intelligence` | `reflections.session_intelligence.run` | Session Analysis → LLM Reflection → Bug Issue Filing **(disabled — calls gh CLI and spawns agent)** |
 | `behavioral-learning` | `reflections.behavioral_learning.run` | Episode Cycle-Close → Pattern Crystallization |
-| `daily-report-and-notify` | `reflections.daily_report.run` | Produce daily report → GitHub issues → Telegram notification (run last) **(disabled — spawns agent)** |
+| `daily-report-and-notify` | `reflections.daily_report.run` | Aggregate yesterday's system activity → write Markdown day log to work vault → deliver `/do-debrief`-style audio brief to PM Telegram (no plaintext fallback). See [Distinct daily reflections](#distinct-daily-reflections). |
 | `pm-audio-briefing` | `reflections.pm_audio_briefing.run` | Daily per-project voice brief delivered to Telegram (numbers-free audio + numbered written follow-up). 5-minute registry tick; per-project schedule slot in `projects.json` is the once-per-day gate. See [PM Audio Briefing](pm-audio-briefing.md). |
 
 **Memory management:**
@@ -120,6 +120,50 @@ each update run. This ensures the scheduler always reads the vault version.
 | `memory-decay-prune` | `reflections.memory_management.run_memory_decay_prune` | Delete below-threshold memories with zero access (dry-run default) |
 | `memory-quality-audit` | `reflections.memory_management.run_memory_quality_audit` | 4-layer audit: legacy quality flags (Layer 0) + deterministic supersede of refusal/JSON-shrapnel (Layer 1) + heuristic anomaly detection (Layer 2) + Gemma classification fail-soft (Layer 3); files investigation issues for Layer-2/3 candidates |
 | `embedding-orphan-sweep` | `reflections.memory_management.run_embedding_orphan_sweep` | Reconcile Memory `.npy` embedding files against live records via Popoto `garbage_collect` + `sweep_stale_tempfiles` (dry-run default; opt-in via `EMBEDDING_ORPHAN_SWEEP_APPLY=true`; requires popoto >= 1.6.0) |
+
+### Distinct daily reflections
+
+Two reflections run daily and the names invite confusion. They are deliberately
+kept separate.
+
+| Reflection | Surface scanned | Output channel | Consumer |
+|------------|-----------------|----------------|----------|
+| `daily-log-review` | Server logs (`logs/bridge.log`, etc.) per project | Telegram text summary to `Dev: Valor` | Engineer triage of error-rate spikes / regressions |
+| `daily-report-and-notify` | System activity (commits, PRs, issues, sessions, Telegram decisions, memories, crashes, reflection runs) | Markdown day log written to `~/work-vault/AI Valor Engels System/daily-logs/{date}.md` plus a `~70-word` audio brief to each project's PM Telegram chat | Knowledge search ("what happened on day X?") + spoken executive update |
+
+**Why both exist:** they answer different questions. `daily-log-review` answers
+"is anything actively broken?" by scanning the trailing 24h of bridge/worker
+logs. `daily-report-and-notify` answers "what did the system actually do
+yesterday?" by aggregating substantive events into a durable, searchable file
+on the iCloud-synced work vault. The vault file is auto-indexed by
+`tools/valor_ingest.py` so the agent's knowledge base picks it up without
+extra wiring.
+
+**Daily-report-and-notify pipeline:**
+
+1. `_collect_day_activity(target_date)` aggregates 7 sources concurrently with
+   per-source 30s timeouts and graceful degradation (failures land as
+   `[ERROR: source]` lines, the file still writes).
+2. `_render_day_log()` produces stable section ordering (Commits & PRs →
+   Issues → Sessions → Telegram Decisions → Memory Observations → Errors &
+   Incidents → Reflection Findings) using full named entities so a `grep`
+   over the vault finds the day file.
+3. Atomic write to `~/work-vault/AI Valor Engels System/daily-logs/{date}.md`
+   with idempotent `mkdir -p`. On machines without iCloud sync, the file
+   lands locally — that's expected and not an error.
+4. `_build_audio_brief()` adapts `reflections.pm_audio_briefing.builder.build()`
+   for system-wide input. Pass A (LLM) + Pass B (word-count cut) +
+   Layer 2/3 number-guard regex via direct import (no PR/issue numbers in
+   the spoken transcript).
+5. `tools.tts.synthesize()` produces an `.ogg` (Kokoro local primary, OpenAI
+   tts-1 fallback). On TTS failure, no plaintext fallback is sent — the
+   vault file is authoritative.
+6. RPUSH to `telegram:outbox:daily-report-and-notify-{date}` with the
+   standard voice-note payload shape. The bridge relay drains and delivers.
+
+**Date boundaries are UTC throughout** (per `feedback_timestamp_timezone.md`).
+Target day is `utc_now() - timedelta(days=1)`, so the day file is fully sealed
+by the time the reflection runs at the next scheduler tick after 00:00 UTC.
 
 ### State Model (`models/reflection.py`)
 
@@ -555,7 +599,8 @@ The reflection scheduler starts automatically as part of the standalone worker p
 | psutil | Memory instrumentation | Optional — memory snapshots degrade gracefully if missing |
 | `ANTHROPIC_API_KEY` | `docs-auditor`, `session-intelligence` | Conditional — LLM reflection and docs auditor substrate |
 | `gh` CLI (authenticated) | `task-backlog-check`, `session-intelligence`, `daily-report-and-notify`, `merged-branch-cleanup`, `pr-review-audit` | Conditional |
-| `telethon` | `daily-report-and-notify` | Conditional — Telegram notifications |
+| `tools.tts` (Kokoro local + OpenAI fallback) | `daily-report-and-notify`, `pm-audio-briefing` | Conditional — voice-note synthesis. Failure logs but does not crash the reflection. |
+| Redis outbox + bridge relay | `daily-report-and-notify`, `pm-audio-briefing` | Yes — voice-note delivery uses RPUSH to `telegram:outbox:{session_id}` (no direct Telethon) |
 | `~/Desktop/Valor/projects.json` | Multi-repo reflections | Optional — defaults to AI repo only |
 
 ## Troubleshooting
