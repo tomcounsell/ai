@@ -197,8 +197,8 @@ closed by the maintainer in favor of this umbrella.
 
 For skills that call `tools.browser` Python functions directly (not via CLI):
 1. **Python caller** calls `tools.browser.navigate(url)` or similar.
-2. **`tools/browser/__init__.py`** dispatches to BYOB via its MCP client wrapper (uses
-   `anthropic`-sdk MCP client or subprocess call to the BYOB CLI).
+2. **`tools/browser/__init__.py`** dispatches to BYOB via the **Anthropic SDK in-process MCP
+   client** (no subprocess per call). The same MCP server registered in `.mcp.json` is reused.
 3. Same BYOB → byob-bridge → extension → Chrome path from step 3 above.
 4. **Fallback**: If BYOB bridge is not running, fall through to Playwright headless (existing
    `sync_playwright` path). Failure is surfaced via `BrowserError` with `category="byob_unavailable"`.
@@ -307,11 +307,13 @@ bcu performs action without stealing cursor → result returned
   ```
   The MCP client (Claude Code harness) spawns this process on startup when the server is listed.
 
-- **`tools/browser/` BYOB routing**: Each function checks for BYOB availability by attempting
-  to import or call a thin `_byob_client()` helper. If BYOB bridge is running
-  (`~/.byob/run/byob.sock` exists), dispatch to BYOB. Otherwise fall through to `sync_playwright`.
-  This is a best-effort fallback, not a feature flag — when BYOB is installed and Chrome is open,
-  it is always preferred.
+- **`tools/browser/` BYOB routing (in-process MCP)**: Each function checks for BYOB availability
+  by attempting to import or call a thin `_byob_client()` helper that uses the **Anthropic SDK's
+  in-process MCP client** to talk to the registered BYOB MCP server. No subprocess shell-out per
+  call. If the BYOB bridge is running (`~/.byob/run/byob.sock` exists), dispatch in-process via
+  the MCP client; otherwise fall through to `sync_playwright`. This is a best-effort fallback,
+  not a feature flag — when BYOB is installed and Chrome is open, it is always preferred. The
+  in-process approach avoids per-call native-messaging-host re-handshake (see spike-1).
 
 - **Session collision guard**: A `threading.Lock` (or `filelock` on `~/.byob/session.lock`) in
   `tools/browser/` serializes calls when BYOB is active. Multiple parallel worktrees that would
@@ -454,13 +456,24 @@ The `/update` skill (`scripts/remote-update.sh`) must be extended with:
 1. **BYOB update step**: After pulling main, check if BYOB version has changed
    (`git -C ~/.byob log --oneline -1`). If changed, run `bun install && bun run build` in
    `~/.byob/` and re-register the native messaging host (`bun run setup --skip-extension`).
-2. **bcu update step**: Download the latest bcu binary SHA from upstream. If SHA differs from
-   installed binary, re-download and replace. Prompt user to re-grant Accessibility permission
-   if the bundle identity changed.
+2. **bcu update check + install step**:
+   - First, detect whether bcu is opted-in on this machine (sentinel: `~/.config/valor/computer-use-enabled`,
+     written by `/setup` only after the user confirms).
+   - If opted in but not installed, treat as a fresh install: download the latest bcu binary
+     from upstream (GitHub release asset), verify SHA against the published checksum, install
+     to `~/.local/bin/background-computer-use` (or the upstream-recommended path), and prompt
+     for Accessibility + Screen Recording permission.
+   - If already installed, compare the installed binary's SHA against the latest published SHA.
+     If different, download and replace; re-prompt for Accessibility permission only if the
+     bundle identity changed.
+   - On any install/update hiccup (download fail, SHA mismatch, permission missing), surface a
+     clear, actionable alert to the user (e.g., "bcu update failed: SHA mismatch — skipping;
+     run `/setup` to retry"). Never fail the rest of the update silently.
 3. **Chrome version check**: Read Chrome version. If changed since last update, force re-run
    of `bun run setup` to ensure native messaging registration is fresh.
 
-Both update steps are macOS-only (guard: `[[ "$(uname)" == "Darwin" ]]`).
+All bcu and BYOB steps are macOS-only (guard: `[[ "$(uname)" == "Darwin" ]]`). On non-macOS
+machines, the update script no-ops these steps and prints a one-line note.
 
 ## Agent Integration
 
@@ -670,9 +683,15 @@ Tier 2 (Specialists needed here): mcp-specialist (for MCP server registration re
 - Update `docs/plans/telegram_desktop_control.md`: Set status to `Cancelled`, add note:
   "Superseded by docs/plans/byob_and_computer_use.md — Track 2 (computer-use skill)"
 - Update `/setup` skill: Add BYOB extension install step (`bun run setup` in `~/.byob/`);
-  add bcu download and Accessibility + Screen Recording permission prompts (macOS only)
-- Update `/update` skill: Add BYOB rebuild step; add bcu SHA check and re-download step;
-  add Chrome version change detection → force `bun run setup`
+  before any bcu work, **prompt the user**: "Do you want to enable computer-use (drives native
+  macOS apps for the agent)?". On yes, write the opt-in sentinel
+  (`~/.config/valor/computer-use-enabled`), then download the latest bcu binary, install,
+  request Accessibility + Screen Recording permissions, and surface any install hiccup to the
+  user with an actionable next step. On no, skip bcu entirely (no sentinel written).
+- Update `/update` skill: Add BYOB rebuild step; add the bcu **install-or-update** flow gated
+  on the opt-in sentinel (fresh install if missing, SHA-compare upgrade if present); always
+  alert the user on install/update failure; add Chrome version change detection → force
+  `bun run setup`
 
 ### 7. Write feature documentation
 - **Task ID**: document-feature
@@ -726,18 +745,19 @@ Tier 2 (Specialists needed here): mcp-specialist (for MCP server registration re
 
 ## Open Questions
 
-1. **BYOB MCP tool naming**: The upstream BYOB MCP exposes tools with its own naming scheme.
-   Should the `tools/browser/__init__.py` Python wrapper call those MCP tools via subprocess
-   (shelling out to `byob-mcp` CLI), or use the MCP client SDK to call them in-process? The
-   in-process approach requires importing the Anthropic SDK MCP client; the subprocess approach
-   is simpler but adds latency. What is the preferred integration depth?
+_All resolved 2026-05-03 by Tom (issue #1256)._
 
-2. **`/setup` skill scope for bcu**: Does the user want the `/setup` skill to automatically
-   download and install bcu (requiring notarization checks), or should it just guide the user
-   to the GitHub releases page? Automated download is more convenient but adds complexity.
+1. **BYOB MCP integration depth — RESOLVED**: Use the **in-process Anthropic SDK MCP client** to
+   call the registered BYOB MCP server. No per-call subprocess shell-out. See `## Technical
+   Approach` and the Track 1 Data Flow.
 
-3. **`telegram_desktop_control` plan**: The `telegram_desktop_control.md` plan (`status: Ready`,
-   tracking issue #66 which is now closed) describes Telegram-specific workflows that go beyond
-   the foundational `computer-use` primitives. Should those Telegram-specific workflows be
-   preserved as a follow-on plan, or is the foundational `computer-use` capability sufficient
-   to close the loop?
+2. **`/setup` scope for bcu — RESOLVED**: Automated download + install of latest bcu, gated on
+   an explicit user opt-in prompt ("Do you want to enable computer-use?"). Opt-in writes a
+   sentinel at `~/.config/valor/computer-use-enabled`. The `/update` skill checks the same
+   sentinel on every run: fresh install if opted-in but missing, SHA-compare upgrade otherwise.
+   Any install/update hiccup must surface a clear actionable alert to the user. See
+   `## Update System` and Step 6.
+
+3. **`telegram_desktop_control` plan — RESOLVED**: No Telegram-specific workflows are needed.
+   General-purpose `computer-use` is sufficient. The `telegram_desktop_control.md` plan is
+   cancelled (Step 6) — no follow-on plan.
