@@ -604,19 +604,34 @@ def test_g6_does_not_fire_when_ci_not_passing():
         assert result.row_id != "G6"
 
 
-def test_g6_does_not_fire_when_review_verdict_missing():
-    """G6 is silent when _verdicts['REVIEW'] is absent."""
+def test_g6_fires_when_verdict_in_meta_not_stage_states():
+    """G6 fires when approved verdict is in meta.latest_review_verdict even if _verdicts absent.
+
+    Real-world sdlc-tool stage-query returns the review verdict in _meta.latest_review_verdict
+    (not in stage_states._verdicts). G6 must read meta first to handle this case.
+    """
     states = {k: v for k, v in _g6_happy_states().items() if k != "_verdicts"}
     result = decide_next_dispatch(states, _g6_happy_meta())
+    assert isinstance(result, Dispatch)
+    assert result.skill == SKILL_DO_MERGE
+    assert result.row_id == "G6"
+
+
+def test_g6_does_not_fire_when_review_verdict_missing_from_both():
+    """G6 is silent when review verdict is absent from both meta and _verdicts."""
+    states = {k: v for k, v in _g6_happy_states().items() if k != "_verdicts"}
+    meta = {k: v for k, v in _g6_happy_meta().items() if k != "latest_review_verdict"}
+    result = decide_next_dispatch(states, meta)
     assert isinstance(result, (Dispatch, Blocked))
     if isinstance(result, Dispatch):
         assert result.row_id != "G6"
 
 
 def test_g6_does_not_fire_when_review_verdict_is_changes_requested():
-    """G6 is silent when review verdict is CHANGES REQUESTED."""
+    """G6 is silent when review verdict is CHANGES REQUESTED (in both meta and _verdicts)."""
     states = {**_g6_happy_states(), "_verdicts": {"REVIEW": {"verdict": "CHANGES REQUESTED"}}}
-    result = decide_next_dispatch(states, _g6_happy_meta())
+    meta = {**_g6_happy_meta(), "latest_review_verdict": "CHANGES REQUESTED"}
+    result = decide_next_dispatch(states, meta)
     assert isinstance(result, (Dispatch, Blocked))
     if isinstance(result, Dispatch):
         assert result.row_id != "G6"

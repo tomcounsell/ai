@@ -408,8 +408,12 @@ def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict)
     # DOCS must be completed before dispatching merge — G6 must not bypass the docs gate.
     if stage_states.get("DOCS") != STATUS_COMPLETED:
         return None
-    verdicts = stage_states.get("_verdicts") or {}
-    review_verdict = _verdict_text(verdicts.get("REVIEW"))
+    review_verdict = ""
+    if meta.get("latest_review_verdict"):
+        review_verdict = meta["latest_review_verdict"]
+    else:
+        verdicts = stage_states.get("_verdicts") or {}
+        review_verdict = _verdict_text(verdicts.get("REVIEW"))
     if "APPROVED" not in review_verdict.upper():
         return None
     return Dispatch(

@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: feature
 appetite: Medium
 owner: Valor
@@ -316,9 +316,9 @@ Reflection scheduler tick → `daily_report.run()` → `_collect_day_activity()`
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/reflections.md` — describe the new daily-report behavior (vault destination, audio delivery), explicitly distinguish from `daily-log-review`. Add a "Daily reflections" subsection comparing the two.
-- [ ] Update `docs/features/README.md` index if the reflections entry needs a new tagline.
-- [ ] No new feature doc required — daily-report is a reflection, covered by `docs/features/reflections.md`.
+- [x] Update `docs/features/reflections.md` — describe the new daily-report behavior (vault destination, audio delivery), explicitly distinguish from `daily-log-review`. Add a "Daily reflections" subsection comparing the two.
+- [x] Update `docs/features/README.md` index if the reflections entry needs a new tagline.
+- [x] No new feature doc required — daily-report is a reflection, covered by `docs/features/reflections.md`.
 
 ### External Documentation Site
 
@@ -326,10 +326,10 @@ Not applicable — this repo doesn't use Sphinx/MkDocs.
 
 ### Inline Documentation
 
-- [ ] Docstring on `_collect_day_activity()` enumerating the 7 data sources and their date-filter contracts.
-- [ ] Docstring on `_render_day_log()` describing section order and entity-naming requirements (full names, not bare numbers).
-- [ ] Docstring on `_build_audio_brief()` referencing `/do-debrief` pattern and the no-numbers regex layers.
-- [ ] One-line comment on the UTC date-boundary choice in `run()` (per `feedback_timestamp_timezone.md`).
+- [x] Docstring on `_collect_day_activity()` enumerating the 7 data sources and their date-filter contracts.
+- [x] Docstring on `_render_day_log()` describing section order and entity-naming requirements (full names, not bare numbers).
+- [x] Docstring on `_build_audio_brief()` referencing `/do-debrief` pattern and the no-numbers regex layers.
+- [x] One-line comment on the UTC date-boundary choice in `run()` (per `feedback_timestamp_timezone.md`).
 
 ## Success Criteria
 
@@ -339,10 +339,10 @@ Not applicable — this repo doesn't use Sphinx/MkDocs.
 - [ ] Telegram delivery is a `.ogg` voice note constructed via the `/do-debrief` pattern (~70 spoken words, decisions/heads-up/FYIs structure). No text preface. No plaintext fallback.
 - [ ] Audio guard regex test confirms no PR/issue numbers slip into the spoken transcript across a fixture set including: "PR 1263", "issue #1263", "10 commits", "ms" exempted, "%" exempted.
 - [ ] `daily-log-review` (#1188) test suite still passes — verifies no accidental breakage.
-- [ ] `docs/features/reflections.md` updated with new daily-log behavior + the daily-report-vs-daily-log-review distinction.
-- [ ] `config/reflections.yaml` `daily-report-and-notify` flipped to `enabled: true`.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] `docs/features/reflections.md` updated with new daily-log behavior + the daily-report-vs-daily-log-review distinction.
+- [x] `config/reflections.yaml` `daily-report-and-notify` flipped to `enabled: true`.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
 - [ ] No raw Redis access in the new code (per `feedback_never_raw_delete_popoto.md`) — enforced by `validate_no_raw_redis_delete.py` hook.
 
 ## Team Orchestration
