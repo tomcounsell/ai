@@ -129,6 +129,11 @@ def test_run_handles_tts_failure_without_crashing(yesterday_utc, temp_vault):
         patch.object(dr, "_collect_day_activity", side_effect=fake_collect),
         patch.object(dr, "_build_audio_brief", return_value=("Brief transcript", "")),
         patch("tools.tts.synthesize", side_effect=fake_tts),
+        patch.object(
+            dr,
+            "load_local_projects",
+            return_value=[{"slug": "ai", "telegram": {"groups": {"PM: ai": {"chat_id": -98765}}}}],
+        ),
     ):
         result = asyncio.run(dr.run())
 
