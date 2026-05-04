@@ -129,7 +129,7 @@ kept separate.
 | Reflection | Surface scanned | Output channel | Consumer |
 |------------|-----------------|----------------|----------|
 | `daily-log-review` | Server logs (`logs/bridge.log`, etc.) per project | Telegram text summary to `Dev: Valor` | Engineer triage of error-rate spikes / regressions |
-| `daily-report-and-notify` | System activity (commits, PRs, issues, sessions, Telegram decisions, memories, crashes, reflection runs) | Markdown day log written to `~/work-vault/AI Valor Engels System/daily-logs/{date}.md` plus a `~70-word` audio brief to each project's PM Telegram chat | Knowledge search ("what happened on day X?") + spoken executive update |
+| `daily-report-and-notify` | System activity (commits, PRs, issues, sessions, Telegram decisions, memories, crashes, reflection runs) | Markdown day log written to `~/work-vault/AI Valor Engels System/daily-logs/{date}.md` plus a `~70-word` audio brief to the first configured PM Telegram chat (system-wide brief; fan-out unsafe with cleanup_file relay contract) | Knowledge search ("what happened on day X?") + spoken executive update |
 
 **Why both exist:** they answer different questions. `daily-log-review` answers
 "is anything actively broken?" by scanning the trailing 24h of bridge/worker
