@@ -29,6 +29,7 @@ from scripts.update import (  # noqa: E402
     hardlinks,
     hooks,
     kokoro,
+    mcp_byob,
     mcp_memory,
     migrations,
     npm_tools,
@@ -883,6 +884,25 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if not _ollama_ok:
             # Title-gen falls back to category-only stubs — informational only.
             pass
+
+    # Step 4.9: Verify BYOB MCP registration in ~/.claude.json (idempotent).
+    # Same lock + atomic-write pattern as the memory MCP step above. The
+    # registrar self-heals drift on every /update invocation regardless of
+    # whether ~/.byob is being rebuilt this run. Failure is non-fatal --
+    # BYOB is a convenience surface; the agent still has agent-browser /
+    # bowser as parallel browser surfaces. macOS-only by ergonomics (BYOB
+    # ships a Chrome MV3 extension) but the registrar itself is platform-
+    # agnostic; the BYOB binary install is gated separately.
+    log("Verifying BYOB MCP registration...", v)
+    _mcp_byob_write = config.do_service_restart  # full/cron only
+    mcp_byob_result = mcp_byob.verify_byob_mcp(write=_mcp_byob_write)
+    log(f"  {mcp_byob_result.message}", v)
+    if not mcp_byob_result.ok:
+        if _mcp_byob_write:
+            result.warnings.append(f"BYOB MCP: {mcp_byob_result.message}")
+        else:
+            # --verify mode: report drift but do not warn aggressively
+            result.warnings.append(f"BYOB MCP drift: {mcp_byob_result.message}")
 
     # Step 5: Service management
     if config.do_service_restart:
