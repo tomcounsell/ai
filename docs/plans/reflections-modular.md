@@ -1,32 +1,35 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor
 created: 2026-04-17
 tracking: https://github.com/tomcounsell/ai/issues/1028
 last_comment_id:
+revision_applied: true
 ---
 
 # Reflections Modularization: One File per Reflection, Grouped Dashboard
 
 ## Problem
 
-The reflections system has 31 recurring jobs declared in `config/reflections.yaml`, dispatched by `agent/reflection_scheduler.py`. After PR #967 extracted the 3,086-line monolith, their definitions still live in 9 bundle modules totaling ~3,250 LOC (`reflections/auditing.py` 715L, `reflections/maintenance.py` 470L, `agent/sustainability.py` 626L, etc.). The dashboard renders them as a 31-row flat list that dominates the `localhost:8500` home view.
+The reflections system has 33 recurring jobs declared in `config/reflections.yaml`, dispatched by `agent/reflection_scheduler.py`. After PR #967 extracted the 3,086-line monolith, their definitions still live in bundle modules totaling ~3,250 LOC (`reflections/auditing.py` 715L, `reflections/maintenance.py` 470L, `agent/sustainability.py` 626L, etc.). The dashboard renders them as a flat list that dominates the `localhost:8500` home view.
 
 **Current behavior:**
 - Bundle modules force a reader to scroll past 5 unrelated reflections to understand one. Cadence rationale, failure modes, and cross-references aren't consistently documented per reflection.
 - A failing test in `reflections/auditing.py` doesn't identify which of its 6 reflections broke without digging.
-- The dashboard "Reflections" section on `localhost:8500` is a 31-row flat table with no grouping, no collapse, no summary. It owns ~70% of the viewport.
-- 9 of the 31 reflections live outside `reflections/` (in `agent/sustainability.py`, `agent/agent_session_queue.py`, `scripts/`) — the callable registry is the only thing that makes them cohere as a subsystem.
+- The dashboard "Reflections" section on `localhost:8500` is a flat table with no grouping, no collapse, no summary. It owns ~70% of the viewport.
+- 9 reflections live outside `reflections/` (in `agent/sustainability.py`, `agent/agent_session_queue.py`, `scripts/`) — the callable registry is the only thing that makes them cohere as a subsystem.
 - `config/reflections.yaml:58` still references `ReflectionRunner` (deleted in PR #967).
+- The dashboard's group taxonomy is defined twice: as `REFLECTION_GROUPS` constants in `ui/data/reflections.py` AND implicitly via bundle file membership. The Python constants are also stale (e.g. references `docs-auditor` while YAML has `documentation-audit` and `feature-docs-audit`). Single source of truth is needed.
 
 **Desired outcome:**
 - Every reflection is a self-contained file at `reflections/{group}/{reflection_name}.py` with a module docstring covering purpose, cadence rationale, failure modes, and related reflections.
 - Shared helpers live in one file: `reflections/utilities.py` — only genuinely shared logic (≥3 callers or non-trivial).
 - Model properties and methods stay on their Popoto models; reflection files orchestrate, they don't own model logic.
-- Dashboard renders 7 collapsible groups; default collapsed, each summary shows enabled/total, soonest next_due, and error indicator.
-- `agent/sustainability.py` is empty of reflection callables; stale YAML comment removed.
+- Dashboard renders 4 collapsible groups (matching the existing dashboard taxonomy: `agents`, `housekeeping`, `audits`, `memory`); default collapsed, each summary shows enabled/total, soonest next_due, and error indicator.
+- `agent/sustainability.py` deleted; stale YAML comment removed.
+- YAML `group:` field becomes the single source of truth for group membership; `REFLECTION_GROUPS` constants in `ui/data/reflections.py` deleted.
 
 ## Freshness Check
 
@@ -53,7 +56,7 @@ The reflections system has 31 recurring jobs declared in `config/reflections.yam
 
 **Active plans in `docs/plans/` overlapping this area:** None. `docs/plans/reflections-quality-pass.md` remains closed-via-#933.
 
-**Notes:** The dashboard-domination problem is now more acute — 9/31 reflections are disabled, yet the dashboard renders all 31 rows regardless of enabled state. Collapsible grouping is more valuable post-drift, not less. Any `enabled: false` reflection has a comment explaining why; preserve that comment verbatim when adding the `group:` field during YAML cutover (task 9).
+**Notes:** The dashboard-domination problem is now more acute — 9/33 reflections are disabled, yet the dashboard renders all rows regardless of enabled state. Collapsible grouping is more valuable post-drift, not less. Any `enabled: false` reflection has a comment explaining why; preserve that comment verbatim when adding the `group:` field during YAML cutover (task 6).
 
 ## Prior Art
 
@@ -116,18 +119,19 @@ No prerequisites — this work has no external dependencies, no new env vars, no
 ### Key Elements
 
 - **`reflections/utilities.py`** — shared helpers. Contents: `load_local_projects()` (5 callers) and `run_llm_reflection()` (wraps Anthropic SDK config). Replaces `reflections/utils.py`.
-- **7 group directories** under `reflections/`: `core/`, `self_healing/`, `maintenance/`, `auditing/`, `memory/`, `tasks/`, `pipelines/`. Each with an `__init__.py` (empty — no package-level re-exports).
-- **31 reflection files** — one per reflection. Each a self-contained teaching artifact: module docstring → imports → `run(...)` public entry → private helpers.
-- **Relocated callables** — the 4 `agent/sustainability.py` reflections move into `reflections/self_healing/`. The 3 `agent/agent_session_queue.py` callables get thin wrappers in `reflections/core/` (keeping the queue functions where ops scripts call them). `scripts/popoto_index_cleanup.py` and `scripts/memory_consolidation.py` get thin wrappers or move, depending on whether they're used outside the scheduler.
-- **YAML migration** — `config/reflections.yaml` updates every `callable:` path and adds an explicit `group:` field per entry. Stale `ReflectionRunner` comment at line 58 removed.
-- **Dashboard grouping** — `ui/data/reflections.py` returns grouped structure; `ui/templates/reflections/_partials/status_grid.html` renders `<details>` per group.
+- **4 group directories** under `reflections/`: `agents/`, `housekeeping/`, `audits/`, `memory/`. Each with an `__init__.py` (empty — no package-level re-exports). These match the existing dashboard taxonomy in `ui/data/reflections.py` (`GROUP_AGENTS`, `GROUP_HOUSEKEEPING`, `GROUP_AUDITS`, `GROUP_MEMORY`).
+- **One file per reflection** — every reflection in `config/reflections.yaml` (33 currently) gets a file at `reflections/{group}/{name}.py`. Each is a self-contained teaching artifact: module docstring → imports → `run(...)` public entry → private helpers. **Includes agent-type reflections** (`system-health-digest`, `sentry-issue-triage`, plus any others with `execution_type: agent`): these get placeholder files whose docstring documents purpose/cadence/failure modes and explicitly points at the YAML `command:` as the executable source-of-truth.
+- **Relocated callables** — the 4 `agent/sustainability.py` reflections move into `reflections/agents/`. The 3 `agent/agent_session_queue.py` callables get thin wrappers in `reflections/agents/` and `reflections/housekeeping/` (keeping the queue functions where ops scripts call them). `scripts/popoto_index_cleanup.py` and `scripts/memory_consolidation.py` keep thin shims in their original locations (per Tom: existing CLI invocations may exist; safer to leave shims than risk breaking them); the reflection logic moves into `reflections/housekeeping/redis_index_cleanup.py` and `reflections/memory/memory_dedup.py` respectively.
+- **YAML migration** — `config/reflections.yaml` updates every `callable:` path and adds an explicit `group:` field per entry (one of `agents`, `housekeeping`, `audits`, `memory`). Stale `ReflectionRunner` comment at line 58 removed.
+- **`agent/sustainability.py` fully deleted** — all 4 reflections move out; recon will re-confirm no external non-test callers; if `send_hibernation_notification` or `sustainability_digest` exports have surviving callers, they relocate to a non-reflection module (e.g. `agent/notifications.py`) before deletion.
+- **Dashboard grouping** — `ui/data/reflections.py` returns grouped structure; the `REFLECTION_GROUPS` Python mapping is deleted (YAML `group:` field is the new source of truth); `ui/templates/reflections/_partials/status_grid.html` renders `<details>` per group.
 
 ### Flow
 
-**Phase A (skeleton):** Create `reflections/utilities.py` and the 7 group directories with empty `__init__.py`.
-**Phase B (migrate, parallel per group):** For each group, create individual reflection files by extracting from the source bundle (or moving from `agent/sustainability.py` / wrapping from `agent/agent_session_queue.py`).
-**Phase C (cutover):** Update `config/reflections.yaml` all at once (new paths + `group:` fields), then delete the 4 bundle modules + `reflections/utils.py` + stale comment.
-**Phase D (dashboard):** Update `ui/data/reflections.py` to group, update Jinja template to render collapsible `<details>`.
+**Phase A (skeleton):** Create `reflections/utilities.py` and the 4 group directories with empty `__init__.py`.
+**Phase B (migrate, parallel per group):** For each group, create individual reflection files by extracting from the source bundle (or moving from `agent/sustainability.py` / wrapping from `agent/agent_session_queue.py`). Includes agent-type placeholder files.
+**Phase C (cutover):** Update `config/reflections.yaml` all at once (new paths + `group:` fields), then delete the 4 bundle modules + `reflections/utils.py` + `agent/sustainability.py` + stale comment.
+**Phase D (dashboard):** Update `ui/data/reflections.py` to read `group:` from YAML (delete `REFLECTION_GROUPS` constants), update Jinja template to render collapsible `<details>`.
 **Phase E (docs + verify):** Update `docs/features/reflections.md`, any `docs/features/README.md` entries, and `CLAUDE.md` references. Run full test suite + one scheduler tick to verify no callable resolution breaks.
 
 ### Technical Approach
@@ -160,19 +164,21 @@ See also:
 
 **Wrappers vs. moves:**
 - **Move** when the function is used *only* by the reflection scheduler: all 4 `agent/sustainability.py` callables, `scripts/memory_consolidation.py:run_consolidation`, `scripts/popoto_index_cleanup.py:run_cleanup`.
-- **Wrap** when the function is called by non-reflection code paths: the 3 `agent/agent_session_queue.py` callables stay in-place (they're also called by ops scripts); `reflections/core/*.py` imports and delegates.
+- **Wrap** when the function is called by non-reflection code paths: the 3 `agent/agent_session_queue.py` callables stay in-place (they're also called by ops scripts); the corresponding `reflections/agents/*.py` or `reflections/housekeeping/*.py` file imports and delegates. Same pattern for `scripts/popoto_index_cleanup.py` and `scripts/memory_consolidation.py` per Tom's resolution: shims stay at original paths, reflection logic moves into the new files.
 
 **YAML grouping field:**
 ```yaml
 - name: circuit-health-gate
-  group: self_healing    # NEW: explicit for dashboard rendering
+  group: agents          # NEW: one of agents | housekeeping | audits | memory
   description: "..."
   interval: 60
   priority: high
   execution_type: function
-  callable: "reflections.self_healing.circuit_health_gate.run"
+  callable: "reflections.agents.circuit_health_gate.run"
   enabled: true
 ```
+
+**Group assignment heuristic:** The dashboard's existing `REFLECTION_GROUPS` constant in `ui/data/reflections.py` is the starting point. During YAML cutover, each reflection's `group:` matches that mapping where present. New reflections not in the mapping (e.g. `documentation-audit`, `feature-docs-audit`, `knowledge-reindex`, `embedding-orphan-sweep`) inherit by intuitive fit: anything ending in `-audit` → `audits`; anything memory/embedding-related → `memory`; anything sweeping/cleaning → `housekeeping`. The single source of truth shifts from the Python constant to the YAML field, and the constant gets deleted in Phase D.
 
 **Dashboard collapsible-rendering pattern:**
 
@@ -202,8 +208,8 @@ The current template wraps the entire grid in an HTMX swap target (`#status-grid
 **`ui/data/reflections.py` addition:** new function `get_grouped_reflections()` that returns a list of group dicts:
 ```python
 {
-  "name": "self_healing",
-  "label": "Self-Healing",
+  "name": "agents",
+  "label": "Agents",
   "reflections": [...],            # existing per-reflection dicts
   "enabled_count": 5,
   "total_count": 6,
@@ -225,12 +231,12 @@ Group labels come from a constant mapping in `ui/data/reflections.py` (keeps dis
 
 ### Error State Rendering
 - [ ] Dashboard group summary with a failing child: red dot renders, group label unchanged. Test in `tests/unit/test_ui_reflections_data.py`.
-- [ ] Empty group (e.g., if `tasks/` ships with only 1 reflection after disabling one): group still renders with `0/1` display.
+- [ ] Empty group (e.g., if `memory/` ships with only 1 reflection after disabling others): group still renders with `0/1` display.
 
 ## Test Impact
 
 - [ ] `tests/unit/test_reflections_package.py` — UPDATE: 26 tests import from `reflections.maintenance`, `reflections.auditing`, etc. Imports change to `reflections.maintenance.tech_debt_scan`, `reflections.auditing.documentation_audit`, etc. Test logic stays.
-- [ ] `tests/unit/test_sustainability.py` — UPDATE: 23 tests import from `agent.sustainability`. Move to `tests/unit/reflections/test_self_healing.py` (or per-reflection files) with new import paths.
+- [ ] `tests/unit/test_sustainability.py` — UPDATE: 23 tests import from `agent.sustainability`. Move to `tests/unit/reflections/test_agents_self_healing.py` (or per-reflection files) with new import paths pointing at `reflections.agents.{circuit_health_gate,session_recovery_drip,session_count_throttle,failure_loop_detector}`.
 - [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE: 47 tests. Any that mock/assert specific callable paths need path updates. Most are generic scheduler tests; minimal impact.
 - [ ] `tests/unit/test_ui_reflections_data.py` — UPDATE + EXTEND: 12 existing tests stay; add new tests for `get_grouped_reflections()` covering empty groups, all-disabled groups, mixed-status groups, error aggregation.
 - [ ] `tests/integration/test_reflections_redis.py` — UPDATE: 13 tests. Imports change; Redis persistence tests unaffected.
@@ -243,7 +249,8 @@ No tests to DELETE — all existing coverage is relevant. No REPLACE needed — 
 - **Don't normalize docstring style across all Popoto models.** Model behavior stays on models, but this plan is not a doc pass on `models/`. Scope creep.
 - **Don't replace HTMX with a client framework.** The `<details>`-outside-swap-target approach works with the existing stack. Don't add Idiomorph, Alpine.js, or Lit just to solve open-state preservation.
 - **Don't auto-derive groups from callable module paths in code.** The user asked for explicit `group:` fields in YAML — stick to that. Auto-derivation is implicit magic.
-- **Don't collapse `reflections/session_intelligence.py`, `behavioral_learning.py`, `daily_report.py` further.** These are already single-file and already match the one-file-per-reflection principle; they just move into `reflections/pipelines/`.
+- **Don't collapse `reflections/session_intelligence.py`, `behavioral_learning.py`, `daily_report.py` further.** These are already single-file and already match the one-file-per-reflection principle; they just move into the appropriate group directory (`agents/`, `housekeeping/`, `audits/` respectively per dashboard taxonomy).
+- **Don't introduce a new group taxonomy.** Per Tom: use the existing 4 dashboard groups (`agents`, `housekeeping`, `audits`, `memory`) verbatim. Do not propose `core/`, `self_healing/`, `tasks/`, `pipelines/`, or any other directory name.
 - **Don't redesign the reflection details modal or run history pane.** The current drill-in view works; only the top-level grid changes.
 
 ## Risks
@@ -293,7 +300,7 @@ No agent integration required — reflections are scheduled background jobs exec
 - [ ] No new `docs/infra/` doc needed — no infra changes.
 
 ### Inline Documentation
-- [ ] Each of the 31 reflection files has a module docstring covering purpose, cadence rationale, failure modes, related reflections, and cross-references (see Technical Approach for the standard shape).
+- [ ] Each reflection file (33 currently) has a module docstring covering purpose, cadence rationale, failure modes, related reflections, and cross-references (see Technical Approach for the standard shape). Agent-type files use the placeholder docstring pattern pointing at the YAML `command:`.
 - [ ] `reflections/utilities.py` has a module docstring listing each public helper, its purpose, and its callers.
 
 ### CLAUDE.md
@@ -301,15 +308,18 @@ No agent integration required — reflections are scheduled background jobs exec
 
 ## Success Criteria
 
-- [ ] `reflections/{group}/{name}.py` exists for all 31 reflections, each with a single `run()` public entry and a module docstring matching the standard shape
+- [ ] `reflections/{group}/{name}.py` exists for every reflection in `config/reflections.yaml` (33 currently), each with a single `run()` public entry and a module docstring matching the standard shape. Agent-type reflections get placeholder files whose docstring points at YAML `command:` as executable source-of-truth.
 - [ ] `reflections/utilities.py` exists with `load_local_projects` + `run_llm_reflection`; `reflections/utils.py` deleted
-- [ ] `reflections/maintenance.py`, `reflections/auditing.py`, `reflections/memory_management.py`, `reflections/task_management.py` all deleted
-- [ ] `agent/sustainability.py` contains no reflection callables (file either deleted or reduced to non-reflection helpers with justification)
-- [ ] `config/reflections.yaml`: every entry has a `group:` field, every `callable:` points at a resolvable path, stale `ReflectionRunner` comment at line 58 removed
-- [ ] Dashboard at `localhost:8500` renders 7 collapsible groups, default collapsed, with enabled/total count + soonest next_due + error indicator per group
+- [ ] All single-file bundles deleted: `reflections/maintenance.py`, `reflections/auditing.py`, `reflections/memory_management.py`, `reflections/task_management.py`, `reflections/session_intelligence.py`, `reflections/behavioral_learning.py`, `reflections/daily_report.py`
+- [ ] `agent/sustainability.py` **fully deleted** (per Tom). Any non-reflection helpers with surviving callers (`send_hibernation_notification`, `sustainability_digest`) relocated to `agent/notifications.py` first.
+- [ ] `scripts/popoto_index_cleanup.py` and `scripts/memory_consolidation.py` retained as thin import-and-delegate shims (per Tom: existing CLI invocations may exist; safer to leave shims).
+- [ ] `config/reflections.yaml`: every entry has a `group:` field with value in `{agents, housekeeping, audits, memory}`, every `callable:` points at a resolvable path, stale `ReflectionRunner` comment at line 58 removed
+- [ ] `REFLECTION_GROUPS`, `GROUP_DESCRIPTIONS`, and `GROUP_DISPLAY_ORDER` constants deleted from `ui/data/reflections.py` (YAML `group:` field is now the single source of truth)
+- [ ] Dashboard at `localhost:8500` renders 4 collapsible groups (`Agents`, `Housekeeping`, `Audits`, `Memory`), default collapsed, with enabled/total count + soonest next_due + error indicator per group
 - [ ] HTMX auto-refresh preserves `<details>` open/closed state (verified manually)
-- [ ] All 98 reflection-related tests pass after import-path updates
+- [ ] All ~120 reflection-related tests pass after import-path updates (counts: 26 + 23 + 47 + 12 + 13 = 121)
 - [ ] New test: `test_all_callables_resolve` iterates `config/reflections.yaml` and asserts `_resolve_callable()` succeeds for every entry
+- [ ] New test: `test_every_yaml_entry_has_group` iterates `config/reflections.yaml` and asserts every entry has a `group:` field with valid value
 - [ ] `/do-test` passes
 - [ ] `/do-docs` passes
 - [ ] `python -m ruff check .` and `python -m ruff format --check .` both clean
@@ -328,21 +338,21 @@ Single-dev refactor; team structure stays lean.
   - Agent Type: builder
   - Resume: true
 
-- **Builder (per group — 7 parallel)**
-  - Name: `group-builder-{group}` (7 instances: `core`, `self_healing`, `maintenance`, `auditing`, `memory`, `tasks`, `pipelines`)
-  - Role: Migrate all reflections for one group — extract/move/wrap to `reflections/{group}/{name}.py`, write standardized docstrings, keep behavior identical
+- **Builder (per group — 4 parallel)**
+  - Name: `group-builder-{group}` (4 instances: `agents`, `housekeeping`, `audits`, `memory`)
+  - Role: Migrate all reflections for one group — extract/move/wrap to `reflections/{group}/{name}.py`, write standardized docstrings, keep behavior identical, including agent-type placeholder files where applicable
   - Agent Type: builder
   - Resume: true
 
 - **Builder (YAML cutover)**
   - Name: `yaml-cutover-builder`
-  - Role: Update `config/reflections.yaml` paths + add `group:` fields; delete the 4 bundle modules + `reflections/utils.py` + stale comment line 58
+  - Role: Update `config/reflections.yaml` paths + add `group:` fields per entry (one of `agents`, `housekeeping`, `audits`, `memory`); delete the 4 bundle modules + `reflections/utils.py` + `agent/sustainability.py` + stale comment line 58
   - Agent Type: builder
   - Resume: true
 
 - **Builder (dashboard)**
   - Name: `dashboard-builder`
-  - Role: Add `get_grouped_reflections()` to `ui/data/reflections.py`; restructure `ui/templates/reflections/_partials/status_grid.html` for collapsible groups; add route for per-group partial refresh
+  - Role: Add `get_grouped_reflections()` to `ui/data/reflections.py` (reading `group:` from YAML); delete `REFLECTION_GROUPS`/`GROUP_DESCRIPTIONS`/`GROUP_DISPLAY_ORDER` constants; restructure `ui/templates/reflections/_partials/status_grid.html` for collapsible groups; add route for per-group partial refresh
   - Agent Type: builder
   - Resume: true
 
@@ -369,141 +379,122 @@ Single-dev refactor; team structure stays lean.
 ### 1. Scaffold utilities + group directories
 - **Task ID**: build-scaffold
 - **Depends On**: none
-- **Validates**: file existence — `reflections/utilities.py`, `reflections/{core,self_healing,maintenance,auditing,memory,tasks,pipelines}/__init__.py`
+- **Validates**: file existence — `reflections/utilities.py`, `reflections/{agents,housekeeping,audits,memory}/__init__.py`
 - **Assigned To**: scaffold-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `reflections/utilities.py` with `load_local_projects` and `run_llm_reflection` copied verbatim from `reflections/utils.py` (keep other helpers in `utils.py` for now — they'll be inlined during group migrations).
-- Create 7 group directories under `reflections/` with empty `__init__.py`.
+- Create 4 group directories under `reflections/` (`agents/`, `housekeeping/`, `audits/`, `memory/`) with empty `__init__.py`.
 
-### 2. Migrate `core` group
-- **Task ID**: build-core
+### 2. Migrate `agents` group
+- **Task ID**: build-agents
 - **Depends On**: build-scaffold
-- **Validates**: `tests/unit/test_reflections_package.py::test_core_callables` (add)
-- **Assigned To**: group-builder-core
+- **Validates**: existing `tests/unit/test_sustainability.py` still passes via new paths; `tests/unit/test_reflections_package.py` agent-related tests pass
+- **Assigned To**: group-builder-agents
 - **Agent Type**: builder
-- **Parallel**: true (with 3-8)
-- Create `reflections/core/session_liveness_check.py` → thin wrapper calling `agent.agent_session_queue._agent_session_health_check`
-- Create `reflections/core/agent_session_cleanup.py` → wrapper for `cleanup_corrupted_agent_sessions`
-- Create `reflections/core/stale_branch_cleanup.py` → wrapper for `cleanup_stale_branches_all_projects`
-- Create `reflections/core/redis_index_cleanup.py` → wrapper for `scripts.popoto_index_cleanup.run_cleanup`
+- **Parallel**: true (with 3-5)
+- Wrap (thin shim, source stays put): `agent.agent_session_queue._agent_session_health_check` → `reflections/agents/session_liveness_check.py`; `cleanup_corrupted_agent_sessions` → `reflections/agents/agent_session_cleanup.py`
+- Move from `agent/sustainability.py`: `circuit_health_gate`, `session_recovery_drip`, `session_count_throttle`, `failure_loop_detector` → per-file `reflections/agents/*.py`. Carry internal helpers (`_compute_fingerprint`, `_file_github_issue`, `_send_telegram`) with whichever reflection uses them; duplicate if shared by ≥2.
+- Move: `reflections/session_intelligence.py` → `reflections/agents/session_intelligence.py`
+- Placeholder file (agent-type, no Python callable): `reflections/agents/system_health_digest.py` — module docstring documents purpose/cadence/failure modes and points at YAML `command:` as executable source-of-truth
+- Placeholder file (agent-type, if applicable): `reflections/agents/pm_audio_briefing.py` — same pattern; verify `execution_type` during build before treating as placeholder
 - Each file gets a standardized docstring per Technical Approach
+- **Preserve sync signatures** — per commit `65fcfcc5`, several reflections were converted from async to sync; do not reintroduce `async def run()`
+- **Preserve `to_unix_ts` imports** — the 3 sustainability reflections (`session_recovery_drip`, `session_count_throttle`, `failure_loop_detector`) use `from bridge.utc import to_unix_ts` per the naive-datetime hotfix (commit `9e3a64f5`); preserve verbatim
 
-### 3. Migrate `self_healing` group
-- **Task ID**: build-self-healing
+### 3. Migrate `housekeeping` group
+- **Task ID**: build-housekeeping
 - **Depends On**: build-scaffold
-- **Validates**: existing `tests/unit/test_sustainability.py` still passes via new paths
-- **Assigned To**: group-builder-self_healing
+- **Validates**: `tests/unit/test_reflections_package.py` housekeeping tests pass with new imports
+- **Assigned To**: group-builder-housekeeping
 - **Agent Type**: builder
-- **Parallel**: true (with 2, 4-8)
-- Move `circuit_health_gate`, `session_recovery_drip`, `session_count_throttle`, `failure_loop_detector` from `agent/sustainability.py` into per-file `reflections/self_healing/*.py`
-- Carry internal helpers (`_compute_fingerprint`, `_file_github_issue`, `_send_telegram`) with whichever reflection uses them; duplicate if shared by ≥2
-- Create `reflections/self_healing/system_health_digest.py` → `execution_type: agent` entries still declare their `command:` in YAML; the file exists for docs and any future function conversion (docstring + placeholder if execution_type stays `agent`)
-- Create `reflections/self_healing/sentry_issue_triage.py` → same pattern (currently disabled, `execution_type: agent`)
+- **Parallel**: true (with 2, 4-5)
+- Wrap (thin shim, source stays put): `agent.agent_session_queue.cleanup_stale_branches_all_projects` → `reflections/housekeeping/stale_branch_cleanup.py`
+- Move logic, keep CLI shim: `scripts/popoto_index_cleanup.py:run_cleanup` → `reflections/housekeeping/redis_index_cleanup.py`. Per Tom: leave the shim at `scripts/popoto_index_cleanup.py` (may be invoked manually as CLI). The shim becomes a thin import-and-delegate wrapper.
+- Split `reflections/maintenance.py` into per-file units in `reflections/housekeeping/`: `tech_debt_scan.py`, `redis_ttl_cleanup.py`, `redis_quality_audit.py`, `merged_branch_cleanup.py`, `disk_space_check.py`, `analytics_rollup.py` — **note** `tech_debt_scan` and `redis_quality_audit` will move to `audits/` per group-membership rules; only the cleanup/check/rollup ones land in `housekeeping/`
+- Move: `reflections/behavioral_learning.py` → `reflections/housekeeping/behavioral_learning.py`. Preserve `to_unix_ts` import (per commit `9e3a64f5`)
+- Move: `do-docs-branch-sweeper` callable (locate via `config/reflections.yaml` → its current source module) into `reflections/housekeeping/do_docs_branch_sweeper.py`
+- Inline single-use helpers (`extract_structured_errors`, regex constants) into their owning files
 
-### 4. Migrate `maintenance` group
-- **Task ID**: build-maintenance
+### 4. Migrate `audits` group
+- **Task ID**: build-audits
 - **Depends On**: build-scaffold
-- **Validates**: `tests/unit/test_reflections_package.py` maintenance tests pass with new imports
-- **Assigned To**: group-builder-maintenance
+- **Validates**: `tests/unit/test_reflections_package.py` audit tests pass with new imports
+- **Assigned To**: group-builder-audits
 - **Agent Type**: builder
-- **Parallel**: true (with 2-3, 5-8)
-- Split `reflections/maintenance.py` into 6 files: `tech_debt_scan.py`, `redis_ttl_cleanup.py`, `redis_quality_audit.py`, `merged_branch_cleanup.py`, `disk_space_check.py`, `analytics_rollup.py`
-- Inline `extract_structured_errors` (single caller) into its owning file
-- Each file imports `load_local_projects` from `reflections.utilities` as needed
+- **Parallel**: true (with 2-3, 5)
+- Split `reflections/auditing.py` (715L, 6 reflections) into per-file units under `reflections/audits/`: `daily_log_review.py`, `documentation_audit.py`, `feature_docs_audit.py`, `skills_audit.py`, `hooks_audit.py`, `pr_review_audit.py`
+- Move from `maintenance.py` (per group-fit): `tech_debt_scan.py`, `redis_quality_audit.py` → `reflections/audits/`
+- Split `reflections/task_management.py` into `reflections/audits/task_backlog_check.py` and `reflections/audits/principal_staleness.py` (these were in the prior `tasks/` group; per dashboard taxonomy they belong in `audits/`)
+- Move: `reflections/daily_report.py` → `reflections/audits/daily_report_and_notify.py` (rename to match registry `name:`)
+- Placeholder file (agent-type, currently disabled): `reflections/audits/sentry_issue_triage.py` — module docstring + pointer to YAML `command:`
+- Inline single-use helpers into their owning files
 
-### 5. Migrate `auditing` group
-- **Task ID**: build-auditing
-- **Depends On**: build-scaffold
-- **Validates**: `tests/unit/test_reflections_package.py` auditing tests pass with new imports
-- **Assigned To**: group-builder-auditing
-- **Agent Type**: builder
-- **Parallel**: true (with 2-4, 6-8)
-- Split `reflections/auditing.py` (715L, 6 reflections) into per-file units
-- Inline `extract_structured_errors` (single caller) if it lives here
-
-### 6. Migrate `memory` group
+### 5. Migrate `memory` group
 - **Task ID**: build-memory
 - **Depends On**: build-scaffold
 - **Validates**: memory management tests pass with new imports
 - **Assigned To**: group-builder-memory
 - **Agent Type**: builder
-- **Parallel**: true (with 2-5, 7-8)
-- Split `reflections/memory_management.py` into `memory_decay_prune.py`, `memory_quality_audit.py`, `knowledge_reindex.py`
-- Move `scripts/memory_consolidation.py:run_consolidation` → `reflections/memory/memory_dedup.py` (keeping a thin `scripts/memory_consolidation.py` shim if any CLI invokes it directly; else delete `scripts/memory_consolidation.py`)
+- **Parallel**: true (with 2-4)
+- Split `reflections/memory_management.py` into `reflections/memory/memory_decay_prune.py`, `reflections/memory/memory_quality_audit.py`. Preserve `to_unix_ts` import per commit `9e3a64f5`.
+- Move logic, keep CLI shim: `scripts/memory_consolidation.py:run_consolidation` → `reflections/memory/memory_dedup.py`. Per Tom: leave the shim at `scripts/memory_consolidation.py` (may be invoked manually as CLI). The shim becomes a thin import-and-delegate wrapper.
+- Move (verify existence first): `knowledge-reindex` callable → `reflections/memory/knowledge_reindex.py`
+- Move (verify existence first): `embedding-orphan-sweep` callable → `reflections/memory/embedding_orphan_sweep.py`
 
-### 7. Migrate `tasks` group
-- **Task ID**: build-tasks
-- **Depends On**: build-scaffold
-- **Validates**: task management tests pass with new imports
-- **Assigned To**: group-builder-tasks
-- **Agent Type**: builder
-- **Parallel**: true (with 2-6, 8)
-- Split `reflections/task_management.py` (122L, 2 reflections) into `task_backlog_check.py` and `principal_staleness.py`
-
-### 8. Migrate `pipelines` group
-- **Task ID**: build-pipelines
-- **Depends On**: build-scaffold
-- **Validates**: pipeline tests pass with new imports
-- **Assigned To**: group-builder-pipelines
-- **Agent Type**: builder
-- **Parallel**: true (with 2-7)
-- Move `reflections/session_intelligence.py` → `reflections/pipelines/session_intelligence.py`
-- Move `reflections/behavioral_learning.py` → `reflections/pipelines/behavioral_learning.py`
-- Move `reflections/daily_report.py` → `reflections/pipelines/daily_report_and_notify.py` (rename to match registry `name:`)
-- Update each file's module docstring to the standard shape if it's not already
-
-### 9. YAML cutover + delete old bundles
+### 6. YAML cutover + delete old bundles
 - **Task ID**: build-yaml-cutover
-- **Depends On**: build-core, build-self-healing, build-maintenance, build-auditing, build-memory, build-tasks, build-pipelines
-- **Validates**: `test_all_callables_resolve` (new test added in task 12); scheduler startup doesn't ImportError
+- **Depends On**: build-agents, build-housekeeping, build-audits, build-memory
+- **Validates**: `test_all_callables_resolve` (new test added in task 9); scheduler startup doesn't ImportError
 - **Assigned To**: yaml-cutover-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Update every `callable:` in `config/reflections.yaml` to the new path
-- Add `group:` field to every entry
+- Update every `callable:` in `config/reflections.yaml` to the new path (e.g. `reflections.agents.circuit_health_gate.run`)
+- Add `group:` field to every entry, value one of `agents | housekeeping | audits | memory`. Group assignment per the heuristic in Technical Approach (existing `REFLECTION_GROUPS` mapping as starting point; new entries by intuitive fit)
 - Delete stale `ReflectionRunner` comment at line 58
-- Delete `reflections/maintenance.py`, `reflections/auditing.py`, `reflections/memory_management.py`, `reflections/task_management.py`, `reflections/utils.py`
-- Empty (or delete) `agent/sustainability.py` — if any non-reflection helpers remain with legitimate callers, leave them with a `# NOT a reflection — used by X` comment
+- Delete bundles: `reflections/maintenance.py`, `reflections/auditing.py`, `reflections/memory_management.py`, `reflections/task_management.py`, `reflections/utils.py`, `reflections/session_intelligence.py`, `reflections/behavioral_learning.py`, `reflections/daily_report.py`
+- **Fully delete `agent/sustainability.py`** (per Tom). If `send_hibernation_notification` or `sustainability_digest` exports have surviving non-test callers (re-grep before deletion), relocate them to `agent/notifications.py` first; otherwise delete the file outright. Do not leave a stub.
 - Run `python -m ruff check .` and `python -m ruff format .` to clean import reshuffling
 
-### 10. Dashboard grouping
+### 7. Dashboard grouping
 - **Task ID**: build-dashboard
 - **Depends On**: build-yaml-cutover
 - **Validates**: `tests/unit/test_ui_reflections_data.py` passes with new grouping tests; manual browser check
 - **Assigned To**: dashboard-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `get_grouped_reflections()` to `ui/data/reflections.py` with group-label mapping constant
+- Add `get_grouped_reflections()` to `ui/data/reflections.py` reading `group:` from each YAML entry (no longer from `REFLECTION_GROUPS` constant)
+- **Delete the `REFLECTION_GROUPS`, `GROUP_DESCRIPTIONS`, and `GROUP_DISPLAY_ORDER` constants** in `ui/data/reflections.py` — YAML `group:` field is now the single source of truth. Display labels (`"Agents"`, `"Housekeeping"`, `"Audits"`, `"Memory"`) become a small constant mapping for title-case rendering only.
 - Restructure `ui/templates/reflections/_partials/status_grid.html`: outer `<details>` per group (NOT in HTMX swap target), inner rows swap via a new `/reflections/_partials/group/{group}/` route
 - Add the per-group partial route in `ui/app.py` (follows existing pattern around line 295)
 - Summary row format: `{label}  {enabled_count}/{total_count} enabled  next: {ts}  [error dot if any child failed]`
 - Default state: all `<details>` collapsed
 
-### 11. Manual UI validation
+### 8. Manual UI validation
 - **Task ID**: validate-dashboard
 - **Depends On**: build-dashboard
 - **Assigned To**: lead-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Start `python -m ui.app`; open `http://localhost:8500`
-- Verify: 7 group rows render, all collapsed
+- Verify: 4 group rows render (`Agents`, `Housekeeping`, `Audits`, `Memory`), all collapsed
 - Expand one group, wait 15 seconds, confirm it stays expanded through the HTMX refresh
 - Confirm error dot renders when any child reflection has `last_status: error`
 - Screenshot before/after
 
-### 12. Test updates + new resolution test
+### 9. Test updates + new resolution test
 - **Task ID**: build-tests
 - **Depends On**: build-yaml-cutover, build-dashboard
 - **Validates**: `pytest tests/unit/ tests/integration/test_reflections_redis.py -q`
 - **Assigned To**: test-engineer
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Update all import paths across `tests/unit/test_reflections_package.py`, `tests/unit/test_sustainability.py`, `tests/unit/test_reflection_scheduler.py`, `tests/unit/test_ui_reflections_data.py`, `tests/integration/test_reflections_redis.py`
+- Update all import paths across `tests/unit/test_reflections_package.py`, `tests/unit/test_sustainability.py`, `tests/unit/test_reflection_scheduler.py`, `tests/unit/test_ui_reflections_data.py`, `tests/unit/test_utc.py` (if it imports from sustainability), `tests/integration/test_reflections_redis.py`
 - Add `test_all_callables_resolve` in `test_reflection_scheduler.py`: iterate `config/reflections.yaml`, call `_resolve_callable()` on each entry, assert no ImportError / AttributeError
+- Add `test_every_yaml_entry_has_group` in `test_reflection_scheduler.py`: iterate `config/reflections.yaml`, assert every entry has a `group:` field with value in `{agents, housekeeping, audits, memory}`
 - Extend `test_ui_reflections_data.py` with tests for `get_grouped_reflections()`: empty registry, single-group registry, mixed-status groups, error aggregation
 
-### 13. Documentation
+### 10. Documentation
 - **Task ID**: document-feature
 - **Depends On**: build-tests
 - **Assigned To**: docs-writer
@@ -513,7 +504,7 @@ Single-dev refactor; team structure stays lean.
 - Grep `docs/` and `CLAUDE.md` for references to `reflections/maintenance.py`, `agent/sustainability.py`, etc., and replace with new paths or remove
 - Confirm `docs/features/README.md` index is accurate
 
-### 14. Final validation
+### 11. Final validation
 - **Task ID**: validate-all
 - **Depends On**: validate-dashboard, build-tests, document-feature
 - **Assigned To**: lead-validator
@@ -521,7 +512,7 @@ Single-dev refactor; team structure stays lean.
 - **Parallel**: false
 - Run all Verification table commands
 - Confirm every Success Criteria checkbox is met
-- Generate final report: line count delta (expect ~3,250 → ~similar or slightly more due to docstrings, but distributed across 31 files), file count delta (9 → 33+ including `__init__.py`), list of files deleted
+- Generate final report: line count delta (expect ~3,250 → ~similar or slightly more due to docstrings, but distributed across 33 files), file count delta (9 → 33+ including `__init__.py`), list of files deleted
 
 ## Verification
 
@@ -531,11 +522,14 @@ Single-dev refactor; team structure stays lean.
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | All callables resolve | `pytest tests/unit/test_reflection_scheduler.py::test_all_callables_resolve -q` | exit code 0 |
-| No bundle modules left | `test ! -f reflections/maintenance.py && test ! -f reflections/auditing.py && test ! -f reflections/memory_management.py && test ! -f reflections/task_management.py && test ! -f reflections/utils.py` | exit code 0 |
-| 31 reflection files exist | `find reflections -mindepth 2 -maxdepth 2 -name '*.py' ! -name '__init__.py' \| wc -l` | output > 30 |
-| Every YAML entry has group | `python -c "import yaml; d=yaml.safe_load(open('config/reflections.yaml')); [assert_group(r) for r in d['reflections']]"` | exit code 0 |
+| Every YAML entry has group | `pytest tests/unit/test_reflection_scheduler.py::test_every_yaml_entry_has_group -q` | exit code 0 |
+| No bundle modules left | `test ! -f reflections/maintenance.py && test ! -f reflections/auditing.py && test ! -f reflections/memory_management.py && test ! -f reflections/task_management.py && test ! -f reflections/utils.py && test ! -f reflections/session_intelligence.py && test ! -f reflections/behavioral_learning.py && test ! -f reflections/daily_report.py` | exit code 0 |
+| `agent/sustainability.py` deleted | `test ! -f agent/sustainability.py` | exit code 0 |
+| All reflection files exist | `find reflections -mindepth 2 -maxdepth 2 -name '*.py' ! -name '__init__.py' \| wc -l` | output ≥ 33 |
 | Stale comment removed | `grep -n 'ReflectionRunner' config/reflections.yaml` | exit code 1 |
-| Dashboard renders groups | `curl -s localhost:8500/ \| grep -c '<details class="reflection-group"'` | output > 6 |
+| `REFLECTION_GROUPS` constant gone | `grep -n 'REFLECTION_GROUPS' ui/data/reflections.py` | exit code 1 |
+| Dashboard renders 4 groups | `curl -s localhost:8500/ \| grep -c '<details class="reflection-group"'` | output ≥ 4 |
+| Shims preserved | `test -f scripts/popoto_index_cleanup.py && test -f scripts/memory_consolidation.py` | exit code 0 |
 
 ## Critique Results
 
@@ -547,10 +541,12 @@ Single-dev refactor; team structure stays lean.
 
 ## Open Questions
 
-1. **Agent-type reflections (`system-health-digest`, `sentry-issue-triage`) — do they get files?** These have `execution_type: agent` and no Python callable; they're prompts executed by a PM session. Options: (a) create placeholder files with docstrings pointing at the YAML `command:` as source-of-truth, for consistency and discoverability; (b) skip — only function-type reflections get files. I assumed (a) in the plan; confirm.
+All 4 open questions resolved by Tom on 2026-05-04:
 
-2. **`scripts/memory_consolidation.py` and `scripts/popoto_index_cleanup.py` — move or wrap?** Recon didn't find non-scheduler callers, but these live in `scripts/` suggesting they may have been run manually as CLIs historically. If either is still invoked from a shell command or docs, keep a thin shim. Confirm or let me verify during build.
+1. **Agent-type reflections — do they get files?** ✅ **Resolved: yes — separate files (option A).** Plan reflects this throughout: agent-type reflections (`system-health-digest`, `sentry-issue-triage`, plus any others) get placeholder files whose docstring documents purpose/cadence/failure modes and explicitly points at the YAML `command:` as the executable source-of-truth.
 
-3. **`agent/sustainability.py` file — fully delete, or leave a stub?** All 4 reflections move out; recon found no external non-test callers. Deleting is cleanest. But `send_hibernation_notification` and `sustainability_digest` exports exist — are these called by anything I missed? (Will re-grep during build to be sure.)
+2. **`scripts/memory_consolidation.py` and `scripts/popoto_index_cleanup.py` — move or wrap?** ✅ **Resolved: keep a thin shim.** Both scripts retained at their current paths as thin import-and-delegate wrappers. Reflection logic moves into `reflections/memory/memory_dedup.py` and `reflections/housekeeping/redis_index_cleanup.py` respectively.
 
-4. **Group labels for display** — proposed: Core, Self-Healing, Maintenance, Auditing, Memory, Tasks, Pipelines. Any preference on ordering (priority-first: Self-Healing → Core → ... vs. alphabetical vs. frequency-based)? I'll default to priority-first for the dashboard since most interesting groups should be at the top.
+3. **`agent/sustainability.py` file — fully delete, or leave a stub?** ✅ **Resolved: delete after refactored out.** All 4 reflection callables relocate; non-reflection helpers (`send_hibernation_notification`, `sustainability_digest`) move to `agent/notifications.py` if they have surviving callers (re-grep during build), then the file is deleted. No stub.
+
+4. **Group labels for display** ✅ **Resolved: use the existing dashboard group labels.** The dashboard already defines 4 groups in `ui/data/reflections.py`: `agents`, `housekeeping`, `audits`, `memory`. The plan adopts these as the directory layout (`reflections/agents/`, `reflections/housekeeping/`, `reflections/audits/`, `reflections/memory/`) and as the `group:` field values in YAML. The `REFLECTION_GROUPS` Python constants are deleted; YAML becomes the single source of truth. This collapses the previously proposed 7 groups (Core, Self-Healing, Maintenance, Auditing, Memory, Tasks, Pipelines) into the 4 already-shipped dashboard groups.
