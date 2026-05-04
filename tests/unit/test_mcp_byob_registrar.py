@@ -49,11 +49,13 @@ def test_install_on_fresh_file(claude_config_path):
     assert "byob" in config["mcpServers"]
     entry = config["mcpServers"]["byob"]
     assert entry["type"] == "stdio"
-    assert entry["command"] == "node"
-    # args points at ~/.byob/dist/mcp-server.js (absolute, expanded)
+    # BYOB v0.3+ ships a TS entry executed via tsx; both binaries live in
+    # the workspace under ~/.byob/packages/mcp-server/.
+    assert entry["command"].endswith("/tsx")
+    assert "/.byob/" in entry["command"]
     assert len(entry["args"]) == 1
     assert "byob" in entry["args"][0]
-    assert "mcp-server.js" in entry["args"][0]
+    assert entry["args"][0].endswith("/byob-mcp.ts")
     # Security default: BYOB_ALLOW_EVAL=0
     assert entry["env"]["BYOB_ALLOW_EVAL"] == "0"
 
@@ -88,8 +90,8 @@ def test_drift_heal_corrects_eval_flag(claude_config_path):
                 "mcpServers": {
                     "byob": {
                         "type": "stdio",
-                        "command": "node",
-                        "args": [str(mcp_byob.BYOB_MCP_SERVER_JS)],
+                        "command": str(mcp_byob.BYOB_TSX_BIN),
+                        "args": [str(mcp_byob.BYOB_MCP_SERVER_TS)],
                         "env": {"BYOB_ALLOW_EVAL": "1"},
                     }
                 }
@@ -129,7 +131,7 @@ def test_drift_heal_corrects_command(claude_config_path):
     assert result.action == "repaired"
 
     config = json.loads(claude_config_path.read_text())
-    assert config["mcpServers"]["byob"]["command"] == "node"
+    assert config["mcpServers"]["byob"]["command"] == str(mcp_byob.BYOB_TSX_BIN)
 
 
 def test_verify_mode_reports_drift_without_writing(claude_config_path):

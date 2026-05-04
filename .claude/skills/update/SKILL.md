@@ -221,7 +221,7 @@ from scripts.update import mcp_memory, mcp_byob
 r1 = mcp_memory.verify_memory_mcp(write=True)
 # r1.ok, r1.action ("ok"|"installed"|"repaired"|...)
 
-# BYOB MCP -- node ~/.byob/dist/mcp-server.js, BYOB_ALLOW_EVAL=0
+# BYOB MCP -- tsx ~/.byob/packages/mcp-server/bin/byob-mcp.ts, BYOB_ALLOW_EVAL=0
 r2 = mcp_byob.verify_byob_mcp(write=True)
 # r2.ok, r2.action
 ```

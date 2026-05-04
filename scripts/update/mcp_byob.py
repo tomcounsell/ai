@@ -41,10 +41,14 @@ CLAUDE_CONFIG_LOCK_PATH = Path.home() / ".claude.json.lock"
 CLAUDE_CONFIG_BACKUP_PATH = Path.home() / ".claude.json.bak"
 
 MCP_SERVER_KEY = "byob"
-MCP_SERVER_COMMAND = "node"
-# Resolved at registration time -- ~/.byob/dist/mcp-server.js (expanded).
+# BYOB v0.3+ ships its MCP server as a TypeScript entrypoint executed via
+# tsx. Per BYOB README's "Manual MCP registration" section the canonical
+# invocation is `<tsx> <byob-mcp.ts>`. Both binaries are workspace-local
+# after `bun install` runs in ~/.byob/.
 BYOB_HOME = Path.home() / ".byob"
-BYOB_MCP_SERVER_JS = BYOB_HOME / "dist" / "mcp-server.js"
+BYOB_MCP_SERVER_TS = BYOB_HOME / "packages" / "mcp-server" / "bin" / "byob-mcp.ts"
+BYOB_TSX_BIN = BYOB_HOME / "packages" / "mcp-server" / "node_modules" / ".bin" / "tsx"
+MCP_SERVER_COMMAND = str(BYOB_TSX_BIN)
 
 # Lock retry schedule (matches mcp_memory.py) -- in milliseconds.
 _LOCK_RETRY_BACKOFF_MS = (50, 200, 800)
@@ -69,7 +73,7 @@ def _expected_entry() -> dict:
     return {
         "type": "stdio",
         "command": MCP_SERVER_COMMAND,
-        "args": [str(BYOB_MCP_SERVER_JS)],
+        "args": [str(BYOB_MCP_SERVER_TS)],
         "env": {"BYOB_ALLOW_EVAL": "0"},
     }
 
@@ -236,7 +240,7 @@ def verify_byob_mcp(*, write: bool = True) -> McpByobResult:
         return McpByobResult(
             ok=True,
             action=action,
-            message=f"byob MCP registration: {action} (server={BYOB_MCP_SERVER_JS})",
+            message=f"byob MCP registration: {action} (server={BYOB_MCP_SERVER_TS})",
         )
 
     finally:
