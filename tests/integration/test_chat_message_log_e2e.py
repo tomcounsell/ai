@@ -144,3 +144,97 @@ class TestChatMessageLogE2E:
         assert "Recent chat in this thread" not in prompt
         assert isinstance(prompt, str)
         assert "Agent did work." in prompt
+
+
+class TestCompletionRunnerSuppressionE2E:
+    """End-to-end (issue #1262): mid-session Path B send → completion runner
+    fires → suppression check reads chat_message_log and dedupes.
+
+    Asserts on chat_message_log (Path B's only writer), NOT recent_sent_drafts
+    (Path A only). Mocks the harness, send_cb, and Redis layers; uses real
+    Popoto/AgentSession persistence for the chat_log read-back.
+    """
+
+    def test_completion_runner_reads_chat_message_log_for_suppression_baseline(self, session):
+        """Path B `valor-telegram send` populates chat_message_log; the
+        completion runner's _build_completion_baseline returns the entry
+        in the should_suppress shape ({ts, text, artifacts}).
+        """
+        from agent.session_completion import _build_completion_baseline
+
+        path_b_text = "Deployment complete — all 5 pods green and serving."
+        payload = {
+            "text": path_b_text,
+            "chat_id": "12345",
+            "session_id": "cli-7777",
+            "owner_agent_session_id": session.agent_session_id,
+        }
+        _append_outbound_chat_log(payload, msg_id=999)
+
+        # Re-fetch from Redis (simulates the runner's pre-suppression refetch)
+        rows = list(AgentSession.query.filter(session_id=session.session_id))
+        fresh = rows[0]
+        baseline = _build_completion_baseline(fresh)
+
+        # The baseline must be the should_suppress shape, not the raw chat_log
+        # entry shape. This is the load-bearing adapter contract.
+        assert len(baseline) == 1
+        entry = baseline[0]
+        assert entry["text"] == path_b_text
+        assert "ts" in entry
+        assert "artifacts" in entry
+        # Adapter must NOT leak the chat_log-only fields
+        assert "direction" not in entry
+        assert "message_id" not in entry
+        assert "sender" not in entry
+
+    def test_completion_runner_baseline_excludes_inbound_entries_e2e(self, session):
+        """The user's own inbound message must never become the suppression
+        baseline (we never suppress against the user's own message).
+        """
+        from agent.session_completion import _build_completion_baseline
+
+        session.append_chat_log(
+            direction="in",
+            sender="Tom",
+            content="What is the deploy status?",
+            message_id=50,
+        )
+        rows = list(AgentSession.query.filter(session_id=session.session_id))
+        fresh = rows[0]
+        baseline = _build_completion_baseline(fresh)
+        assert baseline == []
+
+    def test_completion_runner_baseline_uses_chat_log_not_recent_sent_drafts(self, session):
+        """Critical regression guard: the completion runner's baseline source
+        is chat_message_log, NOT recent_sent_drafts. recent_sent_drafts is
+        Path-A-only (TelegramRelayOutputHandler.send), so it would be empty
+        for the duplicate-via-Path-B scenario this fix targets.
+        """
+        from agent.session_completion import _build_completion_baseline
+
+        # Set recent_sent_drafts to a value that should NOT influence the
+        # suppression baseline (it's the wrong field for Path B duplicates).
+        path_a_text = "this is a Path A entry that we DO NOT want to use"
+        session.recent_sent_drafts = [
+            {"ts": __import__("time").time(), "text": path_a_text, "artifacts": {}}
+        ]
+        session.save()
+
+        # Add a Path B outbound entry that IS the right baseline source.
+        path_b_text = "this is the Path B entry that we DO want to dedupe against"
+        session.append_chat_log(
+            direction="out",
+            sender="valor",
+            content=path_b_text,
+            message_id=60,
+        )
+
+        rows = list(AgentSession.query.filter(session_id=session.session_id))
+        fresh = rows[0]
+        baseline = _build_completion_baseline(fresh)
+
+        # Baseline must contain the Path B text only.
+        baseline_texts = [entry["text"] for entry in baseline]
+        assert path_b_text in baseline_texts
+        assert path_a_text not in baseline_texts
