@@ -87,13 +87,28 @@ BYOB upstream blocks reading `chrome://` and `file://` URLs and login pages for 
 
 `scripts/update/run.py` Step 4.9 calls `mcp_byob.verify_byob_mcp(write=...)` on every `/update` invocation. `--verify` runs read-only (LOCK_SH); `--full`/`--cron` repair under LOCK_EX. The registrar is the same shape as `mcp_memory`, so the lock contention + drift-heal patterns are identical.
 
-When `config/byob_pin.json` changes, `/update --full` rebuilds `~/.byob/dist/` (planned: snapshot to `~/.byob/dist.prev/` first, run `bun install && bun run build && bun run setup --skip-extension`, then run `scripts/update/byob_canary.js` end-to-end probe -- on canary failure restore from `dist.prev/`).
+When `config/byob_pin.json` changes, `/update --full` rebuilds the BYOB workspace under `~/.byob/` (planned: snapshot the entire tree to `~/.byob.prev/` first, then `git -C ~/.byob fetch && git -C ~/.byob checkout <pin>` followed by `bun install && bun run setup`, then verify with `bun run doctor` and the planned `scripts/update/byob_canary.js` end-to-end probe -- on canary failure `rm -rf ~/.byob && mv ~/.byob.prev ~/.byob`). BYOB v0.3+ is a monorepo (`packages/bridge/`, `packages/extension/`, `packages/mcp-server/`) with build artifacts under `packages/*/output/` and `packages/*/dist/`; there is no single top-level `dist/` to snapshot.
 
 ## Failure modes
 
-- **BYOB MCP server fails to start** (bridge not running, socket missing, extension not loaded): Claude Code surfaces the MCP startup failure. `byob_*` tools are absent from the agent context. The agent surfaces "BYOB bridge not running -- start Chrome and run `~/.byob/start.sh`" rather than silently retrying. **There is no Playwright fallback** in the BYOB surface -- anonymous Playwright work belongs to `bowser`.
+- **BYOB MCP server fails to start** (bridge not running, socket missing, extension not loaded): Claude Code surfaces the MCP startup failure. `byob_*` tools are absent from the agent context. The agent surfaces "BYOB bridge not running -- run `cd ~/.byob && bun run doctor` to diagnose, most commonly the Chrome extension needs to be loaded" rather than silently retrying. **There is no Playwright fallback** in the BYOB surface -- anonymous Playwright work belongs to `bowser`.
 - **Lock contention on `~/.claude.json.lock`**: 3-attempt backoff (50/200/800ms). On exhaustion, the registrar returns `action="skipped"` and `/update` logs a warning; next `/update` invocation retries.
 - **Two real-Chrome sessions queued at once**: scheduler defers the second; first runs to completion; pop loop picks the second on the next cycle.
+
+## Setup gotchas (BYOB v0.3+)
+
+These are the realities of BYOB's actual on-disk layout. Verified during PR #1277 live setup; documented here so future operators don't waste time on the same drift.
+
+| What you might assume | What's actually true |
+|---|---|
+| `~/.byob/extension/` is the extension folder for "Load unpacked" | The folder is `~/.byob/packages/extension/output/chrome-mv3/` (built by `bun run setup`). The parent `packages/extension/` directory has source, not a `manifest.json` Chrome can load. |
+| BYOB MCP server is JavaScript: `node ~/.byob/dist/mcp-server.js` | BYOB v0.3+ ships a TypeScript entry executed via tsx: `~/.byob/packages/mcp-server/node_modules/.bin/tsx ~/.byob/packages/mcp-server/bin/byob-mcp.ts`. Both paths resolve inside the BYOB workspace after `bun install`. The `mcp_byob.py` registrar uses these correct paths. |
+| The IPC socket is at a fixed `~/.byob/run/byob.sock` | The socket is **per-device**, UUID-keyed: `~/.byob/bridges/<deviceId>.sock`. The deviceId is generated at first bridge launch. The MCP server discovers the socket itself; callers must never hardcode the path. |
+| `cd ~/.byob && bun run setup` makes the bridge start | The bridge starts only when the **extension connects to the native messaging host** — i.e., after Chrome has the extension loaded and has been **fully restarted** (`⌘Q`, not just close window). Until then `bun run doctor` reports "no live bridge". |
+| Closing the Chrome window is enough to pick up native messaging changes | No. Chrome reads native messaging config at startup only. Use `⌘Q` (macOS) or fully quit (other OSes) and reopen. |
+| `bun run setup` rebuilds incrementally | `bun run setup` runs the full install workflow and prompts you to multi-select MCP clients to register. We don't use BYOB's auto-registration — we use `scripts/update/mcp_byob.py` instead — so just press **enter** through the registration prompt. |
+
+**Canonical verification command** for any state question: `cd ~/.byob && bun run doctor`. It tells you which step is broken and how to fix it. Do not poke specific paths to verify.
 
 ## See also
 

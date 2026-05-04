@@ -369,13 +369,24 @@ python -c "from scripts.update import mcp_byob; r = mcp_byob.verify_byob_mcp(wri
 ```
 
 After install, the user must:
-- Open Chrome -> chrome://extensions -> Developer mode ON -> "Load unpacked" -> select `~/.byob/extension/` (the BYOB extension cannot be auto-installed; this is an operator click-through).
+1. Open Chrome → `chrome://extensions` → toggle **Developer mode** ON (top-right) → click **Load unpacked** (top-left) → select `~/.byob/packages/extension/output/chrome-mv3/` (the BYOB extension cannot be auto-installed; this is an operator click-through).
+2. **Quit Chrome completely** (`⌘Q` on macOS — closing windows is not enough). Reopen Chrome. Chrome only re-reads the Native Messaging config on full restart.
 
-Verify:
+Verify with BYOB's own diagnostic — this is authoritative across BYOB versions and tells you exactly what's wrong if anything's off:
+
 ```bash
-# After Chrome + BYOB extension are running:
-ls -la ~/.byob/run/byob.sock   # should exist
+cd ~/.byob && bun run doctor
 ```
+
+Expected output (all green checkmarks):
+- ✓ Native Messaging manifest registered
+- ✓ Launcher script present
+- ✓ Bridge process: pid N, deviceId UUID, uptime Ns
+- ✓ IPC socket: `~/.byob/bridges/<deviceId>.sock`
+
+If any line is red, the message points at the exact fix. The most common case is "no live bridge — extension never connected" which means the user hasn't loaded the extension yet, or loaded it into a different Chrome profile than the one being tested.
+
+Note: the IPC socket path is **per-device** (UUID-keyed under `~/.byob/bridges/`), not a fixed `~/.byob/run/byob.sock`. The MCP server discovers the socket at startup; callers should never hardcode the path.
 
 ### Computer-Use (bcu, native macOS app control)
 

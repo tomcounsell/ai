@@ -247,7 +247,14 @@ implementation in `scripts/update/run.py` and the post-install canary at
 - `/update --bump-bcu` -- next bcu release tag
 
 Rollback paths:
-- BYOB: `~/.byob/dist.prev/` snapshot, restored on canary failure.
+- BYOB: snapshot the entire `~/.byob/` tree to `~/.byob.prev/` before
+  `git pull && bun install && bun run setup`. BYOB v0.3+ is a workspace
+  monorepo with build artifacts under `packages/*/output/` and
+  `packages/*/dist/` — there is no single top-level `dist/` to copy.
+  Restore by `rm -rf ~/.byob && mv ~/.byob.prev ~/.byob` on canary
+  failure (defined as `cd ~/.byob && bun run doctor` reporting any red
+  status, or the post-install end-to-end probe — once
+  `byob_canary.js` is built — failing within 30s).
 - bcu: `~/.local/bin/background-computer-use.prev` symlink, restored on
   `/v1/list_apps` canary failure.
 
