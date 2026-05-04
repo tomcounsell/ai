@@ -296,21 +296,37 @@ is intentional.
 
 ## Prerequisites
 
+The Prerequisites table only gates on **operator-required** state — things the build itself
+cannot create. Build-installable dependencies (`bun`, `~/.byob` clone) are handled inside
+`build-byob-mcp` (Step 1) using the `command -v X || install_command` pattern, not as gating
+prereqs. bcu install is **not a build gate** — the integration tests skip when the manifest is
+absent, and the OS gate in `tools.computer.cli:main` covers manifest-missing at runtime.
+
 Each Check Command is a single shell command with no escaped-pipe gymnastics — the parser at
-`scripts/check_prerequisites.py:58` splits cells on raw `|` and cannot handle markdown-escaped
-pipes inside backticks. Multi-step probes go in a separate code block under the table.
+`scripts/check_prerequisites.py:58` splits cells on raw `|`.
 
 | Requirement | Check Command | Install Command (if missing) | Purpose |
 |-------------|---------------|------------------------------|---------|
-| `bun` runtime | `command -v bun` | `curl -fsSL https://bun.sh/install \| bash` | Required for BYOB setup |
 | Chrome (not Chromium) | `test -d "/Applications/Google Chrome.app"` | `brew install --cask google-chrome` | BYOB targets real Chrome |
 | Node.js ≥18 | `node -e "process.exit(parseInt(process.versions.node) < 18 ? 1 : 0)"` | `brew install node` | BYOB build dep |
-| byob cloned | `test -d ~/.byob` | `git clone https://github.com/wxtsky/byob ~/.byob && cd ~/.byob && bun install && bun run setup` | BYOB native messaging host install target |
-| bcu binary | `test -f "$TMPDIR/background-computer-use/runtime-manifest.json"` | See `## Update System` for download flow | bcu running |
-| Accessibility permission | `osascript -e 'tell application "System Events" to name of processes' >/dev/null` | System Settings → Privacy & Security → Accessibility | bcu requires it |
-| Screen Recording permission | `screencapture -t png -x /tmp/sr-probe.png && test -s /tmp/sr-probe.png` | System Settings → Privacy & Security → Screen Recording | bcu screenshots |
 
 Run all checks: `python scripts/check_prerequisites.py docs/plans/byob_and_computer_use.md`
+
+### Operator Setup (out of build scope)
+
+These items require operator interaction (Chrome extension click-through, System Settings
+permission grants) and are **not** required for the build to succeed. The BYOB extension is
+installed during `bun run setup` (Step 1, build-byob-mcp); bcu install is delegated to the
+`/setup` skill (Step 7, build-skill-updates) which prompts the user before doing anything.
+Integration tests that require these are marked `@pytest.mark.integration` and skip cleanly
+when the underlying state is absent.
+
+| Operator Step | When | Provides |
+|---------------|------|----------|
+| Click "Load extension" in Chrome (BYOB MV3) | After `bun run setup` runs in Step 1 | `~/.byob/run/byob.sock` activation |
+| Run `/setup` and answer "yes" to computer-use opt-in | Anytime after build merges | Downloads + installs `BackgroundComputerUse.app` |
+| Grant Accessibility permission to bcu | First bcu launch | `osascript`-callable AX |
+| Grant Screen Recording permission to bcu | First bcu launch | bcu can screenshot windows |
 
 ## Solution
 
