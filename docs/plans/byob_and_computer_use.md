@@ -8,6 +8,7 @@ tracking: https://github.com/tomcounsell/ai/issues/1256
 last_comment_id: 4360511073
 revision_applied: 2026-05-04
 revision_addresses: sha256:4ed1ce3bfbe220cd1bd4f2f6dc364ce5ce1e242da3f59854a527c7ac0b95f59b
+revision_pass: 3
 ---
 
 # BYOB Real-Chrome Control + macOS Computer Use
@@ -367,8 +368,12 @@ bcu performs action without stealing cursor → result returned
   Each function reads manifest, constructs request, handles `ConnectionRefusedError` → converts
   to `ComputerUseUnavailableError`. Timeout: 10s per call.
 
-- **OS gate in `computer-use` skill**: Skill checks `sys.platform == "darwin"` at entry. On
-  non-macOS, exits with: `"computer-use is macOS-only. This machine runs {platform}; skipping."`.
+- **OS gate**: Enforced in `tools.computer.cli:main` (the `valor-computer` entry point), not in
+  the SKILL.md (skills are markdown and cannot execute Python). On `sys.platform != "darwin"`
+  the CLI prints `"computer-use is macOS-only. This machine runs {platform}; skipping."` to
+  stderr and exits 78 (`EX_CONFIG`). The SKILL.md documents this behavior so the agent knows to
+  expect the message; tests in `tools/computer/tests/test_computer_use.py` cover both branches
+  by patching `sys.platform`.
 
 - **Downstream skill updates**: Skills that shell out to `agent-browser` CLI directly
   (`do-design-audit`, `do-pr-review`, `mermaid-render`, `linkedin`, `do-discover-paths`,
@@ -380,17 +385,20 @@ bcu performs action without stealing cursor → result returned
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `tools/browser/__init__.py` has `except Exception as e: return {"error": ...}` in every
-  public function — each must have a test asserting the `"error"` key is present and non-empty
-  when Playwright (or BYOB) raises. Existing tests in `tools/browser/tests/` cover Playwright
-  paths; BYOB fallback tests use a mock BYOB unavailable scenario.
+- [ ] `agent-browser` CLI (BYOB-backed) — every command (`open`, `snapshot`, `click`, `fill`,
+  `screenshot`, `close`, `connect`, `back`, `forward`, `reload`) must exit 1 with a clear stderr
+  message when the BYOB socket is missing or the bridge errors. **No silent Playwright fallback
+  inside the CLI** (rev2 decision; spike-2). Test: each command invoked while
+  `~/.byob/run/byob.sock` is renamed → exit 1 + stderr contains "BYOB bridge not running".
 - [ ] `tools/computer/__init__.py` must raise `ComputerUseUnavailableError` when the runtime
   manifest is absent. Test: call any function when manifest does not exist.
-- [ ] BYOB bridge socket absent: `tools/browser/` must fall back to Playwright without crashing.
-  Test: rename `~/.byob/run/byob.sock` and call `navigate()`.
+- [ ] `agent-browser` CLI under lock contention: when another process holds
+  `~/.byob/session.lock`, the second invocation must exit 2 with stderr "BYOB busy" within the
+  5s `flock` timeout. Test: hold the lock in a test fixture, invoke `agent-browser open`,
+  assert exit 2.
 
 ### Empty/Invalid Input Handling
-- [ ] `tools/browser.navigate("")` — empty URL → `{"error": "..."}`, not a crash.
+- [ ] `agent-browser open ""` — empty URL → exit 1 with stderr message, not a crash.
 - [ ] `tools/computer.click(window_id=None, x=0, y=0)` → `ComputerUseUnavailableError` or
   `ValueError` (not a silent no-op).
 - [ ] `tools/computer.type_text(window_id=1, text="")` → success (empty string is valid).
@@ -398,8 +406,10 @@ bcu performs action without stealing cursor → result returned
 ### Error State Rendering
 - [ ] `computer-use` skill body must surface bcu errors to the agent output, not swallow them.
   The skill should print the raw error dict when `tools/computer` returns `{"error": ...}`.
-- [ ] BYOB MCP connection failure must surface a clear message to the skill output:
-  "BYOB bridge not running — start Chrome and run `~/.byob/start.sh`."
+- [ ] BYOB-down behavior at the agent layer: the calling skill reads CLI exit 1 + stderr and
+  surfaces "BYOB bridge not running — start Chrome and run `~/.byob/start.sh`" to the agent
+  output, then either prompts the user or routes to `bowser` for the same task. No skill should
+  treat a BYOB failure as a transient retry condition.
 
 ## Test Impact
 
@@ -443,9 +453,13 @@ bcu performs action without stealing cursor → result returned
 ### Risk 1: BYOB upstream breaks on Chrome updates
 **Impact:** `agent-browser` skill stops working entirely when Chrome auto-updates and the
 extension API surface changes.
-**Mitigation:** Pin BYOB to a specific git commit in `/setup`. Add a health-check step to
-`/update` that runs `agent-browser connect 9222 && agent-browser get url` after any BYOB rebuild.
-Alert if health check fails.
+**Mitigation:** Pin BYOB to a specific git commit in `config/byob_pin.json` (only bumped via
+`/update --bump-byob`). After any BYOB rebuild, `/update` runs the post-install canary
+documented in the Update System section: confirm `~/.byob/run/byob.sock` appears within 10s of
+starting Chrome, then run `agent-browser open about:blank && agent-browser get title` against
+the socket. If either step fails, restore `~/.byob/dist.prev/` and surface an alert. The legacy
+`agent-browser connect 9222` workflow (manual `--remote-debugging-port`) is gone — BYOB does not
+expose CDP on a TCP port.
 
 ### Risk 2: bcu Accessibility permission grant is persistent but fragile
 **Impact:** A macOS upgrade or re-sign can revoke the Accessibility permission for `xyz.dubdub.backgroundcomputeruse`, silently breaking the computer-use skill.
@@ -566,12 +580,16 @@ machines, the update script no-ops these steps and prints a one-line note.
   (`byob_navigate`, `byob_click`, `byob_screenshot`, etc.) into the agent context when the
   server is active. The agent uses these via the existing `agent-browser` skill pattern — no
   new CLI entry points needed.
-- **`tools/computer/` Python module**: Invoked from the `computer-use` skill via Bash
-  (`python -m tools.computer list_windows --json`). Add CLI entry points in `pyproject.toml`:
+- **`tools/computer/` Python module + `valor-computer` CLI**: The skill invokes
+  `valor-computer <command>` via Bash. The CLI is declared as a `[project.scripts]` entry in
+  `pyproject.toml`:
   ```toml
   valor-computer = "tools.computer.cli:main"
   ```
-  The `computer-use` skill calls `valor-computer` commands.
+  This is the only invocation pattern for the skill — `python -m tools.computer ...` is not
+  used (it would bypass the entry-point shim and complicate the OS gate in Step 4). All bcu
+  HTTP calls happen inside `tools.computer.cli:main` and the underlying `tools/computer/`
+  functions; the skill never speaks HTTP directly.
 - **Skills that use `agent-browser` directly**: No code changes needed in skill files — the
   `agent-browser` binary name is preserved. The backing changes are transparent to callers.
 - **Integration test**: After setup, `agent-browser open https://github.com && agent-browser
@@ -726,8 +744,11 @@ Tier 2 (Specialists needed here): mcp-specialist (for MCP server registration re
 - Update `tools/browser/__init__.py` Python module: add a deprecation note to its docstring
   pointing callers to the `agent-browser` CLI. Do NOT delete the module — its tests for
   `_downscale_if_needed` continue to run.
-- Update `tools/browser/manifest.json` to remove `playwright` from `agent-browser` CLI's
-  declared dependencies.
+- Update `tools/browser/manifest.json`: change `source.repository` from
+  `https://github.com/vercel-labs/agent-browser` to `https://github.com/wxtsky/byob`, change
+  `commands.install` to the BYOB clone+setup invocation, and update the `authenticated-session`
+  workflow to drop `state save auth.json` (BYOB uses the user's real Chrome profile — no auth
+  state files in repo).
 
 ### 3. Create `tools/computer/` module
 - **Task ID**: build-computer-module
@@ -750,16 +771,22 @@ Tier 2 (Specialists needed here): mcp-specialist (for MCP server registration re
 ### 4. Create `computer-use` skill
 - **Task ID**: build-computer-skill
 - **Depends On**: build-computer-module
-- **Validates**: `computer-use` skill invocation on non-macOS returns clear error
+- **Validates**: `valor-computer list_apps` on non-macOS exits 78 with the documented message;
+  `.claude/skills/computer-use/SKILL.md` exists and references `valor-computer` (not `python
+  -m tools.computer`).
 - **Informed By**: spike-3, research finding on bcu endpoints
 - **Assigned To**: computer-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `.claude/skills/computer-use/SKILL.md`
-- Include OS gate: check `sys.platform == "darwin"`, exit with message on non-macOS
+- Create `.claude/skills/computer-use/SKILL.md` referencing `valor-computer` as the only
+  invocation surface (no `python -m tools.computer`)
+- Document the OS gate behavior — gate is enforced in `tools.computer.cli:main`, not the skill
+  body. SKILL.md states: "On non-macOS machines, `valor-computer` exits 78 with
+  `computer-use is macOS-only`."
 - Document bcu HTTP server is loopback-only
 - Document `BYOB_ALLOW_EVAL` stays unset for browser operations
-- Include example workflow: list apps → find Notes.app → list windows → click → type → screenshot
+- Include example workflow: `valor-computer list_apps` → find Notes.app → `list_windows` →
+  `click` → `type_text` → `screenshot_window`
 
 ### 5. Write browser and computer-use tests
 - **Task ID**: build-tests
@@ -780,7 +807,8 @@ Tier 2 (Specialists needed here): mcp-specialist (for MCP server registration re
   - Unit tests with mocked HTTP responses for each `tools/computer` function
   - Test `ComputerUseUnavailableError` when manifest absent
   - Test HTTP 404 → `window_not_found` error dict
-  - Test platform-specific OS gate behavior
+  - Test OS gate in `tools.computer.cli:main` — patch `sys.platform` to a non-darwin value
+    (e.g., `"linux"`); assert exit code 78 and stderr contains "computer-use is macOS-only"
   - **Test Electron AX staleness mitigation**: mock the bundle_id detection, assert
     `tools/computer.click()` re-queries `get_window_state` for Electron bundle IDs.
 - Create `tools/computer/tests/test_computer_use_integration.py`:
@@ -837,7 +865,8 @@ Tier 2 (Specialists needed here): mcp-specialist (for MCP server registration re
 - Run: `agent-browser open https://github.com && agent-browser get title` — confirm
   authenticated page (not public GitHub)
 - Run: `valor-computer list_windows` on macOS — confirm bcu responds
-- Run: `computer-use` on non-macOS platform — confirm OS gate message
+- Run: `valor-computer list_apps` on a non-macOS host (or with `sys.platform` patched to
+  `"linux"` in a test fixture) — confirm exit 78 + stderr contains "computer-use is macOS-only"
 - Run: `pytest tools/browser/tests/ tools/computer/tests/ -v -x`
 - Run: `python -m ruff check . && python -m ruff format --check .`
 - Verify all success criteria are met
@@ -872,6 +901,22 @@ revision pass. They are recorded here as a durable trace of what changed and why
 | CONCERN | Operator | `bun` is listed as a prereq but `/setup` had no install command. New machines fail at first `bun run setup` with no clear recovery path. | Prereqs table now has Install Command column | Added "Install Command (if missing)" column to the Prerequisites table. `bun` row: `curl -fsSL https://bun.sh/install \| bash`. Step 1 build task now starts with `bun --version || curl -fsSL https://bun.sh/install \| bash`. |
 | CONCERN | User | Success Criteria are entirely technical (test-pass, lint-clean, files-exist). The headline user-facing claim — "automation does not steal the user's cursor or focus" — has no acceptance verification. | User-facing manual verification subsection added to Success Criteria | New Success Criteria subsection lists four manual verifications: cursor-not-stolen test (user types while bcu drives a window), parallel-session graceful failure (two concurrent `agent-browser` invocations), BYOB-down clarity (Chrome stopped → exit 1, no Playwright), and Electron AX retry (Slack click after AX invalidation). |
 | NIT | Archaeologist | Research finding 4 (MCP-vs-CLI) frames the question as token cost in the prose summary but the spike conclusion is about connection lifecycle (per the GitHub commenter). Mismatch in framing. | Research finding 4 prose updated to lead with connection lifecycle | Reframed the Research finding to lead with connection lifecycle (per m13v's comment) and demote token cost to a secondary consideration. Spike-1 already had this right; only the prose intro changed. |
+
+### Rev3 — Internal consistency sweep (2026-05-04)
+
+After rev2 was committed the router re-dispatched `/do-plan` with the same critique verdict
+hash. Rather than waiting for a fresh critique to surface new findings, the rev3 pass audited
+the rev2 plan against its own architectural decisions and fixed residual contradictions left
+over from the rev1 → rev2 transition. No critic raised these explicitly; they are
+self-discovered consistency drift.
+
+| Severity | Origin | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| CONCERN | Self-audit | Failure Path Test Strategy still listed "BYOB bridge socket absent: `tools/browser/` must fall back to Playwright without crashing" — directly contradicts the rev2 "no silent Playwright fallback" decision. | Failure Path Test Strategy rewritten | Rewrote the section to test the BYOB-down → exit 1 path, the lock-contention → exit 2 path, and the agent-layer surfacing of CLI errors. Removed every "fall back to Playwright" assertion. |
+| CONCERN | Self-audit | Risk 1 mitigation referenced `agent-browser connect 9222` as the post-rebuild health check. BYOB does not expose CDP on a TCP port — it uses the Unix socket at `~/.byob/run/byob.sock`. The mitigation step was unrunnable. | Risk 1 mitigation rewritten | Replaced with the documented post-install canary: socket appears within 10s of starting Chrome, `agent-browser open about:blank && agent-browser get title` against the socket. Restore from `dist.prev/` on canary failure. Explicitly noted the legacy CDP-port workflow is gone. |
+| CONCERN | Self-audit | Step 2 build task said "Update tools/browser/manifest.json to remove `playwright` from declared dependencies" — but the actual file does not list playwright. The instruction was a no-op and would have left the manifest still pointing at the old upstream (`vercel-labs/agent-browser`). | Step 2 manifest task rewritten | Replaced with the actual edits: change `source.repository` to `wxtsky/byob`, change `commands.install` to the BYOB clone+setup invocation, drop `state save auth.json` from the `authenticated-session` workflow (no auth-state files in repo with BYOB). |
+| CONCERN | Self-audit | Agent Integration section said the `computer-use` skill invokes `python -m tools.computer ...` AND `valor-computer ...`. Two invocation patterns for one skill creates ambiguity for downstream test code and OS-gate placement. | Agent Integration narrowed to single invocation pattern | Skill uses `valor-computer` exclusively. `python -m tools.computer` is explicitly excluded. The OS gate lives inside `tools.computer.cli:main` so the entry-point shim catches it before any HTTP work. |
+| CONCERN | Self-audit | Plan claimed "OS gate in computer-use skill: Skill checks `sys.platform == "darwin"` at entry." Skills are markdown files — they cannot execute Python. The gate had nowhere to live. | OS gate relocated to `tools.computer.cli:main` | Plan now states the gate is enforced in the CLI entry point (exit 78 / `EX_CONFIG`) and that the skill body merely documents the expected behavior. Step 4 and the test step updated to reflect this. Validation step in Step 8 updated to assert exit 78 + stderr message rather than a vague "OS gate message". |
 
 ---
 
