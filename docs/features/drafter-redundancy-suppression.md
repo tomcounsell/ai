@@ -20,8 +20,9 @@ for subsequent near-duplicates — the signal "still working" without the noise.
 
 | File | Role |
 |------|------|
-| `bridge/redundancy_filter.py` | Pure functions: `should_suppress()`, `SuppressionVerdict` |
-| `agent/output_handler.py` | Call site: wired into `TelegramRelayOutputHandler.send` |
+| `bridge/redundancy_filter.py` | Pure functions: `should_suppress()`, `SuppressionVerdict`. Optional per-call `threshold` parameter (default: `REDUNDANCY_THRESHOLD`). |
+| `agent/output_handler.py` | Call site #1: wired into `TelegramRelayOutputHandler.send`. Reads `recent_sent_drafts` baseline; gated on `session.is_sdlc`. |
+| `agent/session_completion.py` | Call site #2: wired into `_deliver_pipeline_completion`. Reads `chat_message_log` outbound entries via `_build_completion_baseline`; uses `threshold=0.55` (LOW band) and enforces `DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD` (HIGH=0.75) in caller. See [PM Final Delivery](pm-final-delivery.md#mid-session-send-aware-completion-suppression). |
 | `models/agent_session.py` | `recent_sent_drafts` field + `record_recent_sent_draft()` helper |
 | `agent/agent_session_queue.py` | `recent_sent_drafts` in `_AGENT_SESSION_FIELDS` allow-list |
 
@@ -102,9 +103,32 @@ All knobs are environment variables with sensible defaults. Set them in
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DRAFTER_REDUNDANCY_SUPPRESSION_ENABLED` | `true` | Kill switch. Set to `false` to restore pre-fix behavior. |
-| `DRAFTER_REDUNDANCY_THRESHOLD` | `0.65` | Bigram Jaccard threshold. Higher = stricter (fewer suppressions). |
+| `DRAFTER_REDUNDANCY_THRESHOLD` | `0.65` | Bigram Jaccard threshold for the in-session drafter call site (Path A). Higher = stricter (fewer suppressions). |
+| `DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD` | `0.75` | High-confidence cutoff for the PM completion-runner call site (issue #1262). Read by `agent/session_completion.py`; applied in caller after `should_suppress(threshold=0.55)` returns. Above HIGH → suppress; `[0.55, HIGH)` → escalate to Haiku judge. |
 | `DRAFTER_RECENT_DRAFTS_N` | `3` | Number of recent sent drafts retained per session for comparison. |
-| `DRAFTER_REDUNDANCY_WINDOW_SECONDS` | `600` | Time window (seconds) for comparison. Older entries are skipped. |
+| `DRAFTER_REDUNDANCY_WINDOW_SECONDS` | `600` | Time window (seconds) for comparison. Older entries are skipped. Reused by both call sites. |
+
+## Second call site: PM completion runner (issue #1262)
+
+`should_suppress` accepts an optional `threshold: float | None = None` kwarg
+(defaults to `REDUNDANCY_THRESHOLD`). The PM completion runner
+(`_deliver_pipeline_completion`) calls it with three deviations from the Path A
+contract:
+
+- `threshold=0.55` (LOW band edge) — forces `verdict.jaccard` to be populated
+  for any meaningful match so the caller can apply its own HIGH cutoff
+  (`DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD`, default `0.75`) and a borderline
+  Haiku escalation in `[0.55, HIGH)`.
+- `session_status=None` — intentionally bypasses the `_TERMINAL_STATUSES`
+  exemption (which is correct for the in-session drafter but wrong for the
+  completion runner, where dedupe IS desired even on terminal sessions).
+- `expectations=None` — Pass 2 of the runner returns plain text, not a
+  `MessageDraft`.
+
+Baseline source is `chat_message_log` outbound entries (Path A + Path B
+visibility), not `recent_sent_drafts` (which only Path A populates). See
+[PM Final Delivery: mid-session-send-aware completion suppression](pm-final-delivery.md#mid-session-send-aware-completion-suppression)
+for the full caller contract.
 
 ## Relationship to RTR
 

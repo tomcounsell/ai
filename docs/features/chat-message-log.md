@@ -83,7 +83,7 @@ Every Telegram message dispatched to a session via `dispatch_telegram_session` r
 
 > **Dispatch gap:** Follow-up steering messages and interjection messages to already-running sessions (dispatched via `bridge/dispatch.py` steering path) are not captured in the chat log — only new-session dispatch is logged.
 
-## Read Path: Message Drafter
+## Read Path 1: Message Drafter
 
 **Location:** `bridge/message_drafter.py::_build_draft_prompt`
 
@@ -99,6 +99,19 @@ Recent chat in this thread (you have already said the 'out' lines — avoid repe
 This block is inserted into the drafter prompt just before the agent output text. The drafter sees its own prior sends and avoids generating duplicate content.
 
 **Fault tolerance:** If `chat_message_log` is `None`, `[]`, or contains entries with missing keys, the block is omitted silently. The drafter never crashes on a malformed log.
+
+## Read Path 2: PM Completion Runner (issue #1262)
+
+**Location:** `agent/session_completion.py::_build_completion_baseline` (Pass 1 prompt block + post-draft suppression baseline)
+
+The PM final-delivery runner reads outbound `chat_message_log` entries to detect when its drafted summary would restate a message the agent already sent in-session via `valor-telegram send` (Path B). The adapter (`_build_completion_baseline`) maps `chat_message_log` outbound entries (`{direction, sender, content, message_id, ts}`) to the `should_suppress` baseline shape (`{ts, text, artifacts}`), filters `direction == "out"`, and drops entries older than `REDUNDANCY_WINDOW_SECONDS`.
+
+The runner uses the chat log in two distinct ways per pipeline-complete:
+
+1. **Pass 1 prompt injection** — appends an `[out]` block of recent outbound entries to the harness prompt so the drafter "only adds materially-new context".
+2. **Post-draft suppression** — calls `bridge/redundancy_filter.should_suppress(threshold=0.55, ...)` with the same adapter baseline, then enforces a HIGH cutoff (`DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD`, default `0.75`) in caller; the borderline band escalates to a Haiku judge.
+
+To bound the read-after-write race against Path B publishes, the runner first calls `_await_outbox_drained(parent, timeout_seconds=2.0)` and re-fetches the parent from Popoto before reading. See [PM Final Delivery: mid-session-send-aware completion suppression](pm-final-delivery.md#mid-session-send-aware-completion-suppression) for the full contract, and [Drafter Redundancy Suppression](drafter-redundancy-suppression.md#second-call-site-pm-completion-runner-issue-1262) for the Path A vs. completion-runner contract differences.
 
 ## Bound and Trimming
 

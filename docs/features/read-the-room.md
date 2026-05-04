@@ -207,6 +207,8 @@ The two layers compose cleanly:
 
 See [Drafter Redundancy Suppression](drafter-redundancy-suppression.md) for full details.
 
+**PM Completion Runner Haiku Judge** (`agent/session_completion.py::_judge_completion_novelty`, issue #1262) is a *separate* Haiku call site distinct from RTR. It runs only inside `_deliver_pipeline_completion` for the borderline band of the post-draft suppression check (Jaccard `[0.55, 0.75)`), with its own tool schema (`completion_novelty_verdict` with `restate`/`new` enum) and 3-second timeout. It deliberately does NOT share code with RTR: RTR judges room context against a candidate draft; the completion-novelty judge compares two specific message strings (prior mid-session send vs. drafted final summary). Both follow the same fail-open pattern (`semaphore_slot()` + inline `anthropic.AsyncAnthropic(timeout=3.0)`); if the RTR Haiku model identifier or timeout changes, audit `_judge_completion_novelty` for parallel updates. See [PM Final Delivery: mid-session-send-aware completion suppression](pm-final-delivery.md#mid-session-send-aware-completion-suppression).
+
 ## Related documentation
 
 * [`docs/features/bridge-worker-architecture.md`](bridge-worker-architecture.md) — Path A flow showing where RTR sits.

@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -386,16 +386,16 @@ The integration test at `tests/integration/test_chat_message_log_e2e.py` already
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/pm-dev-session-architecture.md` (or whichever doc owns the completion-runner narrative) with a new section: *"Mid-session-send-aware completion suppression"*. Document: (a) why the runner now reads `chat_message_log`, (b) when it suppresses, (c) what the user sees on suppression (👀 reaction, no text), (d) that `response_delivered_at = None` is intentional after suppression.
-- [ ] Update `docs/features/README.md` index table only if a new top-level feature doc is added (otherwise the existing PM completion-runner doc gets the section).
-- [ ] Add a one-paragraph callout to `bridge/redundancy_filter.py` module docstring (the *## Suppression contract* section): note that the completion runner is now a second consumer of `should_suppress`, calling it with `session_status=None` to bypass `_TERMINAL_STATUSES`. Cross-reference this plan.
+- [x] Updated `docs/features/pm-final-delivery.md` (canonical home for the completion-runner narrative; +134 lines in PR #1278) with the *"Mid-session-send-aware completion suppression"* section covering (a)–(d). `docs/features/pm-dev-session-architecture.md` got a one-paragraph cross-reference.
+- [x] Updated `docs/features/README.md` index table — both "PM Final Delivery" and "Drafter Redundancy Suppression" entries now mention the new behavior; no new top-level doc was added.
+- [x] Module docstring on `bridge/redundancy_filter.py` extended to document the second consumer's distinct semantics (`session_status=None` bypasses `_TERMINAL_STATUSES`, additive `threshold` parameter). Cross-referenced from `docs/features/drafter-redundancy-suppression.md` (new "Second call site" section), `docs/features/chat-message-log.md` (new "Read Path 2" section), and `docs/features/read-the-room.md` ("Adjacent layers" cross-ref to the second Haiku judge site).
 
 ### External Documentation Site
 N/A — this repo has no external docs site.
 
 ### Inline Documentation
-- [ ] Inline comment at the new suppression-check call site in `agent/session_completion.py` explaining the `session_status=None` choice (per Risk 4 mitigation).
-- [ ] Docstring on the new `_judge_completion_novelty` helper documenting fail-open contract and timeout.
+- [x] Inline comment at the new suppression-check call site in `agent/session_completion.py` explaining the `session_status=None` choice (per Risk 4 mitigation).
+- [x] Docstring on the new `_judge_completion_novelty` helper documenting fail-open contract and timeout.
 
 ## Success Criteria
 
