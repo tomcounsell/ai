@@ -230,8 +230,12 @@ closed by the maintainer in favor of this umbrella.
    whether the session is marked as needing real Chrome (see `## Solution → Scheduler-Layer
    Serialization`). If another real-Chrome session is currently executing, the new session waits
    in the queue rather than starting concurrently. There is no per-process file lock.
-3. **BYOB MCP server**: Node process spawned by Claude Code's MCP runtime when the agent session
-   loads. Holds a persistent connection to `byob-bridge` over `~/.byob/run/byob.sock`.
+3. **BYOB MCP server**: Node process (run via `tsx`) spawned by Claude Code's MCP runtime when
+   the agent session loads. Holds a persistent connection to `byob-bridge` over a per-device
+   Unix socket under `~/.byob/bridges/<deviceId>.sock`. The MCP server discovers the socket at
+   startup; callers must never hardcode a fixed socket path. (Documented during PR #1277 live
+   setup — BYOB v0.3+ uses UUID-keyed per-device sockets, not a single `~/.byob/run/byob.sock`
+   path that earlier rev plans assumed.)
 4. **byob-bridge**: Communicates with the Chrome extension over Native Messaging.
 5. **Chrome extension** (MV3): Receives commands, operates on the currently active tab in the
    user's real Chrome session.
@@ -323,7 +327,7 @@ when the underlying state is absent.
 
 | Operator Step | When | Provides |
 |---------------|------|----------|
-| Click "Load extension" in Chrome (BYOB MV3) | After `bun run setup` runs in Step 1 | `~/.byob/run/byob.sock` activation |
+| Click "Load extension" in Chrome (BYOB MV3) → fully quit & reopen Chrome (`⌘Q`) | After `bun run setup` runs in Step 1 | Bridge process activation; per-device socket appears under `~/.byob/bridges/<deviceId>.sock` (verify with `cd ~/.byob && bun run doctor`) |
 | Run `/setup` and answer "yes" to computer-use opt-in | Anytime after build merges | Downloads + installs `BackgroundComputerUse.app` |
 | Grant Accessibility permission to bcu | First bcu launch | `osascript`-callable AX |
 | Grant Screen Recording permission to bcu | First bcu launch | bcu can screenshot windows |
@@ -470,10 +474,13 @@ stealing cursor → result returned.
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] **BYOB MCP server startup failure**: When `~/.byob/run/byob.sock` is missing or the bridge
-  is not running, `byob` MCP server start must fail with a clear stderr message that Claude Code
-  can surface. Test: rename `~/.byob/run/byob.sock`, start a fresh agent session, assert the MCP
+- [ ] **BYOB MCP server startup failure**: When the BYOB bridge is not running (Chrome not open,
+  extension not loaded, or `cd ~/.byob && bun run doctor` reports any red status), `byob` MCP
+  server start must fail with a clear stderr message that Claude Code can surface. Test: kill
+  the bridge process (`pkill -f byob-bridge.ts`), start a fresh agent session, assert the MCP
   server entry shows a startup error and the `byob_*` tools are absent from the agent context.
+  (Per-device socket path under `~/.byob/bridges/<deviceId>.sock` is discovered by the MCP
+  server at startup — never hardcode the path.)
 - [ ] **`scripts/update/mcp_byob.py` lock contention**: When `~/.claude.json.lock` is held,
   the registrar must use the 3-attempt backoff (50ms / 200ms / 800ms) — same pattern as
   `mcp_memory.py`. Test: hold the lock in a fixture, call the registrar, assert it retries and
@@ -555,13 +562,15 @@ stealing cursor → result returned.
 changes.
 **Mitigation:** Pin BYOB to a specific git commit in `config/byob_pin.json` (only bumped via
 `/update --bump-byob`). After any BYOB rebuild, `/update` runs an **end-to-end** post-install
-canary (rev3 C2): a small Node script (`scripts/update/byob_canary.js`) connects directly to
-`~/.byob/run/byob.sock`, sends a `byob_navigate('about:blank')` followed by a `byob_get_title`
-round-trip with `socket.settimeout(30)`, and asserts both succeed. A stale socket file from a
-crashed previous run will pass an `os.path.exists` check but fail `connect()` — that is treated
-as a canary failure (not as "socket not yet ready"). On canary failure, restore
-`~/.byob/dist.prev/` and surface an alert. (BYOB does not expose CDP on a TCP port; the legacy
-`agent-browser connect 9222` workflow is unrelated to this plan.)
+canary (rev3 C2): a small Node script (`scripts/update/byob_canary.js`) discovers the active
+per-device socket under `~/.byob/bridges/<deviceId>.sock` (not a fixed path — BYOB v0.3+ uses
+UUID-keyed sockets, see `cd ~/.byob && bun run doctor` for the canonical discovery), connects,
+sends a `byob_navigate('about:blank')` followed by a `byob_get_title` round-trip with
+`socket.settimeout(30)`, and asserts both succeed. A stale socket file from a crashed previous
+run will fail `connect()` — that is treated as a canary failure (not as "socket not yet
+ready"). On canary failure, restore the previous BYOB tree from `~/.byob.prev/`
+(`rm -rf ~/.byob && mv ~/.byob.prev ~/.byob`) and surface an alert. (BYOB does not expose CDP
+on a TCP port; the legacy `agent-browser connect 9222` workflow is unrelated to this plan.)
 
 ### Risk 2: bcu Accessibility permission grant is persistent but fragile
 **Impact:** A macOS upgrade or re-sign can revoke the Accessibility permission for `xyz.dubdub.backgroundcomputeruse`, silently breaking the computer-use skill.
@@ -658,15 +667,20 @@ with:
 1. **BYOB update step**: After pulling main, check if BYOB pinned commit has changed
    (`config/byob_pin.json` holds the pinned upstream commit SHA). If different from
    `git -C ~/.byob rev-parse HEAD`:
-   - Snapshot the current `~/.byob/dist/` to `~/.byob/dist.prev/` for rollback.
+   - **Snapshot the entire `~/.byob/` tree** to `~/.byob.prev/` for rollback. BYOB v0.3+ is a
+     workspace monorepo with build artifacts under `packages/*/output/` and `packages/*/dist/`
+     — there is no single top-level `dist/` to copy. Snapshot the whole tree.
    - `git -C ~/.byob fetch && git -C ~/.byob checkout <pinned-sha>`.
-   - Run `bun install && bun run build` in `~/.byob/` and re-register the native messaging host
-     (`bun run setup --skip-extension`).
-   - **Post-install canary** (end-to-end, rev3 C2): Run `scripts/update/byob_canary.js` which
-     connects to `~/.byob/run/byob.sock` and asserts a `byob_navigate('about:blank')` +
-     `byob_get_title` round-trip succeeds within 30s. A stale socket from a crashed prior run
-     fails `connect()` — that is treated as canary failure, not as "socket not yet ready". On
-     canary failure, restore `~/.byob/dist.prev/` and alert the user.
+   - Run `bun install && bun run setup` in `~/.byob/`. (`bun run setup` builds the extension,
+     re-registers the native messaging host, and prompts for MCP-client registration — press
+     enter through the registration prompt; we use `scripts/update/mcp_byob.py` for that.)
+   - **Post-install canary** (end-to-end, rev3 C2): First run `cd ~/.byob && bun run doctor` —
+     it must report all green (manifest, launcher, bridge process, IPC socket). Then run
+     `scripts/update/byob_canary.js` which discovers the per-device socket under
+     `~/.byob/bridges/<deviceId>.sock`, connects, and asserts a
+     `byob_navigate('about:blank')` + `byob_get_title` round-trip succeeds within 30s. On
+     canary failure, restore the previous tree (`rm -rf ~/.byob && mv ~/.byob.prev ~/.byob`)
+     and alert the user.
    - Only bump the pin via `/update --bump-byob`.
 2. **bcu update check + install step**:
    - First, detect whether bcu is opted-in on this machine (sentinel: `~/.config/valor/computer-use-enabled`,
@@ -872,7 +886,7 @@ Tier 2 (Specialists needed here): mcp-specialist (for MCP server registration re
   - Self-heals drift on every invocation
 - Wire `mcp_byob.py` into `scripts/update/run.py` alongside `mcp_memory`
 - Run the registrar; verify `~/.claude.json` `mcpServers.byob` is present
-- Verify `~/.byob/run/byob.sock` exists after Chrome + BYOB are running
+- Verify BYOB is healthy after Chrome + extension are running by `cd ~/.byob && bun run doctor` (must report green for manifest, launcher, bridge process, and per-device IPC socket under `~/.byob/bridges/<deviceId>.sock`)
 
 ### 1b. Add `AgentSession.requires_real_chrome` field + worker scheduler check
 - **Task ID**: build-scheduler-gate
