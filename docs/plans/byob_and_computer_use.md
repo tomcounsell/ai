@@ -398,12 +398,16 @@ stealing cursor → result returned.
   ```json
   "mcpServers": {
     "byob": {
-      "command": "node",
-      "args": ["~/.byob/dist/mcp-server.js"],
+      "type": "stdio",
+      "command": "~/.byob/packages/mcp-server/node_modules/.bin/tsx",
+      "args": ["~/.byob/packages/mcp-server/bin/byob-mcp.ts"],
       "env": { "BYOB_ALLOW_EVAL": "0" }
     }
   }
   ```
+  (BYOB v0.3+ ships its MCP server as a TypeScript entry executed via `tsx`. Both paths resolve
+  inside the BYOB workspace after `bun install` runs in `~/.byob/`. This matches BYOB's own
+  "Manual MCP registration" recipe in upstream README.)
   The registrar holds `fcntl.flock(LOCK_EX | LOCK_NB)` on `~/.claude.json.lock` with the same
   3-attempt backoff (50 ms / 200 ms / 800 ms) used by `scripts/update/mcp_memory.py:46`,
   because `~/.claude.json` is rewritten by the Claude Code harness on every session event and
