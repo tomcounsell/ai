@@ -464,7 +464,11 @@ def _rule_plan_not_critiqued(stage_states: dict, meta: dict, context: dict) -> b
     """Plan exists, not yet critiqued."""
     plan_status = stage_states.get("PLAN")
     critique_status = stage_states.get("CRITIQUE")
-    return plan_status in (STATUS_COMPLETED, "ready") and critique_status in (None, "pending")
+    return plan_status in (STATUS_COMPLETED, "ready") and critique_status in (
+        None,
+        "pending",
+        "ready",
+    )
 
 
 def _rule_critique_needs_revision(stage_states: dict, meta: dict, context: dict) -> bool:
