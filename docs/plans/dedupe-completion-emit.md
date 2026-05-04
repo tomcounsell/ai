@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-05-03
 tracking: https://github.com/tomcounsell/ai/issues/1262
 last_comment_id:
+revision_applied: 2026-05-04
+prior_critique_artifact_hash: sha256:5230ef8c0a11c04101f913f726689af0a87cf924af2e4782e166afe7c9f26069
 ---
 
 # Dedupe Completion Emit
@@ -64,7 +66,9 @@ The redundancy filter that *would* catch this (`bridge/redundancy_filter.py`) is
 
 **Active plans in `docs/plans/` overlapping this area:** `phantom-pm-twin-dedupe.md` is unrelated — it dedupes Redis `AgentSession` rows, not Telegram messages.
 
-**Notes:** All cited file:line pointers match current HEAD exactly. No drift.
+**Notes:** All cited file:line pointers match current HEAD within ±2 lines. No semantic drift.
+
+**Revision (2026-05-04) re-check:** Re-verified the load-bearing assumption that `recent_sent_drafts` is *not* populated by Path B. Confirmed via `grep -rn "recent_sent_drafts" agent/ bridge/ tools/`: only writers are `models/agent_session.py:1519` (the `record_recent_sent_draft` helper definition) and `agent/output_handler.py:586` (the sole caller, gated on `session.is_sdlc`). No Path B writer exists. This refutes the prior revision's Data Flow §5 claim and triggered the BLOCKER fix recorded in §Critique Results.
 
 ## Prior Art
 
@@ -95,9 +99,9 @@ Five parallel research passes ran during issue triage (transcript: `/tmp/issue-1
 ### spike-3: Suppressed-emit fallback behavior (Q3)
 - **Assumption**: Silent suppression vs text "Done." vs emoji reaction are all viable.
 - **Method**: code-read of `tools/react_with_emoji.py:80`, `bridge/telegram_relay.py:84-144`, `bridge/response.py:54-75`, `models/agent_session.py:1425-1431`. Memory check: `feedback_emoji_over_acks`, `feedback_reactor_voice_emoji`.
-- **Finding**: 👀 reaction is the established project convention (`feedback_emoji_over_acks`, `feedback_reactor_voice_emoji`). Infrastructure exists end-to-end: `tools/react_with_emoji.py` queues to `telegram:outbox:{session_id}`; `bridge/telegram_relay.py::_send_queued_reaction` consumes and dispatches via `set_reaction`; `bridge/response.py::VALIDATED_REACTIONS` includes "👀". Completion runner already receives `telegram_message_id` (anchor message id) as a parameter — no new plumbing. Plan #1205 already shipped this exact pattern for RTR. Reuse.
+- **Finding (revised)**: 👀 reaction is the established project convention (`feedback_emoji_over_acks`, `feedback_reactor_voice_emoji`). Outbox-side infrastructure exists end-to-end: `bridge/telegram_relay.py::_send_queued_reaction` consumes outbox reaction events and dispatches via `set_reaction`; `bridge/response.py::VALIDATED_REACTIONS` includes "👀". Completion runner already receives `telegram_message_id` (anchor message id) as a parameter — no new plumbing on the consumer side. Plan #1205 already shipped this exact pattern for RTR. **Producer-side correction (revision 2026-05-04)**: spike-3 originally claimed `tools/react_with_emoji.py` could be reused as the producer. False — `react(feeling: str)` is CLI-only, reads `TELEGRAM_CHAT_ID` / `TELEGRAM_REPLY_TO` / `VALOR_SESSION_ID` from env vars, and `sys.exit(1)`s on missing values. The actual usable in-process producer is `TelegramRelayOutputHandler._rtr_queue_reaction` at `agent/output_handler.py:763-787` (which builds a payload via `_build_reaction_payload` and rpushes it).
 - **Confidence**: high
-- **Impact on plan**: On suppress, queue 👀 reaction on `telegram_message_id`. If `telegram_message_id` is None (rare — only when the completion runner was invoked without an anchor), fall through to silent completion + log warning. Never emit text "Done." (violates persona convention).
+- **Impact on plan**: On suppress, queue 👀 reaction on `telegram_message_id` via the canonical outbox path — `TelegramRelayOutputHandler._build_reaction_payload` (`agent/output_handler.py:789-820`) + `r.rpush(f"telegram:outbox:{parent.session_id}", json.dumps(payload))` + `r.expire(..., 3600)`. Implementation choice in revised Technical Approach: extract to `bridge/reaction_outbox.py` (preferred) or inline-replicate the snippet. If `telegram_message_id` is None (rare — only when the completion runner was invoked without an anchor), fall through to silent completion + log warning. Never emit text "Done." (violates persona convention).
 
 ### spike-4: Terminal-status exemption reconciliation (Q4)
 - **Assumption**: Either modify `_TERMINAL_STATUSES` exemption or add a separate completion-specific filter call.
@@ -121,12 +125,13 @@ End-to-end trace of a session that fires both a mid-session send and the complet
 2. **Worker spawns CLI harness**: `agent/sdk_client.py:1380-1385` injects `VALOR_SESSION_ID` and `AGENT_SESSION_ID` into the subprocess env.
 3. **PM dispatches sub-skill** (e.g. `/sdlc` or `/do-docs`) which calls `valor-telegram send "status update"`.
 4. **`tools/valor_telegram.py::cmd_send`** reads `AGENT_SESSION_ID` from env (line 1042-1044), sets `payload["owner_agent_session_id"]`, publishes to `telegram:outbox:{session_id}`.
-5. **`bridge/telegram_relay.py::_resolve_owner_session`** Tier-1 resolves to the parent session; relay appends `{direction: "out", sender, content, message_id, ts}` entry to `parent.chat_message_log` (PR #1244 plumbing). The send also lands in `parent.recent_sent_drafts` via the post-send hook in `TelegramRelayOutputHandler.send` (`agent/output_handler.py:407`+).
+5. **`bridge/telegram_relay.py::_resolve_owner_session`** Tier-1 resolves to the parent session; relay appends `{direction: "out", sender, content, message_id, ts}` entry to `parent.chat_message_log` (PR #1244 plumbing — appended via `await asyncio.to_thread(_append_outbound_chat_log, ...)` after the underlying send succeeds, see `bridge/telegram_relay.py:697`). **The send does NOT land in `parent.recent_sent_drafts`** — that field is populated only by `TelegramRelayOutputHandler.send` (Path A, see `agent/output_handler.py:586`), which Path B `valor-telegram send` bypasses entirely. **This is the load-bearing reason the suppression baseline below must read `chat_message_log`, not `recent_sent_drafts`.**
 6. **Sub-skill returns**; PM continues; eventually all stages complete.
 7. **Completion runner fires** (`agent/session_completion.py::_deliver_pipeline_completion`) — runs Pass 1 + Pass 2 drafter, produces `final_text`.
 8. **NEW**: Pass 1 prompt is built with a *"messages already sent this session"* block extracted from `parent.chat_message_log` outbound entries (mirroring `bridge/message_drafter.py:1246-1276` shape). Drafter is instructed to acknowledge what was sent and produce only materially-new content.
-9. **NEW**: After Pass 2 produces `final_text`, a completion-specific suppression check runs:
-   - Call `should_suppress(final_text, extract_artifacts(final_text), parent.recent_sent_drafts, expectations=None, session_status=None)` with a per-call threshold of `0.75`.
+9. **NEW**: After Pass 2 produces `final_text`, a completion-specific suppression check runs against **`chat_message_log` outbound entries** (NOT `recent_sent_drafts`, which Path B does not populate):
+   - **Adapter step** (required because shapes differ): build a `chat_log_baseline: list[dict]` by filtering `parent.chat_message_log` to entries with `direction == "out"` from the last `REDUNDANCY_WINDOW_SECONDS` (re-using the existing constant in `bridge/redundancy_filter.py:47`), then mapping each `{direction, sender, content, message_id, ts}` entry to `{ts, text: content, artifacts: extract_artifacts(content)}`. Cap to last 5 entries.
+   - Call `should_suppress(final_text, extract_artifacts(final_text), chat_log_baseline, expectations=None, session_status=None, threshold=0.75)`.
    - If verdict is `suppress`: queue 👀 reaction on `telegram_message_id`, log the decision, skip `send_cb`, set `delivery_attempted=False`.
    - If verdict is `send` AND best Jaccard ∈ [0.55, 0.75): escalate to a Haiku judge (RTR pattern). Judge returns `restate` (suppress) or `new` (send).
    - Otherwise proceed with `send_cb` as today.
@@ -134,11 +139,12 @@ End-to-end trace of a session that fires both a mid-session send and the complet
 
 ## Architectural Impact
 
-- **New dependencies**: None. Reuses `bridge/redundancy_filter.should_suppress`, `bridge/message_drafter.extract_artifacts`, `bridge/read_the_room` Haiku-judge pattern, `tools/react_with_emoji` (or its underlying outbox publish).
-- **Interface changes**: None. `_deliver_pipeline_completion` signature unchanged; `should_suppress` signature unchanged. `recent_sent_drafts` and `chat_message_log` already exist on `AgentSession`.
-- **Coupling**: Modest increase — `agent/session_completion.py` gains imports from `bridge/redundancy_filter`, `bridge/message_drafter`, and (conditionally) `bridge/read_the_room`. Acceptable: these are shared bridge-layer utilities, and this is the same layering as `agent/output_handler.py` already does.
+- **New dependencies**: None external. Reuses `bridge/redundancy_filter.should_suppress`, `bridge/message_drafter.extract_artifacts`, `bridge/read_the_room` Haiku-judge pattern, and the outbox `rpush` mechanism that `TelegramRelayOutputHandler._rtr_queue_reaction` uses.
+- **Interface changes**: One additive parameter — `should_suppress` gains optional `threshold: float | None = None` (defaults preserve all existing behavior). `_deliver_pipeline_completion` signature unchanged. `chat_message_log` already exists on `AgentSession`. **Removed dependency**: `recent_sent_drafts` is NOT read by this plan (corrected in revision); see Solution > Technical Approach for rationale.
+- **Optional new module**: `bridge/reaction_outbox.py` exposing `build_reaction_payload(...)` and `queue_reaction(...)` — extracts the shared payload schema currently duplicated between `output_handler.py:789-820` (`_build_reaction_payload`) and the new completion-runner suppression branch. Net code change: zero (extracted, not added) plus one import. Optional — if extraction is rejected during build, the completion runner inline-replicates the snippet with a sync-with-canonical comment.
+- **Coupling**: Modest increase — `agent/session_completion.py` gains imports from `bridge/redundancy_filter`, `bridge/message_drafter`, `bridge/read_the_room`, and either `bridge/reaction_outbox` (if extracted) or the redis client. Acceptable: these are shared bridge-layer utilities, and this is the same layering as `agent/output_handler.py` already does.
 - **Data ownership**: Unchanged. Completion runner remains sole owner of the final-emit decision and parent-session `completed` transition (per #1058).
-- **Reversibility**: High. The suppression check is a single conditional branch around the existing `send_cb` block. Removing the feature is a clean revert.
+- **Reversibility**: High. The suppression check is a single conditional branch around the existing `send_cb` block; the helpers (`_build_completion_baseline`, `_await_outbox_drained`, `_judge_completion_novelty`) are dead code if the branch is removed. Removing the feature is a clean revert. The optional `bridge/reaction_outbox.py` extraction is independently reversible by inlining the helper back into `output_handler.py`.
 
 ## Appetite
 
@@ -164,17 +170,18 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/dedupe-complet
 
 ### Key Elements
 
-- **Chat-log prompt injection** (Pass 1): Append a "messages already sent this session" block (drawn from `parent.chat_message_log` outbound entries) to the existing `_COMPLETION_PROMPT_PREFIX + summary_context` prompt. Mirrors `bridge/message_drafter.py:1246-1276` shape. Lets the drafter elide / shrink / acknowledge naturally.
-- **Post-draft hybrid suppression** (after Pass 2): Bigram-Jaccard pre-check at threshold `0.75` (env-tunable). Suppress on J ≥ 0.75. Send on J < 0.55. Escalate to Haiku judge in band [0.55, 0.75).
+- **Chat-log prompt injection** (Pass 1): Append a "messages already sent this session" block (drawn from `parent.chat_message_log` outbound entries) to the existing `_COMPLETION_PROMPT_PREFIX + summary_context` prompt. Mirrors `bridge/message_drafter.py:1262-1276` shape. Lets the drafter elide / shrink / acknowledge naturally.
+- **Post-draft hybrid suppression** (after Pass 2): Bigram-Jaccard pre-check at threshold `0.75` (env-tunable) against an adapter-mapped view of `parent.chat_message_log` outbound entries. **Critical: baseline source is `chat_message_log`, NOT `recent_sent_drafts`** — `recent_sent_drafts` is Path-A-only (`agent/output_handler.py:586`); the duplicate scenario in this issue is Path-B-source, which only populates `chat_message_log`. Suppress on J ≥ 0.75. Send on J < 0.55. Escalate to Haiku judge in band [0.55, 0.75).
+- **Shape adapter**: `_build_completion_baseline(parent, window_seconds=REDUNDANCY_WINDOW_SECONDS, max_entries=5) -> list[dict]` translates `chat_message_log` `{direction, sender, content, message_id, ts}` entries into the `{ts, text, artifacts}` shape expected by `should_suppress`'s `recent_sent_drafts` parameter. Filters to `direction == "out"` and entries inside the time window. Computes `artifacts` via `bridge.message_drafter.extract_artifacts(content)` per entry.
 - **Haiku judge**: Single Haiku call with `tool_use` returning `{action: "restate" | "new"}`. Fail-open contract per RTR pattern. Prompt includes `prior_timestamp` so the judge can weight stale-vs-fresh context.
-- **Suppress-fallback**: Queue 👀 reaction on `telegram_message_id` via existing `tools/react_with_emoji` infrastructure. Silent fallback (log + skip send) when `telegram_message_id` is None.
+- **Suppress-fallback**: Queue 👀 reaction on `telegram_message_id` via the same outbox path used by `TelegramRelayOutputHandler._rtr_queue_reaction` (`agent/output_handler.py:763-787`) — NOT via `tools/react_with_emoji` (CLI-only, reads chat/reply/session from env vars). Either (a) extract `_build_reaction_payload` from `output_handler.py:789-820` to a new `bridge/reaction_outbox.py` module and call it from both sites, or (b) inline-replicate the 6-line payload + rpush snippet in the completion runner with a comment cross-referencing the canonical site. Silent fallback (log + skip send) when `telegram_message_id` is None.
 - **Documentation update**: Document that `response_delivered_at = None` is intentional when the completion runner suppresses (so dashboards/analytics treat it as an intentional signal, not failure).
 
 ### Flow
 
 End-to-end user-visible flow:
 
-**Mid-session sub-skill send** → User sees status update with content X → **PM session continues** → All stages complete → **Completion runner fires** → Pass 1 sees "you already sent X" in prompt → Drafts a focused "all done" message OR returns minimal acknowledgement → Pass 2 reviews → Post-draft filter compares to `recent_sent_drafts` → If duplicate of X: queue 👀 on user's last message → User sees only one message + reaction.
+**Mid-session sub-skill send** → User sees status update with content X → **PM session continues** → All stages complete → **Completion runner fires** → Pass 1 sees "you already sent X" in prompt (sourced from `chat_message_log` outbound entries) → Drafts a focused "all done" message OR returns minimal acknowledgement → Pass 2 reviews → Post-draft filter compares against the same `chat_message_log` outbound baseline (shape-adapted for `should_suppress`) → If duplicate of X: queue 👀 on user's last message → User sees only one message + reaction.
 
 **Counterexample (legitimate non-duplicate)**: Mid-session send covers partial content → completion summary adds new outcomes → Post-draft Jaccard < 0.55 (or Haiku judges "new") → emit fires → user sees both messages.
 
@@ -184,23 +191,53 @@ End-to-end user-visible flow:
 - **Hybrid filter call**: Reuse `bridge/redundancy_filter.should_suppress` with two adjustments:
   1. Pass `session_status=None` to bypass `_TERMINAL_STATUSES` exemption.
   2. Wrap the call to use a per-completion threshold (default `0.75`, env `DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD`). Implementation option: temporarily monkey-patch `REDUNDANCY_THRESHOLD` (rejected — global module state, race-prone), or add a `threshold: float | None = None` parameter to `should_suppress` (preferred — additive, defaults to existing constant).
+- **Baseline source — `chat_message_log` (NOT `recent_sent_drafts`)**: The `recent_sent_drafts` field is updated only inside `TelegramRelayOutputHandler.send` at `agent/output_handler.py:586` (and only when `session.is_sdlc` is True at `agent/output_handler.py:584`). Path B `valor-telegram send` writes directly to `telegram:outbox:{session_id}` and the relay drains it — neither path touches `recent_sent_drafts`. The relay does, however, append to `chat_message_log` via `_append_outbound_chat_log` at `bridge/telegram_relay.py:697` for both Path A AND Path B sends (Tier-1 resolution covers Path B when `owner_agent_session_id` is in the payload, which `cmd_send` injects from `AGENT_SESSION_ID` at `tools/valor_telegram.py:1042-1044`). Therefore: `chat_message_log` is the only field that captures Path B mid-session sends, and is the only valid suppression baseline for this plan.
+- **Shape adapter helper** (new in `agent/session_completion.py`):
+  ```python
+  def _build_completion_baseline(parent, *, window_seconds=REDUNDANCY_WINDOW_SECONDS, max_entries=5) -> list[dict]:
+      """Adapt chat_message_log outbound entries to the should_suppress recent_sent_drafts shape.
+      Returns [{ts, text, artifacts}, ...]; empty list if no qualifying entries.
+      Fail-open: any exception → []."""
+      from bridge.message_drafter import extract_artifacts
+      try:
+          import time as _t
+          now = _t.time()
+          entries = parent.chat_message_log or []
+          out = []
+          for e in entries:
+              if not isinstance(e, dict): continue
+              if e.get("direction") != "out": continue
+              ts = e.get("ts")
+              if not isinstance(ts, (int, float)) or now - ts > window_seconds: continue
+              content = (e.get("content") or "").strip()
+              if not content: continue
+              out.append({"ts": ts, "text": content, "artifacts": extract_artifacts(content) or {}})
+          return out[-max_entries:]
+      except Exception:
+          return []
+  ```
+  Note `REDUNDANCY_WINDOW_SECONDS` is exported by `bridge/redundancy_filter.py:47`.
 - **Haiku escalation**: Copy the call shape from `bridge/read_the_room.py:343-518` (`run_read_the_room` Haiku invocation with `tool_use`). New helper `_judge_completion_novelty(prior_text, prior_ts, draft_text) -> bool` returns `True` to suppress, `False` to send. Fail-open: any exception → `False` (deliver).
 - **Chat-log block format**: Mirror `bridge/message_drafter.py:1262-1276` line shape: `"\n\nYou already sent these messages in this thread (do not repeat them — only add materially-new context):\n" + "\n".join(f"[out] {sender}: {content}" for entry in outbound_entries[-N:])`. Cap N at 5 to bound prompt growth.
-- **Reaction queueing**: Use existing path. Either import `tools/react_with_emoji::queue_reaction` directly (if a clean function exists) or replicate its outbox-publish snippet. Reaction queue key: `telegram:outbox:{parent.session_id}`.
+- **Reaction queueing**: `tools/react_with_emoji` is CLI-only — its `react()` function reads `TELEGRAM_CHAT_ID` / `TELEGRAM_REPLY_TO` / `VALOR_SESSION_ID` from the process environment and `sys.exit(1)`s on missing values, so it cannot be called in-process from `agent/session_completion.py`. Use the same outbox path as the existing RTR-suppress branch: `TelegramRelayOutputHandler._build_reaction_payload` (`agent/output_handler.py:789-820`) + `r.rpush(f"telegram:outbox:{parent.session_id}", json.dumps(payload))` + `r.expire(..., 3600)`. Implementation choice: extract `_build_reaction_payload` to a new `bridge/reaction_outbox.py::build_reaction_payload(...)` module function (preferred — single source of truth, removes the existing duplication risk) and call from both `output_handler.py:763-787` (`_rtr_queue_reaction`) and the new completion-runner suppression branch. Backstop: if extraction is rejected during build for scope reasons, inline-replicate the 6-line payload dict + rpush in the completion runner with a comment `# Mirror of TelegramRelayOutputHandler._build_reaction_payload — keep in sync.`
 - **Logging**: Every suppression decision logs `[completion-runner] Suppressed final emit for {parent_id} (jaccard=X.XX, judge={judge_verdict_or_n/a})` so operators can audit. Send decisions log similarly (`reason=below_threshold` or `reason=judge_says_new`).
+- **`is_sdlc` scope note**: This plan targets SDLC PM sessions where the completion runner fires and a duplicate emit can occur. Non-SDLC PM/teammate sessions don't trigger `_deliver_pipeline_completion` (it's only invoked from the pipeline-completion path), so the suppression logic naturally only runs in scope. No new gating needed; document explicitly.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `should_suppress` already has fail-open contract — any unhandled exception returns `SuppressionVerdict(action="send", reason="filter_error")`. Test asserts the completion runner inherits this: a malformed `chat_message_log` entry MUST NOT crash delivery.
+- [ ] `should_suppress` already has fail-open contract — any unhandled exception returns `SuppressionVerdict(action="send", reason="filter_error")`. Test asserts the completion runner inherits this: a malformed `chat_message_log` entry passed through the adapter MUST NOT crash delivery.
 - [ ] Haiku judge MUST fail-open (deliver) on any exception (timeout, API error, malformed response). Test mocks Haiku to raise `TimeoutError` — verify `final_text` is delivered.
-- [ ] If `tools/react_with_emoji::queue_reaction` raises (e.g. Redis unavailable), the suppression branch logs a warning and the session still finalizes cleanly — test asserts no crash.
+- [ ] `_build_completion_baseline` adapter MUST fail-open on any exception (returns `[]`). Test passes a `chat_message_log` containing a non-dict entry; adapter returns `[]`; suppression filter sees no baseline and delivers normally.
+- [ ] If the reaction-outbox `rpush` raises (e.g. Redis unavailable), the suppression branch logs a warning and the session still finalizes cleanly — test asserts no crash. (Tests target the new shared helper if extracted to `bridge/reaction_outbox.py`, otherwise the inline-replicated snippet.)
+- [ ] If `_await_outbox_drained` raises or times out, the runner proceeds with whatever `chat_message_log` contains; test mocks Redis to raise → wait helper returns `True` (fail-open) → suppression check runs against current state.
 
 ### Empty/Invalid Input Handling
-- [ ] Empty `chat_message_log`: prompt-injection helper produces empty string (no "you already sent" block); suppression filter returns `no_baseline` and delivers normally.
-- [ ] `chat_message_log` with no outbound entries (only inbound): same as empty — no-op.
-- [ ] `final_text` is empty: existing sentinel/fallback path takes over; suppression check should NOT run on the sentinel string. Add an early-return guard.
-- [ ] `telegram_message_id` is None on suppression: fall through to silent + log warning; verify no exception.
+- [ ] Empty `chat_message_log`: prompt-injection helper produces empty string (no "you already sent" block); adapter returns `[]`; `should_suppress` returns `send` with reason `no_baseline`; delivery proceeds normally.
+- [ ] `chat_message_log` with no outbound entries (only inbound): adapter filters them out → returns `[]` → same path as empty.
+- [ ] `chat_message_log` with outbound entries OUTSIDE the `REDUNDANCY_WINDOW_SECONDS` window: adapter filters them out → returns `[]` → same path as empty (stale entries never suppress).
+- [ ] `final_text` is empty/sentinel: existing sentinel/fallback path takes over at `agent/session_completion.py:567`; suppression check MUST NOT run on the sentinel string `[completion-runner internal error — no final_text assigned]`. Add an early-return guard checking for the sentinel literal AND `not final_text.strip()`.
+- [ ] `telegram_message_id` is None on suppression: fall through to silent + log warning; verify no exception, no reaction queued, `delivery_attempted=False`.
 
 ### Error State Rendering
 - [ ] When suppressed: verify the user sees exactly the 👀 reaction on their anchor message and no text. Integration test inspects the outbox for both message and reaction payloads.
@@ -210,16 +247,22 @@ End-to-end user-visible flow:
 
 Existing tests that must be updated, plus new tests to add. Each item carries a disposition.
 
-- [ ] `tests/unit/test_deliver_pipeline_completion.py` — UPDATE: add `recent_sent_drafts` and `chat_message_log` setup to existing fixtures. Most existing tests should still pass (no-suppression path unchanged when those fields are empty).
-- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_suppressed_when_final_text_matches_recent_sent_draft` — ADD: parent has a recent outbound draft; final_text matches at J ≥ 0.75; verify `send_cb` not called, 👀 reaction queued, `response_delivered_at` stays None, `finalize_session("completed")` still runs.
-- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_delivered_when_final_text_unique` — ADD: parent has recent outbound drafts; final_text unrelated; verify normal delivery.
+- [ ] `tests/unit/test_deliver_pipeline_completion.py` — UPDATE: add `chat_message_log` setup to existing fixtures (NOT `recent_sent_drafts` — see plan rationale; that field is Path-A-only). Most existing tests should still pass (no-suppression path unchanged when `chat_message_log` is empty).
+- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_suppressed_when_final_text_matches_chat_log_outbound` — ADD: parent has a recent outbound entry in `chat_message_log` (simulating a Path B `valor-telegram send`); final_text matches at J ≥ 0.75 after adapter shape-mapping; verify `send_cb` not called, 👀 reaction queued via the canonical reaction-outbox path, `response_delivered_at` stays None, `finalize_session("completed")` still runs.
+- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_delivered_when_final_text_unique` — ADD: parent has recent outbound chat_log entries; final_text unrelated; verify normal delivery.
+- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_baseline_excludes_inbound_entries` — ADD: parent has an inbound (`direction: "in"`) chat_log entry whose content matches `final_text`; baseline adapter filters it out; suppression returns `send` (we never suppress against the user's own message).
+- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_baseline_excludes_stale_entries` — ADD: parent has outbound chat_log entry with `ts` older than `REDUNDANCY_WINDOW_SECONDS`; baseline adapter filters it out; suppression returns `send`.
 - [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_judge_called_in_borderline_band` — ADD: J ∈ [0.55, 0.75); mock Haiku judge to return "restate" → suppressed; flip to "new" → delivered.
-- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_filter_failopen_on_exception` — ADD: malformed `recent_sent_drafts` entry; verify delivery proceeds + warning logged.
+- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_adapter_failopen_on_malformed_entry` — ADD: malformed `chat_message_log` entry (non-dict, missing keys); adapter returns `[]`; verify delivery proceeds + warning logged.
 - [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_silent_fallback_when_telegram_message_id_none` — ADD: suppression decision + None anchor → no reaction, no send, log warning, finalize cleanly.
+- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_skips_suppression_check_on_sentinel_text` — ADD: `final_text` is the sentinel string from `agent/session_completion.py:567`; suppression check is bypassed; existing sentinel/fallback path takes over.
+- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_outbox_drain_wait_times_out_gracefully` — ADD: mock Redis `llen` to always return 1 (queue never drains); `_await_outbox_drained` returns False after timeout; runner proceeds with whatever's in chat_message_log; verify no crash and warning logged.
+- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_refetches_parent_before_suppression_check` — ADD: in-memory `parent` has stale chat_message_log; `AgentSession.get_by_id` returns a fresh copy with new outbound entry; runner uses fresh copy for suppression baseline.
 - [ ] `tests/unit/test_message_drafter_chat_log.py` — UPDATE: confirm regular drafter's chat-log injection format remains the canonical reference. Completion runner injection mirrors but does NOT share code (per spike-1 / spike-4 rationale: keep the two surfaces decoupled).
-- [ ] `tests/integration/test_chat_message_log_e2e.py` — REPLACE: extend the existing end-to-end fixture. (a) PM session, (b) mid-session `valor-telegram send` writes to `chat_message_log`, (c) completion runner fires, (d) only one user-visible message is emitted (or message + reaction). Asserts on the recorded outbox payloads.
+- [ ] `tests/integration/test_chat_message_log_e2e.py` — REPLACE: extend the existing end-to-end fixture. (a) PM session with `is_sdlc=True`, (b) mid-session `valor-telegram send` writes to `chat_message_log` via Tier-1 owner resolution (NOT `recent_sent_drafts`), (c) completion runner fires, (d) only one user-visible message is emitted (or message + reaction). Asserts on the recorded outbox payloads, not on `recent_sent_drafts`.
 - [ ] `tests/unit/test_redundancy_filter.py::TestTerminalStatus` — NO CHANGE. Plan does NOT modify `_TERMINAL_STATUSES`. Existing exemption stays valid for the regular `TelegramRelayOutputHandler.send` path.
-- [ ] `tests/unit/test_redundancy_filter.py` — UPDATE if the `threshold: float | None = None` parameter is added to `should_suppress`: add one test case asserting the per-call threshold overrides the env default.
+- [ ] `tests/unit/test_redundancy_filter.py::test_threshold_parameter_overrides_default` — ADD: add one test case asserting the new `threshold: float | None = None` parameter on `should_suppress` overrides `REDUNDANCY_THRESHOLD` at the call site (passes `threshold=0.75`, asserts borderline 0.70 case is no longer suppressed).
+- [ ] `tests/unit/test_reaction_outbox.py` — ADD (only if `_build_reaction_payload` is extracted to `bridge/reaction_outbox.py`): unit test for the extracted function asserting the payload schema is byte-identical to `output_handler.py:789-820`'s output. Skip this test row if the inline-replication option is chosen during build.
 
 ## Rabbit Holes
 
@@ -255,20 +298,41 @@ Existing tests that must be updated, plus new tests to add. Each item carries a 
 ## Race Conditions
 
 ### Race 1: chat_message_log read-after-write between mid-session send and completion runner
-**Location:** `agent/session_completion.py:551` (new context-injection read) reads `parent.chat_message_log`, which is written by `bridge/telegram_relay.py:519-528` in the relay drain loop.
-**Trigger:** Mid-session `valor-telegram send` published to outbox; relay processes the send; completion runner fires before the relay's chat-log append commits to Redis.
-**Data prerequisite:** All outbound entries from this session that have completed sending (i.e. been ack'd by the relay) MUST be visible in `parent.chat_message_log`.
-**State prerequisite:** PM session signals "completion ready" only after its last sub-skill subprocess returns. The sub-skill subprocess returns only after `valor-telegram send` writes to outbox AND the publish completes. Relay's outbox-drain loop processes the publish and writes `chat_message_log` synchronously. By construction, the relay's append precedes the PM session's completion signal.
-**Mitigation:** The architecture already enforces this ordering via the synchronous outbox-drain → chat-log-append sequence in `_resolve_owner_session`. No new mitigation needed. If the assumption breaks (e.g., relay decoupled to be async): add a re-read with 100ms backoff.
+**Location:** Both new reads (Pass 1 prompt injection AND post-draft suppression) read `parent.chat_message_log`, which is written by `_append_outbound_chat_log` at `bridge/telegram_relay.py:697` from inside the relay's outbox-drain loop.
+**Trigger:** Mid-session `valor-telegram send` rpushes to `telegram:outbox:{session_id}` and **returns immediately** (`tools/valor_telegram.py:1049-1052`). The PM session's sub-skill returns; PM proceeds to mark stages complete; completion runner fires — all of this is **independent of and concurrent with** the relay drain loop. There is NO cross-process synchronization that guarantees the relay has called `_append_outbound_chat_log` before the completion runner reads the field.
+**Data prerequisite:** Outbound entries from this session that should logically be visible (i.e. were rpushed to the outbox before the runner started) MUST be visible in `parent.chat_message_log` when the runner reads it — OR the runner must handle their absence gracefully without false negatives that re-emit duplicates.
+**State prerequisite (CORRECTED — prior revision asserted a non-existent ordering guarantee):** None at the architecture level. The publisher (`cmd_send`) returns after `r.rpush` succeeds; the consumer (relay drain loop) processes outbox events asynchronously in `bridge/telegram_relay.py::run_outbox_consumer`. The only ordering guarantee is FIFO inside a single outbox queue.
+**Mitigation (NEW — three-layer defense, no architectural ordering claim):**
+  1. **Bounded synchronous wait** before reading `chat_message_log` in the completion runner. Pseudocode:
+     ```python
+     async def _await_outbox_drained(parent, timeout_seconds=2.0, poll_interval=0.1):
+         """Wait for the parent session's outbox queue to be empty (best effort).
+         Returns True if drained, False on timeout. Fail-open: returns True on any exception."""
+         try:
+             import time
+             from agent.redis_client import get_redis_async  # or equivalent
+             r = get_redis_async()
+             deadline = time.time() + timeout_seconds
+             queue_key = f"telegram:outbox:{parent.session_id}"
+             while time.time() < deadline:
+                 if await r.llen(queue_key) == 0:
+                     return True
+                 await asyncio.sleep(poll_interval)
+             return False
+         except Exception:
+             return True  # fail-open
+     ```
+     This bounds the worst-case race to a 2-second wait. The drain loop's per-event latency is sub-100ms in practice, so the typical wait is ≤100ms. If timeout fires: log a warning and proceed with whatever's in `chat_message_log`; the suppression check may miss the most-recent send and emit a duplicate (degraded behavior == today's behavior, not worse).
+  2. **Re-fetch the parent session from Popoto immediately before the suppression check** so a stale in-memory copy from earlier in the runner doesn't shadow a fresh chat_log append: `parent = AgentSession.get_by_id(parent.agent_session_id) or parent`. Pattern matches `models/agent_session.py:1407-1410`'s `append_to_chat_message_log` re-fetch defense against the same hazard.
+  3. **Idempotent fallback**: if the post-draft suppression baseline is empty AND the Pass-1 chat-log block was also empty, the runner has no signal and proceeds with `send_cb` as today. This is no worse than current behavior — the duplicate ships, but it's a logged, observable degradation rather than a silent crash.
+**Failure mode if mitigation insufficient:** A duplicate emit slips through. Same as today's behavior. The mitigation reduces the race window from "always" to "the rare case where the drain takes >2s AND the wait times out AND a re-fetch still misses the entry." Acceptable degradation gradient.
 
-### Race 2: recent_sent_drafts read-after-write
-**Location:** Same as Race 1 — `parent.recent_sent_drafts` is appended by `agent/output_handler.py:407+` after each successful send.
-**Trigger:** Same as Race 1.
-**Mitigation:** Same. Both `chat_message_log` and `recent_sent_drafts` are written by the relay/handler synchronously during outbox drain.
+### Race 2 (REMOVED — was based on the false `recent_sent_drafts`-is-populated assumption)
+The prior revision included a Race 2 stating that `recent_sent_drafts` is also written by the relay during outbox drain. That is incorrect — `recent_sent_drafts` is written ONLY by `TelegramRelayOutputHandler.send` (Path A) at `agent/output_handler.py:586`, never by the relay drain loop and never by Path B. Since this plan no longer reads `recent_sent_drafts`, no Race 2 exists.
 
 ### Race 3: Two concurrent completion runners for sibling PM sessions
-**Trigger:** Two PM sessions in the same chat, both completing within seconds of each other. Each suppression check sees the other's `recent_sent_drafts`? No — they read their OWN `parent.recent_sent_drafts`, which is session-scoped. Not a race.
-**Mitigation:** None needed. Confirmed not a race.
+**Trigger:** Two PM sessions in the same chat, both completing within seconds of each other. Each runner reads its OWN `parent.chat_message_log` (session-scoped via `get_by_id(parent.agent_session_id)`). Not a race in the suppression-baseline sense. There IS a UX consideration: the user may see two completion summaries for two distinct sessions in rapid succession, but each is correctly attributed and not a duplicate of the other.
+**Mitigation:** None needed for the suppression mechanism. (Cross-session deduplication is out of scope — see No-Gos.)
 
 ## No-Gos (Out of Scope)
 
@@ -312,9 +376,12 @@ N/A — this repo has no external docs site.
 
 - [ ] When a sub-skill posts content X via `valor-telegram send` mid-session and the completion runner's drafter would otherwise post a reformatted version of X at session-end, the user receives only one message (or one message + a 👀 reaction).
 - [ ] The completion runner's prompt assembly reads from `parent.chat_message_log` recent outbound entries and exposes them to the drafter — verifiable by inspecting `agent/session_completion.py` and the prompt sent to the harness.
-- [ ] The post-draft suppression check runs against `parent.recent_sent_drafts` with `session_status=None` — verifiable by code inspection.
+- [ ] The post-draft suppression check runs against `parent.chat_message_log` outbound entries (shape-adapted via `_build_completion_baseline`) with `session_status=None` — verifiable by code inspection. **Specifically: the implementation does NOT read from `parent.recent_sent_drafts`** (Path B does not populate that field).
+- [ ] The reaction-queueing path uses the canonical outbox mechanism (`_build_reaction_payload` shape) — NOT `tools/react_with_emoji.react()`. Verifiable by code inspection.
+- [ ] A bounded outbox-drain wait runs before the suppression baseline read (`_await_outbox_drained`, ≤2s, fail-open) — verifiable by code inspection.
+- [ ] The parent session is re-fetched from Popoto immediately before the suppression baseline read — verifiable by code inspection.
 - [ ] The terminal-status exemption in `bridge/redundancy_filter.py` is unchanged. New behavior is documented in this plan and inline at the call site.
-- [ ] Regression test in `tests/integration/test_chat_message_log_e2e.py` exercises the full flow and asserts single user-visible message (or message + reaction) for the duplicate-content case.
+- [ ] Regression test in `tests/integration/test_chat_message_log_e2e.py` exercises the full flow and asserts single user-visible message (or message + reaction) for the duplicate-content case. The test asserts on `chat_message_log` populating, NOT `recent_sent_drafts`.
 - [ ] No regression to legitimate non-duplicate completion summaries — when mid-session sends covered partial content and the completion adds new info, the auto-emit still fires.
 - [ ] `response_delivered_at = None` after suppression is documented in the affected feature doc.
 - [ ] All new unit tests in `tests/unit/test_deliver_pipeline_completion.py` pass.
@@ -380,28 +447,54 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Task ID**: build-suppression-core
 - **Depends On**: build-filter-param
 - **Validates**: `tests/unit/test_deliver_pipeline_completion.py` (existing tests still pass; new tests added in step 4 will exercise the new behavior)
-- **Informed By**: spike-1 (hybrid intercept), spike-3 (👀 reaction fallback), spike-4 (`session_status=None` bypass)
+- **Informed By**: spike-1 (hybrid intercept), spike-3 (👀 reaction fallback), spike-4 (`session_status=None` bypass), revision (Path B does NOT update `recent_sent_drafts`; only `chat_message_log` is the valid baseline)
 - **Assigned To**: suppression-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `agent/session_completion.py::_deliver_pipeline_completion`, before the existing prompt assembly at line 551:
-  - Read `parent.chat_message_log`, filter to outbound entries from this session, take last 5.
-  - Build a `chat_log_block` string mirroring `bridge/message_drafter.py:1262-1276` shape.
-  - Append the block to `summary_context` before truncation.
-- After `final_text` is finalized (line 691) and before the `send_cb` call (line 694):
-  - Import `bridge.redundancy_filter.should_suppress` and `bridge.message_drafter.extract_artifacts`.
-  - Read `parent.recent_sent_drafts` (already populated by the relay).
-  - Call `should_suppress(final_text, extract_artifacts(final_text), recent_sent_drafts, expectations=None, session_status=None, threshold=float(os.environ.get("DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD", "0.75")))`.
-  - If verdict.action == "suppress": queue 👀 reaction on `telegram_message_id` (use existing `tools/react_with_emoji` infrastructure or replicate its outbox-publish snippet); log decision; set `delivery_attempted = False`; skip `send_cb`.
-  - If verdict.action == "send" AND `verdict.jaccard ∈ [0.55, 0.75)`: call new `_judge_completion_novelty(prior_text, prior_ts, final_text)` helper. If returns True (restate): suppress as above. If False (new): proceed with `send_cb`.
-  - Else: proceed with `send_cb` as today.
-- Add `_judge_completion_novelty` helper to `agent/session_completion.py`:
-  - Single Haiku call with `tool_use` returning `{action: "restate" | "new"}`. Pattern copied from `bridge/read_the_room.py:343-518`.
-  - Prompt includes `prior_text`, `prior_ts` (as relative time delta), and `draft_text`.
-  - 3-second timeout; fail-open (return False on any exception).
-- Inline comment at the suppression-check call site explaining `session_status=None` (per Risk 4).
-- If `telegram_message_id is None` on the suppression branch: log warning, no reaction, silent fall-through.
-- Guard the entire suppression block with `try/except` that logs and falls through to delivery on any unhandled exception.
+
+**2a. Add `_build_completion_baseline` helper in `agent/session_completion.py`:**
+- Adapter function that translates `parent.chat_message_log` outbound entries to the `should_suppress` `recent_sent_drafts` shape (`{ts, text, artifacts}`).
+- Filter to `direction == "out"` AND `ts` within `REDUNDANCY_WINDOW_SECONDS` (imported from `bridge/redundancy_filter.py:47`).
+- Cap at last 5 entries.
+- Compute `artifacts` per entry via `bridge.message_drafter.extract_artifacts(content)`.
+- Fail-open: any exception → return `[]`.
+- See exact pseudocode in plan §Solution > Technical Approach.
+
+**2b. Add `_await_outbox_drained` helper in `agent/session_completion.py`:**
+- Async function that polls `LLEN telegram:outbox:{parent.session_id}` every 100ms until empty or 2-second timeout.
+- Returns True on drain, False on timeout. Fail-open: any exception → return True (don't block delivery on monitoring bugs).
+- See exact pseudocode in plan §Race Conditions > Race 1 Mitigation.
+
+**2c. Add `_judge_completion_novelty` helper in `agent/session_completion.py`:**
+- Single Haiku call with `tool_use` returning `{action: "restate" | "new"}`. Pattern copied from `bridge/read_the_room.py:343-518`.
+- Prompt includes `prior_text`, `prior_ts` (formatted as relative time delta, e.g. "23s ago", "2m ago"), and `draft_text`.
+- 3-second timeout; fail-open (return False on any exception → deliver).
+
+**2d. Wire context-injection into Pass 1 prompt assembly:**
+- In `_deliver_pipeline_completion`, before the existing prompt assembly (current `agent/session_completion.py:551`):
+  - Re-fetch parent: `parent = AgentSession.get_by_id(parent.agent_session_id) or parent` (defends against stale in-memory copy).
+  - Build `chat_log_block` from `parent.chat_message_log` outbound entries (last 5, in-window) using the format from `bridge/message_drafter.py:1262-1276`. Mirror shape but DO NOT share code (decoupling rationale per spike-1 / spike-4).
+  - Append the block to `summary_context` before the `[:3000]` truncation (or to a separate variable that's concatenated with the prefix — choose whichever preserves the existing literal-`{}`-safety property at line 549-550).
+
+**2e. Wire post-draft suppression check between `final_text` finalization and `send_cb`:**
+- After `final_text` is finalized (current `agent/session_completion.py:691`) and before the `send_cb` call (current line 694):
+  - Early-return guard: if `final_text` is empty, whitespace-only, OR equals the sentinel `[completion-runner internal error — no final_text assigned]` → skip suppression check, proceed to existing send path.
+  - Await `_await_outbox_drained(parent)` (best-effort, bounded to 2s).
+  - Re-fetch parent again to capture any chat_log writes that landed during the wait.
+  - Build baseline: `baseline = _build_completion_baseline(parent)`.
+  - If `baseline == []`: skip suppression (no signal); proceed to existing send path.
+  - Otherwise: call `should_suppress(final_text, extract_artifacts(final_text), baseline, expectations=None, session_status=None, threshold=float(os.environ.get("DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD", "0.75")))`.
+  - If `verdict.action == "suppress"`: queue 👀 reaction on `telegram_message_id` via the canonical reaction-outbox path (see step 2f); log decision with `[completion-runner] Suppressed final emit for {parent_id} (jaccard={verdict.jaccard:.2f}, judge=n/a)`; set `delivery_attempted = False`; skip `send_cb`.
+  - If `verdict.action == "send"` AND `0.55 <= verdict.jaccard < 0.75`: call `_judge_completion_novelty(prior_text=baseline[verdict.matched_index]["text"], prior_ts=baseline[verdict.matched_index]["ts"], draft_text=final_text)`. If True (restate): suppress as above (with `judge=restate` in log). If False (new): proceed with `send_cb` (log `judge=new`).
+  - Else (`verdict.action == "send"` AND J < 0.55): proceed with `send_cb` as today (log `reason=below_threshold`).
+- Inline comment at the `should_suppress` call site explaining the `session_status=None` choice (per Risk 4).
+- If `telegram_message_id is None` on the suppression branch: log warning `[completion-runner] suppress decision but no anchor message_id; falling silent`, no reaction queued, silent fall-through.
+- Guard the entire suppression block (steps 2d wait/refetch + 2e suppression check) with `try/except Exception` that logs and falls through to delivery on any unhandled exception.
+
+**2f. Decide and implement reaction-queueing path:**
+- Preferred: extract `_build_reaction_payload` from `agent/output_handler.py:789-820` to a new module `bridge/reaction_outbox.py` exposing `build_reaction_payload(...)` and `queue_reaction(parent_session_id, chat_id, reply_to_msg_id, emoji)`. Update `_rtr_queue_reaction` at `agent/output_handler.py:763-787` to call into the new module so there's one source of truth. Call from completion runner.
+- Backstop (if extraction is rejected for scope reasons): inline-replicate the 6-line payload + `r.rpush` + `r.expire(..., 3600)` snippet directly in the completion runner with a comment `# Mirror of TelegramRelayOutputHandler._build_reaction_payload — keep in sync.`
+- DO NOT call `tools/react_with_emoji.react()` — it's CLI-only and `sys.exit(1)`s on missing env vars.
 
 ### 3. Validate suppression-core implementation
 - **Task ID**: validate-suppression-core
@@ -424,13 +517,20 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Agent Type**: test-engineer
 - **Parallel**: true (with step 5)
 - Implement all ADD entries in Test Impact:
-  - `test_completion_suppressed_when_final_text_matches_recent_sent_draft`
+  - `test_completion_suppressed_when_final_text_matches_chat_log_outbound`
   - `test_completion_delivered_when_final_text_unique`
+  - `test_completion_baseline_excludes_inbound_entries`
+  - `test_completion_baseline_excludes_stale_entries`
   - `test_completion_judge_called_in_borderline_band` (with mocked Haiku)
-  - `test_completion_filter_failopen_on_exception`
+  - `test_completion_adapter_failopen_on_malformed_entry`
   - `test_completion_silent_fallback_when_telegram_message_id_none`
-- REPLACE the integration test in `tests/integration/test_chat_message_log_e2e.py` per Test Impact.
-- UPDATE existing fixtures in `test_deliver_pipeline_completion.py` to include `recent_sent_drafts` and `chat_message_log` (defaults to empty for unaffected tests).
+  - `test_completion_skips_suppression_check_on_sentinel_text`
+  - `test_completion_outbox_drain_wait_times_out_gracefully`
+  - `test_completion_refetches_parent_before_suppression_check`
+  - `test_threshold_parameter_overrides_default` (in `tests/unit/test_redundancy_filter.py`)
+  - `test_reaction_outbox.py` shape-equivalence test (only if extraction option chosen in step 2f)
+- REPLACE the integration test in `tests/integration/test_chat_message_log_e2e.py` per Test Impact (assert against `chat_message_log`, NOT `recent_sent_drafts`).
+- UPDATE existing fixtures in `test_deliver_pipeline_completion.py` to include `chat_message_log` (defaults to empty list for unaffected tests).
 - All tests use real Popoto Redis fixtures; only Haiku call is mocked.
 
 ### 5. Update documentation
@@ -465,23 +565,39 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | Terminal-status exemption untouched | `grep -n '_TERMINAL_STATUSES = frozenset' bridge/redundancy_filter.py` | output contains `frozenset({"completed", "failed", "blocked"})` |
 | Suppression call site exists | `grep -n 'session_status=None' agent/session_completion.py` | output > 0 |
 | Inline rationale present | `grep -n '_TERMINAL_STATUSES' agent/session_completion.py` | output contains comment line referencing this plan or #1262 |
-| Doc updated | `grep -l 'Mid-session-send-aware completion suppression' docs/features/` | exit code 0 |
+| Baseline source is chat_message_log NOT recent_sent_drafts | `grep -nE '\.chat_message_log\|_build_completion_baseline\|recent_sent_drafts' agent/session_completion.py` | output contains `chat_message_log` and `_build_completion_baseline`; NO occurrences of `recent_sent_drafts` |
+| Outbox-drain wait helper exists | `grep -n '_await_outbox_drained\|_build_completion_baseline\|_judge_completion_novelty' agent/session_completion.py` | output contains all three names |
+| Reaction queueing is canonical (not react_with_emoji) | `grep -n 'react_with_emoji\|tools.react_with_emoji' agent/session_completion.py` | exit code 1 (no match — completion runner does NOT call this) |
+| Threshold parameter present in should_suppress | `grep -n 'threshold' bridge/redundancy_filter.py` | output > 0 (parameter exists) |
+| Doc updated | `grep -rl 'Mid-session-send-aware completion suppression' docs/features/` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique. Leave empty until critique is run. -->
+Cycle 1 critique returned `NEEDS REVISION` (recorded 2026-05-04T11:23:39Z, artifact_hash `sha256:5230ef8c0a11c04101f913f726689af0a87cf924af2e4782e166afe7c9f26069`). Findings are reconstructed below from a self-critique pass against the recon-validated source files (the original critic-by-critic transcript was not persisted; this plan's revision cycle re-derives the load-bearing issues by re-reading `agent/output_handler.py:584-590`, `tools/valor_telegram.py:1042-1052`, `tools/react_with_emoji.py:43-92`, `bridge/telegram_relay.py:519-549,690-700`, and `agent/session_completion.py:551,694-697,771`). Each finding has a concrete addressed-by reference in the revised plan.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic + Archaeologist | Plan's Data Flow §5 and Technical Approach state `parent.recent_sent_drafts` is "already populated by the relay" and use it as the suppression baseline. False — `recent_sent_drafts` is written ONLY by `TelegramRelayOutputHandler.send` at `agent/output_handler.py:586` (Path A), gated on `session.is_sdlc`. Path B (`valor-telegram send`) writes directly to the outbox and the relay's drain loop never touches `recent_sent_drafts`. The post-draft suppression check would compare against an empty/incomplete baseline for the Path-B-source duplicates that this issue is filed to fix. | Revised Solution > Technical Approach to use `chat_message_log` as the baseline source; added `_build_completion_baseline` adapter helper; updated Data Flow §5, all task steps, all test cases, Success Criteria. | Source-of-truth check: `grep -rn "recent_sent_drafts =\|.recent_sent_drafts.append\|record_recent_sent_draft" agent/ bridge/ tools/` returns ONLY `models/agent_session.py:1519` (the helper itself) and `agent/output_handler.py:586` (the sole caller). No Path-B writer exists. |
+| BLOCKER | Adversary + Operator | Race 1 mitigation reasoning is wrong. Plan claimed "by construction the relay's append precedes the PM session's completion signal" because "the relay's outbox-drain loop processes the publish and writes `chat_message_log` synchronously." This is false: `tools/valor_telegram.py:1049-1052` returns immediately after `r.rpush`; the relay drains in a separate process via `bridge/telegram_relay.py::run_outbox_consumer`. There is NO cross-process synchronization between publisher return and consumer append. The race is real and present. | Replaced Race 1 mitigation with three-layer defense: (a) `_await_outbox_drained` bounded 2s wait helper, (b) re-fetch parent from Popoto immediately before suppression-baseline read, (c) idempotent fallback (empty baseline → existing send path == today's behavior, not worse). Removed the false architectural-ordering claim. | The drain consumer runs in `bridge/telegram_relay.py::run_outbox_consumer` as a separate asyncio task on the bridge process; cmd_send runs in a different (subprocess of the) session worker process. Cross-process ordering is not a thing here. |
+| CONCERN | Skeptic | Reaction-queueing direction names a non-existent function: `tools/react_with_emoji::queue_reaction`. The `tools/react_with_emoji.py` module exposes `react(feeling: str)` only — a CLI entry point that reads `TELEGRAM_CHAT_ID` / `TELEGRAM_REPLY_TO` / `VALOR_SESSION_ID` from env vars and `sys.exit(1)`s on missing values. It is unusable from in-process code in `agent/session_completion.py`. | Revised Technical Approach to use `TelegramRelayOutputHandler._build_reaction_payload` (`agent/output_handler.py:789-820`) + outbox `rpush` directly. Added step 2f offering two options: extract to `bridge/reaction_outbox.py` (preferred — single source of truth) OR inline-replicate with sync-with-canonical comment. Added Success Criterion verifying the canonical mechanism is used. | The existing pattern is at `agent/output_handler.py:763-787` (`_rtr_queue_reaction`) plus the static `_build_reaction_payload`. Either lift those to a module and call from both sites, or copy the 6-line snippet inline. |
+| CONCERN | Operator | Data shape mismatch: `should_suppress`'s `recent_sent_drafts` parameter expects `[{ts, text, artifacts}, ...]`. `chat_message_log` entries are `[{direction, sender, content, message_id, ts}, ...]`. Plan didn't account for the adapter step. | Added explicit `_build_completion_baseline(parent, *, window_seconds, max_entries)` adapter helper with full pseudocode in Technical Approach. Filters by direction and time window; computes per-entry `artifacts` via `extract_artifacts`. Fail-open. Added unit tests for inbound-filter, stale-filter, and malformed-entry-failopen behavior. | Adapter pseudocode in plan lives in §Solution > Technical Approach. Caller site references it by name in step 2e. |
+| CONCERN | Adversary | Sentinel string `"[completion-runner internal error — no final_text assigned]"` could be passed through the suppression check if the assignment-tracking logic doesn't catch a code path. Bigram-Jaccard against the sentinel against any baseline is undefined and not a useful signal. | Added explicit early-return guard in step 2e: skip suppression check if `final_text` is empty, whitespace-only, or equals the sentinel literal. Added unit test `test_completion_skips_suppression_check_on_sentinel_text`. | Guard placement: at the start of the suppression block, immediately after Pass 2 returns. The sentinel literal is a constant in `agent/session_completion.py:567` and should be referenced by name (export as `_DEGRADED_FINAL_TEXT_SENTINEL` if not already). |
+| CONCERN | Operator | The `is_sdlc` gate at `agent/output_handler.py:584` means non-SDLC sessions don't update `recent_sent_drafts` at all. Even if the plan had used `recent_sent_drafts`, non-SDLC PM sessions would have an empty baseline. This was a hidden scope assumption. | Now moot for the suppression baseline (we use `chat_message_log` which has no `is_sdlc` gate). Added explicit scope note in Technical Approach: this plan targets SDLC PM sessions (where `_deliver_pipeline_completion` actually fires); non-SDLC sessions don't trigger the runner. | `_deliver_pipeline_completion` is called from `agent/session_completion.py::_attempt_pipeline_completion`, which only runs at end of pipeline-ish completions. Non-SDLC PM/teammate sessions take a different path. |
+| NIT | Archaeologist | Tracking URL in frontmatter was malformed (`https://github.com/tomcounsell/issues/1262` — missing repo slug). | Corrected to `https://github.com/tomcounsell/ai/issues/1262` in frontmatter. | n/a — typo fix. |
+| NIT | Simplifier | Race 2 (recent_sent_drafts read-after-write) was redundant scaffolding once the baseline source changed. | Race 2 removed entirely with explanatory note pointing to the false-assumption history. Race 3 retained (sibling-PM concurrent runners). | n/a — section-level cleanup. |
 
 ---
 
 ## Open Questions
 
-1. **Hybrid intercept (Q1) vs single cut.** The user's invocation explicitly named "post-draft suppression," but Tom's earlier message in the Telegram thread asked for the *drafter to see* what was sent (= context-injection). This plan proposes both — context-injection at Pass 1 plus post-draft suppression as backstop. Confirm both are wanted. If only one: post-draft suppression is the deterministic-cost choice; context-injection is the lighter-touch choice that may not catch LLM-disobeys-instructions cases.
+The four open questions from cycle 1 are resolved by this revision:
 
-2. **Suppression-fallback when `telegram_message_id is None`.** Plan proposes silent fall-through (skip send, log warning). Alternative: deliver the auto-emit anyway (acknowledge that no anchor → no reaction → user gets nothing → fall back to text). Which is preferred?
+1. **Hybrid intercept (Q1) vs single cut.** RESOLVED: hybrid (both context-injection at Pass 1 AND post-draft suppression as backstop). Forced by the corrected understanding of Path B's data flow — context-injection alone can't catch the LLM-disobeys-instructions case, and post-draft suppression alone doesn't help the drafter avoid synthesizing the duplicate in the first place. Both cuts are cheap (chat-log read is ~3-5ms, per-call adapter is O(5 entries)).
 
-3. **Per-completion threshold default.** Plan proposes `0.75` (env-tunable via `DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD`). The existing in-session threshold is `0.65`. Confirm 0.75 is the right starting value, or specify a different default. Higher = fewer suppressions (false-negative risk: user sees duplicates); lower = more suppressions (false-positive risk: legit completion summaries get dropped).
+2. **Suppression-fallback when `telegram_message_id is None`.** RESOLVED: silent fall-through with warning log. Rationale: this case occurs only when the completion runner was invoked without an anchor message (rare — most invocations carry one through from the originating Telegram message). Sending text "Done." or similar would violate the persona convention (per `feedback_emoji_over_acks`); silent fall-through is the conservative choice. If operators see this warning frequently, file a follow-up to plumb anchor through more reliably.
 
-4. **Helper module placement.** New helpers live in `agent/session_completion.py` initially; extract to `agent/completion_suppression.py` if the block exceeds ~80 LoC. Confirm OK or pre-decide module layout now.
+3. **Per-completion threshold default.** RESOLVED: `0.75` (env-tunable via `DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD`). Higher than the in-session `0.65` because completion summaries legitimately include some prior content and we don't want false-positive suppressions; the borderline band [0.55, 0.75) gets the Haiku judge.
+
+4. **Helper module placement.** RESOLVED: new private helpers (`_build_completion_baseline`, `_await_outbox_drained`, `_judge_completion_novelty`) live in `agent/session_completion.py`. The reaction-payload helper EXTRACTION is a separate decision in step 2f (preferred: extract to `bridge/reaction_outbox.py`; backstop: inline-replicate in completion runner). Other helpers stay local.
+
+**No new open questions** introduced by this revision.
