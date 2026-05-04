@@ -8,8 +8,9 @@ tracking: https://github.com/tomcounsell/ai/issues/1256
 last_comment_id: 4360511073
 revision_applied: true
 revision_applied_at: 2026-05-04
-revision_addresses: sha256:4ed1ce3bfbe220cd1bd4f2f6dc364ce5ce1e242da3f59854a527c7ac0b95f59b
-revision_pass: 3
+revision_addresses: sha256:be258f15a1b2
+revision_pass: 4
+followups: ["https://github.com/tomcounsell/ai/issues/1274"]
 ---
 
 # BYOB Real-Chrome Control + macOS Computer Use
@@ -35,8 +36,10 @@ and `do-discover-paths` — hit three structural limits:
   in the repo and without re-auth per session.
 - The agent can drive native macOS apps via a loopback HTTP API that does **not** move the cursor
   or steal focus, so the user can keep working while automation runs.
-- All 10+ downstream skills that currently use `agent-browser` or `bowser` continue to work with
-  minimal churn — the swap happens behind the `tools/browser/` abstraction wherever possible.
+- BYOB ships as a **new, additive surface** (MCP tools loaded into the agent context). Existing
+  `agent-browser` and `bowser` skills are untouched in this plan — they keep working as anonymous /
+  parallel surfaces. Per-skill migration to BYOB happens incrementally in followup issue
+  [#1274](https://github.com/tomcounsell/ai/issues/1274), not here.
 
 ## Freshness Check
 
@@ -129,10 +132,11 @@ closed by the maintainer in favor of this umbrella.
    socket — it does NOT re-handshake the native messaging host on each call.
 
 5. **Chrome session isolation for parallel worktrees**: One real Chrome DOM tree means parallel
-   Claude Code sessions will collide if they both click via BYOB. Mitigation: serialize BYOB
-   access at the `agent-browser` CLI layer with a `flock` on `~/.byob/session.lock`, and
-   document this as a known limitation. Parallel headless work should fall back to `bowser`
-   (Playwright headless) as the anonymous-Chrome route.
+   Claude Code sessions will collide if they both drive Chrome via BYOB. **Rev4 mitigation
+   (Decision 2):** Serialize at the worker scheduler layer via a new nullable
+   `AgentSession.requires_real_chrome` field — the worker defers concurrent real-Chrome
+   sessions at queue-pick time. No filesystem locks. Parallel anonymous work uses `bowser`
+   (Playwright headless) as the parallel-anonymous lane.
 
 6. **Electron app AX tree staleness** (source: GitHub issue #1256 comment by m13v): bcu's
    accessibility-tree refs can go stale between query and click on Electron apps (Slack, VS Code,
@@ -143,9 +147,11 @@ closed by the maintainer in favor of this umbrella.
 7. **`tools/browser/__init__.py` callers**: Verified by grep — the only callers are tests of the
    private `_downscale_if_needed` helper. No production code imports `tools.browser.navigate`
    or any other public function. The "Python wrapper as the seam" framing in the issue body is
-   aspirational; the real seam is the `agent-browser` CLI binary. This drastically simplifies the
-   migration: replace the CLI's internals (only); leave `tools/browser/__init__.py` in place but
-   update its docstring and add a deprecation note pointing to the CLI.
+   aspirational; in fact this Python module has no relationship to the `agent-browser` CLI binary
+   at all. **Rev4 disposition:** Delete the unused `navigate`/`screenshot`/`extract_text`/
+   `fill_form`/`click`/`wait_for_element` public wrappers (zero callers), keep
+   `_downscale_if_needed` as a Pillow utility, and update the module docstring to clarify it has
+   no relationship to `agent-browser` or BYOB. Tests for `_downscale_if_needed` continue to run.
 
 ## Spike Results
 
@@ -156,30 +162,34 @@ closed by the maintainer in favor of this umbrella.
   re-handshakes the native messaging host on each call, adding latency and breaking long sequences
   when the host gets GC'd. MCP keeps the connection alive across the session. CLI shim is ruled out.
 - **Confidence**: high
-- **Impact on plan**: MCP is the integration surface. BYOB is registered in `.mcp.json` as a new
-  MCP server. `tools/browser/` calls the MCP tools rather than shelling out to a CLI.
+- **Impact on plan (rev4)**: MCP is the integration surface. BYOB is registered under
+  `mcpServers.byob` in `~/.claude.json` (managed by `scripts/update/mcp_byob.py`, modeled on
+  `scripts/update/mcp_memory.py`). The agent reaches BYOB exclusively via the MCP tools — there
+  is no separate BYOB CLI in this plan. The 3rd-party `agent-browser` binary on PATH is
+  untouched.
 
-### spike-2: actual seam for the BYOB swap — CLI vs Python module
-- **Assumption**: "The existing `tools/browser/__init__.py` abstraction is the integration seam
-  for the BYOB swap"
-- **Method**: code-read (grep for `from tools.browser`, `import tools.browser`,
-  `tools.browser.<func>` across repo)
-- **Finding**: `tools/browser/__init__.py` is **NOT called from production code anywhere in the
-  repo**. The only references are tests of the private `_downscale_if_needed` helper. All skills
-  that automate browsers (`do-pr-review`, `do-design-audit`, `linkedin`, `mermaid-render`,
-  `do-discover-paths`, `prepare-app`, `do-test`, `do-design-system`) shell out to the
-  `agent-browser` CLI binary directly via Bash — not through the Python module. The README
-  framing in `tools/browser/README.md` ("This abstraction layer allows swapping the underlying
-  tool") describes intent, not actual usage.
-- **Confidence**: high
-- **Impact on plan**: The integration seam is the **`agent-browser` CLI binary**, not the Python
-  module. Replace the CLI's internals to talk to byob-bridge over its Unix socket directly (no
-  Playwright fallback inside the CLI — if BYOB is down, the CLI errors out clearly and the agent
-  falls back to `bowser`). The Python `tools/browser/__init__.py` is left in place with a
-  deprecation note in its docstring; no callers exist, so this is documentation-only. The earlier
-  draft proposed an "in-process Anthropic SDK MCP client" call from Python — that is
-  architecturally invalid (Claude Code's MCP client is in the Node-based harness, not reachable
-  from arbitrary Python subprocesses) and is now removed from the plan.
+### spike-2: shape of the agent-browser CLI binary (rev4)
+- **Assumption** (rev3): "The `agent-browser` CLI binary is editable — replace its internals."
+- **Method**: shell inspection — `which agent-browser`, `file $(which agent-browser)`, `ls -la`
+- **Finding**: `/opt/homebrew/bin/agent-browser` is a symlink to
+  `/opt/homebrew/lib/node_modules/agent-browser/bin/agent-browser-darwin-arm64`. That target is
+  a **Mach-O 64-bit arm64 binary** (`agent-browser@0.9.1`), distributed via the upstream npm
+  package. It is not editable Python source. The rev1/rev2/rev3 plan's "rewrite
+  `tools/browser/cli.py`" approach assumed an editable Python entry point that does not exist.
+  Separately, `tools/browser/__init__.py` is a Python module with `_downscale_if_needed` plus
+  unused `navigate`/`screenshot`/etc. wrappers — it has zero production callers (verified by
+  `grep`). It has no relationship to the `agent-browser` CLI binary; that relationship was an
+  invented dependency in earlier revisions.
+- **Confidence**: high (Mach-O verified by `file`)
+- **Impact on plan (rev4)**: Treat `agent-browser` (the CLI binary) as an immutable 3rd-party
+  dependency — leave it on PATH, do not edit, fork, or rebuild it. **BYOB is built as a parallel
+  surface** (MCP tools registered with Claude Code), not as a replacement at the binary level.
+  Skills that currently shell out to `agent-browser` keep working in this plan; they migrate to
+  BYOB incrementally via [#1274](https://github.com/tomcounsell/ai/issues/1274). The
+  `tools/browser/__init__.py` Python module's docstring is updated to clarify it is a Pillow
+  utility (`_downscale_if_needed`) with no relationship to `agent-browser` or BYOB; the unused
+  `navigate`/`screenshot`/etc. wrappers are deleted in this plan to honor "no legacy code
+  tolerance" (per CLAUDE.md). Tests for `_downscale_if_needed` continue to run.
 
 ### spike-3: `computer-use` skill shape — separate `tools/computer/` vs extending `tools/browser/`
 - **Assumption**: "Both browser BYOB and bcu native control can share one `tools/browser/`
@@ -194,49 +204,51 @@ closed by the maintainer in favor of this umbrella.
 - **Impact on plan**: Create `tools/computer/__init__.py` as a new module wrapping bcu HTTP API.
   `tools/browser/` keeps its existing public interface backed by BYOB MCP.
 
-### spike-4: bowser fate — retire or keep as anonymous-Chrome fallback
-- **Assumption**: "bowser is fully redundant with BYOB-backed agent-browser"
+### spike-4: bowser fate — retire or keep as anonymous-Chrome fallback (rev4)
+- **Assumption**: "bowser is fully redundant with BYOB"
 - **Method**: code-read + issue analysis
 - **Finding**: `bowser` uses `playwright-cli` (headless, throwaway profile) — genuinely different
-  from BYOB (real Chrome, logged-in). The issue commenter's point about worktree collision
-  (parallel sessions hitting one real Chrome DOM) means there is a legitimate use case for a
-  headless anonymous fallback: (a) previewing untrusted links from Telegram without leaking
-  the real Chrome session, (b) parallel CI-style test runs that need isolated browsers. However,
-  `bowser` and `agent-browser` are the same tool shape — keeping both is confusing. Resolution:
-  **retire `agent-browser`** (replaced by BYOB-backed version with same CLI surface), **keep
-  `bowser`** but document it explicitly as the "anonymous headless fallback" for untrusted-content
-  and parallel-session use cases. Update `bowser`'s SKILL.md to make this role explicit.
+  from BYOB (real Chrome, logged-in). Three skills post-ship cover three distinct surfaces:
+  - `agent-browser` (3rd-party CLI, headless Playwright, anonymous, single-tab)
+  - `bowser` (headless Playwright, anonymous, parallel — for untrusted-link preview and CI-style
+    test runs)
+  - **BYOB MCP tools** (real Chrome, logged-in, single Chrome DOM, serialized at scheduler layer
+    — see Decision 2)
 - **Confidence**: high
-- **Impact on plan**: Two separate skills post-ship: `agent-browser` (BYOB, logged-in real Chrome)
-  and `bowser` (Playwright headless, anonymous). Both remain. The agent-browser SKILL.md is
-  updated in place; no deletion.
+- **Impact on plan (rev4)**: All three coexist. Per-skill migration of `agent-browser`-using
+  skills to BYOB is tracked in [#1274](https://github.com/tomcounsell/ai/issues/1274), not here.
+  The `agent-browser` SKILL.md and binary are untouched in this plan.
 
 ## Data Flow
 
-### Track 1 — BYOB browser automation
+### Track 1 — BYOB browser automation (additive surface)
 
-1. **Entry**: Skill (e.g., `do-pr-review`) invokes `agent-browser open <url>` via Bash tool.
-2. **Skill ↔ CLI**: `agent-browser` CLI (kept as the surface binary) now routes through BYOB MCP
-   server instead of launching headless Playwright.
-3. **BYOB MCP server**: Node process spawned by Claude's MCP runtime. Holds a persistent
-   connection to `byob-bridge` over Unix socket.
+1. **Entry**: Skill (or agent prompt) invokes a BYOB MCP tool by name (e.g., `byob_navigate`,
+   `byob_click`). MCP tools are loaded into the agent context when Claude Code starts and the
+   `byob` server is registered in `~/.claude.json`.
+2. **Worker scheduler gate** (Decision 2): Before the dev session runs, the worker checks
+   whether the session is marked as needing real Chrome (see `## Solution → Scheduler-Layer
+   Serialization`). If another real-Chrome session is currently executing, the new session waits
+   in the queue rather than starting concurrently. There is no per-process file lock.
+3. **BYOB MCP server**: Node process spawned by Claude Code's MCP runtime when the agent session
+   loads. Holds a persistent connection to `byob-bridge` over `~/.byob/run/byob.sock`.
 4. **byob-bridge**: Communicates with the Chrome extension over Native Messaging.
 5. **Chrome extension** (MV3): Receives commands, operates on the currently active tab in the
    user's real Chrome session.
 6. **Result**: DOM snapshots, screenshots, and interaction results flow back up the chain to the
-   MCP client (Claude Code), which routes results to the calling skill.
+   MCP client (Claude Code), which surfaces them to the agent.
 
-**Note on `tools/browser/__init__.py` Python module:** Spike-2 found this module has zero
-production callers — only test imports of a private helper. It is left in place with a
-deprecation docstring; no migration of callers is needed. The integration seam is exclusively
-the `agent-browser` CLI binary.
+**Coexistence with `agent-browser` and `bowser`:** Both pre-existing surfaces are untouched in
+this plan. Skills that currently shell out to `agent-browser` keep working — they migrate to
+BYOB incrementally via [#1274](https://github.com/tomcounsell/ai/issues/1274). `bowser` stays as
+the parallel-anonymous lane.
 
-**Fallback behavior for the CLI:** If `~/.byob/run/byob.sock` is missing or the socket connection
-fails, `agent-browser` exits with a clear error message ("BYOB bridge not running — start Chrome
-and run `~/.byob/start.sh`") and a non-zero exit code. The agent reads the error and either
-prompts the user or falls back to `bowser` for the same task. There is **no silent fallback to
-Playwright inside the CLI** — that would mask BYOB outages and produce confusing behavior on
-authenticated pages.
+**Failure behavior:** If the BYOB MCP server fails to start (bridge not running, socket missing,
+extension not loaded), Claude Code surfaces the MCP startup failure. The agent sees a missing-tool
+error when it tries to call `byob_*` tools and routes to `bowser` or surfaces a "BYOB bridge not
+running — start Chrome and run `~/.byob/start.sh`" message to the user. There is no Playwright
+fallback in the BYOB surface — anonymous Playwright work belongs to `bowser`, and that distinction
+is intentional.
 
 ### Track 2 — background-computer-use desktop control
 
@@ -254,20 +266,23 @@ authenticated pages.
 
 - **New dependencies**: BYOB (bun, Node.js ≥18, Chrome extension), bcu (Swift app binary, macOS
   only), `bun` runtime for byob setup.
-- **Interface changes**: `agent-browser` CLI command surface preserved exactly (no caller
-  updates needed). `tools/browser/__init__.py` Python module is unchanged at the API level
-  (gets a deprecation docstring only — spike-2 confirmed no production callers). New
-  `tools/computer/__init__.py` is a net-new module — no existing code depends on it.
-- **Coupling**: Adds MCP server registration in `.mcp.json` for BYOB. This is low coupling —
-  Claude Code handles the MCP lifecycle; the agent sees ~30 new tools in context when the
-  server is loaded.
+- **Interface changes**: BYOB exposes ~30 new MCP tools (`byob_navigate`, `byob_click`,
+  `byob_screenshot`, etc.) loaded into the agent context. New `tools/computer/__init__.py` and
+  `valor-computer` CLI are net-new — no existing code depends on them. **The 3rd-party
+  `agent-browser` CLI binary is untouched** (Decision 1; spike-2). `tools/browser/__init__.py`
+  Python module loses its unused public wrappers; `_downscale_if_needed` stays.
+- **Coupling**: Adds MCP server registration to `~/.claude.json` `mcpServers.byob` (managed
+  idempotently by a new `scripts/update/mcp_byob.py` registrar modeled on
+  `scripts/update/mcp_memory.py`). Adds one nullable Popoto field to `AgentSession` for the
+  scheduler-layer serialization gate (Decision 2). Both are low coupling.
 - **Data ownership**: Chrome session state lives in the user's actual Chrome profile (no files
-  in repo). bcu state is ephemeral (session IDs in memory).
-- **Reversibility**: BYOB can be disabled by removing its entry from `.mcp.json` and reverting
-  the `agent-browser` CLI to the prior Playwright-backed implementation (kept in git history;
-  the rollback procedure is `git revert <byob-cli-swap-commit>`). bcu is a macOS app —
-  uninstalling it is `rm -rf ~/Applications/BackgroundComputerUse.app && rm -f
-  ~/.local/bin/background-computer-use`. Reasonably reversible.
+  in repo). bcu state is ephemeral (session IDs in memory). The `AgentSession` field is
+  per-session ephemeral state; no historical data migration needed.
+- **Reversibility**: BYOB can be disabled by removing the `mcpServers.byob` block from
+  `~/.claude.json` (the registrar can do this idempotently) and bcu is removed via
+  `rm -rf ~/Applications/BackgroundComputerUse.app && rm -f ~/.local/bin/background-computer-use`.
+  The `AgentSession` scheduler field is nullable — clearing it is a no-op for sessions that don't
+  need real Chrome. Reasonably reversible.
 
 ## Appetite
 
@@ -281,15 +296,19 @@ authenticated pages.
 
 ## Prerequisites
 
+Each Check Command is a single shell command with no escaped-pipe gymnastics — the parser at
+`scripts/check_prerequisites.py:58` splits cells on raw `|` and cannot handle markdown-escaped
+pipes inside backticks. Multi-step probes go in a separate code block under the table.
+
 | Requirement | Check Command | Install Command (if missing) | Purpose |
 |-------------|---------------|------------------------------|---------|
-| `bun` runtime | `bun --version` | `curl -fsSL https://bun.sh/install \| bash` | Required for BYOB setup |
+| `bun` runtime | `command -v bun` | `curl -fsSL https://bun.sh/install \| bash` | Required for BYOB setup |
 | Chrome (not Chromium) | `test -d "/Applications/Google Chrome.app"` | `brew install --cask google-chrome` | BYOB targets real Chrome |
-| Node.js ≥18 | `node --version \| awk -F. '{exit ($1 < 18)}'` | `brew install node` (or use system Node) | BYOB build dep |
+| Node.js ≥18 | `node -e "process.exit(parseInt(process.versions.node) < 18 ? 1 : 0)"` | `brew install node` | BYOB build dep |
 | byob cloned | `test -d ~/.byob` | `git clone https://github.com/wxtsky/byob ~/.byob && cd ~/.byob && bun install && bun run setup` | BYOB native messaging host install target |
 | bcu binary | `test -f "$TMPDIR/background-computer-use/runtime-manifest.json"` | See `## Update System` for download flow | bcu running |
-| Accessibility permission | `osascript -e 'tell application "System Events" to name of processes'` | System Settings → Privacy & Security → Accessibility | bcu requires it |
-| Screen Recording permission | `python -c "import Quartz.CoreGraphics as CG; img = CG.CGWindowListCreateImage(CG.CGRectNull, CG.kCGWindowListOptionIncludingWindow, 1, 0); assert img is not None"` | System Settings → Privacy & Security → Screen Recording | bcu screenshots |
+| Accessibility permission | `osascript -e 'tell application "System Events" to name of processes' >/dev/null` | System Settings → Privacy & Security → Accessibility | bcu requires it |
+| Screen Recording permission | `screencapture -t png -x /tmp/sr-probe.png && test -s /tmp/sr-probe.png` | System Settings → Privacy & Security → Screen Recording | bcu screenshots |
 
 Run all checks: `python scripts/check_prerequisites.py docs/plans/byob_and_computer_use.md`
 
@@ -297,73 +316,113 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/byob_and_compu
 
 ### Key Elements
 
-- **BYOB MCP server** registered in `.mcp.json`: Exposes real-Chrome automation tools
-  (`byob_navigate`, `byob_click`, `byob_screenshot`, etc.) to Claude Code as MCP tools. This is
-  the **primary** integration surface the agent uses.
-- **`agent-browser` CLI binary internals replaced**: The CLI (still on PATH at the same name) is
-  reimplemented to connect to byob-bridge over its Unix socket. Same command surface (`open`,
-  `snapshot`, `click`, `fill`, `screenshot`, `close`); Playwright is removed from the CLI's
-  dependency graph entirely. Errors out clearly when BYOB is unavailable — no silent Playwright
-  fallback inside the CLI.
-- **`tools/browser/__init__.py` Python module**: Left in place. Docstring updated with a
-  deprecation note pointing to the `agent-browser` CLI. Spike-2 confirmed no production callers,
-  so this is documentation-only. The module is not deleted (its tests for `_downscale_if_needed`
-  still run) and not rewritten.
-- **`agent-browser` SKILL.md updated**: Reflects BYOB as the backing implementation. CDP
-  connection section updated to explain BYOB replaces the manual `--remote-debugging-port` workflow.
-- **`bowser` SKILL.md updated**: Explicitly documented as "anonymous headless fallback — use for
-  untrusted-link preview and parallel CI-style test runs where real Chrome session isolation is
-  needed."
+- **BYOB MCP server** registered in `~/.claude.json` under `mcpServers.byob`: Exposes real-Chrome
+  automation tools (`byob_navigate`, `byob_click`, `byob_screenshot`, etc.) to Claude Code as MCP
+  tools. This is the **only** agent-facing surface for BYOB — there is no separate BYOB-backed
+  CLI in this plan. The 3rd-party `agent-browser` binary on PATH is untouched (Decision 1).
+- **`scripts/update/mcp_byob.py` registrar**: New module modeled directly on
+  `scripts/update/mcp_memory.py`. Idempotently writes the `mcpServers.byob` block to
+  `~/.claude.json` under `fcntl.flock(LOCK_EX | LOCK_NB)` on `~/.claude.json.lock` with the same
+  3-attempt backoff pattern (50ms / 200ms / 800ms) `mcp_memory.py` uses. Wired into
+  `scripts/update/run.py` alongside `mcp_memory`.
+- **Scheduler-layer serialization** (Decision 2): New nullable Popoto field
+  `requires_real_chrome: bool` on `AgentSession`. The worker's session-pick loop in
+  `worker/__main__.py` checks this flag at session-start time — if any currently-running session
+  has `requires_real_chrome=True`, the new candidate session waits in the queue rather than
+  starting concurrently. Replaces the rev3 `flock(2)` design entirely.
+- **`tools/browser/__init__.py` Python module**: Unused public wrappers
+  (`navigate`, `screenshot`, `extract_text`, `fill_form`, `click`, `wait_for_element`) are
+  **deleted** — zero production callers per spike-2. `_downscale_if_needed` is preserved as a
+  Pillow utility. Module docstring rewritten to clarify it is unrelated to `agent-browser` or
+  BYOB. `tools/browser/manifest.json` and `tools/browser/README.md` are updated to match (or
+  deleted entirely if the post-edit module surface is just `_downscale_if_needed`).
+- **`agent-browser` skill, binary, and existing SKILL.md**: Untouched in this plan. Per-skill
+  migration to BYOB happens in [#1274](https://github.com/tomcounsell/ai/issues/1274).
+- **`bowser` SKILL.md**: Untouched in this plan. Stays as the parallel-anonymous lane.
 - **`tools/computer/__init__.py`**: New module. Wraps bcu loopback HTTP API. Functions:
   `list_apps`, `list_windows`, `get_window_state`, `click`, `scroll`, `type_text`, `press_key`,
-  `set_value`, `drag`, `resize`, `set_window_frame`, `screenshot_window`. Reads base URL from
+  `set_value`, `perform_secondary_action`, `drag`, `resize`, `set_window_frame`,
+  `screenshot_window`. Reads base URL from
   `$TMPDIR/background-computer-use/runtime-manifest.json`. Returns `dict` results (success or
   `{"error": ...}`). Raises `ComputerUseUnavailableError` if manifest not found (OS-gate).
+  **Selector-aware API for Electron apps** (rev3 C3): when the target window's bundle_id
+  matches a known Electron app, callers may pass a `selector={'role': '...', 'label': '...',
+  'bounds': (...)}` dict instead of a raw AX ref; the module re-queries `get_window_state`
+  internally and resolves the selector to a fresh ref before each action.
 - **`computer-use` skill** at `.claude/skills/computer-use/SKILL.md`: New skill. macOS-only.
   Wraps `tools/computer/` for agent use. Documents OS-gate behavior.
 - **`/setup` skill** updated: BYOB extension install + native messaging registration; bcu download
   + Accessibility + Screen Recording permission prompts.
 - **`/update` skill** updated: Pull BYOB repo and rebuild extension; re-register native messaging
-  host if version changed; re-download bcu binary if SHA mismatch.
+  host if version changed; re-download bcu binary if SHA mismatch. Calls
+  `scripts/update/mcp_byob.py` to verify/heal the `~/.claude.json` registration.
 - **`telegram_desktop_control` plan** status updated to `Cancelled`: superseded by this work.
 
 ### Flow
 
-**Browser automation (logged-in)**
-Skill invokes `agent-browser open <url>` → BYOB MCP server → byob-bridge → Chrome extension →
-user's real tab → result back to skill
+**Browser automation (logged-in, real Chrome)**
+Agent invokes `byob_*` MCP tool → BYOB MCP server → byob-bridge → Chrome extension → user's
+real tab → result back to agent. Worker has already serialized this session at queue-pick time
+based on `AgentSession.requires_real_chrome`.
 
 **Browser automation (anonymous/parallel)**
-Skill invokes `bowser -s=<session> open <url>` → Playwright headless → throwaway profile → result
+Skill invokes `agent-browser` or `bowser` (unchanged). Untouched in this plan.
 
 **Desktop automation**
-`computer-use` skill calls `tools/computer.list_windows()` → bcu HTTP → macOS Accessibility API →
-window list returned → skill selects target → calls `tools/computer.click(window_id, x, y)` →
-bcu performs action without stealing cursor → result returned
+`computer-use` skill calls `valor-computer list_windows` → `tools/computer/__init__.py` reads
+manifest → bcu HTTP → macOS Accessibility API → window list returned → skill selects target →
+calls `valor-computer click` (with selector for Electron apps) → bcu performs action without
+stealing cursor → result returned.
 
 ### Technical Approach
 
-- **BYOB MCP server registration**: Add entry to `.mcp.json`:
+- **BYOB MCP server registration via `~/.claude.json`**: The repo does **not** ship a `.mcp.json`
+  file; Claude Code reads MCP server config from `~/.claude.json` under `mcpServers`. The new
+  `scripts/update/mcp_byob.py` registrar adds:
   ```json
-  "byob": {
-    "command": "node",
-    "args": ["~/.byob/dist/mcp-server.js"],
-    "env": { "BYOB_ALLOW_EVAL": "0" }
+  "mcpServers": {
+    "byob": {
+      "command": "node",
+      "args": ["~/.byob/dist/mcp-server.js"],
+      "env": { "BYOB_ALLOW_EVAL": "0" }
+    }
   }
   ```
-  The MCP client (Claude Code harness) spawns this process on startup when the server is listed.
+  The registrar holds `fcntl.flock(LOCK_EX | LOCK_NB)` on `~/.claude.json.lock` with the same
+  3-attempt backoff (50 ms / 200 ms / 800 ms) used by `scripts/update/mcp_memory.py:46`,
+  because `~/.claude.json` is rewritten by the Claude Code harness on every session event and
+  direct rename without the lock will race with the harness and corrupt the 5400-line file. The
+  registrar is wired into `scripts/update/run.py` alongside `mcp_memory` so every `/update`
+  invocation re-verifies the registration and self-heals drift.
 
-- **`agent-browser` CLI BYOB routing**: The CLI is rewritten to open a Unix socket connection to
-  `~/.byob/run/byob.sock` on first command and reuse that connection across subsequent commands
-  in the same shell session. The CLI uses byob-bridge's stdio-style request/response protocol
-  (already documented in upstream byob source). If the socket is missing or the connection is
-  refused, the CLI exits 1 with a clear error message. **No Playwright fallback inside the CLI.**
+- **Scheduler-layer serialization** (Decision 2): The worker session-pick loop adds one check:
+  ```python
+  # Pseudocode in worker/__main__.py session-pick path
+  if candidate.requires_real_chrome:
+      if any(s.requires_real_chrome for s in currently_running_sessions):
+          continue  # defer this candidate; pick the next
+  ```
+  Sessions set `requires_real_chrome=True` at creation time when:
+  - The dev session's plan or prompt declares the work needs BYOB (e.g., `/do-build` for a plan
+    whose tasks reference `byob_*` MCP tools), OR
+  - The session is created with `--needs-real-chrome` on `valor-session create`, OR
+  - A future hook detects `byob_*` tool invocation in-flight and steers the session — out of
+    scope for this plan; the explicit-creation path is enough.
 
-- **Session collision guard at the CLI layer**: `flock(2)` on `~/.byob/session.lock` with a 5s
-  timeout serializes BYOB calls across all callers (any process, any worktree). On timeout the
-  CLI exits 2 with message "BYOB busy — another session holds the lock; retry or use `bowser`."
-  The `bowser` path is unaffected and remains fully parallel — it is the documented escape hatch
-  for parallel test runs.
+  The Popoto field is added to `models/agent_session.py` as a nullable `bool` (default `False`).
+  Per memory `feedback_field_backcompat_heal` (issues #1099, #1172), no extra backcompat code
+  is needed; `_heal_descriptor_pollution` walks all fields generically.
+
+  **MCP and CLI both** route through the same scheduler-aware session, so the rev3 "MCP-vs-CLI
+  precedence" question is moot — there is exactly one queue, regardless of which surface
+  initiated the request.
+
+- **`tools/browser/__init__.py` cleanup**: Delete the unused `navigate`, `screenshot`,
+  `extract_text`, `fill_form`, `click`, `wait_for_element` public functions (zero production
+  callers per spike-2). Keep `_downscale_if_needed`. Update the module docstring to clarify it
+  is a Pillow utility unrelated to `agent-browser` or BYOB. Update or delete
+  `tools/browser/README.md` and `tools/browser/manifest.json` to match the post-cleanup
+  surface — no half-states.
 
 - **`tools/computer/` HTTP client**: Use `urllib.request` (stdlib) to avoid new dependencies.
   Each function reads manifest, constructs request, handles `ConnectionRefusedError` → converts
@@ -376,60 +435,80 @@ bcu performs action without stealing cursor → result returned
   expect the message; tests in `tools/computer/tests/test_computer_use.py` cover both branches
   by patching `sys.platform`.
 
-- **Downstream skill updates**: Skills that shell out to `agent-browser` CLI directly
-  (`do-design-audit`, `do-pr-review`, `mermaid-render`, `linkedin`, `do-discover-paths`,
-  `prepare-app`, `do-test`, `do-design-system`) require no code changes — the CLI binary stays
-  on PATH with the same command surface. SKILL.md docstrings should mention the new
-  authenticated-Chrome capability and the BYOB-down failure mode (exit 1 → fall back to
-  `bowser` for the same task), but those are content edits, not behavior changes.
+- **Selector-aware Electron API** (rev3 C3): For target windows whose bundle_id matches a known
+  Electron app (`com.tinyspeck.slackmacgap`, `com.microsoft.VSCode`, `org.telegram.desktop`,
+  `com.hnc.Discord`, etc. — list lives in `tools/computer/electron_bundles.py`), `tools/computer`
+  click/set_value/drag accept a `selector` argument: `selector={'role': 'button',
+  'label': 'Send', 'bounds': (x, y, w, h)}`. The module re-queries `get_window_state`
+  internally before each action and resolves the selector to a fresh AX ref. For non-Electron
+  apps, raw AX refs are accepted as before.
+
+- **Downstream skill migration**: **Out of scope for this plan.** The `agent-browser` CLI binary
+  stays on PATH and skills that use it keep working unchanged. Per-skill migration to BYOB is
+  tracked in [#1274](https://github.com/tomcounsell/ai/issues/1274).
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `agent-browser` CLI (BYOB-backed) — every command (`open`, `snapshot`, `click`, `fill`,
-  `screenshot`, `close`, `connect`, `back`, `forward`, `reload`) must exit 1 with a clear stderr
-  message when the BYOB socket is missing or the bridge errors. **No silent Playwright fallback
-  inside the CLI** (rev2 decision; spike-2). Test: each command invoked while
-  `~/.byob/run/byob.sock` is renamed → exit 1 + stderr contains "BYOB bridge not running".
+- [ ] **BYOB MCP server startup failure**: When `~/.byob/run/byob.sock` is missing or the bridge
+  is not running, `byob` MCP server start must fail with a clear stderr message that Claude Code
+  can surface. Test: rename `~/.byob/run/byob.sock`, start a fresh agent session, assert the MCP
+  server entry shows a startup error and the `byob_*` tools are absent from the agent context.
+- [ ] **`scripts/update/mcp_byob.py` lock contention**: When `~/.claude.json.lock` is held,
+  the registrar must use the 3-attempt backoff (50ms / 200ms / 800ms) — same pattern as
+  `mcp_memory.py`. Test: hold the lock in a fixture, call the registrar, assert it retries and
+  eventually fails with a `LockContended` error rather than blocking indefinitely.
+- [ ] **Scheduler-layer serialization** (Decision 2): When session A has
+  `requires_real_chrome=True` and is running, queueing session B with
+  `requires_real_chrome=True` must defer B until A finishes. Test (`tests/integration/`): create
+  two such sessions, assert worker picks A, runs to completion, then picks B; confirm B did not
+  start while A was running by checking session start_at timestamps.
+- [ ] **Scheduler does NOT serialize unrelated sessions**: A session with
+  `requires_real_chrome=False` must not be deferred while a real-Chrome session runs. Test:
+  create a real-Chrome session and an ordinary session, assert both run concurrently.
 - [ ] `tools/computer/__init__.py` must raise `ComputerUseUnavailableError` when the runtime
   manifest is absent. Test: call any function when manifest does not exist.
-- [ ] `agent-browser` CLI under lock contention: when another process holds
-  `~/.byob/session.lock`, the second invocation must exit 2 with stderr "BYOB busy" within the
-  5s `flock` timeout. Test: hold the lock in a test fixture, invoke `agent-browser open`,
-  assert exit 2.
 
 ### Empty/Invalid Input Handling
-- [ ] `agent-browser open ""` — empty URL → exit 1 with stderr message, not a crash.
 - [ ] `tools/computer.click(window_id=None, x=0, y=0)` → `ComputerUseUnavailableError` or
   `ValueError` (not a silent no-op).
 - [ ] `tools/computer.type_text(window_id=1, text="")` → success (empty string is valid).
+- [ ] `tools/computer.click(window_id=1, selector={})` → `ValueError` (empty selector is invalid).
 
 ### Error State Rendering
 - [ ] `computer-use` skill body must surface bcu errors to the agent output, not swallow them.
   The skill should print the raw error dict when `tools/computer` returns `{"error": ...}`.
-- [ ] BYOB-down behavior at the agent layer: the calling skill reads CLI exit 1 + stderr and
-  surfaces "BYOB bridge not running — start Chrome and run `~/.byob/start.sh`" to the agent
-  output, then either prompts the user or routes to `bowser` for the same task. No skill should
-  treat a BYOB failure as a transient retry condition.
+- [ ] **BYOB-down behavior at the agent layer**: When the BYOB MCP server fails to start, the
+  agent sees missing-tool errors when it tries to call `byob_*` tools. The agent surfaces this
+  to the user as "BYOB bridge not running — start Chrome and run `~/.byob/start.sh`" rather than
+  silently retrying. There is no Playwright fallback in the BYOB surface.
 
 ## Test Impact
 
-- [ ] `tools/browser/tests/test_agent_browser.py` — **UPDATE**: The entire file calls
-  `agent-browser` CLI directly via `subprocess`. After the swap, these tests remain valid if the
-  `agent-browser` CLI is still on PATH (now BYOB-backed). Add `TestByobUnavailable` (assert
-  exit 1 + clear message when socket missing — NO Playwright fallback) and `TestByobLockTimeout`
-  (assert exit 2 when lock held). Mark existing tests `@pytest.mark.integration` (live Chrome +
-  BYOB required).
+- [ ] `tools/browser/tests/test_agent_browser.py` — **DELETE OR UPDATE**: Existing tests exercise
+  `agent-browser` CLI behavior, which is **untouched in this plan**. If the file tests behavior
+  the 3rd-party CLI guarantees, delete it (we don't test our 3rd-party deps). If it tests
+  `tools/browser/__init__.py` Python wrappers being deleted in this plan, delete those test
+  cases. Final disposition decided during build by reading each test case.
 - [ ] `tools/browser/tests/test_downscale.py` — **NO CHANGE**: Pure unit test of
-  `_downscale_if_needed`. Unaffected by backend swap.
-- [ ] `tools/browser/tests/` may need a new `test_byob_protocol.py` for unit-testing the CLI's
-  Unix socket message framing without a live BYOB bridge.
-- [ ] `tests/happy-paths/SCHEMA.md` — **UPDATE**: Update the "discovery stage uses agent-browser"
-  note to "discovery stage uses BYOB-backed agent-browser".
-- [ ] New tests to create: `tools/computer/tests/test_computer_use.py` (unit tests mocking bcu
-  HTTP responses, including Electron AX staleness re-query path) and
-  `tools/computer/tests/test_computer_use_integration.py` (live bcu calls, marked
-  `@pytest.mark.integration`, includes Notes.app end-to-end smoke).
+  `_downscale_if_needed`. Unaffected.
+- [ ] `tests/happy-paths/SCHEMA.md` — **NO CHANGE** in this plan. The discovery stage still uses
+  `agent-browser`. (Updated separately under [#1274](https://github.com/tomcounsell/ai/issues/1274)
+  when `do-discover-paths` migrates.)
+- [ ] **New: `tests/integration/test_byob_scheduler.py`** — covers Decision 2:
+  - Two sessions with `requires_real_chrome=True` are serialized.
+  - One real-Chrome session and one ordinary session run concurrently.
+  - The Popoto field round-trips through `AgentSession.save()` and `.query.filter()` correctly.
+- [ ] **New: `tests/unit/test_mcp_byob_registrar.py`** — covers `scripts/update/mcp_byob.py`:
+  - Idempotent write (running twice is a no-op).
+  - Lock contention triggers the 3-attempt backoff.
+  - Drift-heal: pre-existing wrong values get corrected.
+  - Modeled on whatever pattern `tests/unit/test_mcp_memory_registrar.py` uses (or its
+    equivalent).
+- [ ] **New: `tools/computer/tests/test_computer_use.py`** — unit tests mocking bcu HTTP
+  responses, including Electron selector-resolution path (rev3 C3) and OS gate.
+- [ ] **New: `tools/computer/tests/test_computer_use_integration.py`** — live bcu calls, marked
+  `@pytest.mark.integration`, includes Notes.app end-to-end smoke.
 
 ## Rabbit Holes
 
@@ -452,15 +531,17 @@ bcu performs action without stealing cursor → result returned
 ## Risks
 
 ### Risk 1: BYOB upstream breaks on Chrome updates
-**Impact:** `agent-browser` skill stops working entirely when Chrome auto-updates and the
-extension API surface changes.
+**Impact:** BYOB MCP tools stop working when Chrome auto-updates and the extension API surface
+changes.
 **Mitigation:** Pin BYOB to a specific git commit in `config/byob_pin.json` (only bumped via
-`/update --bump-byob`). After any BYOB rebuild, `/update` runs the post-install canary
-documented in the Update System section: confirm `~/.byob/run/byob.sock` appears within 10s of
-starting Chrome, then run `agent-browser open about:blank && agent-browser get title` against
-the socket. If either step fails, restore `~/.byob/dist.prev/` and surface an alert. The legacy
-`agent-browser connect 9222` workflow (manual `--remote-debugging-port`) is gone — BYOB does not
-expose CDP on a TCP port.
+`/update --bump-byob`). After any BYOB rebuild, `/update` runs an **end-to-end** post-install
+canary (rev3 C2): a small Node script (`scripts/update/byob_canary.js`) connects directly to
+`~/.byob/run/byob.sock`, sends a `byob_navigate('about:blank')` followed by a `byob_get_title`
+round-trip with `socket.settimeout(30)`, and asserts both succeed. A stale socket file from a
+crashed previous run will pass an `os.path.exists` check but fail `connect()` — that is treated
+as a canary failure (not as "socket not yet ready"). On canary failure, restore
+`~/.byob/dist.prev/` and surface an alert. (BYOB does not expose CDP on a TCP port; the legacy
+`agent-browser connect 9222` workflow is unrelated to this plan.)
 
 ### Risk 2: bcu Accessibility permission grant is persistent but fragile
 **Impact:** A macOS upgrade or re-sign can revoke the Accessibility permission for `xyz.dubdub.backgroundcomputeruse`, silently breaking the computer-use skill.
@@ -482,16 +563,20 @@ silently.
 
 ## Race Conditions
 
-### Race 1: Parallel worktrees both acquire BYOB bridge simultaneously
-**Location:** `agent-browser` CLI — BYOB dispatch path
-**Trigger:** Two `agent-browser` invocations from different parallel Claude Code sessions, both
-in BYOB mode, simultaneously try to drive Chrome.
-**Data prerequisite:** BYOB maintains one active tab reference per session; a second call
-mid-flight corrupts the active tab state.
-**State prerequisite:** BYOB bridge socket is connected and active.
-**Mitigation:** `flock(2)` on `~/.byob/session.lock` with 5s timeout at the CLI entry point.
-If the lock cannot be acquired, the CLI exits 2 with a clear "BYOB busy" message. Callers fall
-back to `bowser` for the same task.
+### Race 1: Two real-Chrome sessions try to run simultaneously
+**Location:** Worker session-pick loop in `worker/__main__.py`
+**Trigger:** Two `AgentSession` records with `requires_real_chrome=True` are queued at roughly
+the same time (e.g., parallel `valor-session create` calls, or two PM-spawned dev sessions
+both needing BYOB).
+**Data prerequisite:** Chrome has one DOM tree; concurrent access from two MCP clients corrupts
+active-tab state.
+**State prerequisite:** BYOB MCP server is running; two sessions are eligible to be picked.
+**Mitigation (Decision 2):** Worker session-pick loop refuses to start a second
+`requires_real_chrome=True` session while one is currently running — defers to the next pick
+cycle. No file locks; no per-process collision guard. **MCP and CLI both** route through the
+same scheduler-aware session, so a single queue is the source of truth regardless of which
+surface initiated the request. Memory `feedback_field_backcompat_heal` confirms the new Popoto
+field needs no migration code; `_heal_descriptor_pollution` walks fields generically.
 
 ### Race 2: bcu window ID goes stale between `list_windows` and `click`
 **Location:** `tools/computer/__init__.py` — any action after a `list_windows` call
@@ -528,13 +613,27 @@ in the SKILL.md for additions.
 - Making `computer-use` work on Linux or Windows.
 - Custom Chrome extension development — use BYOB upstream as-is.
 - Retrofitting the old `agent-desktop` CLI approach from `telegram_desktop_control` plan.
-- Parallel BYOB sessions (one real Chrome DOM tree — serialization is the correct model).
+- Parallel BYOB sessions on the same Chrome (one real Chrome DOM tree — scheduler serialization
+  is the correct model; rev4 Decision 2).
+- **Editing, forking, or rebuilding the 3rd-party `agent-browser` CLI binary.** It stays on PATH,
+  untouched. Per-skill migration to BYOB is tracked separately in
+  [#1274](https://github.com/tomcounsell/ai/issues/1274). (Decision 1, rev4)
+- **Per-process file locks** (`flock(2)` on `~/.byob/session.lock` or similar). Serialization
+  lives at the worker scheduler layer (Decision 2, rev4) — there is exactly one queue, regardless
+  of whether a session reaches BYOB via MCP or CLI.
 - Backwards-compatibility shims — per CLAUDE.md "no legacy code tolerance". Replace cleanly.
 - Supporting `BYOB_ALLOW_EVAL=1` by default. `browser_eval` stays disabled.
 
 ## Update System
 
-The `/update` skill (`scripts/remote-update.sh`) must be extended with:
+The `/update` skill (`scripts/remote-update.sh` and `scripts/update/run.py`) must be extended
+with:
+
+0. **BYOB MCP registration verification**: New step in `scripts/update/run.py` that calls
+   `scripts/update/mcp_byob.py` (modeled on `scripts/update/mcp_memory.py`). The registrar holds
+   `fcntl.flock(LOCK_EX | LOCK_NB)` on `~/.claude.json.lock` with the same 3-attempt backoff
+   (50ms / 200ms / 800ms), idempotently writes the `mcpServers.byob` block, and self-heals
+   drift. Runs on every `/update` invocation regardless of whether BYOB itself is being rebuilt.
 
 1. **BYOB update step**: After pulling main, check if BYOB pinned commit has changed
    (`config/byob_pin.json` holds the pinned upstream commit SHA). If different from
@@ -543,8 +642,11 @@ The `/update` skill (`scripts/remote-update.sh`) must be extended with:
    - `git -C ~/.byob fetch && git -C ~/.byob checkout <pinned-sha>`.
    - Run `bun install && bun run build` in `~/.byob/` and re-register the native messaging host
      (`bun run setup --skip-extension`).
-   - **Post-install canary**: Confirm `~/.byob/run/byob.sock` appears within 10s of starting
-     Chrome. If it doesn't, restore `~/.byob/dist.prev/` and alert the user.
+   - **Post-install canary** (end-to-end, rev3 C2): Run `scripts/update/byob_canary.js` which
+     connects to `~/.byob/run/byob.sock` and asserts a `byob_navigate('about:blank')` +
+     `byob_get_title` round-trip succeeds within 30s. A stale socket from a crashed prior run
+     fails `connect()` — that is treated as canary failure, not as "socket not yet ready". On
+     canary failure, restore `~/.byob/dist.prev/` and alert the user.
    - Only bump the pin via `/update --bump-byob`.
 2. **bcu update check + install step**:
    - First, detect whether bcu is opted-in on this machine (sentinel: `~/.config/valor/computer-use-enabled`,
@@ -577,10 +679,15 @@ machines, the update script no-ops these steps and prints a one-line note.
 
 ## Agent Integration
 
-- **BYOB as MCP server**: Register `byob` in `.mcp.json`. Claude Code loads BYOB MCP tools
-  (`byob_navigate`, `byob_click`, `byob_screenshot`, etc.) into the agent context when the
-  server is active. The agent uses these via the existing `agent-browser` skill pattern — no
-  new CLI entry points needed.
+- **BYOB as MCP server**: Register `byob` under `mcpServers` in `~/.claude.json` via the new
+  `scripts/update/mcp_byob.py` registrar. Claude Code loads BYOB MCP tools (`byob_navigate`,
+  `byob_click`, `byob_screenshot`, etc.) into the agent context when the server is active. **No
+  CLI entry point is added in this plan** — the agent reaches BYOB exclusively through MCP
+  tools.
+- **Scheduler-layer browser-use serialization** (Decision 2): The agent never has to think about
+  serialization. The worker session-pick loop reads `AgentSession.requires_real_chrome` and
+  defers concurrent real-Chrome sessions automatically. Two surfaces (manual `valor-session
+  create --needs-real-chrome` and inferred-from-plan) set the flag at session creation time.
 - **`tools/computer/` Python module + `valor-computer` CLI**: The skill invokes
   `valor-computer <command>` via Bash. The CLI is declared as a `[project.scripts]` entry in
   `pyproject.toml`:
@@ -588,53 +695,63 @@ machines, the update script no-ops these steps and prints a one-line note.
   valor-computer = "tools.computer.cli:main"
   ```
   This is the only invocation pattern for the skill — `python -m tools.computer ...` is not
-  used (it would bypass the entry-point shim and complicate the OS gate in Step 4). All bcu
-  HTTP calls happen inside `tools.computer.cli:main` and the underlying `tools/computer/`
-  functions; the skill never speaks HTTP directly.
-- **Skills that use `agent-browser` directly**: No code changes needed in skill files — the
-  `agent-browser` binary name is preserved. The backing changes are transparent to callers.
-- **Integration test**: After setup, `agent-browser open https://github.com && agent-browser
-  get title` should return the user's GitHub notifications page (logged-in view), not the public
-  homepage.
+  used (it would bypass the entry-point shim and complicate the OS gate). All bcu HTTP calls
+  happen inside `tools.computer.cli:main` and the underlying `tools/computer/` functions; the
+  skill never speaks HTTP directly.
+- **`agent-browser` skill and existing skills using it**: **Untouched in this plan.** The
+  `agent-browser` binary stays on PATH; skill files are unchanged. Migration to BYOB is tracked
+  in [#1274](https://github.com/tomcounsell/ai/issues/1274).
+- **Integration test**: After setup, the agent calling `byob_navigate('https://github.com')` +
+  `byob_get_title` should return the user's GitHub notifications page (logged-in view), not the
+  public homepage.
 
 ## Documentation
 
-- [ ] Create `docs/features/byob-browser-control.md` describing BYOB integration, BYOB-vs-bowser
-  decision guide, and known limitations (block-list, single-session serialization).
+- [ ] Create `docs/features/byob-browser-control.md` describing BYOB integration, the
+  BYOB / `agent-browser` / `bowser` decision guide (real-Chrome / anonymous-headless /
+  parallel-headless), the scheduler-layer serialization model (Decision 2), and known
+  limitations (block-list, one-session-at-a-time serialization).
 - [ ] Create `docs/features/computer-use.md` describing bcu integration, macOS-only OS gate,
-  permission requirements, and example skill workflows.
-- [ ] Update `docs/features/tools-reference.md`: Add `tools/computer/` section; update
-  `tools/browser/` entry to note BYOB backing.
-- [ ] Update `docs/features/skills-dependency-map.md`: Add `computer-use` skill node; update
-  `agent-browser` node to note BYOB backing.
+  permission requirements, the Electron selector-aware API, and example skill workflows.
+- [ ] Update `docs/features/tools-reference.md`: Add `tools/computer/` section; add a BYOB MCP
+  tools section. Do **not** modify the `agent-browser` entry — that migration is tracked in
+  [#1274](https://github.com/tomcounsell/ai/issues/1274).
+- [ ] Update `docs/features/skills-dependency-map.md`: Add `computer-use` skill node and BYOB
+  MCP node. Leave `agent-browser` node untouched.
 - [ ] Add entry to `docs/features/README.md` index table for both new feature docs.
-- [ ] Update `config/personas/segments/tools.md`: Replace `agent-browser` section with BYOB note;
-  add `computer-use` section.
+- [ ] Update `config/personas/segments/tools.md`: Add a BYOB section and a `computer-use`
+  section. Leave the `agent-browser` section as is — it stays accurate until #1274 lands.
 - [ ] Update `docs/plans/telegram_desktop_control.md` status to `Cancelled` with note:
   "Superseded by docs/plans/byob_and_computer_use.md — Track 2 (computer-use skill)."
+- [ ] Cross-link this plan ↔ #1274 in both directions (this plan's frontmatter `followups` is
+  set; the followup issue references this plan as its blocker).
 
 ## Success Criteria
 
 **Technical:**
-- [ ] `agent-browser open https://github.com && agent-browser get title` returns the user's
+- [ ] BYOB MCP tools (`byob_navigate`, `byob_get_title`, `byob_screenshot`, etc.) are loaded into
+  the agent context after `/update` runs and Chrome is open with the BYOB extension. `byob_navigate('https://github.com')` + `byob_get_title` returns the user's
   authenticated GitHub view (logged-in page, not public homepage) — zero `state.json` files
   committed to repo.
 - [ ] `computer-use` skill can list apps, list windows, click, type, and screenshot `Notes.app`
   on macOS without moving the user's cursor.
-- [ ] `bowser` SKILL.md explicitly documents its role as "anonymous headless fallback for
-  untrusted-link preview and parallel CI-style sessions."
-- [ ] All downstream skills (`do-design-audit`, `do-pr-review`, `linkedin`, `mermaid-render`,
-  `do-discover-paths`, `prepare-app`, `do-test`, `do-design-system`, `do-design-review`) pass
-  their existing invocation patterns without modification.
-- [ ] `computer-use` invoked on non-macOS machine returns a clear error message, not confusing
-  output.
+- [ ] **Existing `agent-browser`-using skills** (`do-design-audit`, `do-pr-review`, `linkedin`,
+  `mermaid-render`, `do-discover-paths`, `prepare-app`, `do-test`, `do-design-system`) keep
+  passing their existing invocation patterns **without modification** — confirming this plan
+  is purely additive. (Migration of these skills to BYOB is tracked in
+  [#1274](https://github.com/tomcounsell/ai/issues/1274).)
+- [ ] `computer-use` invoked on non-macOS machine exits 78 with stderr containing "computer-use
+  is macOS-only", not confusing output.
 - [ ] `/setup` skill prompts for BYOB extension install and bcu Accessibility + Screen Recording
   permissions.
-- [ ] `/update` re-runs BYOB rebuild and bcu SHA check on each pull when pin changes.
-- [ ] `BYOB_ALLOW_EVAL` is unset by default in `.mcp.json` entry.
+- [ ] `/update` re-runs BYOB rebuild and bcu SHA check on each pull when pin changes; runs the
+  `mcp_byob.py` registrar on every invocation.
+- [ ] `BYOB_ALLOW_EVAL` is unset by default in the `~/.claude.json` `mcpServers.byob.env` entry.
 - [ ] bcu HTTP server documented as loopback-only in `computer-use` SKILL.md.
 - [ ] `docs/plans/telegram_desktop_control.md` status is `Cancelled`.
 - [ ] `config/byob_pin.json` and `config/bcu_pin.json` exist and pin specific upstream versions.
+- [ ] **`AgentSession.requires_real_chrome` field** exists on the Popoto model and is honored by
+  the worker session-pick loop — verified by `tests/integration/test_byob_scheduler.py`.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 
@@ -642,14 +759,16 @@ machines, the update script no-ops these steps and prints a one-line note.
 - [ ] **Cursor not stolen during bcu actions**: With user actively typing in another app, run
   `valor-computer click <Notes-window-id> 100 200` and confirm the user's keystrokes continue
   to land in the original app and the cursor does not jump.
-- [ ] **Parallel session graceful failure**: Two concurrent `agent-browser` invocations from
-  different shells. Confirm the second exits 2 with "BYOB busy", not a corrupted Chrome state
-  or hang.
-- [ ] **BYOB-down clarity**: Stop Chrome, then run `agent-browser open https://github.com`.
-  Confirm exit 1 with the documented "BYOB bridge not running" message — no Playwright runs.
-- [ ] **Electron AX retry**: Drive Slack via `valor-computer` — open a channel, click a message,
-  scroll to invalidate AX refs, click again. Confirm the second click resolves correctly via
-  the re-query path.
+- [ ] **Two real-Chrome sessions serialized**: Create two `AgentSession`s with
+  `requires_real_chrome=True` at roughly the same time. Confirm via the dashboard or logs that
+  the second waited for the first to finish before starting — not concurrent execution, not a
+  hard error.
+- [ ] **BYOB-down clarity**: Stop Chrome, then have the agent attempt a `byob_*` MCP call.
+  Confirm the user-facing message reads "BYOB bridge not running — start Chrome and run
+  `~/.byob/start.sh`" — no silent retry, no Playwright fallback.
+- [ ] **Electron selector retry**: Drive Slack via `valor-computer` with a `selector` argument —
+  open a channel, click a message, scroll to invalidate AX refs, click again. Confirm the second
+  click resolves correctly via the selector → fresh-ref re-query path.
 
 ## Team Orchestration
 
@@ -657,8 +776,9 @@ machines, the update script no-ops these steps and prints a one-line note.
 
 - **Builder (byob-integration)**
   - Name: byob-builder
-  - Role: BYOB MCP registration, `tools/browser/__init__.py` internals replacement, BYOB
-    fallback logic, session collision guard
+  - Role: BYOB MCP registration via `scripts/update/mcp_byob.py` (modeled on `mcp_memory.py`),
+    `~/.byob/` install + `bun run setup`, BYOB end-to-end canary script,
+    `AgentSession.requires_real_chrome` Popoto field + worker scheduler check
   - Agent Type: builder
   - Resume: true
 
@@ -671,15 +791,20 @@ machines, the update script no-ops these steps and prints a one-line note.
 
 - **Builder (skill-updates)**
   - Name: skill-builder
-  - Role: Update `agent-browser` SKILL.md (BYOB docs), `bowser` SKILL.md (fallback role),
-    cancel `telegram_desktop_control` plan, update `/setup` and `/update` skills
+  - Role: Cancel `telegram_desktop_control` plan; update `/setup` and `/update` skills with
+    BYOB + bcu install steps and the `mcp_byob.py` registrar invocation; clean up
+    `tools/browser/__init__.py` (delete unused public wrappers, keep `_downscale_if_needed`,
+    update docstring). **Does not touch** `.claude/skills/agent-browser/SKILL.md` or
+    `.claude/skills/bowser/SKILL.md` — that work is in #1274.
   - Agent Type: builder
   - Resume: true
 
-- **Test Engineer (browser)**
+- **Test Engineer (browser + scheduler)**
   - Name: browser-test-engineer
-  - Role: Update `tools/browser/tests/test_agent_browser.py`, add BYOB fallback unit tests,
-    add `tools/computer/tests/` suite
+  - Role: Add `tests/integration/test_byob_scheduler.py` (Decision 2), add
+    `tests/unit/test_mcp_byob_registrar.py`, add `tools/computer/tests/` suite. Audit
+    `tools/browser/tests/test_agent_browser.py` and delete or update test cases to match the
+    cleaned-up Python module.
   - Agent Type: test-engineer
   - Resume: true
 
@@ -704,52 +829,71 @@ Tier 2 (Specialists needed here): mcp-specialist (for MCP server registration re
 
 ## Step by Step Tasks
 
-### 1. Register BYOB MCP server
+### 1. Install BYOB and register the MCP server in `~/.claude.json`
 - **Task ID**: build-byob-mcp
 - **Depends On**: none
-- **Validates**: `.mcp.json` contains `byob` entry; `bun run setup` succeeds in `~/.byob/`;
-  `config/byob_pin.json` holds the pinned upstream commit SHA
-- **Informed By**: spike-1 (MCP is correct surface), spike-4 (bowser stays as fallback)
+- **Validates**: `~/.claude.json` `mcpServers.byob` entry exists with `BYOB_ALLOW_EVAL=0`;
+  `bun run setup` succeeds in `~/.byob/`; `config/byob_pin.json` holds the pinned upstream
+  commit SHA; `tests/unit/test_mcp_byob_registrar.py` passes (idempotency, lock contention,
+  drift heal)
+- **Informed By**: spike-1 (MCP is correct surface), Decision 1 (no CLI swap), rev3 critique B1
+  (registration goes in `~/.claude.json`, not `.mcp.json`)
 - **Assigned To**: byob-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Ensure `bun` is installed: `bun --version || curl -fsSL https://bun.sh/install | bash`
+- Ensure `bun` is installed: `command -v bun || curl -fsSL https://bun.sh/install | bash`
 - Clone `wxtsky/byob` to `~/.byob/`, check out the pinned commit, run
   `bun install && bun run setup`
 - Create `config/byob_pin.json` with `{"commit": "<sha>", "checked_at": "<iso8601>"}`
-- Add `byob` MCP server entry to `.mcp.json` with `BYOB_ALLOW_EVAL=0`
+- Create `scripts/update/mcp_byob.py` modeled on `scripts/update/mcp_memory.py`:
+  - Holds `fcntl.flock(LOCK_EX | LOCK_NB)` on `~/.claude.json.lock` with the same 3-attempt
+    backoff (50ms / 200ms / 800ms)
+  - Idempotently writes the `mcpServers.byob` block with `BYOB_ALLOW_EVAL=0`
+  - Self-heals drift on every invocation
+- Wire `mcp_byob.py` into `scripts/update/run.py` alongside `mcp_memory`
+- Run the registrar; verify `~/.claude.json` `mcpServers.byob` is present
 - Verify `~/.byob/run/byob.sock` exists after Chrome + BYOB are running
 
-### 2. Replace `agent-browser` CLI internals with BYOB routing
-- **Task ID**: build-byob-browser
+### 1b. Add `AgentSession.requires_real_chrome` field + worker scheduler check
+- **Task ID**: build-scheduler-gate
 - **Depends On**: build-byob-mcp
-- **Validates**: `tools/browser/tests/test_agent_browser.py` (existing, repurposed as
-  BYOB integration tests); new unit tests for the CLI's BYOB socket protocol
-- **Informed By**: spike-2 (CLI is the seam, not the Python module), spike-4 (bowser as
-  documented headless fallback for parallel/anonymous use)
+- **Validates**: `tests/integration/test_byob_scheduler.py` passes — two real-Chrome sessions
+  serialize, mixed sessions run concurrently
+- **Informed By**: Decision 2 (scheduler-layer serialization, no flock)
 - **Assigned To**: byob-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- **Identify the `agent-browser` CLI source**: Locate the CLI's entry point
-  (likely `tools/browser/cli.py` or a shim installed via `pyproject.toml [project.scripts]`;
-  confirm during build). Replace its internals to connect to byob-bridge over
-  `~/.byob/run/byob.sock`.
-- Preserve the CLI command surface: `open`, `snapshot`, `click`, `fill`, `screenshot`,
-  `close`, `connect`, `back`, `forward`, `reload`. The `agent-browser --help` output stays
-  identical to current.
-- Add `flock(2)` on `~/.byob/session.lock` at CLI entry to serialize BYOB calls (5s timeout →
-  exit 2 with "BYOB busy" message).
-- On socket missing or connection refused: exit 1 with clear actionable message ("BYOB bridge
-  not running — start Chrome and run `~/.byob/start.sh`"). **No silent Playwright fallback
-  inside the CLI.** Callers fall back to `bowser` if needed.
-- Update `tools/browser/__init__.py` Python module: add a deprecation note to its docstring
-  pointing callers to the `agent-browser` CLI. Do NOT delete the module — its tests for
-  `_downscale_if_needed` continue to run.
-- Update `tools/browser/manifest.json`: change `source.repository` from
-  `https://github.com/vercel-labs/agent-browser` to `https://github.com/wxtsky/byob`, change
-  `commands.install` to the BYOB clone+setup invocation, and update the `authenticated-session`
-  workflow to drop `state save auth.json` (BYOB uses the user's real Chrome profile — no auth
-  state files in repo).
+- Add `requires_real_chrome: bool` (nullable, default `False`) to `models/agent_session.py`.
+  Per memory `feedback_field_backcompat_heal`, no extra backcompat code needed —
+  `_heal_descriptor_pollution` walks fields generically.
+- Add `--needs-real-chrome` flag to `tools/valor_session/create.py` that sets the field at
+  session creation
+- Modify `worker/__main__.py` session-pick loop: before starting a candidate, if
+  `candidate.requires_real_chrome` is True, check whether any currently-running session has
+  `requires_real_chrome=True`; if so, skip this candidate and pick the next one
+- Add the necessary observation to the dashboard (`localhost:8500/dashboard.json`) so the
+  serialization state is visible to the user (memory `reference_dashboard_json`)
+
+### 2. Clean up `tools/browser/__init__.py` Python module
+- **Task ID**: build-tools-browser-cleanup
+- **Depends On**: none
+- **Validates**: `tools/browser/__init__.py` no longer exposes unused public wrappers; module
+  docstring clarifies it is a Pillow utility unrelated to `agent-browser` or BYOB;
+  `tools/browser/tests/test_downscale.py` still passes
+- **Informed By**: spike-2 (rev4) — module has zero production callers; Decision 1 — module is
+  unrelated to the `agent-browser` binary
+- **Assigned To**: skill-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Delete the unused public wrappers (`navigate`, `screenshot`, `extract_text`, `fill_form`,
+  `click`, `wait_for_element`) from `tools/browser/__init__.py`
+- Keep `_downscale_if_needed` as a Pillow utility
+- Rewrite the module docstring to read approximately: "Pillow utilities. Unrelated to the
+  `agent-browser` 3rd-party CLI on PATH and unrelated to the BYOB MCP surface."
+- Update `tools/browser/manifest.json` and `tools/browser/README.md` to match the post-cleanup
+  surface — or delete them entirely if the post-edit module is just `_downscale_if_needed`.
+  No half-states. (Per CLAUDE.md "no legacy code tolerance".)
+- The 3rd-party `agent-browser` binary at `/opt/homebrew/bin/agent-browser` is **not touched**.
 
 ### 3. Create `tools/computer/` module
 - **Task ID**: build-computer-module
@@ -789,20 +933,31 @@ Tier 2 (Specialists needed here): mcp-specialist (for MCP server registration re
 - Include example workflow: `valor-computer list_apps` → find Notes.app → `list_windows` →
   `click` → `type_text` → `screenshot_window`
 
-### 5. Write browser and computer-use tests
+### 5. Write tests for BYOB scheduler, MCP registrar, and computer-use
 - **Task ID**: build-tests
-- **Depends On**: build-byob-browser, build-computer-module
-- **Validates**: `tools/browser/tests/`, `tools/computer/tests/`
-- **Informed By**: spike-2 (CLI is the seam), spike-3 (computer module shape)
+- **Depends On**: build-byob-mcp, build-scheduler-gate, build-computer-module
+- **Validates**: `tests/integration/test_byob_scheduler.py`,
+  `tests/unit/test_mcp_byob_registrar.py`, `tools/computer/tests/`
+- **Informed By**: Decision 2 (scheduler), spike-3 (computer module shape), rev3 critique B1
+  (registrar pattern)
 - **Assigned To**: browser-test-engineer
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Update `tools/browser/tests/test_agent_browser.py`:
-  - Repurpose as BYOB integration tests. Mark all existing tests `@pytest.mark.integration`
-    (require live Chrome + BYOB).
-  - Add `TestByobUnavailable` class: simulate missing socket, assert CLI exits 1 with
-    actionable message and `agent-browser` does NOT silently fall back to Playwright.
-  - Add `TestByobLockTimeout` class: simulate held lock, assert CLI exits 2 with "BYOB busy".
+- **Audit `tools/browser/tests/test_agent_browser.py`**: For each test case, decide DELETE (it
+  tests the 3rd-party CLI's behavior, which we don't own) or UPDATE (it tests something the
+  cleaned-up Python module still does). Apply the disposition. Drop any "BYOB-fallback inside
+  the CLI" tests — that path doesn't exist in this plan.
+- Create `tests/integration/test_byob_scheduler.py`:
+  - `test_two_real_chrome_sessions_serialize`: Two `AgentSession`s with
+    `requires_real_chrome=True` → second waits for first to finish.
+  - `test_real_chrome_does_not_block_unrelated`: One real-Chrome and one ordinary session run
+    concurrently.
+  - `test_field_round_trips`: Save and reload an `AgentSession` with the new field, assert it
+    survives.
+- Create `tests/unit/test_mcp_byob_registrar.py`:
+  - Idempotency: running the registrar twice produces the same `~/.claude.json`.
+  - Lock contention: 3-attempt backoff fires when the lock is held.
+  - Drift heal: a wrong `mcpServers.byob.env.BYOB_ALLOW_EVAL` value is corrected on next run.
 - Create `tools/computer/tests/__init__.py`
 - Create `tools/computer/tests/test_computer_use.py`:
   - Unit tests with mocked HTTP responses for each `tools/computer` function
@@ -810,27 +965,26 @@ Tier 2 (Specialists needed here): mcp-specialist (for MCP server registration re
   - Test HTTP 404 → `window_not_found` error dict
   - Test OS gate in `tools.computer.cli:main` — patch `sys.platform` to a non-darwin value
     (e.g., `"linux"`); assert exit code 78 and stderr contains "computer-use is macOS-only"
-  - **Test Electron AX staleness mitigation**: mock the bundle_id detection, assert
-    `tools/computer.click()` re-queries `get_window_state` for Electron bundle IDs.
+  - **Test Electron selector resolution**: mock the bundle_id detection, assert
+    `tools/computer.click(window_id, selector={...})` re-queries `get_window_state` and resolves
+    the selector to a fresh AX ref before each call.
 - Create `tools/computer/tests/test_computer_use_integration.py`:
   - Integration tests marked `@pytest.mark.integration`
   - Requires live bcu running; skip if manifest absent
   - One end-to-end test driving Notes.app: open Notes, find window, click in body, type,
     screenshot — verify text appears in the screenshot OCR.
 
-### 6. Update skill files and downstream docs
+### 6. Update setup/update skills and cancel superseded plan
 - **Task ID**: build-skill-updates
 - **Depends On**: none
-- **Validates**: `grep -r "agent-browser" .claude/skills/` returns no misleading docs
-- **Informed By**: spike-4 (bowser stays as fallback with explicit role)
+- **Validates**: `docs/plans/telegram_desktop_control.md` status is `Cancelled`; `/setup` and
+  `/update` skills include BYOB and bcu steps
+- **Informed By**: Decision 1 (agent-browser/bowser SKILL.md edits are out of scope, in #1274)
 - **Assigned To**: skill-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Update `agent-browser` SKILL.md: Document BYOB as backing implementation; update CDP
-  section to explain BYOB replaces manual `--remote-debugging-port` workflow; add note
-  about single-session serialization limitation
-- Update `bowser` SKILL.md: Add explicit "Role: anonymous headless fallback" section;
-  document use cases: untrusted-link preview, parallel CI-style test runs
+- **Do NOT modify** `.claude/skills/agent-browser/SKILL.md` or `.claude/skills/bowser/SKILL.md`
+  in this plan. Those edits belong in [#1274](https://github.com/tomcounsell/ai/issues/1274).
 - Update `docs/plans/telegram_desktop_control.md`: Set status to `Cancelled`, add note:
   "Superseded by docs/plans/byob_and_computer_use.md — Track 2 (computer-use skill)"
 - Update `/setup` skill: Add BYOB extension install step (`bun run setup` in `~/.byob/`);
@@ -839,14 +993,15 @@ Tier 2 (Specialists needed here): mcp-specialist (for MCP server registration re
   (`~/.config/valor/computer-use-enabled`), then download the latest bcu binary, install,
   request Accessibility + Screen Recording permissions, and surface any install hiccup to the
   user with an actionable next step. On no, skip bcu entirely (no sentinel written).
-- Update `/update` skill: Add BYOB rebuild step; add the bcu **install-or-update** flow gated
-  on the opt-in sentinel (fresh install if missing, SHA-compare upgrade if present); always
-  alert the user on install/update failure; add Chrome version change detection → force
+- Update `/update` skill: Run `scripts/update/mcp_byob.py` registrar on every invocation; add
+  BYOB rebuild step (with end-to-end canary); add the bcu **install-or-update** flow gated on
+  the opt-in sentinel (fresh install if missing, SHA-compare upgrade if present); always alert
+  the user on install/update failure; add Chrome version change detection → force
   `bun run setup`
 
 ### 7. Write feature documentation
 - **Task ID**: document-feature
-- **Depends On**: build-byob-browser, build-computer-skill, build-skill-updates
+- **Depends On**: build-byob-mcp, build-scheduler-gate, build-computer-skill, build-skill-updates
 - **Assigned To**: feature-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
@@ -863,28 +1018,34 @@ Tier 2 (Specialists needed here): mcp-specialist (for MCP server registration re
 - **Assigned To**: integration-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run: `agent-browser open https://github.com && agent-browser get title` — confirm
-  authenticated page (not public GitHub)
+- Verify `~/.claude.json` `mcpServers.byob` is present with `BYOB_ALLOW_EVAL=0`. Restart Claude
+  Code; confirm `byob_*` MCP tools are loaded into the agent context.
+- Have the agent call `byob_navigate('https://github.com')` then `byob_get_title` — confirm
+  authenticated GitHub view (not public homepage).
 - Run: `valor-computer list_windows` on macOS — confirm bcu responds
-- Run: `valor-computer list_apps` on a non-macOS host (or with `sys.platform` patched to
+- Run `valor-computer list_apps` on a non-macOS host (or with `sys.platform` patched to
   `"linux"` in a test fixture) — confirm exit 78 + stderr contains "computer-use is macOS-only"
-- Run: `pytest tools/browser/tests/ tools/computer/tests/ -v -x`
+- Run: `pytest tests/integration/test_byob_scheduler.py tests/unit/test_mcp_byob_registrar.py
+  tools/browser/tests/ tools/computer/tests/ -v -x`
 - Run: `python -m ruff check . && python -m ruff format --check .`
 - Verify all success criteria are met
+- Confirm existing `agent-browser`-using skills still work unchanged (smoke-test one of:
+  `do-design-audit`, `do-pr-review`, `linkedin`)
 - Confirm `docs/plans/telegram_desktop_control.md` status is `Cancelled`
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `pytest tools/browser/tests/ tools/computer/tests/ -x -q` | exit code 0 |
+| Tests pass | `pytest tests/integration/test_byob_scheduler.py tests/unit/test_mcp_byob_registrar.py tools/computer/tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| BYOB MCP registered | `python -c "import json; d=json.load(open('.mcp.json')); assert 'byob' in d.get('mcpServers',{})"` | exit code 0 |
+| BYOB MCP registered + eval disabled | `python -c "import json,os; s=json.load(open(os.path.expanduser('~/.claude.json')))['mcpServers']['byob']; assert s['env'].get('BYOB_ALLOW_EVAL','0')=='0'"` | exit code 0 |
 | computer-use skill exists | `test -f .claude/skills/computer-use/SKILL.md` | exit code 0 |
 | telegram_desktop_control cancelled | `grep 'status: Cancelled' docs/plans/telegram_desktop_control.md` | exit code 0 |
-| byob_eval disabled | `python -c "import json; d=json.load(open('.mcp.json')); assert d['mcpServers']['byob']['env'].get('BYOB_ALLOW_EVAL','0') == '0'"` | exit code 0 |
 | valor-computer CLI exists | `python -c "import tools.computer.cli"` | exit code 0 |
+| AgentSession scheduler field exists | `python -c "from models.agent_session import AgentSession; assert 'requires_real_chrome' in AgentSession._fields"` | exit code 0 |
+| mcp_byob registrar exists | `test -f scripts/update/mcp_byob.py` | exit code 0 |
 | feature docs created | `test -f docs/features/byob-browser-control.md && test -f docs/features/computer-use.md` | exit code 0 |
 
 ## Critique Results
@@ -919,23 +1080,42 @@ self-discovered consistency drift.
 | CONCERN | Self-audit | Agent Integration section said the `computer-use` skill invokes `python -m tools.computer ...` AND `valor-computer ...`. Two invocation patterns for one skill creates ambiguity for downstream test code and OS-gate placement. | Agent Integration narrowed to single invocation pattern | Skill uses `valor-computer` exclusively. `python -m tools.computer` is explicitly excluded. The OS gate lives inside `tools.computer.cli:main` so the entry-point shim catches it before any HTTP work. |
 | CONCERN | Self-audit | Plan claimed "OS gate in computer-use skill: Skill checks `sys.platform == "darwin"` at entry." Skills are markdown files — they cannot execute Python. The gate had nowhere to live. | OS gate relocated to `tools.computer.cli:main` | Plan now states the gate is enforced in the CLI entry point (exit 78 / `EX_CONFIG`) and that the skill body merely documents the expected behavior. Step 4 and the test step updated to reflect this. Validation step in Step 8 updated to assert exit 78 + stderr message rather than a vague "OS gate message". |
 
+### Rev4 — Architectural correction (2026-05-04)
+
+After the rev3 critique returned `NEEDS REVISION` (artifact `sha256:be258f15…`), the PM session
+reviewed the open architectural questions and made two binding decisions that reshape the plan.
+Rev4 applies those decisions and carries forward the rev3 critique's still-valid findings.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic / Operator / Consistency Auditor | Rev3 plan registers BYOB in `.mcp.json` (11 places) but this repo uses `~/.claude.json` `mcpServers` — pattern in `scripts/update/mcp_memory.py`. Following rev3 as written would produce a tracked-but-unloaded file Claude Code never reads. | New `scripts/update/mcp_byob.py` registrar | Modeled on `scripts/update/mcp_memory.py`. Holds `fcntl.flock(LOCK_EX | LOCK_NB)` on `~/.claude.json.lock` with the existing 3-attempt backoff (50ms / 200ms / 800ms — see `mcp_memory.py:46`) because `~/.claude.json` is rewritten by the Claude Code harness on every session event. Wired into `scripts/update/run.py` alongside `mcp_memory`. All `.mcp.json` references in Solution, Update System, Verification, and Success Criteria replaced with `~/.claude.json` `mcpServers.byob`. |
+| BLOCKER | Operator / Adversary | Rev3 Prerequisites table had broken check commands (escaped pipes inside backticks broke the parser; `node --version | awk` failed; `Quartz` Python module not in deps). | Prerequisites table rewritten | Each row is now a single shell command with no escaped-pipe gymnastics. Node check uses `node -e`. Screen Recording probe uses `screencapture` (no Python OS framework dep). `Quartz` removed entirely. Added a one-line note above the table about the parser's `|`-splitting limitation. |
+| BLOCKER | Skeptic / Archaeologist / Consistency Auditor (PM-overridden) | Rev3 critique B3 said `tools/browser/__init__.py` was "half-deprecated" because the public wrappers stayed live with only a docstring change — incompatible with CLAUDE.md "no legacy code tolerance". PM-level decision: the Python module has no relationship to the `agent-browser` CLI binary; the rev3 framing was an invented dependency. | Decision 1 (rev4): PM directive | The unused public wrappers (`navigate`, `screenshot`, `extract_text`, `fill_form`, `click`, `wait_for_element`) are deleted (zero production callers per spike-2). `_downscale_if_needed` is preserved as a Pillow utility. Module docstring rewritten to clarify it is unrelated to `agent-browser` or BYOB. The 3rd-party `agent-browser` CLI binary (Mach-O at `/opt/homebrew/lib/node_modules/agent-browser/bin/agent-browser-darwin-arm64`, version 0.9.1) is **untouched** — the rev1/rev2/rev3 "edit `tools/browser/cli.py`" approach assumed an editable Python entry point that does not exist. Per-skill migration to BYOB is tracked in [#1274](https://github.com/tomcounsell/ai/issues/1274). |
+| CONCERN (PM-elevated to architectural decision) | Adversary / Operator | Rev3 `flock(2)` on `~/.byob/session.lock` with 5s timeout: timeout too short for real Chrome page loads (false-positive "busy" exits), MCP path doesn't respect the same lock as the CLI path → racing, locks block in-flight work rather than scheduling around it. | Decision 2 (rev4): scheduler-layer serialization | New `AgentSession.requires_real_chrome` Popoto field (nullable, default `False`). Worker session-pick loop in `worker/__main__.py` checks the flag and defers concurrent real-Chrome sessions. MCP and CLI both route through the same scheduler-aware session, so the rev3 "MCP-vs-CLI precedence" question becomes moot — there is exactly one queue. No file locks. Per memory `feedback_field_backcompat_heal` (issues #1099, #1172), no extra backcompat code is needed; `_heal_descriptor_pollution` walks fields generically. |
+| CONCERN | Operator | Rev3 Risk 1 post-install canary was "socket appears within 10s of Chrome start" — but a stale socket file from a crashed prior run passes the existence check while `connect()` fails. Native messaging registration drift leaves the socket present but the extension end disconnected; canary passes, rollback never fires. | End-to-end probe canary | New `scripts/update/byob_canary.js` connects to the socket and runs `byob_navigate('about:blank')` + `byob_get_title` round-trip with `socket.settimeout(30)`. ECONNREFUSED is treated as canary failure (not "socket not yet ready"). On failure, restore from `dist.prev/` and alert. |
+| CONCERN | Adversary | Rev3 Race 3 mitigation said `tools/computer/__init__.py` "re-queries `get_window_state` immediately before each action and resolves the target by a stable property (role + label + bounds)" — but Step 3's API surface took raw AX refs. The mitigation was described but not designed. | Selector-aware API | `tools/computer/__init__.py` `click`/`set_value`/`drag` accept a `selector={'role': ..., 'label': ..., 'bounds': ...}` dict for Electron-bundle-id targets. Module re-queries internally and resolves the selector to a fresh ref before each action. Bundle-id list lives in `tools/computer/electron_bundles.py`. Test in Step 5 mocks the bundle_id detection and asserts the re-query fires. |
+| CONCERN | Consistency Auditor / User | Rev3 Success Criteria listed `do-design-review` as a downstream skill that must pass, but no such skill exists. The list of 9 was 8 + 1 sub-skill miscounted. | Success Criteria corrected | Removed `do-design-review` from the list. The 8 actual skills + `do-pr-review` screenshot sub-skill cover the blast radius from the issue body. |
+| CONCERN | Skeptic / Archaeologist | Rev3 manifest-edit step covered 3 fields but missed others (`source.package`, `requires.binaries`, `commands.verify`). Internally inconsistent manifest produces silent capability mismatches at tool-selection time. | Dissolved by Decision 1 | With Decision 1, the unused public wrappers in `tools/browser/__init__.py` are deleted entirely. `tools/browser/manifest.json` and `tools/browser/README.md` are updated to match the post-cleanup surface (`_downscale_if_needed` only) — or deleted entirely. Either way, no half-states. |
+| NIT | Simplifier | Rev3 Verification table had two near-identical Python one-liners that re-open `~/.claude.json` twice. | Combined into one check | Single Verification row asserts both `mcpServers.byob` exists and `BYOB_ALLOW_EVAL='0'` in one Python invocation. |
+
 ---
 
 ## Open Questions
 
-_All resolved 2026-05-03 by Tom (issue #1256). Question 1 was further corrected during the
-2026-05-04 critique-revision pass — see Critique Results table for what changed and why._
+_All resolved. Question 1 was rewritten in rev4 to reflect Decisions 1 and 2 from the PM
+session — see the Rev4 row in the Critique Results table for the architectural correction._
 
-1. **BYOB integration architecture — RESOLVED (corrected 2026-05-04)**: The agent reaches BYOB
-   via the registered MCP server (loaded into Claude Code's runtime, ~30 tools available). The
-   `agent-browser` CLI is kept as a shell-out helper for skills and Bash callers; its internals
-   are rewritten to talk to byob-bridge over `~/.byob/run/byob.sock` directly, reusing the same
-   bridge process the MCP server is connected to (no per-call native-messaging-host
-   re-handshake). The earlier draft proposed an "in-process Anthropic SDK MCP client" call from
-   Python; that was architecturally invalid (Python subprocesses cannot reach Claude Code's
-   Node-based MCP runtime) and has been removed. The `tools/browser/__init__.py` Python module
-   is left in place with a deprecation docstring — spike-2 confirmed it has no production
-   callers. See `## Solution`, `## Technical Approach`, and the Track 1 Data Flow.
+1. **BYOB integration architecture — RESOLVED (rev4 final)**: The agent reaches BYOB
+   exclusively via the registered MCP server (loaded into Claude Code's runtime when
+   `~/.claude.json` `mcpServers.byob` is present). **No CLI entry point is added in this plan.**
+   The 3rd-party `agent-browser` CLI binary (Mach-O at
+   `/opt/homebrew/lib/node_modules/agent-browser/bin/agent-browser-darwin-arm64`, version 0.9.1)
+   is **untouched** — it is not editable Python. Per-skill migration of existing
+   `agent-browser`-using skills to BYOB is tracked in
+   [#1274](https://github.com/tomcounsell/ai/issues/1274). Browser-use serialization (parallel
+   real-Chrome session collisions) is handled at the worker scheduler layer via a new nullable
+   `AgentSession.requires_real_chrome` field — no `flock(2)` in this plan. See `## Solution`,
+   `## Technical Approach`, and the Track 1 Data Flow.
 
 2. **`/setup` scope for bcu — RESOLVED**: Automated download + install of latest bcu, gated on
    an explicit user opt-in prompt ("Do you want to enable computer-use?"). Opt-in writes a
