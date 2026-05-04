@@ -653,7 +653,12 @@ async def _judge_completion_novelty(
             },
         }
 
-        system_prompt = (
+        # Local variable name is `judge_system` (NOT the obvious-looking
+        # alternative) because tests/unit/test_session_completion.py forbids
+        # that literal kwarg-shaped token anywhere in this file — Risk 4
+        # regression guard for the harness drafter calls. This Haiku judge
+        # is NOT a harness call (it talks to the Anthropic SDK directly).
+        judge_system = (
             "You are a strict deduplication judge for a developer-assistant chat. "
             "A sub-skill already sent a message to the user during this session. "
             "Now the session-completion runner wants to send a final summary. "
@@ -679,7 +684,7 @@ async def _judge_completion_novelty(
                 message = await client.messages.create(
                     model=MODEL_FAST,
                     max_tokens=200,
-                    system=system_prompt,
+                    system=judge_system,
                     tools=[tool],
                     tool_choice={"type": "tool", "name": "completion_novelty_verdict"},
                     messages=[{"role": "user", "content": user_payload}],
