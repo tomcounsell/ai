@@ -294,6 +294,8 @@ With the skip in place:
 
 See `docs/features/session-lifecycle.md#transcript-boundary-skip-issue-1156` for the full rationale and caller audit.
 
+The completion runner now reads `parent.chat_message_log` to dedupe its auto-emit against any mid-session sends a sub-skill already delivered via `valor-telegram send` (Path B). When a high-confidence duplicate is detected, the runner suppresses the text emit and queues a 👀 reaction on the user's anchor message instead. See `docs/features/pm-final-delivery.md#mid-session-send-aware-completion-suppression` for the full design (issue #1262).
+
 ### Single-Issue Scoping
 
 PM sessions are scoped to a single issue when the incoming message references a specific issue number. The PM persona includes a hard rule (Rule 3) prohibiting `gh issue list` queries for other issues and dispatching stages for unrelated issues. This prevents cross-contamination between concurrent SDLC pipelines observed in production when one PM session assessed global state and dispatched BUILD for another PM's issue.
