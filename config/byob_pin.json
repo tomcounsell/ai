@@ -1,0 +1,7 @@
+{
+  "_comment": "Pinned commit for BYOB upstream (github.com/wxtsky/byob). Bump only via `/update --bump-byob`. The /update skill clones BYOB to ~/.byob/ and checks out this commit before running `bun install && bun run build`.",
+  "repository": "https://github.com/wxtsky/byob",
+  "commit": "main",
+  "checked_at": "2026-05-04T00:00:00Z",
+  "notes": "Initial pin uses 'main' as a placeholder. Replace with a specific commit SHA on first /update --bump-byob run."
+}

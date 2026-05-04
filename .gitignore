@@ -427,6 +427,8 @@ telegram_session.session
 .mcp.json
 !config/*.example.json
 !config/mcp_library.json
+!config/byob_pin.json
+!config/bcu_pin.json
 
 # Design-system Node toolchain (do-design-system skill)
 !package.json
