@@ -78,6 +78,18 @@ class TestRow2PlanNotCritiqued:
         assert result.skill == SKILL_DO_PLAN_CRITIQUE
         assert result.row_id == "2"
 
+    def test_plan_completed_critique_ready_dispatches_critique(self):
+        # When PLAN completes, the state machine auto-transitions CRITIQUE
+        # from "pending" to "ready". Row 2 must accept the "ready" status
+        # too (regression for the issue #1262 dispatch failure).
+        states = _states_all_pending()
+        states["PLAN"] = "completed"
+        states["CRITIQUE"] = "ready"
+        result = decide_next_dispatch(states, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN_CRITIQUE
+        assert result.row_id == "2"
+
 
 class TestRow3CritiqueNeedsRevision:
     def test_needs_revision_without_loop_dispatches_plan(self):
