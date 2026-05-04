@@ -295,3 +295,69 @@ class TestErrorFallback:
         v = should_suppress(None, "not-a-dict", "not-a-list", 42, object())  # type: ignore[arg-type]
         # May return any send verdict — the important thing is no exception.
         assert v.action == "send"
+
+
+# ── Per-call threshold parameter (issue #1262) ───────────────────────────────
+
+
+class TestThresholdParameter:
+    """The completion runner (a second consumer of should_suppress) needs to
+    pass a per-call threshold so SuppressionVerdict.jaccard is populated for
+    borderline-band escalation. The threshold parameter is additive and
+    defaults to REDUNDANCY_THRESHOLD when None.
+    """
+
+    def test_threshold_parameter_overrides_default_to_suppress(self):
+        """A J value below the module default but above the per-call threshold
+        must produce a suppress verdict.
+        """
+        from unittest.mock import patch as _patch
+
+        text = _repeat_text()
+        prior = _draft(text)
+
+        # Construct J=0.60: below 0.65 default, above 0.55 per-call.
+        new_bigrams = frozenset([(f"w{i}",) for i in range(60)])
+        prior_bigrams = frozenset([(f"w{i}",) for i in range(60)] + [(f"x{i}",) for i in range(40)])
+
+        with _patch(
+            "agent.memory_extraction._extract_bigrams",
+            side_effect=[new_bigrams, prior_bigrams],
+        ):
+            v = should_suppress(text, {}, [prior], None, None, threshold=0.55)
+
+        assert v.action == "suppress"
+        assert v.jaccard is not None
+        assert 0.55 <= v.jaccard < REDUNDANCY_THRESHOLD
+        assert v.matched_index == 0
+
+    def test_threshold_parameter_overrides_default_to_send(self):
+        """A J value above the module default but below the per-call threshold
+        must produce a send verdict (raised cutoff).
+        """
+        from unittest.mock import patch as _patch
+
+        text = _repeat_text()
+        prior = _draft(text)
+
+        # Construct J=0.70: above 0.65 default, below 0.75 per-call.
+        new_bigrams = frozenset([(f"w{i}",) for i in range(70)])
+        prior_bigrams = frozenset([(f"w{i}",) for i in range(70)] + [(f"x{i}",) for i in range(30)])
+
+        with _patch(
+            "agent.memory_extraction._extract_bigrams",
+            side_effect=[new_bigrams, prior_bigrams],
+        ):
+            v = should_suppress(text, {}, [prior], None, None, threshold=0.75)
+
+        assert v.action == "send"
+        assert v.reason == "below_threshold"
+
+    def test_threshold_none_falls_back_to_module_default(self):
+        """Explicit threshold=None must be equivalent to omitting the kwarg."""
+        text = _repeat_text()
+        prior = _draft(text)
+        v_none = should_suppress(text, {}, [prior], None, None, threshold=None)
+        v_omit = should_suppress(text, {}, [prior], None, None)
+        assert v_none.action == v_omit.action
+        assert v_none.reason == v_omit.reason

@@ -27,6 +27,27 @@ This module contains only pure functions. The SDLC scoping decision
 never reads ``session`` directly — callers pass the pre-extracted fields
 (recent_sent_drafts, expectations, session_status) to keep this module
 side-effect-free and trivially testable.
+
+## Consumers
+
+Two production callers invoke ``should_suppress``:
+
+1. ``agent/output_handler.py::TelegramRelayOutputHandler.send`` — the original
+   in-session drafter path (PR #1239). Passes ``session_status`` as the live
+   ``AgentSession.status`` so the terminal-status exemption fires for
+   in-session terminal transitions.
+2. ``agent/session_completion.py::_deliver_pipeline_completion`` — the
+   mid-session-send-aware completion runner (issue #1262 / plan
+   ``docs/plans/dedupe-completion-emit.md``). Passes ``session_status=None``
+   to **bypass** the terminal-status exemption (the completion-runner emit is
+   an out-of-band post-session surface where dedupe-against-mid-session-sends
+   IS desired). Also passes a low ``threshold=0.55`` so
+   ``SuppressionVerdict.jaccard`` is always populated for borderline-band
+   escalation; the high-confidence cutoff is enforced in the caller.
+
+The ``threshold`` parameter (additive, defaults to ``REDUNDANCY_THRESHOLD``)
+exists specifically to support consumer #2's two-tier verdict pattern without
+mutating module state.
 """
 
 from __future__ import annotations
@@ -77,6 +98,7 @@ def should_suppress(
     recent_sent_drafts: list[dict] | None,
     expectations: list | None,
     session_status: str | None,
+    threshold: float | None = None,
 ) -> SuppressionVerdict:
     """Decide whether to suppress a Telegram draft that is about to be sent.
 
@@ -96,7 +118,8 @@ def should_suppress(
        → ``send`` (real progress: new PR URL, commit hash, error string, etc.).
 
     After the termination conditions, bigram Jaccard similarity is computed.
-    If any prior draft within the time window has J >= ``REDUNDANCY_THRESHOLD``
+    If any prior draft within the time window has J >= the per-call
+    ``threshold`` (defaults to module-level ``REDUNDANCY_THRESHOLD``)
     **and** no new artifact relative to that prior draft, the verdict is
     ``suppress``. Otherwise ``send``.
 
@@ -113,6 +136,15 @@ def should_suppress(
                              Non-empty means the agent has a question for the
                              human — always ``send``.
         session_status:      Current ``AgentSession.status`` string.
+        threshold:           Per-call Jaccard cutoff. ``None`` (default) uses
+                             the module-level ``REDUNDANCY_THRESHOLD``. The
+                             completion runner (a second consumer of this
+                             function) passes the LOW band edge (0.55) so that
+                             ``SuppressionVerdict.jaccard`` is populated for
+                             borderline-band escalation; see
+                             ``agent/session_completion.py`` and
+                             ``docs/plans/dedupe-completion-emit.md`` for
+                             rationale.
 
     Returns:
         A :class:`SuppressionVerdict` with ``action`` ``"send"`` or
@@ -127,6 +159,7 @@ def should_suppress(
             recent_sent_drafts,
             expectations,
             session_status,
+            threshold=threshold,
         )
     except Exception:
         return SuppressionVerdict(action="send", reason="filter_error")
@@ -141,9 +174,15 @@ def _should_suppress_inner(
     recent_sent_drafts: list[dict] | None,
     expectations: list | None,
     session_status: str | None,
+    *,
+    threshold: float | None = None,
 ) -> SuppressionVerdict:
     """Core suppression logic — called by ``should_suppress`` inside try/except."""
     from agent.memory_extraction import _extract_bigrams  # single canonical import
+
+    # Per-call threshold override; defaults to module-level constant. Read once
+    # so the loop below uses a stable local.
+    effective_threshold = REDUNDANCY_THRESHOLD if threshold is None else float(threshold)
 
     # ── Termination condition 1: empty / whitespace-only draft ──────────────
     if not draft_text or not draft_text.strip():
@@ -215,10 +254,10 @@ def _should_suppress_inner(
             best_index = idx
 
     # If the best matching prior is above threshold, suppress.
-    if best_index is not None and best_jaccard >= REDUNDANCY_THRESHOLD:
+    if best_index is not None and best_jaccard >= effective_threshold:
         return SuppressionVerdict(
             action="suppress",
-            reason=f"jaccard={best_jaccard:.2f}>=threshold={REDUNDANCY_THRESHOLD}",
+            reason=f"jaccard={best_jaccard:.2f}>=threshold={effective_threshold}",
             jaccard=best_jaccard,
             matched_index=best_index,
         )
