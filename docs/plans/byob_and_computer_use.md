@@ -6,7 +6,8 @@ owner: Valor
 created: 2026-05-02
 tracking: https://github.com/tomcounsell/ai/issues/1256
 last_comment_id: 4360511073
-revision_applied: 2026-05-04
+revision_applied: true
+revision_applied_at: 2026-05-04
 revision_addresses: sha256:4ed1ce3bfbe220cd1bd4f2f6dc364ce5ce1e242da3f59854a527c7ac0b95f59b
 revision_pass: 3
 ---
