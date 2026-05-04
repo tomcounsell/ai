@@ -156,6 +156,140 @@ SETNX `interrupted-sent:{session_id}` with a 120s TTL. Only the caller that
 acquires the lock sends. Genuine distinct interruptions more than 2
 minutes apart still surface; rapid-fire duplicates are suppressed.
 
+## Mid-session-send-aware completion suppression
+
+Issue #1262 / plan `docs/plans/dedupe-completion-emit.md`.
+
+### Why it exists
+
+A PM bridge session can finish in two visible steps:
+
+1. A sub-skill (`/do-docs`, `/sdlc`, etc.) calls `valor-telegram send` from
+   inside the session and posts an answer to the user (Path B).
+2. Seconds later, the completion runner fires its auto-emit and posts a
+   reformatted version of the same answer.
+
+Without a dedupe check the user sees two consecutive messages saying
+substantively the same thing. The runner now reads
+`parent.chat_message_log` to detect this and suppresses the auto-emit
+when the new draft is substantively a restatement of a recent Path B send.
+
+### What the user sees
+
+| Scenario | User-visible result |
+|----------|---------------------|
+| Mid-session send + materially-different completion summary | Two messages (the mid-session send + the new summary). |
+| Mid-session send + completion summary that restates it (high-confidence dedupe) | One message (the mid-session send) + 👀 reaction on the user's anchor message. |
+| Mid-session send + completion summary in the borderline band, judge says "new" | Two messages (the mid-session send + the summary). |
+| Mid-session send + completion summary in the borderline band, judge says "restate" | One message + 👀 reaction. |
+| No mid-session send | One message (existing behavior — unchanged). |
+
+### Implementation
+
+The runner does two new things between Pass 2's `final_text` and the
+existing `send_cb` call:
+
+1. **Pass 1 prompt injection** — a "you already sent these messages in
+   this thread" block is appended to the harness prompt, drawn from
+   `parent.chat_message_log` outbound entries within the redundancy
+   window. Mirrors (but does not share code with)
+   `bridge/message_drafter.py::_build_draft_prompt`'s chat-log block.
+2. **Post-draft suppression check** — calls
+   `bridge/redundancy_filter.should_suppress(...)` against an adapter-mapped
+   view of the same `chat_message_log` outbound entries
+   (`_build_completion_baseline`). The call passes:
+   - `threshold=0.55` (LOW band edge — forces `verdict.jaccard` to be
+     populated for any meaningful match; the high-confidence cutoff is
+     enforced in the caller)
+   - `session_status=None` (intentionally bypasses the
+     `_TERMINAL_STATUSES` exemption — that exemption is correct for the
+     in-session drafter path but the completion runner is a different
+     surface where dedupe IS desired)
+   - `expectations=None` (Pass 2 returns plain text, not a `MessageDraft`)
+
+   The caller then enforces the high-confidence cutoff
+   (`DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD`, default `0.75`):
+   - `J >= 0.75` → suppress without LLM cost (high confidence).
+   - `0.55 <= J < 0.75` → escalate to a Haiku judge
+     (`_judge_completion_novelty`) with the prior text and timestamp;
+     judge returns `restate` (suppress) or `new` (deliver).
+   - `verdict.action == "send"` → deliver (legitimate non-duplicate).
+
+### Suppress fallback: 👀 reaction on the anchor message
+
+When the runner suppresses, it queues a 👀 reaction on
+`telegram_message_id` (the user's anchor message) via the canonical
+outbox path — the same payload schema as
+`TelegramRelayOutputHandler._build_reaction_payload`
+(`agent/output_handler.py:789-820`). If `telegram_message_id` is `None`
+(rare: the runner was invoked without an anchor), the runner falls
+silent and logs a warning rather than emitting a "Done." text (which
+would violate the persona convention of emoji-over-acks).
+
+### Race mitigation: outbox-drain wait + parent re-fetch
+
+The Path B publisher (`tools/valor_telegram.py::cmd_send`) returns
+immediately after `r.rpush`; the relay drain loop appends to
+`chat_message_log` asynchronously in a separate process. To bound the
+read-after-write race, the runner:
+
+1. Calls `_await_outbox_drained(parent, timeout_seconds=2.0)` before
+   reading the baseline. Polls `LLEN telegram:outbox:{session_id}` every
+   100ms until empty or 2s timeout. Fail-open: returns `True` on any
+   exception so a Redis outage cannot block delivery.
+2. Re-fetches the parent from Popoto immediately before the suppression
+   check via `AgentSession.get_by_id(parent.agent_session_id)` so a
+   stale in-memory copy doesn't shadow a fresh chat_log append.
+
+If the wait times out and the suppression baseline misses the most
+recent send, the duplicate ships — degraded behavior == today's
+behavior, not worse.
+
+### `response_delivered_at = None` is intentional after suppression
+
+When the runner suppresses, `delivery_attempted` stays `False` and
+`response_delivered_at` is NOT stamped. Dashboards and analytics that
+treat `None` as a failure should be updated to recognize this as
+"intentional silent suppression". The session still finalizes cleanly
+to `"completed"` (the `finally` block's `finalize_session` call runs
+unconditionally).
+
+### Fail-open contract
+
+Every layer of the suppression block is fail-open:
+
+- `_build_completion_baseline` exception → returns `[]` → no suppression.
+- `_await_outbox_drained` exception → returns `True` → proceed
+  immediately.
+- `_judge_completion_novelty` exception or timeout → returns `False` →
+  deliver the draft.
+- `should_suppress` exception → existing contract returns
+  `SuppressionVerdict(action="send", reason="filter_error")`.
+- The whole suppression block is wrapped in `try/except` that logs and
+  falls through to the existing delivery path.
+
+A buggy suppression check MUST NEVER block a legitimate completion
+delivery.
+
+### Scope: SDLC PM sessions only
+
+The completion runner is only invoked by the pipeline-completion path,
+which fires for SDLC PM sessions. Non-SDLC PM/teammate sessions take a
+different path and are unaffected by this fix. No new gating is needed.
+
+### Tests
+
+- Unit: `tests/unit/test_deliver_pipeline_completion.py::TestCompletionSuppression`
+  (14 cases — high-confidence suppress, borderline-band restate vs new,
+  inbound-filter, stale-filter, defensive matched_index fallthrough,
+  send-with-new-artifact, malformed-entry fail-open, silent-fallback-no-
+  anchor, sentinel-bypass, drain-wait-timeout, refetch-before-suppress).
+- Unit: `tests/unit/test_redundancy_filter.py::TestThresholdParameter`
+  (per-call threshold override).
+- Integration: `tests/integration/test_chat_message_log_e2e.py::TestCompletionRunnerSuppressionE2E`
+  (3 cases — adapter shape, inbound-exclusion, baseline-source-is-
+  chat_message_log-not-recent_sent_drafts).
+
 ## Deprecation
 
 The `[PIPELINE_COMPLETE]` marker is fully removed:

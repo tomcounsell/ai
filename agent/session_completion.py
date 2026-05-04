@@ -57,6 +57,14 @@ _COMPLETION_REVIEW_PROMPT_PREFIX = (
 )
 
 
+# Sentinel literal assigned to ``final_text`` before any drafter pass runs.
+# Every successful drafter path overwrites it; if the suppression check ever
+# sees this value it must early-return (suppressing this string against any
+# baseline is not a meaningful signal). See issue #1262 / plan
+# ``docs/plans/dedupe-completion-emit.md``.
+_DEGRADED_FINAL_TEXT_SENTINEL = "[completion-runner internal error — no final_text assigned]"
+
+
 def _build_degraded_fallback(summary_context: str) -> str:
     """Compose a visible-but-explicit fallback when the drafter fails.
 
@@ -451,6 +459,312 @@ def _interrupted_sent_key(session_id: str) -> str:
     return f"interrupted-sent:{session_id}"
 
 
+# ── Mid-session-send-aware completion suppression (issue #1262) ─────────────
+#
+# The completion runner emits a final summary at session-end. When a sub-skill
+# (e.g. `/do-docs`, `/sdlc`) has already posted a `valor-telegram send` mid-
+# session, that send lands in `parent.chat_message_log` (Path B) but NOT in
+# `parent.recent_sent_drafts` (Path A only). Without this suppression layer,
+# the completion runner re-emits a reformatted version of the same content.
+#
+# The three helpers below implement a hybrid: a bigram-Jaccard pre-check
+# (low-threshold call, see plan §"Two-tier verdict via low-threshold call")
+# escalates to a Haiku judge in the borderline band [0.55, 0.75). Final cutoff
+# above 0.75 suppresses without LLM cost. All paths are fail-open — a buggy
+# suppression check must NEVER block a legitimate completion delivery.
+#
+# Plan: docs/plans/dedupe-completion-emit.md
+
+# Low-band edge passed to ``should_suppress`` so verdict.jaccard is always
+# populated when the score is meaningful. The high-band cutoff is read from
+# env at call time (default ``0.75``) and enforced in the caller.
+_COMPLETION_SUPPRESSION_LOW_CUTOFF = 0.55
+
+
+def _build_completion_baseline(
+    parent: AgentSession,
+    *,
+    window_seconds: int | None = None,
+    max_entries: int = 5,
+) -> list[dict]:
+    """Adapt ``parent.chat_message_log`` outbound entries to the
+    ``should_suppress`` ``recent_sent_drafts`` shape.
+
+    Returns ``[{ts, text, artifacts}, ...]``; empty list if no qualifying
+    entries. Filters to ``direction == "out"`` and entries inside
+    ``window_seconds`` (defaults to ``REDUNDANCY_WINDOW_SECONDS``). Computes
+    ``artifacts`` via ``bridge.message_drafter.extract_artifacts(content)``.
+
+    Fail-open: any exception → returns ``[]`` (the suppression check is then
+    a no-op and delivery proceeds normally).
+
+    The baseline source is ``chat_message_log`` (NOT ``recent_sent_drafts``)
+    because Path B (`valor-telegram send` mid-session) only writes to the
+    former. See plan §Solution > Technical Approach.
+    """
+    try:
+        import time as _t
+
+        from bridge.message_drafter import extract_artifacts
+        from bridge.redundancy_filter import REDUNDANCY_WINDOW_SECONDS
+
+        effective_window = (
+            int(REDUNDANCY_WINDOW_SECONDS) if window_seconds is None else int(window_seconds)
+        )
+        now = _t.time()
+        entries = getattr(parent, "chat_message_log", None) or []
+        out: list[dict] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("direction") != "out":
+                continue
+            ts = entry.get("ts")
+            if not isinstance(ts, (int, float)):
+                continue
+            if (now - ts) > effective_window:
+                continue
+            content = (entry.get("content") or "").strip()
+            if not content:
+                continue
+            try:
+                artifacts = extract_artifacts(content) or {}
+            except Exception:
+                artifacts = {}
+            out.append({"ts": ts, "text": content, "artifacts": artifacts})
+        return out[-max_entries:]
+    except Exception:
+        return []
+
+
+async def _await_outbox_drained(
+    parent: AgentSession,
+    *,
+    timeout_seconds: float = 2.0,
+    poll_interval: float = 0.1,
+) -> bool:
+    """Wait for the parent session's outbox queue to be empty (best effort).
+
+    Bounds the read-after-write race between ``cmd_send`` (returns immediately
+    after ``r.rpush``) and the relay drain loop (``_append_outbound_chat_log``
+    runs after the underlying Telegram send succeeds). The publisher and
+    consumer run in different processes; there is no cross-process ordering
+    guarantee.
+
+    Uses the synchronous ``redis.Redis.from_url(...)`` client (matching the
+    pattern in ``agent/output_handler.py`` and ``bridge/telegram_relay.py``;
+    the codebase has no async-redis usage) wrapped via ``asyncio.to_thread``
+    so the event loop is not blocked by the sub-millisecond ``LLEN`` call.
+
+    Returns:
+        ``True`` if the outbox drained inside ``timeout_seconds``, ``False``
+        on timeout. Fail-open: returns ``True`` on any exception so a Redis
+        outage cannot block delivery.
+    """
+    try:
+        import asyncio as _asyncio
+        import os
+        import time as _time
+
+        import redis  # sync client — codebase has no async-redis usage
+
+        session_id = getattr(parent, "session_id", None)
+        if not session_id:
+            return True
+
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        r = redis.Redis.from_url(redis_url, decode_responses=True)
+        deadline = _time.time() + timeout_seconds
+        queue_key = f"telegram:outbox:{session_id}"
+        while _time.time() < deadline:
+            length = await _asyncio.to_thread(r.llen, queue_key)
+            if length == 0:
+                return True
+            await _asyncio.sleep(poll_interval)
+        return False
+    except Exception:
+        return True  # fail-open — never block delivery on monitoring
+
+
+async def _judge_completion_novelty(
+    prior_text: str,
+    prior_ts: float,
+    draft_text: str,
+) -> bool:
+    """Borderline-band Haiku judge: is ``draft_text`` materially new vs.
+    ``prior_text`` (sent at ``prior_ts``)?
+
+    Returns ``True`` to suppress (judge says "restate"), ``False`` to send
+    (judge says "new" OR any failure). Fail-open: every exception path
+    returns ``False`` so the completion still ships when the judge is down.
+
+    Pattern adapted from ``bridge/read_the_room.py::read_the_room`` —
+    ``semaphore_slot`` + ``async with anthropic.AsyncAnthropic(timeout=...)``,
+    NO outer ``asyncio.wait_for``. Uses the ``MODEL_FAST`` (Haiku) family
+    with a single ``tool_use`` block.
+    """
+    try:
+        import time as _t
+
+        import anthropic
+
+        from agent.anthropic_client import semaphore_slot
+        from config.models import MODEL_FAST
+        from utils.api_keys import get_anthropic_api_key
+
+        # Format relative time delta so the judge can weight stale-vs-fresh
+        # context (Risk 1 mitigation: bias toward "new" when the prior is
+        # older than ~2 minutes — the user has likely scrolled away).
+        try:
+            age_secs = max(0, int(_t.time() - float(prior_ts)))
+        except Exception:
+            age_secs = 0
+        if age_secs < 60:
+            relative_time = f"{age_secs}s ago"
+        elif age_secs < 3600:
+            relative_time = f"{age_secs // 60}m ago"
+        else:
+            relative_time = f"{age_secs // 3600}h ago"
+
+        tool = {
+            "name": "completion_novelty_verdict",
+            "description": (
+                "Decide whether the candidate completion-summary draft restates the "
+                "prior message or contains materially-new information for the user."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["restate", "new"],
+                        "description": (
+                            "'restate' = draft is substantially the same content as "
+                            "the prior message; suppress. 'new' = draft adds material "
+                            "outcomes the user does not yet have; deliver."
+                        ),
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Short machine-readable reason string.",
+                    },
+                },
+                "required": ["action", "reason"],
+            },
+        }
+
+        # Local variable name is `judge_system` (NOT the obvious-looking
+        # alternative) because tests/unit/test_session_completion.py forbids
+        # that literal kwarg-shaped token anywhere in this file — Risk 4
+        # regression guard for the harness drafter calls. This Haiku judge
+        # is NOT a harness call (it talks to the Anthropic SDK directly).
+        judge_system = (
+            "You are a strict deduplication judge for a developer-assistant chat. "
+            "A sub-skill already sent a message to the user during this session. "
+            "Now the session-completion runner wants to send a final summary. "
+            "Your job: decide whether the final summary is materially-new for the "
+            "user (deliver) or substantially the same as the prior message (suppress).\n"
+            "\n"
+            "Bias toward 'new' when the prior message is older than ~2 minutes — "
+            "the user has likely scrolled away and benefits from a fresh anchor. "
+            "Bias toward 'restate' when the prior message is recent and the draft "
+            "is a reformatted version with no new outcomes (no new PR/commit/error/decision)."
+        )
+        user_payload = (
+            f"## Prior message (sent {relative_time})\n{prior_text}\n\n"
+            f"## Final-summary draft about to be sent\n{draft_text}\n\n"
+            "Return your verdict via the completion_novelty_verdict tool."
+        )
+
+        async with semaphore_slot():
+            async with anthropic.AsyncAnthropic(
+                api_key=get_anthropic_api_key(),
+                timeout=3.0,
+            ) as client:
+                message = await client.messages.create(
+                    model=MODEL_FAST,
+                    max_tokens=200,
+                    system=judge_system,
+                    tools=[tool],
+                    tool_choice={"type": "tool", "name": "completion_novelty_verdict"},
+                    messages=[{"role": "user", "content": user_payload}],
+                )
+
+        content = getattr(message, "content", None) or []
+        for block in content:
+            if (
+                getattr(block, "type", None) == "tool_use"
+                and getattr(block, "name", None) == "completion_novelty_verdict"
+            ):
+                payload = getattr(block, "input", None) or {}
+                action = payload.get("action")
+                if action == "restate":
+                    return True
+                if action == "new":
+                    return False
+        # No usable tool_use block → fail-open (deliver).
+        return False
+    except Exception as judge_err:
+        logger.warning(
+            "[completion-runner] Haiku novelty judge failed (non-fatal, defaulting to deliver): %s",
+            judge_err,
+        )
+        return False
+
+
+def _queue_completion_suppress_reaction(
+    parent: AgentSession,
+    chat_id: str,
+    reply_to_msg_id: int,
+    emoji: str = "👀",
+) -> bool:
+    """Queue a 👀 reaction on the user's anchor message via the canonical
+    outbox path (mirrors :meth:`TelegramRelayOutputHandler._build_reaction_payload`).
+
+    Returns True on success, False on any error (logged at WARNING). The
+    completion runner uses the return value only for logging; failures are
+    non-fatal — the session still finalizes cleanly.
+    """
+    try:
+        import json
+        import os
+        import time as _t
+
+        import redis
+
+        session_id = getattr(parent, "session_id", None)
+        if not session_id:
+            logger.warning(
+                "[completion-runner] cannot queue suppress reaction — no session_id on parent"
+            )
+            return False
+
+        # Mirror of TelegramRelayOutputHandler._build_reaction_payload — keep in sync.
+        # (See agent/output_handler.py:789-820. We inline the schema here rather
+        # than importing the static method to avoid pulling the entire output-
+        # handler module into the completion-runner import graph for one dict.)
+        payload = {
+            "type": "reaction",
+            "chat_id": chat_id,
+            "reply_to": int(reply_to_msg_id) if reply_to_msg_id else None,
+            "emoji": str(emoji) if emoji is not None else None,
+            "session_id": session_id,
+            "timestamp": _t.time(),
+        }
+        queue_key = f"telegram:outbox:{session_id}"
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        r = redis.Redis.from_url(redis_url, decode_responses=True)
+        r.rpush(queue_key, json.dumps(payload))
+        r.expire(queue_key, 3600)
+        return True
+    except Exception as react_err:
+        logger.warning(
+            "[completion-runner] failed to queue suppress reaction (non-fatal): %s",
+            react_err,
+        )
+        return False
+
+
 async def _deliver_pipeline_completion(
     parent: AgentSession,
     summary_context: str,
@@ -546,9 +860,50 @@ async def _deliver_pipeline_completion(
         logger.warning("[completion-runner] UUID lookup failed: %s", uuid_err)
         pm_uuid = None
 
+    # Mid-session-send-aware context injection (issue #1262). Re-fetch the
+    # parent so a stale in-memory copy from earlier in the runner doesn't
+    # shadow a fresh chat_log append from a Path B `valor-telegram send`.
+    # Pattern matches models/agent_session.py:1407-1410's append-to-log
+    # re-fetch defense against the same stale-copy hazard.
+    try:
+        refreshed = AgentSession.get_by_id(parent.agent_session_id)
+        if refreshed is not None:
+            parent = refreshed
+    except Exception as refetch_err:
+        logger.warning(
+            "[completion-runner] parent re-fetch before Pass 1 failed (non-fatal): %s",
+            refetch_err,
+        )
+
+    # Build a chat-log block from outbound entries. Mirrors (does NOT share
+    # code with) bridge/message_drafter.py:1262-1276 — the two surfaces are
+    # intentionally decoupled per spike-1 / spike-4. Cap at 5 entries to
+    # bound prompt growth. Fail-open: any error → empty block.
+    chat_log_block = ""
+    try:
+        baseline_for_prompt = _build_completion_baseline(parent, max_entries=5)
+        if baseline_for_prompt:
+            lines = [
+                f"[out] {entry.get('text', '').strip()}"
+                for entry in baseline_for_prompt
+                if (entry.get("text") or "").strip()
+            ]
+            if lines:
+                chat_log_block = (
+                    "\n\nYou already sent these messages in this thread "
+                    "(do not repeat them — only add materially-new context):\n"
+                    + "\n".join(lines)
+                    + "\n"
+                )
+    except Exception as chat_log_err:
+        logger.warning(
+            "[completion-runner] chat-log prompt block build failed (non-fatal): %s",
+            chat_log_err,
+        )
+
     # Build the Pass 1 prompt via concat (not .format()) so literal ``{`` / ``}``
     # in summary_context (e.g. JSON snippets, dict reprs) cannot crash us (ADV-1).
-    prompt = _COMPLETION_PROMPT_PREFIX + (summary_context or "")[:3000]
+    prompt = _COMPLETION_PROMPT_PREFIX + (summary_context or "")[:3000] + chat_log_block
 
     # D6 v2: 2-pass drafter + no-silent-fail + always-finalize.
     # - Pass 1 uses session_id=None (S-1): do NOT write the drafter's UUID
@@ -563,7 +918,7 @@ async def _deliver_pipeline_completion(
     # Pass 1 draft, or degraded fallback). D6(c) "never return empty" — any
     # code path that reaches send_cb with this value is a bug.
     delivery_attempted = False
-    final_text: str = "[completion-runner internal error — no final_text assigned]"
+    final_text: str = _DEGRADED_FINAL_TEXT_SENTINEL
     cancelled = False
     try:
         from agent.session_executor import (  # noqa: PLC0415
@@ -690,8 +1045,171 @@ async def _deliver_pipeline_completion(
         # final_text is guaranteed non-empty at this point (either refined,
         # Pass 1 draft, or degraded fallback). D6(c) "never return empty".
 
-        # --- Deliver ---
-        if send_cb is not None and chat_id:
+        # --- Mid-session-send-aware suppression (issue #1262) ---
+        # Decide whether to skip the auto-emit because a sub-skill already
+        # delivered substantively-the-same content via Path B
+        # (`valor-telegram send`) earlier in this session. The whole block is
+        # try/except'd with fail-open semantics — a buggy suppression check
+        # MUST NOT block a legitimate completion delivery.
+        suppress_decision = False
+        try:
+            # Early-return guard: never run suppression on the sentinel
+            # (bigram-Jaccard against the literal "[completion-runner internal
+            # error ..." is meaningless) or on empty/whitespace text (the
+            # downstream send path handles that case).
+            if (
+                not final_text
+                or not final_text.strip()
+                or final_text == _DEGRADED_FINAL_TEXT_SENTINEL
+            ):
+                pass  # skip suppression check; let existing send path handle
+            elif send_cb is None or not chat_id:
+                pass  # nothing to suppress; the no-send path below logs
+            else:
+                # Wait for the outbox to drain so any in-flight Path B sends
+                # are reflected in chat_message_log. Fail-open on Redis errors.
+                await _await_outbox_drained(parent)
+
+                # Re-fetch parent again to capture any chat_log writes that
+                # landed during the wait. Same defense as above the prompt.
+                try:
+                    refreshed_after_wait = AgentSession.get_by_id(parent.agent_session_id)
+                    if refreshed_after_wait is not None:
+                        parent = refreshed_after_wait
+                except Exception as refetch_err:
+                    logger.warning(
+                        "[completion-runner] parent re-fetch before suppression "
+                        "check failed (non-fatal): %s",
+                        refetch_err,
+                    )
+
+                baseline = _build_completion_baseline(parent)
+                if baseline:
+                    # High-confidence cutoff (env-tunable). Read once per call.
+                    # Names HIGH_CUTOFF / LOW_CUTOFF are deliberate constants
+                    # (referenced verbatim in the plan's Verification table).
+                    HIGH_CUTOFF = float(  # noqa: N806
+                        os.environ.get("DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD", "0.75")
+                    )
+                    LOW_CUTOFF = _COMPLETION_SUPPRESSION_LOW_CUTOFF  # noqa: N806
+
+                    from bridge.message_drafter import extract_artifacts as _xa
+                    from bridge.redundancy_filter import should_suppress as _ss
+
+                    # Call should_suppress with the LOW threshold so
+                    # SuppressionVerdict.jaccard is populated for any match
+                    # >= 0.55. The HIGH cutoff is enforced by the caller below
+                    # (see plan §"Two-tier verdict via low-threshold call").
+                    #
+                    # session_status=None bypasses the _TERMINAL_STATUSES
+                    # exemption in bridge/redundancy_filter.py:161-162. That
+                    # exemption is correct for the in-session drafter path
+                    # (TelegramRelayOutputHandler.send) where final messages
+                    # must always deliver; the completion runner is a
+                    # different surface (out-of-band post-session emit) where
+                    # dedupe-against-mid-session-sends IS desired. See
+                    # docs/plans/dedupe-completion-emit.md and #1262.
+                    #
+                    # expectations=None: Pass 2 returns plain text, not a
+                    # MessageDraft, so there is no expectations concept here.
+                    verdict = _ss(
+                        final_text,
+                        _xa(final_text),
+                        baseline,
+                        expectations=None,
+                        session_status=None,
+                        threshold=LOW_CUTOFF,
+                    )
+
+                    if verdict.action == "suppress" and verdict.jaccard is None:
+                        # Should not happen — suppress branch always populates
+                        # jaccard (bridge/redundancy_filter.py:218-224). Defensive.
+                        logger.warning(
+                            "[completion-runner] suppress verdict missing jaccard; "
+                            "defaulting to send for %s",
+                            parent_id,
+                        )
+                    elif verdict.action == "suppress" and verdict.jaccard >= HIGH_CUTOFF:
+                        # High-confidence duplicate — suppress without LLM cost.
+                        suppress_decision = True
+                        logger.info(
+                            "[completion-runner] Suppressed final emit for %s "
+                            "(jaccard=%.2f, judge=n/a, decision=high_confidence)",
+                            parent_id,
+                            verdict.jaccard,
+                        )
+                    elif (
+                        verdict.action == "suppress" and LOW_CUTOFF <= verdict.jaccard < HIGH_CUTOFF
+                    ):
+                        # Borderline — escalate to Haiku judge.
+                        idx = verdict.matched_index
+                        prior = (
+                            baseline[idx]
+                            if (idx is not None and 0 <= idx < len(baseline))
+                            else None
+                        )
+                        if prior is None:
+                            logger.warning(
+                                "[completion-runner] borderline verdict but "
+                                "matched_index=%r out of range (baseline len=%d); "
+                                "defaulting to send for %s",
+                                idx,
+                                len(baseline),
+                                parent_id,
+                            )
+                        else:
+                            judge_verdict = await _judge_completion_novelty(
+                                prior_text=prior["text"],
+                                prior_ts=prior["ts"],
+                                draft_text=final_text,
+                            )
+                            if judge_verdict:
+                                suppress_decision = True
+                                logger.info(
+                                    "[completion-runner] Suppressed final emit "
+                                    "for %s (jaccard=%.2f, judge=restate, "
+                                    "decision=borderline_haiku_restate)",
+                                    parent_id,
+                                    verdict.jaccard,
+                                )
+                            else:
+                                logger.info(
+                                    "[completion-runner] Delivering final emit for %s "
+                                    "(jaccard=%.2f, judge=new, decision=borderline_haiku_new)",
+                                    parent_id,
+                                    verdict.jaccard,
+                                )
+                    else:
+                        # verdict.action == "send" — below LOW cutoff, new
+                        # artifact, or other legitimate send reason. Proceed.
+                        logger.info(
+                            "[completion-runner] Delivering final emit for %s "
+                            "(reason=%s, decision=below_low_cutoff_or_other_send_reason)",
+                            parent_id,
+                            verdict.reason,
+                        )
+        except Exception as suppress_err:
+            logger.warning(
+                "[completion-runner] suppression-block crashed (non-fatal, "
+                "falling through to deliver): %s",
+                suppress_err,
+            )
+            suppress_decision = False
+
+        # --- Suppress branch: queue 👀 reaction (or silent fall-through) ---
+        if suppress_decision:
+            if telegram_message_id is not None and chat_id:
+                _queue_completion_suppress_reaction(parent, chat_id, int(telegram_message_id))
+            else:
+                logger.warning(
+                    "[completion-runner] suppress decision but no anchor "
+                    "message_id; falling silent for %s",
+                    parent_id,
+                )
+            # delivery_attempted stays False so response_delivered_at is NOT
+            # stamped (intentional silent suppression — see plan §Risk 5).
+        elif send_cb is not None and chat_id:
+            # --- Deliver ---
             delivery_attempted = True
             try:
                 await send_cb(chat_id, final_text, telegram_message_id, parent)
