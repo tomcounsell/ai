@@ -150,6 +150,7 @@ class TestSharedModuleIsTheOnlyConstructor:
         {
             "agent/anthropic_client.py",  # the shared module itself
             "agent/memory_extraction.py",  # hotfix #1055 invariants
+            "agent/session_completion.py",  # mirrors read_the_room #1055 pattern (issue #1262)
             "bridge/read_the_room.py",  # hotfix #1055 pattern (issue #1193)
             "bridge/promise_gate.py",  # mirrors read_the_room #1055 pattern
         }

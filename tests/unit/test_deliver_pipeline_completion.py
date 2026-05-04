@@ -705,7 +705,7 @@ class TestCompletionSuppression:
             patch("agent.sdk_client._get_prior_session_uuid", return_value="u"),
             patch("models.session_lifecycle.finalize_session"),
             patch("redis.Redis") as _r,
-            patch("bridge.redundancy_filter.should_suppress") as mock_ss,
+            patch("bridge.redundancy_filter.should_suppress") as _mock_ss,
         ):
             _patch_redis_no_drain_wait(_r)
             await session_completion._deliver_pipeline_completion(
@@ -713,10 +713,8 @@ class TestCompletionSuppression:
             )
         # On the sentinel/degraded-fallback path, the runner intentionally
         # bypasses the suppression check. The degraded message MUST always
-        # reach the user.
+        # reach the user. _mock_ss is unused (delivery is the only assertion).
         send_cb.assert_awaited_once()
-        # mock_ss may or may not have been called (depends on the actual
-        # final_text content); the load-bearing assertion is delivery.
 
     async def test_completion_outbox_drain_wait_times_out_gracefully(self, send_cb):
         """LLEN never returns 0 → wait times out → runner proceeds."""
