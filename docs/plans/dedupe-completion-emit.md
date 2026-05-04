@@ -8,7 +8,7 @@ tracking: https://github.com/tomcounsell/ai/issues/1262
 last_comment_id:
 revision_applied: true
 revision_applied_date: 2026-05-04
-prior_critique_artifact_hash: sha256:5230ef8c0a11c04101f913f726689af0a87cf924af2e4782e166afe7c9f26069
+prior_critique_artifact_hash: sha256:75f2ad0276272d3d14f38204ad6c62fe3a03a3ccba438e5ec2e3c63b70b2827b
 ---
 
 # Dedupe Completion Emit
@@ -132,11 +132,25 @@ End-to-end trace of a session that fires both a mid-session send and the complet
 8. **NEW**: Pass 1 prompt is built with a *"messages already sent this session"* block extracted from `parent.chat_message_log` outbound entries (mirroring `bridge/message_drafter.py:1246-1276` shape). Drafter is instructed to acknowledge what was sent and produce only materially-new content.
 9. **NEW**: After Pass 2 produces `final_text`, a completion-specific suppression check runs against **`chat_message_log` outbound entries** (NOT `recent_sent_drafts`, which Path B does not populate):
    - **Adapter step** (required because shapes differ): build a `chat_log_baseline: list[dict]` by filtering `parent.chat_message_log` to entries with `direction == "out"` from the last `REDUNDANCY_WINDOW_SECONDS` (re-using the existing constant in `bridge/redundancy_filter.py:47`), then mapping each `{direction, sender, content, message_id, ts}` entry to `{ts, text: content, artifacts: extract_artifacts(content)}`. Cap to last 5 entries.
-   - Call `should_suppress(final_text, extract_artifacts(final_text), chat_log_baseline, expectations=None, session_status=None, threshold=0.75)`.
-   - If verdict is `suppress`: queue 👀 reaction on `telegram_message_id`, log the decision, skip `send_cb`, set `delivery_attempted=False`.
-   - If verdict is `send` AND best Jaccard ∈ [0.55, 0.75): escalate to a Haiku judge (RTR pattern). Judge returns `restate` (suppress) or `new` (send).
-   - Otherwise proceed with `send_cb` as today.
+   - Call `should_suppress(final_text, extract_artifacts(final_text), chat_log_baseline, expectations=None, session_status=None, threshold=0.55)` — note the **low** threshold of 0.55, NOT 0.75. Rationale below in §"Two-tier verdict via low-threshold call".
+   - If verdict is `suppress` AND `verdict.jaccard >= 0.75` (high-confidence duplicate): queue 👀 reaction on `telegram_message_id`, log the decision, skip `send_cb`, set `delivery_attempted=False`.
+   - If verdict is `suppress` AND `0.55 <= verdict.jaccard < 0.75` (borderline): escalate to a Haiku judge (RTR pattern), passing `prior_text=baseline[verdict.matched_index]["text"]` and `prior_ts=baseline[verdict.matched_index]["ts"]`. Judge returns `restate` (suppress as above) or `new` (proceed to send_cb).
+   - If verdict is `send` (J < 0.55, OR new artifact present, OR empty baseline): proceed with `send_cb` as today.
 10. **`finally`** block at line 771 runs `finalize_session(parent, "completed", ...)` regardless. Session terminates cleanly.
+
+### Two-tier verdict via low-threshold call (load-bearing implementation note)
+
+`SuppressionVerdict` populates `jaccard` and `matched_index` **only when `action == "suppress"`** (`bridge/redundancy_filter.py:218-224`). For `action == "send"` returns — including the `below_threshold` path at line 226 — both fields are `None` (the dataclass defaults at lines 70-71). This means the borderline-band escalation cannot inspect the score on a `send` verdict.
+
+**Solution: call `should_suppress` with `threshold=0.55` (the bottom of the borderline band).** This forces the function into the suppress branch for *any* match J ≥ 0.55, which populates both `jaccard` and `matched_index`. The completion runner then inspects `verdict.jaccard` to decide:
+
+- `verdict.jaccard >= 0.75` → final suppress (high confidence)
+- `0.55 <= verdict.jaccard < 0.75` → escalate to Haiku judge (uses `verdict.matched_index` to fetch prior text/ts from the baseline)
+- (N/A — verdict.action would have been `send` if J < 0.55 with no other suppression triggers)
+
+For `action == "send"` returns from `should_suppress` (J < 0.55, new artifact present, empty baseline, etc.), the completion runner skips Haiku entirely and proceeds to `send_cb`. The Termination Conditions 1-5 in `should_suppress` (`bridge/redundancy_filter.py:148-162, 197-201`) are unaffected — they all force `send` and are appropriate exits for the completion runner too (empty draft → existing sentinel guard handles; no baseline → nothing to compare; new artifact → real progress, ship it).
+
+This removes the need for any change to `SuppressionVerdict` or `should_suppress` beyond adding the `threshold` parameter (step 1). The completion-specific threshold semantics live entirely in the caller.
 
 ## Architectural Impact
 
@@ -172,7 +186,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/dedupe-complet
 ### Key Elements
 
 - **Chat-log prompt injection** (Pass 1): Append a "messages already sent this session" block (drawn from `parent.chat_message_log` outbound entries) to the existing `_COMPLETION_PROMPT_PREFIX + summary_context` prompt. Mirrors `bridge/message_drafter.py:1262-1276` shape. Lets the drafter elide / shrink / acknowledge naturally.
-- **Post-draft hybrid suppression** (after Pass 2): Bigram-Jaccard pre-check at threshold `0.75` (env-tunable) against an adapter-mapped view of `parent.chat_message_log` outbound entries. **Critical: baseline source is `chat_message_log`, NOT `recent_sent_drafts`** — `recent_sent_drafts` is Path-A-only (`agent/output_handler.py:586`); the duplicate scenario in this issue is Path-B-source, which only populates `chat_message_log`. Suppress on J ≥ 0.75. Send on J < 0.55. Escalate to Haiku judge in band [0.55, 0.75).
+- **Post-draft hybrid suppression** (after Pass 2): Bigram-Jaccard pre-check via `should_suppress(..., threshold=0.55)` (low-threshold call — see §Data Flow §"Two-tier verdict via low-threshold call" for the load-bearing rationale around `SuppressionVerdict.jaccard` being unpopulated on `send` verdicts) against an adapter-mapped view of `parent.chat_message_log` outbound entries. **Critical: baseline source is `chat_message_log`, NOT `recent_sent_drafts`** — `recent_sent_drafts` is Path-A-only (`agent/output_handler.py:586`); the duplicate scenario in this issue is Path-B-source, which only populates `chat_message_log`. The completion-specific `0.75` cutoff (env-tunable via `DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD`) is enforced in the caller by inspecting the populated `verdict.jaccard`: `verdict.jaccard >= 0.75` → suppress, `0.55 <= verdict.jaccard < 0.75` → escalate to Haiku, `action == "send"` → ship.
 - **Shape adapter**: `_build_completion_baseline(parent, window_seconds=REDUNDANCY_WINDOW_SECONDS, max_entries=5) -> list[dict]` translates `chat_message_log` `{direction, sender, content, message_id, ts}` entries into the `{ts, text, artifacts}` shape expected by `should_suppress`'s `recent_sent_drafts` parameter. Filters to `direction == "out"` and entries inside the time window. Computes `artifacts` via `bridge.message_drafter.extract_artifacts(content)` per entry.
 - **Haiku judge**: Single Haiku call with `tool_use` returning `{action: "restate" | "new"}`. Fail-open contract per RTR pattern. Prompt includes `prior_timestamp` so the judge can weight stale-vs-fresh context.
 - **Suppress-fallback**: Queue 👀 reaction on `telegram_message_id` via the same outbox path used by `TelegramRelayOutputHandler._rtr_queue_reaction` (`agent/output_handler.py:763-787`) — NOT via `tools/react_with_emoji` (CLI-only, reads chat/reply/session from env vars). Either (a) extract `_build_reaction_payload` from `output_handler.py:789-820` to a new `bridge/reaction_outbox.py` module and call it from both sites, or (b) inline-replicate the 6-line payload + rpush snippet in the completion runner with a comment cross-referencing the canonical site. Silent fallback (log + skip send) when `telegram_message_id` is None.
@@ -189,9 +203,10 @@ End-to-end user-visible flow:
 ### Technical Approach
 
 - **Module placement**: New private helpers live inside `agent/session_completion.py` initially. If the suppression block grows past ~80 LoC, extract to `agent/completion_suppression.py`. Keep coupling local until the file requires it.
-- **Hybrid filter call**: Reuse `bridge/redundancy_filter.should_suppress` with two adjustments:
-  1. Pass `session_status=None` to bypass `_TERMINAL_STATUSES` exemption.
-  2. Wrap the call to use a per-completion threshold (default `0.75`, env `DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD`). Implementation option: temporarily monkey-patch `REDUNDANCY_THRESHOLD` (rejected — global module state, race-prone), or add a `threshold: float | None = None` parameter to `should_suppress` (preferred — additive, defaults to existing constant).
+- **Hybrid filter call**: Reuse `bridge/redundancy_filter.should_suppress` with three adjustments:
+  1. Pass `session_status=None` to bypass `_TERMINAL_STATUSES` exemption (per spike-4).
+  2. Pass `expectations=None` — Pass 2 returns plain text, not a `MessageDraft`-shaped object, so there is no expectations concept here. (Termination Condition 3 inside `should_suppress` would force `send` if expectations were non-empty; passing `None` keeps the suppression check active.)
+  3. Add a `threshold: float | None = None` parameter to `should_suppress` (additive, defaults to `REDUNDANCY_THRESHOLD`) and **call with `threshold=0.55`** — NOT 0.75. The 0.75 completion-specific cutoff is enforced by the caller inspecting `verdict.jaccard` after a `suppress` verdict. This is forced by `SuppressionVerdict.jaccard` being `None` on `send` verdicts (`bridge/redundancy_filter.py:226`) — see §Data Flow §"Two-tier verdict via low-threshold call". Rejected alternatives: (a) monkey-patch `REDUNDANCY_THRESHOLD` — global module state, race-prone; (b) populate `jaccard` on `send` verdicts too — touches `SuppressionVerdict` semantics in a way that affects the existing `output_handler.py` consumer and complicates the existing logger-formatted `reason` string; (c) compute jaccard separately in the completion runner — duplicates `_extract_bigrams` and the windowing logic. The low-threshold-call approach is the smallest delta and keeps `should_suppress` itself unchanged in semantics.
 - **Baseline source — `chat_message_log` (NOT `recent_sent_drafts`)**: The `recent_sent_drafts` field is updated only inside `TelegramRelayOutputHandler.send` at `agent/output_handler.py:586` (and only when `session.is_sdlc` is True at `agent/output_handler.py:584`). Path B `valor-telegram send` writes directly to `telegram:outbox:{session_id}` and the relay drains it — neither path touches `recent_sent_drafts`. The relay does, however, append to `chat_message_log` via `_append_outbound_chat_log` at `bridge/telegram_relay.py:697` for both Path A AND Path B sends (Tier-1 resolution covers Path B when `owner_agent_session_id` is in the payload, which `cmd_send` injects from `AGENT_SESSION_ID` at `tools/valor_telegram.py:1042-1044`). Therefore: `chat_message_log` is the only field that captures Path B mid-session sends, and is the only valid suppression baseline for this plan.
 - **Shape adapter helper** (new in `agent/session_completion.py`):
   ```python
@@ -253,7 +268,10 @@ Existing tests that must be updated, plus new tests to add. Each item carries a 
 - [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_delivered_when_final_text_unique` — ADD: parent has recent outbound chat_log entries; final_text unrelated; verify normal delivery.
 - [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_baseline_excludes_inbound_entries` — ADD: parent has an inbound (`direction: "in"`) chat_log entry whose content matches `final_text`; baseline adapter filters it out; suppression returns `send` (we never suppress against the user's own message).
 - [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_baseline_excludes_stale_entries` — ADD: parent has outbound chat_log entry with `ts` older than `REDUNDANCY_WINDOW_SECONDS`; baseline adapter filters it out; suppression returns `send`.
-- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_judge_called_in_borderline_band` — ADD: J ∈ [0.55, 0.75); mock Haiku judge to return "restate" → suppressed; flip to "new" → delivered.
+- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_judge_called_in_borderline_band` — ADD: J ∈ [0.55, 0.75); mock Haiku judge to return "restate" → suppressed; flip to "new" → delivered. Test asserts the call to `should_suppress` uses `threshold=0.55` (low cutoff), NOT 0.75, and that the verdict's `jaccard` and `matched_index` are populated and used to fetch prior context for the Haiku call.
+- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_high_confidence_suppress_skips_haiku` — ADD: J ≥ 0.75 (e.g. 0.85). Verify verdict.action == "suppress", verdict.jaccard >= 0.75, suppress branch fires WITHOUT calling Haiku. Mocks Haiku to assert it is NOT called (failing the test if Haiku is invoked).
+- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_borderline_with_invalid_matched_index_falls_through_to_send` — ADD: defensive case. Construct a `SuppressionVerdict` with `action="suppress", jaccard=0.65, matched_index=99` (out of range vs a 3-entry baseline). Verify warning logged and `send_cb` invoked normally (no Haiku call, no crash).
+- [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_send_verdict_with_new_artifact_proceeds_normally` — ADD: baseline contains an outbound entry with high text similarity but the new draft includes a new commit URL not in the baseline; `should_suppress` returns `action="send", reason="new_artifact"` (per `bridge/redundancy_filter.py:201`); no Haiku call; `send_cb` proceeds.
 - [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_adapter_failopen_on_malformed_entry` — ADD: malformed `chat_message_log` entry (non-dict, missing keys); adapter returns `[]`; verify delivery proceeds + warning logged.
 - [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_silent_fallback_when_telegram_message_id_none` — ADD: suppression decision + None anchor → no reaction, no send, log warning, finalize cleanly.
 - [ ] `tests/unit/test_deliver_pipeline_completion.py::test_completion_skips_suppression_check_on_sentinel_text` — ADD: `final_text` is the sentinel string from `agent/session_completion.py:567`; suppression check is bypassed; existing sentinel/fallback path takes over.
@@ -304,26 +322,32 @@ Existing tests that must be updated, plus new tests to add. Each item carries a 
 **Data prerequisite:** Outbound entries from this session that should logically be visible (i.e. were rpushed to the outbox before the runner started) MUST be visible in `parent.chat_message_log` when the runner reads it — OR the runner must handle their absence gracefully without false negatives that re-emit duplicates.
 **State prerequisite (CORRECTED — prior revision asserted a non-existent ordering guarantee):** None at the architecture level. The publisher (`cmd_send`) returns after `r.rpush` succeeds; the consumer (relay drain loop) processes outbox events asynchronously in `bridge/telegram_relay.py::run_outbox_consumer`. The only ordering guarantee is FIFO inside a single outbox queue.
 **Mitigation (NEW — three-layer defense, no architectural ordering claim):**
-  1. **Bounded synchronous wait** before reading `chat_message_log` in the completion runner. Pseudocode:
+  1. **Bounded synchronous wait** before reading `chat_message_log` in the completion runner. Pseudocode (uses the sync `redis.Redis` client wrapped via `asyncio.to_thread` because the codebase has no async-redis client — verified via `grep -rn "redis.asyncio" agent/ bridge/`, returns no matches):
      ```python
-     async def _await_outbox_drained(parent, timeout_seconds=2.0, poll_interval=0.1):
+     async def _await_outbox_drained(parent, *, timeout_seconds=2.0, poll_interval=0.1):
          """Wait for the parent session's outbox queue to be empty (best effort).
-         Returns True if drained, False on timeout. Fail-open: returns True on any exception."""
+         Returns True if drained, False on timeout. Fail-open: returns True on any exception.
+         """
          try:
-             import time
-             from agent.redis_client import get_redis_async  # or equivalent
-             r = get_redis_async()
-             deadline = time.time() + timeout_seconds
+             import asyncio as _asyncio
+             import os
+             import time as _time
+             import redis  # sync client — codebase has no async-redis usage
+             redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+             r = redis.Redis.from_url(redis_url, decode_responses=True)
+             deadline = _time.time() + timeout_seconds
              queue_key = f"telegram:outbox:{parent.session_id}"
-             while time.time() < deadline:
-                 if await r.llen(queue_key) == 0:
+             while _time.time() < deadline:
+                 # llen is sub-millisecond; to_thread keeps the event loop free
+                 length = await _asyncio.to_thread(r.llen, queue_key)
+                 if length == 0:
                      return True
-                 await asyncio.sleep(poll_interval)
+                 await _asyncio.sleep(poll_interval)
              return False
          except Exception:
-             return True  # fail-open
+             return True  # fail-open — never block delivery on monitoring
      ```
-     This bounds the worst-case race to a 2-second wait. The drain loop's per-event latency is sub-100ms in practice, so the typical wait is ≤100ms. If timeout fires: log a warning and proceed with whatever's in `chat_message_log`; the suppression check may miss the most-recent send and emit a duplicate (degraded behavior == today's behavior, not worse).
+     This bounds the worst-case race to a 2-second wait. The drain loop's per-event latency is sub-100ms in practice, so the typical wait is ≤100ms. If timeout fires: log a warning and proceed with whatever's in `chat_message_log`; the suppression check may miss the most-recent send and emit a duplicate (degraded behavior == today's behavior, not worse). The `redis.Redis.from_url(decode_responses=True)` constructor is the same shape used by `agent/output_handler.py:159` and `bridge/telegram_relay.py:81` — single source-of-truth for the connection string.
   2. **Re-fetch the parent session from Popoto immediately before the suppression check** so a stale in-memory copy from earlier in the runner doesn't shadow a fresh chat_log append: `parent = AgentSession.get_by_id(parent.agent_session_id) or parent`. Pattern matches `models/agent_session.py:1407-1410`'s `append_to_chat_message_log` re-fetch defense against the same hazard.
   3. **Idempotent fallback**: if the post-draft suppression baseline is empty AND the Pass-1 chat-log block was also empty, the runner has no signal and proceeds with `send_cb` as today. This is no worse than current behavior — the duplicate ships, but it's a logged, observable degradation rather than a silent crash.
 **Failure mode if mitigation insufficient:** A duplicate emit slips through. Same as today's behavior. The mitigation reduces the race window from "always" to "the rare case where the drain takes >2s AND the wait times out AND a re-fetch still misses the entry." Acceptable degradation gradient.
@@ -481,16 +505,29 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - After `final_text` is finalized (current `agent/session_completion.py:691`) and before the `send_cb` call (current line 694):
   - Early-return guard: if `final_text` is empty, whitespace-only, OR equals the sentinel `[completion-runner internal error — no final_text assigned]` → skip suppression check, proceed to existing send path.
   - Await `_await_outbox_drained(parent)` (best-effort, bounded to 2s).
-  - Re-fetch parent again to capture any chat_log writes that landed during the wait.
+  - Re-fetch parent again to capture any chat_log writes that landed during the wait: `parent = AgentSession.get_by_id(parent.agent_session_id) or parent`.
   - Build baseline: `baseline = _build_completion_baseline(parent)`.
   - If `baseline == []`: skip suppression (no signal); proceed to existing send path.
-  - Otherwise: call `should_suppress(final_text, extract_artifacts(final_text), baseline, expectations=None, session_status=None, threshold=float(os.environ.get("DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD", "0.75")))`.
-  - If `verdict.action == "suppress"`: queue 👀 reaction on `telegram_message_id` via the canonical reaction-outbox path (see step 2f); log decision with `[completion-runner] Suppressed final emit for {parent_id} (jaccard={verdict.jaccard:.2f}, judge=n/a)`; set `delivery_attempted = False`; skip `send_cb`.
-  - If `verdict.action == "send"` AND `0.55 <= verdict.jaccard < 0.75`: call `_judge_completion_novelty(prior_text=baseline[verdict.matched_index]["text"], prior_ts=baseline[verdict.matched_index]["ts"], draft_text=final_text)`. If True (restate): suppress as above (with `judge=restate` in log). If False (new): proceed with `send_cb` (log `judge=new`).
-  - Else (`verdict.action == "send"` AND J < 0.55): proceed with `send_cb` as today (log `reason=below_threshold`).
-- Inline comment at the `should_suppress` call site explaining the `session_status=None` choice (per Risk 4).
-- If `telegram_message_id is None` on the suppression branch: log warning `[completion-runner] suppress decision but no anchor message_id; falling silent`, no reaction queued, silent fall-through.
-- Guard the entire suppression block (steps 2d wait/refetch + 2e suppression check) with `try/except Exception` that logs and falls through to delivery on any unhandled exception.
+  - Read the high-confidence cutoff from env once: `HIGH_CUTOFF = float(os.environ.get("DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD", "0.75"))` and the low cutoff from a module constant: `LOW_CUTOFF = 0.55` (sourced from §Solution > Two-tier verdict; document inline).
+  - **Call `should_suppress` with the LOW threshold** (not the high one — see §Data Flow §"Two-tier verdict"):
+    ```python
+    verdict = should_suppress(
+        final_text,
+        extract_artifacts(final_text),
+        baseline,
+        expectations=None,       # Pass 2 returns plain text — no expectations concept here
+        session_status=None,     # Bypass _TERMINAL_STATUSES exemption (Risk 4 / spike-4)
+        threshold=LOW_CUTOFF,    # Low threshold so verdict.jaccard is populated for the borderline-band check below
+    )
+    ```
+  - **Branch on the verdict shape**:
+    - If `verdict.action == "suppress"` AND `verdict.jaccard is not None` AND `verdict.jaccard >= HIGH_CUTOFF`: high-confidence duplicate. Queue 👀 reaction on `telegram_message_id` via the canonical reaction-outbox path (see step 2f); log `[completion-runner] Suppressed final emit for {parent_id} (jaccard={verdict.jaccard:.2f}, judge=n/a, decision=high_confidence)`; set `delivery_attempted = False`; skip `send_cb`.
+    - If `verdict.action == "suppress"` AND `verdict.jaccard is not None` AND `LOW_CUTOFF <= verdict.jaccard < HIGH_CUTOFF`: borderline. Resolve prior context defensively: `idx = verdict.matched_index; prior = baseline[idx] if (idx is not None and 0 <= idx < len(baseline)) else None`. If `prior is None`: log warning `[completion-runner] borderline verdict but matched_index out of range; defaulting to send`, proceed to `send_cb`. Otherwise: call `_judge_completion_novelty(prior_text=prior["text"], prior_ts=prior["ts"], draft_text=final_text)`. If True (restate): suppress as above (log `judge=restate, decision=borderline_haiku_restate`). If False (new): proceed with `send_cb` (log `judge=new, decision=borderline_haiku_new`).
+    - If `verdict.action == "suppress"` AND `verdict.jaccard is None`: should not happen given the dataclass populates it on the suppress path (`bridge/redundancy_filter.py:218-224`), but handle defensively — log warning `[completion-runner] suppress verdict missing jaccard; defaulting to send` and proceed to `send_cb`.
+    - If `verdict.action == "send"`: proceed with `send_cb` as today (log `reason={verdict.reason}, decision=below_low_cutoff_or_other_send_reason`). This branch covers J < LOW_CUTOFF, new artifact present, empty draft, etc. — all the legitimate send paths from `should_suppress`.
+- Inline comment at the `should_suppress` call site explaining: (a) why `session_status=None` (per Risk 4 / spike-4), (b) why `expectations=None` (Pass 2 returns plain text), (c) why `threshold=LOW_CUTOFF` not `HIGH_CUTOFF` (verdict.jaccard population — cite this plan and `bridge/redundancy_filter.py:218-226`).
+- If `telegram_message_id is None` on the suppression branch: log warning `[completion-runner] suppress decision but no anchor message_id; falling silent`, no reaction queued, no send, silent fall-through. `delivery_attempted = False`.
+- Guard the entire suppression block (steps 2d wait/refetch + 2e suppression check) with `try/except Exception` that logs `[completion-runner] suppression-block crashed (non-fatal): {exc}` and falls through to the existing delivery path on any unhandled exception. Fail-open: a buggy suppression check must never block a legitimate completion delivery.
 
 **2f. Decide and implement reaction-queueing path:**
 - Preferred: extract `_build_reaction_payload` from `agent/output_handler.py:789-820` to a new module `bridge/reaction_outbox.py` exposing `build_reaction_payload(...)` and `queue_reaction(parent_session_id, chat_id, reply_to_msg_id, emoji)`. Update `_rtr_queue_reaction` at `agent/output_handler.py:763-787` to call into the new module so there's one source of truth. Call from completion runner.
@@ -566,6 +603,11 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | Terminal-status exemption untouched | `grep -n '_TERMINAL_STATUSES = frozenset' bridge/redundancy_filter.py` | output contains `frozenset({"completed", "failed", "blocked"})` |
 | Suppression call site exists | `grep -n 'session_status=None' agent/session_completion.py` | output > 0 |
 | Inline rationale present | `grep -n '_TERMINAL_STATUSES' agent/session_completion.py` | output contains comment line referencing this plan or #1262 |
+| Low-threshold call enforced | `grep -nE 'should_suppress\(' agent/session_completion.py` | output > 0 AND the call uses `threshold=LOW_CUTOFF` (or literal `0.55`), NOT `HIGH_CUTOFF` directly |
+| HIGH_CUTOFF read from env | `grep -n 'DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD' agent/session_completion.py` | output > 0 (env var read with default `0.75`) |
+| Two-tier verdict logic present | `grep -nE 'verdict\.jaccard\s*>=\s*HIGH_CUTOFF\|verdict\.jaccard\s*<\s*HIGH_CUTOFF' agent/session_completion.py` | output >= 1 (high/borderline branching present) |
+| Defensive matched_index guard | `grep -nE 'matched_index|borderline.*range' agent/session_completion.py` | output >= 1 (defensive idx-bounds check) |
+| Sync-redis pattern in wait helper | `grep -nE 'redis\.Redis\.from_url|asyncio\.to_thread\(.*llen' agent/session_completion.py` | output >= 2 (constructor + to_thread wrapper for sync llen) |
 | Baseline source is chat_message_log NOT recent_sent_drafts | `grep -nE '\.chat_message_log\|_build_completion_baseline\|recent_sent_drafts' agent/session_completion.py` | output contains `chat_message_log` and `_build_completion_baseline`; NO occurrences of `recent_sent_drafts` |
 | Outbox-drain wait helper exists | `grep -n '_await_outbox_drained\|_build_completion_baseline\|_judge_completion_novelty' agent/session_completion.py` | output contains all three names |
 | Reaction queueing is canonical (not react_with_emoji) | `grep -n 'react_with_emoji\|tools.react_with_emoji' agent/session_completion.py` | exit code 1 (no match — completion runner does NOT call this) |
@@ -573,6 +615,19 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | Doc updated | `grep -rl 'Mid-session-send-aware completion suppression' docs/features/` | exit code 0 |
 
 ## Critique Results
+
+### Cycle 2 (rev2 → rev3)
+
+Cycle 2 critique returned `NEEDS REVISION` (recorded 2026-05-04T11:51:35Z, artifact_hash `sha256:75f2ad0276272d3d14f38204ad6c62fe3a03a3ccba438e5ec2e3c63b70b2827b`). The critic-by-critic transcript was not persisted; the rev3 author re-derived the load-bearing issues by re-reading `bridge/redundancy_filter.py:55-71,138-226` (`SuppressionVerdict` shape and `_should_suppress_inner` exit paths), `agent/output_handler.py:159` and `bridge/telegram_relay.py:81` (sync-redis client patterns), and grep'd for `redis.asyncio` (no matches). Each finding has a concrete addressed-by reference below.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic + Adversary | Plan rev2's step 2e references `verdict.jaccard` and `verdict.matched_index` on a `verdict.action == "send"` branch (`if verdict.action == "send" AND 0.55 <= verdict.jaccard < 0.75`). False — `SuppressionVerdict.jaccard` and `SuppressionVerdict.matched_index` are populated **only on the `suppress` path** (`bridge/redundancy_filter.py:218-224`). All `send` exit paths (lines 150, 154, 158, 162, 201, 226) construct the verdict with default `None` for those fields (defaults at lines 70-71). Step 2e's borderline-band escalation would dereference `None` and raise `TypeError: '<=' not supported between instances of 'float' and 'NoneType'` — completion runner crashes inside the new suppression block. | Restructured §Solution > Technical Approach and step 2e to call `should_suppress` with `threshold=0.55` (the LOW cutoff) and inspect `verdict.jaccard` only when `verdict.action == "suppress"`. Added new §Data Flow §"Two-tier verdict via low-threshold call" that documents the rationale and the dataclass invariant. Added defensive guard for `verdict.jaccard is None` AND defensive bounds check on `verdict.matched_index`. Added 4 new test cases to Test Impact: high-confidence-suppress-skips-haiku, borderline-with-invalid-matched-index, send-verdict-with-new-artifact, and revised borderline-band test to assert `threshold=0.55` is used. Added Verification rows asserting LOW_CUTOFF and HIGH_CUTOFF are both wired correctly. | Source check: `SuppressionVerdict` dataclass (`bridge/redundancy_filter.py:55-71`) has `jaccard: float \| None = field(default=None)` and `matched_index: int \| None = field(default=None)`. Only `_should_suppress_inner` line 219-223 (the suppress-with-match branch) ever passes non-None values. |
+| BLOCKER | Operator + Archaeologist | Plan rev2's `_await_outbox_drained` pseudocode imports `from agent.redis_client import get_redis_async`, which does not exist in this codebase. Verified via `find . -name "*.py" -path "*/agent/*" \| xargs grep -l "def get_redis"` (no matches) and `grep -rn "redis.asyncio" agent/ bridge/` (no matches). The codebase uses sync `redis.Redis.from_url(decode_responses=True)` exclusively (see `agent/output_handler.py:159`, `bridge/telegram_relay.py:81`). Build will fail at import time when the helper is first invoked. | Rewrote `_await_outbox_drained` pseudocode in §Race Conditions > Race 1 Mitigation to use sync `redis.Redis.from_url(...)` matching the existing codebase pattern, with `await asyncio.to_thread(r.llen, queue_key)` to keep the event loop free. Added explicit comment in the pseudocode explaining the choice. Added Verification row asserting both `redis.Redis.from_url` and `asyncio.to_thread(...llen...)` appear in `agent/session_completion.py`. | The same connection-string handling (`os.environ.get("REDIS_URL", "redis://localhost:6379/0")`) is used by `agent/output_handler.py:155-159` and `bridge/telegram_relay.py:75-81`. The plan now matches that single source-of-truth pattern. |
+| CONCERN | Operator | Step 2e didn't explicitly justify `expectations=None`. A reader unfamiliar with the regular drafter pipeline might assume the completion runner has access to a `MessageDraft.expectations` value and that `None` is wrong. (Termination Condition 3 in `should_suppress` forces `send` if expectations is non-empty — passing the wrong value would silently break the suppression check.) | Added explicit rationale in §Solution > Technical Approach > "Hybrid filter call" item 2: Pass 2 returns plain text, not a `MessageDraft`-shaped object, so there is no expectations concept here. Inline comment at the call site (per step 2e's revised inline-comment requirement) now also covers this. | Pass 2 in `_deliver_pipeline_completion` returns the harness's plain string output (see `agent/session_completion.py:597`), not a structured drafter object. The `expectations` mechanism only exists on `MessageDraft` returned by the regular drafter (`bridge/message_drafter.py`). |
+| NIT | Simplifier | Plan rev2 had a `prior_critique_artifact_hash` frontmatter field still pointing to the cycle-1 hash (`5230ef8c...`) even though cycle 2 had run and produced a new verdict (`75f2ad...`). Stale tracking field. | Updated frontmatter `prior_critique_artifact_hash` to the cycle-2 hash. The G5 (Unchanged critique artifact) guard in `/sdlc` will now see the next critique as a re-evaluation of a *new* artifact (rev3 differs from rev2). | n/a — frontmatter housekeeping. |
+
+### Cycle 1 (rev1 → rev2)
 
 Cycle 1 critique returned `NEEDS REVISION` (recorded 2026-05-04T11:23:39Z, artifact_hash `sha256:5230ef8c0a11c04101f913f726689af0a87cf924af2e4782e166afe7c9f26069`). Findings are reconstructed below from a self-critique pass against the recon-validated source files (the original critic-by-critic transcript was not persisted; this plan's revision cycle re-derives the load-bearing issues by re-reading `agent/output_handler.py:584-590`, `tools/valor_telegram.py:1042-1052`, `tools/react_with_emoji.py:43-92`, `bridge/telegram_relay.py:519-549,690-700`, and `agent/session_completion.py:551,694-697,771`). Each finding has a concrete addressed-by reference in the revised plan.
 
@@ -601,4 +656,9 @@ The four open questions from cycle 1 are resolved by this revision:
 
 4. **Helper module placement.** RESOLVED: new private helpers (`_build_completion_baseline`, `_await_outbox_drained`, `_judge_completion_novelty`) live in `agent/session_completion.py`. The reaction-payload helper EXTRACTION is a separate decision in step 2f (preferred: extract to `bridge/reaction_outbox.py`; backstop: inline-replicate in completion runner). Other helpers stay local.
 
-**No new open questions** introduced by this revision.
+**No new open questions** introduced by rev2 (cycle-1 fix). 
+
+Rev3 (cycle-2 fix) likewise introduces no new open questions — the BLOCKER findings (verdict shape mismatch, nonexistent `get_redis_async`) were both self-resolvable design errors with clear codebase-grounded fixes:
+
+- The `should_suppress` `threshold` parameter (already in step 1) is now used at the LOW value (0.55) by the completion runner; the HIGH cutoff (0.75) lives in the caller. No external interface changes beyond what step 1 already proposed.
+- `_await_outbox_drained` now uses the same sync `redis.Redis.from_url(...)` pattern as the rest of the codebase, wrapped in `asyncio.to_thread` for non-blocking poll. Zero new dependencies.
