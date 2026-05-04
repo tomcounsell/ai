@@ -986,9 +986,9 @@ async def _send_audio_brief(
 
     Fan-out across multiple chats is unsafe with the current relay contract:
     payloads share `audio_path` with `cleanup_file: True`, and the relay
-    unlinks the file after the first successful send. Subsequent sends would
+    unlinks the file after the first successful send — subsequent sends would
     see an empty `available` list, no text, and silently drop the message
-    while this method falsely reported success. See PR #1264 review feedback.
+    without raising an error.
 
     Returns a list of human-readable findings strings for the run record.
     On TTS failure, logs and skips delivery (no plaintext fallback per scope).

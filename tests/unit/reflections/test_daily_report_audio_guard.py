@@ -41,22 +41,19 @@ def test_layer2_catches_prefixed_numbers(text):
 # --- Layer 3: bare 3+ digit integers -----------------------------------------
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "We made 1263 changes",
-        "Reviewed 363 lines of patch",  # 'lines' exempt; bare 363 only flags if non-adjacent
-    ],
-)
-def test_layer3_catches_bare_integers_without_exempted_unit(text):
-    """Bare 3+ digit integers without an exempted unit suffix must trigger.
-
-    Note: The Layer 3 regex exempts certain unit suffixes inline; "363 lines"
-    is exempted, so this test covers the 1263 case which has no exempt word.
-    """
-    # First case must raise; second is exempted so we narrow the test:
+def test_layer3_catches_bare_integers_without_exempted_unit():
+    """Bare 3+ digit integers without an exempted unit suffix must trigger."""
     with pytest.raises(BriefingNumbersDetectedError):
         _check_numbers("We made 1263 changes")
+
+
+def test_layer3_exempted_unit_passes():
+    """Bare 3+ digit integers followed by an exempted unit suffix must NOT trigger.
+
+    "363 lines" is exempt because 'lines' is an exempted unit; the regex only
+    flags numbers whose adjacent word is not in the exempt list.
+    """
+    _check_numbers("Reviewed 363 lines of patch")  # must not raise
 
 
 @pytest.mark.parametrize(
