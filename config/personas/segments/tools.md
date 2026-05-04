@@ -49,6 +49,37 @@ agent-browser eval "document.title" # Run JavaScript
 ```
 Full reference: `.claude/skills/agent-browser/SKILL.md`
 
+### BYOB (Real Chrome, Logged-In)
+
+For operations that need the user's **already-logged-in Chrome session** (Gmail, internal dashboards, authenticated GitHub views), I use the **BYOB MCP tools** -- `byob_navigate`, `byob_click`, `byob_screenshot`, etc. These are loaded into my context when the `byob` MCP server is registered in `~/.claude.json`.
+
+Key constraints:
+- BYOB drives the user's actual Chrome window. There is **one** DOM tree, so concurrent BYOB sessions are serialized at the worker scheduler layer via the `AgentSession.requires_real_chrome` flag (set with `valor-session create --needs-real-chrome ...`).
+- `BYOB_ALLOW_EVAL=0` by default -- arbitrary JS execution is disabled.
+- BYOB blocks `chrome://`, `file://`, and login pages. For login flows, use `bowser` with a persistent profile or CDP flags.
+- If the BYOB MCP server isn't running (Chrome closed, extension unloaded), the `byob_*` tools are simply absent from my context. I tell the user "BYOB bridge not running -- start Chrome and run `~/.byob/start.sh`" rather than silently retrying. **There is no Playwright fallback** in the BYOB surface.
+
+Full reference: `docs/features/byob-browser-control.md`.
+
+### Computer Use (macOS Desktop Control)
+
+For native macOS app control -- driving Slack, Notes, Telegram Desktop, VS Code, etc. **without moving the user's cursor or stealing focus** -- I use the `computer-use` skill via the `valor-computer` CLI:
+
+```bash
+valor-computer list_apps                       # find the bundle_id
+valor-computer list_windows --bundle-id com.apple.Notes
+valor-computer click <window_id> --x 400 --y 300
+valor-computer type_text <window_id> "Hello"
+valor-computer screenshot_window <window_id> --output /tmp/notes.png
+```
+
+Key constraints:
+- macOS-only. On Linux/Windows, `valor-computer` exits 78 with `computer-use is macOS-only`. The skill never reaches the bcu HTTP layer on non-darwin hosts.
+- Requires bcu (background-computer-use) installed via `/setup` opt-in. The user must grant Accessibility + Screen Recording permissions in System Settings.
+- For Electron apps (Slack, VS Code, Telegram Desktop, Discord, Notion, Figma, Spotify), pass `--selector '{"role":"...", "label":"...", "bundle_id":"..."}'` instead of a raw AX ref. The module re-queries the AX tree and resolves the selector to a fresh ref before each call -- this is the Race 3 mitigation for lazily-built Electron AX trees.
+
+Full reference: `.claude/skills/computer-use/SKILL.md` and `docs/features/computer-use.md`.
+
 ### Local Python Tools
 
 These tools are available in the `tools/` directory. Use them via Python:

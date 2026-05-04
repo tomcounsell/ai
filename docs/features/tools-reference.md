@@ -10,6 +10,8 @@ Individual operations that can be composed into larger workflows:
 |------|---------|---------------|
 | **Sentry** | Error monitoring, performance analysis | `.mcp.json` |
 | **GitHub** | Repository operations, PRs, issues | `gh` CLI (pre-authenticated) |
+| **memory** | `memory_get`, `memory_search` over the subconscious memory store | `~/.claude.json` `mcpServers.memory` (registrar: `scripts/update/mcp_memory.py`) |
+| **byob** | Real-Chrome automation (`byob_navigate`, `byob_click`, `byob_screenshot`, etc.) against the user's logged-in Chrome session. macOS-friendly; serialization via `AgentSession.requires_real_chrome` -- see [BYOB Browser Control](byob-browser-control.md). | `~/.claude.json` `mcpServers.byob` (registrar: `scripts/update/mcp_byob.py`) |
 
 ## Local Python Tools
 
@@ -269,6 +271,32 @@ states = query_stage_states(issue_number=704)
 ```
 
 Always exits 0 and returns `{}` on any error (missing session, Redis down, malformed data). See `docs/features/pipeline-state-machine.md` for how the router uses this tool.
+
+### Computer Use (`tools.computer`, `valor-computer`)
+
+macOS-only desktop control via background-computer-use (bcu). Wraps the bcu loopback HTTP API so the agent can drive native macOS apps -- click, type, screenshot windows -- without moving the user's cursor.
+
+```bash
+# Discover
+valor-computer list_apps                       # all visible apps
+valor-computer list_windows --bundle-id com.apple.Notes
+
+# Inspect
+valor-computer get_window_state <window_id>
+
+# Drive
+valor-computer click <window_id> --x 100 --y 200
+valor-computer type_text <window_id> "Hello world"
+valor-computer screenshot_window <window_id> --output /tmp/notes.png
+
+# Electron apps: pass selector instead of raw ref to handle stale AX trees
+valor-computer click <slack_window> \
+  --selector '{"role":"AXButton","label":"Send","bundle_id":"com.tinyspeck.slackmacgap"}'
+```
+
+OS gate: on non-macOS hosts, `valor-computer` exits **78** (`EX_CONFIG`) with `computer-use is macOS-only. This machine runs <platform>; skipping.` to stderr. Skill body never reaches the bcu HTTP layer on Linux/Windows.
+
+See [Computer Use](computer-use.md) for the full design + `.claude/skills/computer-use/SKILL.md` for the agent reference.
 
 ## OfficeCLI
 
