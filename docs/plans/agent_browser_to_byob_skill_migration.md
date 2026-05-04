@@ -675,9 +675,21 @@ builds directly — they deploy team members and coordinate.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict (2026-05-04, /do-plan-critique):** NEEDS REVISION — 1 blocker.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Operator | `requires_real_chrome` flag never set on bridge-spawned sessions — Telegram-initiated invocations bypass the scheduler gate from PR #1277 | Pending revision | Add bridge-side inference in `bridge/telegram_bridge.py` enqueue path: scan initial message for skill triggers (`linkedin`, etc.) and set `requires_real_chrome=True` before `agent_session_queue._push_agent_session()`. Migration of linkedin must land WITH this wiring, not before. |
+| CONCERN | Skeptic | Smoke test is structural-only (grep checks); no behavioral validation that BYOB actually drives the user's Chrome | Pending revision | Operator runs `valor-session create --role dev --needs-real-chrome --message "list my linkedin DMs"` after build-linkedin, captures output to `tests/manual/linkedin_byob_smoke.txt`, links from PR description. Without this artifact, success criterion #2 is not executable per memory `feedback_acceptance_criteria_must_be_executable`. |
+| CONCERN | Skeptic, Consistency Auditor | Verification check for CDP fallback is non-deterministic — "0 matches OR 1 match" cannot decide pass/fail | Pending revision | Keep CDP block, prefix with deprecation callout. Verification becomes `grep -q "Fallback path — deprecated" .claude/skills/linkedin/SKILL.md` (exit 0). File followup issue for CDP removal as part of build phase. |
+| CONCERN | Operator | No rollback path documented other than `git revert` | Pending revision | Confirm `git revert <build-linkedin commit SHA>` is acceptable rollback for a text-only chore migration; add explicit one-liner to Risk 1's mitigation block. Skip env-var feature flag — runtime branching not justified for revertable work. |
+| CONCERN | Adversary | TOCTOU on dual-surface routing — public URL can redirect to login page, wrong-surface choice produces wrong-shaped output silently | Pending revision | Each dual-surface skill body adds a "Surface decision" allowlist of known-public domains (e.g., `github.com`, `vercel.app preview-*` for do-pr-review; public marketing domains for do-design-audit). Default-route to BYOB for everything else. 5-line addition per skill. |
+| CONCERN | Consistency Auditor | Issue Acceptance Criterion #5 (uninstall agent-browser if all skills migrate) cannot trigger — 4 skills explicitly stay | Pending revision | Add an "Issue Acceptance Criteria — Disposition" subsection after No-Gos walking through each AC: satisfied / deferred / partial. AC #5 row: "deferred — 4 skills stay per Decision Matrix; future cleanup." |
+| NIT | Archaeologist | Prior Art does not cite the originating PR for the CDP-attach pattern in linkedin/SKILL.md | Pending revision | Run `git log -p --follow .claude/skills/linkedin/SKILL.md \| grep -B2 "remote-debugging-port"` and add the originating commit to Prior Art. |
+| NIT | Adversary | No fail-fast check that BYOB MCP is registered before migrated skills are usable | Pending revision | Verify PR #1277 already adds a `/setup` or `/doctor` check; reference it in Prerequisites instead of duplicating. |
+| NIT | Simplifier | Team Orchestration over-specifies (6 members for a text-editing job) | Pending revision | Consolidate to 3 members: linkedin-builder, migration-builder (covers dual-surface + doc-only + decision-rule), final-validator. |
+| NIT | Simplifier | Decision Matrix duplicated between this plan and `byob-browser-control.md` | Pending revision | Plan's matrix stays in plan; feature doc gets a short summary + link back. After archive, matrix moves to feature doc (one-time). |
+| NIT | User | Problem section understates operator pain (manual `pkill chrome && launch with debug-port` recipe) | Pending revision | Add one sentence to Problem → Current behavior: "Operators using `/linkedin` today must manually relaunch their Chrome with debug flags before each session — BYOB removes that step entirely." |
 
 ---
 
