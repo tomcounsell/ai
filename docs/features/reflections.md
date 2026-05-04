@@ -254,7 +254,7 @@ The package modules:
 | `reflections.task_management` | 2 task management callables (task check, principal staleness) |
 | `reflections.session_intelligence` | Pipeline: session analysis → LLM reflection → bug issue filing |
 | `reflections.behavioral_learning` | Pipeline: episode cycle-close → pattern crystallization |
-| `reflections.daily_report` | Pipeline: collect findings → GitHub issues → Telegram notification |
+| `reflections.daily_report` | Pipeline: aggregate day activity → write Markdown vault log → deliver audio brief to PM Telegram |
 | `reflections.memory_management` | 3 memory management callables (decay prune, quality audit, knowledge reindex) |
 
 ## State & Persistence
@@ -579,7 +579,7 @@ The reflection scheduler starts automatically as part of the standalone worker p
 | `reflections/task_management.py` | 2 task management callables |
 | `reflections/session_intelligence.py` | Session analysis → LLM reflection → bug issue pipeline |
 | `reflections/behavioral_learning.py` | Episode cycle-close → pattern crystallization pipeline |
-| `reflections/daily_report.py` | Daily report → GitHub issues → Telegram pipeline |
+| `reflections/daily_report.py` | Daily log pipeline: aggregate 7 sources → write `~/work-vault/.../daily-logs/{date}.md` → audio brief to PM Telegram |
 | `reflections/memory_management.py` | 3 memory management callables |
 | `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
 | `models/reflection_ignore.py` | ReflectionIgnore: auto-fix suppression with TTL-based expiry |
