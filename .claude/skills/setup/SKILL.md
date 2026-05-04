@@ -340,6 +340,71 @@ launchctl list | grep com.valor.reflections
 
 If the output shows the `com.valor.reflections` label, the scheduler is installed. It will run `scripts/reflections.py` daily at 6 AM, performing log review, session analysis, LLM reflection, and memory consolidation.
 
+## Step 8.5: Optional BYOB + Computer-Use Install (macOS only)
+
+These two surfaces are operator-opt-in. Skip on non-macOS hosts.
+
+### BYOB (real-Chrome control)
+
+BYOB lets the agent read and act on the user's already-logged-in Chrome via MCP tools (`byob_navigate`, `byob_click`, etc.) -- no `state.json` files in the repo, no per-session re-auth.
+
+```bash
+# 1. Install bun if not already present
+command -v bun >/dev/null || curl -fsSL https://bun.sh/install | bash
+
+# 2. Clone BYOB to ~/.byob/ and check out the pinned commit
+PIN=$(python3 -c "import json; print(json.load(open('config/byob_pin.json'))['commit'])")
+if [ ! -d ~/.byob ]; then
+  git clone https://github.com/wxtsky/byob ~/.byob
+fi
+git -C ~/.byob fetch
+git -C ~/.byob checkout "$PIN"
+
+# 3. Build + register the native messaging host
+cd ~/.byob && bun install && bun run setup
+cd ~/src/ai
+
+# 4. Register the BYOB MCP server in ~/.claude.json (idempotent, self-healing)
+python -c "from scripts.update import mcp_byob; r = mcp_byob.verify_byob_mcp(write=True); print(r.message)"
+```
+
+After install, the user must:
+- Open Chrome -> chrome://extensions -> Developer mode ON -> "Load unpacked" -> select `~/.byob/extension/` (the BYOB extension cannot be auto-installed; this is an operator click-through).
+
+Verify:
+```bash
+# After Chrome + BYOB extension are running:
+ls -la ~/.byob/run/byob.sock   # should exist
+```
+
+### Computer-Use (bcu, native macOS app control)
+
+bcu drives Slack, Notes, Telegram Desktop, etc. via the macOS Accessibility API without moving the user's cursor. **Prompt the user before installing**:
+
+> Do you want to enable computer-use (lets the agent drive native macOS apps -- Slack, Notes, etc. -- without moving your cursor)?
+
+On **yes**:
+```bash
+# Write the opt-in sentinel
+mkdir -p ~/.config/valor && touch ~/.config/valor/computer-use-enabled
+
+# Resolve the pinned bcu release
+TAG=$(python3 -c "import json; print(json.load(open('config/bcu_pin.json'))['release_tag'])")
+
+# Download + verify SHA + install -- /update handles this on every run too,
+# so the SETUP-time fetch is just bootstrap. See scripts/update/run.py.
+echo "bcu pinned tag: $TAG"
+echo "Run: python scripts/update/run.py --full to fetch + install + permission-prompt."
+```
+
+After install, the user must grant **two** permissions in System Settings:
+- Privacy & Security -> Accessibility -> add `BackgroundComputerUse.app`
+- Privacy & Security -> Screen Recording -> add `BackgroundComputerUse.app`
+
+These permissions cannot be granted programmatically.
+
+On **no**: skip everything. Don't write the sentinel; `/update` will leave bcu alone.
+
 ## Step 9: Start the Bridge
 
 Ensure the logs directory exists, then start the bridge as a background process:

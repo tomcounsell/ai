@@ -1,13 +1,17 @@
 ---
-status: Ready
+status: Cancelled
 type: feature
 appetite: Small
 owner: Valor
 created: 2026-02-12
+cancelled: 2026-05-04
+cancelled_reason: "Superseded by docs/plans/byob_and_computer_use.md — Track 2 (computer-use skill)"
 tracking: https://github.com/tomcounsell/ai/issues/66
 ---
 
-# Telegram Desktop Control
+# Telegram Desktop Control (CANCELLED)
+
+> **Cancelled 2026-05-04.** Superseded by [`docs/plans/byob_and_computer_use.md`](./byob_and_computer_use.md) — Track 2 (computer-use skill). The general-purpose computer-use surface (driving Slack, Notes, Telegram Desktop, etc. via the macOS Accessibility API + bcu) covers everything this plan needed and more. Issue #66 was closed in favor of the umbrella issue #1256 before this revision landed.
 
 ## Problem
 

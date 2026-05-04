@@ -207,6 +207,50 @@ config = calendar.generate_calendar_config(project_dir)
 # config.success, config.mappings, config.error
 ```
 
+### MCP Server Registration (`mcp_memory.py`, `mcp_byob.py`)
+
+Both modules idempotently verify/repair their entry in `~/.claude.json`
+`mcpServers` under `fcntl.flock(LOCK_EX | LOCK_NB)` on
+`~/.claude.json.lock` with the same 3-attempt backoff (50/200/800ms).
+`run.py` calls both on every invocation so drift is healed automatically.
+
+```python
+from scripts.update import mcp_memory, mcp_byob
+
+# Memory MCP -- python3 -m mcp_servers.memory_server
+r1 = mcp_memory.verify_memory_mcp(write=True)
+# r1.ok, r1.action ("ok"|"installed"|"repaired"|...)
+
+# BYOB MCP -- node ~/.byob/dist/mcp-server.js, BYOB_ALLOW_EVAL=0
+r2 = mcp_byob.verify_byob_mcp(write=True)
+# r2.ok, r2.action
+```
+
+`write=False` runs in verify-only mode (LOCK_SH, no rename) -- used by
+`/update --verify`.
+
+### BYOB + Computer-Use Update Steps
+
+`run.py` wires:
+
+- **Step 4.8**: `mcp_memory.verify_memory_mcp()` -- runs every invocation.
+- **Step 4.9**: `mcp_byob.verify_byob_mcp()` -- runs every invocation.
+
+For BYOB binary updates (rebuild ~/.byob/ when the pinned commit changes
+in `config/byob_pin.json`) and bcu binary updates (re-download + SHA verify
+against `config/bcu_pin.json` when the opt-in sentinel
+`~/.config/valor/computer-use-enabled` is present), see the upcoming
+implementation in `scripts/update/run.py` and the post-install canary at
+`scripts/update/byob_canary.js`. Pins are bumped only via:
+
+- `/update --bump-byob` -- next BYOB upstream commit
+- `/update --bump-bcu` -- next bcu release tag
+
+Rollback paths:
+- BYOB: `~/.byob/dist.prev/` snapshot, restored on canary failure.
+- bcu: `~/.local/bin/background-computer-use.prev` symlink, restored on
+  `/v1/list_apps` canary failure.
+
 ### Service Management (`service.py`)
 
 ```python
