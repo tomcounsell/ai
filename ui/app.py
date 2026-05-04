@@ -411,6 +411,12 @@ def create_app() -> FastAPI:
             "last_turn_at": s.last_turn_at,
             "recent_thinking_excerpt": s.recent_thinking_excerpt,
             "last_evidence_at": s.last_evidence_at,
+            # BYOB scheduler-layer serialization (issue #1256, Decision 2).
+            # When True, the worker session-pick loop refuses to start this
+            # session concurrently with another requires_real_chrome=True
+            # session. Surfaced here so operators can see why a pending
+            # session is being deferred.
+            "requires_real_chrome": getattr(s, "requires_real_chrome", False),
             "children": [_session_to_json(c) for c in s.children],
             "events": [
                 {

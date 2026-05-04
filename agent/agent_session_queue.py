@@ -224,6 +224,7 @@ async def _push_agent_session(
     project_config: dict | None = None,
     extra_context_overrides: dict | None = None,
     model: str | None = None,
+    requires_real_chrome: bool = False,
     **_kwargs,
 ) -> int:
     """Create an agent session in Redis and return the pending queue depth for this chat.
@@ -241,6 +242,10 @@ async def _push_agent_session(
             email_message_id=...). Keys in overrides take precedence over derived values.
         model: Optional Claude model name (e.g. "sonnet", "opus"). When set, overrides
             the environment-level default for this session. None inherits the default.
+        requires_real_chrome: When True, the worker scheduler will not start this
+            session concurrently with another requires_real_chrome=True session
+            (issue #1256, Decision 2). Default False keeps the existing
+            non-serialized scheduling behavior for ordinary sessions.
     """
     # Convert float timestamps to datetime (backward compat)
     if isinstance(scheduled_at, int | float):
@@ -315,6 +320,7 @@ async def _push_agent_session(
         telegram_message_key=telegram_message_key,
         project_config=project_config or None,
         model=model or None,
+        requires_real_chrome=requires_real_chrome,
     )
 
     # Initialize stage_states for SDLC sessions so the dashboard shows
