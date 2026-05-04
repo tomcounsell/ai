@@ -1069,6 +1069,7 @@ async def run() -> dict:
     findings: list[str] = []
     target_date = utc_now() - timedelta(days=1)
     target_date_str = _date_str(target_date)
+    projects = load_local_projects()
 
     # 1. Aggregate
     activity = await _collect_day_activity(target_date)
@@ -1100,7 +1101,7 @@ async def run() -> dict:
 
     # 4. Synthesize + Telegram delivery
     if transcript:
-        delivery_findings = await _send_audio_brief(transcript, target_date, load_local_projects())
+        delivery_findings = await _send_audio_brief(transcript, target_date, projects)
         findings.extend(delivery_findings)
 
     summary = (
