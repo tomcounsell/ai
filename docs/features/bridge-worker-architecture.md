@@ -112,7 +112,7 @@ When a project does have an explicit `EmailOutputHandler` registered (via `regis
 8. Run message catchup scan and reconciler on startup
 
 The bridge does **not**:
-- Call `_ensure_worker()`, `_recover_interrupted_agent_sessions_startup()`, `_agent_session_health_loop()`, `_session_notify_listener()`, or `_cleanup_orphaned_claude_processes()`
+- Call `_ensure_worker()`, `_recover_interrupted_agent_sessions_startup()`, `_agent_session_health_loop()`, `_session_notify_listener()`, `_cleanup_orphaned_claude_processes()`, `_reap_orphan_session_processes()`, or `register_worker_pid()`
 - Call `AgentSession.rebuild_indexes()`
 - Poll Redis for orphaned sessions
 - Kill or manage Claude SDK subprocesses
@@ -124,9 +124,10 @@ The worker's startup sequence is deterministic:
 | Step | Function | Purpose |
 |------|----------|---------|
 | 1 | `AgentSession.rebuild_indexes()` | Repair stale/corrupt Redis index entries |
-| 2 | `cleanup_corrupted_agent_sessions()` | Remove malformed session records; phantom-filter guarded and calls `repair_indexes()` to clear orphan `$IndexF` members (issue #1069) |
+| 2 | `cleanup_corrupted_agent_sessions()` | Remove malformed session records and reap cross-process orphan `claude`/MCP processes; phantom-filter guarded and calls `repair_indexes()` to clear orphan `$IndexF` members (issues #1069, #1271). Returns `{"corrupted": int, "orphans": int}`. |
 | 3 | `_recover_interrupted_agent_sessions_startup()` | Reset running sessions to pending (orphaned from prior process) |
-| 4 | `_cleanup_orphaned_claude_processes()` | Kill orphaned Claude SDK subprocesses (PPID=1) |
+| 3.5 | `register_worker_pid()` | Write `worker:registered_pid:{hostname}:{pid}` (TTL 24h) so the cross-process reaper's skip-set excludes this worker (issue #1271 self-suicide guard) |
+| 4 | `_cleanup_orphaned_claude_processes()` | Backward-compat shim — delegates to `_reap_orphan_session_processes()`. The hourly `agent-session-cleanup` reflection now covers the same OS-table scan, so startup is no longer the only call site (issue #1271). |
 | 4.5 | `verify_harness_health()` | Verify CLI harness binary (`claude`) is available and healthy; fatal if missing (see [Harness Abstraction](harness-abstraction.md)) |
 | 5 | `_ensure_worker(worker_key)` for each pending session | Kick per-worker-key loops for queued sessions |
 | 6 | `_agent_session_health_loop()` | Background task: periodic session health checks, orphan detection (safety net) |
@@ -503,7 +504,7 @@ The bridge imports from `agent.agent_session_queue` are allowlisted to these fun
 - `register_callbacks` — register output delivery callbacks
 - `clear_restart_flag` — clear stale update restart flag
 
-Any function imported by the bridge that is not on this list is a violation of the boundary. The bridge does **not** import execution functions. If you see `_ensure_worker`, `_recover_interrupted_agent_sessions_startup`, `_agent_session_health_loop`, `_session_notify_listener`, or `_cleanup_orphaned_claude_processes` imported in `bridge/telegram_bridge.py`, that is a regression.
+Any function imported by the bridge that is not on this list is a violation of the boundary. The bridge does **not** import execution functions. If you see `_ensure_worker`, `_recover_interrupted_agent_sessions_startup`, `_agent_session_health_loop`, `_session_notify_listener`, `_cleanup_orphaned_claude_processes`, `_reap_orphan_session_processes`, or `register_worker_pid` imported in `bridge/telegram_bridge.py`, that is a regression.
 
 This boundary is enforced by `use correct Python path syntax`, which uses an allowlist to catch any unauthorized additions.
 

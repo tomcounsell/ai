@@ -321,7 +321,8 @@ Telegram → Python Bridge (Telethon) → Enqueues AgentSession to Redis (I/O on
                                               → Registers output callbacks for delivery
 
 Standalone Worker (python -m worker) → Sole session execution engine
-              (worker/__main__.py)         → Startup: index rebuild → recovery → orphan cleanup
+              (worker/__main__.py)         → Startup: index rebuild → corrupted+orphan cleanup → recovery → register_worker_pid (self-suicide guard)
+                                           → Hourly `agent-session-cleanup` reflection: corrupted records + cross-process orphan reap (claude/MCP, PPID==1, heartbeat-gated; issue #1271)
                                            → Executes PM session (AgentSession session_type=pm, read-only)
                                                → PM creates Dev session via valor_session CLI
                                                    → Worker executes Dev session via CLI harness (claude -p → Claude API)
