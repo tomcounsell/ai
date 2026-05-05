@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor
 created: 2026-05-05
 tracking: https://github.com/tomcounsell/ai/issues/1288
-last_comment_id: 4376959048
+last_comment_id: IC_kwDOEYGa088AAAABBOMYSA
 ---
 
 # Session-branch checkout guard (pre-commit hook)
