@@ -13,7 +13,7 @@ this section is the post-build summary.
 
 | Skill | Post-build state | Notes |
 |-------|------------------|-------|
-| `linkedin` | **migrated to BYOB** | First canonical migration. Frontmatter declares both `mcp__byob__*` and `Bash(agent-browser:*)` (legacy fallback for one release cycle, retained under explicit "Fallback path — deprecated" callout). |
+| `linkedin` | **migrated to BYOB** | First canonical migration. Frontmatter declares both `mcp__byob__*` and `Bash(agent-browser:*)` for one release cycle so machines without BYOB still have a working linkedin skill. The retained CDP-attach block is prefixed with an explicit "Fallback path" callout (verified by build-time grep). |
 | `do-design-audit` | **dual-surface** | Public-domain allowlist routes to `agent-browser`; everything else (auth dashboards, unknown hosts) routes to BYOB. Default-to-BYOB closes the public-URL-302s-to-login TOCTOU window. |
 | `do-pr-review` (incl. `sub-skills/screenshot.md`) | **dual-surface** | Allowlist: `localhost`, `*.vercel.app`, `*.netlify.app`, `*.pages.dev`, `*.fly.dev`, `*.railway.app`, `github.com`. Anything else routes to BYOB. |
 | `do-design-system` | doc-only update | Cosmos / Pinterest / Are.na are public; stays on `agent-browser`. Note added explaining BYOB is the alternative for any future logged-in moodboard source. |
