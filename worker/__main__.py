@@ -170,6 +170,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         _write_worker_heartbeat,
         cleanup_corrupted_agent_sessions,
         register_callbacks,
+        register_worker_pid,
         request_shutdown,
     )
     from agent.output_handler import FileOutputHandler, TelegramRelayOutputHandler
@@ -186,6 +187,16 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     from bridge.email_bridge import EmailOutputHandler as _EmailOutputHandler
 
     email_handler = _EmailOutputHandler()
+
+    # Register the worker's PID in Redis (issue #1271). The cross-process
+    # orphan reaper reads `worker:registered_pid:*` keys to build a positive-ID
+    # skip-set so a live worker is never reaped even if a future code change
+    # re-adds the worker pattern to the cmdline regex set. The same key is
+    # refreshed on every heartbeat tick by `_write_worker_heartbeat`.
+    try:
+        register_worker_pid()
+    except Exception as e:
+        logger.warning(f"register_worker_pid (startup) failed: {e}")
 
     # Verify Redis is reachable by attempting to list sessions
     try:
@@ -276,10 +287,20 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         logger.warning(f"Popoto index rebuild failed (non-fatal): {e}")
 
     # Step 2: Clean up corrupted sessions before recovery (prevents error spam)
+    # Returns dict {"corrupted": int, "orphans": int} as of issue #1271.
     try:
-        cleaned = cleanup_corrupted_agent_sessions()
+        result = cleanup_corrupted_agent_sessions()
+        if isinstance(result, dict):
+            cleaned = result.get("corrupted", 0)
+            orphans = result.get("orphans", 0)
+        else:
+            # Defensive: support legacy int return from older session_health.py
+            cleaned = int(result) if result is not None else 0
+            orphans = 0
         if cleaned:
             logger.info(f"Cleaned up {cleaned} corrupted session(s)")
+        if orphans:
+            logger.info(f"Reaped {orphans} orphan claude/MCP process(es) at startup")
     except Exception as e:
         logger.warning(f"Corrupted session cleanup failed (non-fatal): {e}")
 

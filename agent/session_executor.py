@@ -1240,8 +1240,13 @@ async def _execute_agent_session(session: AgentSession) -> None:
             if handle is not None:
                 handle.pid = pid
             try:
+                # #1271: persist the OS pid alongside the SDK heartbeat so the
+                # cross-process orphan reaper can resolve owning session per-PID
+                # via AgentSession.find_by_claude_pid(). Cleared on terminal
+                # transitions in models/session_lifecycle.py::finalize_session.
                 session.last_sdk_heartbeat_at = datetime.now(tz=UTC)
-                session.save(update_fields=["last_sdk_heartbeat_at"])
+                session.claude_pid = pid
+                session.save(update_fields=["last_sdk_heartbeat_at", "claude_pid"])
             except Exception as e:
                 logger.warning(
                     "[%s] on_sdk_started save failed (pid=%s): %s",

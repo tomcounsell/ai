@@ -179,13 +179,21 @@ class TestCleanupCorruptedAgentSessions:
         assert any(getattr(s, "session_id", None) is None for s in raw)
 
         with caplog.at_level(logging.INFO, logger="agent.session_health"):
-            cleaned = cleanup_corrupted_agent_sessions()
+            result = cleanup_corrupted_agent_sessions()
 
+        # As of issue #1271, cleanup_corrupted_agent_sessions returns
+        # {"corrupted": int, "orphans": int}. Operate on the dict.
+        assert isinstance(result, dict)
+        cleaned = result["corrupted"]
         # No real records should have been deleted.
         assert cleaned == 0, (
             f"cleanup destroyed {cleaned} records; expected 0 because the only "
             "'corrupt' signal was a phantom"
         )
+        # Orphan count is best-effort; if no orphan claude procs are running,
+        # it should be 0. Either way, the field must be a non-negative int.
+        assert isinstance(result["orphans"], int)
+        assert result["orphans"] >= 0
 
         # Live record must still exist.
         after = AgentSession.get_by_id(live_id)
@@ -205,9 +213,10 @@ class TestCleanupCorruptedAgentSessions:
         from agent.session_health import cleanup_corrupted_agent_sessions
 
         with caplog.at_level(logging.INFO, logger="agent.session_health"):
-            cleaned = cleanup_corrupted_agent_sessions()
+            result = cleanup_corrupted_agent_sessions()
 
-        assert cleaned == 0
+        assert isinstance(result, dict)
+        assert result["corrupted"] == 0
         # No repair_indexes log line should appear.
         repair_logs = [rec for rec in caplog.records if "repair_indexes" in rec.message]
         messages = [rec.message for rec in repair_logs]
@@ -237,9 +246,10 @@ class TestCleanupCorruptedAgentSessions:
         _seed_phantom_record()
 
         with caplog.at_level(logging.INFO, logger="agent.session_health"):
-            cleaned = cleanup_corrupted_agent_sessions()
+            result = cleanup_corrupted_agent_sessions()
 
-        assert cleaned == 0
+        assert isinstance(result, dict)
+        assert result["corrupted"] == 0
         assert invoked["count"] == 1, (
             "repair_indexes must be called when phantoms are observed, even if zero "
             "real corrupt records"
@@ -323,11 +333,12 @@ class TestCleanupCorruptedAgentSessions:
         AgentSession.save = _failing_save
         try:
             with caplog.at_level(logging.WARNING, logger="agent.session_health"):
-                cleaned = cleanup_corrupted_agent_sessions()
+                result = cleanup_corrupted_agent_sessions()
         finally:
             AgentSession.save = original_save
 
-        assert cleaned == 1, "Drifted record must be counted as cleaned"
+        assert isinstance(result, dict)
+        assert result["corrupted"] == 1, "Drifted record must be counted as cleaned"
         # And actually removed from Redis.
         assert not POPOTO_REDIS_DB.exists(drifted_key), (
             f"Hash {drifted_key} still present after cleanup"

@@ -80,11 +80,13 @@ from agent.session_health import (  # noqa: F401
     _cleanup_orphaned_claude_processes,
     _dependency_health_check,
     _has_progress,
+    _reap_orphan_session_processes,
     _recover_interrupted_agent_sessions_startup,
     _tier2_reprieve_signal,
     _write_worker_heartbeat,
     cleanup_corrupted_agent_sessions,
     format_duration,
+    register_worker_pid,
 )
 from agent.session_logs import save_session_snapshot
 

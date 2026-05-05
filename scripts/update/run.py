@@ -1117,9 +1117,18 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     try:
         from agent.agent_session_queue import cleanup_corrupted_agent_sessions
 
-        corrupted = cleanup_corrupted_agent_sessions()
+        # Returns dict {"corrupted": int, "orphans": int} as of issue #1271.
+        result = cleanup_corrupted_agent_sessions()
+        if isinstance(result, dict):
+            corrupted = result.get("corrupted", 0)
+            orphans = result.get("orphans", 0)
+        else:
+            corrupted = int(result) if result is not None else 0
+            orphans = 0
         if corrupted > 0:
             log(f"Cleaned up {corrupted} corrupted session(s)", v)
+        if orphans > 0:
+            log(f"Reaped {orphans} orphan claude/MCP process(es)", v)
     except Exception as e:
         log(f"WARN: Corrupted session cleanup failed: {e}", v)
 

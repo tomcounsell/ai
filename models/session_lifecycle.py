@@ -388,6 +388,14 @@ def finalize_session(
         session._saved_field_values["status"] = current_status
     session.status = status
     session.completed_at = time.time()
+    # #1271: clear claude_pid on terminal-state transitions so the cross-process
+    # orphan reaper's `find_by_claude_pid()` lookup falls through to "no owning
+    # session" for any subprocess that survives this transition. Wrapped in
+    # try/except — older records without the field must not block finalize.
+    try:
+        session.claude_pid = None
+    except Exception:
+        pass
     session.save()
 
     # 5.1. Defensive srem: remove session from ALL non-target status index sets.
