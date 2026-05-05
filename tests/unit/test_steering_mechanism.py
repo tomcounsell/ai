@@ -7,6 +7,8 @@ Covers:
 4. valor-session CLI — help output and basic argument parsing
 """
 
+import pytest
+
 
 class TestOutputRouterExports:
     """Verify agent.output_router exports all expected symbols."""
@@ -287,6 +289,7 @@ class TestValorSessionCLI:
         assert hasattr(vs, "main")
         assert callable(vs.main)
 
+    @pytest.mark.slow
     def test_help_exits_zero(self):
         """--help should exit with code 0."""
         import subprocess
@@ -300,6 +303,7 @@ class TestValorSessionCLI:
         assert result.returncode == 0
         assert "valor-session" in result.stdout
 
+    @pytest.mark.slow
     def test_subcommands_present_in_help(self):
         import subprocess
         import sys
@@ -312,6 +316,7 @@ class TestValorSessionCLI:
         for cmd in ("create", "steer", "status", "list", "kill"):
             assert cmd in result.stdout, f"Subcommand '{cmd}' missing from help output"
 
+    @pytest.mark.slow
     def test_steer_requires_message(self):
         """valor-session steer --id X should fail without --message."""
         import subprocess

@@ -59,6 +59,7 @@ class TestWorkerArgParsing:
         assert args.dry_run is True
 
 
+@pytest.mark.slow
 class TestWorkerDryRun:
     """Test worker dry-run mode via subprocess."""
 

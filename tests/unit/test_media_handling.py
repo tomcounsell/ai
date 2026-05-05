@@ -205,6 +205,7 @@ class TestProcessIncomingMedia:
             assert files == []
 
 
+@pytest.mark.slow
 class TestDescribeImage:
     """Tests for describe_image function using Claude Haiku 4.5 vision.
 
