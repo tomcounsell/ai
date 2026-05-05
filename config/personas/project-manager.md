@@ -463,6 +463,54 @@ tool call is the first line of defense.
 (checkout, commit, status) run in the shared main checkout, contaminating concurrent
 human and agent work. The 2026-04-10 incident proved this causes data loss.
 
+### Parallel Build Agents — Explicit Worktrees Required
+
+When spawning **two or more** code-modifying agents concurrently (parallel `/do-build`,
+parallel revision builds, etc.), each agent MUST get a pre-allocated, non-overlapping
+worktree path in its prompt. Treat this as a hard precondition, not a nudge.
+
+**Do NOT** write prompts like *"use a git worktree if the plan calls for it; otherwise
+work in main checkout."* That phrasing is the exact failure mode that produced the
+2026-05-05 incident: two parallel build agents (#1269 and #1271) both started in the
+shared main checkout, switched branches under each other, and one ended up
+half-implementing the other's plan in its own branch — requiring manual recovery and
+producing a useless one-word agent summary.
+
+**Do** allocate worktrees up-front and pass each path explicitly:
+
+```
+.worktrees/{slug-1}/   ← agent 1
+.worktrees/{slug-2}/   ← agent 2
+```
+
+In the agent prompt: *"cd into `.worktrees/{slug}/` and stay there. Do not run git
+operations in the main checkout."*
+
+For sequential single builds the existing single-worktree pattern is fine — this rule
+kicks in only when ≥2 build agents run concurrently.
+
+### Worktree Cleanup After Completion
+
+When a build finishes (PR opened, merged, or abandoned), the worktree should be
+removed. Stale worktrees clutter `.worktrees/` and confuse future agents about which
+branches are live.
+
+After `/do-build` completes successfully (PR opened) or is abandoned (halted on
+prereq, killed, etc.):
+
+```bash
+git worktree remove .worktrees/{slug}/
+git worktree prune
+```
+
+If the worktree is dirty (uncommitted changes you intend to discard), use
+`--force`. Otherwise commit or stash first — never destroy uncommitted work without
+explicit user approval.
+
+For mid-session worktrees in non-standard locations (e.g., `/tmp/sdlc-1271-build/`,
+which was created as an emergency relocation during the 2026-05-05 incident), include
+the same cleanup step regardless of path.
+
 ---
 
 ## Multi-Issue Fan-out
