@@ -46,6 +46,46 @@ Sessions with status `running` or `active` whose `updated_at` is more than 10 mi
 
 Sessions with status `dormant` show `expectations` as an italic subtitle in the Name column, indicating what the agent is waiting for from the human.
 
+### Lifecycle Iconography
+
+All 8 non-terminal lifecycle states render with distinct glyphs in the row template (see [Session Lifecycle](session-lifecycle.md) for state semantics):
+`running`, `pending`, `dormant`, `active`, `waiting_for_children`, `paused`, `paused_circuit`, `superseded`. Terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`, `superseded`) collapse the row into the terminal-status presentation.
+
+## Liveness Signals
+
+The dashboard exposes session liveness as state-of-truth so operators can answer "is this session actually progressing right now, or is it claimed-running-but-dead (ghost)?" without leaving the dashboard.
+
+### Row-level signals (non-terminal sessions only)
+
+- **Freshness chip** — age since `last_evidence_at` rendered as a colored chip via the `freshness_age` Jinja filter:
+  - green (`freshness-fresh`) for `<60s`
+  - amber (`freshness-warm`) for `<600s`
+  - red (`freshness-stale`) for `>=600s`
+- **Ghost badge** — when `process_alive == False` (the harness PID returned `ProcessLookupError` from a non-blocking `os.kill(pid, 0)` probe), the row renders a dashed-red `GHOST` badge to mark sessions whose harness subprocess has died but whose record still claims `running`/`active`.
+
+### Modal Liveness section
+
+`session_modal_content.html` renders a `Liveness` sub-table between Timing and SDLC, gated by the `_has_liveness` macro. Rows include:
+
+- **PID** — `harness_pid` with one of three chips: alive (probe returned True), `GHOST — process dead` (probe returned False), or unknown (probe returned None: PID is None or `<= 0`, or `PermissionError`/`OSError`)
+- `current_tool_name`, `last_evidence_at`, `last_heartbeat_at`, `last_sdk_heartbeat_at`, `last_stdout_at`, `last_tool_use_at`, `last_turn_at`
+- `recovery_attempts`, `reprieve_count`
+- `watchdog_unhealthy` reason (when set)
+
+### Process-alive probe
+
+`ui/data/sdlc._check_process_alive(pid)` is a non-blocking `os.kill(pid, 0)` with tri-state return: `True` (alive), `False` (`ProcessLookupError` — ghost), or `None` (PID is None or `<= 0` to dodge process-group semantics, or `PermissionError`/`OSError`). The probe is gated to non-terminal probe statuses (`running`, `active`, `paused`, `paused_circuit`) — terminal sessions never trigger a probe.
+
+### PID lifecycle invariant
+
+`AgentSession.harness_pid` follows a single-writer subprocess-scoped contract owned by `_execute_agent_session` in `agent/session_executor.py`:
+
+- Set on subprocess spawn via the `_on_sdk_started(pid)` closure
+- Cleared on `proc.communicate()` return via the paired `_on_sdk_finished()` closure (`agent/messenger.py::notify_sdk_finished`)
+- Defensive idempotent clear in the session-exit `finally` block as backstop for abnormal termination (worker crash, `CancelledError` before `proc.communicate()`)
+
+The `notify_sdk_finished` callback is threaded through all three `_run_harness_subprocess` call sites in `agent/sdk_client.py` (primary spawn + image-dim fallback + stale-UUID fallback). See [PM Session Liveness](pm-session-liveness.md) for the broader evidence-based liveness model.
+
 ## Data Flow
 
 1. **Redis (Popoto):** `AgentSession` records with `datetime.datetime` timestamp fields
@@ -66,6 +106,8 @@ The `PipelineProgress` Pydantic model is the serialization layer between Redis d
 **Hierarchy:** `parent_agent_session_id`, `children` (list of nested `PipelineProgress`)
 
 **Metadata:** `context_summary`, `expectations`, `turn_count`, `tool_call_count`, `watchdog_unhealthy`, `priority`, `classification_type`, `is_stale`
+
+**Liveness:** `harness_pid`, `last_heartbeat_at`, `last_sdk_heartbeat_at`, `last_stdout_at`, `recovery_attempts`, `reprieve_count`, `process_alive`. Existing fields used by the row freshness chip and modal Liveness section: `current_tool_name`, `last_tool_use_at`, `last_turn_at`, `last_evidence_at`
 
 **SDLC:** `stages`, `current_stage`, `events`
 

@@ -153,6 +153,13 @@ All writes go through `agent/hooks/liveness_writers.py`, which enforces:
   last_sdk_heartbeat_at, last_stdout_at, last_tool_use_at, last_turn_at,
   last_compaction_ts)`. None when every contributing field is None.
 
+Issue [#1269](https://github.com/tomcounsell/ai/issues/1269) extends the dashboard
+surface with a row-level freshness chip (age since `last_evidence_at`), a ghost
+badge driven by a non-blocking process-alive probe, and a modal Liveness section
+that surfaces seven additional keys: `harness_pid`, `process_alive`,
+`last_heartbeat_at`, `last_sdk_heartbeat_at`, `last_stdout_at`,
+`recovery_attempts`, `reprieve_count`. See [Dashboard — Liveness Signals](dashboard.md#liveness-signals).
+
 Backwards-compatible JSON addition — extra keys are ignored by typical
 consumers.
 

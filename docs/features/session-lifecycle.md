@@ -27,6 +27,10 @@ How sessions transition between states via the consolidated lifecycle module (`m
 | `abandoned` | Unfinished, auto-detected by watchdog or health check |
 | `cancelled` | Cancelled before execution (pending -> cancelled) |
 
+### Dashboard Iconography
+
+All 8 non-terminal states render with distinct glyphs in the dashboard row template (`ui/templates/_partials/sessions_table.html`) — including specific glyphs for `paused` (⏸), `paused_circuit` (⛌), `superseded` (→), `waiting_for_children`, `running`, `pending`, `dormant`, and `active`. Non-terminal rows additionally surface a row-level freshness chip (age since `last_evidence_at`) and a ghost badge when the harness PID probe reports a dead process. See [Dashboard — Liveness Signals](dashboard.md#liveness-signals).
+
 ## Lifecycle Module
 
 All session status mutations go through `models/session_lifecycle.py`. Direct `.status =` mutations outside this module are prohibited.
