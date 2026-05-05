@@ -173,8 +173,8 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         register_worker_pid,
         request_shutdown,
     )
-    from agent.session_health import _agent_session_tool_timeout_loop
     from agent.output_handler import FileOutputHandler, TelegramRelayOutputHandler
+    from agent.session_health import _agent_session_tool_timeout_loop
 
     # Initialize global concurrency semaphore BEFORE any worker loops are created.
     # Clamp to minimum 1 to prevent deadlock if MAX_CONCURRENT_SESSIONS=0.

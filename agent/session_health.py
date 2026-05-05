@@ -914,9 +914,7 @@ async def _apply_recovery_transition(
             try:
                 from popoto.redis_db import POPOTO_REDIS_DB as _MR
 
-                _MR.incr(
-                    f"{entry.project_key}:session-health:tier2_reprieve_total:{reprieve}"
-                )
+                _MR.incr(f"{entry.project_key}:session-health:tier2_reprieve_total:{reprieve}")
             except Exception as _m_err:
                 logger.debug("[session-health] tier2_reprieve counter failed: %s", _m_err)
             try:
@@ -1002,8 +1000,7 @@ async def _apply_recovery_transition(
                 skip_auto_tag=True,
             )
             logger.info(
-                "[session-health] Marked local session %s as abandoned "
-                "(chat=%s, attempts=%s)",
+                "[session-health] Marked local session %s as abandoned (chat=%s, attempts=%s)",
                 entry.agent_session_id,
                 worker_key,
                 entry.recovery_attempts,
@@ -1018,8 +1015,7 @@ async def _apply_recovery_transition(
                 ),
             )
             logger.warning(
-                "[session-health] Finalized session %s as failed after "
-                "%s recovery attempts",
+                "[session-health] Finalized session %s as failed after %s recovery attempts",
                 entry.agent_session_id,
                 entry.recovery_attempts,
             )
