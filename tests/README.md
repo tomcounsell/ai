@@ -166,7 +166,7 @@ tests/
 
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
-| unit | `test_docs_auditor.py` | 62 | Documentation reference validation |
+| unit | `test_docs_auditor_substrate.py` | 62 | Documentation reference validation |
 | unit | `test_features_readme_sort.py` | 27 | README table sorting |
 | unit | `test_verification_parser.py` | 20 | Verification section parsing |
 | unit | `test_validate_test_impact.py` | 20 | Test impact section validation |

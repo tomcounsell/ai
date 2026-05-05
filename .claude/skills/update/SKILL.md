@@ -55,7 +55,7 @@ The update system automatically checks PyPI for newer versions of `anthropic` an
 
 1. Bumps the pin in `pyproject.toml`
 2. Runs `uv sync` to install the new version
-3. Runs a smoke test (import check + `pytest tests/test_docs_auditor.py -x -q`)
+3. Runs a smoke test (import check + `pytest tests/unit/test_docs_auditor_substrate.py -x -q`)
 4. If smoke test passes: commits and pushes the bump
 5. If smoke test fails: rolls back `pyproject.toml` and re-syncs old versions
 
