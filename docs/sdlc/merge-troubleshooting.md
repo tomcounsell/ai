@@ -216,3 +216,59 @@ for TEST pending).
 After any remediation, re-dispatch `/do-merge {pr}`. If the same blocker
 category recurs 3 times, escalate to the human per the G4 convergence
 rule — do not loop further.
+
+---
+
+## Why was my PR classified as `mixed`?
+
+The shape classifier (`scripts/pr_shape_classify.py`) routes each PR
+through a gate set proportional to its blast radius. When >=50% of the
+changed files match a safe-shape allowlist (`docs-only`, `lockfile-only`,
+`small-patch`) AND >=1 file violates it, the PR is classified as `mixed`
+and bumped back to the full gate stack with a logged disqualifier list.
+
+### Find the disqualifiers
+
+The merge gate emits the disqualifier list to stderr in a deterministic
+shape so you can grep it:
+
+```bash
+# In the /do-merge output, look for:
+SHAPE: mixed -- claimed safe shape '<X>' touched non-allowlisted paths: ['path/a', 'path/b']
+```
+
+Re-run the classifier locally to inspect the verdict directly:
+
+```bash
+python -m scripts.pr_shape_classify --pr {N} | python3 -m json.tool
+```
+
+The output's `claimed_shape` and `disqualifiers` fields tell you which
+safe shape the classifier considered and which files broke the claim.
+
+### Common cases
+
+| Diff signature                                 | Result | Why                                                                  |
+|------------------------------------------------|--------|----------------------------------------------------------------------|
+| 1 doc + 1 py                                   | mixed  | docs-only claim is exactly 50% (>= threshold); the py is the disqualifier |
+| 1 doc + 5 py                                   | feature| docs-only claim is 17%; too thin to call the PR a "claimed safe shape" |
+| `uv.lock` + `pyproject.toml`                   | mixed  | lockfile-only claim is 50%; `pyproject.toml` can swap a runtime dep  |
+| 1 new `.py` file only (no docs)                | feature| no safe shape matches >=50% with any disqualifiers                   |
+
+The 50% threshold is documented in
+`scripts/pr_shape_classify.py::detect_mixed` and unit-tested in
+`tests/unit/test_pr_shape_classify.py`. It exists to prevent two failure
+modes: a single-file Python change being labelled "claimed docs-only"
+just because the file isn't a doc, and a single doc edit attached to a
+50-file refactor looking like a "claimed docs-only" PR.
+
+### Resolving a mixed classification
+
+There is nothing to "fix" -- `mixed` PRs run the full gate stack
+(unchanged behavior). If the routing was correct, no action is needed.
+If you genuinely intended a safe shape and the disqualifier was an
+accidental include (e.g. a `__pycache__` slip), drop the offending file
+from the diff and the next push will reclassify.
+
+See [`docs/features/pr-shape-aware-merge-gates.md`](../features/pr-shape-aware-merge-gates.md)
+for the full shape taxonomy and defect-detection contract.

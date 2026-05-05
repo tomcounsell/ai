@@ -37,3 +37,22 @@ If the merged PR touched `bridge/`, `agent/`, or `worker/`, run:
 ./scripts/valor-service.sh restart
 ```
 Confirm with `tail -5 logs/bridge.log` showing "Connected to Telegram".
+
+## Shape-Aware Routing
+
+Each PR is classified into a shape (`docs-only`, `lockfile-only`,
+`small-patch`, `mixed`, `feature`) before the gate stack runs. Safe shapes
+get a lighter gate set proportional to their blast radius; the `feature`
+shape is the unchanged status quo.
+
+A per-SHA verdict cache (`data/pr_shape_verdict_cache.json`, gitignored)
+lets an unchanged tree skip the full pytest re-run on the same baseline.
+A safe-shape follow-up commit on a previously-approved PR preserves the
+prior `## Review: Approved` (anchored to the approval SHA via the
+`<!-- REVIEW_CONTEXT head_sha=... -->` trailer); pre-trailer or unsafe
+follow-ups still invalidate.
+
+See [`docs/features/pr-shape-aware-merge-gates.md`](../features/pr-shape-aware-merge-gates.md)
+for the shape taxonomy, gate matrix, defect-detection contract, cache
+eviction policy, and the relationship to
+[`merge-gate-baseline.md`](../features/merge-gate-baseline.md).

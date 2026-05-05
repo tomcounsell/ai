@@ -131,12 +131,63 @@ print('ALL_GATES_PASS' if all_pass else 'GATES_FAILED')
 "
 ```
 
+### Shape Classification
+
+<!--
+    Shape-aware routing -- see docs/features/pr-shape-aware-merge-gates.md.
+
+    The classifier inspects the PR diff and returns one of:
+      docs-only      (markdown / docs/ only)         -> skip Lockfile + Full Suite
+      lockfile-only  (strictly uv.lock)              -> run all gates, preserve approval
+      small-patch    (<=20 net lines, mapped tests)  -> targeted pytest, preserve approval
+      mixed          (claimed safe shape, has leaks) -> full gate stack, log disqualifiers
+      feature        (default / anything ambiguous)  -> full gate stack (status quo)
+
+    The cache (data/pr_shape_verdict_cache.json) stores per-(pr, sha,
+    baseline_hash) gate verdicts so an unchanged tree skips the pytest re-run.
+    Both files are gitignored under the `data/` rule at .gitignore:181.
+-->
+
+```bash
+SHAPE_JSON=$(python -m scripts.pr_shape_classify --pr "$ARGUMENTS" 2>/dev/null || echo '{"shape":"feature","log_line":"SHAPE: feature (classifier failed; defaulting to full gates)"}')
+SHAPE=$(echo "$SHAPE_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('shape','feature'))")
+SHAPE_LOG=$(echo "$SHAPE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('log_line',''))")
+echo "$SHAPE_LOG"
+if [ "$SHAPE" = "mixed" ]; then
+  echo "$SHAPE_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(f\"SHAPE: mixed -- claimed safe shape '{d.get('claimed_shape')}' touched non-allowlisted paths: {d.get('disqualifiers')}\", file=sys.stderr)"
+fi
+
+# Cache lookup -- on hit we skip the full pytest re-run later.
+SHA=$(gh pr view "$ARGUMENTS" --json headRefOid -q .headRefOid 2>/dev/null || echo "")
+CACHED_VERDICT=""
+if [ -n "$SHA" ]; then
+  CACHED_VERDICT=$(python -m scripts.pr_shape_cache get --pr "$ARGUMENTS" --sha "$SHA" 2>/dev/null || echo "")
+  if [ -n "$CACHED_VERDICT" ]; then
+    CLASSIFIED_AT=$(echo "$CACHED_VERDICT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('classified_at',''))")
+    echo "SHAPE_CACHE: HIT -- verdict reused from $CLASSIFIED_AT"
+  else
+    echo "SHAPE_CACHE: MISS"
+  fi
+fi
+```
+
+The classifier defaults to `feature` on any ambiguity (failed `gh` call, unknown file shape,
+mixed-content diffs). Safe shapes always run the cheap gates (ruff lint, ruff format,
+syntax checks); only the expensive ones (Full Suite Gate, Lockfile Sync Check, docs gate)
+get conditionally skipped.
+
 ### Structured Review Comment Check
 
 Before authorizing merge, scan PR issue comments for the most recent `## Review:` comment.
 Stale reviews are filtered by comparing each comment's `created_at` against the PR's latest
 commit `committer.date` — comments that predate the latest commit are treated as stale (a
 force-push would have superseded them) and are dropped from consideration.
+
+**Safe-shape exemption:** when no current review exists but a prior `## Review: Approved`
+exists AND the diff between the approval-commit (extracted from the
+`<!-- REVIEW_CONTEXT head_sha=<SHA> ... -->` trailer that `/do-pr-review` emits) and HEAD
+classifies as a safe shape, the prior approval is re-admitted. Reviews without the trailer
+fail closed -- a fresh review is required.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
@@ -159,6 +210,43 @@ LAST_REVIEW=$(gh api repos/$REPO/issues/$ARGUMENTS/comments \
   2>/dev/null) || { echo "REVIEW_COMMENT: FAIL — gh api call failed (network/auth error)"; echo "GATES_FAILED"; exit 1; }
 
 if [ -z "$LAST_REVIEW" ]; then
+  # Safe-shape exemption: re-admit a prior `## Review: Approved` if the diff
+  # between the approval-commit and HEAD classifies as a safe shape.
+  # Anchor SHA is extracted from the `<!-- REVIEW_CONTEXT head_sha=<SHA> ... -->`
+  # trailer that /do-pr-review emits. Reviews without the trailer fail closed.
+  PRIOR_APPROVAL=$(gh api "repos/$REPO/issues/$ARGUMENTS/comments" \
+    --jq '[.[] | select(.body | startswith("## Review: Approved"))] | last' 2>/dev/null || echo "")
+  if [ -n "$PRIOR_APPROVAL" ] && [ "$PRIOR_APPROVAL" != "null" ]; then
+    PRIOR_BODY=$(echo "$PRIOR_APPROVAL" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('body','') if isinstance(d, dict) else '')")
+    APPROVAL_COMMIT_SHA=$(echo "$PRIOR_BODY" | grep -oE 'REVIEW_CONTEXT head_sha=[a-f0-9]{40}' | sed 's/REVIEW_CONTEXT head_sha=//' | tail -1)
+    if [ -z "$APPROVAL_COMMIT_SHA" ]; then
+      echo "REVIEW_COMMENT: SKIP — prior approval has no REVIEW_CONTEXT trailer; cannot anchor safe-shape diff. Falling through to require fresh review." >&2
+    else
+      git -C "${SDLC_TARGET_REPO:-.}" cat-file -e "$APPROVAL_COMMIT_SHA" 2>/dev/null || \
+        git -C "${SDLC_TARGET_REPO:-.}" fetch origin "$APPROVAL_COMMIT_SHA" 2>/dev/null || {
+          echo "REVIEW_COMMENT: SKIP — approval SHA $APPROVAL_COMMIT_SHA not fetchable; falling through to require fresh review." >&2
+          APPROVAL_COMMIT_SHA=""
+        }
+    fi
+    if [ -n "$APPROVAL_COMMIT_SHA" ]; then
+      HEAD_SHA=$(git -C "${SDLC_TARGET_REPO:-.}" rev-parse HEAD)
+      DIFF_SHAPE_JSON=$(python -m scripts.pr_shape_classify --diff-from "$APPROVAL_COMMIT_SHA" --diff-to "$HEAD_SHA" 2>/dev/null || echo '{"shape":"feature"}')
+      DIFF_SHAPE=$(echo "$DIFF_SHAPE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('shape','feature'))")
+      case " docs-only lockfile-only small-patch " in
+        *" $DIFF_SHAPE "*)
+          echo "REVIEW_COMMENT: PASS — Prior approval at ${APPROVAL_COMMIT_SHA:0:7} preserved (post-approval diff is $DIFF_SHAPE)"
+          LAST_REVIEW="$PRIOR_BODY"
+          SAFE_SHAPE_EXEMPTED=1
+          ;;
+        *)
+          echo "REVIEW_COMMENT: SKIP — post-approval diff is $DIFF_SHAPE (not a safe shape); fresh review required." >&2
+          ;;
+      esac
+    fi
+  fi
+fi
+
+if [ -z "$LAST_REVIEW" ]; then
   echo "REVIEW_COMMENT: FAIL — No current '## Review:' comment found on PR #$ARGUMENTS"
   echo "(Comments older than the latest commit at $LATEST_COMMIT_DATE were filtered as stale.)"
   echo "Run /do-pr-review before merging."
@@ -169,6 +257,8 @@ elif echo "$LAST_REVIEW" | grep -q "^## Review: Changes Requested"; then
   echo "Unchecked blockers:"
   echo "$BLOCKERS"
   echo "GATES_FAILED"
+elif [ "${SAFE_SHAPE_EXEMPTED:-0}" -eq 1 ]; then
+  : # PASS already emitted by the safe-shape exemption block above; skip duplicate.
 else
   echo "REVIEW_COMMENT: PASS — Most recent review is 'Approved' (post-latest-commit)"
 fi
@@ -181,10 +271,16 @@ If the review comment check prints GATES_FAILED, report the specific blocker and
 Verify `uv.lock` matches `pyproject.toml` so the merge doesn't leave every
 machine with a dirty working tree after `uv sync`. `uv lock --locked` is
 read-only — it exits non-zero if a regeneration would produce changes, and
-never modifies files:
+never modifies files.
+
+**Shape-aware skip:** `docs-only` PRs cannot affect lockfile sync (no `*.toml`
+or `*.lock` files in the diff), so this gate is skipped. All other shapes
+run it.
 
 ```bash
-if uv lock --locked >/dev/null 2>&1; then
+if [ "$SHAPE" = "docs-only" ]; then
+  echo "LOCKFILE: SKIP — docs-only shape cannot affect lockfile"
+elif uv lock --locked >/dev/null 2>&1; then
   echo "LOCKFILE: PASS"
 else
   echo "LOCKFILE: FAIL — uv.lock is out of sync with pyproject.toml"
@@ -209,19 +305,52 @@ with the merge. Fix: `uv lock && git add uv.lock && git commit -m "Sync uv.lock"
 
 After the Lockfile Sync Check, run a full test suite gate to ensure the PR branch does not introduce new regressions. PR failures are compared against a categorised baseline (`real`, `flaky`, `hung`, `import_error`) -- new `real`/`hung`/`import_error` failures block, new `flaky`-category re-occurrences are reported but non-blocking.
 
+**Shape-aware routing:**
+- `docs-only` -> SKIP (no `*.py` files, no runtime regression possible)
+- `small-patch` -> targeted pytest only (touched-file -> test glob from the classifier)
+- All other shapes -> full suite as below
+- On a cache HIT (same PR + SHA + baseline_hash), the prior verdict is reused
+
 ```bash
+if [ "$SHAPE" = "docs-only" ]; then
+  echo "FULL_SUITE: SKIP — docs-only shape (no Python files changed)"
+elif [ -n "$CACHED_VERDICT" ]; then
+  CACHED_GATE_VERDICT=$(echo "$CACHED_VERDICT" | python3 -c "import json,sys; v=json.load(sys.stdin).get('verdict',{}); print('PASS' if v.get('exit_code',1) == 0 else 'FAIL')")
+  echo "FULL_SUITE: $CACHED_GATE_VERDICT (cached; pytest re-run skipped)"
+  if [ "$CACHED_GATE_VERDICT" = "FAIL" ]; then
+    echo "GATES_FAILED"
+  fi
+else
 # Run the full suite on the PR branch (already checked out) and emit junitxml.
 # No -p pytest_timeout flag here: the merge gate does not classify hangs per
 # test -- that is the refresh tool's job on main. do-test's existing retry
 # infrastructure handles flaky PR-branch failures before we reach this gate.
 rm -f /tmp/pr_run.xml
-pytest tests/ -q --tb=no --junitxml=/tmp/pr_run.xml 2>&1 | tee /tmp/pytest_output.txt
+if [ "$SHAPE" = "small-patch" ]; then
+  TARGETED_TESTS=$(echo "$SHAPE_JSON" | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin).get('tests_to_run',[])))")
+  echo "FULL_SUITE: targeted pytest for small-patch -> $TARGETED_TESTS"
+  if [ -z "$TARGETED_TESTS" ]; then
+    pytest tests/ -q --tb=no --junitxml=/tmp/pr_run.xml 2>&1 | tee /tmp/pytest_output.txt
+  else
+    pytest $TARGETED_TESTS -q --tb=no --junitxml=/tmp/pr_run.xml 2>&1 | tee /tmp/pytest_output.txt
+  fi
+else
+  pytest tests/ -q --tb=no --junitxml=/tmp/pr_run.xml 2>&1 | tee /tmp/pytest_output.txt
+fi
 PYTEST_EXIT=$?
 
 BASELINE_FILE="data/main_test_baseline.json"
+# GATE_VERDICT_EXIT is the *combined* gate decision (pytest + baseline-gate
+# categorisation), set in each PASS/FAIL branch below. The cache must persist
+# this — NOT the raw $PYTEST_EXIT — so a re-run on the same {pr, sha,
+# baseline_hash} reuses the same accept-pre-existing semantics that the
+# cache-miss path applied. Caching $PYTEST_EXIT instead would block PRs whose
+# pytest failures were all categorised as pre-existing by baseline_gate.
+GATE_VERDICT_EXIT=1
 
 if [ $PYTEST_EXIT -eq 0 ]; then
     echo "FULL_SUITE: PASS"
+    GATE_VERDICT_EXIT=0
     mkdir -p data
     python3 -c "
 import json
@@ -265,6 +394,7 @@ Path('data/main_test_baseline.json').write_text(json.dumps({
 print(f'Bootstrap baseline written with {len(failing)} pre-existing failures (bootstrap=true).')
 "
     echo "FULL_SUITE: PASS (bootstrap; run python scripts/refresh_test_baseline.py on main soon)"
+    GATE_VERDICT_EXIT=0
 else
     # Delegate to scripts/baseline_gate.py for categorised comparison.
     # Exit 0 when no new blocking regressions. Exit 1 otherwise.
@@ -280,6 +410,7 @@ else
         PREEXISTING=$(echo "$GATE_OUTPUT" | python3 -c "import json, sys; print(json.load(sys.stdin)['preexisting_failures_present'])")
         FLAKY_COUNT=$(echo "$GATE_OUTPUT" | python3 -c "import json, sys; print(len(json.load(sys.stdin)['new_flaky_occurrences']))")
         echo "FULL_SUITE: PASS (pre-existing=$PREEXISTING, flaky re-occurrences=$FLAKY_COUNT -- all non-blocking)"
+        GATE_VERDICT_EXIT=0
         # Baseline decay + quarantine hint emission (item 4 of sdlc-1155).
         # Invokes the helpers added in scripts/baseline_gate.py so the gate
         # can age out stale `real` entries and flag repeat flakes without a
@@ -289,8 +420,31 @@ else
         echo "FULL_SUITE: FAIL — new regression(s) not in baseline:"
         echo "$GATE_OUTPUT" | python3 -c "import json, sys; [print(' -', n) for n in json.load(sys.stdin)['new_blocking_regressions'][:20]]"
         echo "GATES_FAILED"
+        GATE_VERDICT_EXIT=1
     fi
 fi
+
+# Cache write: on cache-miss path only, persist the verdict for re-runs on
+# the same {pr, sha, baseline_hash}. Best-effort -- a failed cache write
+# never blocks the merge.
+#
+# IMPORTANT: cache $GATE_VERDICT_EXIT (the combined gate decision after
+# baseline_gate categorisation), NOT $PYTEST_EXIT. When pytest fails but
+# baseline_gate accepts the failures as pre-existing (PYTEST_EXIT=1,
+# GATE_EXIT=0), the gate admits the PR on the cache-miss path; caching
+# $PYTEST_EXIT instead would cause the cache-hit path to FAIL the same
+# {pr, sha, baseline_hash} and block the PR.
+if [ -n "$SHA" ] && [ "$SHAPE" != "docs-only" ]; then
+  if [ "${GATE_VERDICT_EXIT:-1}" -eq 0 ]; then
+    VERDICT_JSON=$(printf '{"exit_code": 0}')
+  else
+    VERDICT_JSON=$(printf '{"exit_code": 1}')
+  fi
+  echo "$VERDICT_JSON" | python -m scripts.pr_shape_cache write \
+    --pr "$ARGUMENTS" --sha "$SHA" --shape "$SHAPE" \
+    --verdict-file - 2>/dev/null && echo "SHAPE_CACHE: WROTE verdict for $ARGUMENTS:${SHA:0:7}" || true
+fi
+fi  # end: cache-hit / docs-only outer guard
 ```
 
 **Red-main recovery path:** If `data/main_test_baseline.json` does not exist and tests fail, write the current failure list as a bootstrap schema-v2 baseline (`bootstrap: true`). This allows the first merge after a red-main period to proceed, establishing the baseline for future comparisons. The `bootstrap: true` flag makes the staleness warning fire on every subsequent gate invocation until `python scripts/refresh_test_baseline.py` writes a properly categorised baseline.
