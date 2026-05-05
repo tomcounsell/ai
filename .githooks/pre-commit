@@ -21,6 +21,42 @@ else
     PYTHON="python3"
 fi
 
+# ── Phase 0.5: Session-branch worktree guard (#1288) ───────────────────
+# Block commits on `session/{slug}` branches that are not happening from
+# inside the owning `.worktrees/{slug}/` worktree. Worker-side enforcement
+# (#887) covers AgentSession spawns; this guard covers manual `git commit`
+# from the main checkout or any other working tree. Detached HEAD is a
+# no-op; non-session branches (main, hotfix, etc.) are unaffected.
+BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+if [[ "$BRANCH" == session/* ]]; then
+    SLUG="${BRANCH#session/}"
+    TOPLEVEL=$(git rev-parse --show-toplevel)
+    if [ -z "$SLUG" ]; then
+        echo ""
+        echo "COMMIT BLOCKED: branch name '$BRANCH' has an empty slug." >&2
+        echo "This is the #1288 guard. A 'session/<slug>' branch must have a non-empty slug." >&2
+        echo "Rename the branch to a real session/<name> or move off it before committing." >&2
+        echo ""
+        exit 1
+    fi
+    EXPECTED_SUFFIX=".worktrees/${SLUG}"
+    if [[ "$TOPLEVEL" != *"$EXPECTED_SUFFIX" ]]; then
+        echo ""
+        echo "COMMIT BLOCKED: branch session/${SLUG} must be committed from inside .worktrees/${SLUG}/." >&2
+        echo "Current working tree: ${TOPLEVEL}" >&2
+        echo "Expected:             <repo_root>/.worktrees/${SLUG}/" >&2
+        echo "" >&2
+        echo "This is the #1288 guard. To proceed correctly:" >&2
+        echo "  cd <repo_root>/.worktrees/${SLUG}" >&2
+        echo "  git commit ..." >&2
+        echo "" >&2
+        echo "If the worktree doesn't exist, create it:" >&2
+        echo "  python -c \"from agent.worktree_manager import get_or_create_worktree; from pathlib import Path; print(get_or_create_worktree(Path('.'), '${SLUG}'))\"" >&2
+        echo ""
+        exit 1
+    fi
+fi
+
 # ── Phase 1: Auto-fix lint on staged Python files ──────────────────────
 # Get list of staged Python files (Added, Copied, Modified)
 STAGED_PY_FILES=$(git diff --cached --name-only --diff-filter=ACM -- '*.py' | tr '\n' ' ')

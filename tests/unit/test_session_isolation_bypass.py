@@ -8,6 +8,12 @@ Tests the three fix paths from #887:
 And the residual-hole fix from #1272:
 - Synthetic slug allocation for slugless dev sessions
 - Synthetic-slug worktree cleanup
+
+The git-side complement of #887 lives in
+``tests/unit/test_session_branch_guard.py`` (issue #1288): a pre-commit
+hook that blocks ``git commit`` on ``session/<slug>`` branches from
+outside the owning ``.worktrees/<slug>/`` directory. Sibling
+enforcement, different surface (worker vs git).
 """
 
 import re
