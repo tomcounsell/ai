@@ -791,6 +791,13 @@ def _session_to_pipeline(session) -> PipelineProgress:
         recent_thinking_excerpt=recent_thinking_excerpt,
         last_evidence_at=last_evidence_at,
         requires_real_chrome=bool(getattr(session, "requires_real_chrome", False)),
+        harness_pid=harness_pid,
+        last_heartbeat_at=last_heartbeat_at,
+        last_sdk_heartbeat_at=last_sdk_heartbeat_at,
+        last_stdout_at=last_stdout_at,
+        recovery_attempts=recovery_attempts,
+        reprieve_count=reprieve_count,
+        process_alive=process_alive,
     )
 
 
