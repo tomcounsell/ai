@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-05-04
 tracking: https://github.com/tomcounsell/ai/issues/1268
 last_comment_id:
+revision_applied: true
 ---
 
 # Composed Persona System: Single (persona × access-level × channel) Builder
@@ -25,7 +26,7 @@ The agent's system-prompt assembly conflates three independent axes — *who the
   - `load_pm_system_prompt(working_dir)` — bakes in the project-manager persona, *omits* `WORKER_RULES`, appends work-vault `CLAUDE.md`. Documented invariant in its docstring at sdk_client.py:1022–1026.
   - For teammate / customer-service personas, `_load_persona_overlay_with_log()` is called directly with no rails layer at all.
 - Channel awareness leaks into the working-agent prompt: persona segments (`identity.md`, `tools.md`) and the developer overlay describe Telegram-specific behaviour, even though most of those concerns only matter at message-drafting time.
-- Voice rules (banned phrases, "no empty promises", good/bad reply examples) are scattered across persona overlays and `bridge/message_drafter.py:1295` `DRAFTER_SYSTEM_PROMPT` with no single source of truth.
+- Voice rules (banned phrases, "no empty promises", good/bad reply examples) are scattered across persona overlays and `bridge/message_drafter.py:1295` `DRAFTER_SYSTEM_PROMPT` with no single source of truth. This plan **observes** the duplication but does not consolidate it (see Risk 4 / No-Gos — voice consolidation is deferred to a follow-up plan to keep the byte-stability mitigation clean).
 - `email.persona` per-project override is the only "channel changes the prompt" code path and lives inline in *both* pickers, not in a composer.
 
 **Desired outcome:**
@@ -84,7 +85,7 @@ External research skipped — this is an internal refactor with no new dependenc
 - **New function**: `compose_system_prompt(persona, access_level, channel=None, *, project=None, working_directory=None) -> str` in `agent/sdk_client.py` (or a new `agent/persona_composer.py` if extraction is preferred — the plan defaults to keeping it adjacent to the existing loaders to keep the diff focused).
 - **Removed/redirected functions**: `load_system_prompt()` and `load_pm_system_prompt()` become thin wrappers that call `compose_system_prompt(...)` with the right tuple. `_load_persona_overlay_with_log()` stays as a logging adapter but now delegates the actual composition to `compose_system_prompt`.
 - **Picker collapse**: both `sdk_client.py:3326–3395` and `session_executor.py:1430–1486` collapse to a single helper `_resolve_compose_args(session_type, project, transport, ...) -> (persona, access_level, channel)` that lives in one place and is called from both sites.
-- **Channel-aware drafter**: `bridge/message_drafter.py` receives a `channel` parameter (default `"telegram"` for backward compatibility) that selects channel-specific format rules. The drafter system prompt is split into a base voice section (shared with the working agent) plus a per-channel format section.
+- **Channel-aware drafter**: `bridge/message_drafter.py` receives a `channel` parameter (default `"telegram"` for backward compatibility) that selects channel-specific format rules. The drafter system prompt is split into a channel-agnostic base section plus a per-channel format section. The base section keeps the drafter's current voice content in place — no shared `voice.md` segment is introduced in this plan (see Risk 4 + No-Gos; consolidation is deferred to a follow-up).
 - **Coupling**: Slightly *decreased*. Today the picker knows about three concerns (session type, project mode, transport). After: the picker knows only about resolving three values; the composer knows only about composition; the drafter knows only about channel format.
 - **Reversibility**: High. The composer is purely additive; the new enum is small; both wrappers preserve their old signatures for safety. Rollback = revert the diff.
 
@@ -115,8 +116,8 @@ Communication overhead is the bottleneck: the seven architectural questions each
 - **`compose_system_prompt(...)` function**: the single composer. Internally: load identity → assemble segments per manifest → append persona overlay (preserving `load_persona_prompt`'s drift-warning pattern from sdk_client.py:919–948) → apply access-level rails (prepend `WORKER_RULES` for `AccessLevel.WORKER`, append principal+completion-criteria for the same) → optionally append a minimal channel facet (TBD per Question 4) → append project extras (work-vault `CLAUDE.md` for `AccessLevel.PM_READONLY`).
 - **`_resolve_compose_args(...)` helper**: collapses the two-site picker into one function. Inputs: `session_type`, `project`, `transport`, `chat_title`, `is_dm`. Outputs: `(persona, access_level, channel)`. Single source of truth for the email-persona override.
 - **`load_system_prompt()` / `load_pm_system_prompt()` wrappers**: kept as thin shims for backward compatibility. They delegate to the composer with the appropriate tuple. New code is encouraged to call the composer directly.
-- **Voice rules consolidation (Question 2)**: a single `config/personas/segments/voice.md` segment is added to the manifest. It contains the banned-phrases, no-empty-promises, and tone rules. Both the working-agent composer (via segment assembly) and the drafter (via direct file load) pull from it.
-- **Channel-aware drafter**: `bridge/message_drafter.py` accepts a `channel` parameter and composes its system prompt as `BASE_DRAFTER_PROMPT + CHANNEL_RULES[channel]`. Today's behaviour is the `channel="telegram"` cell.
+- **Voice rules consolidation: deferred (out of scope).** Voice content (banned phrases, no-empty-promises, tone) stays in its current locations — per-persona overlays + `DRAFTER_SYSTEM_PROMPT` — for this plan. Promoting voice rules into a shared `voice.md` segment is **explicitly out of scope** because adding a new segment to `manifest.json` would change the assembled prompt bytes for the existing four cells and break Risk 1's byte-stability mitigation (see Risk 4 + No-Gos). A follow-up plan, opened after this composer ships and stabilizes, will move voice content into a shared source. This plan only introduces the composer; the drafter's voice content stays exactly where it is.
+- **Channel-aware drafter**: `bridge/message_drafter.py` accepts a `channel` parameter and composes its system prompt as `BASE_DRAFTER_PROMPT + CHANNEL_RULES[channel]`. Today's behaviour is the `channel="telegram"` cell. `BASE_DRAFTER_PROMPT` retains the drafter's current voice content verbatim (no extraction to a separate file in this plan).
 
 ### Flow
 
@@ -135,13 +136,13 @@ Worker emits agent output → `bridge/message_drafter.py:format_for_chat(text, c
 
   1. **Access-level vs session-type**: `AccessLevel` is **orthogonal** to `SessionType`. `SessionType` is the AgentSession discriminator (decides queueing, child-session shape, output handler); `AccessLevel` is the prompt-rails layer. The mapping today happens to be 1:1 (`pm` → `PM_READONLY`, `dev` → `WORKER`, `teammate` → `TEAMMATE`), but they live separately so future per-project rails (e.g., a teammate session in customer-service mode) don't need new SessionType members. The resolver `_resolve_compose_args` encodes the mapping.
 
-  2. **Voice doc location**: a new shared segment `config/personas/segments/voice.md` listed in `manifest.json`. Both the composer (via segment assembly) and the drafter (via direct read) pull from it. Banned phrases and tone rules live there, NOT in `identity.md` (which keeps role/identity content) and NOT in per-persona overlays. The PM overlay's "no empty promises" rule moves to `voice.md`. The drafter's `DRAFTER_SYSTEM_PROMPT` no longer duplicates voice content; it imports `voice.md` text once and inlines it in the prompt template at module-load time (no runtime IO in the drafter hot path).
+  2. **Voice doc location: deferred to a follow-up plan.** Voice rules (banned phrases, "no empty promises", tone) stay in their current locations — distributed across per-persona overlays and `bridge/message_drafter.py:1295` `DRAFTER_SYSTEM_PROMPT`. Consolidating them into a shared `voice.md` segment would require adding a new entry to `config/personas/segments/manifest.json`, which would change the assembled prompt bytes for the existing four cells and break Risk 1's byte-stability mitigation (see Risk 4 + No-Gos). The drafter and the working-agent composer continue to read voice content from where it lives today; no shared file is introduced. A follow-up plan will move voice content into a single source after this composer ships and the byte-stability test stabilizes — that plan can negotiate the cache bust on its own terms.
 
-  3. **Channel extraction into the drafter**: `bridge/message_drafter.py` composes its system prompt **at module load** as `BASE + CHANNEL_RULES[channel]`. The structured-output `tool_use` schema is unchanged — it stays shared across channels. Channel parameter defaults to `"telegram"` for backward compatibility with all existing call sites; only the future email-channel case needs to pass `channel="email"`.
+  3. **Channel extraction into the drafter**: `bridge/message_drafter.py` composes its system prompt **at module load** as `BASE + CHANNEL_RULES[channel]`. The structured-output `tool_use` schema is unchanged — it stays shared across channels. Channel parameter defaults to `"telegram"` for backward compatibility with all existing call sites; only the future email-channel case needs to pass `channel="email"`. `BASE_DRAFTER_PROMPT` keeps the drafter's existing voice content verbatim — voice consolidation is deferred (see Question 2).
 
   4. **Minimum channel-awareness for the working agent**: **None.** The working agent does not need channel context in its system prompt. Reachability/emoji-react decisions are made by the agent based on tool output (e.g., reading recent Telegram chat state via `valor-telegram read`), not encoded in the prompt. This drops the `channel=` parameter from the composer's required signature; it remains as an optional facet **only if a concrete need is proven during build** (Open Question 1 below pins this).
 
-  5. **Composition order and overrides**: **strict additive layering, no redaction.** Order is fixed: `WORKER_RULES (if WORKER) → identity → work-patterns → tools → voice → private-tag → persona overlay → principal context (if WORKER) → completion criteria (if WORKER) → work-vault CLAUDE.md (if PM_READONLY)`. If two layers contradict, the source documents must be fixed; the composer does not silently mediate. A startup lint pass (Question 7) detects contradictions.
+  5. **Composition order and overrides**: **strict additive layering, no redaction.** Order is fixed: `WORKER_RULES (if WORKER) → identity → work-patterns → tools → private-tag → persona overlay → principal context (if WORKER) → completion criteria (if WORKER) → work-vault CLAUDE.md (if PM_READONLY)`. The order matches today's `manifest.json` exactly; **no new segments are added** in this plan (see Question 2 — voice.md is deferred). If two layers contradict, the source documents must be fixed; the composer does not silently mediate. A startup lint pass (Question 7) detects contradictions.
 
   6. **Migration path**: the four existing overlays continue to load via `_resolve_overlay_path` unchanged. The migration is internal to the composer — wrappers preserve their public signatures. Byte-stability test (Success Criterion below) asserts the `(developer, WORKER, None)` and `(project-manager, PM_READONLY, None)` cells produce **byte-identical** output to `load_system_prompt()` and `load_pm_system_prompt(work_dir)` from main today.
 
@@ -155,7 +156,7 @@ Worker emits agent output → `bridge/message_drafter.py:format_for_chat(text, c
 ### Exception Handling Coverage
 
 - [ ] `_load_persona_overlay_with_log` already has structured exception handling for missing overlays (sdk_client.py:1837–1853). The composer must NOT swallow exceptions silently — it raises `FileNotFoundError` for missing required overlays, matching `load_persona_prompt`'s behavior at sdk_client.py:960–963. Tests assert that the composer raises (not returns empty string) for unknown personas with no fallback.
-- [ ] Add tests asserting that a missing `voice.md` segment produces a clear error at startup, not silent omission of voice rules.
+- [ ] Add tests asserting that a missing required segment listed in `manifest.json` produces a clear error at startup (preserves today's behavior; the composer does not swallow segment-load failures).
 
 ### Empty/Invalid Input Handling
 
@@ -166,7 +167,7 @@ Worker emits agent output → `bridge/message_drafter.py:format_for_chat(text, c
 
 ### Error State Rendering
 
-- [ ] If `voice.md` is missing the composer raises at startup; the worker logs `[persona-compose-failed]` and the session refuses to start (no silent fallback to a voice-less prompt). Test asserts the log line is emitted.
+- [ ] If a required segment listed in `manifest.json` is missing the composer raises at startup; the worker logs `[persona-compose-failed]` and the session refuses to start (no silent fallback to a segment-less prompt). Test asserts the log line is emitted.
 - [ ] If the picker resolves to an unknown `(persona, access_level)` pair, the composer raises before any IO; test asserts no partial prompt is returned.
 
 ## Test Impact
@@ -187,7 +188,8 @@ No existing integration tests reference the prompt-byte content directly, so no 
 - **A new runtime permission system tied to AccessLevel.** The hook system at `agent/hooks/pre_tool_use.py` already enforces PM read-only restrictions via `SESSION_TYPE`. AccessLevel is **prompt-only**; do not refactor the hook layer to use it. Out of scope.
 - **Refactoring `bridge/message_drafter.py` beyond the channel split.** The drafter is 1860 lines with substantial format logic, structured-output schemas, fallback chains, and chat-log formatting. The plan touches ONLY the system-prompt composition; everything else stays.
 - **Moving `WORKER_RULES` content into a segment file.** The current constant is short (13 lines) and lives next to the composer. Moving it to `config/personas/rails/worker.md` adds file IO without value. Defer.
-- **A new "voice doc" with good/bad reply *examples*.** The fazm pattern includes good-vs-bad example pairs. This plan adds the **rules** (banned phrases, tone) to `voice.md` but defers reply *examples* — they're a quality concern that needs separate validation. Out of scope for this refactor.
+- **Voice rules consolidation into a shared `voice.md` segment.** Promoting banned-phrases / tone / no-empty-promises rules into a single source is a worthy follow-up but is **deferred** because it would alter assembled prompt bytes for the existing four cells and break Risk 1's byte-stability mitigation. A separate plan handles it after this composer ships. Out of scope.
+- **A new "voice doc" with good/bad reply *examples*.** Even if voice consolidation were in scope, good-vs-bad example pairs are a separate quality concern that needs independent validation. Out of scope for this refactor.
 - **Renaming `_session_type` / picker variables.** Cosmetic. Stays out.
 
 ## Risks
@@ -202,15 +204,15 @@ No existing integration tests reference the prompt-byte content directly, so no 
 **Impact:** A future change to the email override is added to one picker site and not the other; behaviour diverges between the `get_response_via_harness` path and the `session_executor` harness path.
 **Mitigation:** the `_resolve_compose_args` helper is the single source of truth; both call sites import it. A unit test (`test_resolve_compose_args.py`) is the primary regression. Optional: a grep-based test asserts no `if _session_type == SessionType` ladder remains in either file outside the helper.
 
-### Risk 3: Voice rules consolidation breaks the drafter's existing format rules
+### Risk 3: Drafter format rules break when the channel split lands
 
 **Impact:** Drafter output silently changes — bullets vs prose, "no empty promises" warnings change, format regressions ship to production.
-**Mitigation:** voice content is moved verbatim from current sources (PM overlay, developer overlay, `DRAFTER_SYSTEM_PROMPT` quality rules) into `voice.md`. The drafter prompt's *format rules* (bullets, "---" separator, ">> " prefix) stay in `DRAFTER_SYSTEM_PROMPT`. Tests in `test_drafter_validators.py` already cover format invariants — they must remain green.
+**Mitigation:** `BASE_DRAFTER_PROMPT` keeps today's `DRAFTER_SYSTEM_PROMPT` text verbatim (minus the channel-specific format rules that move into `CHANNEL_RULES["telegram"]`). The split is purely structural — concatenating `BASE + CHANNEL_RULES["telegram"]` reproduces today's prompt byte-for-byte. Tests in `test_drafter_validators.py` already cover format invariants — they must remain green. (Note: voice consolidation is **not** part of this plan; see Risk 4 and No-Gos.)
 
-### Risk 4: Adding `voice.md` to the segment manifest changes the developer / teammate / customer-service prompt bytes
+### Risk 4: A new shared voice segment would change prompt bytes for existing cells
 
-**Impact:** The `(DEVELOPER, WORKER)` cell is no longer byte-stable against today's `load_system_prompt()` because a new segment is inserted into the assembled prompt. This breaks Risk 1's mitigation.
-**Mitigation:** **two-step rollout.** Step 1 (this plan) introduces the composer with byte-stability for the existing four cells — voice content is NOT yet promoted to a segment; it stays where it is in each overlay. The composer reads `voice.md` only when the drafter requests it. Step 2 (follow-up plan, NOT this issue) deprecates the duplicated voice rules in overlays. This keeps Risk 1 and Risk 3 mitigations independent.
+**Impact:** If `voice.md` were added to `manifest.json` in this plan, the `(DEVELOPER, WORKER)` cell would no longer be byte-stable against today's `load_system_prompt()` because a new segment would be inserted into the assembled prompt. This would break Risk 1's mitigation.
+**Mitigation:** **Voice consolidation is out of scope for this plan.** This plan introduces the composer with byte-stability for the existing four cells; voice content stays in its current locations (per-persona overlays + `DRAFTER_SYSTEM_PROMPT`). A follow-up plan, opened only after this one ships and stabilizes, will move voice content into a shared source — that plan can negotiate the one-time cache bust on its own terms with #1227's invariant in mind. This keeps Risk 1's mitigation simple and avoids two simultaneously-changing variables.
 
 ## Race Conditions
 
@@ -219,8 +221,8 @@ No race conditions identified — prompt composition is synchronous, single-thre
 ## No-Gos (Out of Scope)
 
 - AccessLevel as a runtime hook-enforcement system (see Rabbit Holes).
-- Promoting voice rules to a segment file in this plan (deferred to a follow-up to keep Risk 1 mitigation clean).
-- Adding good/bad reply *examples* in `voice.md` (rules only; examples are a separate quality plan).
+- Promoting voice rules to a shared `voice.md` segment in this plan (deferred to a follow-up plan to keep Risk 1's byte-stability mitigation clean — see Risk 4).
+- Adding good/bad reply *examples* in any voice file (rules only would still be a separate quality plan; examples definitely separate).
 - Refactoring the drafter beyond system-prompt composition.
 - Adding new persona overlays (`developer`, `project-manager`, `teammate`, `customer-service` are the only four; new ones are a separate plan).
 - Channel-awareness in the working-agent prompt (resolved as "none" per Question 4; revisit only if a concrete need surfaces during build).
@@ -228,7 +230,7 @@ No race conditions identified — prompt composition is synchronous, single-thre
 
 ## Update System
 
-No update system changes required — this is a purely internal refactor. The `update` skill at `scripts/remote-update.sh` already pulls `config/personas/` and the new `voice.md` segment is delivered via normal git pull. The only consideration: when this lands on bridge machines, the first PM session after pull warms a fresh prompt cache (one-time 15–20min cold start). The plan's byte-stability mitigation (Risk 1) ensures this happens **only** on the deploy itself, not on every subsequent session.
+No update system changes required — this is a purely internal refactor. The `update` skill at `scripts/remote-update.sh` already pulls `config/personas/`; no new files or segments are added in this plan, so existing pull behavior is sufficient. There are no new dependencies, no new config files, no migration steps for existing installations. Bridge machines pick up the composer code on the next normal `git pull` like any other internal refactor.
 
 ## Agent Integration
 
@@ -238,7 +240,7 @@ No agent integration required — this is internal to the agent prompt-compositi
 
 ### Feature Documentation
 
-- [ ] Create `docs/features/composed-persona-system.md` describing: the composer signature, the (persona × access-level) matrix, where to add a new access-level, the byte-stability invariant, and how the drafter's channel split interacts. Reference the seven resolved questions and their answers.
+- [ ] Create `docs/features/composed-persona-system.md` describing: the composer signature, the (persona × access-level) matrix, where to add a new access-level, the byte-stability invariant, and how the drafter's channel split interacts. Reference the seven resolved questions and their answers. Include an explicit note that voice consolidation is deferred and a follow-up plan will be filed.
 - [ ] Add entry to `docs/features/README.md` index table.
 - [ ] Update `docs/features/pm-dev-session-architecture.md` to reference the composer as the prompt source for both PM and Dev sessions (replaces the implicit pointer to `load_pm_system_prompt`).
 
@@ -258,10 +260,11 @@ No external docs site for this repo — skip.
 - [ ] `AccessLevel` enum is defined in `config/enums.py` with members `WORKER`, `PM_READONLY`, `TEAMMATE`, `CUSTOMER_SERVICE`.
 - [ ] `_resolve_compose_args(...)` helper exists and is the only branch ladder mapping `SessionType + project + transport → (persona, access_level, channel)`. Both `agent/sdk_client.py:3326` and `agent/session_executor.py:1430` call it.
 - [ ] **Byte-stability**: `compose_system_prompt(DEVELOPER, WORKER)` is byte-identical to `load_system_prompt()` from main; `compose_system_prompt(PROJECT_MANAGER, PM_READONLY, working_directory=W)` is byte-identical to `load_pm_system_prompt(W)` from main. Asserted via fixture files in `tests/fixtures/`.
-- [ ] Drafter accepts `channel` parameter; default `"telegram"` produces the same prompt as today.
+- [ ] Drafter accepts `channel` parameter; default `"telegram"` produces the same prompt bytes as today.
 - [ ] `email.persona` per-project override flows through the composer (not as inline branches in either picker site).
 - [ ] All seven open architectural questions are answered in the plan body (above) with rationale.
 - [ ] PM/Dev/Teammate/Customer-Service sessions continue to work with no observable behaviour change for the existing four overlays.
+- [ ] No new segments added to `config/personas/segments/manifest.json` (voice consolidation is explicitly deferred).
 - [ ] Tests pass (`pytest tests/unit/test_compose_system_prompt.py tests/unit/test_resolve_compose_args.py tests/unit/test_persona_loading.py tests/unit/test_sdk_client_sdlc.py tests/unit/test_message_drafter.py`).
 - [ ] Documentation updated (`/do-docs`).
 - [ ] Lint clean (`python -m ruff check .`).
@@ -327,6 +330,7 @@ No external docs site for this repo — skip.
 - Rewrite `load_system_prompt()` as a one-line wrapper: `return compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER)`
 - Rewrite `load_pm_system_prompt(working_directory)` as a one-line wrapper: `return compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, working_directory=working_directory)`
 - Implement `_resolve_compose_args(session_type, project, transport, chat_title=None, is_dm=False)` returning `(persona, access_level, channel)` near `_resolve_persona`
+- **Do NOT** modify `config/personas/segments/manifest.json` — no new segments are added (voice consolidation is deferred per Risk 4)
 
 ### 3. Collapse picker sites
 
@@ -349,9 +353,10 @@ No external docs site for this repo — skip.
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `channel: str = "telegram"` parameter to `format_for_chat` (and any other public drafter entry points)
-- Refactor `DRAFTER_SYSTEM_PROMPT` into `BASE_DRAFTER_PROMPT` (channel-agnostic) + `CHANNEL_RULES = {"telegram": ..., "email": ...}` (initially: `"telegram"` is today's exact text, `"email"` is a stub identical to `"telegram"` minus Telegram-only format rules)
+- Refactor `DRAFTER_SYSTEM_PROMPT` into `BASE_DRAFTER_PROMPT` (channel-agnostic, retains today's voice content verbatim) + `CHANNEL_RULES = {"telegram": ..., "email": ...}` (initially: `"telegram"` is today's exact format-rules text, `"email"` is a stub identical to `"telegram"` minus Telegram-only format rules)
 - Add helper `_compose_drafter_prompt(channel)` that returns `BASE_DRAFTER_PROMPT + CHANNEL_RULES[channel]`
 - All drafter call sites that don't pass `channel=` get `"telegram"` by default — no behaviour change
+- Verify `BASE + CHANNEL_RULES["telegram"]` reproduces today's `DRAFTER_SYSTEM_PROMPT` byte-for-byte (snapshot test)
 
 ### 5. Byte-stability and matrix tests
 
@@ -374,6 +379,7 @@ No external docs site for this repo — skip.
 - Run `pytest tests/unit/test_compose_system_prompt.py tests/unit/test_resolve_compose_args.py tests/unit/test_persona_loading.py tests/unit/test_sdk_client_sdlc.py tests/unit/test_message_drafter.py tests/unit/test_drafter_validators.py -v`
 - Run `python -m ruff check . && python -m ruff format --check .`
 - Grep for any remaining `if _session_type == SessionType` branches outside the helper — must return zero outside `_resolve_compose_args`
+- Confirm `config/personas/segments/manifest.json` is unchanged from main (no new segments added)
 
 ### 7. Documentation
 
@@ -382,7 +388,7 @@ No external docs site for this repo — skip.
 - **Assigned To**: composer-docs
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/composed-persona-system.md`
+- Create `docs/features/composed-persona-system.md` (include explicit note that voice consolidation is deferred to a follow-up plan)
 - Add entry to `docs/features/README.md` index
 - Update `docs/features/pm-dev-session-architecture.md` to reference the composer
 
@@ -409,13 +415,13 @@ No external docs site for this repo — skip.
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No leftover picker ladder | `grep -E "if _session_type == SessionType\.(PM\|TEAMMATE\|DEV)" agent/sdk_client.py agent/session_executor.py \| grep -v _resolve_compose_args` | exit code 1 |
 | Byte-stability fixture present | `test -f tests/fixtures/pm_system_prompt_baseline.txt && test -f tests/fixtures/dev_system_prompt_baseline.txt` | exit code 0 |
+| Manifest unchanged | `git diff main -- config/personas/segments/manifest.json` | empty output |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique. Leave empty until critique runs. -->
-
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER  | (cycle-1 critique) | voice.md scope contradiction — plan simultaneously claimed voice.md was a new segment in `manifest.json` (Solution Key Element 5; Question 2 + Question 5 resolutions) AND was NOT created in this plan because doing so breaks byte-stability (Risk 4 + No-Gos). | Solution Key Element on voice rules; Technical Approach Question 2 + Question 5; Risk 3; Risk 4; No-Gos; Update System; Step 2 + Step 4 + Step 6 task notes; Documentation; Success Criteria; Verification table. | Scrubbed all references to creating `config/personas/segments/voice.md` in this plan. Voice consolidation is now uniformly framed as **deferred to a follow-up plan**. The composition order in Question 5 no longer includes a `voice` segment (matches today's `manifest.json` exactly). The drafter's `BASE_DRAFTER_PROMPT` retains today's voice content verbatim — no extraction. A new Success Criterion + Verification check assert `manifest.json` is unchanged. Risk 4's framing is preserved as authoritative. |
 
 ---
 
@@ -425,4 +431,4 @@ No external docs site for this repo — skip.
 
 2. **AccessLevel.CUSTOMER_SERVICE enum member naming**: the customer-service overlay today is loaded via `_load_persona_overlay_with_log("customer-service", ...)` with no rails. If we keep one access level per overlay, we get a 1:1 mapping that arguably defeats the orthogonality goal. Alternative: collapse `TEAMMATE` and `CUSTOMER_SERVICE` access levels into a single `CONVERSATIONAL` level, and let the persona overlay carry the action-orientation difference. Tighter design, but breaks the 1:1 today. Reviewer call.
 
-3. **Where the `voice.md` segment file lives**: the plan defers promoting voice rules to a segment file (Risk 4). Should `voice.md` be created as a stub now (empty file in the manifest) so the follow-up plan is purely a content move, or should it not exist until the follow-up creates it?
+3. **Follow-up plan for voice consolidation**: this plan defers voice consolidation entirely (see Question 2 / Risk 4). Should a placeholder follow-up issue be filed as part of this plan's PR (so the work is tracked), or should we wait until the composer ships and stabilizes before opening the follow-up? Default in the plan: file the follow-up issue at PR-merge time, not at plan-commit time, so it can reference the actual landed composer.
