@@ -20,6 +20,8 @@ revision_addresses:
 
 # PR-Shape-Aware Merge Gates
 
+Closes #1283.
+
 ## Problem
 
 **Current behavior:**
