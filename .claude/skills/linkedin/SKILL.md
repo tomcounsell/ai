@@ -1,13 +1,18 @@
 ---
 name: linkedin
 description: "Use when browsing LinkedIn, reading posts, writing comments, checking DMs, or engaging with content. Triggered by requests to comment on LinkedIn, browse feed, interact with posts, or read/reply to LinkedIn messages."
-allowed-tools: mcp__byob__browser_list_tabs, mcp__byob__browser_navigate, mcp__byob__browser_read, mcp__byob__browser_get_html, mcp__byob__browser_click, mcp__byob__browser_type, mcp__byob__browser_press_key, mcp__byob__browser_scroll, mcp__byob__browser_wait_for, mcp__byob__browser_screenshot, mcp__byob__browser_close_tab, mcp__byob__browser_switch_tab, Bash(git:*), Read, Write, Edit, Grep, Glob, Agent
+allowed-tools: mcp__byob__browser_list_tabs, mcp__byob__browser_navigate, mcp__byob__browser_read, mcp__byob__browser_get_html, mcp__byob__browser_click, mcp__byob__browser_type, mcp__byob__browser_press_key, mcp__byob__browser_scroll, mcp__byob__browser_wait_for, mcp__byob__browser_screenshot, mcp__byob__browser_close_tab, mcp__byob__browser_switch_tab, Bash(agent-browser:*), Bash(git:*), Read, Write, Edit, Grep, Glob, Agent
 user-invocable: true
 ---
 
 # LinkedIn Activity
 
-Browse LinkedIn, engage with posts, and manage direct messages using **BYOB** — the Chrome extension + native messaging stack that drives the user's already-logged-in real Chrome via MCP tools (`mcp__byob__browser_*`). No CDP flag, no `state.json`, no headless-fingerprint detection.
+**Migrated from `agent-browser` in #1274.** This skill drives the user's real,
+logged-in Chrome session via the **BYOB** stack — the Chrome extension + native
+messaging host + MCP server (`mcp__byob__browser_*`). No CDP flag, no
+`state.json`, no headless-fingerprint detection. The fallback CDP-attach path
+is still documented below for machines where BYOB is not yet installed; it
+will be removed in a followup once BYOB is verified working everywhere.
 
 ## Default Behavior (no arguments)
 
@@ -23,9 +28,70 @@ If arguments are given, interpret them and do only what's asked.
 
 ## Prerequisites
 
-- BYOB bridge live and Chrome extension loaded. Verify once at session start with the `browser_list_tabs` tool — if it returns tabs, you're good. If the MCP tool itself is missing, run `cd ~/.byob && bun run doctor` and follow its diagnostics.
-- User logged into LinkedIn in Chrome (BYOB inherits the session).
-- If this skill is invoked from a queued AgentSession, that session should have been created with `valor-session create --needs-real-chrome ...` so the worker scheduler serializes around the single real-Chrome DOM tree.
+This skill needs **two preconditions** plus a **scheduler-gate flag**:
+
+### 1. BYOB extension installed and connected
+
+BYOB is the "Bring Your Own Browser" stack: a Chrome extension + native
+messaging host + MCP server that lets this skill act on the user's already
+logged-in Chrome (no headless profile, no per-session re-auth). Set up via
+`/setup`'s computer-use opt-in or by following
+[`docs/features/byob-browser-control.md`](../../../docs/features/byob-browser-control.md).
+
+Verify the install in one shot:
+
+```bash
+cd ~/.byob && bun run doctor
+```
+
+All status lines should be green: extension loaded, native bridge running,
+Unix socket live. If any line is red, the BYOB MCP tools below will return
+a transport error -- run `/setup` and answer "yes" to the computer-use
+opt-in to repair.
+
+After `bun run doctor` passes, sanity-check from inside the agent that
+the extension is actually talking to Chrome by listing open tabs:
+
+```text
+mcp__byob__browser_list_tabs    # returns the user's currently open Chrome tabs
+```
+
+If `browser_list_tabs` returns an empty list or a transport error, the
+extension loaded but isn't bound to an active Chrome window -- open Chrome
+(or focus it) and retry. **Do not proceed to LinkedIn work until
+`browser_list_tabs` returns at least one tab.** A silent transport failure
+here means every subsequent BYOB call returns wrong-shaped output and the
+skill drives nothing.
+
+The user must be logged into LinkedIn in that Chrome session.
+
+### 2. Real-Chrome scheduler gate (`requires_real_chrome=True`)
+
+LinkedIn driving real Chrome must be **serialized** against any other
+real-Chrome session — two concurrent BYOB sessions on the active tab
+collide and corrupt each other's DOM. PR #1277 added the
+`AgentSession.requires_real_chrome` field; the worker scheduler defers
+any second real-Chrome candidate until the first finishes.
+
+There are two paths that set the flag:
+
+- **Bridge-spawned (Telegram or email)**: the bridge calls
+  `agent.byob_skill_triggers.infer_requires_real_chrome(message_text)`
+  before enqueue. Messages mentioning "linkedin" with first-person /
+  intent phrasing (e.g. "check my LinkedIn DMs", "/linkedin") match a
+  trigger and the flag is set automatically. No operator action required.
+- **CLI-spawned**: launch with the explicit flag:
+
+  ```bash
+  valor-session create \
+    --role dev \
+    --project-key valor \
+    --needs-real-chrome \
+    --message "list my linkedin DMs"
+  ```
+
+  Always use `--needs-real-chrome` for any session that calls this skill.
+  Without it, two real-Chrome sessions can race.
 
 ## Tab discovery (do this first)
 
@@ -64,7 +130,33 @@ When multiple `interactiveElements` map to the same logical control (the Like bu
 - **`browser_scroll` with `y: <number>` or `to: "bottom"` does nothing on the feed** — LinkedIn scrolls an inner container, not the window. The returned `scrollY` will be `0` regardless. Use `browser_scroll(tabId, text: "<unique substring>")` or `selector: "byob:idx=N"` to bring a specific element into view; ignore the `scrollY` field. For bulk feed loading, just bump `browser_read`'s `screens` parameter — it auto-scrolls and is the right tool.
 - **Feed reads cap at 1000 IEs.** When the read returns `stopReason: "limit_reached"` and `canContinue: true`, you've only seen the first slice. Process those, then call `browser_read` again to advance.
 - **Post bodies often don't appear in `interactiveElements`** because they're non-interactive `<div>`s. The IE list captures author headers, action buttons, and accessibility labels — not the post text itself. To read the actual post body, use `browser_get_html(tabId, selector="main")` and parse text out, or open the post URL directly (`/feed/update/urn:li:share:<id>/`) and use `browser_read` on the dedicated post page where the body usually surfaces in chunks.
+- **Tool-result file overflow:** both `browser_read` and `browser_get_html` on rich pages routinely exceed the inline tool-result limit and dump to `tool-results/*.txt`. Be ready to parse those out via Bash/grep/jq. Set realistic `maxBytes` and `screens` defaults to keep the inline path viable when you can.
 - **Block list:** BYOB upstream blocks reading `chrome://`, `file://`, and login pages for Google/Microsoft/Apple. Not relevant for in-session LinkedIn use.
+
+### Fallback path — deprecated
+
+The recipe below pre-dates BYOB and is kept for one release cycle so
+operators on machines without BYOB still have a working LinkedIn
+skill. **Do not use this path if BYOB is installed.** It will be
+removed in a followup issue once BYOB is verified working on every
+operator machine.
+
+```bash
+# DEPRECATED — use BYOB above. CDP-attach hack:
+pkill -f "Google Chrome" && sleep 2
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir=/tmp/chrome-debug-profile &>/dev/null &
+sleep 5
+agent-browser connect 9222
+```
+
+When using the fallback, every `mcp__byob__browser_<verb>` call below maps to
+`agent-browser <verb>`, with the same arguments and roughly equivalent
+behavior (anonymous CDP-attached profile rather than the user's real
+Chrome). The fallback path requires the user to manually relaunch Chrome
+with debug flags before each session — which is exactly the friction
+BYOB removes.
 
 ---
 
@@ -288,13 +380,12 @@ If the draft fails the casual-reader test, send the subagent back with specific 
 
 ### Publish
 
-> **⚠️ KNOWN LIMITATION (verified live 2026-05-05):** BYOB **cannot drive LinkedIn's "Start a post" composer modal.** Clicking the "Start a post" trigger opens the modal visually (confirmed via screenshot) but the modal's contenteditable textbox renders into a portal that `browser_read`, `browser_get_html`, and `browser_wait_for` cannot see. With no selector to target, `browser_type` has nothing to type into. `browser_press_key` does dispatch into the focused textbox, but it's single-key-per-call — typing 1500 chars one at a time is impractical.
+> **⚠️ KNOWN LIMITATION (verified live 2026-05-05, see PR #1286 / issue #1274):** BYOB **cannot drive LinkedIn's "Start a post" composer modal.** Clicking the "Start a post" trigger opens the modal visually (confirmed via screenshot showing "What do you want to talk about?"), but the modal's contenteditable textbox renders inside a **React portal** that `browser_read`, `browser_get_html`, and `browser_wait_for` cannot traverse. With no selector to target, `browser_type` has nothing to type into. `browser_press_key` does dispatch into the focused textbox, but it's single-key-per-call — typing 1500 chars one at a time is impractical (1500 round-trips). This is a general BYOB gap (every React-portal-rendered modal on every site likely has the same problem), not a LinkedIn-specific one — worth filing upstream.
 >
-> **What to do until BYOB resolves this:** at the point you'd publish, render the final draft inline AND state plainly: *"BYOB can't drive the post composer modal yet — paste this from `/tmp/linkedin-post.txt` into LinkedIn yourself, or send via the mobile app where the share flow is different."* Then proceed to Task 3 (which works fine — comments use an inline textbox, not a portal modal).
+> **What to do until BYOB resolves this:** at the point you'd publish, render the final draft inline AND state plainly: *"BYOB can't drive the post composer modal yet (React portal — see SKILL.md KNOWN LIMITATION) — paste this from `/tmp/linkedin-post.txt` into LinkedIn yourself, or send via the mobile app where the share flow is different."* Then proceed to Task 3 (which works fine — comments use an inline textbox, not a portal modal).
 >
 > Things that have been verified NOT to work for the share modal:
-> - `browser_click("byob:idx=...")` on every "Start a post" IE variant (modal opens but textbox not in document)
-> - `force: true` on the click (same)
+> - `browser_click("byob:idx=...")` on every "Start a post" IE variant (`idx=137..141`, `tag` "div"/"p", with and without `force:true`) — modal opens but textbox not in document
 > - `browser_get_html("body")` after open (returns navigation chrome only — modal lives elsewhere)
 > - `browser_get_html("[contenteditable=true]")`, `[role='dialog']`, `.share-creation-state`, `.ql-editor` (all `selector_not_found`)
 > - `browser_wait_for(...)` for any of those selectors (always times out)
@@ -321,7 +412,7 @@ As you read through posts, Like any that are relevant to the work — agentic sy
 
 **Commenting always implies a Like.** If a post passes the screening gate and you draft a comment for it, also like the post. Engagement should be coherent — a comment without the like reads as half-engaged. The reverse isn't true: plenty of posts are worth a like but not a comment.
 
-In the IE list, Like buttons appear with `name: "Reaction button state: no reactionLike"` (or `name: "Like"`). After clicking, the same button's name flips to `"Reaction button state: Like"` — that's how you confirm the like landed. If the name already shows `"Reaction button state: Like"` or `"Unreact Like"`, the post is already liked — skip.
+In the IE list, Like buttons appear with `name: "Reaction button state: no reactionLike"` (or `name: "Like"`). After clicking, the same button's name flips to `"Reaction button state: Like"` — that's the reliable success indicator (don't gate on reaction-count diffs, those can lag). If the name already shows `"Reaction button state: Like"` or `"Unreact Like"`, the post is already liked — skip.
 
 ```text
 browser_click(tabId=<linkedin_tab>, selector="byob:idx=<like_idx>")
@@ -510,3 +601,4 @@ Only use Edit to fix typos or rewrite the whole comment as a clean standalone.
 - **Opening a message marks it as read** — be aware of "seen" indicators if you don't intend to actually engage.
 - **Screenshots over 1MB fail** — use `format="jpeg"` and `quality=50-60` for confirmation captures.
 - **No Playwright fallback in BYOB.** If the bridge dies mid-session, the agent surfaces a clear error — don't try to reroute through `bowser` (different stack, anonymous, no LinkedIn login).
+- **If `mcp__byob__browser_*` calls return transport errors mid-session**, the Chrome extension may have lost its bridge — run `cd ~/.byob && bun run doctor` in a fresh shell to repair, then retry the failed call.
