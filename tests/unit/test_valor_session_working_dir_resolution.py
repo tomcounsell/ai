@@ -126,8 +126,12 @@ class TestWorkingDirDerivesFromProjectKey:
         assert mock_wt.call_args.args[0] == cuttlefish_root
 
     def test_no_slug_uses_repo_root_as_working_dir(self, tmp_path, monkeypatch):
-        """Dev session without --slug gets the project repo_root as working_dir,
-        not the cwd and not a worktree.
+        """Dev session WITH --slug gets the worktree as working_dir.
+
+        Issue #1272 changed the semantic: ``--role dev`` without ``--slug``
+        (and without ``issue #N`` in the message) now exits 1. To continue
+        exercising the working-dir-from-project-key path for dev sessions,
+        the test passes an explicit ``--slug``.
         """
         demo_root = tmp_path / "demo"
         demo_root.mkdir()
@@ -139,19 +143,35 @@ class TestWorkingDirDerivesFromProjectKey:
         async def fake_push(**kwargs):
             captured.update(kwargs)
 
+        wt_path = demo_root / ".worktrees" / "fix-typo"
+        wt_path.mkdir(parents=True)
+
         with (
             patch(
                 "bridge.routing.load_config",
                 return_value={"projects": projects_json, "defaults": {}},
             ),
+            patch(
+                "agent.worktree_manager.get_or_create_worktree",
+                return_value=wt_path,
+            ),
+            patch("agent.worktree_manager._validate_slug"),
             patch("agent.agent_session_queue._push_agent_session", side_effect=fake_push),
             patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
         ):
-            rc = cmd_create(_make_args(role="dev", project_key="demo", message="fix typo"))
+            rc = cmd_create(
+                _make_args(
+                    role="dev",
+                    project_key="demo",
+                    message="fix typo",
+                    slug="fix-typo",
+                )
+            )
 
         assert rc == 0
-        assert captured["working_dir"] == str(demo_root)
-        assert captured["slug"] is None
+        # Dev sessions with a slug always run inside the slug worktree (#1272).
+        assert captured["working_dir"] == str(wt_path)
+        assert captured["slug"] == "fix-typo"
 
 
 # ---------------------------------------------------------------------------
@@ -272,18 +292,29 @@ class TestParentInheritance:
         async def fake_push(**kwargs):
             captured.update(kwargs)
 
+        wt_path = proj_root / ".worktrees" / "x"
+        wt_path.mkdir(parents=True)
+
         with (
             patch(
                 "bridge.routing.load_config",
                 return_value={"projects": projects_json, "defaults": {}},
             ),
             patch("tools.valor_session._find_session", return_value=None),
+            patch(
+                "agent.worktree_manager.get_or_create_worktree",
+                return_value=wt_path,
+            ),
+            patch("agent.worktree_manager._validate_slug"),
             patch("agent.agent_session_queue._push_agent_session", side_effect=fake_push),
             patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
         ):
+            # #1272 requires --slug for dev sessions; passes a slug so this
+            # test stays focused on the parent-inheritance fall-through path.
             rc = cmd_create(
                 _make_args(
-                    role="dev",  # dev so no --slug required
+                    role="dev",
+                    slug="x",
                     parent="nonexistent-uuid",
                     project_key=None,
                     message="whatever",
@@ -320,7 +351,10 @@ class TestErrorSurfaces:
             patch("agent.agent_session_queue._push_agent_session"),
             patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
         ):
-            rc = cmd_create(_make_args(role="dev", project_key=None, message="hi"))
+            # #1272: dev sessions require --slug. Provide one so the test
+            # exercises the project-key/cwd resolution error path, not the
+            # slug-required guard.
+            rc = cmd_create(_make_args(role="dev", slug="x", project_key=None, message="hi"))
 
         assert rc != 0
         err = capsys.readouterr().err
@@ -345,7 +379,9 @@ class TestErrorSurfaces:
             patch("agent.agent_session_queue._push_agent_session"),
             patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
         ):
-            rc = cmd_create(_make_args(role="dev", project_key="nonexistent", message="hi"))
+            rc = cmd_create(
+                _make_args(role="dev", slug="x", project_key="nonexistent", message="hi")
+            )
 
         assert rc != 0
         err = capsys.readouterr().err
@@ -364,7 +400,7 @@ class TestErrorSurfaces:
             patch("agent.agent_session_queue._push_agent_session"),
             patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
         ):
-            rc = cmd_create(_make_args(role="dev", project_key="anything", message="hi"))
+            rc = cmd_create(_make_args(role="dev", slug="x", project_key="anything", message="hi"))
 
         assert rc != 0
         err = capsys.readouterr().err
@@ -462,7 +498,7 @@ class TestErrorPathWritesToStderrOnly:
             patch("agent.agent_session_queue._push_agent_session"),
             patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
         ):
-            rc = cmd_create(_make_args(role="dev", project_key=None, message="hi"))
+            rc = cmd_create(_make_args(role="dev", slug="x", project_key=None, message="hi"))
 
         assert rc != 0
         cap = capsys.readouterr()
@@ -485,7 +521,9 @@ class TestErrorPathWritesToStderrOnly:
             patch("agent.agent_session_queue._push_agent_session"),
             patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
         ):
-            rc = cmd_create(_make_args(role="dev", project_key="nonexistent", message="hi"))
+            rc = cmd_create(
+                _make_args(role="dev", slug="x", project_key="nonexistent", message="hi")
+            )
 
         assert rc != 0
         cap = capsys.readouterr()
@@ -549,12 +587,16 @@ class TestThreeLevelPMChain:
         wt_level1.mkdir(parents=True)
         wt_level2 = demo_root / ".worktrees" / "sdlc-101"
         wt_level2.mkdir(parents=True)
+        wt_level3 = demo_root / ".worktrees" / "impl-feat"
+        wt_level3.mkdir(parents=True)
 
         def fake_worktree(root, slug):
             if slug == "sdlc-100":
                 return wt_level1
             if slug == "sdlc-101":
                 return wt_level2
+            if slug == "impl-feat":
+                return wt_level3
             raise AssertionError(f"Unexpected slug: {slug}")
 
         # Level-1 PM creation — explicit project_key, cwd unrelated.
@@ -613,7 +655,10 @@ class TestThreeLevelPMChain:
         level2 = captured_per_level[-1]
         level2_uuid = "level2-uuid-def"
 
-        # Level-3 Dev creation — inherits via --parent, no slug (Dev default).
+        # Level-3 Dev creation — inherits via --parent. Issue #1272 now
+        # requires dev sessions to have a slug, so the test passes one
+        # explicitly. The point of this test is project_key inheritance,
+        # not slug handling.
         fake_parent_level2 = MagicMock()
         fake_parent_level2.project_key = "demo"
         fake_parent_level2.agent_session_id = level2_uuid
@@ -624,12 +669,18 @@ class TestThreeLevelPMChain:
                 return_value={"projects": projects_json, "defaults": {}},
             ),
             patch("tools.valor_session._find_session", return_value=fake_parent_level2),
+            patch(
+                "agent.worktree_manager.get_or_create_worktree",
+                side_effect=fake_worktree,
+            ),
+            patch("agent.worktree_manager._validate_slug"),
             patch("agent.agent_session_queue._push_agent_session", side_effect=fake_push),
             patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
         ):
             rc3 = cmd_create(
                 _make_args(
                     role="dev",
+                    slug="impl-feat",
                     parent=level2_uuid,
                     project_key=None,
                     message="implement feature",
@@ -649,8 +700,10 @@ class TestThreeLevelPMChain:
         assert level2["working_dir"].startswith(demo_str)
         assert level3["working_dir"].startswith(demo_str)
 
-        # Level-3 has no slug so working_dir IS the demo_root (no worktree).
-        assert level3["working_dir"] == demo_str
+        # Level-3 dev session runs in its own worktree (#1272 — every dev
+        # session has a slug, every dev session gets a worktree).
+        assert level3["working_dir"] == str(demo_root / ".worktrees" / "impl-feat")
+        assert level3["slug"] == "impl-feat"
 
         # project_config also travels consistently with the project dict.
         assert level1["project_config"] == projects_json["demo"]

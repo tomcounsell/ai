@@ -150,3 +150,102 @@ class TestCreateEnrichmentHeaderGuard:
             pass
         captured = capsys.readouterr()
         assert "enrichment header" not in captured.err.lower()
+
+
+class TestCreateDevRoleRequiresSlug:
+    """Issue #1272: ``--role dev`` without a slug (or 'issue #N') must exit 1.
+
+    Mirrors the pre-existing PM-slug-required check at
+    ``tools/valor_session.py:cmd_create``. The CLI is the first line of
+    defense — keeping slugless dev sessions out of the queue means the
+    executor's synthetic-slug fallback (#1272) is only ever exercised
+    by future programmatic spawn sites that bypass the CLI.
+    """
+
+    def test_create_dev_role_requires_slug(self, capsys):
+        """``--role dev`` with no slug and no 'issue #N' must exit 1 with stderr error."""
+        args = _make_args(
+            "no slug here, no issue reference either",
+            role="dev",
+            slug=None,
+        )
+        rc = valor_session.cmd_create(args)
+        captured = capsys.readouterr()
+
+        assert rc == 1, f"Expected exit code 1 for slugless --role dev, got {rc}"
+        # Per the plan's "CLI rejection message must be grep-able" criterion:
+        # the substring ``dev sessions must be created with --slug`` (case-
+        # sensitive in our message) must appear in stderr.
+        assert "PM and dev sessions must be created with --slug" in captured.err, (
+            f"Expected slug-required error message in stderr, got: {captured.err!r}"
+        )
+        # Issue references for grep / reflections
+        assert "#1272" in captured.err, (
+            f"Expected issue #1272 reference in error message, got: {captured.err!r}"
+        )
+        # Must write to stderr, not stdout
+        assert captured.out == "" or "Error" not in captured.out, (
+            f"Error must go to stderr, not stdout: stdout={captured.out!r}"
+        )
+
+    def test_create_dev_role_with_issue_n_auto_derives_slug(self, capsys, monkeypatch, tmp_path):
+        """``--role dev`` with 'issue #N' in the message auto-derives the slug.
+
+        This is the same auto-derive path that PM uses; #1272 extends it
+        to dev. We don't care about the downstream enqueue here — only
+        that the slug-required guard does NOT fire (no exit 1, no error).
+        """
+        monkeypatch.setattr(valor_session, "_check_worker_health", lambda: (True, 1))
+        monkeypatch.setattr(
+            valor_session,
+            "resolve_project_key",
+            lambda cwd: "test-1272",
+        )
+        monkeypatch.setattr(
+            valor_session,
+            "_resolve_project_working_directory",
+            lambda key: (tmp_path, {"working_directory": str(tmp_path)}),
+        )
+
+        args = _make_args("Fix issue #42 broken thing", role="dev", slug=None)
+        rc = None
+        try:
+            rc = valor_session.cmd_create(args)
+        except Exception:
+            # Downstream enqueue may fail (no Redis) — we only care that the
+            # slug-required guard didn't fire.
+            pass
+        captured = capsys.readouterr()
+
+        assert "PM and dev sessions must be created with --slug" not in captured.err, (
+            f"Auto-derive should have produced a slug, but rejection fired: {captured.err!r}"
+        )
+        # If the guard didn't fire, rc is either None (downstream raised)
+        # or some non-1 value. Specifically must NOT be 1 from this guard.
+        if rc is not None:
+            assert rc != 1 or "must be created with --slug" not in captured.err
+
+    def test_create_dev_role_with_explicit_slug_passes_guard(self, capsys, monkeypatch, tmp_path):
+        """``--role dev --slug my-feat`` must not trigger the guard."""
+        monkeypatch.setattr(valor_session, "_check_worker_health", lambda: (True, 1))
+        monkeypatch.setattr(
+            valor_session,
+            "resolve_project_key",
+            lambda cwd: "test-1272",
+        )
+        monkeypatch.setattr(
+            valor_session,
+            "_resolve_project_working_directory",
+            lambda key: (tmp_path, {"working_directory": str(tmp_path)}),
+        )
+
+        args = _make_args("test message", role="dev", slug="my-feat")
+        try:
+            valor_session.cmd_create(args)
+        except Exception:
+            pass
+        captured = capsys.readouterr()
+
+        assert "PM and dev sessions must be created with --slug" not in captured.err, (
+            f"Guard fired with explicit --slug present: {captured.err!r}"
+        )
