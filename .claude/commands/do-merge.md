@@ -178,10 +178,18 @@ get conditionally skipped.
 
 ### Structured Review Comment Check
 
-Before authorizing merge, scan PR issue comments for the most recent `## Review:` comment.
-Stale reviews are filtered by comparing each comment's `created_at` against the PR's latest
-commit `committer.date` — comments that predate the latest commit are treated as stale (a
-force-push would have superseded them) and are dropped from consideration.
+Before authorizing merge, scan **both** issue comments AND PR review submissions for the
+most recent `## Review:` body. Both surfaces must be scanned because `/do-pr-review`
+posts the structured review body via different gh subcommands depending on path:
+zero-findings approvals on non-self-authored PRs go through `gh pr review --approve`
+(a PR review submission), while every other path uses `gh pr comment` (an issue comment).
+Issue-comments-only scanning silently misses the approval surface and forces a workaround
+of reposting the review as an issue comment (PR #1281 surfaced this gap).
+
+Stale reviews are filtered by comparing each entry's timestamp (`created_at` for issue
+comments, `submitted_at` for PR reviews) against the PR's latest commit `committer.date`
+— entries that predate the latest commit are treated as stale (a force-push would have
+superseded them) and are dropped from consideration.
 
 **Safe-shape exemption:** when no current review exists but a prior `## Review: Approved`
 exists AND the diff between the approval-commit (extracted from the
@@ -205,17 +213,50 @@ if [ -z "$LATEST_COMMIT_DATE" ]; then
   exit 1
 fi
 
-LAST_REVIEW=$(gh api repos/$REPO/issues/$ARGUMENTS/comments \
-  --jq "[.[] | select(.body | startswith(\"## Review:\")) | select(.created_at >= \"$LATEST_COMMIT_DATE\")] | last | .body // \"\"" \
-  2>/dev/null) || { echo "REVIEW_COMMENT: FAIL — gh api call failed (network/auth error)"; echo "GATES_FAILED"; exit 1; }
+# Fetch both surfaces; fail closed on either API error so a transient outage
+# can't masquerade as "no review found."
+ISSUE_COMMENTS_JSON=$(gh api "repos/$REPO/issues/$ARGUMENTS/comments" 2>/dev/null) || {
+  echo "REVIEW_COMMENT: FAIL — gh api call failed (issue comments)"
+  echo "GATES_FAILED"
+  exit 1
+}
+PR_REVIEWS_JSON=$(gh api "repos/$REPO/pulls/$ARGUMENTS/reviews" 2>/dev/null) || {
+  echo "REVIEW_COMMENT: FAIL — gh api call failed (pr reviews)"
+  echo "GATES_FAILED"
+  exit 1
+}
+
+# Merge both surfaces on a normalized {body, ts} shape, filter to `## Review:`
+# bodies posted at-or-after the latest commit, and pick the most recent.
+LAST_REVIEW=$(jq -n --arg cutoff "$LATEST_COMMIT_DATE" \
+  --argjson ic "$ISSUE_COMMENTS_JSON" \
+  --argjson pr "$PR_REVIEWS_JSON" '
+    [
+      ($ic[]? | {body, ts: .created_at}),
+      ($pr[]? | {body, ts: .submitted_at})
+    ]
+    | map(select(.body // "" | startswith("## Review:")))
+    | map(select(.ts >= $cutoff))
+    | sort_by(.ts) | last | .body // ""
+  ')
 
 if [ -z "$LAST_REVIEW" ]; then
   # Safe-shape exemption: re-admit a prior `## Review: Approved` if the diff
   # between the approval-commit and HEAD classifies as a safe shape.
   # Anchor SHA is extracted from the `<!-- REVIEW_CONTEXT head_sha=<SHA> ... -->`
   # trailer that /do-pr-review emits. Reviews without the trailer fail closed.
-  PRIOR_APPROVAL=$(gh api "repos/$REPO/issues/$ARGUMENTS/comments" \
-    --jq '[.[] | select(.body | startswith("## Review: Approved"))] | last' 2>/dev/null || echo "")
+  # Same dual-surface scan as above, but unfiltered by cutoff so a prior
+  # approval that predates the latest commit is still findable.
+  PRIOR_APPROVAL=$(jq -n \
+    --argjson ic "$ISSUE_COMMENTS_JSON" \
+    --argjson pr "$PR_REVIEWS_JSON" '
+      [
+        ($ic[]? | {body, ts: .created_at}),
+        ($pr[]? | {body, ts: .submitted_at})
+      ]
+      | map(select(.body // "" | startswith("## Review: Approved")))
+      | sort_by(.ts) | last
+    ')
   if [ -n "$PRIOR_APPROVAL" ] && [ "$PRIOR_APPROVAL" != "null" ]; then
     PRIOR_BODY=$(echo "$PRIOR_APPROVAL" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('body','') if isinstance(d, dict) else '')")
     APPROVAL_COMMIT_SHA=$(echo "$PRIOR_BODY" | grep -oE 'REVIEW_CONTEXT head_sha=[a-f0-9]{40}' | sed 's/REVIEW_CONTEXT head_sha=//' | tail -1)
@@ -530,8 +571,12 @@ Complete the missing stages before requesting merge.
 Fall back to manual checks:
 
 ```bash
-# Check for review
-gh pr view $ARGUMENTS --json comments --jq '.comments[] | select(.body | contains("Review:")) | .body[:80]'
+# Check for review (scans both issue comments and PR review submissions)
+gh pr view $ARGUMENTS --json comments,reviews --jq '
+  (.comments + .reviews)[]
+  | select(.body | contains("Review:"))
+  | .body[:80]
+'
 
 # Check tests pass
 pytest tests/ -x -q --tb=no 2>&1 | tail -5

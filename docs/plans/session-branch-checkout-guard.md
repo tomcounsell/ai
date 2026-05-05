@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor
 created: 2026-05-05
 tracking: https://github.com/tomcounsell/ai/issues/1288
-last_comment_id:
+last_comment_id: 4376959048
 ---
 
 # Session-branch checkout guard (pre-commit hook)
@@ -169,9 +169,11 @@ No other existing tests affected — the hook is purely additive at the start of
 **Impact:** Theoretical concern that `git rev-parse --show-toplevel` might return a path differing from `pwd` when symlinks are involved.
 **Mitigation:** Verified empirically during planning. From a symlinked CWD (`/tmp/symlink_test/linked_repo` → `real_repo`), `git rev-parse --show-toplevel` returns the canonical path `/private/tmp/symlink_test/real_repo` regardless of how the user `cd`'d in. The suffix predicate works without a `realpath` fallback. The remaining theoretical edge — `.worktrees/` itself being a symlink — does not occur because `get_or_create_worktree` creates a real directory. No symlink-specific test case is needed.
 
-### Risk 3: Hook is bypassed by `--no-verify`
-**Impact:** Determined user (or AI agent) can commit through the block.
-**Mitigation:** Acceptable. `--no-verify` is an explicit override and the user takes responsibility. The hook's job is to make the easy path correct, not to enforce policy against active circumvention. CLAUDE.md already discourages `--no-verify` for non-WIP commits.
+### Risk 3: Hook is bypassed by `--no-verify` (including via the agent's Bash tool)
+**Impact:** Determined user — or an AI agent calling `git commit --no-verify` through its Bash tool — can commit through the block.
+**Mitigation (rev1, concern #2):** Acceptable for this PR. `--no-verify` is an explicit override and the caller takes responsibility. CLAUDE.md already discourages it for non-WIP commits, and the bash hook's job is to make the easy path correct, not to enforce policy against active circumvention.
+
+If `--no-verify` becomes the dominant bypass vector after this hook ships, the layered fix is a `.claude/hooks/validators/` PreToolUse hook on the Bash tool that inspects the command for `git commit --no-verify` on `session/*` branches and refuses. **Not built here** — would expand scope from "git-layer enforcement" to "git-layer + agent-layer enforcement," and we have no current evidence the agent uses `--no-verify` against this guard. File a follow-up bug if the bypass is observed in practice. Tracking note: title would be something like "PreToolUse validator: refuse `git commit --no-verify` on `session/*` branches."
 
 ## Race Conditions
 
@@ -184,13 +186,18 @@ No race conditions identified. The pre-commit hook is invoked synchronously by `
 - **Centralizing `WORKTREES_DIR` between bash hook and Python.** The drift cost is one line if the constant ever changes; not worth a `python -c` invocation per commit.
 - **Migrating manually-created worktrees outside `.worktrees/`.** Out of scope. The hook will block commits from non-canonical worktrees on session branches; that's correct.
 - **Auto-creating the worktree when the violation is detected.** Out of scope. The hook surfaces the problem; the user (or agent) chooses how to fix it.
-- **Updating `/setup` to verify `core.hooksPath`.** Already done — `/setup` configures `core.hooksPath = .githooks` on new machines. No additional work needed there.
+- **Adding `core.hooksPath` provisioning to `/setup`.** Out of scope for this plan. `/update` already does it (`scripts/update/git.py:166`); migrating that responsibility to `/setup` is a separate concern about deployment ordering, not about the hook itself.
 
 ## Update System
 
-No update-system changes required for the **mechanism** — `core.hooksPath = .githooks` is already set by `/setup` on every machine, and the new phase ships in-tree under `.githooks/pre-commit`, so it propagates via `git pull` like any other code change.
+**Implementation Note (rev1, concern #1):** `core.hooksPath = .githooks` is configured by **`/update`** (specifically `scripts/update/git.py:166`), **not** by `/setup`. Earlier draft of this plan claimed the opposite — corrected here so the builder doesn't ship a deployment story based on the wrong skill.
 
-One small note for awareness in `/update`: machines that have not run `git pull` since this lands will not have the guard. There is no migration to perform, but if a machine is exhibiting the bypass behavior, the first remediation step is "ensure your repo is up to date." Add a one-line note to the `/update` skill's troubleshooting section if one exists; otherwise no action.
+Practical implications for this plan:
+
+- The new pre-commit Phase 0.5 ships in-tree under `.githooks/pre-commit` and propagates via `git pull` like any other code change. No update-script edit is required on the *mechanism* side.
+- **Machines that have run `/update` at any point** already have `core.hooksPath` set; the new phase activates on their next `git pull` automatically. Most active machines are in this category.
+- **Machines that have only run `/setup`** have not had `core.hooksPath` configured and will silently skip the new hook (and every other phase in `.githooks/pre-commit`). Remediation is a one-liner: `git config core.hooksPath .githooks`. Either run `/update` (which does this and other provisioning) or set the config manually.
+- No migration code added in this PR. If we want defensive-set in `/setup`, that's a separate plan — out of scope here.
 
 ## Agent Integration
 
@@ -251,7 +258,7 @@ No agent integration required. The pre-commit hook is invoked by git itself, not
 - **Agent Type**: builder
 - **Parallel**: true
 - Read current `.githooks/pre-commit` to understand the existing structure.
-- Insert new Phase 0.5 ahead of the lint phase (before line 27 "Phase 1: Auto-fix lint"), with a one-line header comment "── Phase 0.5: Session-branch worktree guard (#1288) ───────────────────".
+- **Insert by marker, not line number (rev1, concern #4):** find the line `# ── Phase 1: Auto-fix lint on staged Python files ──────────────────────` and insert the new Phase 0.5 immediately above it. Header comment for the new phase: `# ── Phase 0.5: Session-branch worktree guard (#1288) ───────────────────`. Line numbers in the existing hook drift under unrelated edits; the marker comment is stable.
 - Implement the predicate per Technical Approach: `git symbolic-ref --short HEAD 2>/dev/null || echo ""`, glob match on `session/*`, suffix check on `git rev-parse --show-toplevel`, explicit empty-slug guard, detached-HEAD safe.
 - Emit the actionable error message from Technical Approach to stderr on block.
 
@@ -270,6 +277,11 @@ No agent integration required. The pre-commit hook is invoked by git itself, not
   - `test_detached_head_does_not_trigger_guard`
   - `test_session_slash_empty_slug_blocks`
 - Use real `git init`, `git checkout -b`, and `git worktree add` in fixtures — no mocks. The hook is bash; testing it via Python mocks would lose fidelity.
+- **Stage a non-Python plain-text file in every fixture (rev1, concern #3).** The "passes" test cases run through to subsequent pre-commit phases (Phase 1: ruff auto-fix, Phase 1.5: `uv lock --locked`, Phase 2: secret scan). In `tmp_path` fixtures with no `.venv` and no `uv` binary, those phases will fail and contaminate the test signal. To short-circuit them, stage exactly one file like `notes.txt` containing benign content (e.g., `"placeholder for hook test fixture"`):
+  - Phase 1 (ruff): `STAGED_PY_FILES` is empty → block skipped.
+  - Phase 1.5 (uv lock): `LOCKFILE_STAGED` is empty (no `pyproject.toml` or `uv.lock` staged) → block skipped.
+  - Phase 2 (secret scan): runs on `notes.txt`, no patterns match → passes.
+  Result: the passes-cases isolate Phase 0.5 cleanly and don't depend on the test machine having ruff/uv installed.
 
 ### 3. Validate predicate correctness
 - **Task ID**: validate-hook
@@ -325,4 +337,14 @@ These three calls were resolved at plan-finalization time. Recording them inline
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique. -->
+War-room critique cycle 1 — verdict: **READY TO BUILD (with concerns)**. Issue comment: https://github.com/tomcounsell/ai/issues/1288#issuecomment-4376959048
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| concern  | Operator | Plan claimed `/setup` configures `core.hooksPath`. Verified false — configurator is `scripts/update/git.py:166`, runs via `/update`. Machines that have only run `/setup` would silently skip the hook. | rev1 edit to `## Update System` and `## No-Gos` | Builder must NOT add hooksPath provisioning to `/setup` in this PR. The fix is documentation-only: explain in plan + feature doc that `/update` is the install path. |
+| concern  | Adversary | `--no-verify` is trivially typeable by the agent's Bash tool. Plan accepted as out-of-scope without a tracked follow-up. | rev1 edit to `## Risks` Risk 3 | Out of scope for this PR. If agent-side bypass becomes a real vector after the hook ships, file follow-up: PreToolUse Bash validator that refuses `git commit --no-verify` on `session/*` branches. |
+| concern  | Operator | Test "passes" cases will hit existing pre-commit Phases 1/1.5/2 (ruff, uv lock, secret scan), which fail in `tmp_path` fixtures lacking `.venv`/`uv`. | rev1 edit to Step-by-step Task 2 | Stage exactly one non-Python plain-text file (e.g., `notes.txt`) per fixture. Phase 1 skips on empty `STAGED_PY_FILES`, Phase 1.5 skips on empty `LOCKFILE_STAGED`, Phase 2 sees no secrets. Hook runs on a clean substrate. |
+| concern  | Archaeologist | Task 1 cited "before line 27" — actual line is 24. Drift-prone under unrelated edits. | rev1 edit to Step-by-step Task 1 | Switched to marker-based insertion: anchor on the existing `# ── Phase 1: Auto-fix lint on staged Python files ──────────────────────` comment, insert above it. Stable across hook edits. |
+| nit      | Simplifier | Phase numbering "0.5" reads as a hot-fix afterthought. Could rename to "Phase 0" or rotate the existing phases. | (not addressed) | Cosmetic; left to builder discretion. Renaming all phases is a wider edit than the value justifies for one new phase. |
+| nit      | Simplifier | Empty-slug guard adds a special case for a pathological branch name that shouldn't occur. | (not addressed) | Cosmetic; cheap to keep, defensive. Builder may delete if they prefer minimalism. |
+| nit      | User | Error-message recovery block is verbose (4 lines + a one-liner). | (not addressed) | Cosmetic. The error fires on a violation that's already a surprise; verbose recovery is appropriate over terse. Builder may shorten if they have a stronger preference. |
