@@ -27,7 +27,7 @@ logger = logging.getLogger("reflections.pm_audio_briefing.log_audit")
 SLOT_TYPE = "log_audit"
 
 
-def _scan_project_logs(project: dict, yesterday: str) -> list[str]:
+def _scan_project_logs(project: dict) -> list[str]:
     """Run the per-project log scan, returning a list of finding strings.
 
     Mirrors the per-project body of ``reflections.auditing.run_log_review``,
@@ -112,10 +112,7 @@ def build(project: dict, slot_config: dict) -> tuple[str, str, dict[str, Any]]:
         list of findings under the ``findings`` key for skip-when-empty
         detection.
     """
-    from bridge.utc import utc_now
-
-    yesterday = (utc_now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    findings = _scan_project_logs(project, yesterday)
+    findings = _scan_project_logs(project)
 
     raw_signals: dict[str, list[dict]] = {"findings": [{"text": f} for f in findings]}
 
@@ -125,10 +122,10 @@ def build(project: dict, slot_config: dict) -> tuple[str, str, dict[str, Any]]:
         return ("", "", {})
 
     slug = project.get("slug", "?")
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    report_date = datetime.now(UTC).strftime("%Y-%m-%d")
     if findings:
         body_lines = [
-            f"## Daily Log Audit — {today} ({slug})",
+            f"## Daily Log Audit — {report_date} ({slug})",
             f"{len(findings)} finding(s)",
             "",
         ]
@@ -139,7 +136,8 @@ def build(project: dict, slot_config: dict) -> tuple[str, str, dict[str, Any]]:
         followup_md = "\n".join(body_lines) + "\n"
     else:
         followup_md = (
-            f"## Daily Log Audit — {today} ({slug})\n0 findings — log-scan pipeline healthy.\n"
+            f"## Daily Log Audit — {report_date} ({slug})\n"
+            "0 findings — log-scan pipeline healthy.\n"
         )
 
     return ("", followup_md, raw_signals)

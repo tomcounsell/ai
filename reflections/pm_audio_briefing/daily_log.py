@@ -63,15 +63,17 @@ def build(project: dict, slot_config: dict) -> tuple[str, str, dict[str, Any]]:
 
     target_date = utc_now() - timedelta(days=1)
 
-    # Run the async collector via asyncio.run; this slot is invoked from a
-    # sync dispatcher, so we own a fresh event loop here. (The reflection
-    # scheduler dispatches the parent ``run()`` via ``run_in_executor``.)
+    # Run the async collector. In production we are inside a running event
+    # loop: the parent ``pm_audio_briefing.run()`` is ``async def`` and the
+    # reflection scheduler awaits it directly (see
+    # ``agent/reflection_scheduler.py``), so the ``loop.is_running()`` branch
+    # is the production path. ``asyncio.run`` cannot run inside an existing
+    # loop, so we hand the coroutine to a dedicated thread that owns its own
+    # event loop. The else branch handles direct sync invocations (CLI tools,
+    # tests) where no loop is running yet.
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # Defensive: this branch is unexpected in production because the
-            # reflection scheduler uses run_in_executor. If we hit it, run the
-            # coroutine in a dedicated thread loop.
             import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:

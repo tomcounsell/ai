@@ -147,7 +147,7 @@ record rows under the parent registry entry's group.
     "status": "ok" | "partial" | "error",
     "projects": [
         {"slug": "alpha", "slot": "morning", "status": "ok",
-         "duration": 0.0, "findings_count": 0, "error": None,
+         "duration": 1.42, "findings_count": 0, "error": None,
          "date_iso": "2026-04-30"},
         ...
     ],
@@ -158,7 +158,15 @@ record rows under the parent registry entry's group.
 
 The per-record `date_iso` field is included so a Tuesday-LA row and a
 Wednesday-LA row don't overwrite each other when projects span timezones
-(per the plan critique).
+(per the plan critique). `duration` is the wall-clock seconds spent in
+`_run_slot` for this (project × slot). `findings_count` is the number of
+items in the slot's `raw_signals["findings"]` (currently the `log_audit`
+slot — `morning` and `daily_log` always report 0).
+
+`summary.succeeded + summary.failed` may be less than `considered * slots`
+because schedule-miss / lock-held / already-succeeded slots are reported as
+`status: "skipped"` and intentionally excluded from both counters (they
+aren't run-attempts).
 
 ## Rollback
 

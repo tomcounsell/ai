@@ -268,23 +268,25 @@ def _run_slot(
 
     started_at = time.time()
     side_effect_started = False
+    findings_count = 0
     reflection.mark_started()
     try:
         # --- Pre-side-effect: pure build ---
-        transcript, followup, _raw_signals = builder_fn(project, slot_config)
+        transcript, followup, raw_signals = builder_fn(project, slot_config)
+        findings_count = len(raw_signals.get("findings", []))
 
         # Skip-when-empty: a slot whose build returns no transcript and no
         # followup is a noop.
         if not transcript and not followup:
-            reflection.mark_completed(
-                duration=time.time() - started_at,
-                error=None,
-            )
+            duration = time.time() - started_at
+            reflection.mark_completed(duration=duration, error=None)
             return {
                 "status": "noop",
                 "reason": "skip_when_empty",
                 "slot": slot_name,
                 "date_iso": today_iso,
+                "duration": duration,
+                "findings_count": findings_count,
             }
 
         # --- Side-effect phase: delivery ---
@@ -311,7 +313,8 @@ def _run_slot(
             # directly to enqueue ONE text payload per target group.
             result = _send_text_only(redis_conn, project, target_groups, followup)
 
-        reflection.mark_completed(duration=time.time() - started_at, error=None)
+        duration = time.time() - started_at
+        reflection.mark_completed(duration=duration, error=None)
 
         # On dry-run, release the lock so re-runs are allowed during testing.
         if dry_run:
@@ -322,22 +325,28 @@ def _run_slot(
             "slot": slot_name,
             "date_iso": today_iso,
             "delivery": result,
+            "duration": duration,
+            "findings_count": findings_count,
         }
     except BriefingTtsFailedError as e:
         # TTS failure is a "post-side-effect" failure (the failure-notice
         # text payload was already enqueued by delivery.send). HOLD the lock.
+        duration = time.time() - started_at
         err_msg = f"BriefingTtsFailedError: {e}"
-        reflection.mark_completed(duration=time.time() - started_at, error=err_msg)
+        reflection.mark_completed(duration=duration, error=err_msg)
         return {
             "status": "error",
             "phase": "post_side_effect",
             "slot": slot_name,
             "date_iso": today_iso,
             "error": err_msg,
+            "duration": duration,
+            "findings_count": findings_count,
         }
     except Exception as e:
+        duration = time.time() - started_at
         err_msg = f"{type(e).__name__}: {e}"
-        reflection.mark_completed(duration=time.time() - started_at, error=err_msg)
+        reflection.mark_completed(duration=duration, error=err_msg)
         if not side_effect_started:
             _release_lock(redis_conn, lock_key)
             return {
@@ -346,6 +355,8 @@ def _run_slot(
                 "slot": slot_name,
                 "date_iso": today_iso,
                 "error": err_msg,
+                "duration": duration,
+                "findings_count": findings_count,
             }
         return {
             "status": "error",
@@ -353,6 +364,8 @@ def _run_slot(
             "slot": slot_name,
             "date_iso": today_iso,
             "error": err_msg,
+            "duration": duration,
+            "findings_count": findings_count,
         }
 
 
@@ -421,12 +434,16 @@ async def run() -> dict:
                     "slug": slug,
                     "slot": slot_name,
                     "status": res.get("status", "unknown"),
-                    "duration": 0.0,
-                    "findings_count": 0,
+                    "duration": float(res.get("duration") or 0.0),
+                    "findings_count": int(res.get("findings_count") or 0),
                     "error": res.get("error"),
                     "date_iso": res.get("date_iso"),
                 }
             )
+            # "skipped" slots (outside_slot, no_schedule, lock_held,
+            # already_succeeded_today) are intentionally NOT counted as
+            # successes or failures — they aren't run-attempts. As a result,
+            # summary.succeeded + summary.failed <= considered * slots_per_project.
             if res.get("status") in ("ok", "noop"):
                 successes += 1
             elif res.get("status") == "error":
