@@ -40,7 +40,11 @@ REFLECTION_GROUPS: dict[str, str] = {
     "session-recovery-drip": GROUP_AGENTS,
     "session-intelligence": GROUP_AGENTS,
     "system-health-digest": GROUP_AGENTS,
-    "pm-audio-briefing": GROUP_AGENTS,
+    "pm-audio-briefing": GROUP_AUDITS,  # consolidated PM briefings (issue #1276)
+    # ``pm-briefings`` is reserved for the future registry rename. Mapping it
+    # here ensures any pre-rename per-(project x slot) record surfaces in the
+    # correct group via ``_classify_group``.
+    "pm-briefings": GROUP_AUDITS,
     "redis-index-cleanup": GROUP_HOUSEKEEPING,
     "redis-ttl-cleanup": GROUP_HOUSEKEEPING,
     "disk-space-check": GROUP_HOUSEKEEPING,
@@ -71,7 +75,12 @@ REFLECTION_GROUPS: dict[str, str] = {
 # registry entry AND each per-project record, all classified into the parent's
 # group. Hard-coded as a tuple at module-load so there is exactly one place to
 # update when adding a new prefix-expanded reflection (per plan C1-R2).
-_PREFIX_EXPANDED_REFLECTIONS: tuple[str, ...] = ("pm-audio-briefing",)
+# The ``pm-audio-briefing`` registry entry (kept as the import path is widely
+# referenced) now produces per-(project x slot) Reflection records named
+# ``pm-briefings-<slug>-<slot>`` after issue #1276. Both prefixes are listed so
+# any pre-rename ``pm-audio-briefing-<slug>`` records still in Redis continue
+# to surface on the dashboard.
+_PREFIX_EXPANDED_REFLECTIONS: tuple[str, ...] = ("pm-briefings", "pm-audio-briefing")
 
 
 def _classify_group(name: str) -> str:
@@ -130,6 +139,16 @@ def _build_entry(name: str, config: dict, state, now: float) -> dict:
     }
 
 
+_PREFIX_FALLBACK_PARENTS: dict[str, str] = {
+    # The pm-briefings consolidation (#1276) writes per-(project x slot)
+    # records under the "pm-briefings-" prefix, but the registry entry name
+    # remains "pm-audio-briefing" until the vault yaml is renamed in a
+    # follow-up. Map the new prefix to the legacy registry parent so the
+    # records surface on the dashboard immediately.
+    "pm-briefings": "pm-audio-briefing",
+}
+
+
 def _expand_prefix_records(
     registry: dict[str, dict], states: dict[str, "object"], now: float
 ) -> list[dict]:
@@ -144,15 +163,21 @@ def _expand_prefix_records(
     for prefix in _PREFIX_EXPANDED_REFLECTIONS:
         parent = registry.get(prefix)
         if parent is None:
-            # Parent entry isn't registered (e.g. removed from YAML) -- skip
-            # to avoid surfacing orphan per-project rows without context.
+            # Try the fallback-parent table (consolidation transition).
+            fallback = _PREFIX_FALLBACK_PARENTS.get(prefix)
+            if fallback is not None:
+                parent = registry.get(fallback)
+        if parent is None:
+            # No parent and no fallback -- skip to avoid orphan rows without
+            # context. (e.g. a prefix listed but never registered.)
             continue
         needle = f"{prefix}-"
         for record_name, state in states.items():
             if not record_name.startswith(needle) or record_name == prefix:
                 continue
             row = _build_entry(record_name, parent, state, now)
-            # Per-project rows reuse the parent's group classification.
+            # Per-project rows reuse the prefix's group classification (which
+            # may differ from the fallback parent's group).
             row["group"] = _classify_group(prefix)
             rows.append(row)
     return rows

@@ -1,12 +1,30 @@
 """
-reflections/pm_audio_briefing — Daily PM audio briefing reflection.
+reflections/pm_audio_briefing — Slot-driven PM briefings reflection.
 
-Per-project fan-out: iterates load_local_projects(), filters by
-pm_briefing.enabled and machine ownership, and on each project's local
-schedule slot constructs a 30-second voice brief (numbers-free) plus a
-written follow-up (with numbers + links).
+One reflection (registered as ``pm-briefings``) owns ALL PM-facing slot-
+driven content. Each project declares any number of "briefing slots" in its
+``pm_briefing.slots`` config; at each tick the dispatcher fans out
+(project x slot), runs the slot-specific ``build()``, and delivers ONE
+Telegram message per (project, slot) per day.
 
-See docs/features/pm-audio-briefing.md for the full design.
+Backward compatibility: a project with the legacy
+``pm_briefing.angles + pm_briefing.schedule`` shape (single morning brief)
+is interpreted as a one-element slot list ``[{name: "morning", type:
+"morning", schedule: <existing>, angles: <existing>}]`` -- zero
+``projects.json`` edits required for existing morning-brief users.
+
+Slot types and their builders are wired in ``_SLOT_BUILDERS``:
+- ``morning`` -> ``morning.build``
+- ``daily_log`` -> ``daily_log.build``
+- ``log_audit`` -> ``log_audit.build``
+
+Lock-release policy (per the plan's Implementation Notes): the dispatcher
+acquires SETNX, dispatches to the pure ``slot.build()``, and ONLY THEN
+performs side effects. Slot builders are pure functions returning
+``(transcript, followup, raw_signals)``. Pre-side-effect failure releases
+the lock; post-side-effect failure HOLDS the lock to prevent duplicates.
+
+See ``docs/features/pm-briefings.md`` for the full design.
 """
 
 from __future__ import annotations
@@ -15,11 +33,13 @@ import logging
 import os
 import subprocess
 import time
+import uuid
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from reflections.pm_audio_briefing import builder, collector, delivery
+from reflections.pm_audio_briefing import daily_log, log_audit, morning
 from reflections.utils import load_local_projects
 
 logger = logging.getLogger("reflections.pm_audio_briefing")
@@ -27,6 +47,15 @@ logger = logging.getLogger("reflections.pm_audio_briefing")
 # One-shot startup logging gate (logs project counts on first tick after
 # process start, never again).
 _startup_logged = False
+
+
+SlotBuilder = Callable[[dict, dict], tuple[str, str, dict[str, Any]]]
+
+_SLOT_BUILDERS: dict[str, SlotBuilder] = {
+    "morning": morning.build,
+    "daily_log": daily_log.build,
+    "log_audit": log_audit.build,
+}
 
 
 def _resolve_machine() -> str:
@@ -44,12 +73,7 @@ def _resolve_machine() -> str:
 
 
 def _slot_match(now_local: datetime, schedule: str) -> bool:
-    """Absolute-minute arithmetic slot match.
-
-    Returns True iff `now_local` is within the 5-minute slot window starting
-    at `schedule` (HH:MM). Handles hour rollover correctly:
-    schedule="00:58" matches now=01:02 because 58 <= 62 < 63.
-    """
+    """Absolute-minute arithmetic slot match (5-minute window starting at HH:MM)."""
     try:
         sh, sm = schedule.split(":")
         slot_start_abs = int(sh) * 60 + int(sm)
@@ -59,48 +83,26 @@ def _slot_match(now_local: datetime, schedule: str) -> bool:
     return slot_start_abs <= now_abs < slot_start_abs + 5
 
 
-def _today_in_project_tz(project: dict) -> tuple[Any, str]:
-    """Return (date_obj, isoformat_str) anchored in the project's timezone."""
+def _project_tz(project: dict) -> ZoneInfo:
     tz_name = (project.get("pm_briefing") or {}).get("timezone") or "UTC"
     try:
-        tz = ZoneInfo(tz_name)
-    except Exception:  # swallow-ok: bad/missing tz name falls back to UTC; not a fatal config error
-        tz = ZoneInfo("UTC")
-    today = datetime.fromtimestamp(time.time(), tz=tz).date()
+        return ZoneInfo(tz_name)
+    except Exception:  # swallow-ok: bad/missing tz name falls back to UTC
+        return ZoneInfo("UTC")
+
+
+def _today_in_project_tz(project: dict) -> tuple[Any, str]:
+    """Return ``(date_obj, isoformat_str)`` anchored in the project's timezone."""
+    today = datetime.fromtimestamp(time.time(), tz=_project_tz(project)).date()
     return today, today.isoformat()
 
 
 def _now_in_project_tz(project: dict) -> datetime:
-    tz_name = (project.get("pm_briefing") or {}).get("timezone") or "UTC"
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:  # swallow-ok: bad/missing tz name falls back to UTC; not a fatal config error
-        tz = ZoneInfo("UTC")
-    return datetime.now(tz=tz)
+    return datetime.now(tz=_project_tz(project))
 
 
-def _last_run_date_in_project_tz(reflection, project: dict):
-    """Resolve the last-run calendar date in the project's timezone.
-
-    `reflection.ran_at` is a unix-epoch float. The Reflection model has no
-    `ran_at_date` shortcut -- we always compute it via
-    datetime.fromtimestamp(ran_at, tz=ZoneInfo(...)).date().
-    """
-    if not reflection or not reflection.ran_at:
-        return None
-    tz_name = (project.get("pm_briefing") or {}).get("timezone") or "UTC"
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:  # swallow-ok: bad/missing tz name falls back to UTC; not a fatal config error
-        tz = ZoneInfo("UTC")
-    try:
-        return datetime.fromtimestamp(float(reflection.ran_at), tz=tz).date()
-    except (TypeError, ValueError):
-        return None
-
-
-def _redis_lock_key(project_key: str, today_iso: str) -> str:
-    return f"pm-briefing-lock:{project_key}:{today_iso}"
+def _redis_lock_key(project_key: str, slot_name: str, today_iso: str) -> str:
+    return f"pm-briefings-lock:{project_key}:{slot_name}:{today_iso}"
 
 
 def _try_acquire_lock(redis_conn, key: str, ttl_s: int = 90000) -> bool:
@@ -120,119 +122,263 @@ def _release_lock(redis_conn, key: str) -> None:
         logger.debug("Failed to release lock %s: %s", key, e)
 
 
-def _process_one_project(project: dict, this_machine: str, *, dry_run: bool) -> dict:
-    """Run the full per-project pipeline. Returns a status dict.
+def _load_slots(project: dict) -> list[dict]:
+    """Resolve the slot list for a project.
 
-    The lock-release policy is split:
-    - Pre-side-effect failure (collector or builder raises BEFORE the first
-      r.rpush): release the lock so the next tick can retry on
-      last_status="error".
-    - Post-side-effect failure (delivery raises after the first r.rpush):
-      DO NOT release the lock. Subsequent ticks see the held lock and skip.
-      The next day's lock key is different (different date) so the briefing
-      resumes naturally tomorrow.
+    Backward-compat: if ``pm_briefing.slots`` is missing but the legacy
+    ``pm_briefing.angles + pm_briefing.schedule`` keys are present,
+    synthesize a single ``morning`` slot. Existing morning-brief users do
+    NOT need to edit ``projects.json``.
+
+    A slot dict has the following recognized keys:
+        - ``name`` (str, required) -- unique identifier within the project
+        - ``type`` (str, required) -- must be a key of ``_SLOT_BUILDERS``
+        - ``schedule`` (str, "HH:MM", required) -- local-time match
+        - ``target_groups`` (list[str], optional) -- Telegram groups to
+          deliver to; falls back to ``pm_briefing.target_groups``
+        - ``voice`` (str, optional) -- TTS voice override
+        - ``vault_writer`` (bool, optional) -- only for ``daily_log`` slot;
+          default False. Single-machine-ownership invariant ensures one
+          machine owns this flag for any given (project, date).
+        - ``skip_when_empty`` (bool, optional) -- default True
+        - ``angles`` (dict, optional) -- for ``morning`` slot; fallback to
+          ``pm_briefing.angles``
+    """
+    pm = project.get("pm_briefing") or {}
+    slots = pm.get("slots")
+    if isinstance(slots, list) and slots:
+        return [dict(s) for s in slots if isinstance(s, dict)]
+
+    # Legacy single-morning-brief shape.
+    if pm.get("schedule"):
+        return [
+            {
+                "name": "morning",
+                "type": "morning",
+                "schedule": pm.get("schedule"),
+                "angles": pm.get("angles") or {},
+                "target_groups": list(pm.get("target_groups") or []),
+                "voice": pm.get("voice"),
+                "skip_when_empty": bool(pm.get("skip_when_empty", False)),
+                "fallback_message": pm.get("fallback_message"),
+            }
+        ]
+    return []
+
+
+def _resolve_target_groups(project: dict, slot_config: dict) -> list[str]:
+    pm = project.get("pm_briefing") or {}
+    return list(slot_config.get("target_groups") or pm.get("target_groups") or [])
+
+
+def _send_text_only(
+    redis_conn, project: dict, target_groups: list[str], text: str
+) -> dict[str, str]:
+    """Enqueue a plain text Telegram payload to each target group.
+
+    Mirrors the text-payload pattern from
+    ``reflections.pm_audio_briefing.delivery._text_payload``.
+    """
+    import json
+
+    from reflections.pm_audio_briefing.delivery import _resolve_chat_id, _text_payload
+
+    session_id = f"pm-briefings-text-{uuid.uuid4().hex[:8]}"
+    queue_key = f"telegram:outbox:{session_id}"
+    results: dict[str, str] = {}
+    for group in target_groups:
+        chat_id = _resolve_chat_id(project, group)
+        if chat_id is None:
+            results[group] = "skipped_no_chat_id"
+            continue
+        payload = _text_payload(chat_id=chat_id, text=text, session_id=session_id)
+        try:
+            redis_conn.rpush(queue_key, json.dumps(payload))
+            redis_conn.expire(queue_key, 3600)
+            results[group] = "enqueued"
+        except Exception as e:
+            logger.warning("text payload enqueue failed for %s: %s", group, e)
+            results[group] = f"error:{type(e).__name__}"
+    return results
+
+
+def _run_slot(
+    project: dict,
+    slot_config: dict,
+    *,
+    dry_run: bool,
+) -> dict:
+    """Run a single (project x slot). Returns a status dict.
+
+    The dispatcher owns ALL side effects (lock acquire, delivery enqueue,
+    Reflection record update). The slot's ``build()`` is pure -- it does
+    NOT touch Redis, Telegram, or Reflection state.
     """
     from models.reflection import Reflection
+    from reflections.pm_audio_briefing.delivery import (
+        BriefingTtsFailedError,
+        _get_redis_connection,
+        send,
+    )
 
     project_key = project.get("slug") or "unknown"
-    pm = project.get("pm_briefing") or {}
-
-    # Machine-ownership filter.
-    project_machine = (project.get("machine") or "").strip()
-    if this_machine and project_machine and project_machine != this_machine:
-        return {"status": "skipped", "reason": "wrong_machine"}
+    slot_name = slot_config.get("name") or slot_config.get("type") or "unknown"
+    slot_type = slot_config.get("type") or slot_name
 
     # Schedule-slot filter.
-    schedule = pm.get("schedule") or ""
+    schedule = slot_config.get("schedule") or ""
     if not schedule:
         return {"status": "skipped", "reason": "no_schedule"}
     now_local = _now_in_project_tz(project)
     if not _slot_match(now_local, schedule):
         return {"status": "skipped", "reason": "outside_slot"}
 
-    # Idempotency check (cheap, skip-only-on-success).
     today_obj, today_iso = _today_in_project_tz(project)
-    reflection_name = f"pm-audio-briefing-{project_key}"
+
+    # Per-(project x slot) Reflection record (drives dashboard expansion).
+    reflection_name = f"pm-briefings-{project_key}-{slot_name}"
     reflection = Reflection.get_or_create(name=reflection_name)
-    last_run_date = _last_run_date_in_project_tz(reflection, project)
-    if last_run_date == today_obj and reflection.last_status == "success":
-        return {"status": "skipped", "reason": "already_succeeded_today"}
 
-    # Acquire SETNX lock (the within-tick atomic gate).
-    from reflections.pm_audio_briefing.delivery import _get_redis_connection
+    # Idempotency: if the per-(project x slot) record already succeeded
+    # today (in the project's local tz), skip without acquiring the lock.
+    if reflection.ran_at:
+        try:
+            last_local_date = datetime.fromtimestamp(
+                float(reflection.ran_at), tz=_project_tz(project)
+            ).date()
+        except (TypeError, ValueError):
+            last_local_date = None
+        if last_local_date == today_obj and reflection.last_status == "success":
+            return {"status": "skipped", "reason": "already_succeeded_today"}
 
+    # Acquire SETNX lock.
     redis_conn = _get_redis_connection()
-    lock_key = _redis_lock_key(project_key, today_iso)
+    lock_key = _redis_lock_key(project_key, slot_name, today_iso)
     if not _try_acquire_lock(redis_conn, lock_key):
         return {"status": "skipped", "reason": "lock_held"}
 
+    builder_fn = _SLOT_BUILDERS.get(slot_type)
+    if builder_fn is None:
+        _release_lock(redis_conn, lock_key)
+        return {
+            "status": "error",
+            "phase": "dispatch",
+            "error": f"unknown slot type {slot_type!r}",
+        }
+
     started_at = time.time()
     side_effect_started = False
+    findings_count = 0
     reflection.mark_started()
     try:
-        # --- Pre-side-effect phase ---
-        angles = pm.get("angles") or {}
-        include = list(angles.get("include") or [])
-        exclude = list(angles.get("exclude") or [])
-        raw = collector.collect(project, include, exclude)
-        transcript, followup = builder.build(
-            raw,
-            fallback_message=pm.get("fallback_message") or "Nothing shipped yesterday.",
-            skip_when_empty=bool(pm.get("skip_when_empty", False)),
-            project=project,
-        )
+        # --- Pre-side-effect: pure build ---
+        transcript, followup, raw_signals = builder_fn(project, slot_config)
+        findings_count = len(raw_signals.get("findings", []))
 
-        # If skip_when_empty fired and produced an empty transcript, record
-        # success-with-noop; hold the lock for the day (expires at 25h TTL).
-        if not transcript:
-            reflection.mark_completed(
-                duration=time.time() - started_at,
-                error=None,
-            )
-            return {"status": "noop", "reason": "skip_when_empty"}
+        # Skip-when-empty: a slot whose build returns no transcript and no
+        # followup is a noop.
+        if not transcript and not followup:
+            duration = time.time() - started_at
+            reflection.mark_completed(duration=duration, error=None)
+            return {
+                "status": "noop",
+                "reason": "skip_when_empty",
+                "slot": slot_name,
+                "date_iso": today_iso,
+                "duration": duration,
+                "findings_count": findings_count,
+            }
 
-        # --- Side-effect phase begins inside delivery.send() ---
-        target_groups = list(pm.get("target_groups") or [])
+        # --- Side-effect phase: delivery ---
+        target_groups = _resolve_target_groups(project, slot_config)
         if not target_groups:
-            raise RuntimeError("pm_briefing.target_groups is empty")
+            raise RuntimeError(
+                f"slot {slot_name!r} has no target_groups "
+                "(and project.pm_briefing.target_groups is empty)"
+            )
         side_effect_started = True
 
-        result = delivery.send(
-            transcript,
-            followup,
-            target_groups,
-            project,
-            voice=pm.get("voice"),
-            dry_run=dry_run,
-        )
-        reflection.mark_completed(duration=time.time() - started_at, error=None)
+        if transcript:
+            # Voice + (optional) follow-up.
+            result = send(
+                transcript,
+                followup,
+                target_groups,
+                project,
+                voice=slot_config.get("voice") or (project.get("pm_briefing") or {}).get("voice"),
+                dry_run=dry_run,
+            )
+        else:
+            # Text-only slot (e.g. log_audit). Use the delivery helpers
+            # directly to enqueue ONE text payload per target group.
+            result = _send_text_only(redis_conn, project, target_groups, followup)
+
+        duration = time.time() - started_at
+        reflection.mark_completed(duration=duration, error=None)
+
         # On dry-run, release the lock so re-runs are allowed during testing.
         if dry_run:
             _release_lock(redis_conn, lock_key)
-        return {"status": "ok", "delivery": result}
+
+        return {
+            "status": "ok",
+            "slot": slot_name,
+            "date_iso": today_iso,
+            "delivery": result,
+            "duration": duration,
+            "findings_count": findings_count,
+        }
+    except BriefingTtsFailedError as e:
+        # TTS failure is a "post-side-effect" failure (the failure-notice
+        # text payload was already enqueued by delivery.send). HOLD the lock.
+        duration = time.time() - started_at
+        err_msg = f"BriefingTtsFailedError: {e}"
+        reflection.mark_completed(duration=duration, error=err_msg)
+        return {
+            "status": "error",
+            "phase": "post_side_effect",
+            "slot": slot_name,
+            "date_iso": today_iso,
+            "error": err_msg,
+            "duration": duration,
+            "findings_count": findings_count,
+        }
     except Exception as e:
-        # Distinguish pre- vs post-side-effect failure.
+        duration = time.time() - started_at
         err_msg = f"{type(e).__name__}: {e}"
-        reflection.mark_completed(duration=time.time() - started_at, error=err_msg)
+        reflection.mark_completed(duration=duration, error=err_msg)
         if not side_effect_started:
-            # Safe to release: nothing was enqueued.
             _release_lock(redis_conn, lock_key)
-            return {"status": "error", "phase": "pre_side_effect", "error": err_msg}
-        # Side-effects already started -- HOLD the lock to prevent duplicate
-        # voice-notes on next tick. Next-day's lock is different.
-        return {"status": "error", "phase": "post_side_effect", "error": err_msg}
+            return {
+                "status": "error",
+                "phase": "pre_side_effect",
+                "slot": slot_name,
+                "date_iso": today_iso,
+                "error": err_msg,
+                "duration": duration,
+                "findings_count": findings_count,
+            }
+        return {
+            "status": "error",
+            "phase": "post_side_effect",
+            "slot": slot_name,
+            "date_iso": today_iso,
+            "error": err_msg,
+            "duration": duration,
+            "findings_count": findings_count,
+        }
 
 
 async def run() -> dict:
     """Entry point invoked by the reflection scheduler.
 
-    Iterates all local projects with pm_briefing configured, runs the
-    per-project pipeline in isolation (one project's failure does NOT abort
-    others), and returns an aggregate status dict.
+    Iterates all local projects with ``pm_briefing.enabled = True`` AND
+    ``machine`` matching this host, then iterates each project's slot list
+    and dispatches matching slots. Per-(project x slot) failures are
+    isolated: one slot's exception does NOT abort other slots or projects.
 
-    The `interval: 300` registry entry means this is invoked every 5
-    minutes. The per-project schedule slot inside the callable is the real
-    once-per-day gate.
+    Returns an aggregate status dict suitable for
+    ``Reflection.mark_completed(projects=[...])``.
     """
     global _startup_logged
     dry_run = os.environ.get("DRY_RUN") == "1"
@@ -251,7 +397,7 @@ async def run() -> dict:
     if not _startup_logged:
         skipped = len(eligible) - len(owned)
         logger.info(
-            "pm-audio-briefing: loaded %d projects with pm_briefing.enabled=true on %s "
+            "pm-briefings: loaded %d projects with pm_briefing.enabled=true on %s "
             "(skipped %d not owned by this machine)",
             len(owned),
             this_machine or "(unknown machine)",
@@ -260,23 +406,53 @@ async def run() -> dict:
         _startup_logged = True
 
     results: dict[str, dict] = {}
+    project_records: list[dict] = []
     successes = 0
     failures = 0
+
     for project in owned:
         slug = project.get("slug") or "unknown"
-        try:
-            res = _process_one_project(project, this_machine, dry_run=dry_run)
-        except Exception as e:
-            res = {"status": "error", "phase": "outer", "error": str(e)}
-        results[slug] = res
-        if res.get("status") == "ok" or res.get("status") == "noop":
-            successes += 1
-        elif res.get("status") == "error":
-            failures += 1
+        slots = _load_slots(project)
+        if not slots:
+            results[slug] = {"status": "skipped", "reason": "no_slots"}
+            continue
+        for slot in slots:
+            slot_name = slot.get("name") or slot.get("type") or "unknown"
+            key = f"{slug}:{slot_name}"
+            try:
+                res = _run_slot(project, slot, dry_run=dry_run)
+            except Exception as e:
+                res = {
+                    "status": "error",
+                    "phase": "outer",
+                    "slot": slot_name,
+                    "error": f"{type(e).__name__}: {e}",
+                }
+            results[key] = res
+            project_records.append(
+                {
+                    "slug": slug,
+                    "slot": slot_name,
+                    "status": res.get("status", "unknown"),
+                    "duration": float(res.get("duration") or 0.0),
+                    "findings_count": int(res.get("findings_count") or 0),
+                    "error": res.get("error"),
+                    "date_iso": res.get("date_iso"),
+                }
+            )
+            # "skipped" slots (outside_slot, no_schedule, lock_held,
+            # already_succeeded_today) are intentionally NOT counted as
+            # successes or failures — they aren't run-attempts. As a result,
+            # summary.succeeded + summary.failed <= considered * slots_per_project.
+            if res.get("status") in ("ok", "noop"):
+                successes += 1
+            elif res.get("status") == "error":
+                failures += 1
 
     return {
-        "status": "ok" if failures == 0 else "partial" if successes else "error",
-        "projects": results,
+        "status": "ok" if failures == 0 else ("partial" if successes else "error"),
+        "projects": project_records,
+        "results": results,
         "summary": {
             "considered": len(owned),
             "succeeded": successes,

@@ -90,7 +90,7 @@ each update run. This ensures the scheduler always reads the vault version.
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `daily-log-review` | `reflections.auditing.run_log_review` | Review previous day's logs per project; sends summary to `Dev: Valor` Telegram (with optional Sentry counts) |
+| `daily-log-review` | `reflections.auditing.run_log_review` | **Superseded** by the `pm-briefings` `log_audit` slot type (issue #1276). Disable in vault registry on rollout — see [pm-briefings.md](pm-briefings.md). |
 | `docs-auditor` | `reflections.docs_auditor.run_docs_auditor` | Unified docs auditor: rotates least-recently-audited primary doc, applies auto-fixes, opens `docs-audit/*` PR (see [Docs Auditor](docs-auditor.md)) |
 | `do-docs-branch-sweeper` | `reflections.docs_auditor.run_docs_branch_sweeper` | Delete stale `docs-audit/*` branches >7d with no PR; close open `docs-audit/*` PRs >14d |
 | `skills-audit` | `reflections.auditing.run_skills_audit` | Validate all SKILL.md files (see [Skills Audit](do-skills-audit.md)) |
@@ -110,8 +110,8 @@ each update run. This ensures the scheduler always reads the vault version.
 |------|----------|-------------|
 | `session-intelligence` | `reflections.session_intelligence.run` | Session Analysis → LLM Reflection → Bug Issue Filing **(disabled — calls gh CLI and spawns agent)** |
 | `behavioral-learning` | `reflections.behavioral_learning.run` | Episode Cycle-Close → Pattern Crystallization |
-| `daily-report-and-notify` | `reflections.daily_report.run` | Aggregate yesterday's system activity → write Markdown day log to work vault → deliver `/do-debrief`-style audio brief to PM Telegram (no plaintext fallback). See [Distinct daily reflections](#distinct-daily-reflections). |
-| `pm-audio-briefing` | `reflections.pm_audio_briefing.run` | Daily per-project voice brief delivered to Telegram (numbers-free audio + numbered written follow-up). 5-minute registry tick; per-project schedule slot in `projects.json` is the once-per-day gate. See [PM Audio Briefing](pm-audio-briefing.md). |
+| `daily-report-and-notify` | `reflections.daily_report.run` | **Superseded** by the `pm-briefings` `daily_log` slot type (issue #1276). Already disabled; daily activity recap now ships via the slot dispatch — see [pm-briefings.md](pm-briefings.md). |
+| `pm-audio-briefing` | `reflections.pm_audio_briefing.run` | Slot-driven PM briefings dispatcher (issue #1276 consolidated `pm-audio-briefing` + `daily-log-review` + `daily-report-and-notify` into one). Each project declares slots (`morning`, `daily_log`, `log_audit`) in `projects.json`; legacy single-morning shape is auto-migrated. See [pm-briefings.md](pm-briefings.md). |
 
 **Memory management:**
 
