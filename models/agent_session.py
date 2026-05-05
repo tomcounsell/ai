@@ -197,6 +197,16 @@ class AgentSession(Model):
     # calls in the same process (#1127 PR #1135 review tech-debt).
     claude_session_uuid = IndexedField(null=True)
 
+    # === Claude CLI subprocess PID (issue #1271) ===
+    # The OS PID of the `claude_agent_sdk/_bundled/claude` subprocess spawned
+    # for this session. Persistent across the session's lifetime (cleared on
+    # terminal-state transitions in `models/session_lifecycle.py`). Written by
+    # the `_on_sdk_started(pid)` callback in `agent/session_executor.py`.
+    # IndexedField so the cross-process orphan reaper
+    # (`agent/session_health.py::_reap_orphan_session_processes`) can resolve
+    # the owning session per-PID via `find_by_claude_pid()` without a full scan.
+    claude_pid = IndexedField(null=True)
+
     # === Tracing ===
     correlation_id = Field(null=True)  # End-to-end request tracing ID
 
@@ -786,6 +796,49 @@ class AgentSession(Model):
                 "AgentSession.get_by_id found %d sessions for id=%s (expected 1)",
                 len(results),
                 agent_session_id,
+            )
+        return results[0]
+
+    @classmethod
+    def find_by_claude_pid(cls, pid: int | None) -> "AgentSession | None":
+        """Look up the AgentSession that owns the given Claude CLI subprocess PID.
+
+        Issue #1271. Used by the cross-process orphan reaper
+        (``agent/session_health.py::_reap_orphan_session_processes``) to gate
+        kills on the owning session's heartbeat freshness — only provably stale
+        or terminal sessions' subprocesses are reaped.
+
+        Args:
+            pid: The OS PID of a `claude_agent_sdk/_bundled/claude` subprocess.
+
+        Returns:
+            The matching AgentSession (first if multiple match — should never
+            happen in steady state because PIDs are unique while live), or
+            None if no record matches or pid is None/invalid.
+        """
+        if pid is None:
+            return None
+        try:
+            pid_int = int(pid)
+        except (TypeError, ValueError):
+            return None
+        try:
+            results = list(cls.query.filter(claude_pid=pid_int))
+        except Exception as exc:
+            logger.warning(
+                "AgentSession.find_by_claude_pid lookup failed for pid=%s: %s",
+                pid_int,
+                exc,
+            )
+            return None
+        if not results:
+            return None
+        if len(results) > 1:
+            logger.warning(
+                "AgentSession.find_by_claude_pid found %d sessions for pid=%s "
+                "(expected 1) — returning the first hydrated record",
+                len(results),
+                pid_int,
             )
         return results[0]
 

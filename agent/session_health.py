@@ -14,8 +14,9 @@ See ``docs/features/pm-session-liveness.md`` for the full model.
 import asyncio
 import logging
 import os
+import re
 import signal
-import subprocess
+import socket
 import time
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
@@ -27,6 +28,42 @@ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 from models.session_lifecycle import get_authoritative_session
 
 logger = logging.getLogger(__name__)
+
+# === Cross-process orphan reaper constants (issue #1271) ===
+#
+# Compiled cmdline regex patterns. Two signatures match:
+#   - Claude CLI (``claude_agent_sdk/_bundled/claude``)
+#   - Any MCP server module under ``mcp_servers/``
+#
+# The worker pattern (``python -m worker``) is INTENTIONALLY EXCLUDED:
+# on macOS, every launchd-respawned worker has PPID==1 by design (launchd is
+# PID 1 and ``com.valor.worker.plist`` sets ``KeepAlive=true``), so a worker
+# signature + PPID==1 filter would match every live worker. As an additional
+# defense-in-depth layer, the reaper builds a positive-ID skip-set from
+# ``worker:registered_pid:*`` Redis keys.
+_CLAUDE_CMDLINE_RE = re.compile(r"claude_agent_sdk/_bundled/claude\b")
+_MCP_SERVER_CMDLINE_RE = re.compile(r"mcp_servers/[\w_]+\.py\b")
+
+# Heartbeat-freshness threshold for the per-PID gate (30 minutes).
+ORPHAN_PROCESS_HEARTBEAT_GRACE_SECONDS = 1800
+
+# Redis key prefix for positive-ID self-protection. Worker writes
+# ``worker:registered_pid:{hostname}:{pid}`` at startup with TTL, refreshed on
+# every heartbeat tick. The reaper reads all keys matching the prefix and adds
+# the integer values to its skip-set.
+WORKER_REGISTERED_PID_KEY_PREFIX = "worker:registered_pid:"
+WORKER_REGISTERED_PID_TTL_SECONDS = 86400  # 24h
+
+# SIGKILL escalation queue for cross-process orphans.
+# Stages ``(pid, create_time)`` tuples. At drain time the reaper reconstructs
+# ``psutil.Process(pid)`` and verifies ``proc.create_time() == staged`` BEFORE
+# issuing SIGKILL — if the create_time differs, macOS recycled the PID to an
+# unrelated process and the SIGKILL is skipped.
+_pending_sigkill_orphans: set[tuple[int, float]] = set()
+
+# Hostname captured at module load — used by the orphan-reap counter and the
+# registered-PID key. Captured here (vs called per-tick) for amortization.
+_ORPHAN_REAP_HOSTNAME = socket.gethostname()
 
 
 def _filter_hydrated_sessions(sessions: Iterable) -> list[AgentSession]:
@@ -1526,8 +1563,31 @@ async def _dependency_health_check() -> None:
     pass
 
 
+def register_worker_pid() -> None:
+    """Write ``worker:registered_pid:{hostname}:{pid}`` to Redis with TTL.
+
+    Issue #1271. Called from worker startup AND from ``_write_worker_heartbeat``
+    on every heartbeat tick. The cross-process orphan reaper reads all keys
+    matching the prefix and adds their integer values to its skip-set, so a
+    live worker is never reaped even if a future code change re-adds the
+    worker pattern to the cmdline regex set. Failure is non-fatal: the reaper
+    still has ``os.getpid()`` in its skip-set.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        pid = os.getpid()
+        key = f"{WORKER_REGISTERED_PID_KEY_PREFIX}{_ORPHAN_REAP_HOSTNAME}:{pid}"
+        _R.set(key, pid, ex=WORKER_REGISTERED_PID_TTL_SECONDS)
+    except Exception as e:
+        logger.debug("[session-health] register_worker_pid write failed: %s", e)
+
+
 def _write_worker_heartbeat() -> None:
-    """Write worker heartbeat file so the dashboard can show worker status."""
+    """Write worker heartbeat file so the dashboard can show worker status.
+
+    Also refreshes the worker's registered-PID key in Redis (issue #1271).
+    """
     heartbeat_file = Path(__file__).parent.parent / "data" / "last_worker_connected"
     try:
         heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1536,6 +1596,10 @@ def _write_worker_heartbeat() -> None:
         os.replace(tmp, heartbeat_file)
     except OSError:
         pass
+    try:
+        register_worker_pid()
+    except Exception as e:
+        logger.debug("[session-health] register_worker_pid refresh failed: %s", e)
 
 
 async def _agent_session_health_loop() -> None:
@@ -1604,7 +1668,7 @@ def _delete_with_stale_key_lookup(session) -> bool:
         return False
 
 
-def cleanup_corrupted_agent_sessions() -> int:
+def cleanup_corrupted_agent_sessions() -> dict[str, int]:
     """Delete AgentSession records with corrupted data that prevent .save().
 
     Detects sessions where the ID field has an invalid length (e.g., 60 chars
@@ -1632,8 +1696,16 @@ def cleanup_corrupted_agent_sessions() -> int:
     Called by the reflection scheduler as the 'agent-session-cleanup' reflection.
     Also safe to call from startup recovery or the update script.
 
-    Returns the number of corrupted sessions deleted. The phantom count and
-    orphan-cleanup stats are logged at INFO but not returned.
+    Issue #1271: after the corrupted-record pass and ``repair_indexes()``, this
+    function calls ``_reap_orphan_session_processes()`` to scan the OS process
+    table for PPID==1 orphan claude/MCP subprocesses. Reaper failure is
+    swallowed and reported as ``orphans=0`` in the return dict — never aborts
+    the corrupted-record cleanup.
+
+    Returns a dict ``{"corrupted": int, "orphans": int}``:
+        - ``corrupted``: number of corrupted AgentSession records deleted.
+        - ``orphans``: number of OS-process orphans reaped (parent kills only;
+          descendants are bookkeeping for the staged SIGKILL drain).
     """
     cleaned = 0
     raw_sessions = list(AgentSession.query.all())
@@ -1716,86 +1788,294 @@ def cleanup_corrupted_agent_sessions() -> int:
     else:
         logger.debug("[agent-session-cleanup] No corrupted sessions found")
 
-    return cleaned
+    # === Cross-process orphan reap pass (#1271) ===
+    # Wrapped in try/except — reaper failure must never abort corrupted-record
+    # cleanup. On reaper exception, log WARNING and report orphans=0.
+    orphans_reaped = 0
+    try:
+        orphans_reaped = _reap_orphan_session_processes()
+    except Exception as reap_err:
+        logger.warning(
+            "[agent-session-cleanup] Orphan-process reaper raised (non-fatal): %s",
+            reap_err,
+            exc_info=True,
+        )
+        orphans_reaped = 0
+
+    return {"corrupted": cleaned, "orphans": orphans_reaped}
+
+
+def _psutil_process_for_pid(pid: int):
+    """Construct a ``psutil.Process(pid)`` or return None on lookup failure.
+
+    Wrapped in a function to make patching from tests trivial. Issue #1271.
+    """
+    try:
+        import psutil
+
+        return psutil.Process(pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return None
+    except Exception:
+        return None
+
+
+def _session_is_alive(session) -> bool:
+    """Return True if the owning session's heartbeat is fresh enough to skip.
+
+    Decision matrix (issue #1271):
+      - status in TERMINAL_STATUSES → False (kill the orphan)
+      - last_heartbeat_at is None → False (never heartbeated)
+      - (now - last_heartbeat_at) < 30min → True (alive, skip)
+      - else → False (stale, kill)
+    """
+    status = getattr(session, "status", None)
+    if status in _TERMINAL_STATUSES:
+        return False
+    hb = getattr(session, "last_heartbeat_at", None)
+    if hb is None:
+        return False
+    try:
+        if isinstance(hb, datetime):
+            if hb.tzinfo is None:
+                hb = hb.replace(tzinfo=UTC)
+            age = (datetime.now(UTC) - hb).total_seconds()
+        else:
+            age = time.time() - float(hb)
+    except Exception:
+        return False
+    return age < ORPHAN_PROCESS_HEARTBEAT_GRACE_SECONDS
+
+
+def _increment_orphan_process_counter(session) -> None:
+    """Increment the appropriate orphan-reap counter (issue #1271).
+
+    Known owning session: ``{project_key}:session-health:orphan_process_reaped``.
+    Unknown:              ``session-health:orphan_process_reaped:{hostname}``.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        if session is not None:
+            project_key = getattr(session, "project_key", None) or "unknown"
+            _R.incr(f"{project_key}:session-health:orphan_process_reaped")
+        else:
+            _R.incr(f"session-health:orphan_process_reaped:{_ORPHAN_REAP_HOSTNAME}")
+    except Exception as e:
+        logger.debug("[orphan-reap] counter increment failed (non-fatal): %s", e)
+
+
+def _reap_orphan_session_processes() -> int:
+    """Scan the OS process table for PPID==1 orphans matching Claude/MCP signatures.
+
+    Issue #1271. This is the cross-process orphan reaper. It complements:
+      - ``cleanup_corrupted_agent_sessions()`` — corrupted DB-row reaper
+      - ``_pending_sigkill`` reap inside ``_agent_session_health_check`` (#1218)
+        — in-process map scan
+
+    Algorithm:
+      0. Honor ``DISABLE_ORPHAN_PROCESS_REAP=1`` kill switch (early return 0).
+      1. Drain ``_pending_sigkill_orphans``: for each ``(pid, staged_create_time)``,
+         construct ``psutil.Process(pid)`` and verify ``proc.create_time() ==
+         staged_create_time`` BEFORE issuing SIGKILL. Skip on mismatch.
+      2. Build ``skip_pids`` from ``os.getpid()`` + all
+         ``worker:registered_pid:*`` Redis values.
+      3. Iterate ``psutil.process_iter`` with per-iteration try/except. For
+         each process whose PPID==1 AND cmdline matches the Claude or MCP
+         regex AND PID not in ``skip_pids``: per-PID heartbeat gate, then
+         capture descendants, terminate parent + descendants, stage tuples.
+      4. Counter scheme via ``_increment_orphan_process_counter``.
+
+    Returns the number of *parent* kills (descendants are bookkeeping only).
+    """
+    if os.environ.get("DISABLE_ORPHAN_PROCESS_REAP") == "1":
+        logger.debug("[orphan-reap] Disabled via DISABLE_ORPHAN_PROCESS_REAP=1")
+        return 0
+
+    try:
+        import psutil
+    except ImportError:
+        logger.warning("[orphan-reap] psutil unavailable — skipping reap pass")
+        return 0
+
+    # === Step 1: Drain staged SIGKILL queue with create-time verification ===
+    staged = list(_pending_sigkill_orphans)
+    _pending_sigkill_orphans.clear()
+    for pid, staged_create_time in staged:
+        proc = _psutil_process_for_pid(pid)
+        if proc is None:
+            logger.debug("[orphan-reap] Drain: PID %d already gone, skip SIGKILL", pid)
+            continue
+        try:
+            current_ct = proc.create_time()
+        except Exception as e:
+            logger.debug("[orphan-reap] Drain: create_time() failed for PID %d: %s", pid, e)
+            continue
+        if abs(current_ct - staged_create_time) > 1e-3:
+            logger.debug(
+                "[orphan-reap] Drain: PID %d recycled (create_time %f != %f), skip",
+                pid,
+                current_ct,
+                staged_create_time,
+            )
+            continue
+        try:
+            proc.kill()
+            logger.info("[orphan-reap] Drain: SIGKILL'd PID %d (escalation)", pid)
+        except psutil.NoSuchProcess:
+            pass
+        except Exception as e:
+            logger.debug("[orphan-reap] Drain: kill() failed for PID %d: %s", pid, e)
+
+    # === Step 2: Build skip_pids (positive-ID self-protection) ===
+    skip_pids: set[int] = {os.getpid()}
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        for k in _R.scan_iter(f"{WORKER_REGISTERED_PID_KEY_PREFIX}*"):
+            try:
+                v = _R.get(k)
+                if v is None:
+                    continue
+                skip_pids.add(int(v))
+            except (ValueError, TypeError):
+                continue
+    except Exception as e:
+        logger.debug("[orphan-reap] skip_pids Redis scan failed (non-fatal): %s", e)
+
+    # === Step 3: Iterate process table ===
+    parent_kills = 0
+    try:
+        proc_iter_raw = psutil.process_iter(["pid", "ppid", "cmdline", "create_time"])
+    except Exception as e:
+        logger.warning("[orphan-reap] process_iter failed: %s", e)
+        return 0
+
+    # Coerce to a real iterator so ``next()`` works for both psutil's generator
+    # and test mocks that return a list.
+    proc_iter = iter(proc_iter_raw)
+    while True:
+        try:
+            proc = next(proc_iter)
+        except StopIteration:
+            break
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
+            logger.debug("[orphan-reap] iter exception (continuing): %s", e)
+            continue
+        except Exception as e:
+            logger.debug("[orphan-reap] iter unexpected exception: %s", e)
+            break
+
+        try:
+            info = proc.info or {}
+            pid = info.get("pid")
+            ppid = info.get("ppid")
+            cmdline = info.get("cmdline") or []
+            create_time = info.get("create_time") or 0.0
+
+            if pid is None or ppid is None:
+                continue
+            if pid in skip_pids:
+                continue
+            if ppid != 1:
+                continue
+            if not cmdline:
+                continue
+
+            cmdline_str = " ".join(str(x) for x in cmdline)
+            is_claude = bool(_CLAUDE_CMDLINE_RE.search(cmdline_str))
+            is_mcp = bool(_MCP_SERVER_CMDLINE_RE.search(cmdline_str))
+            if not (is_claude or is_mcp):
+                continue
+
+            # === Per-PID heartbeat gate ===
+            session = AgentSession.find_by_claude_pid(pid)
+            if session is None and is_mcp:
+                # MCP servers don't have a direct claude_pid mapping. Try the
+                # parent: if it resolves to a live session, inherit that decision.
+                try:
+                    parent = proc.parent()
+                    if parent is not None:
+                        session = AgentSession.find_by_claude_pid(parent.pid)
+                except Exception as e:
+                    logger.debug(
+                        "[orphan-reap] proc.parent() lookup failed for PID %d: %s",
+                        pid,
+                        e,
+                    )
+
+            if session is not None and _session_is_alive(session):
+                logger.debug("[orphan-reap] Skip PID %d — owning session is alive", pid)
+                continue
+
+            # === Capture descendants BEFORE killing the parent ===
+            descendants: list = []
+            try:
+                descendants = list(proc.children(recursive=True))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                descendants = []
+            except Exception as e:
+                logger.debug("[orphan-reap] children() failed for PID %d: %s", pid, e)
+                descendants = []
+
+            try:
+                proc.terminate()
+            except psutil.NoSuchProcess:
+                continue
+            except Exception as e:
+                logger.debug("[orphan-reap] terminate() parent PID %d failed: %s", pid, e)
+                continue
+
+            _pending_sigkill_orphans.add((pid, create_time))
+            for d in descendants:
+                d_pid = None
+                d_ct = 0.0
+                try:
+                    d_pid = d.pid
+                    d_ct = d.create_time()
+                    d.terminate()
+                except psutil.NoSuchProcess:
+                    continue
+                except Exception as e:
+                    logger.debug("[orphan-reap] terminate() descendant failed: %s", e)
+                    continue
+                if d_pid is not None:
+                    _pending_sigkill_orphans.add((d_pid, d_ct))
+
+            parent_kills += 1
+            owning_id = getattr(session, "agent_session_id", None) if session else None
+            logger.info(
+                "[orphan-reap] Killed PID %d (cmd=%s, owning_session=%s, descendants=%d)",
+                pid,
+                cmdline_str[:100],
+                owning_id or "<unknown>",
+                len(descendants),
+            )
+
+            _increment_orphan_process_counter(session)
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
+            logger.debug("[orphan-reap] per-PID exception (continuing): %s", e)
+            continue
+        except Exception as e:
+            logger.debug("[orphan-reap] per-PID unexpected exception: %s", e)
+            continue
+
+    return parent_kills
 
 
 def _cleanup_orphaned_claude_processes() -> int:
-    """Kill orphaned Claude Code CLI subprocesses from prior worker/bridge runs.
+    """Backward-compat shim for the cross-process orphan reaper (issue #1271).
 
-    On process restart, SDK subprocesses from the old process may still be alive
-    because Python only cancels asyncio tasks (not OS processes).
-    These zombies block new workers via _ensure_worker's .done() check and
-    consume resources.
+    Originally this function used ``pgrep`` + ``ps`` to scan for orphan
+    ``claude_agent_sdk/_bundled/claude`` processes. As of #1271 it is replaced
+    by ``_reap_orphan_session_processes()`` which uses psutil, walks descendant
+    trees, applies a per-PID heartbeat gate via
+    ``AgentSession.find_by_claude_pid()``, and applies positive-ID
+    self-protection from ``worker:registered_pid:*`` keys.
 
-    Finds all 'claude' processes whose parent is PID 1 (orphaned), then
-    kills them with SIGTERM/SIGKILL.
-
-    Returns the number of processes killed.
+    Kept as a shim so the existing startup wiring in ``worker/__main__.py``
+    (``orphans_killed = _cleanup_orphaned_claude_processes()``) continues to
+    work without rewiring tests.
     """
-    logger = logging.getLogger(__name__)
-    killed = 0
-    current_pid = os.getpid()
-
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "claude_agent_sdk/_bundled/claude"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            return 0
-
-        pids = result.stdout.strip().split("\n")
-        for pid_str in pids:
-            try:
-                pid = int(pid_str.strip())
-                if pid == current_pid:
-                    continue
-
-                # Check parent PID — if PPID is 1 (orphaned), it's stale
-                ppid_result = subprocess.run(
-                    ["ps", "-o", "ppid=", "-p", str(pid)],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if ppid_result.returncode != 0:
-                    continue
-
-                ppid = int(ppid_result.stdout.strip())
-
-                # Only kill if truly orphaned (PPID=1, meaning parent died)
-                if ppid != 1:
-                    continue
-
-                logger.warning(
-                    "[cleanup] Killing orphaned Claude subprocess PID %d (PPID=%d)",
-                    pid,
-                    ppid,
-                )
-                os.kill(pid, signal.SIGTERM)
-                # Wait up to 3 seconds for graceful exit
-                for _ in range(6):
-                    time.sleep(0.5)
-                    try:
-                        os.kill(pid, 0)
-                    except ProcessLookupError:
-                        break
-                else:
-                    logger.warning("[cleanup] Force-killing Claude subprocess PID %d", pid)
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                killed += 1
-
-            except (ValueError, ProcessLookupError, PermissionError) as e:
-                logger.debug("[cleanup] Could not kill PID %s: %s", pid_str, e)
-
-    except subprocess.TimeoutExpired:
-        logger.warning("[cleanup] Timeout scanning for orphaned Claude processes")
-    except Exception as e:
-        logger.debug("[cleanup] Error scanning for orphaned processes: %s", e)
-
-    return killed
+    return _reap_orphan_session_processes()
