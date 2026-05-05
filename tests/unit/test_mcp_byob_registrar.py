@@ -23,7 +23,12 @@ import pytest
 
 @pytest.fixture
 def claude_config_path(tmp_path, monkeypatch):
-    """Redirect mcp_byob's claude config + lock + backup to tmp_path."""
+    """Redirect mcp_byob's claude config + lock + backup to tmp_path.
+
+    Also redirects the BYOB binary paths to existing files in tmp_path so
+    ``verify_byob_mcp()``'s existence gate sees the binaries as installed.
+    Tests covering the not-installed case use ``byob_not_installed`` instead.
+    """
     from scripts.update import mcp_byob
 
     cfg = tmp_path / "claude.json"
@@ -32,6 +37,43 @@ def claude_config_path(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_byob, "CLAUDE_CONFIG_PATH", cfg)
     monkeypatch.setattr(mcp_byob, "CLAUDE_CONFIG_LOCK_PATH", lock)
     monkeypatch.setattr(mcp_byob, "CLAUDE_CONFIG_BACKUP_PATH", bak)
+
+    # Put fake binaries under a `.byob` dir so the existing smoke check
+    # `assert "/.byob/" in entry["command"]` continues to validate that the
+    # entry points under a BYOB home, not just any path.
+    fake_byob = tmp_path / ".byob"
+    fake_byob.mkdir()
+    fake_tsx = fake_byob / "tsx"
+    fake_ts = fake_byob / "byob-mcp.ts"
+    fake_tsx.touch()
+    fake_ts.touch()
+    monkeypatch.setattr(mcp_byob, "BYOB_TSX_BIN", fake_tsx)
+    monkeypatch.setattr(mcp_byob, "BYOB_MCP_SERVER_TS", fake_ts)
+
+    return cfg
+
+
+@pytest.fixture
+def byob_not_installed(tmp_path, monkeypatch):
+    """Same as ``claude_config_path`` but BYOB binaries are absent.
+
+    Used to verify the existence gate: a machine that pulls this code via
+    ``/update`` but has not run ``/setup`` Step 8.5 yet must NOT get a
+    ``mcpServers.byob`` entry written.
+    """
+    from scripts.update import mcp_byob
+
+    cfg = tmp_path / "claude.json"
+    lock = tmp_path / "claude.json.lock"
+    bak = tmp_path / "claude.json.bak"
+    monkeypatch.setattr(mcp_byob, "CLAUDE_CONFIG_PATH", cfg)
+    monkeypatch.setattr(mcp_byob, "CLAUDE_CONFIG_LOCK_PATH", lock)
+    monkeypatch.setattr(mcp_byob, "CLAUDE_CONFIG_BACKUP_PATH", bak)
+
+    missing_dir = tmp_path / "byob-not-installed"
+    monkeypatch.setattr(mcp_byob, "BYOB_TSX_BIN", missing_dir / "tsx")
+    monkeypatch.setattr(mcp_byob, "BYOB_MCP_SERVER_TS", missing_dir / "byob-mcp.ts")
+
     return cfg
 
 
@@ -263,3 +305,114 @@ def test_concurrent_safe_write_under_load(claude_config_path):
     # Final file must be a valid JSON with byob registered.
     config = json.loads(claude_config_path.read_text())
     assert "byob" in config["mcpServers"]
+
+
+# --- Existence gate (BYOB binaries missing) ---------------------------------
+#
+# These tests cover the scenario that motivated the gate: a machine pulls
+# this code via the daily update cron but has never run /setup Step 8.5.
+# Without the gate, `verify_byob_mcp(write=True)` writes a `mcpServers.byob`
+# entry pointing at non-existent paths, and Claude Code logs MCP spawn
+# failures on every session restart.
+
+
+def test_skip_when_binaries_missing_and_no_entry(byob_not_installed):
+    """Fresh machine, no ~/.byob/, no prior entry: nothing to do."""
+    from scripts.update import mcp_byob
+
+    byob_not_installed.write_text(json.dumps({"mcpServers": {}}))
+    result = mcp_byob.verify_byob_mcp(write=True)
+    assert result.ok is True
+    assert result.action == "skipped"
+
+    config = json.loads(byob_not_installed.read_text())
+    assert "byob" not in config.get("mcpServers", {})
+
+
+def test_skip_when_binaries_missing_and_config_absent(byob_not_installed):
+    """Even rawer fresh machine: no ~/.claude.json yet, no ~/.byob/ either."""
+    from scripts.update import mcp_byob
+
+    # Do not pre-create the config file at all.
+    assert not byob_not_installed.exists()
+
+    result = mcp_byob.verify_byob_mcp(write=True)
+    assert result.ok is True
+    assert result.action == "skipped"
+
+    # Registrar must NOT create ~/.claude.json on a fresh machine just to
+    # write a useless empty mcpServers map.
+    assert not byob_not_installed.exists()
+
+
+def test_remove_stale_entry_when_binaries_missing(byob_not_installed):
+    """BYOB was installed once, then ~/.byob/ was removed: drift heal in reverse."""
+    from scripts.update import mcp_byob
+
+    byob_not_installed.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "byob": {
+                        "type": "stdio",
+                        "command": "/old/path/to/tsx",
+                        "args": ["/old/path/to/byob-mcp.ts"],
+                        "env": {"BYOB_ALLOW_EVAL": "0"},
+                    },
+                    "memory": {
+                        "type": "stdio",
+                        "command": "python3",
+                        "args": ["-m", "mcp_servers.memory_server"],
+                        "env": {},
+                    },
+                }
+            }
+        )
+    )
+
+    result = mcp_byob.verify_byob_mcp(write=True)
+    assert result.ok is True
+    assert result.action == "removed"
+
+    config = json.loads(byob_not_installed.read_text())
+    assert "byob" not in config["mcpServers"]
+    # Sibling entries must be preserved.
+    assert config["mcpServers"]["memory"]["command"] == "python3"
+
+
+def test_verify_mode_reports_drift_for_stale_entry(byob_not_installed):
+    """`/update --verify` (write=False) must surface the stale entry as drift."""
+    from scripts.update import mcp_byob
+
+    byob_not_installed.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "byob": {
+                        "type": "stdio",
+                        "command": "/old/tsx",
+                        "args": ["/old/byob-mcp.ts"],
+                        "env": {"BYOB_ALLOW_EVAL": "0"},
+                    }
+                }
+            }
+        )
+    )
+
+    result = mcp_byob.verify_byob_mcp(write=False)
+    assert result.ok is False
+    assert result.action == "drift_detected"
+
+    # File unchanged in verify mode.
+    config = json.loads(byob_not_installed.read_text())
+    assert "byob" in config["mcpServers"]
+
+
+def test_verify_mode_ok_when_binaries_missing_and_no_entry(byob_not_installed):
+    """Clean state on a non-BYOB machine: verify mode reports ok-skipped."""
+    from scripts.update import mcp_byob
+
+    byob_not_installed.write_text(json.dumps({"mcpServers": {}}))
+    result = mcp_byob.verify_byob_mcp(write=False)
+    assert result.ok is True
+    assert result.action == "skipped"

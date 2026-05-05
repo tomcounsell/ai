@@ -48,6 +48,9 @@ MCP_SERVER_KEY = "byob"
 BYOB_HOME = Path.home() / ".byob"
 BYOB_MCP_SERVER_TS = BYOB_HOME / "packages" / "mcp-server" / "bin" / "byob-mcp.ts"
 BYOB_TSX_BIN = BYOB_HOME / "packages" / "mcp-server" / "node_modules" / ".bin" / "tsx"
+# Retained for any external callers; _expected_entry() reads BYOB_TSX_BIN
+# live so monkeypatching the path during tests works without also patching
+# this constant.
 MCP_SERVER_COMMAND = str(BYOB_TSX_BIN)
 
 # Lock retry schedule (matches mcp_memory.py) -- in milliseconds.
@@ -58,8 +61,10 @@ _LOCK_RETRY_BACKOFF_MS = (50, 200, 800)
 class McpByobResult:
     """Result of a verify_byob_mcp() invocation."""
 
-    ok: bool  # True if entry is present + correct (after any write)
-    action: str  # "ok", "installed", "repaired", "drift_detected", "skipped", "failed"
+    ok: bool  # True if config now reflects current install state (entry
+    # present and correct when binaries exist; absent when they don't).
+    action: str  # "ok", "installed", "repaired", "removed",
+    # "drift_detected", "skipped", "failed"
     message: str = ""
 
 
@@ -69,13 +74,28 @@ def _expected_entry() -> dict:
     BYOB security default: ``BYOB_ALLOW_EVAL=0`` keeps ``browser_eval``
     disabled (per BYOB README). Operators who need eval flip the env var
     via their own ~/.byob configuration -- never via this registrar.
+
+    Reads ``BYOB_TSX_BIN`` live (not the cached ``MCP_SERVER_COMMAND``) so
+    monkeypatching the path in tests does not also require patching the
+    string constant.
     """
     return {
         "type": "stdio",
-        "command": MCP_SERVER_COMMAND,
+        "command": str(BYOB_TSX_BIN),
         "args": [str(BYOB_MCP_SERVER_TS)],
         "env": {"BYOB_ALLOW_EVAL": "0"},
     }
+
+
+def _byob_binaries_present() -> bool:
+    """Return True iff both BYOB MCP binaries exist on disk.
+
+    Gates registration so machines that have not run ``/setup`` Step 8.5
+    (BYOB clone + ``bun install``) do not get a ``mcpServers.byob`` entry
+    pointing at non-existent paths -- which would make Claude Code log
+    spawn failures on every session restart.
+    """
+    return BYOB_TSX_BIN.exists() and BYOB_MCP_SERVER_TS.exists()
 
 
 def _entry_matches(actual: object, expected: dict) -> bool:
@@ -202,8 +222,22 @@ def verify_byob_mcp(*, write: bool = True) -> McpByobResult:
         )
 
     try:
+        binaries_present = _byob_binaries_present()
         config = _read_config()
-        if config is None or not isinstance(config, dict):
+        config_missing = config is None or not isinstance(config, dict)
+
+        # Fast path: no config file and BYOB isn't installed -> nothing to do.
+        # Without this, the not-installed gate below would still try to mutate
+        # an empty in-memory config (write mode) or report drift (verify mode)
+        # for a file that doesn't exist.
+        if config_missing and not binaries_present:
+            return McpByobResult(
+                ok=True,
+                action="skipped",
+                message="BYOB not installed on this machine; skipping registration",
+            )
+
+        if config_missing:
             if not write:
                 return McpByobResult(
                     ok=False,
@@ -218,6 +252,39 @@ def verify_byob_mcp(*, write: bool = True) -> McpByobResult:
             config["mcpServers"] = servers
 
         actual = servers.get(MCP_SERVER_KEY)
+
+        # Existence gate: machines without BYOB installed must NOT get an
+        # entry written. If a stale entry from a prior install lingers,
+        # remove it (drift heal in reverse) so Claude Code stops trying to
+        # spawn a server whose binaries no longer exist.
+        if not binaries_present:
+            if actual is None:
+                return McpByobResult(
+                    ok=True,
+                    action="skipped",
+                    message="BYOB not installed on this machine; skipping registration",
+                )
+            if not write:
+                return McpByobResult(
+                    ok=False,
+                    action="drift_detected",
+                    message=(
+                        "byob entry present but BYOB binaries missing; "
+                        "run /update to remove the stale entry"
+                    ),
+                )
+            del servers[MCP_SERVER_KEY]
+            config["mcpServers"] = servers
+            if not _write_config_atomic(config):
+                return McpByobResult(
+                    ok=False, action="failed", message="failed to write ~/.claude.json"
+                )
+            return McpByobResult(
+                ok=True,
+                action="removed",
+                message=("byob MCP entry removed (BYOB binaries not present on this machine)"),
+            )
+
         if _entry_matches(actual, expected):
             return McpByobResult(ok=True, action="ok", message="byob MCP registration: ok")
 
