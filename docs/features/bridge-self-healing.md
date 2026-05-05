@@ -173,7 +173,7 @@ Both the delivery stamp and the health-check guard are wrapped in `try/except` s
 
 A legitimately slow-starting BUILD session that takes 600s before its first turn will still have `claude_session_uuid` populated within seconds of auth, so the no-progress branch does not fire. The recovered session routes through the existing delivery guard, then the `is_local` split: local sessions become `abandoned`, project-keyed sessions become `pending` (re-queued with `priority=high` and a fresh `_ensure_worker` call). The PM-associated project-keyed worker will pop and execute the re-queued dev session because `_pop_agent_session` filters only by `project_key`/`status`, not by `session_type`.
 
-**Observability**: Each recovery increments a project-scoped Redis counter keyed `{project_key}:session-health:recoveries:{reason_kind}` where `reason_kind` is one of `worker_dead`, `no_progress`, or `timeout`. The counter write is wrapped in `try/except` — failure cannot block recovery.
+**Observability**: Each recovery increments a project-scoped Redis counter keyed `{project_key}:session-health:recoveries:{reason_kind}` where `reason_kind` is one of `worker_dead`, `no_progress`, or `tool_timeout` (the previous `timeout` reason was retired by #1172; `tool_timeout` was added by #1270 for the per-tool timeout sub-loop, routed through the shared `_apply_recovery_transition` helper). The counter write is wrapped in `try/except` — failure cannot block recovery.
 
 **Diagnosing no-progress recoveries**:
 
@@ -549,8 +549,18 @@ Redis counters keyed by `<project_key>:session-health:`:
   #1172 with the stdout-stale path itself.
 * `tier2_reprieve_total:{compacting|alive|children}` — reprieve by signal. The `compacting` gate was added by issue #1099 Mode 3; the two OS-level gates were introduced in #1036. The previous fourth `stdout` gate was retired by #1172.
 * `kill_total` — actual kills (after Tier 2 failed and kill-switch off).
-* `recoveries:{worker_dead|no_progress}` — recoveries by reason kind.
-  The previous `timeout` reason was retired by #1172.
+* `recoveries:{worker_dead|no_progress|tool_timeout}` — recoveries by reason
+  kind. The previous `timeout` reason was retired by #1172. `tool_timeout`
+  was added by #1270 for the per-tool timeout sub-loop and is recorded by
+  the shared `_apply_recovery_transition` helper.
+* `tool_timeouts:{internal|mcp|default}` — per-tier hits from the per-tool
+  timeout sub-loop (#1270, parallel 30s loop). Internal tier: lightweight
+  built-ins (`Read`/`Glob`/`Grep`/`Edit`/`Write`/`NotebookEdit`/`ToolSearch`,
+  30s budget). MCP tier: any `mcp__*` tool (120s budget). Default tier:
+  everything else, including `Bash`/`Task`/`Skill` (300s budget). Each
+  tier budget is env-tunable via `TOOL_TIMEOUT_INTERNAL_SEC`,
+  `TOOL_TIMEOUT_MCP_SEC`, `TOOL_TIMEOUT_DEFAULT_SEC`. Sub-loop is gated by
+  `TOOL_TIMEOUT_TIERS_DISABLED` (parity with `DISABLE_PROGRESS_KILL`).
 
 **Distinguishing kill causes in dashboards:**
 - `tier1_flagged_total` high → heartbeat writers are dying (clock/event-loop issue) OR sessions are genuinely stuck

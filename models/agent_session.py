@@ -386,6 +386,20 @@ class AgentSession(Model):
     # `last_evidence_at` derivation. Replaces stdout-staleness inference for
     # operator-facing liveness signal.
     last_tool_use_at = DatetimeField(null=True)
+
+    # === Per-tool timeout counters (issue #1270) ===
+    # Cumulative count of tool-wedge recoveries broken down by tier. Bumped by
+    # `_agent_session_tool_timeout_loop` in `agent/session_health.py` when a
+    # tool's `last_tool_use_at` exceeds its tier-specific budget. The tier is
+    # determined by `_classify_tool_tier(current_tool_name)`:
+    #   - internal: ToolSearch, Read, Glob, Grep, Edit, Write, NotebookEdit (30s)
+    #   - mcp: any tool whose name starts with `mcp__` (120s)
+    #   - default: everything else, e.g. Bash, Task, Skill, WebFetch (300s)
+    # Each counter is bounded by `MAX_RECOVERY_ATTEMPTS` per session lifetime.
+    # Default 0 (Popoto-backcompat-safe — pre-deploy sessions read 0).
+    tool_timeout_count_internal = IntField(default=0)
+    tool_timeout_count_mcp = IntField(default=0)
+    tool_timeout_count_default = IntField(default=0)
     # Timestamp of the most recent SDK `result` event (turn boundary). Written
     # by `agent/sdk_client.py::_run_harness_subprocess` when `event_type ==
     # "result"`. Read by the dashboard for the `last_evidence_at` derivation.
@@ -503,6 +517,12 @@ class AgentSession(Model):
     # back a non-int value.
     _INT_FIELDS_BACKCOMPAT = {
         "exit_returncode",
+        # Per-tool timeout counters (issue #1270) — added after initial model
+        # creation; rows written before the field was added must heal to 0
+        # rather than expose the class-level descriptor.
+        "tool_timeout_count_internal",
+        "tool_timeout_count_mcp",
+        "tool_timeout_count_default",
     }
 
     def __init__(self, **kwargs):

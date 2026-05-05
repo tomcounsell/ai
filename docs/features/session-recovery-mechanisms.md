@@ -1,10 +1,10 @@
 # Session Recovery Mechanisms
 
-Catalogue of all 9 session recovery mechanisms, their triggers, terminal status safety, and guard implementations.
+Catalogue of all 10 session recovery mechanisms, their triggers, terminal status safety, and guard implementations.
 
 ## Overview
 
-The session system has 9 mechanisms that can revive, recover, or re-enqueue sessions. After the zombie loop fix (PR #703) and lifecycle consolidation (PR #721), a systematic audit (issue #723) verified that all mechanisms respect terminal session states. PR #730 added the intake path terminal guard (8th mechanism). Issue #977 added harness startup retry (9th mechanism).
+The session system has 10 mechanisms that can revive, recover, or re-enqueue sessions. After the zombie loop fix (PR #703) and lifecycle consolidation (PR #721), a systematic audit (issue #723) verified that all mechanisms respect terminal session states. PR #730 added the intake path terminal guard (8th mechanism). Issue #977 added harness startup retry (9th mechanism). Issue #1270 added the per-tool timeout sub-loop (10th mechanism) — a 30s parallel loop that recovers sessions wedged on a single tool call (PreToolUse fired but PostToolUse never returned) with tier-specific budgets and per-tier counters.
 
 **Terminal statuses**: `completed`, `failed`, `killed`, `abandoned`, `cancelled`
 
@@ -30,10 +30,10 @@ The session system has 9 mechanisms that can revive, recover, or re-enqueue sess
 | Trigger | Periodic timer (every 5 min, `AGENT_SESSION_HEALTH_CHECK_INTERVAL`) |
 | What it does | Recovers stuck `running` sessions on three signals: (1) dead/missing worker, (2) worker alive but no progress after the 300s startup guard (issue #944), (3) exceeded session timeout. Starts workers for stalled `pending` sessions. |
 | Progress signal | `_has_progress(entry)` uses a **two-tier** detector (issue #1036). Tier 1: either `last_heartbeat_at` (queue-layer) or `last_sdk_heartbeat_at` (messenger-layer) fresh within 90s counts as progress; both must be stale to flag stuck. The three original own-progress signals (`turn_count > 0`, `log_path`, `claude_session_uuid`) and the #963 child-activity check are preserved. Tier 2 (`no_progress` only): `_tier2_reprieve_signal()` checks process-alive / has-children / recent-stdout; any one passing gate reprieves the kill for this cycle. See [Bridge Self-Healing §Two-tier no-progress detector](bridge-self-healing.md#two-tier-no-progress-detector) for the full design. |
-| Kill path | Cancels `handle.task` from `_active_sessions` registry (0.25s grace). Increments `recovery_attempts`; at `MAX_RECOVERY_ATTEMPTS=2` finalizes as `failed` (history preserved); otherwise transitions `running → pending`. `DISABLE_PROGRESS_KILL=1` suppresses kills while keeping flagging active. `worker_dead` and `timeout` recoveries skip Tier 2 entirely. |
+| Kill path | Cancels `handle.task` from `_active_sessions` registry (0.25s grace). Increments `recovery_attempts`; at `MAX_RECOVERY_ATTEMPTS=2` finalizes as `failed` (history preserved); otherwise transitions `running → pending`. `DISABLE_PROGRESS_KILL=1` suppresses kills while keeping flagging active. `worker_dead`, `timeout`, and `tool_timeout` recoveries skip Tier 2 entirely. |
 | Terminal safety | **Safe by query scope** -- only queries `status="running"` and `status="pending"` |
 | Guard | Query filter (only non-terminal statuses) + `transition_status()` with default `reject_from_terminal=True` |
-| Observability | Each recovery increments `{project_key}:session-health:recoveries:{worker_dead\|no_progress\|timeout}` in Redis. Tier 2 reprieve increments `tier2_reprieve_total:{alive\|children\|stdout}`. Kills increment `kill_total`. (all counter writes are non-fatal) |
+| Observability | Each recovery increments `{project_key}:session-health:recoveries:{worker_dead\|no_progress\|tool_timeout}` in Redis (the previous `timeout` reason was retired by #1172; `tool_timeout` was added by #1270 via the shared `_apply_recovery_transition` helper). Tier 2 reprieve increments `tier2_reprieve_total:{compacting\|alive\|children}`. Kills increment `kill_total`. The per-tool timeout sub-loop (mechanism 10) additionally increments `tool_timeouts:{internal\|mcp\|default}` per tier hit. (all counter writes are non-fatal) |
 
 #### Finalization gap on re-execution (issue #917)
 
@@ -116,6 +116,22 @@ When the health check recovers a session (`running → pending → running`), th
 | Re-queue method | `transition_status()` in-place (not delete-and-recreate) — preserves `extra_context` without a second write and leaves no orphan `running` record. |
 
 See [Harness Startup Retry](harness-startup-retry.md) for full design details.
+
+### 10. Per-Tool Timeout Sub-Loop (`_agent_session_tool_timeout_loop`)
+
+| Property | Value |
+|----------|-------|
+| Location | `agent/session_health.py` (worker schedules `asyncio.create_task(name="session-tool-timeout-monitor")` alongside the main `health_task`) |
+| Trigger | Periodic timer (every 30s, `TOOL_TIMEOUT_LOOP_INTERVAL`) |
+| What it does | Recovers sessions whose `current_tool_name` is set (PreToolUse fired) but whose `last_tool_use_at` exceeds a tier-specific budget (PostToolUse never returned). Without this check, the wedge would ride out the 30-min `SDK_PROGRESS_FRESHNESS_WINDOW` — Tier 1 sub-check A treats `last_tool_use_at` as fresh progress. |
+| Tier classification | `_classify_tool_tier(tool_name)`: `mcp__*` → `mcp`, `{ToolSearch, Read, Glob, Grep, Edit, Write, NotebookEdit}` → `internal`, everything else → `default`. Budgets: 30s / 120s / 300s, env-tunable via `TOOL_TIMEOUT_INTERNAL_SEC`, `TOOL_TIMEOUT_MCP_SEC`, `TOOL_TIMEOUT_DEFAULT_SEC`. |
+| Race mitigation | Re-reads `current_tool_name` and `last_tool_use_at` via `AgentSession.get_by_id` immediately before transitioning; aborts if PostToolUse landed between the iterator's read and the transition. The companion writer change (`agent/hooks/liveness_writers.py::record_tool_boundary` bypasses the 5s per-session cooldown when `clear=True`) prevents fast PreToolUse → PostToolUse pairs from leaving stale `current_tool_name`. |
+| Recovery path | Routes through the shared `_apply_recovery_transition` helper with `reason_kind="tool_timeout"`. `MAX_RECOVERY_ATTEMPTS`, OOM-defer, the response-delivered finalize-instead-of-recover guard, and `DISABLE_PROGRESS_KILL` all apply uniformly. Tier 2 reprieve is skipped (the wedge is the evidence). |
+| Terminal safety | **Safe by query scope** — only iterates non-terminal sessions; the shared `_apply_recovery_transition` uses `transition_status()` with `reject_from_terminal=True`. |
+| Counters | Three `IntField` counters on `AgentSession` (`tool_timeout_count_internal`, `..._mcp`, `..._default`) cumulate per-tier hits per session. Project-scoped Redis counter `{project_key}:session-health:tool_timeouts:{internal\|mcp\|default}` mirrors the existing `recoveries:{kind}` pattern for dashboards. |
+| Kill switch | `TOOL_TIMEOUT_TIERS_DISABLED=1` short-circuits the entire sub-loop (parity with `DISABLE_PROGRESS_KILL` for the main loop). |
+
+See [Agent Session Health Monitor §Per-Tool Timeout Sub-Loop](agent-session-health-monitor.md#how-it-works) for the full design, including the v1 single-slot `current_tool_name` limitation and out-of-scope items (per-`tool_use_id` registries, synthetic `tool_result` injection, "your tool wedged" steering messages on recovery).
 
 ## Recovery Ownership
 

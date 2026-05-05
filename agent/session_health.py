@@ -226,6 +226,92 @@ SDK_PROGRESS_FRESHNESS_WINDOW = int(os.environ.get("SDK_PROGRESS_FRESHNESS_WINDO
 # this cap — their recovery depends solely on per-turn freshness in sub-check A.
 MAX_NO_OUTPUT_REPRIEVES = SDK_PROGRESS_FRESHNESS_WINDOW // HEARTBEAT_FRESHNESS_WINDOW  # 20
 
+# === Per-tool timeout sub-loop constants (issue #1270) ===
+# A session whose ``current_tool_name`` is non-null and whose
+# ``last_tool_use_at`` is older than the tier-specific budget is "tool-wedged":
+# the PreToolUse hook fired (so we know which tool is in flight) but the
+# PostToolUse hook never returned. Without this check, the session keeps
+# passing Tier 1 sub-check A in ``_has_progress`` for up to
+# ``SDK_PROGRESS_FRESHNESS_WINDOW`` (30 min) while making no real progress.
+#
+# The check runs in a dedicated 30-second sub-loop
+# (``_agent_session_tool_timeout_loop``) parallel to the main 5-minute health
+# loop so the 30s internal budget can fire within one tick of its expiry.
+# On a hit, the per-tier counter on ``AgentSession`` is bumped, a project-
+# scoped Redis counter is INCR'd, and the session is recovered via the same
+# ``running -> pending`` transition used by the main loop's no_progress path.
+#
+# Kill switch: ``TOOL_TIMEOUT_TIERS_DISABLED=1`` short-circuits the sub-loop
+# (parity with ``DISABLE_PROGRESS_KILL`` for the main loop).
+TOOL_TIMEOUT_LOOP_INTERVAL = 30  # 30s — tightest tier (internal) budget
+# Tier budgets — env-tunable; defaults from issue #1270 / Fazm reference.
+TOOL_TIMEOUT_INTERNAL_SEC = int(os.environ.get("TOOL_TIMEOUT_INTERNAL_SEC", 30))
+TOOL_TIMEOUT_MCP_SEC = int(os.environ.get("TOOL_TIMEOUT_MCP_SEC", 120))
+TOOL_TIMEOUT_DEFAULT_SEC = int(os.environ.get("TOOL_TIMEOUT_DEFAULT_SEC", 300))
+
+# Internal-tier tool name set: lightweight built-in tools that should never
+# legitimately exceed 30s. Hard-coded; adding a tool is a one-line edit. Not
+# env-overridable in v1 — drift risk is small and documented.
+_INTERNAL_TOOL_NAMES: frozenset[str] = frozenset(
+    {"ToolSearch", "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit"}
+)
+
+
+def _classify_tool_tier(tool_name: str | None) -> str:
+    """Return the timeout tier for ``tool_name``: ``"internal"``, ``"mcp"``, or ``"default"``.
+
+    - ``mcp__`` prefix -> ``"mcp"`` (any Model Context Protocol tool).
+    - Name in :data:`_INTERNAL_TOOL_NAMES` -> ``"internal"``.
+    - Everything else -> ``"default"`` (Bash, Task, Skill, WebFetch, ...).
+    - ``None`` or empty string -> ``"default"`` (defensive — a missing name is
+      treated as the most permissive tier so a transient hook race does not
+      mis-tier a real tool into the 30s bucket).
+    """
+    if not tool_name:
+        return "default"
+    if tool_name.startswith("mcp__"):
+        return "mcp"
+    if tool_name in _INTERNAL_TOOL_NAMES:
+        return "internal"
+    return "default"
+
+
+def _tool_tier_budget(tier: str) -> int:
+    """Return the configured budget (seconds) for ``tier``."""
+    if tier == "internal":
+        return TOOL_TIMEOUT_INTERNAL_SEC
+    if tier == "mcp":
+        return TOOL_TIMEOUT_MCP_SEC
+    return TOOL_TIMEOUT_DEFAULT_SEC
+
+
+def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
+    """Return ``(tier, reason)`` if ``entry`` is tool-wedged, else ``None``.
+
+    A session is tool-wedged when ``current_tool_name`` is non-null AND
+    ``last_tool_use_at`` is older than the tier's budget. Pure function — no
+    side effects, no Redis or DB writes. Safe to call from any tick.
+
+    Returns ``None`` when:
+      * ``current_tool_name`` is None / empty (no tool in flight).
+      * ``last_tool_use_at`` is None (legacy session pre-Pillar A).
+      * ``last_tool_use_at`` is fresher than the tier budget.
+    """
+    tool_name = getattr(entry, "current_tool_name", None)
+    if not tool_name or not isinstance(tool_name, str):
+        return None
+    last_at = getattr(entry, "last_tool_use_at", None)
+    if not isinstance(last_at, datetime):
+        return None
+    tier = _classify_tool_tier(tool_name)
+    budget = _tool_tier_budget(tier)
+    last_at_aware = last_at if last_at.tzinfo else last_at.replace(tzinfo=UTC)
+    age = (datetime.now(tz=UTC) - last_at_aware).total_seconds()
+    if age <= budget:
+        return None
+    reason = f"tool-wedge: {tool_name} ({tier} tier) older than {budget}s"
+    return tier, reason
+
 
 # In-process cache for ``_is_memory_tight()`` (issue #1099 Mode 4). Tuple of
 # ``(checked_at_monotonic, result)``. The cache amortizes psutil syscalls when
@@ -726,6 +812,276 @@ def _tier2_reprieve_signal(
     return None
 
 
+async def _apply_recovery_transition(
+    entry: AgentSession,
+    *,
+    reason: str,
+    reason_kind: str,
+    handle: "SessionHandle | None",
+    worker_key: str,
+) -> bool:
+    """Apply the standard ``running -> pending|abandoned|failed`` recovery transition.
+
+    Shared between the main health-check loop (``_agent_session_health_check``)
+    and the per-tool timeout sub-loop (``_agent_session_tool_timeout_loop``).
+    Centralizing the transition prevents the "competing recovery functions
+    racing" antipattern (see issue #1036) — both callers go through the same
+    code path so MAX_RECOVERY_ATTEMPTS, the OOM defer, the response-delivered
+    finalize-instead-of-recover guard, and the kill-switch all apply uniformly.
+
+    ``reason_kind`` controls Tier 2 reprieve eligibility:
+      * ``"no_progress"`` — full Tier 2 reprieve evaluation
+        (compaction/children/alive gates).
+      * ``"worker_dead"`` — skip Tier 2 reprieve; a dead worker cannot be
+        reprieved by an "active children" signal.
+      * ``"tool_timeout"`` — skip Tier 2 reprieve; the wedge condition itself
+        is the evidence (issue #1270). A tool that has not returned within its
+        tier budget is wedged regardless of whether the parent SDK subprocess
+        is still alive.
+
+    Project-scoped Redis counter
+    ``{project_key}:session-health:recoveries:{reason_kind}`` is incremented
+    before the transition attempt. ``tool_timeout`` recoveries also increment
+    ``{project_key}:session-health:tool_timeouts:{tier}`` from the caller, so
+    the two namespaces stay distinct.
+
+    Returns ``True`` if the transition fired (or finalize-instead-of-recover
+    fired), ``False`` if a Tier 2 reprieve or kill-switch suppressed it.
+    """
+    # O1: observability counter — increment a project-scoped Redis counter
+    # for dashboards. Failure must never block recovery.
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        _R.incr(f"{entry.project_key}:session-health:recoveries:{reason_kind}")
+    except Exception as _counter_err:
+        logger.debug(
+            "[session-health] recovery counter increment failed (non-fatal): %s",
+            _counter_err,
+        )
+
+    # Guard: if response was already delivered, finalize instead of recovering
+    # to pending (prevents duplicate delivery, #918).
+    if getattr(entry, "response_delivered_at", None) is not None:
+        try:
+            from models.session_lifecycle import (
+                StatusConflictError,
+                finalize_session,
+            )
+
+            logger.info(
+                "[session-health] Session %s already delivered response at %s, "
+                "finalizing instead of recovering",
+                entry.agent_session_id,
+                entry.response_delivered_at,
+            )
+            finalize_session(
+                entry,
+                "completed",
+                reason="health check: already delivered",
+            )
+        except StatusConflictError as e:
+            logger.info(
+                "[session-health] Skipping finalize for already-delivered session %s: %s",
+                entry.agent_session_id,
+                e,
+            )
+        except Exception as e:
+            logger.error(
+                "[session-health] Failed to finalize already-delivered session %s: %s",
+                entry.agent_session_id,
+                e,
+            )
+        return True
+
+    # === Tier 2 reprieve (no_progress only) ===
+    if handle is None:
+        logger.debug(
+            "[session-health] No registry handle for %s; "
+            "Tier 2 reprieve will only see compaction state",
+            entry.agent_session_id,
+        )
+    if reason_kind == "no_progress":
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+            _MR.incr(f"{entry.project_key}:session-health:tier1_flagged_total")
+        except Exception as _m_err:
+            logger.debug("[session-health] tier1_flagged counter failed: %s", _m_err)
+
+        reprieve = _tier2_reprieve_signal(handle, entry)
+        if reprieve is not None:
+            try:
+                from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+                _MR.incr(f"{entry.project_key}:session-health:tier2_reprieve_total:{reprieve}")
+            except Exception as _m_err:
+                logger.debug("[session-health] tier2_reprieve counter failed: %s", _m_err)
+            try:
+                entry.reprieve_count = (entry.reprieve_count or 0) + 1
+                entry.save(update_fields=["reprieve_count"])
+            except Exception as _rc_err:
+                logger.debug("[session-health] reprieve_count save failed: %s", _rc_err)
+            log_fn = logger.warning if (entry.reprieve_count or 0) >= 3 else logger.info
+            log_fn(
+                "[session-health] Tier 2 reprieve (%s) for session %s — "
+                "skipping kill (reprieve_count=%s)",
+                reprieve,
+                entry.agent_session_id,
+                entry.reprieve_count,
+            )
+            return False
+
+    # All Tier 2 gates failed (or skipped). Respect kill-switch.
+    if os.environ.get("DISABLE_PROGRESS_KILL") == "1":
+        logger.warning(
+            "[session-health] Would kill session %s (DISABLE_PROGRESS_KILL=1): %s",
+            entry.agent_session_id,
+            reason,
+        )
+        return False
+
+    is_local = worker_key.startswith("local")
+    logger.warning(
+        "[session-health] Recovering session %s (chat=%s, session=%s, local=%s, kind=%s): %s",
+        entry.agent_session_id,
+        worker_key,
+        entry.session_id,
+        is_local,
+        reason_kind,
+        reason,
+    )
+
+    # Cancel the in-flight session task if we have a handle and the task
+    # reference has been populated. Cancelling the populated task terminates
+    # the SDK subprocess via CancelledError propagation, preventing orphan
+    # heartbeats. (See plan spike-1, #1039 review.)
+    if handle is not None and handle.task is not None and not handle.task.done():
+        handle.task.cancel()
+        try:
+            await asyncio.wait_for(handle.task, timeout=TASK_CANCEL_TIMEOUT)
+        except (TimeoutError, asyncio.CancelledError):
+            pass
+        except Exception as _c_err:
+            logger.debug(
+                "[session-health] task cancel await raised %s for session %s",
+                _c_err,
+                entry.agent_session_id,
+            )
+        logger.info(
+            "[session-health] Cancelled orphan task for session %s",
+            entry.agent_session_id,
+        )
+
+    from models.session_lifecycle import (
+        StatusConflictError,
+        finalize_session,
+        transition_status,
+    )
+
+    pre_bump_attempts = entry.recovery_attempts or 0
+    entry.recovery_attempts = pre_bump_attempts + 1
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+        _MR.incr(f"{entry.project_key}:session-health:kill_total")
+    except Exception as _m_err:
+        logger.debug("[session-health] kill counter failed: %s", _m_err)
+
+    try:
+        if is_local:
+            finalize_session(
+                entry,
+                "abandoned",
+                reason=(
+                    f"health check: local session showed no progress evidence "
+                    f"(chat={worker_key}, attempts={entry.recovery_attempts}, kind={reason_kind})"
+                ),
+                skip_auto_tag=True,
+            )
+            logger.info(
+                "[session-health] Marked local session %s as abandoned (chat=%s, attempts=%s)",
+                entry.agent_session_id,
+                worker_key,
+                entry.recovery_attempts,
+            )
+        elif entry.recovery_attempts >= MAX_RECOVERY_ATTEMPTS:
+            finalize_session(
+                entry,
+                "failed",
+                reason=(
+                    f"health check: {entry.recovery_attempts} recovery "
+                    f"attempts, never progressed (kind={reason_kind})"
+                ),
+            )
+            logger.warning(
+                "[session-health] Finalized session %s as failed after %s recovery attempts",
+                entry.agent_session_id,
+                entry.recovery_attempts,
+            )
+        else:
+            entry.priority = "high"
+            entry.started_at = None
+            if (
+                getattr(entry, "exit_returncode", None) == -9
+                and pre_bump_attempts == 0
+                and _is_memory_tight()
+            ):
+                entry.scheduled_at = datetime.now(tz=UTC) + timedelta(seconds=120)
+                try:
+                    entry.save(update_fields=["scheduled_at", "recovery_attempts"])
+                except Exception as _sa_err:
+                    logger.debug(
+                        "[session-health] scheduled_at save failed: %s",
+                        _sa_err,
+                    )
+                logger.warning(
+                    "[session-health] OOM backoff: deferring %s for 120s "
+                    "(exit_returncode=-9, recovery_attempts now=%d, "
+                    "memory<400MB)",
+                    entry.agent_session_id,
+                    entry.recovery_attempts,
+                )
+            else:
+                try:
+                    entry.save(update_fields=["recovery_attempts"])
+                except Exception as _ra_err:
+                    logger.debug(
+                        "[session-health] recovery_attempts save failed: %s",
+                        _ra_err,
+                    )
+            transition_status(
+                entry,
+                "pending",
+                reason=(
+                    f"health check: recovered session "
+                    f"(chat={worker_key}, attempt {entry.recovery_attempts}, kind={reason_kind})"
+                ),
+            )
+            logger.info(
+                "[session-health] Recovered session %s (chat=%s, attempt %s, kind=%s)",
+                entry.agent_session_id,
+                worker_key,
+                entry.recovery_attempts,
+                reason_kind,
+            )
+            from agent.agent_session_queue import _ensure_worker  # noqa: PLC0415
+
+            _ensure_worker(worker_key, is_project_keyed=entry.is_project_keyed)
+            event = _active_events.get(worker_key)
+            if event is not None:
+                event.set()
+    except StatusConflictError as _sc_err:
+        # Expected: kill-is-terminal guard (#1208). Session was already terminal
+        # when recovery tried to mark it abandoned/failed. Log at INFO.
+        logger.info(
+            "[session-health] Skipping recovery finalize for %s: %s",
+            entry.agent_session_id,
+            _sc_err,
+        )
+    return True
+
+
 async def _agent_session_health_check() -> None:
     """Health check for worker-managed sessions (running and pending).
 
@@ -892,295 +1248,20 @@ async def _agent_session_health_check() -> None:
                 else:
                     _reason_kind = "worker_dead"
 
-                # O1: observability counter — increment a project-scoped Redis
-                # counter for dashboards. Failure must never block recovery.
-                try:
-                    from popoto.redis_db import POPOTO_REDIS_DB as _R
-
-                    _R.incr(f"{entry.project_key}:session-health:recoveries:{_reason_kind}")
-                except Exception as _counter_err:
-                    logger.debug(
-                        "[session-health] recovery counter increment failed (non-fatal): %s",
-                        _counter_err,
-                    )
-
-                # Guard: if response was already delivered, finalize instead
-                # of recovering to pending (prevents duplicate delivery, #918)
-                if getattr(entry, "response_delivered_at", None) is not None:
-                    try:
-                        from models.session_lifecycle import (
-                            StatusConflictError,
-                            finalize_session,
-                        )
-
-                        logger.info(
-                            "[session-health] Session %s already delivered response at %s, "
-                            "finalizing instead of recovering",
-                            entry.agent_session_id,
-                            entry.response_delivered_at,
-                        )
-                        finalize_session(
-                            entry,
-                            "completed",
-                            reason="health check: already delivered",
-                        )
-                        recovered += 1
-                    except StatusConflictError as e:
-                        # Session already terminal (likely killed) — kill-is-terminal
-                        # invariant. Skip silently at INFO; expected outcome (#1208).
-                        logger.info(
-                            "[session-health] Skipping finalize for already-delivered "
-                            "session %s: %s",
-                            entry.agent_session_id,
-                            e,
-                        )
-                    except Exception as e:
-                        logger.error(
-                            "[session-health] Failed to finalize already-delivered session %s: %s",
-                            entry.agent_session_id,
-                            e,
-                        )
-                    continue
-
-                # === Two-tier no-progress detector (#1036, simplified by #1172) ===
-                # Tier 2 reprieve logic applies ONLY to no_progress recoveries.
-                # worker_dead recoveries skip reprieve and fall through to the
-                # kill path below — a dead worker cannot be reprieved by an
-                # "active children" signal.
                 handle = _active_sessions.get(entry.agent_session_id)
-                if handle is None:
-                    logger.debug(
-                        "[session-health] No registry handle for %s; "
-                        "Tier 2 reprieve will only see compaction state",
-                        entry.agent_session_id,
-                    )
-                if _reason_kind == "no_progress":
-                    try:
-                        from popoto.redis_db import POPOTO_REDIS_DB as _MR
-
-                        _MR.incr(f"{entry.project_key}:session-health:tier1_flagged_total")
-                    except Exception as _m_err:
-                        logger.debug("[session-health] tier1_flagged counter failed: %s", _m_err)
-
-                    reprieve = _tier2_reprieve_signal(handle, entry)
-                    if reprieve is not None:
-                        # Activity-positive: do NOT kill, do NOT increment recovery_attempts.
-                        try:
-                            from popoto.redis_db import POPOTO_REDIS_DB as _MR
-
-                            _MR.incr(
-                                f"{entry.project_key}:session-health:tier2_reprieve_total:{reprieve}"
-                            )
-                        except Exception as _m_err:
-                            logger.debug(
-                                "[session-health] tier2_reprieve counter failed: %s", _m_err
-                            )
-                        try:
-                            entry.reprieve_count = (entry.reprieve_count or 0) + 1
-                            entry.save(update_fields=["reprieve_count"])
-                        except Exception as _rc_err:
-                            logger.debug("[session-health] reprieve_count save failed: %s", _rc_err)
-                        # Escalate log level after 3 reprieves to alert operators
-                        # that a session may be alive-but-silent indefinitely (#1046 C2).
-                        log_fn = logger.warning if (entry.reprieve_count or 0) >= 3 else logger.info
-                        log_fn(
-                            "[session-health] Tier 2 reprieve (%s) for session %s — "
-                            "skipping kill (reprieve_count=%s)",
-                            reprieve,
-                            entry.agent_session_id,
-                            entry.reprieve_count,
-                        )
-                        continue
-
-                # All Tier 2 gates failed. Respect kill-switch.
-                if os.environ.get("DISABLE_PROGRESS_KILL") == "1":
-                    logger.warning(
-                        "[session-health] Would kill session %s (DISABLE_PROGRESS_KILL=1): %s",
-                        entry.agent_session_id,
-                        reason,
-                    )
-                    continue
-
-                is_local = worker_key.startswith("local")
-                logger.warning(
-                    "[session-health] Recovering session %s with no recent progress evidence "
-                    "(chat=%s, session=%s, local=%s): %s",
-                    entry.agent_session_id,
-                    worker_key,
-                    entry.session_id,
-                    is_local,
-                    reason,
-                )
-
-                # Cancel the in-flight session task if we have a handle and
-                # the task reference has been populated. `handle.task` is None
-                # between `_execute_agent_session` entry and
-                # `BackgroundTask.run()` completion — during that setup window
-                # there is nothing session-scoped to cancel (the worker-loop
-                # task is off limits; plan spike-1, #1039 review). Cancelling
-                # the populated `task._task` terminates the SDK subprocess via
-                # CancelledError propagation, preventing orphan heartbeats.
-                if handle is not None and handle.task is not None and not handle.task.done():
-                    handle.task.cancel()
-                    try:
-                        await asyncio.wait_for(handle.task, timeout=TASK_CANCEL_TIMEOUT)
-                    except (TimeoutError, asyncio.CancelledError):
-                        pass
-                    except Exception as _c_err:
-                        logger.debug(
-                            "[session-health] task cancel await raised %s for session %s",
-                            _c_err,
-                            entry.agent_session_id,
-                        )
-                    logger.info(
-                        "[session-health] Cancelled orphan task for session %s",
-                        entry.agent_session_id,
-                    )
-
-                from models.session_lifecycle import (
-                    StatusConflictError,
-                    finalize_session,
-                    transition_status,
-                )
-
-                # Capture pre-bump recovery_attempts BEFORE the increment for the
-                # Mode 4 OOM-defer check below (issue #1099). The increment must
-                # happen AFTER the OOM check so we can distinguish first-time OS
-                # kills (``pre_bump_attempts == 0``) from health-check kills
-                # (``pre_bump_attempts >= 1``). Resolves critique blocker B2 in
-                # the plan: reading ``entry.recovery_attempts`` after the bump
-                # would mean the OOM defer never fires.
-                pre_bump_attempts = entry.recovery_attempts or 0
-                # Bump recovery_attempts counter only on actual kill (#1036).
-                entry.recovery_attempts = pre_bump_attempts + 1
-                try:
-                    from popoto.redis_db import POPOTO_REDIS_DB as _MR
-
-                    _MR.incr(f"{entry.project_key}:session-health:kill_total")
-                except Exception as _m_err:
-                    logger.debug("[session-health] kill counter failed: %s", _m_err)
-
-                try:
-                    if is_local:
-                        # Local CLI sessions have no bridge worker to resume them --
-                        # mark abandoned. Tier 2 reprieves already had a chance above,
-                        # so if we reach here the local session is genuinely wedged.
-                        finalize_session(
-                            entry,
-                            "abandoned",
-                            reason=(
-                                f"health check: local session showed no progress evidence "
-                                f"(chat={worker_key}, attempts={entry.recovery_attempts})"
-                            ),
-                            skip_auto_tag=True,
-                        )
-                        logger.info(
-                            "[session-health] Marked local session %s as abandoned "
-                            "(chat=%s, attempts=%s)",
-                            entry.agent_session_id,
-                            worker_key,
-                            entry.recovery_attempts,
-                        )
-                    elif entry.recovery_attempts >= MAX_RECOVERY_ATTEMPTS:
-                        # Exhausted retries: finalize as `failed` so the session
-                        # reaches a terminal status and is auditable via
-                        # valor-session status. Prevents the Meta.ttl silent-delete
-                        # backstop from eating non-terminal records (spike-2).
-                        finalize_session(
-                            entry,
-                            "failed",
-                            reason=(
-                                f"health check: {entry.recovery_attempts} recovery "
-                                f"attempts, never progressed"
-                            ),
-                        )
-                        logger.warning(
-                            "[session-health] Finalized session %s as failed after "
-                            "%s recovery attempts",
-                            entry.agent_session_id,
-                            entry.recovery_attempts,
-                        )
-                    else:
-                        # Apply companion fields directly to the already-loaded entry,
-                        # then transition via transition_status() which has its own CAS
-                        # re-read. Save recovery_attempts along the way.
-                        entry.priority = "high"
-                        entry.started_at = None
-                        # Mode 4 (issue #1099) — OOM backoff. If the OS killed the
-                        # subprocess (returncode == -9), AND this is the first
-                        # recovery attempt (pre_bump_attempts == 0), AND memory is
-                        # currently tight, defer the next pickup eligibility by
-                        # 120s via the existing ``scheduled_at`` field. The
-                        # session STILL transitions to ``pending`` below — the
-                        # defer works because the pending-scan in
-                        # ``agent/session_pickup.py`` skips sessions whose
-                        # ``scheduled_at > now``. No new "queued but not
-                        # transitioned" intermediate state is introduced.
-                        if (
-                            getattr(entry, "exit_returncode", None) == -9
-                            and pre_bump_attempts == 0
-                            and _is_memory_tight()
-                        ):
-                            entry.scheduled_at = datetime.now(tz=UTC) + timedelta(seconds=120)
-                            try:
-                                entry.save(update_fields=["scheduled_at", "recovery_attempts"])
-                            except Exception as _sa_err:
-                                logger.debug(
-                                    "[session-health] scheduled_at save failed: %s",
-                                    _sa_err,
-                                )
-                            logger.warning(
-                                "[session-health] OOM backoff: deferring %s for 120s "
-                                "(exit_returncode=-9, recovery_attempts now=%d, "
-                                "memory<400MB)",
-                                entry.agent_session_id,
-                                entry.recovery_attempts,
-                            )
-                        else:
-                            try:
-                                entry.save(update_fields=["recovery_attempts"])
-                            except Exception as _ra_err:
-                                logger.debug(
-                                    "[session-health] recovery_attempts save failed: %s",
-                                    _ra_err,
-                                )
-                        transition_status(
-                            entry,
-                            "pending",
-                            reason=(
-                                f"health check: recovered no-progress session "
-                                f"(chat={worker_key}, attempt {entry.recovery_attempts})"
-                            ),
-                        )
-                        logger.info(
-                            "[session-health] Recovered session %s (chat=%s, attempt %s)",
-                            entry.agent_session_id,
-                            worker_key,
-                            entry.recovery_attempts,
-                        )
-                        from agent.agent_session_queue import _ensure_worker  # noqa: PLC0415
-
-                        _ensure_worker(worker_key, is_project_keyed=entry.is_project_keyed)
-                        # Wake up an already-running idle worker — _ensure_worker returns
-                        # early if the worker exists, so the event is never set and the
-                        # recovered pending session would stall until a new notify arrives.
-                        event = _active_events.get(worker_key)
-                        if event is not None:
-                            event.set()
-                except StatusConflictError as _sc_err:
-                    # Expected outcome of the kill-is-terminal guard (#1208):
-                    # the session was already terminal (commonly killed) when
-                    # recovery tried to mark it abandoned/failed. Log at INFO
-                    # so we can distinguish this from genuine concurrency
-                    # anomalies (which would still log at WARNING/ERROR via
-                    # other paths). No further action — the session is in a
-                    # terminal state by definition.
-                    logger.info(
-                        "[session-health] Skipping recovery finalize for %s: %s",
-                        entry.agent_session_id,
-                        _sc_err,
-                    )
-                recovered += 1
+                # Delegate to shared recovery helper (issue #1270). Both this
+                # loop and `_agent_session_tool_timeout_loop` go through the
+                # same code path so MAX_RECOVERY_ATTEMPTS, the OOM defer, the
+                # response-delivered finalize-instead-of-recover guard, and
+                # the kill-switch all apply uniformly.
+                if await _apply_recovery_transition(
+                    entry,
+                    reason=reason,
+                    reason_kind=_reason_kind,
+                    handle=handle,
+                    worker_key=worker_key,
+                ):
+                    recovered += 1
         except Exception:
             logger.exception(
                 "[session-health] Error processing session %s",
@@ -1617,6 +1698,145 @@ async def _agent_session_health_loop() -> None:
         except Exception as e:
             logger.error("[session-health] Error in health check: %s", e, exc_info=True)
         await asyncio.sleep(AGENT_SESSION_HEALTH_CHECK_INTERVAL)
+
+
+async def _agent_session_tool_timeout_check() -> None:
+    """Per-tool timeout sub-loop tick (issue #1270).
+
+    Scans every ``running`` ``AgentSession`` row and recovers any whose
+    ``current_tool_name`` is non-null AND ``last_tool_use_at`` exceeds the
+    tier-specific budget (30s internal / 120s mcp / 300s default).
+
+    On a hit:
+      1. Re-read ``current_tool_name`` and ``last_tool_use_at`` from a fresh
+         query (race mitigation — PostToolUse may have fired between the
+         initial read and this point; if either is now fresh, abort the
+         recovery for this tick).
+      2. Bump the per-tier counter on the session row
+         (``tool_timeout_count_{internal,mcp,default}``).
+      3. INCR ``{project_key}:session-health:tool_timeouts:{tier}`` Redis counter.
+      4. Delegate to ``_apply_recovery_transition`` with
+         ``reason_kind="tool_timeout"`` — bypasses Tier 2 reprieve (the
+         wedge condition itself is the evidence) but otherwise reuses the
+         same MAX_RECOVERY_ATTEMPTS / OOM-defer / kill-switch path as the
+         main loop. See helper docstring for the full transition behavior.
+
+    The kill-switch ``TOOL_TIMEOUT_TIERS_DISABLED=1`` short-circuits the
+    entire tick (parity with ``DISABLE_PROGRESS_KILL`` for the main loop).
+    """
+    if os.environ.get("TOOL_TIMEOUT_TIERS_DISABLED") == "1":
+        return
+
+    running_sessions = _filter_hydrated_sessions(AgentSession.query.filter(status="running"))
+    for entry in running_sessions:
+        # Terminal-status guard (#1006) — IndexedField may show stale running entries.
+        actual_status = getattr(entry, "status", None)
+        if actual_status in _TERMINAL_STATUSES:
+            continue
+        try:
+            check = _check_tool_timeout(entry)
+            if check is None:
+                continue
+            tier, reason = check
+
+            # Race mitigation (issue #1270 Risk 2): re-read both fields from a
+            # fresh query before we transition. PostToolUse may have fired
+            # between the iterator's read and this point. If the second read
+            # shows a fresh (or cleared) state, abort the recovery for this tick.
+            try:
+                fresh = AgentSession.get_by_id(entry.agent_session_id)
+            except Exception as _re_err:
+                logger.debug(
+                    "[session-health] tool-timeout re-read failed for %s: %s",
+                    entry.agent_session_id,
+                    _re_err,
+                )
+                continue
+            if fresh is None:
+                continue
+            if getattr(fresh, "status", None) in _TERMINAL_STATUSES:
+                continue
+            recheck = _check_tool_timeout(fresh)
+            if recheck is None:
+                logger.debug(
+                    "[session-health] tool-timeout race avoided for %s "
+                    "(PostToolUse fired between read and transition)",
+                    entry.agent_session_id,
+                )
+                continue
+            tier, reason = recheck
+
+            # Bump per-tier counter on the session row. Best-effort; failure
+            # must not block the recovery transition (matches the
+            # observability-counter pattern at #1036:863).
+            counter_field = f"tool_timeout_count_{tier}"
+            try:
+                current = getattr(fresh, counter_field, 0) or 0
+                setattr(fresh, counter_field, current + 1)
+                fresh.save(update_fields=[counter_field])
+            except Exception as _cnt_err:
+                logger.debug(
+                    "[session-health] tool_timeout_count_%s save failed: %s",
+                    tier,
+                    _cnt_err,
+                )
+
+            # Project-tier Redis counter — mirrors `recoveries:{kind}` precedent.
+            try:
+                from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+                _R.incr(f"{fresh.project_key}:session-health:tool_timeouts:{tier}")
+            except Exception as _rc_err:
+                logger.debug(
+                    "[session-health] tool_timeouts:%s incr failed: %s",
+                    tier,
+                    _rc_err,
+                )
+
+            handle = _active_sessions.get(fresh.agent_session_id)
+            await _apply_recovery_transition(
+                fresh,
+                reason=reason,
+                reason_kind="tool_timeout",
+                handle=handle,
+                worker_key=fresh.worker_key,
+            )
+        except Exception:
+            logger.exception(
+                "[session-health] tool-timeout check error for session %s",
+                getattr(entry, "agent_session_id", "unknown"),
+            )
+
+
+async def _agent_session_tool_timeout_loop() -> None:
+    """Dedicated 30-second sub-loop for per-tool timeout enforcement.
+
+    Runs in parallel to ``_agent_session_health_loop`` so the 30s internal-tier
+    budget can fire within one tick of expiry. The 5-minute main loop's other
+    checks (psutil, OOM defer, orphan reap) stay on their original cadence —
+    we deliberately avoid running them at 30s to keep load impact bounded.
+
+    Kill switch: ``TOOL_TIMEOUT_TIERS_DISABLED=1`` short-circuits each tick
+    (parity with ``DISABLE_PROGRESS_KILL`` for the main loop).
+    """
+    logger.info(
+        "[session-health] Per-tool timeout sub-loop started (interval=%ds, "
+        "internal=%ds, mcp=%ds, default=%ds)",
+        TOOL_TIMEOUT_LOOP_INTERVAL,
+        TOOL_TIMEOUT_INTERNAL_SEC,
+        TOOL_TIMEOUT_MCP_SEC,
+        TOOL_TIMEOUT_DEFAULT_SEC,
+    )
+    while True:
+        try:
+            await _agent_session_tool_timeout_check()
+        except Exception as e:
+            logger.error(
+                "[session-health] Error in tool-timeout sub-loop: %s",
+                e,
+                exc_info=True,
+            )
+        await asyncio.sleep(TOOL_TIMEOUT_LOOP_INTERVAL)
 
 
 def format_duration(seconds) -> str:
