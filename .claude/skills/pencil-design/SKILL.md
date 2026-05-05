@@ -29,6 +29,54 @@ osascript -e 'tell application "System Events" to keystroke "s" using command do
 
 After saving, verify with `ls` before committing — otherwise pre-commit fails with `no such file`. This bites worst when you `open_document` a fresh path, run a batch of `batch_design` ops, and assume disk reflects the editor state. It doesn't.
 
+Auto-save also misfires after `git checkout` on a file Pencil has open. Pencil's auto-save trigger compares against its in-memory snapshot, not disk. If you `git checkout` an open file (e.g. to recover from a corrupted batch), Pencil's snapshot still matches its tree — subsequent `batch_design` ops modify memory but never persist. Symptom: `git status` shows "working tree clean" even after multiple successful `batch_design` calls. Recovery: trigger Cmd+S via the same `osascript` call as for new files before the next read or before commit. After saving, verify with `ls -la` that mtime advanced and `git status` shows the file as modified.
+
+## Stale editor cache (the silent corruption gotcha)
+
+`mcp__pencil__open_document` on a file that's already loaded in the desktop app **returns Pencil's in-memory tree, not what's on disk**. If the desktop app holds a stale snapshot from a prior session — predating commits made via git, the CLI, or another machine — the next `batch_design` call serializes that stale tree (plus your edits) and overwrites disk. No tool surfaces the drift: there's no version stamp, no mtime check, no reload command. The first sign of trouble is a `git diff` showing deletions you never asked for.
+
+This is independent of the new-file save gotcha and the `git checkout` auto-save misfire above. It bites **existing** files that auto-save fine — the auto-save just commits the wrong base.
+
+### Pre-flight inventory check (mandatory before any batch_design on an existing file)
+
+1. `mcp__pencil__get_editor_state` — note top-level frame count and reusable component count.
+2. `mcp__pencil__batch_get` on 2–3 sentinel nodes whose properties recently changed (the most recent commit's named-node deltas are good candidates).
+3. Compare against a baseline (last committed `.pen`, a checked-in manifest, or a known-good screenshot). If the in-memory state doesn't match the baseline — abort, reload, do not flush.
+
+Pick sentinels that change in normal work — typography roots, recently-added components, recently-renamed nodes. A sentinel that never changes won't catch a stale cache.
+
+### Post-batch diff verification
+
+After every `batch_design` (or batch group), run from the repo root:
+
+```bash
+git diff path/to/design.pen | grep -E "^[+-]\s+\"name\"" | head -40
+```
+
+The output should ONLY show names from the section you intended to touch. Any other named-node deltas — especially deletions — mean the editor flushed a stale tree. Stop, revert (`git checkout path/to/design.pen`), reload the file in Pencil, re-run with a pre-flight check.
+
+### Recovery runbook
+
+Symptom: `git diff` after a batch shows extra deletions or property reversions in nodes you didn't touch.
+
+1. `git checkout path/to/design.pen` — discard the corrupted flush.
+2. In Pencil desktop: File → Close, then reopen the file from disk. (Pencil has no in-app reload; close+reopen is the only way to drop the stale tree.)
+3. Run the pre-flight inventory check above to confirm the reload worked.
+4. Replay your batches.
+
+Note: this recovery path interacts with the `git checkout` auto-save misfire above — after `git checkout`, the close+reopen step is what guarantees Pencil drops the stale tree. Skip it and you're back in misfire territory.
+
+### Subagent isolation
+
+When delegating multi-batch `.pen` work to a subagent, prefer `isolation: "worktree"`. Cache-regression corruption stays in the throwaway worktree and never touches your working tree. Worth the overhead for any session involving more than a handful of `batch_design` calls.
+
+### Project-specific hardening
+
+Project-specific `pencil-design` skills should codify, on top of the above:
+
+- A **baseline manifest** (e.g. `docs/designs/baselines/design-system.baseline.json`) listing top-level frame IDs, component counts, and sentinel node properties — updated whenever the `.pen` is committed. The pre-flight reads this and asserts.
+- A **danger-zone list** of node IDs/names that should NEVER appear in a diff unless explicitly being edited. The post-batch grep checks for these specifically.
+
 ## Common schema pitfalls
 
 The schema text doesn't surface these — each one rolled back batches silently or with cryptic errors. Memorize them:
@@ -63,14 +111,23 @@ R(card+"/slot", {type: "text", ...})             # Replace a descendant entirely
 - Name with a category prefix: `Card/Episode`, `Button/Ghost`, `Input/Search`. Slash-prefixed names group in the editor's component picker.
 - Add a `slot: [...]` array on content frames to mark them as customizable from instances.
 
+### Script nodes (code on canvas)
+
+Script nodes execute a `.js` file and render its output as nested layers. They store only a **relative path** to the script (relative to the `.pen` location), not the code itself, and they re-render every load — output is derived state, not persisted.
+
+- `batch_design` ops on a Script node must preserve the `path` attribute; rewriting it points the node at a different (or missing) script.
+- Moving the `.pen` requires moving the referenced `.js` files alongside it; broken paths render as empty layers.
+- Scripts run in a sandbox: no network, no filesystem, ≤1000 nodes, ≤2s execution. Don't try to do data-fetching from a script — pre-bake inputs.
+- "Convert to layers" snapshots the current output into a regular frame and removes the Script node. Useful when you want diff-able children instead of derived output.
+
 ## Headless CLI vs MCP
 
 The Pencil MCP requires the desktop app's WebSocket bridge to be up. When it isn't (or in non-interactive sessions), use the headless npm CLI. The CLI runs the same AI agent against the same `.pen` schema — no GUI required.
 
 Key distinction:
 
-- **MCP** (`mcp__pencil__open_document`) — can create new files in editor memory, but won't persist them until you Cmd+S (see "Saving new .pen files" above).
-- **Headless CLI** (`pencil --in ... --out ...`) — requires the input file to **already exist on disk**. Cannot create from scratch. Seed it via the MCP (and save) first, or create an empty file in the desktop app.
+- **MCP** (`mcp__pencil__open_document`) — can create new files in editor memory, but won't persist them until you Cmd+S (see "Saving new .pen files" above). Also vulnerable to the stale editor cache (see "Stale editor cache" above).
+- **Headless CLI** (`pencil --in ... --out ...`) — `--in` is **optional**. Omit it to start from an empty canvas; provide it to iterate on an existing file. `--out` is required (unless you only `--export`) and writes/overwrites disk directly — no Cmd+S dance, no editor cache to drift from. The CLI is the safer path for any `.pen` work that doesn't need the GUI.
 
 ### Setup gotchas
 
@@ -84,7 +141,6 @@ Key distinction:
 ### Working pattern: in-place iteration
 
 ```bash
-# File MUST exist on disk first (CLI cannot create it)
 set -a && source .env.local && set +a && /path/to/pencil \
   --in design.pen \
   --out design.pen \
@@ -94,6 +150,18 @@ set -a && source .env.local && set +a && /path/to/pencil \
 ```
 
 Same path for `--in` and `--out` overwrites in place. Subsequent runs read prior state and modify, so prompts can refer to existing structure ("add a sixth tile to the grid").
+
+### Working pattern: create from scratch
+
+Omit `--in` to start with an empty canvas — no need to seed via the MCP, no need for the desktop app at all:
+
+```bash
+set -a && source .env.local && set +a && /path/to/pencil \
+  --out design.pen \
+  --prompt "..."
+```
+
+Cleanest path for greenfield `.pen` files in CI / non-interactive sessions. Avoids both the MCP Cmd+S save dance AND the stale editor cache class of bug entirely.
 
 ### Long runs
 
