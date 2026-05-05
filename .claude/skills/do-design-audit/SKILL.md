@@ -1,13 +1,55 @@
 ---
 name: do-design-audit
 description: "Audit an existing web UI against premium design criteria. Screenshots pages and evaluates visual hierarchy, typography, color, spacing, consistency, and more. Use when the user wants to evaluate design quality, audit a UI, or says 'review this design', 'check the UI', 'audit this page', 'scan the interface', or provides a URL for design feedback."
-allowed-tools: Bash(agent-browser:*)
+allowed-tools: Bash(agent-browser:*), mcp__byob__*
 context: fork
 ---
 
 This skill evaluates existing web interfaces against premium design criteria. It is the review-time companion to `/frontend-design` — that skill builds to the standard; this one audits against it.
 
 Be opinionated. Call out what fails clearly. "Acceptable" is not a compliment.
+
+## Surface decision
+
+Updated in #1274. This skill is **dual-surface** — it runs against both
+public marketing pages (anonymous, headless) and authenticated app
+surfaces (logged in, real Chrome). The choice is not the audit author's;
+it is determined by the URL host:
+
+**Public-domain allowlist → use `agent-browser` (anonymous, headless):**
+
+- Public marketing TLDs: `*.com`, `*.io`, `*.dev`, `*.ai` when served at
+  `/`, `/pricing`, `/about`, `/blog/*`, or any path that is publicly
+  reachable without a login wall
+- Local dev servers: `http://localhost:*`, `http://127.0.0.1:*`,
+  `http://0.0.0.0:*`
+- Known-public preview hosts: `*.vercel.app`, `*.netlify.app`,
+  `*.pages.dev`, `*.fly.dev`, `*.railway.app` (public preview deployments)
+
+**Anything not on the allowlist → use BYOB MCP tools (real Chrome,
+logged-in):** authenticated dashboards, private staging URLs, internal
+admin panels, anything behind SSO. **Default-route unknown hosts to
+BYOB**, not to `agent-browser` — a "public" URL that 302s to a login
+page returns wrong-shaped output on the anonymous surface, and the
+audit is silently invalid. Defaulting to BYOB closes that TOCTOU
+window: BYOB just shows you the logged-in page (correct), while
+anonymous returns the redirect target (wrong-shaped, hard to detect).
+
+When BYOB is used, the calling session **must** have
+`requires_real_chrome=True` set (bridge auto-infers from message text
+for "design audit" patterns; CLI users pass
+`valor-session create --needs-real-chrome ...`). Two concurrent
+real-Chrome sessions race on the active tab and corrupt each other's
+DOM.
+
+Examples below show the public-allowlist (`agent-browser`) form. For a
+non-allowlisted URL, swap each `agent-browser <verb>` for the BYOB
+equivalent: `agent-browser open` → `mcp__byob__navigate`,
+`agent-browser screenshot` → `mcp__byob__screenshot`,
+`agent-browser snapshot -i` → `mcp__byob__screenshot` (BYOB returns the
+accessibility tree alongside the image), `agent-browser click @e<ref>`
+→ `mcp__byob__click <target>`, `agent-browser close` is unnecessary
+under BYOB (no daemon to close — the user's Chrome stays open).
 
 ## When to Use
 
