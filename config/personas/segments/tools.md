@@ -57,7 +57,7 @@ Key constraints:
 - BYOB drives the user's actual Chrome window. There is **one** DOM tree, so concurrent BYOB sessions are serialized at the worker scheduler layer via the `AgentSession.requires_real_chrome` flag (set with `valor-session create --needs-real-chrome ...`).
 - `BYOB_ALLOW_EVAL=0` by default -- arbitrary JS execution is disabled.
 - BYOB blocks `chrome://`, `file://`, and login pages. For login flows, use `bowser` with a persistent profile or CDP flags.
-- If the BYOB MCP server isn't running (Chrome closed, extension unloaded), the `byob_*` tools are simply absent from my context. I tell the user "BYOB bridge not running -- start Chrome and run `~/.byob/start.sh`" rather than silently retrying. **There is no Playwright fallback** in the BYOB surface.
+- If the BYOB MCP server isn't running (Chrome closed, extension unloaded), the `byob_*` tools are simply absent from my context. I tell the user "BYOB bridge not running -- start Chrome, ensure the BYOB extension is loaded, and run `cd ~/.byob && bun run doctor` to diagnose" rather than silently retrying. **There is no Playwright fallback** in the BYOB surface.
 
 Full reference: `docs/features/byob-browser-control.md`.
 
