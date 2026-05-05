@@ -92,13 +92,27 @@ def record_tool_boundary(*, tool_name: str | None, clear: bool) -> bool:
         True if a write was applied, False if the call was a no-op
         (cooldown, missing AGENT_SESSION_ID, no matching session, or save
         failure). Never raises.
+
+    Note:
+        ``clear=True`` (PostToolUse) bypasses the per-session cooldown so the
+        per-tool timeout sub-loop in ``agent/session_health.py`` always sees
+        the cleared ``current_tool_name`` immediately after the tool returns.
+        See issue #1270.
     """
     session_id = os.environ.get("AGENT_SESSION_ID")
     if not session_id:
         return False
 
     now = time.time()
-    if _is_in_cooldown(session_id, now):
+    # PostToolUse writes (clear=True) bypass the cooldown — issue #1270.
+    # The per-tool timeout sub-loop in `agent/session_health.py` interprets a
+    # non-null `current_tool_name` whose `last_tool_use_at` exceeds the tier
+    # budget as a wedge condition. The internal-tier budget is 30s; the 5s
+    # cooldown could coalesce a fast PreToolUse→PostToolUse pair within the
+    # window and leave `current_tool_name` populated, producing false-positive
+    # tool-timeout recoveries. PreToolUse (clear=False) keeps the cooldown so
+    # rapid-fire tool calls don't thrash the field.
+    if not clear and _is_in_cooldown(session_id, now):
         return False
 
     name_to_write: str | None = None if clear else (tool_name or None)

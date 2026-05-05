@@ -173,6 +173,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         register_worker_pid,
         request_shutdown,
     )
+    from agent.session_health import _agent_session_tool_timeout_loop
     from agent.output_handler import FileOutputHandler, TelegramRelayOutputHandler
 
     # Initialize global concurrency semaphore BEFORE any worker loops are created.
@@ -365,6 +366,23 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
             logger.error("Health monitor exited unexpectedly: %s", exc)
 
     health_task.add_done_callback(_health_task_done)
+
+    # Start per-tool timeout sub-loop (issue #1270) — parallel to the main 5-min
+    # health loop on its own 30s cadence so the 30s internal-tier budget can fire
+    # within one tick of expiry. Independent done-callback so a crash here is
+    # logged distinctly from the main monitor.
+    tool_timeout_task = asyncio.create_task(
+        _agent_session_tool_timeout_loop(), name="session-tool-timeout-monitor"
+    )
+
+    def _tool_timeout_task_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.error("Tool-timeout sub-loop exited unexpectedly: %s", exc)
+
+    tool_timeout_task.add_done_callback(_tool_timeout_task_done)
 
     # Start unified reflection scheduler (moved from bridge — processing belongs in worker)
     reflection_task = None
