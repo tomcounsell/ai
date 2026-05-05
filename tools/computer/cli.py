@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 
 # EX_CONFIG = 78 (sysexits.h). Used here to mark "this machine is not
@@ -268,9 +267,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
-# os import retained for environment-related extensions (e.g. TMPDIR
-# overrides during tests). Currently no direct use here but intentionally
-# kept to mirror the pattern of other CLIs in tools/.
-_ = os
