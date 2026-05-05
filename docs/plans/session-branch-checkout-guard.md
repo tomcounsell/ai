@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
@@ -165,9 +165,9 @@ No other existing tests affected — the hook is purely additive at the start of
 **Impact:** A commit that should succeed fails with a confusing message; user must override with `--no-verify` or debug the hook.
 **Mitigation:** The predicate is two clear conditions joined by AND: branch starts with `session/` AND toplevel doesn't end with `.worktrees/{slug}`. Both are easily verified by hand. The test suite covers the three real scenarios. Detached HEAD is explicitly handled. The pathological empty-slug case is explicitly handled. We accept that a worktree mounted at a non-canonical path (e.g., `/tmp/manual-worktree`) will trigger the block — that's correct behavior, not a bug.
 
-### Risk 2: Symlink resolution breaks the suffix check
-**Impact:** Hook fails to detect a violation, or false-positive blocks a legitimate worktree, when the user's repo is mounted via symlinks (e.g., iCloud sync, dev container bind mount).
-**Mitigation:** Add a symlink-resolved path test case. If `git rev-parse --show-toplevel` returns a path that doesn't match the expected suffix due to symlinks, fall back to comparing the realpath of both sides. If realpaths match the expected suffix, allow the commit.
+### Risk 2: Symlink resolution (verified — already handled by `git`)
+**Impact:** Theoretical concern that `git rev-parse --show-toplevel` might return a path differing from `pwd` when symlinks are involved.
+**Mitigation:** Verified empirically during planning. From a symlinked CWD (`/tmp/symlink_test/linked_repo` → `real_repo`), `git rev-parse --show-toplevel` returns the canonical path `/private/tmp/symlink_test/real_repo` regardless of how the user `cd`'d in. The suffix predicate works without a `realpath` fallback. The remaining theoretical edge — `.worktrees/` itself being a symlink — does not occur because `get_or_create_worktree` creates a real directory. No symlink-specific test case is needed.
 
 ### Risk 3: Hook is bypassed by `--no-verify`
 **Impact:** Determined user (or AI agent) can commit through the block.
@@ -315,14 +315,14 @@ No agent integration required. The pre-commit hook is invoked by git itself, not
 | Hook contains #1288 marker | `grep -q '#1288' .githooks/pre-commit` | exit code 0 |
 | Doc subsection present | `grep -q 'Git-Layer Enforcement for Manual Operations' docs/features/session-isolation.md` | exit code 0 |
 
+## Resolved Decisions
+
+These three calls were resolved at plan-finalization time. Recording them inline so reviewers and the builder don't relitigate:
+
+1. **Error-message reference: issue number only (`#1288`).** Stable, grep-friendly, survives issue closure, doesn't rot under doc reorganizations. The error already tells the user what to do (`cd …`, `python -c …`); the breadcrumb just answers "where did this come from?" — a number suffices.
+2. **Symlink handling: no fallback needed.** Empirical test confirmed `git rev-parse --show-toplevel` already canonicalizes through symlinks. See Risk 2 for the verification details.
+3. **Doc location: extend `docs/features/session-isolation.md`.** The doc already covers the worker-side enforcement (#887); the git-side enforcement belongs in the same file so a reader learning the isolation invariant finds both halves together. No standalone `docs/features/git-hooks.md` until a second hook phase justifies the inventory split.
+
 ## Critique Results
 
 <!-- Populated by /do-plan-critique. -->
-
----
-
-## Open Questions
-
-1. **Issue-number in error message vs. permanent doc link.** I drafted the error to mention `#1288` so a future grep finds the origin. Alternative: link to the permanent path `.githooks/pre-commit Phase 0.5` or to `docs/features/session-isolation.md`. Issue numbers are stable and searchable, but the doc link is more durable if the issue gets archived or renumbered. Preference?
-2. **Symlink fallback aggressiveness.** Risk 2 proposes "if suffix check fails due to symlink, retry with realpath." Alternative: only do the realpath compare unconditionally (one extra `realpath` call per commit on a session branch, ~1ms). The unconditional version is simpler and removes an edge-case branch. Acceptable extra latency, or keep the conditional fallback?
-3. **Should the doc subsection live in `session-isolation.md` or a new `git-hooks.md`?** I chose `session-isolation.md` because the rule is part of the isolation contract. But there is no top-level doc inventorying the git hooks installed under `.githooks/`. If we anticipate more hook phases, a dedicated `docs/features/git-hooks.md` might be better — and would let `session-isolation.md` link to it instead of duplicating. No strong preference on my end; flag if you want the standalone doc.
