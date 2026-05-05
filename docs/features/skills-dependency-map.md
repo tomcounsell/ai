@@ -134,9 +134,9 @@ Three browser surfaces + one desktop surface coexist. Decision guide:
 
 | Surface | Anonymous? | Headless? | Logged-in? | When |
 |---------|-----------|-----------|------------|------|
-| `agent-browser` skill | yes | yes | no | Existing skills using it (do-pr-review, etc.) -- migrating in #1274 |
+| `agent-browser` skill | yes | yes | no | Anonymous public-page automation. Per-skill outcomes from the #1274 migration are captured in [`byob-browser-control.md`](byob-browser-control.md#migration-status). |
 | `bowser` skill | yes | yes | optional (CDP) | Untrusted-link previews, parallel runs |
-| BYOB MCP tools | no | no (real Chrome) | yes (user's session) | Logged-in Gmail/GitHub/etc. Serialized at scheduler layer via `AgentSession.requires_real_chrome` |
+| BYOB MCP tools (`mcp__byob__*`) | no | no (real Chrome) | yes (user's session) | Logged-in Gmail/GitHub/LinkedIn/etc. Serialized at scheduler layer via `AgentSession.requires_real_chrome`. Bridge-spawned sessions get the flag inferred from message text via `agent/byob_skill_triggers.py` (#1274). |
 | `computer-use` skill | -- | -- | -- | **Native macOS apps** (not browsers) |
 
 ### Meta Skills (create other skills)

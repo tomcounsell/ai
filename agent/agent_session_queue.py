@@ -1071,6 +1071,7 @@ async def enqueue_agent_session(
     scheduling_depth: int = 0,  # ignored, now derived
     project_config: dict | None = None,
     extra_context_overrides: dict | None = None,
+    requires_real_chrome: bool = False,
 ) -> int:
     """
     Add a session to Redis and ensure worker is running.
@@ -1082,6 +1083,13 @@ async def enqueue_agent_session(
             (legacy callers); the worker will fall back to loading from projects.json.
         extra_context_overrides: Additional key/value pairs merged into extra_context.
             Use for transport-specific metadata, e.g. transport="email".
+        requires_real_chrome: Forwarded to ``_push_agent_session`` so the
+            worker scheduler can serialize this session against any other
+            in-flight real-Chrome session (issue #1256, Decision 2).
+            Bridge enqueue paths set this from
+            ``agent.byob_skill_triggers.infer_requires_real_chrome``;
+            CLI ``valor-session create --needs-real-chrome`` sets it
+            literally. Default False keeps non-serialized scheduling.
 
     Returns queue depth after push.
     """
@@ -1114,6 +1122,7 @@ async def enqueue_agent_session(
         session_type=session_type,
         project_config=project_config,
         extra_context_overrides=extra_context_overrides,
+        requires_real_chrome=requires_real_chrome,
     )
     # KEEP IN SYNC with AgentSession.worker_key in models/agent_session.py
     # Compute worker_key from the same inputs the property uses, without re-querying Redis

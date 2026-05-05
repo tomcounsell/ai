@@ -5,7 +5,7 @@ Human-readable index of all Claude Code skills in this project. Not loaded by Cl
 | Skill | Lines | Invocation | Context | Description |
 |-------|------:|------------|---------|-------------|
 | add-feature | 213 | User + Model | - | Extend the system with new skills, tools, and capabilities |
-| agent-browser | 336 | Model only | - | Browser automation for web testing, screenshots, data extraction |
+| agent-browser | 336 | Model only | - | **Anonymous, headless** browser automation for public sites, screenshots, data extraction. For logged-in operations, use BYOB MCP tools instead — see "When to use which browser surface?" below. |
 | audit-next-tool | 160 | User + Model | - | Audit new/modified tools for quality and architecture compliance |
 | checking-system-logs | 66 | Model only | - | Find bridge events, agent responses, errors in system logs |
 | do-build | 115 | User + Model | fork | Execute a plan document using team orchestration |
@@ -41,6 +41,49 @@ Human-readable index of all Claude Code skills in this project. Not loaded by Cl
 **Scope:**
 - Project-only (not synced to `~/.claude/skills/`): telegram, reading-sms-messages, checking-system-logs, google-workspace
 - All other skills sync to personal scope via `scripts/update/symlinks.py`
+
+---
+
+## When to use which browser surface?
+
+This repo has three coexisting browser surfaces. Pick the right one
+when authoring or extending a skill:
+
+| Surface | Driver | Profile | Parallelism | Use when |
+|---------|--------|---------|-------------|----------|
+| `agent-browser` | 3rd-party CLI (Playwright headless, single instance) | Anonymous, throwaway per invocation | Single tab, single session at a time | The target site is **public** (no login required) — marketing pages, GitHub, public preview deploys, anonymous data extraction. Cheapest. Best for repeat-safe automation against pages that look the same to every visitor. |
+| `bowser` | Playwright headless, parallel-safe, anonymous | Anonymous, throwaway per worker | Many parallel sessions | Same as `agent-browser` but you need **N parallel sessions at once** (e.g., crawling N URLs concurrently). |
+| BYOB MCP (`mcp__byob__*`) | Real Chrome via MV3 extension + native messaging + MCP server | The user's actual logged-in Chrome profile | One real-Chrome slot per machine; serialized by `AgentSession.requires_real_chrome` | The target site requires **the user's identity** — LinkedIn DMs, Gmail, internal dashboards, authenticated GitHub views, private staging URLs, anything behind SSO. The user's session cookies, MFA state, and SSO tokens just work because it IS their browser. |
+
+**Decision rule for skill authors:**
+
+1. **Does the target site require login?**
+   - **Yes, with the operator's identity** → BYOB MCP (`mcp__byob__*`).
+   - **No / public pages only** → continue.
+2. **Do you need many parallel browser sessions at once?**
+   - **Yes** → `bowser`.
+   - **No** → `agent-browser`.
+3. **Is the target ambiguous (might or might not require login, e.g.
+   a "preview" URL that 302s to a login page)?**
+   - Default to BYOB MCP. The cost of an unnecessary BYOB session is one
+     serialized scheduler slot; the cost of an anonymous session
+     hitting a login wall is wrong-shaped output that fails silently.
+
+**Frontmatter declaration**: skills calling BYOB MCP add
+`mcp__byob__*` to `allowed-tools`. Skills calling `agent-browser` add
+`Bash(agent-browser:*)`. Dual-surface skills declare both.
+
+**Scheduler gate (BYOB only)**: BYOB-driving sessions must have
+`AgentSession.requires_real_chrome=True` so the worker scheduler does
+not start two real-Chrome sessions concurrently (the active tab is a
+single resource). Bridge-spawned sessions get this inferred from the
+message text via `agent.byob_skill_triggers.infer_requires_real_chrome`.
+CLI-spawned sessions pass `valor-session create --needs-real-chrome ...`.
+Skipping this guard lets two BYOB sessions race on the active tab and
+corrupt each other's DOM.
+
+For background and the per-skill migration history, see
+[`docs/features/byob-browser-control.md`](../../docs/features/byob-browser-control.md).
 
 ---
 

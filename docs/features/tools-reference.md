@@ -367,6 +367,8 @@ valor-image-analyze --help                               # Show options
 
 ## Browser Automation
 
+Three browser surfaces coexist — `agent-browser` (anonymous CLI), `bowser` (parallel anonymous), and **BYOB MCP tools** (real Chrome, the user's logged-in session). Pick the right one before reaching for any of the snippets below; see [`byob-browser-control.md`](byob-browser-control.md) and the "When to use which browser surface?" section in [`.claude/skills/README.md`](../../.claude/skills/README.md) for the canonical decision rule. The remainder of this section covers the anonymous `agent-browser` CLI; for logged-in operations (Gmail, LinkedIn, internal dashboards, authenticated GitHub views) use BYOB MCP (`mcp__byob__*`) instead.
+
 `agent-browser` - Installed globally via npm.
 
 Headless browser automation for web testing, form filling, screenshots, and data extraction.
@@ -429,7 +431,7 @@ Steps:
 1. Detect branch and workflow ID
 2. Find matching spec in `specs/*.md`
 3. Start app with `/prepare_app`
-4. Capture screenshots via `agent-browser`
+4. Capture screenshots — `agent-browser` for `localhost`/public preview hosts, BYOB MCP (`mcp__byob__*`) for auth dashboards / unknown hosts (see `.claude/skills/do-pr-review/SKILL.md` for the allowlist)
 5. Compare implementation vs spec
 6. Classify issues (blocker/tech_debt/skippable)
 7. Generate report at `agents/{workflow_id}/review/report.json`

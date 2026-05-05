@@ -2,7 +2,46 @@
 
 **Issue:** [#1256](https://github.com/tomcounsell/ai/issues/1256)
 **Plan:** [`docs/plans/byob_and_computer_use.md`](../plans/byob_and_computer_use.md)
-**Followups:** [#1274](https://github.com/tomcounsell/ai/issues/1274) (per-skill migration of `agent-browser`-using skills)
+
+## Migration Status
+
+The `agent-browser` → BYOB skill migration tracked by
+[#1274](https://github.com/tomcounsell/ai/issues/1274) shipped with the
+following per-skill state. The canonical decision matrix lives in
+[`docs/plans/agent_browser_to_byob_skill_migration.md`](../plans/agent_browser_to_byob_skill_migration.md);
+this section is the post-build summary.
+
+| Skill | Post-build state | Notes |
+|-------|------------------|-------|
+| `linkedin` | **migrated to BYOB** | First canonical migration. Frontmatter declares both `mcp__byob__*` and `Bash(agent-browser:*)` for one release cycle so machines without BYOB still have a working linkedin skill. The retained CDP-attach block is prefixed with an explicit "Fallback path" callout (verified by build-time grep). |
+| `do-design-audit` | **dual-surface** | Public-domain allowlist routes to `agent-browser`; everything else (auth dashboards, unknown hosts) routes to BYOB. Default-to-BYOB closes the public-URL-302s-to-login TOCTOU window. |
+| `do-pr-review` (incl. `sub-skills/screenshot.md`) | **dual-surface** | Allowlist: `localhost`, `*.vercel.app`, `*.netlify.app`, `*.pages.dev`, `*.fly.dev`, `*.railway.app`, `github.com`. Anything else routes to BYOB. |
+| `do-design-system` | doc-only update | Cosmos / Pinterest / Are.na are public; stays on `agent-browser`. Note added explaining BYOB is the alternative for any future logged-in moodboard source. |
+| `prepare-app` | doc-only update | Now mentions both surfaces in "When to Use" and "Integration Notes". |
+| `do-test` | doc-only update | The `frontend-tester` agent's `agent-browser` use is unchanged; sentence appended noting BYOB is a future option for that agent. |
+| `.claude/skills/README.md` | doc-only update | Added "When to use which browser surface?" section with the canonical decision rule (1: needs login? 2: needs parallelism? 3: ambiguous → default-to-BYOB). |
+| `do-skills-audit/scripts/audit_skills.py` | one-line update | `byob` added to `BACKGROUND_SKILLS` allowlist so the audit recognizes the BYOB MCP surface (no SKILL.md exists for BYOB by design — it is MCP-only). |
+| `agent-browser` | stays | The skill *is* the wrapper for the 3rd-party anonymous CLI. Pointer added: "When to use BYOB instead?" |
+| `bowser` | stays | Already its own skill. No `agent-browser` references. Documentation-status row only. |
+| `do-discover-paths` | stays | Depends on `agent-browser eval` which BYOB blocks by default. Documented "Why this stays on `agent-browser`" section added. |
+| `mermaid-render` | stays | Excalidraw is anonymous and public; uses `agent-browser eval` which BYOB blocks. Documented "Why this stays on `agent-browser`" section added. |
+
+**Bridge inference**: `agent/byob_skill_triggers.py` exposes
+`BYOB_SKILL_TRIGGERS` (registry) and `infer_requires_real_chrome(text)`
+(case-insensitive regex match with first-person/intent phrasing).
+Both Telegram and email bridge enqueue paths call this before
+`enqueue_agent_session()` so bridge-spawned sessions get the
+`requires_real_chrome` scheduler gate engaged automatically.
+**Adding a new BYOB-migrated skill = add a row to
+`BYOB_SKILL_TRIGGERS`.** No bridge edit required.
+
+CLI users continue to set the flag explicitly:
+`valor-session create --needs-real-chrome ...`.
+
+**Behavioral smoke test**: the operator must verify the canonical
+`linkedin` migration drives real Chrome end-to-end via
+`tests/manual/linkedin_byob_smoke.txt`. See the plan's Success
+Criteria for the executable proof artifact.
 
 ## What it is
 
@@ -22,7 +61,7 @@ Three surfaces coexist after this work shipped:
 
 | Surface | Anonymous? | Headless? | Parallel-safe? | Logged-in? | Use when |
 |---|---|---|---|---|---|
-| `agent-browser` (3rd-party CLI on PATH) | yes | yes | no (single-tab) | no | Existing skills that use it (do-pr-review, do-design-audit, etc.) -- migrating in #1274 |
+| `agent-browser` (3rd-party CLI on PATH) | yes | yes | no (single-tab) | no | Anonymous public-page automation. Per-skill migration outcomes captured in the Migration Status section above (#1274). |
 | `bowser` (Playwright headless) | yes | yes | yes (`-s=` named sessions) | optional (CDP/profile flags) | Untrusted-link previews, parallel CI-style tests |
 | **BYOB MCP** (`byob_*` tools) | no | no (real Chrome) | no (one DOM tree) | yes -- the user's actual session | Logged-in operations (Gmail, GitHub notifications, internal dashboards). Requires scheduler defer. |
 

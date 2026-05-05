@@ -688,6 +688,7 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
         config: The loaded projects.json config dict.
     """
     from agent.agent_session_queue import enqueue_agent_session
+    from agent.byob_skill_triggers import infer_requires_real_chrome
     from bridge.routing import ACTIVE_PROJECTS, find_project_for_email
     from config.enums import SessionType
 
@@ -748,6 +749,15 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
         except Exception as e:
             logger.warning(f"[email] Failed to store inbound msgid mapping: {e}")
 
+    # BYOB scheduler-gate inference (#1274): scan body + subject for
+    # registered triggers (e.g. "linkedin"). Email sessions go through a
+    # separate enqueue path from telegram_bridge.py, so the same inference
+    # hook is wired here independently. Fails closed -- exception-safe.
+    _byob_text = f"{subject or ''}\n{body or ''}"
+    _byob_real_chrome = infer_requires_real_chrome(_byob_text)
+    if _byob_real_chrome:
+        logger.info(f"[email] byob_inference_set_real_chrome session_id={session_id}")
+
     # Enqueue the session with email transport metadata
     try:
         await enqueue_agent_session(
@@ -761,6 +771,7 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
             chat_title=subject or f"Email from {from_addr}",
             project_config=project,
             session_type=session_type,
+            requires_real_chrome=_byob_real_chrome,
             extra_context_overrides={
                 "transport": "email",
                 "email_message_id": message_id,

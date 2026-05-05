@@ -2170,6 +2170,22 @@ async def main():
                     f"chain_len={len(chain)}"
                 )
 
+        # BYOB scheduler-gate inference (#1274): scan the inbound message
+        # text for triggers registered in agent.byob_skill_triggers and
+        # forward the resulting bool as requires_real_chrome=. Bridge-spawned
+        # sessions never see the --needs-real-chrome CLI flag, so this is the
+        # only path that engages the real-Chrome scheduler gate from PR #1277
+        # for Telegram-initiated work. Fails closed: if inference raises (it
+        # shouldn't — it's exception-safe by contract) the call returns
+        # False, preserving status-quo non-serialized scheduling.
+        from agent.byob_skill_triggers import infer_requires_real_chrome
+
+        _byob_real_chrome = infer_requires_real_chrome(safe_text)
+        if _byob_real_chrome:
+            logger.info(
+                f"byob_inference_set_real_chrome session_id={session_id} chat_id={telegram_chat_id}"
+            )
+
         # Enqueue: session_type drives PM vs Dev session creation.
         # Pass full project config so the session carries it through the pipeline.
         # dispatch_telegram_session wraps enqueue_agent_session + dedup record so
@@ -2191,6 +2207,7 @@ async def main():
             session_type=_session_type,
             project_config=project,
             extra_context_overrides=extra_overrides,
+            requires_real_chrome=_byob_real_chrome,
         )
         logger.info(
             f"[{project_name}] Queued session for {sender_name} (msg {message_id}, depth={depth})"

@@ -1,0 +1,152 @@
+linkedin → BYOB behavioral smoke test (captured transcript)
+============================================================
+
+Issue:    https://github.com/tomcounsell/ai/issues/1274
+PR:       https://github.com/tomcounsell/ai/pull/1286
+Plan:     docs/plans/agent_browser_to_byob_skill_migration.md
+Skill:    .claude/skills/linkedin/SKILL.md (post-#1274 migration)
+Captured: 2026-05-05 by valorengels on a BYOB-installed dev machine
+
+Purpose
+-------
+
+This artifact captures a real end-to-end smoke run of the migrated
+`linkedin` BYOB skill against the operator's logged-in Chrome. The
+structural grep checks in the build verify the skill body shape (correct
+tool surface in allowed-tools, deprecation callout retained, migration
+pointer present); this artifact is the executable proof per
+`feedback_acceptance_criteria_must_be_executable` that BYOB actually
+drives the user's real Chrome session — not the CDP-attach hack and not
+anonymous.
+
+What was run
+------------
+
+The dev session was spawned with the scheduler-gate flag set:
+
+  valor-session create \
+    --role dev \
+    --project-key valor \
+    --needs-real-chrome \
+    --message "browse the linkedin feed and engage with one post about AI"
+
+The agent picked up the `linkedin` skill, ran tab-discovery, and
+exercised both Task 1 (DM read) and Task 3 (feed browse + comment + like)
+against real, logged-in LinkedIn. Task 2 (publish a post) is documented
+as a KNOWN LIMITATION in the skill body — see the React-portal contenteditable
+gap below.
+
+End-to-end engagement: comment + like on iqram magdon-ismail's ToS post
+----------------------------------------------------------------------
+
+Target post: urn:li:share:7448938492534939648
+Author:      iqram magdon-ismail
+Topic:       Anthropic Terms of Service / output ownership concerns
+
+Pre-engagement state (from `browser_read` of the post page):
+  - Reaction count: 18
+  - Comment count: 2
+  - Post-level Like button: name="Reaction button state: no reactionLike"
+  - Comment textbox: name="Text editor for creating comment", role="textbox"
+
+Sequence of BYOB calls actually issued:
+
+  1. mcp__byob__browser_list_tabs
+     → returned active LinkedIn tab; reused tabId for all subsequent calls
+       (no duplicate tab opened — gotcha #2 honored).
+
+  2. mcp__byob__browser_navigate
+       url="https://www.linkedin.com/feed/update/urn:li:share:7448938492534939648/"
+       tabId=<linkedin_tab>
+       waitUntil="networkidle"
+     → landed on the dedicated post page.
+
+  3. mcp__byob__browser_read
+       url="https://www.linkedin.com/feed/update/urn:li:share:7448938492534939648/"
+       reuseTab=true
+       screens=2
+     → returned the full post body (the satire about Anthropic's ToS),
+       interactiveElements list with the post-level Like and Comment idxs.
+       Tool-result spilled to tool-results/*.txt — gotcha #9 confirmed in
+       the wild; parsed via Bash + grep.
+
+  4. Reading the full body changed the comment we drafted. The feed snippet
+     read like a straight policy complaint; the dedicated-post body revealed
+     the punchline lower down. Confirms the "Read the full post body before
+     drafting" guidance — see SKILL.md `### Read the full post body before drafting`.
+
+  5. mcp__byob__browser_click
+       tabId=<linkedin_tab>
+       selector="byob:idx=<like_idx>"     # the post-level Like, tag="button"
+     → clicked. Re-read confirmed the button name flipped from
+       "Reaction button state: no reactionLike" → "Reaction button state: Like".
+       This is the reliable success indicator (gotcha #5) — reaction-count
+       lag was visible too (count went 18 → 19 only on the second re-read).
+
+  6. mcp__byob__browser_type
+       tabId=<linkedin_tab>
+       selector="byob:idx=<editor_idx>"    # name="Text editor for creating comment"
+       text="<comment text drafted by general-purpose subagent>"
+     → typed into the inline comment textbox (NOT a portal — the comment
+       composer renders inline, unlike Task 2's share modal).
+
+  7. mcp__byob__browser_read
+       url="<post URL>"
+       reuseTab=true
+       screens=1
+     → re-read invalidated previous indices (gotcha: interactiveSessionTag
+       changed). Now TWO entries with name="Comment" appeared:
+         - idx≈low,  bounds.x≈565  (post-action-bar Comment — opens composer, no-op when open)
+         - idx≈high, bounds.x≈844  (the actual SUBMIT button)
+       Distinguishing by x-coordinate per gotcha #4. Picked the high-x one.
+
+  8. mcp__byob__browser_click
+       tabId=<linkedin_tab>
+       selector="byob:idx=<submit_idx>"   # the high-x Comment, the actual submit
+     → comment posted.
+
+  9. mcp__byob__browser_screenshot
+       tabId=<linkedin_tab>
+       savePath="/tmp/iqram-after-submit.jpg"
+       format="jpeg"
+       quality=55
+     → confirmation screenshot captured. Comment count now 3, my comment
+       visible with author "Valor Engels" and timestamp "now".
+
+Post-engagement state confirmed:
+  - Reaction count: 19 (up from 18)
+  - Post-level Like button: name="Reaction button state: Like" (flipped)
+  - Comment count: 3 (up from 2)
+  - My comment visible inline with timestamp "now"
+  - Screenshots at /tmp/iqram-after-type.jpg and /tmp/iqram-after-submit.jpg
+
+Net result
+----------
+
+The comment + like flow works fully end-to-end via BYOB on the operator's
+real, logged-in Chrome. The migrated `linkedin` skill drove every step
+without falling back to the CDP-attach path. PR #1277's scheduler gate
+held the session as the sole real-Chrome consumer for the duration.
+
+Task 2 (publish a post) remains blocked by the React-portal contenteditable
+gap captured as the KNOWN LIMITATION block in SKILL.md. Comment + like is
+unaffected because the comment composer is inline, not in a portal.
+
+Footnotes
+---------
+
+- The skill-location footgun (`~/.claude/skills/linkedin/SKILL.md` vs
+  `<repo>/.claude/skills/linkedin/SKILL.md`) bit during the rewrite —
+  repo-local wins. A memory record was saved to avoid repeating it.
+  Worth surfacing in `audit_skills.py` if user-global shadowing isn't
+  already warned on.
+
+- This run was on a per-memory "skills/tools only" build machine that
+  needed `/setup` re-run with the computer-use opt-in to install BYOB
+  before the smoke could happen. Once installed, `cd ~/.byob && bun run doctor`
+  reported all green; `mcp__byob__browser_list_tabs` returned the LinkedIn
+  tab on first call. No headless fingerprint, no anonymous profile.
+
+- `?sortBy=RECENT` was dropped during a sibling Task-3 read against `/feed/`
+  (gotcha #6 — confirmed live). Worked the default Top feed and that was
+  fine for finding the iqram post.

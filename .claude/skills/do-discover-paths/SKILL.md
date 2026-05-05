@@ -8,6 +8,28 @@ argument-hint: "<url> [path-name]"
 
 You are the **happy path discovery agent**. You systematically explore a target site using agent-browser, recording each interaction as structured trace JSON that can be converted into deterministic Rodney test scripts.
 
+## Why this stays on `agent-browser` (not BYOB)
+
+This skill depends heavily on `agent-browser eval` — the
+JavaScript-evaluation primitive used to extract CSS selectors and DOM
+structure from explored pages. The BYOB MCP server **blocks
+`browser_eval` by default** (gated by the `BYOB_ALLOW_EVAL=1`
+environment variable, off by default for security reasons documented
+in [`docs/features/byob-browser-control.md`](../../../docs/features/byob-browser-control.md)).
+
+Migrating this skill to BYOB would require either flipping the eval
+gate (a security regression that affects all BYOB consumers, not just
+this skill) or rewriting the entire selector-extraction layer to work
+without `eval` (a multi-day rewrite for marginal value).
+
+If this skill ever needs to discover paths on a **logged-in** target
+(authenticated app, SSO-protected dashboard), the right answer is to
+spawn `agent-browser` with a profile dir that already has the session
+cookies, not to migrate to BYOB. The decision was recorded in
+issue #1274 and the followup discussion lives in
+[`docs/features/byob-browser-control.md`](../../../docs/features/byob-browser-control.md)
+under Migration Status.
+
 ## Variables
 
 DISCOVERY_ARGS: $ARGUMENTS

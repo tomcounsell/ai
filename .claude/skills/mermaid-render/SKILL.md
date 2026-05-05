@@ -10,6 +10,19 @@ user-invocable: true
 
 Convert Mermaid `.mmd` source files (or `.excalidraw` JSON files) to hand-drawn style PNGs.
 
+## Why this stays on `agent-browser` (not BYOB)
+
+The browser-driven leg of this skill targets `excalidraw.com`, which is
+**anonymous and public** — there's no benefit to driving the user's
+real Chrome here. The skill also relies on `agent-browser eval` to
+extract the scene JSON from `localStorage`, which BYOB blocks by
+default (gated by `BYOB_ALLOW_EVAL=1` for security; see
+[`docs/features/byob-browser-control.md`](../../../docs/features/byob-browser-control.md)).
+Migrating would either require flipping the eval gate (security
+regression for every other BYOB consumer) or finding an
+eval-free way to round-trip the scene through Excalidraw's UI
+(slower, more brittle, no upside). Decision recorded in #1274.
+
 ## Dependencies (install once)
 
 ```bash

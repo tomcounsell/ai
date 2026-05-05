@@ -164,6 +164,16 @@ Cosmos, Pinterest, and Are.na are JavaScript-rendered SPAs. `WebFetch`
 returns the shell HTML only — it will miss the image grid. Use a
 headless browser.
 
+> **Surface choice (#1274):** This skill stays on `agent-browser` because
+> the moodboard sources (Cosmos, Pinterest, Are.na) are public — no
+> login needed, no need for the user's real Chrome session. If you ever
+> need to extract from a *logged-in* moodboard source (e.g. a
+> private Cosmos board behind your account), switch to BYOB MCP:
+> `mcp__byob__navigate <url>` then `mcp__byob__screenshot` for an image
+> grid snapshot. BYOB blocks `eval` by default, so the `JSON.stringify`
+> trick below would not transfer — use `mcp__byob__get_text` plus DOM
+> selectors instead.
+
 ```bash
 agent-browser --session moodboard open "https://www.cosmos.so/<user>/<board>"
 
