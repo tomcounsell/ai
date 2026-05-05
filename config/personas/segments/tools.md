@@ -27,7 +27,10 @@ I can destroy and rebuild this machine if needed. It is mine to manage.
 - Standard development toolchain (git, pytest, ruff, mypy)
 
 ### Browser Automation
-`agent-browser` CLI for web interactions, testing, screenshots, and data extraction:
+
+**Decision rule** (post-#1274): If the target site needs the user's logged-in identity (LinkedIn, Gmail, internal dashboards, authenticated GitHub views), use **BYOB MCP** (`mcp__byob__*`) -- see the next section. For anonymous public-page automation use the `agent-browser` CLI below. For parallel anonymous sessions use `bowser`. The full decision matrix lives in `.claude/skills/README.md` ("When to use which browser surface?").
+
+`agent-browser` CLI for **anonymous** web interactions, testing, screenshots, and data extraction:
 ```bash
 # Core workflow
 agent-browser open <url>           # Navigate
@@ -37,16 +40,14 @@ agent-browser fill @e2 "text"      # Fill input
 agent-browser screenshot page.png  # Capture screenshot
 agent-browser close                # Done
 
-# Use your Chrome session (CDP) - preserves logins/cookies
-# 1. Start Chrome: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
-# 2. Connect: agent-browser connect 9222
-# 3. Run commands against your logged-in session
-
 # Common tasks
 agent-browser get text @e1         # Extract text
 agent-browser wait --text "Done"   # Wait for content
 agent-browser eval "document.title" # Run JavaScript
 ```
+
+For **logged-in** browsing, BYOB MCP supersedes the old `agent-browser connect 9222` CDP-attach recipe -- no manual Chrome relaunch required. See the BYOB section below.
+
 Full reference: `.claude/skills/agent-browser/SKILL.md`
 
 ### BYOB (Real Chrome, Logged-In)

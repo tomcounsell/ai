@@ -6,11 +6,19 @@ implemented: 2026-02-04
 
 # Feature: Review Workflow with Screenshots
 
+> **Surface note (post-#1274):** The original proposal below assumed `agent-browser` for all
+> screenshot capture. The shipped review workflow is now **dual-surface** — `agent-browser`
+> for `localhost` and public preview hosts (`*.vercel.app`, `*.netlify.app`, `*.pages.dev`,
+> `*.fly.dev`, `*.railway.app`, `github.com`); BYOB MCP (`mcp__byob__*`) for auth dashboards,
+> private staging URLs, and any unknown host. The allowlist lives in
+> `.claude/skills/do-pr-review/SKILL.md` and `sub-skills/screenshot.md`. See
+> [`byob-browser-control.md`](byob-browser-control.md) for the full decision rule.
+
 ## Overview
 
 The `/do-pr-review` command validates implementations against specifications and captures visual proof via screenshots.
 
-**Status:** ✅ Implemented
+**Status:** ✅ Implemented (dual-surface since #1274)
 **Implementation files:**
 - `.claude/commands/do-pr-review.md` - Review workflow command
 - `.claude/commands/prepare_app.md` - App preparation command
