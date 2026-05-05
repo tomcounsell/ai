@@ -1255,9 +1255,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 session.last_sdk_heartbeat_at = datetime.now(tz=UTC)
                 session.claude_pid = pid
                 session.harness_pid = pid
-                session.save(
-                    update_fields=["last_sdk_heartbeat_at", "claude_pid", "harness_pid"]
-                )
+                session.save(update_fields=["last_sdk_heartbeat_at", "claude_pid", "harness_pid"])
             except Exception as e:
                 logger.warning(
                     "[%s] on_sdk_started save failed (pid=%s): %s",
