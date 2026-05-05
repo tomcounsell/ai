@@ -7,17 +7,35 @@ user-invocable: false
 
 # Browser Automation with agent-browser
 
-## When to Use
+`agent-browser` is the **anonymous, headless** browser surface — a 3rd-party
+Playwright CLI that drives a throwaway profile per invocation. It cannot
+see the user's logged-in sessions and never will (that is its design,
+not a limitation).
 
-- User needs to navigate websites or interact with web pages
-- Filling out web forms or clicking buttons on web pages
-- Taking screenshots of web pages or saving pages as PDFs
-- Extracting data or information from websites
-- Testing web applications or verifying web functionality
-- Recording video demonstrations of web interactions
-- User mentions "browser", "webpage", "website", "screenshot", "web form", or "web scraping"
-- User asks to "open a URL", "click on something", "fill out a form", or "get data from a site"
-- Automating repetitive web tasks or workflows
+## When to use BYOB instead?
+
+If the target site requires the user's **logged-in identity** — Gmail,
+LinkedIn DMs, internal dashboards, authenticated GitHub, anything behind
+SSO — use the BYOB MCP tools (`mcp__byob__navigate`, `mcp__byob__click`,
+`mcp__byob__screenshot`, etc.) instead. BYOB drives the user's real
+Chrome session. See
+[`docs/features/byob-browser-control.md`](../../../docs/features/byob-browser-control.md)
+for the decision rule, and
+[`.claude/skills/README.md`](../README.md) → "When to use which browser
+surface?" for the canonical author guide.
+
+## When to Use (this skill)
+
+- User needs to navigate **public** websites or interact with web pages
+  that do not require login
+- Filling out web forms or clicking buttons on **anonymous** web pages
+- Taking screenshots of public web pages or saving pages as PDFs
+- Extracting data from public websites
+- Testing **public** web applications or verifying public functionality
+- Recording video demonstrations of public web interactions
+- User mentions "browser", "webpage", "website", "screenshot", "web form", or "web scraping" against a public URL
+- User asks to "open a URL", "click on something", "fill out a form", or "get data from a site" without needing their identity
+- Automating repetitive public-web tasks or workflows
 
 ## Quick start
 
