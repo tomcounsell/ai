@@ -725,8 +725,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
             resolved_branch, needs_wt = resolve_branch_for_stage(slug, stage)
             branch_name = resolved_branch
-            # If branch resolution says we need a worktree and working_dir isn't one
-            if needs_wt and WORKTREES_DIR not in str(working_dir):
+            # If branch resolution says we need a worktree and working_dir isn't one,
+            # OR the path looks like a worktree but the directory is missing on disk
+            # (e.g., enqueued path points at .worktrees/{slug}/ that was never created
+            # or got cleaned up between runs — see issue #887 follow-up).
+            if needs_wt and (WORKTREES_DIR not in str(working_dir) or not working_dir.exists()):
                 try:
                     from agent.worktree_manager import get_or_create_worktree
 
@@ -762,18 +765,27 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Main-checkout protection guard (issue #887): dev sessions with a slug
         # must NEVER run in the repo root. If worktree provisioning was skipped
         # or silently failed, catch it here before any git operations run.
+        # The check verifies BOTH that the path is under .worktrees/ AND that the
+        # directory actually exists on disk — a stale path string pointing at a
+        # missing worktree would otherwise let a dev session fall back to the
+        # parent CWD (the main checkout) at shell-launch time.
         _stype = getattr(session, "session_type", None)
-        if _stype == "dev" and slug and WORKTREES_DIR not in str(working_dir):
+        if (
+            _stype == "dev"
+            and slug
+            and (WORKTREES_DIR not in str(working_dir) or not working_dir.exists())
+        ):
             logger.critical(
                 f"[worktree-guard] Dev session {session.session_id} with slug={slug} "
-                f"resolved to main checkout ({working_dir}). Refusing to proceed — "
-                f"this would contaminate the shared working directory. "
-                f"See issue #887."
+                f"resolved to main checkout or missing worktree ({working_dir}, "
+                f"exists={working_dir.exists()}). Refusing to proceed — this would "
+                f"contaminate the shared working directory. See issue #887."
             )
             raise RuntimeError(
-                f"Dev session with slug={slug} must run in a worktree, "
-                f"but working_dir={working_dir} is not a worktree. "
-                f"This is a safety guard to prevent main checkout contamination (issue #887)."
+                f"Dev session with slug={slug} must run in an existing worktree, "
+                f"but working_dir={working_dir} (exists={working_dir.exists()}) "
+                f"is not a usable worktree. This is a safety guard to prevent "
+                f"main checkout contamination (issue #887)."
             )
 
         # Compute task list ID for sub-agent task isolation

@@ -51,72 +51,74 @@ class TestWorktreeEnforcementGuard:
         session.queued_steering_messages = []
         return session
 
-    def test_dev_session_with_slug_fails_without_worktree(self):
-        """A dev session with a slug in the main checkout must be rejected."""
-        # The main-checkout protection guard checks: session_type == "dev"
-        # AND slug is set AND WORKTREES_DIR not in working_dir
-        session = self._make_session(session_type="dev", slug="my-feature")
+    @staticmethod
+    def _should_block(session, working_dir: Path) -> bool:
+        """Replicate the guard predicate from session_executor.py.
 
-        # Simulate what the guard checks
-        working_dir = Path(session.working_dir)
+        Mirrors the live check at ``agent/session_executor.py:766``. The
+        directory-existence test was added as a follow-up to #887: a path
+        string under ``.worktrees/`` is not enough — the directory must
+        actually exist on disk, otherwise the dev session can fall back to
+        the parent CWD (the main checkout) at shell-launch time.
+        """
         _stype = session.session_type
         slug = session.slug
-
-        assert _stype == "dev"
-        assert slug is not None
-        assert WORKTREES_DIR not in str(working_dir)
-
-        # The guard should fire in this case
-        should_block = _stype == "dev" and slug and WORKTREES_DIR not in str(working_dir)
-        assert should_block is True
-
-    def test_dev_session_with_slug_in_worktree_passes(self):
-        """A dev session with a slug already in a worktree should pass."""
-        session = self._make_session(
-            session_type="dev",
-            slug="my-feature",
-            working_dir=f"/Users/test/src/ai/{WORKTREES_DIR}/my-feature",
+        return bool(
+            _stype == "dev"
+            and slug
+            and (WORKTREES_DIR not in str(working_dir) or not working_dir.exists())
         )
 
+    def test_dev_session_with_slug_fails_without_worktree(self):
+        """A dev session with a slug in the main checkout must be rejected."""
+        session = self._make_session(session_type="dev", slug="my-feature")
         working_dir = Path(session.working_dir)
-        _stype = session.session_type
-        slug = session.slug
 
-        should_block = _stype == "dev" and slug and WORKTREES_DIR not in str(working_dir)
-        assert should_block is False
+        assert WORKTREES_DIR not in str(working_dir)
+        assert self._should_block(session, working_dir) is True
+
+    def test_dev_session_with_slug_in_existing_worktree_passes(self, tmp_path):
+        """A dev session with a slug in a worktree that exists on disk should pass."""
+        wt_dir = tmp_path / WORKTREES_DIR / "my-feature"
+        wt_dir.mkdir(parents=True)
+        session = self._make_session(session_type="dev", slug="my-feature", working_dir=str(wt_dir))
+        assert self._should_block(session, wt_dir) is False
+
+    def test_dev_session_with_slug_path_but_missing_dir_fails(self, tmp_path):
+        """Path string says ``.worktrees/`` but directory is missing → must block.
+
+        This is the #887 follow-up: an enqueued working_dir can point at a
+        worktree path that was never created (or got cleaned up between
+        runs). The previous string-only check missed this; the dev session
+        would then launch with a non-existent CWD and the shell would fall
+        back to the parent's CWD, contaminating the main checkout.
+        """
+        missing_wt = tmp_path / WORKTREES_DIR / "ghost-feature"
+        # Deliberately do NOT create missing_wt
+        session = self._make_session(
+            session_type="dev", slug="ghost-feature", working_dir=str(missing_wt)
+        )
+        assert WORKTREES_DIR in str(missing_wt)
+        assert not missing_wt.exists()
+        assert self._should_block(session, missing_wt) is True
 
     def test_pm_session_with_slug_is_not_blocked(self):
         """PM sessions should never be blocked by the worktree guard."""
         session = self._make_session(session_type="pm", slug="my-feature")
-
         working_dir = Path(session.working_dir)
-        _stype = session.session_type
-        slug = session.slug
-
-        should_block = _stype == "dev" and slug and WORKTREES_DIR not in str(working_dir)
-        assert should_block is False
+        assert self._should_block(session, working_dir) is False
 
     def test_teammate_session_without_slug_is_not_blocked(self):
         """Teammate sessions without a slug should not be blocked."""
         session = self._make_session(session_type="teammate", slug=None)
-
         working_dir = Path(session.working_dir)
-        _stype = session.session_type
-        slug = session.slug
-
-        should_block = _stype == "dev" and slug and WORKTREES_DIR not in str(working_dir)
-        assert should_block is False
+        assert self._should_block(session, working_dir) is False
 
     def test_dev_session_without_slug_is_not_blocked(self):
         """Ad-hoc dev sessions (no slug) should proceed normally."""
         session = self._make_session(session_type="dev", slug=None)
-
         working_dir = Path(session.working_dir)
-        _stype = session.session_type
-        slug = session.slug
-
-        should_block = bool(_stype == "dev" and slug and WORKTREES_DIR not in str(working_dir))
-        assert should_block is False
+        assert self._should_block(session, working_dir) is False
 
     def test_worktree_creation_failure_raises_for_dev_session(self):
         """When worktree creation fails for a dev session, it should raise, not fall back."""
