@@ -47,7 +47,7 @@ MCP_SERVER_KEY = "byob"
 # after `bun install` runs in ~/.byob/.
 BYOB_HOME = Path.home() / ".byob"
 BYOB_MCP_SERVER_TS = BYOB_HOME / "packages" / "mcp-server" / "bin" / "byob-mcp.ts"
-BYOB_TSX_BIN = BYOB_HOME / "packages" / "mcp-server" / "node_modules" / ".bin" / "tsx"
+BYOB_TSX_BIN = BYOB_HOME / "node_modules" / ".bin" / "tsx"
 # Retained for any external callers; _expected_entry() reads BYOB_TSX_BIN
 # live so monkeypatching the path during tests works without also patching
 # this constant.
