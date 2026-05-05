@@ -43,8 +43,8 @@ CLAUDE_CONFIG_BACKUP_PATH = Path.home() / ".claude.json.bak"
 MCP_SERVER_KEY = "byob"
 # BYOB v0.3+ ships its MCP server as a TypeScript entrypoint executed via
 # tsx. Per BYOB README's "Manual MCP registration" section the canonical
-# invocation is `<tsx> <byob-mcp.ts>`. Both binaries are workspace-local
-# after `bun install` runs in ~/.byob/.
+# invocation is `<tsx> <byob-mcp.ts>`. tsx lives at the workspace root
+# node_modules (not per-package) after `bun install` runs in ~/.byob/.
 BYOB_HOME = Path.home() / ".byob"
 BYOB_MCP_SERVER_TS = BYOB_HOME / "packages" / "mcp-server" / "bin" / "byob-mcp.ts"
 BYOB_TSX_BIN = BYOB_HOME / "node_modules" / ".bin" / "tsx"
