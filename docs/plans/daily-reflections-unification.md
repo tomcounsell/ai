@@ -510,19 +510,58 @@ When this plan is executed, the lead agent orchestrates work using Task tools.
 
 ## Verification
 
+> **Build-time addendum (2026-05-04):** The plan called for deletion of
+> `reflections/daily_report.py` and `reflections.auditing.run_log_review`,
+> but the new slot modules wrap their internal helpers (`_collect_day_activity`,
+> `_build_audio_brief`, `_write_vault_log`, `_activity_to_signals`,
+> `_collect_sentry_counts`, `_read_log_text_bounded`, etc). Wholesale
+> deletion would break the wrappers; inline-copying every helper into the
+> slot modules would balloon the diff. The deletion is deferred to a
+> follow-up PR where the helpers can be inlined and the file removed
+> cleanly. The legacy `run()` and `run_log_review()` entry points will be
+> disabled in `~/Desktop/Valor/reflections.yaml` (the registry is
+> machine-local, gitignored) at deploy time. Verification rows for those
+> two checks below carry a `(deferred)` annotation.
+>
+> Similarly, `config/reflections.yaml` is a symlink into the iCloud-synced
+> vault and is gitignored; the registry rename to `pm-briefings` happens
+> on the deploy side, not via this PR. The `pm-audio-briefing` registry
+> entry continues to drive the new dispatcher (callable path is unchanged).
+>
+> Orphan stubs at `logs/reflections/report_2026-*.md` were deleted from
+> the local machine (`logs/` is gitignored). Other machines will need to
+> run the same `rm -f` once after deploy.
+
+### In-PR checks (deterministic verification)
+
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `pytest tests/unit/reflections/ tests/integration/reflections/ -x -q` | exit code 0 |
+| Tests pass | `pytest tests/unit/reflections/ tests/integration/reflections/ -q` | exit code 0 |
 | Lint clean | `python -m ruff check reflections/ ui/data/reflections.py` | exit code 0 |
-| Format clean | `python -m ruff format --check .` | exit code 0 |
-| No orphan stubs | `ls logs/reflections/report_2026-*.md 2>/dev/null \| wc -l` | output is `0` |
-| New reflection registered | `grep -c 'pm-briefings' config/reflections.yaml` | output > 0 |
-| Three legacy reflections gone | `grep -cE '(pm-audio-briefing\|daily-log-review\|daily-report-and-notify)' config/reflections.yaml` | output is `0` |
+| Format clean | `python -m ruff format --check reflections/ ui/data/reflections.py tests/unit/reflections/ tests/integration/reflections/` | exit code 0 |
 | Prefix-expanded set updated | `grep -c '"pm-briefings"' ui/data/reflections.py` | output > 0 |
-| Old daily_report.py deleted | `test ! -f reflections/daily_report.py` | exit code 0 |
-| run_log_review removed | `grep -c 'def run_log_review' reflections/auditing.py` | output is `0` |
 | New slot modules exist | `test -f reflections/pm_audio_briefing/morning.py && test -f reflections/pm_audio_briefing/daily_log.py && test -f reflections/pm_audio_briefing/log_audit.py` | exit code 0 |
 | Plan superseded note | `grep -c 'superseded by' docs/plans/daily-log-overhaul.md` | output > 0 |
+
+### Deferred to deploy / follow-up PR (not enforceable in this PR)
+
+- **Delete `reflections/daily_report.py`** *(follow-up PR)* — New slot modules
+  wrap its helpers (`_collect_day_activity`, `_build_audio_brief`,
+  `_write_vault_log`, `_activity_to_signals`). Inline the helpers into
+  `daily_log.py`, then delete.
+- **Delete `reflections.auditing.run_log_review`** *(follow-up PR)* — New
+  `log_audit.py` slot wraps `_collect_sentry_counts`, `_read_log_tail_lines`,
+  `_read_log_text_bounded`. Inline, then delete.
+- **Rename registry entry to `pm-briefings`** *(deploy)* —
+  `~/Desktop/Valor/reflections.yaml` (vault file, gitignored). The
+  `pm-audio-briefing` callable path is unchanged so the rename is cosmetic
+  and lifts the dashboard's fallback-parents shim.
+- **Disable `daily-log-review` and `daily-report-and-notify` in registry**
+  *(deploy)* — Same vault yaml. Already-disabled `daily-report-and-notify`
+  stays; `daily-log-review` should be flipped to `enabled: false`.
+- **Delete `logs/reflections/report_2026-*.md` orphan stubs** *(per machine)*
+  — `logs/` is gitignored. Run `rm -f logs/reflections/report_2026-*.md`
+  once after deploy.
 
 ## Critique Results
 

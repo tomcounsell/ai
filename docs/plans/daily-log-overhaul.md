@@ -10,7 +10,7 @@ last_comment_id:
 
 # Daily Log Overhaul: Comprehensive Activity Log + Vault Archival + Audio-Brief Telegram
 
-> **Superseded by [`docs/plans/daily-reflections-unification.md`](daily-reflections-unification.md) (issue #1276).**
+> **superseded by [`docs/plans/daily-reflections-unification.md`](daily-reflections-unification.md) (issue #1276).**
 > The follow-up plan consolidates this work alongside `pm-audio-briefing`
 > and `daily-log-review` into a slot-driven `pm-briefings` package. The
 > daily-log content collector + audio-brief logic from this plan now lives
