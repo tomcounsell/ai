@@ -756,9 +756,7 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
     _byob_text = f"{subject or ''}\n{body or ''}"
     _byob_real_chrome = infer_requires_real_chrome(_byob_text)
     if _byob_real_chrome:
-        logger.info(
-            f"[email] byob_inference_set_real_chrome session_id={session_id}"
-        )
+        logger.info(f"[email] byob_inference_set_real_chrome session_id={session_id}")
 
     # Enqueue the session with email transport metadata
     try:

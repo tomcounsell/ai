@@ -2183,8 +2183,7 @@ async def main():
         _byob_real_chrome = infer_requires_real_chrome(safe_text)
         if _byob_real_chrome:
             logger.info(
-                "byob_inference_set_real_chrome "
-                f"session_id={session_id} chat_id={telegram_chat_id}"
+                f"byob_inference_set_real_chrome session_id={session_id} chat_id={telegram_chat_id}"
             )
 
         # Enqueue: session_type drives PM vs Dev session creation.

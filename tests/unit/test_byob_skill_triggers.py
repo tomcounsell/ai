@@ -128,6 +128,4 @@ class TestRegistry:
     def test_each_skill_has_patterns(self) -> None:
         for skill, patterns in BYOB_SKILL_TRIGGERS.items():
             assert patterns, f"{skill} has no trigger patterns"
-            assert all(isinstance(p, str) for p in patterns), (
-                f"{skill} has non-string patterns"
-            )
+            assert all(isinstance(p, str) for p in patterns), f"{skill} has non-string patterns"
