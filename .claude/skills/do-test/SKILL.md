@@ -407,7 +407,7 @@ Expected: <inferred from scenario>
 })
 ```
 
-The `frontend-tester` agent owns all `agent-browser` interaction — the skill never calls `agent-browser` directly.
+The `frontend-tester` agent owns all `agent-browser` interaction — the skill never calls `agent-browser` directly. (BYOB MCP is a candidate alternative for `frontend-tester`'s authenticated test scenarios; if/when `frontend-tester` migrates per #1274, this sentence will follow. Out of scope for #1274 because that issue covers skills only, not agents.)
 
 **When running all tests** (no target) and a `tests/frontend/` directory exists with `.json` or `.yaml` scenario files, dispatch one `frontend-tester` subagent per scenario file in parallel alongside the pytest agents.
 
