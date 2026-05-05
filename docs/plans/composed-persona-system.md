@@ -7,6 +7,7 @@ created: 2026-05-04
 tracking: https://github.com/tomcounsell/ai/issues/1268
 last_comment_id:
 revision_applied: true
+revision_cycle: 3
 ---
 
 # Composed Persona System: Single (persona × access-level × channel) Builder
@@ -85,7 +86,7 @@ External research skipped — this is an internal refactor with no new dependenc
 - **New function**: `compose_system_prompt(persona, access_level, channel=None, *, project=None, working_directory=None) -> str` in `agent/sdk_client.py` (or a new `agent/persona_composer.py` if extraction is preferred — the plan defaults to keeping it adjacent to the existing loaders to keep the diff focused).
 - **Removed/redirected functions**: `load_system_prompt()` and `load_pm_system_prompt()` become thin wrappers that call `compose_system_prompt(...)` with the right tuple. `_load_persona_overlay_with_log()` stays as a logging adapter but now delegates the actual composition to `compose_system_prompt`.
 - **Picker collapse**: both `sdk_client.py:3326–3395` and `session_executor.py:1430–1486` collapse to a single helper `_resolve_compose_args(session_type, project, transport, ...) -> (persona, access_level, channel)` that lives in one place and is called from both sites.
-- **Channel-aware drafter**: `bridge/message_drafter.py` receives a `channel` parameter (default `"telegram"` for backward compatibility) that selects channel-specific format rules. The drafter system prompt is split into a channel-agnostic base section plus a per-channel format section. The base section keeps the drafter's current voice content in place — no shared `voice.md` segment is introduced in this plan (see Risk 4 + No-Gos; consolidation is deferred to a follow-up).
+- **Channel-aware drafter**: `bridge/message_drafter.py:draft_message(raw_response, session=None, *, medium="telegram", persona=None)` already accepts `medium` (today wired through to `_validate_for_medium` only — see `bridge/message_drafter.py:1720`–1747). This plan extends `medium` from validator-only into prompt selection: the drafter system prompt splits into a medium-agnostic base section plus a per-medium format section. **No new public parameter is introduced** — `medium` already exists, defaults to `"telegram"`, and is documented as the per-medium prompt/validator discriminator. The base section keeps the drafter's current voice content in place — no shared `voice.md` segment is introduced in this plan (see Risk 4 + No-Gos; consolidation is deferred to a follow-up).
 - **Coupling**: Slightly *decreased*. Today the picker knows about three concerns (session type, project mode, transport). After: the picker knows only about resolving three values; the composer knows only about composition; the drafter knows only about channel format.
 - **Reversibility**: High. The composer is purely additive; the new enum is small; both wrappers preserve their old signatures for safety. Rollback = revert the diff.
 
@@ -117,7 +118,7 @@ Communication overhead is the bottleneck: the seven architectural questions each
 - **`_resolve_compose_args(...)` helper**: collapses the two-site picker into one function. Inputs: `session_type`, `project`, `transport`, `chat_title`, `is_dm`. Outputs: `(persona, access_level, channel)`. Single source of truth for the email-persona override.
 - **`load_system_prompt()` / `load_pm_system_prompt()` wrappers**: kept as thin shims for backward compatibility. They delegate to the composer with the appropriate tuple. New code is encouraged to call the composer directly.
 - **Voice rules consolidation: deferred (out of scope).** Voice content (banned phrases, no-empty-promises, tone) stays in its current locations — per-persona overlays + `DRAFTER_SYSTEM_PROMPT` — for this plan. Promoting voice rules into a shared `voice.md` segment is **explicitly out of scope** because adding a new segment to `manifest.json` would change the assembled prompt bytes for the existing four cells and break Risk 1's byte-stability mitigation (see Risk 4 + No-Gos). A follow-up plan, opened after this composer ships and stabilizes, will move voice content into a shared source. This plan only introduces the composer; the drafter's voice content stays exactly where it is.
-- **Channel-aware drafter**: `bridge/message_drafter.py` accepts a `channel` parameter and composes its system prompt as `BASE_DRAFTER_PROMPT + CHANNEL_RULES[channel]`. Today's behaviour is the `channel="telegram"` cell. `BASE_DRAFTER_PROMPT` retains the drafter's current voice content verbatim (no extraction to a separate file in this plan).
+- **Medium-aware drafter**: `bridge/message_drafter.py:draft_message(...)` already accepts `medium="telegram" | "email"` (see `bridge/message_drafter.py:1720`). The drafter composes its system prompt as `BASE_DRAFTER_PROMPT + MEDIUM_RULES[medium]`. Today's behaviour is the `medium="telegram"` cell. `BASE_DRAFTER_PROMPT` retains the drafter's current voice content verbatim (no extraction to a separate file in this plan).
 
 ### Flow
 
@@ -127,7 +128,9 @@ Session arrives at executor → `_resolve_compose_args(session_type, project, tr
 
 **Drafter prompt assembly:**
 
-Worker emits agent output → `bridge/message_drafter.py:format_for_chat(text, channel="telegram")` → drafter composes `BASE_DRAFTER_PROMPT + CHANNEL_RULES["telegram"]` (or `"email"`, etc.) → calls Haiku via `client.messages.create(system=composed_prompt, ...)`.
+Worker emits agent output → `bridge/message_drafter.py:draft_message(raw_response, session=None, *, medium="telegram", persona=None)` (the existing public entry point at `bridge/message_drafter.py:1720`) → drafter composes `BASE_DRAFTER_PROMPT + MEDIUM_RULES["telegram"]` (or `"email"`, etc.) → calls Haiku via `client.messages.create(system=composed_prompt, ...)`.
+
+**Note on naming:** the function is `draft_message` (not `format_for_chat`) and the parameter is `medium` (not `channel`). The plan uses `medium` consistently because (a) that's the existing parameter name on `draft_message`, (b) `_validate_for_medium(text, medium)` already exists at `bridge/message_drafter.py:381`, and (c) renaming `medium` to `channel` is out of scope. The composer can still be named with `channel` internally because no working-agent prompt cell uses it today (Question 4 / Open Question 1) — but the drafter's public surface stays as `medium=`.
 
 ### Technical Approach
 
@@ -138,7 +141,7 @@ Worker emits agent output → `bridge/message_drafter.py:format_for_chat(text, c
 
   2. **Voice doc location: deferred to a follow-up plan.** Voice rules (banned phrases, "no empty promises", tone) stay in their current locations — distributed across per-persona overlays and `bridge/message_drafter.py:1295` `DRAFTER_SYSTEM_PROMPT`. Consolidating them into a shared `voice.md` segment would require adding a new entry to `config/personas/segments/manifest.json`, which would change the assembled prompt bytes for the existing four cells and break Risk 1's byte-stability mitigation (see Risk 4 + No-Gos). The drafter and the working-agent composer continue to read voice content from where it lives today; no shared file is introduced. A follow-up plan will move voice content into a single source after this composer ships and the byte-stability test stabilizes — that plan can negotiate the cache bust on its own terms.
 
-  3. **Channel extraction into the drafter**: `bridge/message_drafter.py` composes its system prompt **at module load** as `BASE + CHANNEL_RULES[channel]`. The structured-output `tool_use` schema is unchanged — it stays shared across channels. Channel parameter defaults to `"telegram"` for backward compatibility with all existing call sites; only the future email-channel case needs to pass `channel="email"`. `BASE_DRAFTER_PROMPT` keeps the drafter's existing voice content verbatim — voice consolidation is deferred (see Question 2).
+  3. **Medium extraction into the drafter**: `bridge/message_drafter.py` composes its system prompt **at module load** as `BASE + MEDIUM_RULES[medium]`. The structured-output `tool_use` schema is unchanged — it stays shared across mediums. The `medium` parameter on `draft_message` already exists (defaults to `"telegram"`); only the future email-medium case needs to pass `medium="email"` and that call site is also already wired. `BASE_DRAFTER_PROMPT` keeps the drafter's existing voice content verbatim — voice consolidation is deferred (see Question 2). The plan uses `medium` (not `channel`) on the drafter's public surface because that is the existing parameter name; renaming is out of scope.
 
   4. **Minimum channel-awareness for the working agent**: **None.** The working agent does not need channel context in its system prompt. Reachability/emoji-react decisions are made by the agent based on tool output (e.g., reading recent Telegram chat state via `valor-telegram read`), not encoded in the prompt. This drops the `channel=` parameter from the composer's required signature; it remains as an optional facet **only if a concrete need is proven during build** (Open Question 1 below pins this).
 
@@ -174,7 +177,7 @@ Worker emits agent output → `bridge/message_drafter.py:format_for_chat(text, c
 
 - [ ] `tests/unit/test_persona_loading.py` — UPDATE: `load_system_prompt` and `load_pm_system_prompt` now delegate to `compose_system_prompt`; existing tests (lines 164–186, 301) still pass because the wrappers preserve byte output. Add a new test `test_load_system_prompt_byte_stable_through_composer` that asserts the wrapper output equals the direct composer output for the `(DEVELOPER, WORKER)` cell.
 - [ ] `tests/unit/test_sdk_client_sdlc.py` — UPDATE: `WORKER_RULES` constant unchanged; the test that asserts WORKER_RULES is prepended (currently against `load_system_prompt()`) is rewritten to assert against `compose_system_prompt(persona=DEVELOPER, access_level=WORKER)`. Add a regression: `compose_system_prompt(persona=PROJECT_MANAGER, access_level=PM_READONLY, working_directory=...)` does NOT contain `WORKER_RULES` substring (preserves the load_pm_system_prompt invariant from sdk_client.py:1023).
-- [ ] `tests/unit/test_message_drafter.py` — UPDATE: drafter system prompt is now `BASE + CHANNEL_RULES["telegram"]`. Existing tests should pass unchanged because the default `channel="telegram"` produces the same text. Add a new test asserting `format_for_chat(..., channel="email")` uses different format rules.
+- [ ] `tests/unit/test_message_drafter.py` — UPDATE: drafter system prompt is now `BASE + MEDIUM_RULES["telegram"]`. Existing tests should pass unchanged because the default `medium="telegram"` produces the same text. Add a new test asserting `draft_message(raw_response, session=None, medium="email")` uses different format rules. The tested function is `draft_message` at `bridge/message_drafter.py:1720`; signature is `async def draft_message(raw_response: str, session=None, *, medium: str = "telegram", persona: str | None = None) -> MessageDraft`.
 - [ ] `tests/unit/test_drafter_validators.py` — UPDATE: any test that imports `DRAFTER_SYSTEM_PROMPT` directly is updated to import the composed result via the new `_compose_drafter_prompt(channel)` helper.
 - [ ] `tests/unit/test_pm_persona_guards.py` — no change. The PM overlay loader-warning tests at sdk_client.py:919–948 are preserved; they're inside `load_persona_prompt`, which stays as the segment-and-overlay assembler.
 - [ ] `tests/unit/test_message_drafter_chat_log.py`, `test_message_drafter_linkify.py` — UPDATE only if they import `DRAFTER_SYSTEM_PROMPT` directly; otherwise no change.
@@ -197,7 +200,25 @@ No existing integration tests reference the prompt-byte content directly, so no 
 ### Risk 1: Byte-stability regression for the PM cell breaks #1227's prompt cache
 
 **Impact:** PM session TTFT regresses from <90s (warm) to 15–20min (cold). Catastrophic UX hit.
-**Mitigation:** `test_compose_system_prompt.py::test_pm_cell_byte_stable` snapshots the current `load_pm_system_prompt(work_dir)` output (in a fixture file at `tests/fixtures/pm_system_prompt_baseline.txt`, generated once from main). The test asserts byte-equality of the new composer output. The build cannot proceed until this test passes. Includes a check that the `--exclude-dynamic-system-prompt-sections` integration is unaffected.
+
+**Machine-stability problem:** The composed prompt embeds machine-specific values that vary across developer machines and bridge machines:
+- `working_directory` (PM cell only) — embedded as a path inside the work-vault `CLAUDE.md` content; the path differs by machine (`/Users/tomcounsell/...` vs `/Users/valorengels/...`).
+- `{{identity.*}}` substitutions — `config/identity.json` ships repo-default values, but `~/Desktop/Valor/identity.json` shallow-merges per-machine overrides via `load_identity()` at `agent/sdk_client.py:785`. A bridge machine with no override produces different bytes than a dev machine with one.
+- Work-vault `CLAUDE.md` content (PM cell only) — read from `Path(working_directory)/"CLAUDE.md"` at `agent/sdk_client.py:1037`; content varies per project and per machine.
+
+A single `tests/fixtures/pm_system_prompt_baseline.txt` snapshot would be byte-stable only on the machine that generated it.
+
+**Mitigation strategy: per-machine snapshot, asserted on the local machine (strategy (c) in cycle-2 critique).** Rationale: #1227's prompt-cache invariant is *itself* per-machine (Anthropic's cache TTL is per-machine, per-session, and the `--exclude-dynamic-system-prompt-sections` flag already handles cwd/env/git stripping at the `claude -p` boundary). The fixture's job is "the composer output equals what `load_system_prompt()` / `load_pm_system_prompt(work_dir)` returned on **this** machine **before** the refactor" — not "the same bytes on every machine ever." This is the only strategy that preserves Risk 1's actual invariant (cache stability across consecutive sessions on the same machine) without false positives or false negatives.
+
+Concretely:
+- Fixtures live at `tests/fixtures/{machine_name}/dev_system_prompt_baseline.txt` and `tests/fixtures/{machine_name}/pm_system_prompt_baseline.txt`, where `machine_name` is the slug from `socket.gethostname()` (or equivalent stable identifier — to be picked at build time, but `gethostname()` is the leading candidate because it is what Anthropic's prompt cache keys on de facto via the API connection).
+- The byte-stability test reads the local-machine fixture only; on machines without a fixture, the test SKIPs with a clear message (`"no baseline for hostname '{name}'; run scripts/capture_persona_baseline.py to record one"`). Skipping is acceptable because cache stability for this plan's purposes is about *consecutive* sessions on a *single* machine — a freshly-introduced machine has no prior cache to break.
+- A capture script `scripts/capture_persona_baseline.py` regenerates the local-machine fixture from `load_system_prompt()` / `load_pm_system_prompt(work_dir)` *before* the composer ships, and the dev/CI machine commits its own fixture. The build cannot proceed on a machine until it has captured its own baseline.
+- Strategies considered and rejected: (a) **token normalization** (replace machine-specific paths/values with sentinels before snapshot) was rejected because the same normalization would have to be applied at runtime to validate the cache prefix, which means the runtime would no longer pass byte-identical bytes to `claude -p` — defeating the entire #1227 invariant. (b) **structural-equality assertions** (compare segment-list ordering, not bytes) was rejected because the prompt cache hits on byte equality, not structural equality — a structural test would pass while the cache silently broke.
+
+**Build gate:** the build cannot proceed until the byte-stability test passes on the local machine. The fixture(s) committed by the dev are sufficient for local CI; bridge-machine fixtures are captured during deploy and not blockers for the PR.
+
+The mitigation also includes a check that the `--exclude-dynamic-system-prompt-sections` integration is unaffected (the runtime prompt the composer hands to `get_response_via_harness` must still trigger that flag's stripping behavior; tested by inspecting argv in a unit test).
 
 ### Risk 2: Two-site picker drift returns
 
@@ -207,7 +228,7 @@ No existing integration tests reference the prompt-byte content directly, so no 
 ### Risk 3: Drafter format rules break when the channel split lands
 
 **Impact:** Drafter output silently changes — bullets vs prose, "no empty promises" warnings change, format regressions ship to production.
-**Mitigation:** `BASE_DRAFTER_PROMPT` keeps today's `DRAFTER_SYSTEM_PROMPT` text verbatim (minus the channel-specific format rules that move into `CHANNEL_RULES["telegram"]`). The split is purely structural — concatenating `BASE + CHANNEL_RULES["telegram"]` reproduces today's prompt byte-for-byte. Tests in `test_drafter_validators.py` already cover format invariants — they must remain green. (Note: voice consolidation is **not** part of this plan; see Risk 4 and No-Gos.)
+**Mitigation:** `BASE_DRAFTER_PROMPT` keeps today's `DRAFTER_SYSTEM_PROMPT` text verbatim (minus the medium-specific format rules that move into `MEDIUM_RULES["telegram"]`). The split is purely structural — concatenating `BASE + MEDIUM_RULES["telegram"]` reproduces today's prompt byte-for-byte. Tests in `test_drafter_validators.py` already cover format invariants — they must remain green. (Note: voice consolidation is **not** part of this plan; see Risk 4 and No-Gos.)
 
 ### Risk 4: A new shared voice segment would change prompt bytes for existing cells
 
@@ -230,7 +251,13 @@ No race conditions identified — prompt composition is synchronous, single-thre
 
 ## Update System
 
-No update system changes required — this is a purely internal refactor. The `update` skill at `scripts/remote-update.sh` already pulls `config/personas/`; no new files or segments are added in this plan, so existing pull behavior is sufficient. There are no new dependencies, no new config files, no migration steps for existing installations. Bridge machines pick up the composer code on the next normal `git pull` like any other internal refactor.
+**Minor update-system change required** — the per-machine byte-stability fixture (Risk 1) means each machine running the test suite needs its own baseline captured locally:
+
+- New script: `scripts/capture_persona_baseline.py` — captures `tests/fixtures/{machine_name}/{dev,pm}_system_prompt_baseline.txt` from `load_system_prompt()` / `load_pm_system_prompt(work_dir)` on the current machine. Idempotent; safe to re-run.
+- The byte-stability test in `tests/unit/test_compose_system_prompt.py` SKIPs (not FAILs) when no baseline exists for the current machine — so a freshly-updated bridge machine without a baseline does not block deploy. Bridge machines do not run the unit test suite during normal operation; this is a dev-machine concern.
+- `scripts/remote-update.sh` is unchanged. The `update` skill does not need to invoke the capture script automatically — developers running the test suite on a new machine for the first time will hit the SKIP and follow the message to capture their baseline.
+- No new dependencies, no new config files. Bridge machines pick up the composer code on the next normal `git pull` like any other internal refactor.
+- The fixtures in `tests/fixtures/{machine_name}/` are committed per machine. Each developer/CI host commits its own subdirectory. This adds a small N-machines-of-fixtures cost to the repo but keeps the byte-stability test honest (Risk 1).
 
 ## Agent Integration
 
@@ -259,8 +286,8 @@ No external docs site for this repo — skip.
 - [ ] `compose_system_prompt(persona, access_level, channel=None, **kwargs)` exists and is the only path that produces a fully assembled agent system prompt; `load_system_prompt` and `load_pm_system_prompt` are thin wrappers.
 - [ ] `AccessLevel` enum is defined in `config/enums.py` with members `WORKER`, `PM_READONLY`, `TEAMMATE`, `CUSTOMER_SERVICE`.
 - [ ] `_resolve_compose_args(...)` helper exists and is the only branch ladder mapping `SessionType + project + transport → (persona, access_level, channel)`. Both `agent/sdk_client.py:3326` and `agent/session_executor.py:1430` call it.
-- [ ] **Byte-stability**: `compose_system_prompt(DEVELOPER, WORKER)` is byte-identical to `load_system_prompt()` from main; `compose_system_prompt(PROJECT_MANAGER, PM_READONLY, working_directory=W)` is byte-identical to `load_pm_system_prompt(W)` from main. Asserted via fixture files in `tests/fixtures/`.
-- [ ] Drafter accepts `channel` parameter; default `"telegram"` produces the same prompt bytes as today.
+- [ ] **Byte-stability (per-machine)**: `compose_system_prompt(DEVELOPER, WORKER)` is byte-identical to `load_system_prompt()` from main on the local machine; `compose_system_prompt(PROJECT_MANAGER, PM_READONLY, working_directory=W)` is byte-identical to `load_pm_system_prompt(W)` from main on the local machine. Asserted via fixture files at `tests/fixtures/{machine_name}/{dev,pm}_system_prompt_baseline.txt`. Test SKIPs on machines without a captured baseline (with a clear pointer to `scripts/capture_persona_baseline.py`).
+- [ ] Drafter `medium` parameter (already exists on `draft_message` at `bridge/message_drafter.py:1720`) now drives prompt selection; default `"telegram"` produces the same prompt bytes as today.
 - [ ] `email.persona` per-project override flows through the composer (not as inline branches in either picker site).
 - [ ] All seven open architectural questions are answered in the plan body (above) with rationale.
 - [ ] PM/Dev/Teammate/Customer-Service sessions continue to work with no observable behaviour change for the existing four overlays.
@@ -306,16 +333,18 @@ No external docs site for this repo — skip.
 
 ## Step by Step Tasks
 
-### 1. Capture byte-stability baselines
+### 1. Capture byte-stability baselines (per-machine)
 
 - **Task ID**: spike-baseline
 - **Depends On**: none
-- **Validates**: tests/fixtures/pm_system_prompt_baseline.txt, tests/fixtures/dev_system_prompt_baseline.txt
+- **Validates**: tests/fixtures/{machine_name}/pm_system_prompt_baseline.txt, tests/fixtures/{machine_name}/dev_system_prompt_baseline.txt
 - **Assigned To**: byte-stability-tester
 - **Agent Type**: test-engineer
 - **Parallel**: true
-- Run a one-off Python script that calls today's `load_system_prompt()` and `load_pm_system_prompt("/Users/tomcounsell/src/work-vault/AI Valor Engels System")` (or whatever working_dir the dev has locally) and writes the byte-exact output to `tests/fixtures/dev_system_prompt_baseline.txt` and `tests/fixtures/pm_system_prompt_baseline.txt`
-- Commit the fixtures so the byte-stability test has a stable reference even after the composer ships
+- Create `scripts/capture_persona_baseline.py` that reads `socket.gethostname()` (slugified), calls today's `load_system_prompt()` and `load_pm_system_prompt(work_dir)` (where `work_dir` is the local work-vault path, e.g. `/Users/tomcounsell/src/work-vault/AI Valor Engels System` on this machine), and writes byte-exact output to `tests/fixtures/{machine_name}/dev_system_prompt_baseline.txt` and `tests/fixtures/{machine_name}/pm_system_prompt_baseline.txt`
+- Commit the fixtures for the dev's local machine. Other machines (other developers, bridge machines) capture their own baselines during deploy via the same script — see `## Update System` for deploy-time capture wiring
+- The byte-stability test in Step 5 reads the local-machine fixture only; if no fixture exists for the current machine, the test SKIPs (not FAILs) with a message pointing at the capture script
+- **Strategy rationale (per Risk 1):** strategy (c) — per-machine snapshot, asserted on the local machine. Strategies (a) token normalization and (b) structural equality were rejected because they break the actual #1227 invariant (byte-identical runtime prompt for prompt-cache hits)
 
 ### 2. Build AccessLevel enum and compose_system_prompt
 
@@ -352,11 +381,12 @@ No external docs site for this repo — skip.
 - **Assigned To**: drafter-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `channel: str = "telegram"` parameter to `format_for_chat` (and any other public drafter entry points)
-- Refactor `DRAFTER_SYSTEM_PROMPT` into `BASE_DRAFTER_PROMPT` (channel-agnostic, retains today's voice content verbatim) + `CHANNEL_RULES = {"telegram": ..., "email": ...}` (initially: `"telegram"` is today's exact format-rules text, `"email"` is a stub identical to `"telegram"` minus Telegram-only format rules)
-- Add helper `_compose_drafter_prompt(channel)` that returns `BASE_DRAFTER_PROMPT + CHANNEL_RULES[channel]`
-- All drafter call sites that don't pass `channel=` get `"telegram"` by default — no behaviour change
-- Verify `BASE + CHANNEL_RULES["telegram"]` reproduces today's `DRAFTER_SYSTEM_PROMPT` byte-for-byte (snapshot test)
+- The drafter entry point is `draft_message` at `bridge/message_drafter.py:1720`; the `medium: str = "telegram"` parameter already exists (no signature change required)
+- Refactor `DRAFTER_SYSTEM_PROMPT` into `BASE_DRAFTER_PROMPT` (medium-agnostic, retains today's voice content verbatim) + `MEDIUM_RULES = {"telegram": ..., "email": ...}` (initially: `"telegram"` is today's exact format-rules text, `"email"` is a stub identical to `"telegram"` minus Telegram-only format rules)
+- Add helper `_compose_drafter_prompt(medium: str) -> str` that returns `BASE_DRAFTER_PROMPT + MEDIUM_RULES[medium]`
+- Wire `_compose_drafter_prompt(medium)` into the system prompt passed to `client.messages.create(...)` inside `draft_message` (today the drafter loads `DRAFTER_SYSTEM_PROMPT` directly; replace that load with the helper call, parameterized by the existing `medium` argument)
+- All drafter call sites that don't pass `medium=` get `"telegram"` by default — no behaviour change
+- Verify `BASE + MEDIUM_RULES["telegram"]` reproduces today's `DRAFTER_SYSTEM_PROMPT` byte-for-byte (snapshot test)
 
 ### 5. Byte-stability and matrix tests
 
@@ -414,7 +444,7 @@ No external docs site for this repo — skip.
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No leftover picker ladder | `grep -E "if _session_type == SessionType\.(PM\|TEAMMATE\|DEV)" agent/sdk_client.py agent/session_executor.py \| grep -v _resolve_compose_args` | exit code 1 |
-| Byte-stability fixture present | `test -f tests/fixtures/pm_system_prompt_baseline.txt && test -f tests/fixtures/dev_system_prompt_baseline.txt` | exit code 0 |
+| Byte-stability fixture present (per-machine) | `python -c "import socket; from pathlib import Path; m=socket.gethostname().replace('.','-'); assert (Path('tests/fixtures')/m/'pm_system_prompt_baseline.txt').exists() and (Path('tests/fixtures')/m/'dev_system_prompt_baseline.txt').exists(), f'missing baseline for {m}; run scripts/capture_persona_baseline.py'"` | exit code 0 |
 | Manifest unchanged | `git diff main -- config/personas/segments/manifest.json` | empty output |
 
 ## Critique Results
@@ -422,6 +452,8 @@ No external docs site for this repo — skip.
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
 | BLOCKER  | (cycle-1 critique) | voice.md scope contradiction — plan simultaneously claimed voice.md was a new segment in `manifest.json` (Solution Key Element 5; Question 2 + Question 5 resolutions) AND was NOT created in this plan because doing so breaks byte-stability (Risk 4 + No-Gos). | Solution Key Element on voice rules; Technical Approach Question 2 + Question 5; Risk 3; Risk 4; No-Gos; Update System; Step 2 + Step 4 + Step 6 task notes; Documentation; Success Criteria; Verification table. | Scrubbed all references to creating `config/personas/segments/voice.md` in this plan. Voice consolidation is now uniformly framed as **deferred to a follow-up plan**. The composition order in Question 5 no longer includes a `voice` segment (matches today's `manifest.json` exactly). The drafter's `BASE_DRAFTER_PROMPT` retains today's voice content verbatim — no extraction. A new Success Criterion + Verification check assert `manifest.json` is unchanged. Risk 4's framing is preserved as authoritative. |
+| BLOCKER  | (cycle-2 critique) | Byte-stability fixture not machine-stable — single fixture file would fail on bridge machines because composed prompt embeds `working_directory` paths, `{{identity.*}}` overrides from `~/Desktop/Valor/identity.json`, and per-machine work-vault `CLAUDE.md` content. | Risk 1 (full rewrite); Step 1 (capture baselines); Update System; Success Criteria byte-stability bullet; Verification table fixture-present check. | Adopted strategy (c): per-machine snapshots stored at `tests/fixtures/{machine_name}/{dev,pm}_system_prompt_baseline.txt`, with `machine_name` derived from `socket.gethostname()`. Test SKIPs (not FAILs) on machines without a baseline, pointing developers at `scripts/capture_persona_baseline.py`. Strategies (a) token normalization and (b) structural equality were considered and rejected with explicit rationale (both break the actual #1227 cache invariant, which depends on byte-identical runtime prompts). |
+| BLOCKER  | (cycle-2 critique) | `format_for_chat` doesn't exist — plan referenced a non-existent function on the drafter; actual API is `draft_message(raw_response, session=None, *, medium="telegram", persona=None)` at `bridge/message_drafter.py:1720`. | Solution → Flow → Drafter prompt assembly; Solution → Key Elements channel-aware drafter bullet; Technical Approach Question 3; Test Impact `tests/unit/test_message_drafter.py` row; Step 4 (drafter channel-split task). | Replaced every `format_for_chat` reference with `draft_message`. Replaced the parameter name `channel` with `medium` everywhere the drafter's *public surface* is described (Step 4, Test Impact, Flow, Question 3). The composer's internal parameter naming (`channel=None` in the working-agent composer) is unaffected because no working-agent cell uses it today (Question 4 / Open Question 1). The signature `async def draft_message(raw_response: str, session=None, *, medium: str = "telegram", persona: str | None = None) -> MessageDraft` already exists at `bridge/message_drafter.py:1720`–1747; the existing `medium` parameter is wired through to `_validate_for_medium` only today, and this plan extends it to also drive prompt selection (`BASE_DRAFTER_PROMPT + MEDIUM_RULES[medium]`). No new public parameter is introduced. |
 
 ---
 
