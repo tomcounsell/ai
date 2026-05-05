@@ -52,6 +52,19 @@ When a stuck running session is detected, it is automatically recovered by delet
     - **vs. `monitoring/bridge_watchdog.py::kill_zombie_processes()`:** the bridge watchdog runs every 60s and kills `claude`/`pyright` processes older than 2h via raw `os.kill`. The cross-process reap runs every 60min, scopes by PPID==1 + heartbeat-stale + signature, walks descendant trees, and uses psutil for PID-reuse safety. Both swallow `ProcessLookupError`/`NoSuchProcess` so double-kill is safe.
   - **Worker process reaping is intentionally OUT OF SCOPE.** See "Solution → Desired outcome" in `docs/plans/sdlc-1271.md` for the full rationale: under launchd `KeepAlive=true`, every live worker has PPID==1, so worker-signature + PPID==1 matching would self-suicide every reflection tick. Stranded sibling workers are reparented by launchd already.
 - **Race condition guard**: Jobs must be running for at least 5 minutes (`AGENT_SESSION_HEALTH_MIN_RUNNING`) before they become eligible for recovery. This prevents false positives on jobs that just started processing.
+- **Per-Tool Timeout Sub-Loop (issue #1270, parallel to Tier 1/Tier 2)**: A dedicated 30-second sub-loop (`_agent_session_tool_timeout_loop` in `agent/session_health.py`) detects sessions whose `current_tool_name` is non-null but whose `last_tool_use_at` exceeds a tier-specific budget. The PreToolUse hook fired (so we know which tool is in flight) but PostToolUse never returned. Without this check, the session keeps passing Tier 1 sub-check A in `_has_progress` for up to `SDK_PROGRESS_FRESHNESS_WINDOW` (30 min) while making no real progress.
+  - **Tier classification (`_classify_tool_tier`):**
+    - `mcp__` prefix → `"mcp"` (any Model Context Protocol tool)
+    - `{ToolSearch, Read, Glob, Grep, Edit, Write, NotebookEdit}` → `"internal"` (lightweight built-ins that should never legitimately exceed 30s)
+    - everything else (`Bash`, `Task`, `Skill`, `WebFetch`, ...) → `"default"`
+  - **Budgets:** internal 30s, mcp 120s, default 300s. Each is env-tunable via `TOOL_TIMEOUT_INTERNAL_SEC`, `TOOL_TIMEOUT_MCP_SEC`, `TOOL_TIMEOUT_DEFAULT_SEC`.
+  - **Cadence:** dedicated 30s sub-loop in worker startup (parallel to the 5-min main loop), so the 30s internal budget can fire within one tick of expiry. The main loop's psutil/OOM/orphan-reap checks stay on their original cadence — running them at 30s would ~10x the load.
+  - **Race mitigation:** before transitioning, the sub-loop re-reads `current_tool_name` and `last_tool_use_at` from a fresh query. If PostToolUse fired between the iterator's read and this point — clearing `current_tool_name` or refreshing `last_tool_use_at` — the recovery is aborted for the tick.
+  - **Companion writer cooldown:** `agent/hooks/liveness_writers.py::record_tool_boundary` bypasses its 5s per-session cooldown for `clear=True` (PostToolUse) writes so a fast PreToolUse → PostToolUse pair within the cooldown window does not leave `current_tool_name` populated and produce a false-positive wedge.
+  - **Counters:** three `IntField` counters on `AgentSession` (`tool_timeout_count_internal`, `..._mcp`, `..._default`) cumulate per-tier hits for the session's lifetime. A project-scoped Redis counter `{project_key}:session-health:tool_timeouts:{tier}` mirrors the existing `recoveries:{kind}` pattern for dashboards.
+  - **Recovery path:** routes through the shared `_apply_recovery_transition` helper with `reason_kind="tool_timeout"`. Tier 2 reprieve is skipped (the wedge condition itself is the evidence), but `MAX_RECOVERY_ATTEMPTS`, the OOM-defer, the response-delivered finalize-instead-of-recover guard, and the `DISABLE_PROGRESS_KILL` kill-switch all still apply uniformly.
+  - **Kill switch:** `TOOL_TIMEOUT_TIERS_DISABLED=1` short-circuits the entire sub-loop (parity with `DISABLE_PROGRESS_KILL` for the main loop).
+  - **v1 limitations:** the single-slot `current_tool_name` field cannot represent two concurrent tools (Tool A wedged, Tool B fired before A returned would hide A). Per-`tool_use_id` in-flight registries and synthetic `tool_result` injection are explicitly out of scope. Hard recovery (`running → pending`) is the v1 behavior; the recovered session restarts from `pending` without a "your tool wedged" steering message.
 
 ### No wall-clock timeout (issue #1172)
 
@@ -141,6 +154,10 @@ Constants in `agent/session_health.py` (re-exported from `agent_session_queue.py
 | `MAX_RECOVERY_ATTEMPTS` | 2 | Kills before session is finalized as `failed` |
 | `TASK_CANCEL_TIMEOUT` | 0.25s | Grace period after `handle.task.cancel()` |
 | `_MEMORY_CACHE_TTL_SEC` | 5s | Cache TTL for `_is_memory_tight()` psutil syscall (issue #1099) |
+| `TOOL_TIMEOUT_LOOP_INTERVAL` | 30s | Per-tool timeout sub-loop tick cadence (issue #1270) |
+| `TOOL_TIMEOUT_INTERNAL_SEC` | 30s | Budget for internal-tier tools (`Read`, `Glob`, ..., env-tunable) |
+| `TOOL_TIMEOUT_MCP_SEC` | 120s | Budget for MCP-tier tools (`mcp__*`, env-tunable) |
+| `TOOL_TIMEOUT_DEFAULT_SEC` | 300s | Budget for default-tier tools (`Bash`, `Task`, ..., env-tunable) |
 
 > **Retired by issue #1172:** `STDOUT_FRESHNESS_WINDOW`,
 > `FIRST_STDOUT_DEADLINE`, `AGENT_SESSION_TIMEOUT_DEFAULT`,

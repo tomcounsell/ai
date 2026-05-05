@@ -79,9 +79,10 @@ The hook also checks a Redis steering queue on every tool call (lightweight LPOP
 
 ## Related
 
-- [agent-session-health-monitor.md](agent-session-health-monitor.md) -- Queue-level health monitoring (complementary layer)
+- [agent-session-health-monitor.md](agent-session-health-monitor.md) -- Queue-level health monitoring (complementary layer). See its **Per-Tool Timeout Sub-Loop** section for the parallel 30s detector that fires when a tool's PreToolUse hook fires but PostToolUse never returns (issue #1270).
 - [bridge-self-healing.md](bridge-self-healing.md) -- Bridge process-level crash recovery
 - `agent/health_check.py` -- Implementation source
 - `tests/unit/test_health_check.py` -- Unit tests
 - Issue #625 -- Context enrichment tracking issue
 - Issue #374 -- Prior fix for stale session counts
+- Issue #1270 -- Per-tool timeout enforcement with per-tier counters (sub-loop in `agent/session_health.py`, parallel to the watchdog hook here)

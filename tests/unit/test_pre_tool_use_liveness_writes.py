@@ -116,3 +116,41 @@ def test_hook_redis_failure_does_not_crash(liveness_session, monkeypatch):
 
     # Returns False but does not raise.
     assert liveness_writers.record_tool_boundary(tool_name="Edit", clear=False) is False
+
+
+def test_clear_true_bypasses_cooldown_window(liveness_session):
+    """Issue #1270: PostToolUse (``clear=True``) must NOT be coalesced by the
+    cooldown — otherwise a fast PreToolUse->PostToolUse pair within the 5s window
+    leaves ``current_tool_name`` populated and the per-tool timeout sub-loop
+    sees a false-positive wedge condition.
+    """
+    from agent.hooks.liveness_writers import record_tool_boundary
+
+    _reset_cooldown()
+
+    # PreToolUse fires (clear=False) — sets current_tool_name=Read, pumps cooldown.
+    assert record_tool_boundary(tool_name="Read", clear=False) is True
+    refreshed = AgentSession.query.filter(session_id=liveness_session.session_id)
+    assert refreshed[0].current_tool_name == "Read"
+
+    # PostToolUse fires immediately (clear=True). Without the bypass, the 5s
+    # cooldown would coalesce this into a no-op and current_tool_name would
+    # stay populated. With the bypass, the field clears.
+    assert record_tool_boundary(tool_name="Read", clear=True) is True
+    refreshed = AgentSession.query.filter(session_id=liveness_session.session_id)
+    assert refreshed[0].current_tool_name is None
+
+
+def test_clear_false_still_respects_cooldown(liveness_session):
+    """Companion to the above: rapid-fire PreToolUse calls remain coalesced."""
+    from agent.hooks.liveness_writers import record_tool_boundary
+
+    _reset_cooldown()
+
+    # First PreToolUse fires.
+    assert record_tool_boundary(tool_name="Read", clear=False) is True
+    # Second PreToolUse within the cooldown window is suppressed.
+    assert record_tool_boundary(tool_name="Edit", clear=False) is False
+    # current_tool_name reflects only the first write.
+    refreshed = AgentSession.query.filter(session_id=liveness_session.session_id)
+    assert refreshed[0].current_tool_name == "Read"
