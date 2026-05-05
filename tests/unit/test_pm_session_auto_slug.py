@@ -171,8 +171,13 @@ class TestPMAutoSlugFromIssueReference:
         assert rc == 0
         assert captured.get("slug") == "my-custom-slug"
 
-    def test_dev_role_no_slug_does_not_auto_derive(self, tmp_path):
-        """Auto-derivation is PM-only. Dev sessions without --slug stay as-is."""
+    def test_dev_role_no_slug_auto_derives_from_issue_reference(self, tmp_path):
+        """Issue #1272: dev sessions also auto-derive a slug from ``issue #N``.
+
+        Previously, auto-derivation was PM-only and dev sessions without a
+        slug fell back to the repo root. #1272 reversed that — dev sessions
+        now require a slug, and the same auto-derive path PM uses applies.
+        """
         args = _make_args(
             role="dev",
             message="work on issue #1109",
@@ -185,13 +190,14 @@ class TestPMAutoSlugFromIssueReference:
 
         repo_root = tmp_path / "repo"
         repo_root.mkdir()
+        wt_path = repo_root / ".worktrees" / "sdlc-1109"
+        wt_path.mkdir(parents=True)
 
-        # Must NOT call get_or_create_worktree for dev without --slug.
         with (
             patch("agent.agent_session_queue._push_agent_session", side_effect=fake_push),
             patch(
                 "agent.worktree_manager.get_or_create_worktree",
-                side_effect=AssertionError("should not be called for dev"),
+                return_value=wt_path,
             ),
             patch("agent.worktree_manager._validate_slug"),
             patch("tools.valor_session._check_worker_health", return_value=(True, 5)),
@@ -200,7 +206,8 @@ class TestPMAutoSlugFromIssueReference:
             rc = cmd_create(args)
 
         assert rc == 0
-        # No slug assigned; dev session does not auto-derive.
-        assert captured.get("slug") is None
-        # working_dir for a dev session without --slug is the repo_root itself.
-        assert captured.get("working_dir") == str(repo_root)
+        # Auto-derived slug from "issue #1109".
+        assert captured.get("slug") == "sdlc-1109"
+        # working_dir is now the worktree, not repo_root (#1272 ensures every
+        # dev session has worktree isolation).
+        assert captured.get("working_dir") == str(wt_path)

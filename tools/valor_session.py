@@ -305,6 +305,13 @@ def cmd_create(args: argparse.Namespace) -> int:
     ``projects.json[project_key].working_directory`` (optionally with a
     ``.worktrees/{slug}/`` suffix). Callers who need a different repo pass a
     different ``--project-key``.
+
+    Slug requirement: both ``--role pm`` (issue #1109) and ``--role dev``
+    (issue #1272) require a slug — either via ``--slug <slug>`` or by
+    including ``issue #N`` in the message so the slug auto-derives to
+    ``sdlc-N``. Slugless invocations exit 1 with a stderr error. This
+    prevents the session from inheriting the worker's current branch state
+    and ensures dev sessions get worktree isolation.
     """
     _load_env()
     try:
@@ -358,7 +365,13 @@ def cmd_create(args: argparse.Namespace) -> int:
         # a project root or touching the filesystem.
         # ------------------------------------------------------------------
         slug = getattr(args, "slug", None)
-        if not slug and role == "pm":
+        # Issue #1272: dev sessions also require a slug. The previous behavior
+        # accepted slugless ``--role dev`` and let the worker fall back to the
+        # main checkout — the residual hole that #887 left open. Apply the
+        # same auto-derive-or-reject path that PM uses; a synthetic slug is
+        # still allocated downstream by the worker if a slugless dev session
+        # somehow reaches the executor (future programmatic spawn site).
+        if not slug and role in ("pm", "dev"):
             derived = _derive_slug_from_message(message)
             if derived:
                 slug = derived
@@ -368,10 +381,10 @@ def cmd_create(args: argparse.Namespace) -> int:
                 )
             else:
                 print(
-                    "Error: PM sessions must be created with --slug <slug> or include "
-                    "'issue #N' in the message so a worktree can be provisioned. "
-                    "Without a slug the PM would inherit the worker's current branch "
-                    "state (see issue #1109).",
+                    "Error: PM and dev sessions must be created with --slug <slug> "
+                    "or include 'issue #N' in the message so a worktree can be "
+                    "provisioned. Without a slug the session would inherit the "
+                    "worker's current branch state (see issues #1109, #1272).",
                     file=sys.stderr,
                 )
                 return 1

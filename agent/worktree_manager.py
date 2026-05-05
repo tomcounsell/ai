@@ -142,6 +142,70 @@ def resolve_repo_root(file_path: str | Path) -> Path:
     return Path(result.stdout.strip())
 
 
+def resolve_main_repo_root(file_path: str | Path) -> Path:
+    """Determine the main repository root for a file, even when inside a worktree.
+
+    Use this when you need the main repo root regardless of whether
+    ``file_path`` is in a worktree. From inside a linked worktree,
+    ``git rev-parse --show-toplevel`` (used by :func:`resolve_repo_root`)
+    returns the *worktree's* path — which is the wrong base when you need
+    to reach into ``.worktrees/{slug}/`` for cleanup. This helper instead
+    uses ``git rev-parse --git-common-dir``, which always points at the
+    main repo's ``.git`` directory regardless of which worktree you are in.
+    The parent of that ``.git`` directory is the main repo root.
+
+    Contrast with :func:`resolve_repo_root`, which returns the worktree
+    path when called from inside one. Prefer ``resolve_repo_root`` when
+    you intentionally want the local checkout (e.g. plan documents); use
+    this helper when you need to manipulate sibling worktrees.
+
+    Args:
+        file_path: Absolute or relative path to a file or directory.
+            If a directory is given, it is used directly. If a file is
+            given, its parent directory is used.
+
+    Returns:
+        Absolute Path to the main git repository root.
+
+    Raises:
+        FileNotFoundError: If the file or its parent directory does not exist.
+        ValueError: If the path is not inside any git repository.
+    """
+    path = Path(file_path).resolve()
+
+    # Use the directory containing the file, or the path itself if it's a dir
+    search_dir = path if path.is_dir() else path.parent
+
+    if not search_dir.exists():
+        raise FileNotFoundError(
+            f"Cannot resolve main repo root: directory {search_dir} does not exist"
+        )
+
+    result = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=search_dir,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    if result.returncode != 0:
+        raise ValueError(
+            f"Path {file_path} is not inside a git repository. git error: {result.stderr.strip()}"
+        )
+
+    common_dir = Path(result.stdout.strip())
+    # ``--git-common-dir`` may return a relative path (relative to ``cwd``)
+    # or an absolute path depending on the git version and worktree layout.
+    # Normalize before taking ``.parent``.
+    if common_dir.is_absolute():
+        git_dir = common_dir.resolve()
+    else:
+        git_dir = (search_dir / common_dir).resolve()
+
+    return git_dir.parent
+
+
 def _validate_slug(slug: str) -> None:
     """Validate slug to prevent path traversal and invalid directory names.
 

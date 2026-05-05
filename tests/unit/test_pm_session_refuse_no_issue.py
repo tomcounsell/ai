@@ -115,30 +115,32 @@ class TestPMRefuseWithoutIssue:
         assert rc == 0
         assert captured_kwargs.get("slug") == "some-feature"
 
-    def test_dev_role_no_slug_no_issue_allowed(self, tmp_path):
-        """Dev sessions may legitimately run without a slug (ad-hoc)."""
+    def test_dev_role_no_slug_no_issue_refused(self, tmp_path, capsys):
+        """Issue #1272: dev sessions are now slug-required (was: ad-hoc allowed).
+
+        The previous semantic let dev sessions run ad-hoc without a slug,
+        falling back to the repo root. #1272 closed that residual hole —
+        dev now requires ``--slug`` or ``issue #N`` like PM.
+        """
         args = _make_args(
             role="dev",
             message="fix a typo",
         )
 
-        captured_kwargs: dict = {}
-
-        async def fake_push(**kwargs):
-            captured_kwargs.update(kwargs)
-
         repo_root = tmp_path / "repo"
         repo_root.mkdir()
 
         with (
-            patch("agent.agent_session_queue._push_agent_session", side_effect=fake_push),
+            patch("agent.agent_session_queue._push_agent_session"),
             patch("tools.valor_session._check_worker_health", return_value=(True, 5)),
             _stub_project_lookup(repo_root),
         ):
             rc = cmd_create(args)
 
-        assert rc == 0
-        assert captured_kwargs.get("slug") is None
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "PM and dev sessions must be created with --slug" in err
+        assert "#1272" in err
 
     def test_teammate_role_no_slug_no_issue_allowed(self, tmp_path):
         """Teammate sessions are conversational — no slug required."""

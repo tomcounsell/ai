@@ -225,10 +225,11 @@ python -m tools.valor_session status --id <SESSION_ID>
 python -m tools.valor_session steer --id <SESSION_ID> --message "Stop after critique"
 
 # Create a new session (project_key derived from cwd via projects.json)
+# PM and dev roles both require --slug, or `issue #N` in the message for auto-derivation.
 python -m tools.valor_session create --role pm --message "Plan issue #735"
-python -m tools.valor_session create --role dev --message "Fix the bug" --parent <PARENT_ID>
+python -m tools.valor_session create --role dev --slug fix-the-bug --message "Fix the bug" --parent <PARENT_ID>
 # Explicit project key override (useful in scripts/CI where cwd may not match)
-python -m tools.valor_session create --role pm --message "..." --project-key valor
+python -m tools.valor_session create --role pm --slug ad-hoc-task --message "..." --project-key valor
 
 # Kill sessions
 python -m tools.valor_session kill --id <SESSION_ID>

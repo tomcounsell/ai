@@ -4,6 +4,7 @@ nudge/re-enqueue paths, and calendar heartbeat."""
 import asyncio
 import logging
 import os  # noqa: F401
+import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -638,6 +639,60 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # any future spawn site that forgets a required field will fail loudly
         # here instead of mid-startup with no Telegram message. The session is
         # marked ``failed`` so dashboards / reflections surface it.
+
+        # Synthesis precondition (issue #1272): a slugless dev session needs
+        # ``agent_session_id`` to derive its synthetic slug ``dev-{aid[:8]}``.
+        # If both ``slug`` and ``agent_session_id`` are missing on a dev session
+        # the synthesis branch below would crash with
+        # ``TypeError: 'NoneType' object is not subscriptable``. Fail loudly
+        # here so the failure mode is observable instead of obscured.
+        _stype_pre = getattr(session, "session_type", None)
+        _slug_pre = getattr(session, "slug", None)
+        _aid_pre = getattr(session, "agent_session_id", None)
+        if _stype_pre == "dev" and _slug_pre is None and _aid_pre is None:
+            _parent = getattr(session, "parent_agent_session_id", None)
+            logger.error(
+                "[executor-guard] Refusing to start slugless dev session with None "
+                "agent_session_id (reason=missing_aid_for_synthetic_slug): "
+                f"slug={_slug_pre!r} session_type={_stype_pre} "
+                f"parent_agent_session_id={_parent} "
+                f"working_dir={session.working_dir!r} session_id={session.session_id!r}"
+            )
+            try:
+                from models.session_lifecycle import (  # noqa: PLC0415
+                    StatusConflictError,
+                    finalize_session,
+                )
+
+                finalize_session(
+                    session,
+                    "failed",
+                    reason=(
+                        "slugless dev session requires agent_session_id for "
+                        "synthetic slug derivation (issue #1272)"
+                    ),
+                )
+            except StatusConflictError as finalize_conflict:
+                logger.info(
+                    "[executor-guard] Skipping finalize for %s: %s",
+                    getattr(session, "agent_session_id", "?"),
+                    finalize_conflict,
+                )
+            except Exception as finalize_err:
+                logger.error(
+                    "[executor-guard] finalize_session(failed) raised: %s",
+                    finalize_err,
+                )
+                try:
+                    session.status = "failed"
+                    session.save(update_fields=["status", "updated_at"])
+                except Exception as last_resort_err:
+                    logger.debug(
+                        "[executor-guard] last-resort status save failed (non-fatal): %s",
+                        last_resort_err,
+                    )
+            return
+
         if session.working_dir is None or session.session_id is None:
             offending_field = "working_dir" if session.working_dir is None else "session_id"
             _aid = getattr(session, "agent_session_id", None) or getattr(session, "id", "?")
@@ -708,6 +763,33 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Resolve branch: use slug + stage mapping if available, else session-based
         slug = session.slug
         stage = None
+        # Synthetic-slug synthesis for slugless dev sessions (issue #1272,
+        # Alternative A from docs/plans/parallel-session-checkout-guard.md).
+        #
+        # The #887 main-checkout protection guard below short-circuits on
+        # ``slug is None``: ``_stype == "dev" and slug and ...``. That left a
+        # residual hole — a dev session created without a slug (future
+        # debug harness, test fixture, or any code path that bypasses the
+        # CLI) would skip worktree provisioning AND skip the guard, landing
+        # in the main checkout. Synthesizing ``dev-{aid[:8]}`` here funnels
+        # every dev session through the existing worktree-creation path so
+        # the guard always has a slug to enforce against. The
+        # ``agent_session_id`` precondition above (executor-guard) ensures
+        # ``aid`` is non-None before this line runs.
+        # Synthetic dev slug shape: dev-{first 8 chars of agent_session_id}.
+        is_synthetic_slug = False
+        if not slug and getattr(session, "session_type", None) == "dev":
+            _aid_for_slug = getattr(session, "agent_session_id", None)
+            if _aid_for_slug:
+                slug = f"dev-{_aid_for_slug[:8]}"
+                is_synthetic_slug = True
+                # Stable grep marker for post-deploy reflection scans —
+                # MUST be the literal token ``[synthetic-slug]`` so log
+                # audits can count occurrences without false positives.
+                logger.info(
+                    f"[synthetic-slug] Allocated synthetic slug {slug} "
+                    f"for slugless dev session {_aid_for_slug} (issue #1272)"
+                )
         if slug:
             # Try to read current stage from the AgentSession
             try:
@@ -724,6 +806,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
             from agent.agent_session_queue import resolve_branch_for_stage  # noqa: PLC0415
 
             resolved_branch, needs_wt = resolve_branch_for_stage(slug, stage)
+            # Synthetic dev slugs (#1272) have no SDLC stage, so the
+            # default mapping returns ``("main", False)`` — which would
+            # bypass worktree provisioning AND trip the main-checkout
+            # guard below. Force the synthetic case onto a session branch
+            # in a worktree so isolation is guaranteed.
+            if is_synthetic_slug:
+                resolved_branch = f"session/{slug}"
+                needs_wt = True
             branch_name = resolved_branch
             # If branch resolution says we need a worktree and working_dir isn't one,
             # OR the path looks like a worktree but the directory is missing on disk
@@ -1858,3 +1948,37 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # into _active_sessions across sessions on the same worker.
         if _session_id_for_registry:
             _active_sessions.pop(_session_id_for_registry, None)
+
+        # === Synthetic-slug worktree cleanup (issue #1272) ===
+        # Slugless dev sessions get a synthesized slug ``dev-{aid[:8]}`` and a
+        # worktree provisioned for them above. Without an explicit cleanup
+        # hook, those worktrees linger forever — ``prune_worktrees()`` only
+        # runs ``git worktree prune`` (removes references, not directories)
+        # and ``cleanup_after_merge()`` is normally only triggered by a PR
+        # merge. Synthetic-slug sessions may never open a PR. Match the
+        # exact ``dev-{8 hex chars}`` shape so we never touch a real slug.
+        try:
+            _slug_for_cleanup = locals().get("slug")
+            if (
+                _slug_for_cleanup
+                and isinstance(_slug_for_cleanup, str)
+                and re.match(r"^dev-[0-9a-f]{8}$", _slug_for_cleanup)
+            ):
+                from agent.worktree_manager import (  # noqa: PLC0415
+                    cleanup_after_merge,
+                    resolve_main_repo_root,
+                )
+
+                _wd = locals().get("working_dir")
+                if _wd is not None:
+                    _repo_for_cleanup = resolve_main_repo_root(_wd)
+                    cleanup_result = cleanup_after_merge(_repo_for_cleanup, _slug_for_cleanup)
+                    logger.info(
+                        f"[synthetic-slug] Cleaned up worktree+branch for "
+                        f"{_slug_for_cleanup}: {cleanup_result}"
+                    )
+        except Exception as cleanup_err:
+            # Cleanup failures must NEVER propagate as session failures.
+            logger.warning(
+                f"[synthetic-slug] Cleanup failed for synthetic slug (non-fatal): {cleanup_err}"
+            )

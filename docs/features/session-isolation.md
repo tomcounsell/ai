@@ -64,6 +64,33 @@ Dev sessions with a slug are **required** to run inside a worktree. Three enforc
 
 **Why this was added:** The 2026-04-10 incident (issue [#887](https://github.com/tomcounsell/ai/issues/887)) demonstrated that `valor-session create` without a prior `/do-plan` step bypassed worktree provisioning entirely, causing dev sub-sessions to run git operations in the main checkout. This contaminated concurrent human and agent work.
 
+### Synthetic Slugs for Slugless Dev Sessions (Issue #1272)
+
+The #887 main-checkout protection guard short-circuits when `slug is None`:
+
+```python
+if _stype == "dev" and slug and WORKTREES_DIR not in str(working_dir):
+    raise RuntimeError(...)
+```
+
+That left a residual hole — a dev session created without a slug (a future debug harness, a test fixture, or any code path that bypasses the CLI's `--slug` requirement) would skip worktree provisioning AND skip the guard, landing in the main checkout.
+
+Issue [#1272](https://github.com/tomcounsell/ai/issues/1272) closes that hole with two surgical additions:
+
+1. **CLI symmetry guard** (`tools/valor_session.py::cmd_create`): `valor-session create --role dev` now requires `--slug` or `issue #N` in the message, mirroring the existing PM check. Slugless invocations exit 1 with a stderr error referencing #1272. The message format includes the literal substring `dev sessions must be created with --slug` for grep-ability.
+
+2. **Synthetic-slug synthesis** (`agent/session_executor.py`): If a slugless dev session somehow reaches the executor (a future programmatic spawn site that bypasses the CLI), the executor synthesizes a slug `dev-{agent_session_id[:8]}` and provisions a worktree the same way slugged sessions do today. The synthesis emits a stable `[synthetic-slug]` log marker so operators can grep post-deploy:
+
+   ```
+   [synthetic-slug] Allocated synthetic slug dev-abcd1234 for slugless dev session abcd1234-... (issue #1272)
+   ```
+
+3. **Pre-synthesis precondition**: An executor-guard precondition raises (and finalizes the session as failed) if `agent_session_id is None` for a slugless dev session — without an aid, the synthesis line `dev-{aid[:8]}` would crash with `TypeError`.
+
+4. **Synthetic-slug cleanup hook**: Synthetic-slug worktrees may not have a corresponding PR (the dev session may complete without ever opening one), and `prune_worktrees()` only runs `git worktree prune` (removes references, not directories). The session-completion `finally` block in `_execute_agent_session` calls `cleanup_after_merge(repo_root, slug)` directly when the slug matches the regex `^dev-[0-9a-f]{8}$`. The regex is exact — it must NOT match a real human-chosen slug like `dev-improvements` or `dev-1272`. Cleanup failures are logged at WARNING and do NOT propagate as session failures.
+
+The synthetic-slug regex `^dev-[0-9a-f]{8}$` is the safety guarantee: it matches only the synthesis output, never a real human slug.
+
 ### Early Worktree Provisioning via `--slug`
 
 The `valor-session create` CLI command accepts a `--slug` flag that provisions a worktree at session creation time, before the session is enqueued:
