@@ -1,5 +1,15 @@
 # PM Audio Briefing
 
+> **Note (2026-05-04, issue #1276):** The `pm-audio-briefing` reflection now
+> dispatches **multiple slot types** beyond the morning audio brief — see
+> [pm-briefings.md](pm-briefings.md) for the consolidated design. The
+> registry entry name and import path are unchanged for backward
+> compatibility; existing morning-brief users get a single `morning` slot
+> auto-synthesized from their legacy `pm_briefing.angles + pm_briefing.schedule`
+> config. **No `projects.json` edits required.** This doc remains as a
+> reference for the morning brief's content rules (no-numbers guard, word
+> count, Pass A/B/regex layers).
+
 A daily per-project voice brief delivered to Telegram. Each project listed in
 `projects.json` with a `pm_briefing.enabled: true` block fires at the
 configured local schedule slot. The audio transcript is **numbers-free**; a

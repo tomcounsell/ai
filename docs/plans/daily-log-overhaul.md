@@ -10,6 +10,14 @@ last_comment_id:
 
 # Daily Log Overhaul: Comprehensive Activity Log + Vault Archival + Audio-Brief Telegram
 
+> **Superseded by [`docs/plans/daily-reflections-unification.md`](daily-reflections-unification.md) (issue #1276).**
+> The follow-up plan consolidates this work alongside `pm-audio-briefing`
+> and `daily-log-review` into a slot-driven `pm-briefings` package. The
+> daily-log content collector + audio-brief logic from this plan now lives
+> in `reflections.pm_audio_briefing.daily_log` as a slot type. Vault file
+> writing is gated by `slot.vault_writer: true` (was: implicit "ai project"
+> gate).
+
 ## Problem
 
 The current `daily-report` reflection produces a near-empty file (`logs/reflections/report_YYYY-MM-DD.md`) containing only reflection-callable durations and a "Principal Priorities" block. It records nothing about what actually happened across the system that day. Two queries are unanswerable today:
