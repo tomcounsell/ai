@@ -332,4 +332,8 @@ the 5% noise threshold.
 - `.claude/commands/do-merge.md` — orchestration
 - [Test Reliability Flaky Filter](test-reliability-flaky-filter.md) — PR #484,
   the PR-branch retry filter (different layer)
+- [PR-Shape-Aware Merge Gates](pr-shape-aware-merge-gates.md) — PR #1285,
+  the per-SHA verdict cache layered on top of this baseline (the cache key
+  hashes `data/main_test_baseline.json` so any baseline change silently
+  invalidates cached verdicts)
 - `docs/plans/merge-gate-baseline-refresh.md` — design plan

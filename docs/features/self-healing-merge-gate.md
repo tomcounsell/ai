@@ -5,7 +5,8 @@
 **Related features:** [Plan Checkbox Writers](plan-checkbox-writers.md) ·
 [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) ·
 [Merge-Gate Baseline](merge-gate-baseline.md) ·
-[Pipeline State Machine](pipeline-state-machine.md)
+[Pipeline State Machine](pipeline-state-machine.md) ·
+[PR-Shape-Aware Merge Gates](pr-shape-aware-merge-gates.md)
 
 ## Why
 
@@ -57,6 +58,17 @@ On API failure (empty `LATEST_COMMIT_DATE`), the gate fails with a
 specific diagnostic (`GATES_FAILED: could not fetch latest commit date
 for review-filter`) rather than silently regressing to unfiltered
 behavior — silent fallback defeats the class of bug the filter prevents.
+
+**Narrowed by safe-shape exemption (#1283).** The filter is preserved as
+the default; the
+[PR-shape-aware merge gates](pr-shape-aware-merge-gates.md) feature adds
+a narrow exemption that re-admits a prior `## Review: Approved` when the
+post-approval diff classifies as a safe shape (`docs-only`,
+`lockfile-only`, `small-patch`). The exemption anchors on the
+`<!-- REVIEW_CONTEXT head_sha=... -->` trailer that `/do-pr-review`
+emits; reviews lacking the trailer fail closed (no exemption).
+Unsafe-shape follow-ups still invalidate the prior approval — the
+filter's blocking direction for substantive code changes is unchanged.
 
 ### 3. `uv lock --locked` pre-commit phase
 
