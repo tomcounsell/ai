@@ -88,6 +88,7 @@ async def dispatch_telegram_session(
     scheduling_depth: int = 0,
     project_config: dict | None = None,
     extra_context_overrides: dict | None = None,
+    requires_real_chrome: bool = False,
 ) -> int:
     """Enqueue a Telegram-originating session and record dedup.
 
@@ -130,6 +131,7 @@ async def dispatch_telegram_session(
         scheduling_depth=scheduling_depth,
         project_config=project_config,
         extra_context_overrides=extra_context_overrides,
+        requires_real_chrome=requires_real_chrome,
     )
     # Record inbound message in the session's chat_message_log (issue #1192).
     # Called after enqueue so the AgentSession record exists in Redis.
