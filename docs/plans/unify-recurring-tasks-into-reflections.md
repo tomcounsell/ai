@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-05-04
 tracking: https://github.com/tomcounsell/ai/issues/1273
 last_comment_id:
+revision_applied: true
 ---
 
 # Unify Loops, Schedules, Routines, and Reflections into One Persistent Reflection System
@@ -156,17 +157,27 @@ This is the load-bearing section. The issue surfaces eight uncommitted architect
 
 ### Q3: Migration path for `reflections.yaml`
 
-**Decision:** **One-shot migration script run during `/update`. No dual-read window. No legacy compat branch.**
+**Decision:** **One-shot migration script run during `/update`. Coexists with running reflections — no wait-for-quiescence loop. Atomic YAML rename + delta-loop `ReflectionRun` backfill. No dual-read window. No legacy compat branch.**
 
 **Rationale:**
 - `feedback_no_parallel_migrations` mandates fully cutting over.
-- The vault-synced `~/Desktop/Valor/reflections.yaml` is the source of truth, so the migration script writes there. The in-repo symlink picks up the change automatically (if symlink) or via `scripts/update/env_sync.py` (if regular file post-`d47d5a81`).
+- The vault-synced `~/Desktop/Valor/reflections.yaml` is the source of truth, so the migration script writes there. The in-repo symlink picks up the change automatically (per `scripts/update/env_sync.py::sync_reflections_yaml` at `run.py:403`).
 - The script is idempotent: running it twice on already-migrated YAML is a no-op.
 - Migration mapping is mechanical: every `interval: N` → `every: Ns`. No semantic changes. No reflection is lost.
 - Pre-flight: the migration script asserts every entry has a valid post-migration `cron:`/`every:`/`at:` field; if any entry is malformed it aborts before writing.
-- The `/update` skill gains a Step "migrate reflections.yaml if pre-migration shape detected" that runs the migration script. After a single successful update on each machine, the field is permanently in the new shape.
+- The `/update` skill gains **Step 1.67** (immediately after Step 1.66's `sync_reflections_yaml`, before any service-restart logic) that invokes the migration script. After a single successful update on each machine, the registry is permanently in the new shape.
 
-**Implementation guard:** The migration script is `scripts/migrate_reflections_yaml.py` and is invoked from `scripts/update/run.py` Step 4.7 (after `env_sync.py`, before bridge restart). On failure, the update halts and the bridge stays on the previously-validated config.
+**Coexistence-with-running-reflections design (replaces the original "wait 60 s for last_status='running' to clear" approach, which would routinely starve under normal load — long-running reflections like `analytics-rollup` and `docs-auditor` regularly run for several minutes, so the wait would abort the migration on a healthy worker):**
+
+The migration is decomposed into three idempotent phases, each safe to run while reflections are mid-execution:
+
+1. **YAML rewrite (atomic).** Read `~/Desktop/Valor/reflections.yaml`, rewrite every `interval: N` → `every: Ns` in memory, write to a sibling temp file in the same directory, then `os.replace(temp, target)`. POSIX guarantees the rename is atomic; concurrent `load_registry()` reads see either the old or the new full file, never a torn read. **Crucially, the YAML and the model schema are independent surfaces** — a mid-flight reflection's `mark_completed()` writes to `Reflection` Popoto fields whose shape is unchanged by the YAML rewrite, so it cannot conflict with the rewrite.
+2. **`run_history` → `ReflectionRun` backfill (delta-loop).** Walk every `Reflection` record. For each entry in `run_history`, compute a stable key `(name, timestamp_unix)` and call `ReflectionRun.get_or_create(key=...)`. If the record already exists, skip. If `Reflection.last_status == "running"` at scan time, **do not clear `run_history` yet** — record the reflection's name in a sidecar set `reflections:migration:pending_clear` (Popoto-managed; never raw Redis per the project's no-raw-Redis-on-Popoto-keys invariant). After the loop, walk the sidecar set and for each name, re-fetch the `Reflection` record; if `last_status != "running"`, clear `run_history` atomically (Popoto `save()` is atomic per record) and remove the name from the sidecar set. Reflections that are still running at the end of the migration retain their `run_history` (no data loss); the next migration run (next `/update`) cleans them up. The migration is fully reentrant.
+3. **Schema validation pass.** After rewrite + backfill, re-load the registry via `load_registry()` and call `compute_next_due()` on every entry. Any parse error aborts the `/update` step (the rewrite phase is already durable; the bridge keeps serving on the new YAML, only schema validation fails loudly).
+
+This design **never blocks on `last_status="running"`** and never aborts on healthy long-running reflections.
+
+**Implementation guard:** The migration script is `scripts/migrate_reflections_yaml.py` and is invoked from `scripts/update/run.py` **Step 1.67** (immediately after `sync_reflections_yaml` at line 403, before Step 1.7's hook audit). The insertion point is chosen because (a) the YAML symlink/copy is freshly synced from the vault on this same line, so the migration operates on the canonical file; (b) it precedes service-restart logic, so the worker restarts onto migrated state; (c) Step 4.7 is already occupied by the sdlc-tool wrapper validation gate (`run.py:839`). On migration failure, the update halts and the bridge keeps serving on the previously-validated config (the YAML temp-file + atomic-rename pattern means a failed rewrite never leaves a partial file behind).
 
 ### Q4: `/loop` and `/schedule` collapse
 
@@ -216,24 +227,51 @@ This is the load-bearing section. The issue surfaces eight uncommitted architect
 
 ### Q7: MCP tools surface
 
-**Decision:** **New `mcp_servers/reflections_server.py` exposes seven tools:**
+**Decision:** **New `mcp_servers/reflections_server.py` exposes seven tools, with auth grounded in env primitives the SDK client already injects (no invented helpers):**
 
 | Tool | Action | Authorization |
 |------|--------|---------------|
 | `reflections_create` | Create a new Reflection | Any session (creator recorded in `Reflection.created_by_session_id`) |
 | `reflections_list` | List all Reflections, optionally filtered by group/status | Any session (read-only) |
 | `reflections_get` | Get one Reflection's full state | Any session (read-only) |
-| `reflections_update` | Update an existing Reflection's schedule/sink | Only creator session OR root operator (Valor) |
-| `reflections_remove` | Delete a Reflection (and its history) | Only creator session OR root operator |
+| `reflections_update` | Update an existing Reflection's schedule/sink | Only creator session OR registry-source caller |
+| `reflections_remove` | Delete a Reflection (and its history) | Only creator session OR registry-source caller |
 | `reflections_runs` | Query `ReflectionRun` history for a reflection | Any session (read-only) |
-| `reflections_pause` / `reflections_resume` | Toggle `paused_until` | Only creator session OR root operator |
+| `reflections_pause` / `reflections_resume` | Toggle `paused_until` | Only creator session OR registry-source caller |
 
 **Rationale:**
 - Mirrors fazm's `routines_*` surface so cross-tool muscle memory transfers.
-- The "creator OR root" auth model is the lightest workable rule — operator (Tom) is always allowed; otherwise the session that created a reflection owns it.
+- The "creator OR registry-source" auth model is the lightest workable rule — registry-loaded reflections (those declared in `reflections.yaml`) are mutable only by an out-of-band caller that operates on the YAML file directly (the migration script, the worker on registry reload, or a human running `python -m mcp_servers.reflections_server` from a shell with no `VALOR_SESSION_ID` in env). Otherwise the session that created a reflection owns it.
 - The dashboard at `localhost:8500` reads via the same MCP tools (over HTTP) so we don't have two read paths. Writes from the dashboard are out of scope — dashboard remains read-only in this iteration.
 
-**Implementation guard:** `Reflection.created_by_session_id` defaults to `None` for registry-loaded reflections (i.e., reflections from `reflections.yaml` are owned by "everyone" and always editable by root only — no agent session can remove them via MCP). Tools assert `session_id == created_by_session_id OR session.is_root_operator()`.
+**Auth implementation (concrete; no invented helpers):**
+
+The MCP server resolves the calling session's identity from the env primitives that `agent/sdk_client.py:1380-1385` already injects when spawning a Claude Code subprocess:
+
+- `VALOR_SESSION_ID` — the bridge-level session id (always present for bridge-spawned sessions)
+- `AGENT_SESSION_ID` — the canonical AgentSession FK (`agt_xxx`); set for all sessions tracked by the worker
+
+The auth check is a small function in `mcp_servers/reflections_server.py`:
+
+```python
+def _caller_id() -> str | None:
+    """Return the calling session's identity, or None for registry-source callers
+    (the migration script, scheduler reload, or a shell invocation outside of any
+    Claude Code session)."""
+    return os.environ.get("AGENT_SESSION_ID") or os.environ.get("VALOR_SESSION_ID")
+
+def _can_mutate(reflection: Reflection) -> bool:
+    caller = _caller_id()
+    if caller is None:
+        # No session context — this is the migration script, scheduler reload,
+        # or a direct CLI invocation. Allowed to mutate registry-loaded reflections.
+        return True
+    return caller == reflection.created_by_session_id
+```
+
+This grounds the rule entirely in primitives that already exist in the codebase. There is **no `session.is_root_operator()` method** — that name was a stand-in in the previous draft and is removed. The "root operator" concept collapses to "called from a context where neither env var is set," which is exactly what migration scripts and direct CLI invocations look like. (`AGENT_SESSION_ID` is preferred when present because it is the canonical AgentSession FK; `VALOR_SESSION_ID` is the bridge-level fallback for sessions that pre-date the agent_session_id rollout.)
+
+**Implementation guard:** `Reflection.created_by_session_id` defaults to `None` for registry-loaded reflections (i.e., reflections from `reflections.yaml` have no creator session). The `_can_mutate` function rejects all agent-session callers for these (`caller != None`, and `None == created_by_session_id` only when caller is also `None`), so only the no-env-var path can mutate them — preserving the "registry-loaded reflections are sacred to YAML" invariant. Tests assert: (a) an agent session cannot remove a registry-loaded reflection, (b) an agent session can edit/remove a reflection it created, (c) a no-env-var caller can edit any reflection, (d) a different agent session (caller != created_by_session_id) is blocked.
 
 ### Q8: Cost accounting and analytics
 
@@ -283,9 +321,13 @@ No spikes needed. The architecture questions all resolve via prior art (fazm, th
 
 ### Migration path: `/update` first-run on a machine
 
-1. **`scripts/update/run.py` Step 4.7** detects pre-migration `interval:` fields in `reflections.yaml`
-2. **Calls `scripts/migrate_reflections_yaml.py`** — reads vault YAML, rewrites every `interval: N` to `every: Ns`, writes back atomically (temp file + rename)
-3. **Scheduler restart** picks up new shape; `Reflection` records carry forward unchanged (only the registry shape changed)
+1. **`scripts/update/run.py` Step 1.67** runs `scripts/migrate_reflections_yaml.py` immediately after Step 1.66's `sync_reflections_yaml` (line 403). The migration operates on the freshly-synced canonical YAML.
+2. **Phase 1 — atomic YAML rewrite.** Read `~/Desktop/Valor/reflections.yaml`, rewrite every `interval: N` → `every: Ns` in memory, write to a sibling temp file in the same directory, then `os.replace(temp, target)`. POSIX-atomic; concurrent readers see either the old or new full file.
+3. **Phase 2 — `run_history` → `ReflectionRun` delta-loop backfill.** Walk every `Reflection` record. For each `run_history` entry, compute key `(name, timestamp_unix)` and call `ReflectionRun.get_or_create(...)`. If `last_status == "running"` at scan time, record the name in `reflections:migration:pending_clear` (Popoto-managed sidecar set) and skip the clear step. After the scan, walk the sidecar; for each name, re-fetch the Reflection and clear `run_history` only if it has stopped running. Reflections still running at exit are handled on the next migration run (no data loss).
+4. **Phase 3 — schema validation.** Re-load the registry via `load_registry()` and call `compute_next_due()` on every entry. Any parse error aborts and surfaces a loud failure to `/update`.
+5. **Scheduler restart** picks up new shape; `Reflection` records carry forward unchanged.
+
+The migration **never blocks on `last_status="running"`** and is fully reentrant — running it twice on the same machine is a no-op the second time.
 
 ## Failure Path Test Strategy
 
@@ -327,8 +369,12 @@ No spikes needed. The architecture questions all resolve via prior art (fazm, th
 ## Risks
 
 ### Risk 1: Migration breaks an in-flight reflection mid-run
-**Impact:** A reflection running at the moment of `/update`'s migration step has `last_status="running"` and stale `interval` semantics. After migration, the scheduler reads new schema and the in-flight run's completion handler tries to write old fields.
-**Mitigation:** The migration script asserts no `Reflection.last_status == "running"` records exist before rewriting YAML (waits up to 60s for them to finish, aborts if still running). The model's `mark_completed` is unchanged-shape — only the YAML registry shape changes — so even mid-flight runs complete safely. Documented in `scripts/migrate_reflections_yaml.py` docstring.
+**Impact:** A reflection running at the moment of `/update`'s migration step has `last_status="running"` and a long-running execution in flight. The naive design (wait up to 60s for `last_status="running"` to clear, abort otherwise) would routinely starve under normal load — `analytics-rollup`, `docs-auditor`, and the per-project audit reflections regularly run for several minutes. A single long-running reflection would block every machine's `/update` run.
+**Mitigation:** The migration script does NOT wait for in-flight reflections to clear. The design coexists with running reflections in three idempotent phases (see Q3 for the full design):
+1. **Atomic YAML rewrite** via temp file + `os.replace()`. The YAML and the model schema are independent surfaces; mid-flight `mark_completed()` writes to Popoto fields whose shape is unchanged by the YAML rewrite.
+2. **Delta-loop `run_history` → `ReflectionRun` backfill.** Walk every Reflection; for each `run_history` entry, `ReflectionRun.get_or_create((name, timestamp))`. If `Reflection.last_status == "running"` at scan time, do not clear `run_history` — record the name in `reflections:migration:pending_clear` (a Popoto-managed sidecar set, never raw Redis). After the scan, walk the sidecar and clear `run_history` only on reflections that have since stopped running. Reflections still running at exit retain `run_history` and are handled on the next migration run.
+3. **Schema validation** by re-loading the registry through `compute_next_due()`.
+The migration is fully reentrant — running it twice on the same machine is a no-op the second time. The model's `mark_completed` is unchanged-shape so even mid-flight runs complete safely. Documented in `scripts/migrate_reflections_yaml.py` docstring.
 
 ### Risk 2: `croniter` introduces a new dependency the update script must propagate
 **Impact:** Update on a machine where `croniter` isn't installed yet fails at scheduler restart with `ImportError`.
@@ -340,7 +386,7 @@ No spikes needed. The architecture questions all resolve via prior art (fazm, th
 
 ### Risk 4: MCP authorization model lets any session edit registry-loaded reflections
 **Impact:** An agent session calls `reflections_remove("daily-report-and-notify")` and the registry-loaded reflection is gone until the next scheduler restart re-creates it from YAML. Hidden state divergence from `reflections.yaml`.
-**Mitigation:** Registry-loaded reflections have `created_by_session_id=None`; the MCP auth check `session_id == created_by_session_id` fails for `None == "<some session id>"`. Only `is_root_operator()` (Valor) can mutate them. Tests assert this rule explicitly.
+**Mitigation:** Registry-loaded reflections have `created_by_session_id=None`. The MCP auth check `_can_mutate(reflection)` resolves the caller via `os.environ.get("AGENT_SESSION_ID") or os.environ.get("VALOR_SESSION_ID")` (the env primitives the SDK client injects at `agent/sdk_client.py:1380-1385`). For an agent-session caller, `caller != None` and `caller != reflection.created_by_session_id` (which is `None`), so the check rejects. Only a no-env-var caller (the migration script, scheduler reload, or a direct shell invocation) can mutate registry-loaded reflections. Tests assert this rule explicitly using `monkeypatch.setenv`/`monkeypatch.delenv` to drive the env primitives.
 
 ### Risk 5: Splitting `Reflection` and `ReflectionRun` requires data migration of existing run_history
 **Impact:** Existing `Reflection.run_history` lists (up to 200 records each, ~33 reflections) need to be backfilled into `ReflectionRun` rows or accepted as lost.
@@ -385,7 +431,7 @@ No spikes needed. The architecture questions all resolve via prior art (fazm, th
 The `/update` skill needs three changes:
 
 1. **Add `croniter` to `pyproject.toml`** — `uv sync` picks it up on next update.
-2. **Add Step 4.7 to `scripts/update/run.py`** — invoke `scripts/migrate_reflections_yaml.py` after `env_sync.py` and before bridge restart. Halt update on migration error.
+2. **Add Step 1.67 to `scripts/update/run.py`** — invoke `scripts/migrate_reflections_yaml.py` immediately after Step 1.66's `sync_reflections_yaml` (currently at `run.py:403`) and before Step 1.7's hook audit. Halt update on migration error. **Insertion point rationale:** Step 4.7 (suggested in the prior draft) is already occupied — `run.py:839` validates the sdlc-tool wrapper as the green-light gate for service restart. Step 1.67 is the correct slot because (a) `sync_reflections_yaml` has just freshly synced the canonical YAML from the vault on the immediately preceding line, so the migration operates on the same file the worker will read; (b) it precedes service-restart logic, so the worker restarts onto migrated state; (c) atomic temp-file + rename means a failed migration leaves no partial file behind, and the bridge keeps serving on the previously-validated YAML if validation aborts the rewrite.
 3. **Update `scripts/update/__init__.py`** preflight to import-test `croniter` (the deps-installed assertion).
 
 `docs/features/reflections.md` gains a "Migration Notes" section documenting:
@@ -470,7 +516,7 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 
 - **Builder (migration)**
   - Name: migration-builder
-  - Role: Implement `scripts/migrate_reflections_yaml.py` and `scripts/update/run.py` Step 4.7 hook; backfill `ReflectionRun` from existing `run_history`
+  - Role: Implement `scripts/migrate_reflections_yaml.py` and `scripts/update/run.py` Step 1.67 hook; backfill `ReflectionRun` from existing `run_history` via delta-loop (coexists with running reflections)
   - Agent Type: migration-specialist
   - Resume: true
 
@@ -597,15 +643,19 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 - **Task ID**: build-mcp-server
 - **Depends On**: build-model-schema, build-scheduler-grammar
 - **Validates**: tests/integration/test_mcp_reflections.py (create)
-- **Informed By**: Q7 (7 tools, creator-or-root auth)
+- **Informed By**: Q7 (7 tools, creator-or-registry-source auth via env primitives)
 - **Assigned To**: mcp-builder
 - **Agent Type**: mcp-specialist
 - **Parallel**: false
 - Create `mcp_servers/reflections_server.py` exposing 7 tools: `reflections_create / list / get / update / remove / runs / pause / resume`
-- Auth check: `session_id == created_by_session_id OR session.is_root_operator()`
-- Registry-loaded reflections (created_by_session_id=None) are root-only mutable
+- Auth via env primitives the SDK client already injects (`agent/sdk_client.py:1380-1385`):
+  - `_caller_id()` returns `os.environ.get("AGENT_SESSION_ID") or os.environ.get("VALOR_SESSION_ID")`
+  - `_can_mutate(reflection)` returns `True` if `caller is None` (registry-source / migration / direct CLI) or `caller == reflection.created_by_session_id`
+  - **No `is_root_operator()` helper is created** — the rule is grounded entirely in the existing env primitives
+- Registry-loaded reflections (`created_by_session_id=None`) are mutable only by no-env-var callers (migration script, scheduler reload, direct shell)
 - Register in `.mcp.json`
 - Validate schedule grammar at create-time using `compute_next_due()`
+- Tests use `monkeypatch.setenv("AGENT_SESSION_ID", ...)` and `monkeypatch.delenv(...)` to drive the auth states explicitly
 
 ### 7. Update agent_session_scheduler --after
 - **Task ID**: build-cli-wrapper
@@ -623,18 +673,18 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 - **Task ID**: build-migration
 - **Depends On**: build-model-schema, build-scheduler-grammar
 - **Validates**: tests/integration/test_reflections_migration.py (create)
-- **Informed By**: Q3 (one-shot migration), Risk 1 (no in-flight conflict)
+- **Informed By**: Q3 (coexists with running reflections), Risk 1 (no wait-for-quiescence)
 - **Assigned To**: migration-builder
 - **Agent Type**: migration-specialist
 - **Parallel**: false
 - Create `scripts/migrate_reflections_yaml.py` that:
   - Reads `~/Desktop/Valor/reflections.yaml` (vault path)
-  - For each entry, rewrites `interval: N` → `every: Ns`
-  - Asserts no `Reflection.last_status == "running"` exists (waits up to 60s, aborts otherwise)
-  - Writes back via temp file + atomic rename
-  - Walks every existing `Reflection`, creates `ReflectionRun` rows from `run_history`, then clears `run_history`
-  - Idempotent: detects post-migration shape and exits cleanly
-- Add Step 4.7 to `scripts/update/run.py` invoking the script after `env_sync.py`
+  - **Phase 1 (atomic rewrite):** For each entry, rewrites `interval: N` → `every: Ns` in memory; writes a sibling temp file; `os.replace(temp, target)` for atomic POSIX rename. **Does NOT wait for `last_status="running"` to clear** — the YAML and the Popoto record schema are independent surfaces, so mid-flight reflections complete safely.
+  - **Phase 2 (delta-loop backfill):** Walk every existing `Reflection`. For each `run_history` entry, `ReflectionRun.get_or_create((name, timestamp))`. If `Reflection.last_status == "running"` at scan time, append the reflection's name to a Popoto-managed sidecar set `reflections:migration:pending_clear` and skip the `run_history` clear. After the scan, walk the sidecar; for each name, re-fetch the Reflection and clear `run_history` only if it has stopped running (atomic Popoto save). Names still in pending state at exit are handled on the next migration run.
+  - **Phase 3 (schema validation):** Re-load the registry via `load_registry()`, call `compute_next_due()` on every entry, abort with a clear error message on parse failure.
+  - **Idempotent:** detects post-migration shape (every entry already has `cron:`/`every:`/`at:`) and exits cleanly without rewriting; `ReflectionRun.get_or_create` ensures no double-write on re-runs.
+  - **No raw Redis:** all sidecar set operations go through Popoto (`Model.query.filter()`, `instance.save()`, etc.), per the project's no-raw-Redis-on-Popoto-keys invariant.
+- Add **Step 1.67** to `scripts/update/run.py` (immediately after Step 1.66's `sync_reflections_yaml` at line 403, before Step 1.7's hook audit) invoking the script. Step 4.7 is already occupied by sdlc-tool wrapper validation.
 
 ### 9. Surface new fields in dashboard
 - **Task ID**: build-dashboard
@@ -663,8 +713,11 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 - **Agent Type**: validator
 - **Parallel**: false
 - Each of 7 MCP tools called end-to-end against a live worker (or mocked Popoto)
-- Auth model verified: creator session can edit, other session blocked, root operator bypass works
-- Registry-loaded reflections cannot be removed by non-root MCP calls
+- Auth model verified using env-primitive states (driven by `monkeypatch.setenv`/`delenv` on `AGENT_SESSION_ID` and `VALOR_SESSION_ID`):
+  - Creator session (env var matches `created_by_session_id`) can edit/remove
+  - Different session (env var present but does not match) is blocked
+  - No-env-var caller (simulating migration script / direct CLI) can mutate registry-loaded reflections
+  - Agent-session caller (env var present) cannot mutate registry-loaded reflections (`created_by_session_id=None`)
 
 ### 12. Validate migration
 - **Task ID**: validate-migration
@@ -672,10 +725,12 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 - **Assigned To**: migration-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run migration on a fixture YAML; assert idempotent
-- Run migration on a YAML where one entry has malformed `interval`; assert abort with clear message
-- Run migration with simulated `Reflection.last_status="running"`; assert wait-and-abort
-- Verify `run_history` backfill creates exactly one `ReflectionRun` per history entry; no double-write on re-run
+- Run migration on a fixture YAML; assert idempotent (second run is a no-op)
+- Run migration on a YAML where one entry has malformed `interval`; assert abort with clear message before any rewrite
+- **Run migration with simulated `Reflection.last_status="running"`; assert the migration does NOT block, completes Phase 1 (YAML rewrite), records the running reflection's name in `reflections:migration:pending_clear`, and skips the `run_history` clear for that record. Then transition the reflection to `last_status="success"` and re-run the migration — assert it now drains the sidecar and clears `run_history`.**
+- Verify `run_history` backfill creates exactly one `ReflectionRun` per history entry; no double-write on re-run (Popoto `get_or_create` semantics)
+- Verify YAML rewrite is atomic: simulate a concurrent `load_registry()` call mid-rewrite; assert reader sees either the old or new full file, never a torn read
+- Verify the `reflections:migration:pending_clear` sidecar is implemented via Popoto, not raw Redis
 
 ### 13. Author tests
 - **Task ID**: write-tests
@@ -727,9 +782,13 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Cycle 1: NEEDS REVISION — 3 BLOCKERS, 6 CONCERNS. This revision pass (rev2) addresses the 3 BLOCKERS by rewriting Q3 (migration design), Q7 (auth model), and the Update System / Step-by-Step Tasks / Risks / Race Conditions / Data Flow sections. The 6 CONCERNS will be re-surfaced (or cleared) by the cycle-2 critique re-run.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | (cycle-1) | Q7 references `session.is_root_operator()` which does not exist as a method anywhere in the codebase (`grep -rn 'is_root_operator' agent/ models/ mcp_servers/` returns no results). The auth model needs to use existing primitives or define the helper concretely. | Q7 (rewritten); Risk 4 (rewritten); Task 6 (rewritten); Task 11 (rewritten) | Auth check uses `os.environ.get("AGENT_SESSION_ID") or os.environ.get("VALOR_SESSION_ID")` — the primitives `agent/sdk_client.py:1380-1385` already injects when spawning a Claude Code subprocess. `_caller_id()` returns the env var (or `None` for migration scripts / direct CLI). `_can_mutate(reflection)` returns `True` iff `caller is None` (registry-source caller) or `caller == reflection.created_by_session_id`. No new helper method on a session class is needed. Tests use `monkeypatch.setenv`/`monkeypatch.delenv` to drive auth states. |
+| BLOCKER | (cycle-1) | The plan inserts the migration as "Step 4.7" in `scripts/update/run.py`, but Step 4.7 is already occupied (`run.py:839` validates the sdlc-tool wrapper as the green-light gate for service restart). The Update System, Data Flow, and Task 8 sections all repeat this collision. | Q3 (Implementation guard updated); Update System (corrected); Data Flow Migration path (corrected); Task 8 (corrected) | Insertion point is **Step 1.67**, immediately after `sync_reflections_yaml` at `run.py:403` and before Step 1.7's hook audit. Rationale: (a) the YAML has just been synced from the vault on the immediately preceding line, so the migration operates on the canonical file; (b) it precedes service-restart logic, so the worker restarts onto migrated state; (c) Step 4.7 stays with sdlc-tool validation. Atomic temp-file + rename means a failed migration leaves no partial file behind. |
+| BLOCKER | (cycle-1) | The original design waits up to 60s for `last_status="running"` to clear before writing YAML, then aborts. This will routinely starve under normal load — `analytics-rollup`, `docs-auditor`, and per-project audits regularly run for several minutes. A single long-running reflection blocks every machine's `/update`. | Q3 (rewritten with 3-phase design); Risk 1 (rewritten); Race 1 (already correct); Task 8 (rewritten); Task 12 (rewritten with new test cases) | Migration coexists with running reflections in 3 idempotent phases: (1) **Atomic YAML rewrite** — temp file + `os.replace()`; the YAML and the model-record schema are independent surfaces, so mid-flight `mark_completed()` cannot conflict. (2) **Delta-loop `run_history` → `ReflectionRun` backfill** — walk every Reflection; `ReflectionRun.get_or_create((name, timestamp))` for each entry; if `last_status="running"` at scan time, append the name to a Popoto-managed sidecar set `reflections:migration:pending_clear` and skip the `run_history` clear. After the scan, drain the sidecar — clear `run_history` only on reflections that have stopped running. (3) **Schema validation** — re-load registry, call `compute_next_due()` on every entry, abort loudly on parse error. The migration is fully reentrant; reflections still running at exit are handled on the next `/update`. |
 
 ---
 
