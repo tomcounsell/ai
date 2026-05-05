@@ -263,6 +263,7 @@ class TestAuditingCallables:
         with (
             patch("reflections.auditing.load_local_projects", return_value=[]),
             patch("models.bridge_event.BridgeEvent") as mock_be,
+            patch("reflections.auditing.subprocess.run"),
         ):
             mock_be.query.filter.return_value = []
             result = run_async(run_log_review())
