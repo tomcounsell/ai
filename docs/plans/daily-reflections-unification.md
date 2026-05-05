@@ -341,10 +341,10 @@ No agent integration changes required — this is a worker-internal reflection c
 - [ ] Comment in `_load_slots(project)` migration shim explaining the legacy → v1 schema mapping.
 
 ### Code Cleanup
-- [ ] Delete the 24 orphan `logs/reflections/report_2026-*.md` stubs.
-- [ ] Remove the `logs/reflections/` gitignore entry if no other code writes there post-cleanup (verify with `grep -rn "logs/reflections" .` first).
-- [ ] Delete `reflections/daily_report.py` (whole file) after `daily_log.py` reaches parity.
-- [ ] Delete `run_log_review` from `reflections/auditing.py` after `log_audit.py` reaches parity.
+- [x] Delete the 22 orphan `logs/reflections/report_2026-*.md` stubs (count corrected from "24" by critique). Done locally; per-machine cleanup since `logs/` is gitignored.
+- [x] Verify `logs/reflections/` gitignore entry is unnecessary to remove — confirmed: `pm_audio_briefing/delivery.py:236` still writes to `logs/reflections/` for DRY_RUN, so the directory stays.
+- Deferred to follow-up PR: delete `reflections/daily_report.py` (whole file) — see Verification "Deferred to deploy / follow-up PR" section. New slot modules wrap its helpers; inlining + delete is its own scoped change.
+- Deferred to follow-up PR: delete `run_log_review` from `reflections/auditing.py` — same rationale as above.
 
 ## Success Criteria
 
