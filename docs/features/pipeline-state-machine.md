@@ -27,7 +27,7 @@ State is persisted as a JSON dict on `AgentSession.stage_states` -- one Redis fi
 
 The state machine is wired into the worker post-completion handler and the SDK hook system. This is the end-to-end flow for a single SDLC stage:
 
-1. **PM creates dev session**: The PM session calls `python -m tools.valor_session create --role dev --parent "$AGENT_SESSION_ID" --message "Stage: BUILD\n..."`.
+1. **PM creates dev session**: The PM session calls `python -m tools.valor_session create --role dev --slug {slug} --parent "$AGENT_SESSION_ID" --message "Stage: BUILD\n..."`. The `--slug` flag is required (or `issue #N` in the message body for auto-derivation) so the worktree is provisioned at create time.
 
 2. **Worker executes dev session**: `_execute_agent_session()` routes to `get_response_via_harness()` or `get_agent_response_sdk()` based on `DEV_SESSION_HARNESS`.
 

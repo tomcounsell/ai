@@ -341,8 +341,10 @@ The parent-child session lifecycle is driven by the worker's post-completion han
 The PM session creates Dev sessions by calling:
 
 ```bash
-python -m tools.valor_session create --role dev --model <opus|sonnet> --parent "$AGENT_SESSION_ID" --message "Stage: BUILD\n..."
+python -m tools.valor_session create --role dev --model <opus|sonnet> --slug {slug} --parent "$AGENT_SESSION_ID" --message "Stage: BUILD\n..."
 ```
+
+`--slug` is required so the worktree is provisioned at create time. The CLI also accepts a slugless dispatch when the message body contains `issue #N` — the slug is auto-derived as `sdlc-N`. Slugless dispatches that supply neither exit 1; see [Session Isolation](session-isolation.md#synthetic-slugs-for-slugless-dev-sessions-issue-1272) for the executor-side fallback that protects programmatic spawn sites.
 
 This enqueues a new `AgentSession` record with `session_type="dev"` and `parent_agent_session_id` set to the PM's `agent_session_id`. The worker then picks up and executes the session.
 
