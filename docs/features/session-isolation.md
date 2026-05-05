@@ -91,6 +91,20 @@ Issue [#1272](https://github.com/tomcounsell/ai/issues/1272) closes that hole wi
 
 The synthetic-slug regex `^dev-[0-9a-f]{8}$` is the safety guarantee: it matches only the synthesis output, never a real human slug.
 
+### Git-Layer Enforcement for Manual Operations (Issue #1288)
+
+The three #887 layers above all live on the worker / agent code path. Nothing prevented a `git checkout session/X && git commit ...` from the main checkout (or any other working tree) — git was happy, the commit landed, the PR merged, and the only signal of the violation was that `.worktrees/X/` never existed. Issue [#1288](https://github.com/tomcounsell/ai/issues/1288) closes that surface with a pre-commit hook.
+
+**Where it lives:** `.githooks/pre-commit` Phase 0.5 (runs before lint, lockfile, and secret-scan phases so a misplaced commit fails fast).
+
+**What it guards:** if the current branch matches `session/*` and `git rev-parse --show-toplevel` does not end with `.worktrees/{slug}/`, the commit is blocked with an actionable error pointing at the right path. Detached HEAD (rebase, cherry-pick, bisect) is a no-op. Non-`session/*` branches are unaffected. An explicit empty-slug guard handles the pathological `session/` branch name (unreachable through normal git but defensive).
+
+**Override:** `git commit --no-verify` bypasses the hook. This is intentional — the caller takes responsibility, matching the project's broader stance on `--no-verify` for WIP commits. If `--no-verify` becomes a dominant bypass vector, the layered fix is a Claude Code `PreToolUse` Bash validator; not built today.
+
+**Install path:** the hook runs only when `git config core.hooksPath` is set to `.githooks`. This is configured by the `/update` skill (`scripts/update/git.py`), not by `/setup`. Machines that have only run `/setup` will silently skip the hook until `/update` runs (or until the operator runs `git config core.hooksPath .githooks` manually).
+
+**Relationship to #887 and #1272:** sibling enforcement on a different surface. #887 covers the worker-side AgentSession executor; #1272 closes the slugless residual hole; #1288 covers the git-side path (`git commit` from the wrong CWD on a session branch). Together they make the invariant — "`session/{slug}` lives only in `.worktrees/{slug}/`" — a closed system across worker, CLI, and git surfaces.
+
 ### Early Worktree Provisioning via `--slug`
 
 The `valor-session create` CLI command accepts a `--slug` flag that provisions a worktree at session creation time, before the session is enqueued:
