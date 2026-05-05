@@ -128,7 +128,12 @@ can read what's happening live, no inference required.
 All writes go through `agent/hooks/liveness_writers.py`, which enforces:
 
 - **Per-session 5s in-memory cooldown** to bound Redis write rate under
-  tight tool loops.
+  tight tool loops. The cooldown is bypassed for PostToolUse
+  (`record_tool_boundary(clear=True)`) writes so that a fast PreToolUse →
+  PostToolUse pair within the cooldown window cannot leave
+  `current_tool_name` populated; the per-tool timeout sub-loop (#1270)
+  depends on PostToolUse always clearing the field promptly to avoid
+  false-positive wedges.
 - **Best-effort fail-closed.** Every write is wrapped in try/except;
   Redis or Popoto failures log at DEBUG and return False. The hook return
   value is unaffected — the agent never crashes because liveness writes
