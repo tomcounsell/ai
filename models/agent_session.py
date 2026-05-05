@@ -260,6 +260,20 @@ class AgentSession(Model):
     # Meta.ttl below serves as absolute backstop if the release hook never fires.
     retain_for_resume = Field(default=False)
 
+    # === BYOB scheduler-layer serialization (issue #1256, Decision 2) ===
+    # When True, this session expects to drive the user's real Chrome via the
+    # BYOB MCP tools (byob_navigate, byob_click, etc.). Real Chrome has one DOM
+    # tree, so two such sessions cannot run concurrently without corrupting
+    # active-tab state. The worker session-pick loop in agent/session_pickup.py
+    # checks this flag before starting a candidate: if any currently-running
+    # session has requires_real_chrome=True, the new candidate is deferred
+    # until the running one finishes (no file lock; pure scheduler defer).
+    # Set at session creation time via `valor-session create --needs-real-chrome`.
+    # Per memory feedback_field_backcompat_heal (issues #1099, #1172): nullable
+    # Popoto field needs no migration code; _heal_descriptor_pollution walks
+    # fields generically. Default False keeps existing sessions unaffected.
+    requires_real_chrome = Field(default=False)
+
     # === Continuation PM depth tracking ===
     # Tracks how many continuation PMs have been chained from the original PM.
     # Stored directly on the session (O(1)) rather than walking the parent chain

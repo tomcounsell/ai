@@ -13,7 +13,7 @@
 |--------|-----|----------------------|
 | `agent/session_state.py` | ~84 | Shared mutable session-tracking state for the worker — prevents circular imports between executor and health modules. |
 | `agent/session_revival.py` | ~276 | Revival detection, cooldown tracking, and stale branch cleanup for AgentSession. |
-| `agent/session_pickup.py` | ~462 | Session selection, pop locking, startup steering drain, and dependency readiness checks. |
+| `agent/session_pickup.py` | ~462 | Session selection, pop locking, startup steering drain, dependency readiness checks, and real-Chrome slot gate (`_real_chrome_slot_busy()` defers new `requires_real_chrome` sessions while one is already running). |
 | `agent/session_health.py` | ~1231 | Periodic health monitoring, no-progress detection, orphan cleanup, and startup recovery. |
 | `agent/session_completion.py` | ~535 | Post-execution lifecycle: session finalization, parent transitions, dev completion handling, and continuation-PM creation. |
 | `agent/session_executor.py` | ~1398 | Core session execution: CLI harness subprocess lifecycle, turn-boundary steering, nudge/re-enqueue paths, and calendar heartbeat. |

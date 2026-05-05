@@ -121,11 +121,23 @@ These 6 skills form the autonomous development loop. Everything else is support.
 ### Model-Only Background Skills (never user-invoked)
 | Skill | What it does |
 |-------|-------------|
-| agent-browser | Browser automation |
+| agent-browser | Browser automation (3rd-party CLI, anonymous, headless) |
+| bowser | Playwright headless (anonymous, parallel) |
+| computer-use | Native macOS desktop control via bcu (Slack, Notes, Telegram Desktop, etc.); see [Computer Use](computer-use.md) |
 | telegram | Read/send Telegram |
 | reading-sms-messages | Read SMS/iMessage |
 | checking-system-logs | Query bridge logs |
 | google-workspace | Google API guide |
+
+### Browser/Desktop Automation Surfaces (post issue #1256)
+Three browser surfaces + one desktop surface coexist. Decision guide:
+
+| Surface | Anonymous? | Headless? | Logged-in? | When |
+|---------|-----------|-----------|------------|------|
+| `agent-browser` skill | yes | yes | no | Existing skills using it (do-pr-review, etc.) -- migrating in #1274 |
+| `bowser` skill | yes | yes | optional (CDP) | Untrusted-link previews, parallel runs |
+| BYOB MCP tools | no | no (real Chrome) | yes (user's session) | Logged-in Gmail/GitHub/etc. Serialized at scheduler layer via `AgentSession.requires_real_chrome` |
+| `computer-use` skill | -- | -- | -- | **Native macOS apps** (not browsers) |
 
 ### Meta Skills (create other skills)
 ```

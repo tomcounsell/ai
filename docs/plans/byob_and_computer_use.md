@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Large
 owner: Valor
@@ -1078,7 +1078,7 @@ Tier 2 (Specialists needed here): mcp-specialist (for MCP server registration re
 | computer-use skill exists | `test -f .claude/skills/computer-use/SKILL.md` | exit code 0 |
 | telegram_desktop_control cancelled | `grep 'status: Cancelled' docs/plans/telegram_desktop_control.md` | exit code 0 |
 | valor-computer CLI exists | `python -c "import tools.computer.cli"` | exit code 0 |
-| AgentSession scheduler field exists | `python -c "from models.agent_session import AgentSession; assert 'requires_real_chrome' in AgentSession._fields"` | exit code 0 |
+| AgentSession scheduler field exists | `python -c "from models.agent_session import AgentSession; assert hasattr(AgentSession, 'requires_real_chrome')"` | exit code 0 |
 | mcp_byob registrar exists | `test -f scripts/update/mcp_byob.py` | exit code 0 |
 | feature docs created | `test -f docs/features/byob-browser-control.md && test -f docs/features/computer-use.md` | exit code 0 |
 

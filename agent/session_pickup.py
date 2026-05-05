@@ -26,6 +26,54 @@ def dependency_status(session: AgentSession) -> dict[str, str]:
     return {}
 
 
+# Statuses that count as "currently executing" for the BYOB real-Chrome serialization
+# gate (issue #1256, Decision 2). A session in any of these states holds the single
+# real-Chrome slot. `pending`/`paused`/etc. are not counted -- they are not actively
+# driving Chrome.
+_REAL_CHROME_BUSY_STATUSES = frozenset({"running", "active", "dormant"})
+
+
+def _truthy(value: object) -> bool:
+    """Coerce a Popoto-stored value to a strict Python bool.
+
+    Popoto ``Field(default=False)`` round-trips through Redis as the *string*
+    ``'False'`` / ``'True'`` (Field is untyped). A naive ``bool(value)`` check
+    treats both strings as truthy, which would cause the BYOB scheduler gate
+    to misfire on every ordinary session. This helper canonicalizes the
+    common shapes (bool, ``"True"`` / ``"False"`` / ``"1"`` / ``"0"``).
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes"}
+    return bool(value)
+
+
+def _real_chrome_slot_busy() -> bool:
+    """Return True if any currently-running session holds the real-Chrome slot.
+
+    Walks the running/active/dormant sessions and checks the ``requires_real_chrome``
+    flag. Any failure (Redis hiccup, schema drift) returns False -- failing open is
+    safer than wedging the queue. Callers must treat this as advisory.
+
+    See issue #1256 Decision 2: scheduler-layer serialization, no per-process
+    file lock. The real Chrome DOM tree is shared across BYOB MCP clients, so
+    two sessions both invoking ``byob_*`` tools will collide. The worker defers
+    a candidate with ``requires_real_chrome=True`` whenever this returns True.
+    """
+    try:
+        for status in _REAL_CHROME_BUSY_STATUSES:
+            for session in AgentSession.query.filter(status=status):
+                if _truthy(getattr(session, "requires_real_chrome", False)):
+                    return True
+        return False
+    except Exception as exc:  # pragma: no cover -- defensive
+        logger.warning("real-Chrome slot probe failed (failing open, no defer): %s", exc)
+        return False
+
+
 def _acquire_pop_lock(worker_key: str) -> bool:
     """Acquire a Redis SETNX lock for the pop-and-transition block.
 
@@ -368,6 +416,22 @@ async def _pop_agent_session(
                     except Exception as rebuild_err:
                         logger.warning(f"[worker:{worker_key}] Index repair failed: {rebuild_err}")
                 continue
+            # BYOB scheduler-layer serialization (issue #1256, Decision 2):
+            # if this candidate needs the real Chrome and another running session
+            # already holds the slot, defer this candidate by skipping it for now.
+            # The next pop cycle will retry. No file lock; no per-process collision
+            # guard. Pure scheduler-layer defer.
+            if (
+                _truthy(getattr(candidate, "requires_real_chrome", False))
+                and _real_chrome_slot_busy()
+            ):
+                logger.info(
+                    "[worker:%s] Deferring session %s (requires_real_chrome=True) — "
+                    "another real-Chrome session is currently running",
+                    worker_key,
+                    candidate.session_id,
+                )
+                continue
             chosen = candidate
             break
 
@@ -489,6 +553,20 @@ async def _pop_agent_session_with_fallback(
                         logger.info(f"[worker:{worker_key}] Repaired indexes to fix stale entry")
                     except Exception as rebuild_err:
                         logger.warning(f"[worker:{worker_key}] Index repair failed: {rebuild_err}")
+                continue
+            # BYOB scheduler-layer serialization (issue #1256, Decision 2): same
+            # gate as the async path. If another running session holds the real-
+            # Chrome slot, defer this candidate.
+            if (
+                _truthy(getattr(candidate, "requires_real_chrome", False))
+                and _real_chrome_slot_busy()
+            ):
+                logger.info(
+                    "[worker:%s] Sync fallback: deferring session %s "
+                    "(requires_real_chrome=True) — another real-Chrome session is running",
+                    worker_key,
+                    candidate.session_id,
+                )
                 continue
             chosen = candidate
             break

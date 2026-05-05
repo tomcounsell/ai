@@ -83,6 +83,7 @@ valor-image-tagging = "tools.image_tagging:main"
 valor-youtube-search = "tools.youtube_search.cli:main"
 valor-ingest = "tools.valor_ingest:main"
 valor-tts = "tools.tts.cli:main"
+valor-computer = "tools.computer.cli:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true

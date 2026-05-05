@@ -260,6 +260,12 @@ class PipelineProgress(BaseModel):
     recent_thinking_excerpt: str | None = None
     last_evidence_at: float | None = None
 
+    # BYOB scheduler-layer serialization (issue #1256, Decision 2).
+    # Surfaced so operators can see why a real-Chrome session is being
+    # deferred when another holds the slot. Default False keeps the
+    # field invisible for ordinary sessions.
+    requires_real_chrome: bool = False
+
     # SDLC state
     stages: list[StageState] = []
     current_stage: str | None = None
@@ -701,6 +707,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
         last_turn_at=last_turn_at,
         recent_thinking_excerpt=recent_thinking_excerpt,
         last_evidence_at=last_evidence_at,
+        requires_real_chrome=bool(getattr(session, "requires_real_chrome", False)),
     )
 
 

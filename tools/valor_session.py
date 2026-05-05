@@ -427,6 +427,8 @@ def cmd_create(args: argparse.Namespace) -> int:
         else:
             working_dir = str(repo_root)
 
+        needs_real_chrome = bool(getattr(args, "needs_real_chrome", False))
+
         async def _create():
             await _push_agent_session(
                 project_key=project_key,
@@ -441,6 +443,7 @@ def cmd_create(args: argparse.Namespace) -> int:
                 slug=slug,
                 model=model,
                 project_config=project_config,
+                requires_real_chrome=needs_real_chrome,
             )
             return session_id
 
@@ -1215,6 +1218,16 @@ def main() -> int:
             "Claude model to use for this session (e.g. 'sonnet', 'opus'). "
             "When set, overrides the environment/CLI default. "
             "Enables per-SDLC-stage model selection."
+        ),
+    )
+    create_parser.add_argument(
+        "--needs-real-chrome",
+        action="store_true",
+        help=(
+            "Mark this session as requiring the real Chrome (BYOB MCP) surface. "
+            "The worker scheduler will not start this session concurrently with "
+            "another --needs-real-chrome session, since real Chrome has one DOM "
+            "tree (issue #1256, Decision 2). No effect on ordinary sessions."
         ),
     )
     create_parser.add_argument("--json", action="store_true", help="Output JSON")
