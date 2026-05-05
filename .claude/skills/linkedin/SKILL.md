@@ -1,13 +1,13 @@
 ---
 name: linkedin
 description: "Use when browsing LinkedIn, reading posts, writing comments, checking DMs, or engaging with content. Triggered by requests to comment on LinkedIn, browse feed, interact with posts, or read/reply to LinkedIn messages."
-allowed-tools: Bash(agent-browser:*), Bash(git:*), Read, Write, Edit, Grep, Glob, Agent
+allowed-tools: mcp__byob__browser_list_tabs, mcp__byob__browser_navigate, mcp__byob__browser_read, mcp__byob__browser_get_html, mcp__byob__browser_click, mcp__byob__browser_type, mcp__byob__browser_press_key, mcp__byob__browser_scroll, mcp__byob__browser_wait_for, mcp__byob__browser_screenshot, mcp__byob__browser_close_tab, mcp__byob__browser_switch_tab, Bash(git:*), Read, Write, Edit, Grep, Glob, Agent
 user-invocable: true
 ---
 
 # LinkedIn Activity
 
-Browse LinkedIn, engage with posts, and manage direct messages using agent-browser connected to Chrome via CDP.
+Browse LinkedIn, engage with posts, and manage direct messages using **BYOB** — the Chrome extension + native messaging stack that drives the user's already-logged-in real Chrome via MCP tools (`mcp__byob__browser_*`). No CDP flag, no `state.json`, no headless-fingerprint detection.
 
 ## Default Behavior (no arguments)
 
@@ -19,21 +19,52 @@ Run all three tasks in order:
 
 If arguments are given, interpret them and do only what's asked.
 
+**This skill executes — it does not pause for confirmation.** When the skill says "show the draft inline before publishing," that means render the draft in your response *and continue with the publish step in the same turn*. Don't stop to ask "should I post this?" — the user already opted in by invoking the skill, and they can interrupt mid-stream if they want changes. The only legitimate stop conditions are: (a) hard tool failure with no fallback (see the BYOB share-modal limitation under Task 2), (b) a finding that contradicts the skill's premise (e.g. "no DMs need replying" → skip Task 1 cleanly with one sentence of why).
+
 ## Prerequisites
 
-Chrome must be running with CDP enabled and connected to agent-browser:
+- BYOB bridge live and Chrome extension loaded. Verify once at session start with the `browser_list_tabs` tool — if it returns tabs, you're good. If the MCP tool itself is missing, run `cd ~/.byob && bun run doctor` and follow its diagnostics.
+- User logged into LinkedIn in Chrome (BYOB inherits the session).
+- If this skill is invoked from a queued AgentSession, that session should have been created with `valor-session create --needs-real-chrome ...` so the worker scheduler serializes around the single real-Chrome DOM tree.
 
-```bash
-# If not already connected:
-pkill -f "Google Chrome" && sleep 2
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
-  --remote-debugging-port=9222 \
-  --user-data-dir=/tmp/chrome-debug-profile &>/dev/null &
-sleep 5
-agent-browser connect 9222
+## Tab discovery (do this first)
+
+Always start by listing tabs and reusing an existing LinkedIn tab. Opening duplicates clutters the user's window and breaks `tabId`-targeted reads.
+
+```text
+browser_list_tabs   →   look for any tab whose URL contains "linkedin.com"
 ```
 
-User must be logged into LinkedIn in the browser.
+Pick the first match → that's your `tabId` for every subsequent navigate / get_html / click / type call. If no LinkedIn tab exists, call `browser_navigate(url="https://www.linkedin.com/feed/")` once to open one and use the returned `tabId`.
+
+## The two-surface DOM model (critical)
+
+LinkedIn has **two different DOMs** that need different read tools:
+
+| Surface | DOM style | Read with | Click with |
+|---|---|---|---|
+| **Messaging** (`/messaging/...`) | Stable, named classes (`.msg-conversations-container__*`, `.msg-conversation-card__*`) | `browser_get_html(tabId, selector=".msg-*")` | `browser_click(tabId, selector="<stable .msg-* selector>")` |
+| **Feed / Post / Profile** (`/feed/`, `/posts/...`, `/in/...`) | Hashed/obfuscated classes (`._06ad2747`); BYOB injects `data-byob-idx="N"` on every element | `browser_read(url, reuseTab=true, screens=5)` → use `interactiveElements` | `browser_click(tabId, selector="byob:idx=N")` where N is from the most recent read |
+
+**Why this matters:** `browser_read` returns near-empty content on `/messaging/` (LinkedIn renders that surface in a way the read pipeline can't see). `browser_get_html` works there because it pulls real DOM via tabId. Conversely, on the feed the hashed classes are deploy-volatile — the only stable handle is the BYOB-injected `data-byob-idx`, which you address as `selector: "byob:idx=N"`.
+
+### The `byob:idx` workflow
+
+1. `browser_read(url, reuseTab=true, screens=5)` returns `interactiveElements: [{idx, tag, role, name, bounds}, ...]` — up to 1000 per call. The `name` is the accessible label ("Like", "Comment", "Sort by: Top", "Start a post").
+2. Find the element you want by its `name` in that list.
+3. Click it with `browser_click(tabId, selector="byob:idx=<that idx>")`.
+4. **The next `browser_read` invalidates older indices** — its `interactiveSessionTag` changes. After every click that mutates the DOM (sending a comment, opening a thread, expanding a menu), re-read before the next click.
+
+When multiple `interactiveElements` map to the same logical control (the Like button shows up as `div role=button` + `p role=button` + `span role=button`), prefer the entry whose `tag: "button"` — that's the outermost real button. If none has `tag: "button"`, any of them clicks fine.
+
+### Gotchas to remember
+
+- **`browser_navigate` accepts `tabId`** to reuse an existing tab. **`browser_read` does NOT accept `tabId`** — pass `reuseTab: true` along with the same URL the tab is already on. Without `reuseTab` you'll spawn a duplicate.
+- **`?sortBy=RECENT` is dropped** by LinkedIn on direct navigation. You land on the default Top feed. To switch, click the "Sort by: Top" element and pick "Recent" from the dropdown that opens (the dropdown lives in a portal that `browser_read` can't see — re-read after clicking and look for "Recent" in the new IE list, or just work the default Top feed).
+- **`browser_scroll` with `y: <number>` or `to: "bottom"` does nothing on the feed** — LinkedIn scrolls an inner container, not the window. The returned `scrollY` will be `0` regardless. Use `browser_scroll(tabId, text: "<unique substring>")` or `selector: "byob:idx=N"` to bring a specific element into view; ignore the `scrollY` field. For bulk feed loading, just bump `browser_read`'s `screens` parameter — it auto-scrolls and is the right tool.
+- **Feed reads cap at 1000 IEs.** When the read returns `stopReason: "limit_reached"` and `canContinue: true`, you've only seen the first slice. Process those, then call `browser_read` again to advance.
+- **Post bodies often don't appear in `interactiveElements`** because they're non-interactive `<div>`s. The IE list captures author headers, action buttons, and accessibility labels — not the post text itself. To read the actual post body, use `browser_get_html(tabId, selector="main")` and parse text out, or open the post URL directly (`/feed/update/urn:li:share:<id>/`) and use `browser_read` on the dedicated post page where the body usually surfaces in chunks.
+- **Block list:** BYOB upstream blocks reading `chrome://`, `file://`, and login pages for Google/Microsoft/Apple. Not relevant for in-session LinkedIn use.
 
 ---
 
@@ -51,18 +82,32 @@ Write as Valor Engels: direct, concise, genuine. DMs are conversational — not 
 
 ### Read the inbox
 
-```bash
-agent-browser open "https://www.linkedin.com/messaging/"
-sleep 3
-agent-browser snapshot -i
+Navigate the existing tab, then pull the conversation list HTML directly (the messaging surface is stable-class territory):
+
+```text
+browser_navigate(url="https://www.linkedin.com/messaging/", tabId=<linkedin_tab>, waitUntil="networkidle")
+browser_get_html(tabId=<linkedin_tab>, selector=".msg-conversations-container__conversations-list", maxBytes=32768)
 ```
 
-For each conversation with unread messages or recent activity:
+The HTML returned has one `<li class="...msg-conversation-listitem...">` per conversation. From each list item you can read:
 
-```bash
-agent-browser click @eN   # click the conversation
-sleep 2
-agent-browser get text ".msg-s-message-list-content"
+- `.msg-conversation-card__participant-names` → who it's with
+- `.msg-conversation-card__message-snippet` → preview text (often starts with `You:` if Valor was last sender)
+- `.msg-conversation-card__pill` → badges like "Sponsored" (skip these)
+- `.msg-conversation-listitem__time-stamp` → recency
+
+**Default skip rules** (apply before opening any conversation):
+- Sponsored ads → skip
+- Snippet starts with `You:` AND the timestamp is < 4 weeks old → skip (you're already waiting on them; following up reads as needy)
+- Obvious recruiter templates → skip
+- If after these filters the inbox is empty: state "no DMs need replies right now" with a one-line reason and move to Task 2. Don't open conversations just to confirm.
+
+For each remaining conversation worth attention, open it:
+
+```text
+browser_click(tabId=<linkedin_tab>, selector="li.msg-conversation-listitem:nth-of-type(<N>) .msg-conversation-listitem__link")
+browser_wait_for(tabId=<linkedin_tab>, selector=".msg-s-message-list-content", state="visible", timeoutSec=5)
+browser_get_html(tabId=<linkedin_tab>, selector=".msg-s-message-list-content", maxBytes=8192)
 ```
 
 Understand: who is this person, what did they say, is this new/ongoing/cold outreach? Spam and recruiter templates don't need replies.
@@ -91,15 +136,16 @@ Write draft to `/tmp/linkedin-reply.txt`.
 
 Quality check: Is it short enough? Does it invite a response without being needy? Would Valor actually say this?
 
-```bash
-agent-browser snapshot -i
-agent-browser click @eN   # focus message input
-agent-browser fill @eN "reply text"
-agent-browser snapshot -i
-agent-browser click @eN   # Send
-sleep 2
-agent-browser snapshot -i  # verify sent
+Then send it. The message input is a contenteditable, not an `<input>`:
+
+```text
+browser_click(tabId=<linkedin_tab>, selector=".msg-form__contenteditable")
+browser_type(tabId=<linkedin_tab>, selector=".msg-form__contenteditable", text="<reply text>", clear=true)
+browser_click(tabId=<linkedin_tab>, selector=".msg-form__send-button")
+browser_wait_for(tabId=<linkedin_tab>, selector=".msg-form__contenteditable[aria-label*='empty']", state="visible", timeoutSec=5)
 ```
+
+If a selector ever returns `selector_not_found`, dump a fresh `browser_get_html(selector=".msg-form")` and read what the current class names are — the stable thing here is the `msg-form__` prefix, not specific suffixes.
 
 ### Update knowledge base
 
@@ -198,9 +244,11 @@ lesson, not the subject.
   specific.
 - No abbreviations or in-jargon without translation. Terms like `os.replace`,
   `asyncio.Lock`, `MODEL_EXPERIMENT`, `sha256`, `LRU`, `RAG`, `MCP`,
-  `Popoto`, file paths, function names — none of those belong in a
-  LinkedIn post. If you find yourself reaching for them, the lesson hasn't
-  been translated yet.
+  `Popoto`, `pull request`, `pytest`, `CI`, file paths, function names —
+  none of those belong in a LinkedIn post. ("Pull request" in particular:
+  most non-engineers read it as "asking for something" — translate to
+  "a proposed change" or just "a change.") If you find yourself reaching
+  for any of these, the lesson hasn't been translated yet.
 - No listicle bullets unless the content is naturally a list.
 - No "we just shipped" / "I just built" framing — that's an announcement.
 - No performative humility, no chest-thumping.
@@ -233,19 +281,26 @@ extracted.
 When the subagent returns, the parent session:
 1. Reads `/tmp/linkedin-post.txt`
 2. Sanity-checks against the casual-reader test one more time (jargon creep, announcement framing, missing portable takeaway)
-3. Shows the final post inline to the user before publishing
-4. Publishes via agent-browser
+3. Renders the final post inline in the response
+4. **In the same turn**, attempts to publish (see ⚠️ below)
 
 If the draft fails the casual-reader test, send the subagent back with specific feedback (e.g. "sentence two still uses 'API call' — translate that") rather than rewriting it inline. The whole point of the subagent is to keep the engineering context out of the draft; rewriting inline reintroduces it.
 
 ### Publish
 
-```bash
-agent-browser open "https://www.linkedin.com/feed/"
-# snapshot -i, find "Start a post" button, click it
-# fill the textbox, find and click Post
-# snapshot -i to verify it appears
-```
+> **⚠️ KNOWN LIMITATION (verified live 2026-05-05):** BYOB **cannot drive LinkedIn's "Start a post" composer modal.** Clicking the "Start a post" trigger opens the modal visually (confirmed via screenshot) but the modal's contenteditable textbox renders into a portal that `browser_read`, `browser_get_html`, and `browser_wait_for` cannot see. With no selector to target, `browser_type` has nothing to type into. `browser_press_key` does dispatch into the focused textbox, but it's single-key-per-call — typing 1500 chars one at a time is impractical.
+>
+> **What to do until BYOB resolves this:** at the point you'd publish, render the final draft inline AND state plainly: *"BYOB can't drive the post composer modal yet — paste this from `/tmp/linkedin-post.txt` into LinkedIn yourself, or send via the mobile app where the share flow is different."* Then proceed to Task 3 (which works fine — comments use an inline textbox, not a portal modal).
+>
+> Things that have been verified NOT to work for the share modal:
+> - `browser_click("byob:idx=...")` on every "Start a post" IE variant (modal opens but textbox not in document)
+> - `force: true` on the click (same)
+> - `browser_get_html("body")` after open (returns navigation chrome only — modal lives elsewhere)
+> - `browser_get_html("[contenteditable=true]")`, `[role='dialog']`, `.share-creation-state`, `.ql-editor` (all `selector_not_found`)
+> - `browser_wait_for(...)` for any of those selectors (always times out)
+> - Hashed React class selectors are deploy-volatile and not worth chasing
+>
+> If/when BYOB gains portal traversal, the intended flow is: navigate → read → click "Start a post" idx → re-read for editor textbox idx → `browser_type` the post text → re-read for "Post" submit idx → click → screenshot for confirmation.
 
 ---
 
@@ -253,21 +308,12 @@ agent-browser open "https://www.linkedin.com/feed/"
 
 ### Read the feed
 
-```bash
-agent-browser open "https://www.linkedin.com/feed/?sortBy=RECENT"
-sleep 3
-agent-browser get text "main" 2>&1 | head -150
+```text
+browser_navigate(url="https://www.linkedin.com/feed/", tabId=<linkedin_tab>, waitUntil="networkidle")
+browser_read(url="https://www.linkedin.com/feed/", reuseTab=true, screens=5)
 ```
 
-Scroll and repeat to load more posts:
-
-```bash
-agent-browser scroll down 1500
-sleep 2
-agent-browser get text "main" 2>&1 | head -150
-```
-
-If the feed cycles (same posts repeating), stop — you're already on Recent.
+`screens=5` lets BYOB auto-scroll five viewport heights to load lazy posts. Bump to 10+ if you need more. If the read returns `stopReason: "limit_reached"`, call `browser_read` again to get the next slice (the IE indices reset; `interactiveSessionTag` changes).
 
 ### React as you scroll
 
@@ -275,10 +321,10 @@ As you read through posts, Like any that are relevant to the work — agentic sy
 
 **Commenting always implies a Like.** If a post passes the screening gate and you draft a comment for it, also like the post. Engagement should be coherent — a comment without the like reads as half-engaged. The reverse isn't true: plenty of posts are worth a like but not a comment.
 
-```bash
-agent-browser snapshot -i
-# Find "React Like" button for the post
-agent-browser click @eN
+In the IE list, Like buttons appear with `name: "Reaction button state: no reactionLike"` (or `name: "Like"`). After clicking, the same button's name flips to `"Reaction button state: Like"` — that's how you confirm the like landed. If the name already shows `"Reaction button state: Like"` or `"Unreact Like"`, the post is already liked — skip.
+
+```text
+browser_click(tabId=<linkedin_tab>, selector="byob:idx=<like_idx>")
 ```
 
 ### Screen candidates (mandatory before drafting)
@@ -300,7 +346,21 @@ A post passes if:
 
 A loose analogy ("this reminds me of a different problem we had") is not a pass. Keyword overlap without domain overlap is not a pass.
 
-Target: 3 posts that pass this gate.
+Target: 3 posts that pass this gate. If the feed only yields 1-2 quality candidates, post fewer good comments rather than padding with weak ones.
+
+### Read the full post body before drafting
+
+The feed inline rarely shows the full post body in `browser_read`'s text or IE list. Always open the post URL directly before drafting:
+
+```text
+browser_navigate(url="https://www.linkedin.com/feed/update/urn:li:share:<id>/", tabId=<linkedin_tab>, waitUntil="networkidle")
+```
+
+Then either:
+- `browser_read(url=..., reuseTab=true, screens=2)` — works on the dedicated post page (text usually surfaces in chunks), OR
+- `browser_get_html(tabId, selector="main")` and grep visible text out
+
+**Why this matters:** A live test once drafted a comment from the feed snippet alone and missed the post's actual punchline (the joke was buried below the visible fold). The author was making a satire about ChatGPT's sycophant tic; the draft had earnestly engaged with a parenthetical they'd thrown in. Always read the full body before extracting the audience and the insight.
 
 ### Audience model for comments
 
@@ -309,8 +369,6 @@ Target: 3 posts that pass this gate.
 Common failure mode: the parent session has just spent 20 minutes inside engineering files and writes a comment that mirrors that context — file paths, function names, internal terms — onto a post whose audience can't decode any of it. The codebase grounding is for *you*, not for the comment text. File paths and function names belong in the drafter's notes, never in the published reply.
 
 ### For each post: read, gather, delegate, verify
-
-**Read:** Open the post URL directly to get the full text.
 
 **Gather (parent session):** Inside the parent, do the codebase research and extract:
 - The post's audience (one sentence — strategist? designer? AI engineer?)
@@ -399,26 +457,34 @@ Return the final comment text. Nothing else.
 **Verify (parent session):**
 1. Read the returned draft against the audience-check, bragging-token, and insight-up-front rules
 2. If it fails any of them, send the subagent back with specific feedback ("draft still uses 'cache' in sentence one — try 'we skip a request when the inputs haven't changed'")
-3. Show the final comment inline to the user before posting
-4. Save to `/tmp/linkedin-comment-N.txt` and post via agent-browser
+3. Render the final comment inline in your response
+4. **In the same turn**, save to `/tmp/linkedin-comment-N.txt` and post via BYOB
 
-**Like the post you commented on.** Engagement should be coherent — if you cared enough to write a comment, you cared enough to react. After the comment posts, find the post-level "React Like" button (not the comment-level one — the post-level Like sits next to "Comment" and "Repost" in the post's action bar) and click it. If the button label shows "Unreact Like" or `[pressed]`, the post was already liked; skip. The reaction goes on the post itself, never on your own comment.
+### Posting workflow (verified live)
 
-**Post:**
-```bash
-agent-browser snapshot -i
-# Find Comment button by proximity to author name or reaction count
-# — don't rely on nth= index, it shifts as the page loads more content
-agent-browser click @eN
-sleep 2
-agent-browser snapshot -i
-# Find textbox "Text editor for creating comment"
-agent-browser fill @eN "comment text"
-# Submit is labeled "Comment" (not "Post") — find it adjacent to the textbox
-agent-browser click @eN
-sleep 3
-agent-browser snapshot  # verify comment appears
+```text
+# Already on the post page from the read step. Like first (lower stakes).
+browser_read(url="<post_url>", reuseTab=true, screens=2)
+# Find the post-action-bar Like — name "Reaction button state: no reaction" with tag "button"
+browser_click(tabId=<linkedin_tab>, selector="byob:idx=<like_idx>")
+
+# Type the comment into the inline textbox — name "Text editor for creating comment", role "textbox"
+browser_type(tabId=<linkedin_tab>, selector="byob:idx=<editor_idx>", text="<comment text>")
+
+# Re-read — typing into the textbox enables a NEW "Comment" submit button (button tag, distinct from the post-action-bar "Comment" that opens the composer)
+browser_read(url="<post_url>", reuseTab=true, screens=1)
+# The submit button is named "Comment" (button tag) and sits to the right of the textbox (high x-coordinate, e.g. ~844px); the post-action-bar "Comment" sits at ~565px and just opens the composer
+browser_click(tabId=<linkedin_tab>, selector="byob:idx=<submit_idx>")
+
+# Confirm — screenshot OR re-read and look for "Reaction button state: Like" on the post-level button + comment count incremented + your comment appearing with author "Valor Engels" and timestamp "now"
+browser_screenshot(tabId=<linkedin_tab>, savePath="/tmp/linkedin-comment-confirmation.jpg", format="jpeg", quality=55)
 ```
+
+**Distinguishing the two "Comment" IEs**: after typing, you'll see TWO entries with `name: "Comment"`:
+- The post-action-bar Comment (lower idx, bounds x ≈ 565) — this OPENS the composer; clicking does nothing useful when composer is already open
+- The submit Comment (higher idx, bounds x ≈ 844) — this PUBLISHES the comment
+
+Pick the higher-x-coordinate one. After successful submit the textbox empties and your comment appears in the comment list with timestamp "now".
 
 ---
 
@@ -436,8 +502,11 @@ Only use Edit to fix typos or rewrite the whole comment as a clean standalone.
 
 ## Notes
 
-- CDP connection persists across commands in the same session
-- LinkedIn's DOM changes frequently — always re-snapshot after interactions
-- Wait 2-3 seconds after navigation for dynamic content to load
-- If elements aren't found, scroll down and re-snapshot
-- Opening a message marks it as read — be aware of "seen" indicators
+- **Always reuse the same `tabId`** across a session. Discover it once at the start and pass it to every call.
+- **Re-read after every DOM-mutating click** — sending a comment, opening a thread, expanding a menu, opening the post composer. The `interactiveSessionTag` changes; old `byob:idx` values no longer point where you think.
+- **`browser_get_html` for messaging, `browser_read` for feed.** They're not interchangeable on LinkedIn.
+- **`scrollY` is meaningless on LinkedIn** — it's an inner scroll container. Don't gate decisions on the value `browser_scroll` returns.
+- **Wait 2-3s after navigation** for SPA hydration — `waitUntil="networkidle"` mostly handles this; add `browser_wait_for(selector, state="visible")` for specific elements.
+- **Opening a message marks it as read** — be aware of "seen" indicators if you don't intend to actually engage.
+- **Screenshots over 1MB fail** — use `format="jpeg"` and `quality=50-60` for confirmation captures.
+- **No Playwright fallback in BYOB.** If the bridge dies mid-session, the agent surfaces a clear error — don't try to reroute through `bowser` (different stack, anonymous, no LinkedIn login).
