@@ -217,7 +217,7 @@ if [ -z "$LAST_REVIEW" ]; then
   PRIOR_APPROVAL=$(gh api "repos/$REPO/issues/$ARGUMENTS/comments" \
     --jq '[.[] | select(.body | startswith("## Review: Approved"))] | last' 2>/dev/null || echo "")
   if [ -n "$PRIOR_APPROVAL" ] && [ "$PRIOR_APPROVAL" != "null" ]; then
-    PRIOR_BODY=$(echo "$PRIOR_APPROVAL" | python3 -c "import json,sys; d=json.load(sys.stdin) if sys.stdin else {}; print(d.get('body','') if isinstance(d, dict) else '')")
+    PRIOR_BODY=$(echo "$PRIOR_APPROVAL" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('body','') if isinstance(d, dict) else '')")
     APPROVAL_COMMIT_SHA=$(echo "$PRIOR_BODY" | grep -oE 'REVIEW_CONTEXT head_sha=[a-f0-9]{40}' | sed 's/REVIEW_CONTEXT head_sha=//' | tail -1)
     if [ -z "$APPROVAL_COMMIT_SHA" ]; then
       echo "REVIEW_COMMENT: SKIP — prior approval has no REVIEW_CONTEXT trailer; cannot anchor safe-shape diff. Falling through to require fresh review." >&2
@@ -236,6 +236,7 @@ if [ -z "$LAST_REVIEW" ]; then
         *" $DIFF_SHAPE "*)
           echo "REVIEW_COMMENT: PASS — Prior approval at ${APPROVAL_COMMIT_SHA:0:7} preserved (post-approval diff is $DIFF_SHAPE)"
           LAST_REVIEW="$PRIOR_BODY"
+          SAFE_SHAPE_EXEMPTED=1
           ;;
         *)
           echo "REVIEW_COMMENT: SKIP — post-approval diff is $DIFF_SHAPE (not a safe shape); fresh review required." >&2
@@ -256,6 +257,8 @@ elif echo "$LAST_REVIEW" | grep -q "^## Review: Changes Requested"; then
   echo "Unchecked blockers:"
   echo "$BLOCKERS"
   echo "GATES_FAILED"
+elif [ "${SAFE_SHAPE_EXEMPTED:-0}" -eq 1 ]; then
+  : # PASS already emitted by the safe-shape exemption block above; skip duplicate.
 else
   echo "REVIEW_COMMENT: PASS — Most recent review is 'Approved' (post-latest-commit)"
 fi
@@ -337,9 +340,17 @@ fi
 PYTEST_EXIT=$?
 
 BASELINE_FILE="data/main_test_baseline.json"
+# GATE_VERDICT_EXIT is the *combined* gate decision (pytest + baseline-gate
+# categorisation), set in each PASS/FAIL branch below. The cache must persist
+# this — NOT the raw $PYTEST_EXIT — so a re-run on the same {pr, sha,
+# baseline_hash} reuses the same accept-pre-existing semantics that the
+# cache-miss path applied. Caching $PYTEST_EXIT instead would block PRs whose
+# pytest failures were all categorised as pre-existing by baseline_gate.
+GATE_VERDICT_EXIT=1
 
 if [ $PYTEST_EXIT -eq 0 ]; then
     echo "FULL_SUITE: PASS"
+    GATE_VERDICT_EXIT=0
     mkdir -p data
     python3 -c "
 import json
@@ -383,6 +394,7 @@ Path('data/main_test_baseline.json').write_text(json.dumps({
 print(f'Bootstrap baseline written with {len(failing)} pre-existing failures (bootstrap=true).')
 "
     echo "FULL_SUITE: PASS (bootstrap; run python scripts/refresh_test_baseline.py on main soon)"
+    GATE_VERDICT_EXIT=0
 else
     # Delegate to scripts/baseline_gate.py for categorised comparison.
     # Exit 0 when no new blocking regressions. Exit 1 otherwise.
@@ -398,6 +410,7 @@ else
         PREEXISTING=$(echo "$GATE_OUTPUT" | python3 -c "import json, sys; print(json.load(sys.stdin)['preexisting_failures_present'])")
         FLAKY_COUNT=$(echo "$GATE_OUTPUT" | python3 -c "import json, sys; print(len(json.load(sys.stdin)['new_flaky_occurrences']))")
         echo "FULL_SUITE: PASS (pre-existing=$PREEXISTING, flaky re-occurrences=$FLAKY_COUNT -- all non-blocking)"
+        GATE_VERDICT_EXIT=0
         # Baseline decay + quarantine hint emission (item 4 of sdlc-1155).
         # Invokes the helpers added in scripts/baseline_gate.py so the gate
         # can age out stale `real` entries and flag repeat flakes without a
@@ -407,14 +420,22 @@ else
         echo "FULL_SUITE: FAIL — new regression(s) not in baseline:"
         echo "$GATE_OUTPUT" | python3 -c "import json, sys; [print(' -', n) for n in json.load(sys.stdin)['new_blocking_regressions'][:20]]"
         echo "GATES_FAILED"
+        GATE_VERDICT_EXIT=1
     fi
 fi
 
 # Cache write: on cache-miss path only, persist the verdict for re-runs on
 # the same {pr, sha, baseline_hash}. Best-effort -- a failed cache write
 # never blocks the merge.
+#
+# IMPORTANT: cache $GATE_VERDICT_EXIT (the combined gate decision after
+# baseline_gate categorisation), NOT $PYTEST_EXIT. When pytest fails but
+# baseline_gate accepts the failures as pre-existing (PYTEST_EXIT=1,
+# GATE_EXIT=0), the gate admits the PR on the cache-miss path; caching
+# $PYTEST_EXIT instead would cause the cache-hit path to FAIL the same
+# {pr, sha, baseline_hash} and block the PR.
 if [ -n "$SHA" ] && [ "$SHAPE" != "docs-only" ]; then
-  if [ "${PYTEST_EXIT:-0}" -eq 0 ]; then
+  if [ "${GATE_VERDICT_EXIT:-1}" -eq 0 ]; then
     VERDICT_JSON=$(printf '{"exit_code": 0}')
   else
     VERDICT_JSON=$(printf '{"exit_code": 1}')
