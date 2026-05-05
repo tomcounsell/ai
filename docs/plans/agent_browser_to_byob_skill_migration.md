@@ -809,6 +809,14 @@ overhead with no parallelism benefit (Simplifier critique).
 
 **Verdict (2026-05-04, /do-plan-critique cycle 1):** NEEDS REVISION — 1 blocker, 5 concerns, 5 nits.
 **Revision applied (2026-05-04, cycle 2):** All findings addressed. See Addressed By column.
+**Verdict (2026-05-04, /do-plan-critique cycle 2):** READY TO BUILD (with concerns) — 0 blockers, 4 concerns, 5 nits. The cycle-1 BLOCKER is resolved. Cycle-2 concerns are addressed below as Implementation Notes for the builder; per skill spec, "READY TO BUILD (with concerns)" triggers a revision pass that embeds Implementation Notes before build.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| CONCERN | Consistency | Plan references `MODEL_ONLY_INVOCABLE` constant in `audit_skills.py`; actual constant is `BACKGROUND_SKILLS` (line 51) | Builder must verify and use the correct constant name | Read `.claude/skills/do-skills-audit/scripts/audit_skills.py` at build time and use `BACKGROUND_SKILLS`. Update plan-internal references in Step 2b sub-batch and Decision Matrix. |
+| CONCERN | Simplifier | `bowser/SKILL.md` has zero `agent-browser` references but is listed as a "stay" row | Builder drops the row or footnotes it | When migration-builder reaches the staying skills sub-batch, skip `bowser/SKILL.md` (it's already its own skill). The decision matrix row stays for documentation completeness, footnoted as "no edits required". |
+| CONCERN | Adversary | Substring match on `"linkedin"` will false-positive on casual mentions / reply-chain prehydration text | Tighten trigger to word-boundary + first-person phrasing | In `agent/byob_skill_triggers.py`, define `BYOB_SKILL_TRIGGERS = {"linkedin": [r"\b(my|the)\s+linkedin\b", r"\blinkedin\s+(dms?\|messages?\|feed)\b", r"\bcheck\s+linkedin\b"]}` using compiled regex (case-insensitive). The unit test asserts that bare "linkedin" in unrelated context does NOT match, while first-person/intent phrasing does. False-positives serialize unrelated PM sessions behind the real-Chrome slot — false-negatives are the safer failure direction here. |
+| CONCERN | Operator | Step 1 sub-task 2 assumes `enqueue_agent_session()` accepts `requires_real_chrome=`; that kwarg does not exist in current code | Add an explicit pre-build verify-then-extend step | Build phase Step 1 sub-task 0: confirm PR #1277 is merged and `enqueue_agent_session` in `agent/agent_session_queue.py:1042` accepts `requires_real_chrome` as a kwarg (passed through to `_push_agent_session`). If PR #1277 lands without that kwarg, file a follow-up to extend the signature before this plan's build can land. The Prerequisites table's `AgentSession.requires_real_chrome` field check is a precondition; this is the corresponding kwarg-plumbing check. |
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
