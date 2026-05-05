@@ -1,0 +1,85 @@
+linkedin → BYOB behavioral smoke test
+=====================================
+
+Issue:    https://github.com/tomcounsell/ai/issues/1274
+Plan:     docs/plans/agent_browser_to_byob_skill_migration.md
+Skill:    .claude/skills/linkedin/SKILL.md (post-#1274 migration)
+Artifact: tests/manual/linkedin_byob_smoke.txt (this file)
+
+Purpose
+-------
+
+This artifact captures the operator-run end-to-end smoke test for the
+canonical `linkedin` BYOB migration. The structural grep checks in the
+build verify the skill body shape (correct tool surface in
+allowed-tools, deprecation callout retained, migration pointer present);
+this artifact is the executable proof per
+`feedback_acceptance_criteria_must_be_executable` that BYOB actually
+drives the user's real, logged-in Chrome session — not the CDP-attach
+hack and not anonymous.
+
+Smoke-test procedure
+--------------------
+
+Prerequisites (operator side):
+
+  1. PR #1277 (BYOB infrastructure) is merged and `/update --full` has
+     been run on this machine since the merge.
+  2. `cd ~/.byob && bun run doctor` reports all green.
+  3. The BYOB Chrome extension is loaded in a Chrome window where the
+     operator is logged into LinkedIn.
+
+Operator command:
+
+  valor-session create \
+    --role dev \
+    --project-key valor \
+    --needs-real-chrome \
+    --message "list my linkedin DMs"
+
+Expected output (when this artifact is filled in by a real run):
+
+  - The dev session reaches the LinkedIn skill body.
+  - `mcp__byob__list_tabs` returns at least one Chrome tab including
+    a logged-in linkedin.com page.
+  - `mcp__byob__navigate https://www.linkedin.com/messaging/` lands
+    the active tab on the operator's real LinkedIn DM inbox.
+  - The agent transcript lists DM senders that match the operator's
+    actual inbox (redact names/messages as needed before committing).
+
+What goes here when the test runs
+---------------------------------
+
+A real smoke run replaces this README-style placeholder with the
+captured agent transcript (DM list, redacted as the operator sees
+fit). The artifact is committed alongside the build PR so review
+verifies the migration shipped working end-to-end.
+
+CURRENT STATE: PLACEHOLDER (build-time)
+---------------------------------------
+
+This file was created during the do-build run on 2026-05-05 from a
+machine without BYOB installed. The build's structural verification
+passes. The behavioral smoke run is operator-blocked — it requires:
+
+  - BYOB extension installed in Chrome (this machine: not installed,
+    per the user's "this machine is skills/tools only" memory).
+  - The operator to be logged into LinkedIn in that Chrome.
+
+Until an operator with BYOB-installed Chrome runs the procedure above
+and replaces this content with the real transcript, Success Criterion
+#2 is satisfied at the structural level only. The plan's Risks
+section explicitly anticipates this: Risk 2 ("BYOB extension fails to
+load in Chrome silently") is mitigated by the skill body's
+`mcp__byob__list_tabs` precheck, which surfaces silent-failure modes
+to the operator on first use.
+
+Followups
+---------
+
+After an operator runs the full smoke, replace this file with the
+captured transcript (one entry per LinkedIn conversation discovered,
+sender + first-line preview, redact as needed). At that point the
+followup issue can also schedule removal of the linkedin skill's
+deprecated CDP-attach Fallback path (one release cycle after
+behavioral smoke passes on every operator machine).
