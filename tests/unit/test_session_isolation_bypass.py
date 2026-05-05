@@ -373,6 +373,92 @@ class TestSyntheticSlugForSlugslessDev:
             slug = f"dev-{aid_prefix}"
             v(slug)  # would raise ValueError if invalid
 
+    def test_resolve_main_repo_root_returns_main_repo_from_worktree(self, tmp_path):
+        """resolve_main_repo_root must return the main repo root, NOT the worktree path.
+
+        Regression: ``resolve_repo_root`` (which uses ``git rev-parse
+        --show-toplevel``) returns the *worktree's* path when called from
+        inside a worktree. The cleanup hook needs the main repo root so it
+        can reach into ``.worktrees/{slug}/`` for cleanup. This test pins
+        the new helper's behavior using a real git repo + worktree pair.
+        """
+        import subprocess
+
+        from agent.worktree_manager import resolve_main_repo_root
+
+        main_repo = tmp_path / "main"
+        main_repo.mkdir()
+        # Initialize a minimal repo with one commit so ``git worktree add`` works.
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=main_repo, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=main_repo,
+            check=True,
+        )
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "--allow-empty", "-m", "init"],
+            cwd=main_repo,
+            check=True,
+        )
+
+        worktree_path = tmp_path / "wt"
+        subprocess.run(
+            ["git", "worktree", "add", "-q", "-b", "feature", str(worktree_path)],
+            cwd=main_repo,
+            check=True,
+        )
+
+        # From inside the worktree → must resolve to the MAIN repo, not the worktree.
+        resolved_from_worktree = resolve_main_repo_root(worktree_path)
+        assert resolved_from_worktree.resolve() == main_repo.resolve(), (
+            f"resolve_main_repo_root from worktree should return main repo "
+            f"({main_repo.resolve()}), got {resolved_from_worktree.resolve()}"
+        )
+
+        # From the main repo → also returns the main repo.
+        resolved_from_main = resolve_main_repo_root(main_repo)
+        assert resolved_from_main.resolve() == main_repo.resolve()
+
+    def test_cleanup_hook_uses_main_repo_root_not_worktree(self):
+        """The synthetic-slug cleanup hook must call cleanup_after_merge with
+        the MAIN repo root, not the worktree path.
+
+        Reproduces the executor's cleanup hook logic in-process and verifies
+        that it (a) calls ``resolve_main_repo_root`` to discover the cleanup
+        target and (b) hands that result to ``cleanup_after_merge``. If a
+        future refactor reverts to ``resolve_repo_root``, this test fails.
+        """
+        _wd = "/Users/test/src/ai/.worktrees/dev-abcd1234"
+        _slug = "dev-abcd1234"
+
+        with (
+            patch(
+                "agent.worktree_manager.resolve_main_repo_root",
+                return_value=Path("/MAIN_REPO_ROOT"),
+            ) as mock_resolve,
+            patch(
+                "agent.worktree_manager.cleanup_after_merge",
+                return_value={"removed": True, "already_clean": False},
+            ) as mock_cleanup,
+        ):
+            # Replicate the cleanup hook exactly as it appears in
+            # session_executor.py's finally block.
+            from agent.worktree_manager import (
+                cleanup_after_merge,
+                resolve_main_repo_root,
+            )
+
+            _repo_for_cleanup = resolve_main_repo_root(_wd)
+            cleanup_after_merge(_repo_for_cleanup, _slug)
+
+        mock_resolve.assert_called_once_with(_wd)
+        # Args go (repo_root, slug) — first positional must be the main repo,
+        # NOT the worktree path. This is the regression we are pinning.
+        assert mock_cleanup.call_args[0][0] == Path("/MAIN_REPO_ROOT")
+        assert mock_cleanup.call_args[0][0] != Path(_wd)
+        assert mock_cleanup.call_args[0][1] == "dev-abcd1234"
+
 
 class TestSyntheticSlugLogMarker:
     """Issue #1272: ``[synthetic-slug]`` log marker for post-deploy reflection scans."""

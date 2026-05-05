@@ -639,6 +639,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # any future spawn site that forgets a required field will fail loudly
         # here instead of mid-startup with no Telegram message. The session is
         # marked ``failed`` so dashboards / reflections surface it.
+
         # Synthesis precondition (issue #1272): a slugless dev session needs
         # ``agent_session_id`` to derive its synthetic slug ``dev-{aid[:8]}``.
         # If both ``slug`` and ``agent_session_id`` are missing on a dev session
@@ -1953,12 +1954,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
             ):
                 from agent.worktree_manager import (  # noqa: PLC0415
                     cleanup_after_merge,
-                    resolve_repo_root,
+                    resolve_main_repo_root,
                 )
 
                 _wd = locals().get("working_dir")
                 if _wd is not None:
-                    _repo_for_cleanup = resolve_repo_root(_wd)
+                    _repo_for_cleanup = resolve_main_repo_root(_wd)
                     cleanup_result = cleanup_after_merge(_repo_for_cleanup, _slug_for_cleanup)
                     logger.info(
                         f"[synthetic-slug] Cleaned up worktree+branch for "
