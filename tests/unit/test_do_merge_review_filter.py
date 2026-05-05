@@ -104,3 +104,81 @@ def test_committer_date_reference_present_in_markdown():
     """The filter must reference the committer date, not the author date."""
     md = DO_MERGE_MD.read_text()
     assert "committer.date" in md
+
+
+# ---------------------------------------------------------------------------
+# Safe-shape exemption (PR-shape-aware merge gates)
+# ---------------------------------------------------------------------------
+
+
+def test_safe_shape_exemption_extracts_head_sha_from_trailer():
+    """The safe-shape exemption uses a regex to pull the approval-commit SHA
+    out of the ``<!-- REVIEW_CONTEXT head_sha=... -->`` trailer.
+    """
+    md = DO_MERGE_MD.read_text()
+    assert "REVIEW_CONTEXT head_sha=[a-f0-9]{40}" in md
+
+
+def test_safe_shape_exemption_skips_when_trailer_missing():
+    """A prior approval body without REVIEW_CONTEXT trailer must SKIP the
+    exemption (fail closed): the markdown must include a SKIP message
+    explaining the missing trailer.
+    """
+    md = DO_MERGE_MD.read_text()
+    assert "no REVIEW_CONTEXT trailer" in md
+    assert "fresh review" in md.lower()
+
+
+def test_safe_shape_exemption_fetches_unfetchable_sha():
+    """When the approval SHA isn't in local objects, the exemption must
+    attempt to ``fetch origin <sha>`` before giving up.
+    """
+    md = DO_MERGE_MD.read_text()
+    assert "fetch origin" in md
+    assert "fetchable" in md.lower()
+
+
+def test_safe_shape_exemption_classifies_post_approval_diff():
+    """The exemption must invoke the classifier in --diff-from / --diff-to
+    mode to determine if the post-approval diff is a safe shape.
+    """
+    md = DO_MERGE_MD.read_text()
+    assert "pr_shape_classify --diff-from" in md
+    assert "--diff-to" in md
+
+
+def test_safe_shape_exemption_only_admits_safe_shapes():
+    """Only ``docs-only``, ``lockfile-only``, ``small-patch`` post-approval
+    diffs re-admit the prior approval. Feature/mixed shapes still invalidate.
+    """
+    md = DO_MERGE_MD.read_text()
+    assert "docs-only lockfile-only small-patch" in md
+
+
+def test_shape_classifier_called_before_review_check():
+    """The Shape Classification block must precede the Structured Review
+    Comment Check so $SHAPE / $CACHED_VERDICT are available downstream.
+    """
+    md = DO_MERGE_MD.read_text()
+    shape_idx = md.find("### Shape Classification")
+    review_idx = md.find("### Structured Review Comment Check")
+    assert shape_idx >= 0
+    assert review_idx >= 0
+    assert shape_idx < review_idx
+
+
+def test_lockfile_check_skipped_for_docs_only():
+    md = DO_MERGE_MD.read_text()
+    assert "LOCKFILE: SKIP" in md
+
+
+def test_full_suite_skipped_for_docs_only():
+    md = DO_MERGE_MD.read_text()
+    assert "FULL_SUITE: SKIP" in md
+    assert "no Python files changed" in md
+
+
+def test_small_patch_uses_targeted_pytest():
+    md = DO_MERGE_MD.read_text()
+    assert "targeted pytest for small-patch" in md
+    assert "tests_to_run" in md
