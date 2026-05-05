@@ -1118,12 +1118,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         from agent.agent_session_queue import cleanup_corrupted_agent_sessions
 
         # Returns dict {"corrupted": int, "orphans": int} as of issue #1271.
-        result = cleanup_corrupted_agent_sessions()
-        if isinstance(result, dict):
-            corrupted = result.get("corrupted", 0)
-            orphans = result.get("orphans", 0)
+        cleanup_result = cleanup_corrupted_agent_sessions()
+        if isinstance(cleanup_result, dict):
+            corrupted = cleanup_result.get("corrupted", 0)
+            orphans = cleanup_result.get("orphans", 0)
         else:
-            corrupted = int(result) if result is not None else 0
+            corrupted = int(cleanup_result) if cleanup_result is not None else 0
             orphans = 0
         if corrupted > 0:
             log(f"Cleaned up {corrupted} corrupted session(s)", v)
