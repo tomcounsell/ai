@@ -1240,18 +1240,45 @@ async def _execute_agent_session(session: AgentSession) -> None:
             if handle is not None:
                 handle.pid = pid
             try:
-                # #1271: persist the OS pid alongside the SDK heartbeat so the
-                # cross-process orphan reaper can resolve owning session per-PID
-                # via AgentSession.find_by_claude_pid(). Cleared on terminal
-                # transitions in models/session_lifecycle.py::finalize_session.
+                # Persist the harness subprocess PID alongside the SDK heartbeat.
+                # Two fields, two lifecycles, same value:
+                # - `claude_pid` (#1271): session-lifetime, cleared on terminal
+                #   transitions in models/session_lifecycle.py::finalize_session.
+                #   Used by the cross-process orphan reaper via
+                #   AgentSession.find_by_claude_pid().
+                # - `harness_pid` (#1269): subprocess-scoped, paired with
+                #   `_on_sdk_finished` below to clear at proc.communicate()
+                #   return for THIS subprocess. Multi-spawn turns (primary +
+                #   image-dim fallback + stale-UUID fallback) overwrite this
+                #   field 3x with their own PIDs. Used by the dashboard
+                #   liveness probe.
                 session.last_sdk_heartbeat_at = datetime.now(tz=UTC)
                 session.claude_pid = pid
-                session.save(update_fields=["last_sdk_heartbeat_at", "claude_pid"])
+                session.harness_pid = pid
+                session.save(
+                    update_fields=["last_sdk_heartbeat_at", "claude_pid", "harness_pid"]
+                )
             except Exception as e:
                 logger.warning(
                     "[%s] on_sdk_started save failed (pid=%s): %s",
                     session.session_id,
                     pid,
+                    e,
+                )
+
+        def _on_sdk_finished() -> None:
+            # #1269: clear PID the instant proc.communicate() returns for the
+            # harness subprocess. Sibling closure to _on_sdk_started — together
+            # they bracket subprocess lifetime so the dashboard's os.kill(pid,0)
+            # probe never reads a stale PID that has been recycled by a
+            # worker-spawned gh/git/pytest/ruff/MCP subprocess on a busy host.
+            try:
+                session.harness_pid = None
+                session.save(update_fields=["harness_pid"])
+            except Exception as e:
+                logger.warning(
+                    "[%s] on_sdk_finished save failed: %s",
+                    session.session_id,
                     e,
                 )
 
@@ -1282,6 +1309,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             chat_id=session.chat_id,
             session_id=session.session_id,
             on_sdk_started=_on_sdk_started,
+            on_sdk_finished=_on_sdk_finished,
             on_heartbeat_tick=_on_heartbeat_tick,
             on_stdout_event=_on_stdout_event,
         )
@@ -1986,4 +2014,20 @@ async def _execute_agent_session(session: AgentSession) -> None:
             # Cleanup failures must NEVER propagate as session failures.
             logger.warning(
                 f"[synthetic-slug] Cleanup failed for synthetic slug (non-fatal): {cleanup_err}"
+            )
+
+        # === Defensive PID clear (#1269) ===
+        # Idempotent backstop for the abnormal-termination path where
+        # `_on_sdk_finished` could not fire (worker crash inside the harness
+        # loop, CancelledError propagation before proc.communicate() returns).
+        # No-op when the field is already None (the common case).
+        try:
+            if getattr(session, "harness_pid", None) is not None:
+                session.harness_pid = None
+                session.save(update_fields=["harness_pid"])
+        except Exception as _pid_clear_err:
+            logger.warning(
+                "[%s] defensive harness_pid clear failed: %s",
+                getattr(session, "session_id", "?"),
+                _pid_clear_err,
             )

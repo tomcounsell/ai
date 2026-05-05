@@ -2043,6 +2043,7 @@ async def get_response_via_harness(
     model: str | None = None,
     system_prompt: str | None = None,
     on_sdk_started: Callable[[int], None] | None = None,
+    on_sdk_finished: Callable[[], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
 ) -> str:
     """Run a CLI harness (e.g. claude -p) and return the final result text.
@@ -2203,6 +2204,7 @@ async def get_response_via_harness(
         working_dir,
         proc_env,
         on_sdk_started=on_sdk_started,
+        on_sdk_finished=on_sdk_finished,
         on_stdout_event=on_stdout_event,
         ttft_metadata=_ttft_meta,
     )
@@ -2241,6 +2243,7 @@ async def get_response_via_harness(
                 working_dir,
                 proc_env,
                 on_sdk_started=on_sdk_started,
+                on_sdk_finished=on_sdk_finished,
                 on_stdout_event=on_stdout_event,
             )
             total_num_turns += this_num_turns
@@ -2293,6 +2296,7 @@ async def get_response_via_harness(
                 working_dir,
                 proc_env,
                 on_sdk_started=on_sdk_started,
+                on_sdk_finished=on_sdk_finished,
                 on_stdout_event=on_stdout_event,
             )
             total_num_turns += this_num_turns
@@ -2397,6 +2401,7 @@ async def _run_harness_subprocess(
     proc_env: dict[str, str],
     *,
     on_sdk_started: Callable[[int], None] | None = None,
+    on_sdk_finished: Callable[[], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
     ttft_metadata: dict | None = None,
 ) -> tuple[
@@ -2445,9 +2450,13 @@ async def _run_harness_subprocess(
     error message (usage, cost_usd, stderr_snippet are all None,
     num_turns and tool_call_count are 0).
 
-    Optional callbacks (issue #1036):
+    Optional callbacks (issue #1036, #1269):
         on_sdk_started(pid): fires once, immediately after the subprocess is
             spawned with a valid pid. Callback exceptions are caught + logged.
+        on_sdk_finished(): fires once, immediately after `proc.communicate()`
+            returns (subprocess has exited). Paired with on_sdk_started so the
+            caller can clear any per-subprocess PID tracking. Callback
+            exceptions are caught + logged.
         on_stdout_event(): fires on each non-empty stdout line from the SDK.
             Callback exceptions are caught + logged.
 
@@ -2620,6 +2629,21 @@ async def _run_harness_subprocess(
 
     _, stderr_data = await proc.communicate()
     returncode = proc.returncode if proc.returncode is not None else 0
+
+    # Fire SDK-finished callback once the subprocess has exited (#1269).
+    # Paired with on_sdk_started — together they bracket the subprocess
+    # lifetime so the worker can clear AgentSession.harness_pid the instant
+    # the subprocess dies. This defeats PID-recycling false positives in
+    # the dashboard liveness probe: a worker-spawned gh/git/pytest subprocess
+    # would otherwise inherit the freed PID and be misreported as the live
+    # harness. Single-digit milliseconds between this point and the callback
+    # firing is the residual risk window — see Race 4 in the plan.
+    if on_sdk_finished is not None:
+        try:
+            on_sdk_finished()
+        except Exception as _cb_err:
+            logger.warning("on_sdk_finished callback raised: %s", _cb_err)
+
     # Capture first 2000 chars of stderr for Mode 1 sentinel checks (issue #1099).
     # Bound the snippet at 2000 chars: ~4x the 500-char log-only window already
     # used below, enough for sentinel matching while keeping memory tight.

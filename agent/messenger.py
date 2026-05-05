@@ -38,14 +38,20 @@ class BossMessenger:
     The agent uses this to send results when work is complete.
     The bridge provides the actual send implementation.
 
-    Liveness-observer callbacks (optional, issue #1036):
+    Liveness-observer callbacks (optional, issue #1036, #1269):
         on_sdk_started:    one-shot, fires when the SDK subprocess is spawned
                            (pid is provided by the caller once known).
+        on_sdk_finished:   one-shot, fires once per subprocess exit
+                           (`proc.communicate()` return) — issue #1269.
+                           Paired with on_sdk_started so the worker can clear
+                           `AgentSession.harness_pid` immediately when the
+                           subprocess dies, preventing PID-recycling false
+                           positives in the dashboard liveness probe.
         on_heartbeat_tick: fires on each `_watchdog` tick (default 60s) while
                            the SDK subprocess is running.
         on_stdout_event:   fires on each stdout event the SDK emits.
 
-    All three callbacks default to None; when set, exceptions they raise are
+    All four callbacks default to None; when set, exceptions they raise are
     caught and logged at WARNING. The messenger imports nothing from `models/`
     — the queue layer provides implementations that bump ORM fields.
     """
@@ -60,9 +66,10 @@ class BossMessenger:
     # Track sent messages
     messages_sent: list[MessageRecord] = field(default_factory=list)
 
-    # === Liveness callbacks (issue #1036) ===
+    # === Liveness callbacks (issue #1036, #1269) ===
     # These are optional and ORM-free; the messenger invokes them blindly.
     on_sdk_started: Callable[[int], None] | None = None
+    on_sdk_finished: Callable[[], None] | None = None
     on_heartbeat_tick: Callable[[], None] | None = None
     on_stdout_event: Callable[[], None] | None = None
 
@@ -78,6 +85,27 @@ class BossMessenger:
                 "[%s] on_sdk_started callback raised (pid=%s): %s",
                 self.session_id,
                 pid,
+                e,
+            )
+
+    def notify_sdk_finished(self) -> None:
+        """Invoke on_sdk_finished() if provided. Exceptions are logged WARNING.
+
+        Fires once per harness subprocess exit (#1269), symmetric with
+        notify_sdk_started. The worker uses this to clear AgentSession.harness_pid
+        the instant proc.communicate() returns, preventing the dashboard's
+        liveness probe from reading a stale PID that has been recycled by a
+        worker-spawned subprocess (gh/git/pytest/ruff/MCP) on a busy host.
+        """
+        cb = self.on_sdk_finished
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception as e:
+            logger.warning(
+                "[%s] on_sdk_finished callback raised: %s",
+                self.session_id,
                 e,
             )
 

@@ -311,6 +311,30 @@ class AgentSession(Model):
     # Count of Tier 2 reprieves (activity-positive saves) for post-hoc analysis.
     reprieve_count = IntField(default=0)
 
+    # === Harness subprocess PID (issue #1269) ===
+    # PID of the live `claude -p stream-json` subprocess for THIS session, when
+    # one is currently running. Subprocess-scoped lifecycle (NOT session-scoped):
+    # written by the worker's `_on_sdk_started(pid)` closure when a harness
+    # subprocess spawns; cleared by the paired `_on_sdk_finished()` closure the
+    # instant `proc.communicate()` returns for that subprocess. The session-exit
+    # `finally` block in `_execute_agent_session` performs a defensive idempotent
+    # clear for abnormal-termination paths (worker crash, CancelledError).
+    #
+    # Single-writer contract: ONLY `_on_sdk_started` / `_on_sdk_finished` (paired
+    # closures owned by `_execute_agent_session`) write this field. The dashboard
+    # reads it for the `os.kill(pid, 0)` liveness probe. PID may be None at any
+    # time — `_check_process_alive(None)` returns None (uncertain), and the
+    # modal renders gracefully.
+    #
+    # Multi-spawn note: a single turn can spawn up to 3 subprocesses (primary +
+    # image-dimension fallback + stale-UUID fallback). Each invocation owns the
+    # field exclusively for its runtime; between subprocesses the field is None.
+    # See `agent/sdk_client.py::get_response_via_harness` call sites at lines
+    # 2205, 2243, 2295. PID recycling on a busy worker is the principal risk
+    # (gh/git/pytest/ruff subprocesses recycle freed PIDs), and the
+    # subprocess-scoped lifecycle is the principal mitigation.
+    harness_pid = IntField(null=True)
+
     # === Compaction hardening fields (issue #1127) ===
     # Unix timestamp of the most recent successful JSONL backup captured by
     # `pre_compact_hook`. Read by `agent/output_router.py::determine_delivery_action`
