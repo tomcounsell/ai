@@ -229,6 +229,7 @@ class TestCLI:
 
 
 @pytest.mark.integration
+@pytest.mark.slow
 class TestSearchIntegration:
     """Integration tests that hit real YouTube. Require network."""
 

@@ -245,6 +245,7 @@ def test_concurrent_writers_serialize(cache_paths):
     assert e2 is not None
 
 
+@pytest.mark.slow
 def test_lock_timeout_skips_write_without_raising(cache_paths, monkeypatch):
     """Holding the lock for >timeout causes write_verdict to log + return False."""
     cache, lock, baseline = cache_paths

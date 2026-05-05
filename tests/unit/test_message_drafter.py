@@ -254,6 +254,7 @@ class TestDraftMessage:
         assert result.was_drafted is True
 
 
+@pytest.mark.slow
 class TestDraftMessageIntegration:
     """Integration test with real Haiku API call."""
 

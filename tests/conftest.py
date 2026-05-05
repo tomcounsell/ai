@@ -78,6 +78,30 @@ def mock_claude_sdk_cleanup():
             del sys.modules[mod_key]
 
 
+# Cache of popoto modules that hold a `POPOTO_REDIS_DB` symbol. Built lazily
+# and refreshed only when sys.modules grows, so we don't walk all of
+# sys.modules per test (was ~1500 entries × thousands of tests).
+_POPOTO_MODULE_CACHE: list[object] = []
+_POPOTO_MODULE_CACHE_KEY: int = -1
+
+
+def _popoto_modules_with_redis_db():
+    """Return the list of popoto submodules holding a `POPOTO_REDIS_DB` symbol,
+    refreshing the cache only when sys.modules has grown since last call."""
+    import sys as _sys
+
+    global _POPOTO_MODULE_CACHE, _POPOTO_MODULE_CACHE_KEY
+    cur = len(_sys.modules)
+    if cur != _POPOTO_MODULE_CACHE_KEY:
+        _POPOTO_MODULE_CACHE = [
+            mod
+            for name, mod in _sys.modules.items()
+            if mod is not None and name.startswith("popoto") and hasattr(mod, "POPOTO_REDIS_DB")
+        ]
+        _POPOTO_MODULE_CACHE_KEY = cur
+    return _POPOTO_MODULE_CACHE
+
+
 @pytest.fixture(autouse=True)
 def redis_test_db(request):
     """Switch popoto to a dedicated test Redis client for ALL tests.
@@ -98,6 +122,15 @@ def redis_test_db(request):
     Also resets the async Redis connection to use the same db, since popoto v1.0.0b2
     maintains a separate _POPOTO_ASYNC_REDIS_DB connection.
     """
+    import sys as _sys
+
+    # Fast path: if popoto isn't imported yet, this test cannot touch Redis
+    # via Popoto. Pure-logic tests that run before any popoto import skip
+    # flushdb + the patching dance entirely.
+    if "popoto.redis_db" not in _sys.modules:
+        yield
+        return
+
     import popoto.redis_db as rdb
     import redis
     import redis.asyncio as aioredis
@@ -124,15 +157,10 @@ def redis_test_db(request):
     # module that has a local POPOTO_REDIS_DB symbol. Without this, sync
     # reads/writes route to whichever db was active at import (often
     # production), and async vs. sync reads diverge.
-    import sys as _sys
-
     _patched_popoto_modules: list[tuple[object, object]] = []
-    for _modname, _mod in list(_sys.modules.items()):
-        if _mod is None or not _modname.startswith("popoto"):
-            continue
-        if hasattr(_mod, "POPOTO_REDIS_DB"):
-            _patched_popoto_modules.append((_mod, _mod.POPOTO_REDIS_DB))
-            _mod.POPOTO_REDIS_DB = test_client
+    for _mod in _popoto_modules_with_redis_db():
+        _patched_popoto_modules.append((_mod, _mod.POPOTO_REDIS_DB))
+        _mod.POPOTO_REDIS_DB = test_client
 
     # Reset async Redis connection to point at the same test db.
     rdb._POPOTO_ASYNC_REDIS_DB = aioredis.Redis(db=test_db)
