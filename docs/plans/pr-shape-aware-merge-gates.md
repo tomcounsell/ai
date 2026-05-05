@@ -6,6 +6,16 @@ owner: Valor
 created: 2026-05-05
 tracking: https://github.com/tomcounsell/ai/issues/1283
 last_comment_id:
+revision_applied: true
+revision_cycle: 1
+revision_addresses:
+  - "BLOCKER: APPROVAL_COMMIT_SHA extraction from REVIEW_CONTEXT trailer"
+  - "CONCERN-1: mixed-shape detection algorithm underspecified"
+  - "CONCERN-2: data/ gitignore verification not enforced"
+  - "CONCERN-3: cache atomic-write read-modify-write race"
+  - "CONCERN-4: head_sha vs approval-commit SHA semantics"
+  - "CONCERN-5: classifier needs local SHAs fetched for git diff"
+  - "CONCERN-6: test-mapping glob over-matches unrelated tests"
 ---
 
 # PR-Shape-Aware Merge Gates
@@ -173,7 +183,9 @@ PM dispatches `/do-merge {pr}` → Pipeline state check (existing) → **Shape c
 
 **Classifier (`scripts/pr_shape_classify.py`):**
 
-- CLI: `python -m scripts.pr_shape_classify --pr N` → JSON to stdout
+- CLI modes:
+  - `python -m scripts.pr_shape_classify --pr N` — read PR diff via `gh pr diff --name-only N` and `gh pr view N --json additions,deletions,headRefOid` → JSON to stdout
+  - `python -m scripts.pr_shape_classify --diff-from <sha> --diff-to <sha>` — read diff via `git diff --name-only <from>..<to>` and `git diff --shortstat <from>..<to>` → JSON to stdout. **Both SHAs MUST be present in the local objects database**; if either `git cat-file -e <sha>` fails, the CLI exits 2 with a clear stderr message ("SHA <sha> not in local objects; run `git fetch origin <sha>` first"). The caller (`do-merge.md` safe-shape exemption block) is responsible for the fetch — see the bash snippet for the safe-shape exemption above.
 - Pure function: `classify(changed_files: list[str], net_lines: int, has_new: bool, has_deleted: bool) -> ClassifierResult`
 - Allowlist constants:
   - `DOCS_ONLY_GLOBS = ("docs/**", "*.md", "CHANGELOG*", "README*")`
@@ -185,11 +197,42 @@ PM dispatches `/do-merge {pr}` → Pipeline state check (existing) → **Shape c
   3. No new files, no deletions, all touched files exist on `origin/main` HEAD, net_lines ≤ 20, every touched file maps to ≥1 existing test → `small-patch`
   4. Mentions a safe-shape claim (e.g., diff is *mostly* docs but includes one `*.py`) → `mixed` with disqualifier list
   5. Default → `feature`
-- The `mixed` bucket is detected by re-running each safe-shape allowlist with one disqualifier relaxed; if a relaxed allowlist matches, that's the "claimed" shape and the unmatched paths are the disqualifiers. Concrete example: PR touches `docs/foo.md` + `agent/bar.py`. `docs-only` rejects `agent/bar.py`. The relaxed test "would `docs-only` match if we ignored `agent/bar.py`?" returns yes → output `{shape: "mixed", claimed_shape: "docs-only", disqualifiers: ["agent/bar.py"]}`.
+- The `mixed` bucket is detected via a deterministic per-shape "majority-match" algorithm. Pseudocode:
+
+  ```python
+  SAFE_SHAPES_ORDER = ("docs-only", "lockfile-only", "small-patch")
+
+  def detect_mixed(changed_files: list[str]) -> tuple[str, list[str]] | None:
+      """Return (claimed_shape, disqualifying_files) if PR looks like a partial safe shape, else None.
+
+      A shape is "claimed" when ≥50% of changed files match its allowlist AND
+      ≥1 file violates it. The disqualifiers are the files that fall outside
+      the matched shape's allowlist.
+
+      The 50% threshold prevents trivial single-file feature PRs from being
+      classified as "mixed" (e.g., a 1-file Python change isn't a "claimed
+      docs-only PR" just because the file isn't a doc). It also prevents
+      a single doc edit attached to a 50-file refactor from looking like a
+      "claimed docs-only" — the docs are the minority, so it stays `feature`.
+      """
+      for shape in SAFE_SHAPES_ORDER:
+          matched, unmatched = partition_by_allowlist(changed_files, shape)
+          if len(matched) >= len(changed_files) / 2 and unmatched:
+              return (shape, sorted(unmatched))
+      return None  # No partial-safe-shape match → caller defaults to "feature"
+  ```
+
+  Concrete examples:
+  - PR touches `docs/foo.md` + `agent/bar.py` (1 doc, 1 py). `docs-only` matches `docs/foo.md` (50% = ≥50%), unmatched=[`agent/bar.py`] → `mixed`, claimed=`docs-only`, disqualifiers=[`agent/bar.py`].
+  - PR touches 1 doc + 5 py files (1 doc, 5 py). `docs-only` matches 1/6 = 17%, fails the ≥50% gate → `feature` (not `mixed`). The `docs-only` claim is too thin to call.
+  - PR touches `uv.lock` + `pyproject.toml`. `lockfile-only` matches 1/2 = 50%, unmatched=[`pyproject.toml`] → `mixed`, claimed=`lockfile-only`, disqualifiers=[`pyproject.toml`]. (This is the canonical "lockfile-only with pyproject leak" case the issue explicitly calls out.)
+  - PR touches a new file `agent/feature.py` only (1 py, no docs). No safe shape matches ≥50% AND has unmatched. → `feature` (no `mixed`).
+
+  The algorithm is deterministic, side-effect-free, and unit-testable independently of the rest of the classifier. The 50% threshold is a defended constant — its purpose is documented in the docstring.
 
 **Cache (`scripts/pr_shape_cache.py`):**
 
-- File: `data/pr_shape_verdict_cache.json` (gitignored — already covered by `data/`)
+- File: `data/pr_shape_verdict_cache.json` (gitignored — covered by `data/` rule at `.gitignore:181`, verified at plan time and re-verified in Step 6 via `git check-ignore data/pr_shape_verdict_cache.json`)
 - Schema:
   ```json
   {
@@ -209,7 +252,12 @@ PM dispatches `/do-merge {pr}` → Pipeline state check (existing) → **Shape c
   ```
 - Eviction: when `len(entries) > 100`, drop the entry with the oldest `last_used_at`. Single-pass, no background process.
 - `baseline_hash` = first 12 chars of `sha256(pathlib.Path("data/main_test_baseline.json").read_bytes())`. Cache miss when baseline content changes (the most common cache-staleness vector).
-- Atomic writes: write to `data/pr_shape_verdict_cache.json.tmp`, then `os.rename`.
+- Atomic writes with merge-on-write to bound the read-modify-write race window. The naive "read full dict → mutate → atomic-rename" pattern loses ALL of writer A's prior in-memory entries when writer B's `os.rename` lands first. Mitigation:
+  1. Acquire an exclusive `fcntl.flock(LOCK_EX)` on a sidecar file `data/pr_shape_verdict_cache.lock` for the entire read-modify-write critical section. The lock file is created on demand and is gitignored.
+  2. Inside the lock: re-read the cache file fresh, mutate the dict, write to `.tmp`, `os.rename` to the canonical path, release the lock.
+  3. The lock makes the RMW sequence serial — the `os.rename` itself is then atomic only as a tail step inside the already-serial section.
+  4. `flock` is advisory but every cache writer goes through `pr_shape_cache.write_verdict()` which acquires it; no other process touches this file. The advisory contract is sufficient because the *only* other writer is another `/do-merge` invocation calling the same function.
+  5. Lock timeout: 10 seconds. On timeout, log a warning and skip the write (cache miss next time is acceptable — this is an optimization, not correctness state).
 
 **`do-merge.md` shape-routing block (new, between Pre-Merge Pipeline Check and Lockfile Sync Check):**
 
@@ -236,48 +284,126 @@ Then, between Pre-Merge and the existing gate sequence, insert shape-conditional
 
 **Stale-review safe-shape exemption (new, in `do-merge.md:134-175`):**
 
+The exemption hinges on extracting the `head_sha` from the `<!-- REVIEW_CONTEXT head_sha=<SHA> pr_body_hash=<HASH> -->` HTML comment that `/do-pr-review` already emits at the end of every review body (see `.claude/skills/do-pr-review/sub-skills/post-review.md:69, 107, 146, 156` and `.claude/skills/do-pr-review/sub-skills/code-review.md:172-176`). The trailer is the canonical anchor for "what code state was approved" — it records the SHA that the reviewer actually evaluated, which is exactly what we need to compute the post-approval diff against. **Do NOT use the comment's `created_at` timestamp or PR commit history to infer the approved SHA — both are subject to force-push and idempotent replay.**
+
 ```bash
 # Existing: drop comments older than the latest commit
 LATEST_COMMIT_DATE=$(gh api repos/$REPO/pulls/$ARGUMENTS/commits --jq '.[-1].commit.committer.date')
-LAST_REVIEW=$(gh api ... | filter by created_at >= LATEST_COMMIT_DATE)
+LAST_REVIEW=$(gh api repos/$REPO/issues/$ARGUMENTS/comments \
+  --jq "[.[] | select(.created_at >= \"$LATEST_COMMIT_DATE\")] | last")
 
 # NEW: if no current review BUT a prior approval exists AND the diff between
-# approval-commit and HEAD classifies as a safe shape, re-admit the prior approval.
+# the approval's recorded head_sha and HEAD classifies as a safe shape,
+# re-admit the prior approval.
 if [ -z "$LAST_REVIEW" ]; then
   PRIOR_APPROVAL=$(gh api repos/$REPO/issues/$ARGUMENTS/comments \
     --jq '[.[] | select(.body | startswith("## Review: Approved"))] | last')
   if [ -n "$PRIOR_APPROVAL" ]; then
-    APPROVAL_COMMIT_SHA=$(... extract from PRIOR_APPROVAL ...)
-    DIFF_SHAPE=$(python -m scripts.pr_shape_classify --diff-from "$APPROVAL_COMMIT_SHA" --diff-to HEAD)
-    SAFE_SHAPES="docs-only lockfile-only small-patch"
-    if echo "$SAFE_SHAPES" | grep -wq "$DIFF_SHAPE"; then
-      echo "REVIEW_COMMENT: PASS — Prior approval at $APPROVAL_COMMIT_SHA preserved (post-approval diff is $DIFF_SHAPE)"
-      LAST_REVIEW="$PRIOR_APPROVAL"
+    PRIOR_BODY=$(echo "$PRIOR_APPROVAL" | python -c "import json,sys; print(json.load(sys.stdin)['body'])")
+
+    # Extract head_sha from the REVIEW_CONTEXT HTML-comment trailer.
+    # Trailer format: <!-- REVIEW_CONTEXT head_sha=<40-char-sha> pr_body_hash=<12-char-hash> -->
+    APPROVAL_COMMIT_SHA=$(echo "$PRIOR_BODY" | grep -oE 'REVIEW_CONTEXT head_sha=[a-f0-9]{40}' | sed 's/REVIEW_CONTEXT head_sha=//' | tail -1)
+
+    if [ -z "$APPROVAL_COMMIT_SHA" ]; then
+      # Trailer missing or malformed — pre-trailer reviews (before this feature) lack the marker.
+      # Fail closed: do NOT re-admit the prior approval. Surface the reason for the dev.
+      echo "REVIEW_COMMENT: SKIP — prior approval has no REVIEW_CONTEXT trailer; cannot anchor safe-shape diff. Falling through to require fresh review." >&2
+    else
+      # Ensure the approval SHA is fetched locally so git diff can resolve it.
+      # `gh pr checkout` only fetches the PR's HEAD ref; older SHAs may not be in
+      # the local objects database when /do-merge runs from a fresh clone or
+      # after a worktree switch.
+      git -C "${SDLC_TARGET_REPO:-.}" cat-file -e "$APPROVAL_COMMIT_SHA" 2>/dev/null || \
+        git -C "${SDLC_TARGET_REPO:-.}" fetch origin "$APPROVAL_COMMIT_SHA" 2>/dev/null || {
+          echo "REVIEW_COMMENT: SKIP — approval SHA $APPROVAL_COMMIT_SHA not fetchable; falling through to require fresh review." >&2
+          APPROVAL_COMMIT_SHA=""
+        }
+    fi
+
+    if [ -n "$APPROVAL_COMMIT_SHA" ]; then
+      HEAD_SHA=$(git -C "${SDLC_TARGET_REPO:-.}" rev-parse HEAD)
+      DIFF_SHAPE=$(python -m scripts.pr_shape_classify --diff-from "$APPROVAL_COMMIT_SHA" --diff-to "$HEAD_SHA" \
+                   | python -c "import json,sys; print(json.load(sys.stdin)['shape'])")
+      SAFE_SHAPES="docs-only lockfile-only small-patch"
+      if echo "$SAFE_SHAPES" | grep -wq "$DIFF_SHAPE"; then
+        echo "REVIEW_COMMENT: PASS — Prior approval at ${APPROVAL_COMMIT_SHA:0:7} preserved (post-approval diff is $DIFF_SHAPE)"
+        LAST_REVIEW="$PRIOR_APPROVAL"
+      else
+        echo "REVIEW_COMMENT: SKIP — post-approval diff is $DIFF_SHAPE (not a safe shape); fresh review required." >&2
+      fi
     fi
   fi
 fi
 ```
 
-This narrows the existing #1155 commit-SHA filter; it does not replace it. A `feature`-shape follow-up still invalidates the prior approval (status quo).
+**Why `head_sha` from the trailer, not the comment timestamp:** The PR's commit history can be force-pushed; reviews can be replayed idempotently (per `.claude/skills/do-pr-review/sub-skills/post-review.md:149-156`, an idempotent replay re-emits the prior verdict on the *same* HEAD SHA + body hash). The trailer's `head_sha` is the SHA the reviewer actually evaluated — the only stable anchor. The `created_at` timestamp moves on every replay; the commit history can vanish under force-push.
+
+**Why fail closed when trailer is missing:** Reviews authored before the REVIEW_CONTEXT trailer existed (`do-pr-review` pre-this-feature, or human-authored reviews that bypassed the skill) have no anchor SHA. Granting them safe-shape exemption would require *guessing* the approved SHA from comment metadata — a guess that opens the gate against an unverified state. The conservative behavior is to require a fresh review; this matches the original #1155 stale-review filter's safe direction.
+
+This narrows the existing #1155 commit-SHA filter; it does not replace it. A `feature`-shape follow-up still invalidates the prior approval (status quo). A safe-shape follow-up on a pre-trailer approval also still invalidates (defensive).
 
 **Targeted-test mapping for `small-patch`:**
 
+The glob strategy uses two tiers, exact-match-first to bound over-matching:
+
 ```python
 # Inside scripts/pr_shape_classify.py
+SHORT_STEM_THRESHOLD = 4  # stems shorter than this are treated as ambiguous
+
 def map_to_tests(touched_files: list[str], repo_root: Path) -> list[str] | None:
-    """Return list of test files for the touched files, or None if any touched file has no mapping."""
+    """Return list of test files for the touched files, or None if any touched file has no mapping.
+
+    Two-tier strategy:
+      Tier 1 — exact-name match: `tests/**/test_{stem}.py`. Always tried first.
+      Tier 2 — substring match: `tests/**/test_*{stem}*.py`. Only used as fallback
+               when Tier 1 finds nothing AND the stem is long enough to be
+               reasonably specific (≥ SHORT_STEM_THRESHOLD characters).
+
+    Short stems (e.g. "io", "db", "fs") are NOT eligible for substring matching —
+    they would over-match wildly (test_db.py, test_db_loader.py, test_app_db.py,
+    test_db_pool.py, ... all match for stem "db"). Short-stem files with no
+    Tier 1 match return None → classifier falls back to `feature` shape.
+
+    Per-file substring-match safety cap: if Tier 2 returns more than
+    SUBSTRING_MATCH_CAP test files for one source file, the classifier
+    treats it as "ambiguous mapping" and returns None — the cap rejects
+    the small-patch shape rather than running an unbounded test set.
+    """
+    SUBSTRING_MATCH_CAP = 8  # max tests per single source file before we bail
     tests: list[str] = []
     for f in touched_files:
         stem = Path(f).stem
-        candidates = list(repo_root.glob(f"tests/**/test_{stem}.py")) + \
-                     list(repo_root.glob(f"tests/**/test_*{stem}*.py"))
-        if not candidates:
-            return None  # Falls back to feature shape
-        tests.extend(str(c.relative_to(repo_root)) for c in candidates)
+        if stem.startswith("_") or stem == "__init__":
+            return None  # private helpers and package markers — fall back to feature
+
+        # Tier 1: exact-name match
+        exact = list(repo_root.glob(f"tests/**/test_{stem}.py"))
+        if exact:
+            tests.extend(str(c.relative_to(repo_root)) for c in exact)
+            continue
+
+        # Tier 2: substring match (long stems only)
+        if len(stem) < SHORT_STEM_THRESHOLD:
+            return None  # short stem with no exact match → ambiguous → fall back
+
+        substring = list(repo_root.glob(f"tests/**/test_*{stem}*.py"))
+        if not substring:
+            return None
+        if len(substring) > SUBSTRING_MATCH_CAP:
+            # Over-match — running 9+ tests for one file source means our glob
+            # is no longer "targeted." Fall back to feature shape and let the
+            # full suite run.
+            return None
+        tests.extend(str(c.relative_to(repo_root)) for c in substring)
     return sorted(set(tests))
 ```
 
-If `map_to_tests` returns `None` for any touched file, the classifier returns `feature`, not `small-patch`. This is the safety property: silent test-mapping failure cannot wave a regression through.
+If `map_to_tests` returns `None` for any touched file, the classifier returns `feature`, not `small-patch`. This is the safety property: silent test-mapping failure (or ambiguous over-matching) cannot wave a regression through. The unit test suite for `test_pr_shape_classify.py` MUST cover both the short-stem fallback and the over-match cap.
+
+**Why the constants:**
+- `SHORT_STEM_THRESHOLD = 4` — stems of length ≥4 are specific enough that substring matches are meaningful (e.g., "config" → `test_config_loader.py`, `test_app_config.py` is a manageable set; but "io" → 30+ matches is not). The threshold is a defended constant, documented in the docstring, and exercised in tests.
+- `SUBSTRING_MATCH_CAP = 8` — a single source file mapping to 8 tests is the upper bound of "targeted" before the dispatch cost approaches the full suite. Empirically, 8 covers the typical case of a module with one main test file plus a few related integration tests.
 
 ## Failure Path Test Strategy
 
@@ -300,9 +426,26 @@ If `map_to_tests` returns `None` for any touched file, the classifier returns `f
 - [ ] `tests/unit/test_do_merge_baseline.py` — UPDATE: add a test for the cache layer's interaction with `compute_gate_verdict()` — specifically: a cached verdict for `pr=N, sha=X` MUST still pass through `format_staleness_warning` (the warning is not cached; it's recomputed on every call so a freshly-stale baseline still warns even on cache hit).
 - [ ] `tests/unit/test_validate_merge_guard.py` — UPDATE: add a test that `python -m scripts.pr_shape_classify` is allowed by the guard (it's a read-only command, not a `gh pr merge` call). Should pass without modification, but assert explicitly to prevent regression.
 - [ ] `tests/unit/test_do_merge_review_filter.py` — UPDATE: add a test for the safe-shape exemption — a prior `## Review: Approved` followed by a docs-only commit MUST re-admit the prior approval. Adversarial: a prior approval followed by a `feature`-shape commit MUST NOT re-admit.
-- [ ] `tests/unit/test_pr_shape_classify.py` (NEW) — REPLACE: greenfield. Cover: each shape's happy path, every `mixed` defect path (claims docs-only but edits .py; claims lockfile-only but edits pyproject.toml; claims small-patch but creates new file; claims small-patch but exceeds line budget; claims small-patch but has untestable file), ambiguity → `feature`, empty diff → `feature`, malformed diff → `feature`.
-- [ ] `tests/unit/test_pr_shape_cache.py` (NEW) — REPLACE: greenfield. Cover: hit, miss, cache key includes baseline hash (baseline change → miss), LRU eviction at 100 entries, atomic write doesn't corrupt on interrupt, corrupt file resets to empty.
-- [ ] `tests/integration/test_do_merge_shape_routing.sh` (NEW) — REPLACE: greenfield. End-to-end: synthesize a fake PR diff for each shape, invoke the shape-routing block from `do-merge.md`, assert the correct gates ran (e.g., for `docs-only`, `pytest` was NOT invoked).
+- [ ] `tests/unit/test_pr_shape_classify.py` (NEW) — REPLACE: greenfield. Cover:
+  - Each shape's happy path
+  - Every `mixed` defect path (claims docs-only but edits .py; claims lockfile-only but edits pyproject.toml; claims small-patch but creates new file; claims small-patch but exceeds line budget; claims small-patch but has untestable file)
+  - `mixed` 50%-threshold algorithm: 1 doc + 1 py → mixed (docs-only claimed); 1 doc + 5 py → feature (docs claim too thin); `uv.lock` + `pyproject.toml` → mixed (lockfile-only claimed)
+  - Test-mapping safety: short stem (`io`, `db`, `fs`) with no Tier 1 match → returns None → classifier returns feature
+  - Test-mapping safety: substring over-match (>8 hits) → returns None → classifier returns feature
+  - Test-mapping safety: `__init__.py` and `_helper.py` always return None
+  - `--diff-from`/`--diff-to` mode: missing local SHA → exits 2 with stderr message; valid SHAs → returns shape JSON
+  - Ambiguity → `feature`, empty diff → `feature`, malformed diff → `feature`
+- [ ] `tests/unit/test_pr_shape_cache.py` (NEW) — REPLACE: greenfield. Cover:
+  - Hit, miss, cache key includes baseline hash (baseline change → miss)
+  - LRU eviction at 100 entries
+  - Atomic write doesn't corrupt on interrupt (kill mid-write, assert canonical file remains valid)
+  - Corrupt file resets to empty (write garbage, assert get_cached_verdict returns None and logs warning)
+  - **Concurrent write serialization**: two threads each call `write_verdict` with different PR/SHA inputs; assert final cache contains BOTH entries (not one). This is the regression test for the `fcntl.flock` mitigation of Race 1.
+  - **Lock timeout**: hold the lock manually for >10s, call `write_verdict`; assert it returns without raising and logs a "lock timeout" warning, no partial write.
+- [ ] `tests/integration/test_do_merge_shape_routing.sh` (NEW) — REPLACE: greenfield. End-to-end: synthesize a fake PR diff for each shape, invoke the shape-routing block from `do-merge.md`, assert the correct gates ran (e.g., for `docs-only`, `pytest` was NOT invoked). Include the safe-shape exemption fail-closed cases:
+  - Prior approval body without REVIEW_CONTEXT trailer → exemption SKIPS, fresh review required
+  - Prior approval body with REVIEW_CONTEXT trailer but the SHA is not fetched → exemption SKIPS after fetch fails
+  - Prior approval body with valid trailer + safe-shape post-approval diff → exemption PASSES, prior approval re-admitted
 
 ## Rabbit Holes
 
@@ -324,7 +467,11 @@ If `map_to_tests` returns `None` for any touched file, the classifier returns `f
 
 ### Risk 3: Touched-file → test glob misses a test that DOES cover the touched function
 **Impact:** A `small-patch` shape runs targeted tests only, skipping a test in a different file that would have caught the regression. Falsely passes.
-**Mitigation:** Conservative glob casts a wide net (`test_*{stem}*.py` not just `test_{stem}.py`). Rabbit-hole rule: any touched file with zero matched tests downgrades to `feature`. Tests that cross modules (integration tests) are caught by `tests/integration/test_*{stem}*.py` glob. Documented limitation: deeply indirect coupling (e.g., a function imported transitively by `tests/unit/test_other.py`) is not caught — but neither is it caught by the full suite when only the unit test for the touched stem runs in isolation. The relevant comparison is "targeted tests vs. nothing," not "targeted tests vs. omniscient test selection."
+**Mitigation:** Two-tier glob: exact-name `test_{stem}.py` first, then substring `test_*{stem}*.py` for stems ≥4 chars only. Per-file cap of 8 substring matches before falling back to `feature`. Any touched file with zero matched tests downgrades to `feature`. Documented limitation: deeply indirect coupling (e.g., a function imported transitively by `tests/unit/test_other.py`) is not caught — but neither is it caught by the full suite when only the unit test for the touched stem runs in isolation. The relevant comparison is "targeted tests vs. nothing," not "targeted tests vs. omniscient test selection."
+
+### Risk 6: Test-mapping glob over-matches and runs an unintended test set
+**Impact:** A `small-patch` for `tools/db.py` (stem "db") would substring-match `test_db.py`, `test_db_loader.py`, `test_app_db.py`, `test_db_pool.py`, and dozens more if uncapped — defeating the targeted-test goal and possibly running tests that fail for unrelated reasons.
+**Mitigation:** `SHORT_STEM_THRESHOLD = 4` rejects substring matching for stems shorter than 4 chars (the most over-match-prone bucket). `SUBSTRING_MATCH_CAP = 8` rejects substring sets larger than 8 per source file. Both constants are documented and unit-tested. When either rejects a file, the classifier returns `feature` — the safe direction.
 
 ### Risk 4: Safe-shape exemption admits an approval whose context has changed
 **Impact:** A prior approval might have been given assuming a specific code state; a docs-only follow-up that reframes the docs could imply a different intent.
@@ -336,12 +483,13 @@ If `map_to_tests` returns `None` for any touched file, the classifier returns `f
 
 ## Race Conditions
 
-### Race 1: Concurrent `/do-merge` invocations on the same PR
+### Race 1: Concurrent `/do-merge` invocations cause read-modify-write entry loss
 **Location:** `scripts/pr_shape_cache.py::write_verdict`
-**Trigger:** Two PM sessions (or a PM and a manual run) invoke `/do-merge` for the same PR simultaneously.
-**Data prerequisite:** Both processes read the cache file before either writes.
-**State prerequisite:** Both compute verdicts and try to write atomically.
-**Mitigation:** Atomic write via `os.rename` on POSIX — the last writer wins. Both verdicts are correct (same input, same code → same output). The lost write is a missed cache entry, not a correctness issue. No locking required.
+**Trigger:** Two `/do-merge` invocations (e.g., a PM session and a manual run) compute verdicts for two *different* PRs simultaneously and try to write to the cache file.
+**Data prerequisite:** Both processes read the cache file (each sees the same set of N entries), each adds its own new entry, each writes back N+1 entries.
+**State prerequisite:** Both `os.rename` calls land in sequence. The naive atomic-write pattern means writer A's N+1 entries get overwritten by writer B's N+1 entries — A's new entry is lost (but the existing N entries survive because B also had them).
+**Real failure mode:** When the writers' input *also* differs in which old entry the LRU eviction drops (e.g., A and B both compute a new entry, the cache is at exactly 100 entries, both run LRU eviction independently and pick different victims), the final state has TWO new entries missing — A's new entry and B's evicted entry that A would have kept.
+**Mitigation:** `fcntl.flock(LOCK_EX)` on `data/pr_shape_verdict_cache.lock` wrapping the entire read-modify-write critical section. The lock serialises writers; the `os.rename` tail is then an atomic step inside an already-serial section. Verdicts themselves are deterministic (same input → same output) so a lost cache entry is at most one extra pytest run on the next invocation — not a correctness issue. Lock timeout 10s; on timeout the writer logs a warning and skips the write.
 
 ### Race 2: Baseline file rewritten mid-gate by a concurrent merge
 **Location:** `data/main_test_baseline.json` is rewritten by `do-merge.md`'s post-merge reset block
@@ -492,10 +640,10 @@ The classifier is invoked as a Bash command from inside `do-merge.md`. It does n
 - **Assigned To**: shape-test-engineer
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- `tests/unit/test_pr_shape_classify.py` — every shape happy path + every `mixed` disqualifier path + ambiguity → feature + empty/malformed input
-- `tests/unit/test_pr_shape_cache.py` — hit, miss, baseline-change invalidation, LRU eviction, atomic write, corrupt-file recovery
-- `tests/integration/test_do_merge_shape_routing.sh` — synthesize a fake PR diff for each shape, invoke routing, assert correct gates ran
-- Update `tests/unit/test_do_merge_review_filter.py` for safe-shape exemption (positive + adversarial cases)
+- `tests/unit/test_pr_shape_classify.py` — every shape happy path + every `mixed` disqualifier path + 50%-threshold algorithm cases + short-stem fallback + substring over-match cap + `__init__.py` rejection + `--diff-from`/`--diff-to` mode (missing-SHA exit 2; valid SHAs return JSON) + ambiguity → feature + empty/malformed input
+- `tests/unit/test_pr_shape_cache.py` — hit, miss, baseline-change invalidation, LRU eviction, atomic write, corrupt-file recovery, concurrent-write serialization (the `fcntl.flock` regression test for Race 1), lock-timeout no-write
+- `tests/integration/test_do_merge_shape_routing.sh` — synthesize a fake PR diff for each shape, invoke routing, assert correct gates ran. Include the safe-shape exemption fail-closed cases (missing trailer SKIPS; unfetchable SHA SKIPS; valid trailer + safe-shape diff PASSES)
+- Update `tests/unit/test_do_merge_review_filter.py` for safe-shape exemption (positive + adversarial cases including the trailer-missing SKIP regression)
 
 ### 5. Documentation
 - **Task ID**: document-feature
@@ -519,7 +667,9 @@ The classifier is invoked as a Bash command from inside `do-merge.md`. It does n
 - Run `bash tests/integration/test_do_merge_shape_routing.sh`
 - Run `python -m ruff check scripts/pr_shape_classify.py scripts/pr_shape_cache.py`
 - Verify `docs/features/pr-shape-aware-merge-gates.md` exists and is referenced from `docs/features/README.md`
-- Verify the `data/pr_shape_verdict_cache.json` is gitignored (covered by `data/` rule)
+- Verify `git check-ignore data/pr_shape_verdict_cache.json` exits 0 (gitignored under `data/` rule at `.gitignore:181`)
+- Verify `git check-ignore data/pr_shape_verdict_cache.lock` exits 0 (lock sidecar also under `data/`)
+- Verify the safe-shape exemption fail-closed paths via the integration script: missing trailer SKIPS, unfetchable SHA SKIPS, valid trailer + safe-shape diff PASSES
 - Generate final report
 
 ## Verification
@@ -536,12 +686,24 @@ The classifier is invoked as a Bash command from inside `do-merge.md`. It does n
 | Feature doc exists | `test -f docs/features/pr-shape-aware-merge-gates.md` | exit code 0 |
 | Feature doc indexed | `grep -q pr-shape-aware-merge-gates docs/features/README.md` | exit code 0 |
 | Cache file gitignored | `git check-ignore data/pr_shape_verdict_cache.json` | exit code 0 |
+| Cache lock gitignored | `git check-ignore data/pr_shape_verdict_cache.lock` | exit code 0 |
+| Trailer extraction regex | `echo '## Review: Approved\n<!-- REVIEW_CONTEXT head_sha=abc123def456abc123def456abc123def4567890 pr_body_hash=deadbeefcafe -->' \| grep -oE 'REVIEW_CONTEXT head_sha=[a-f0-9]{40}'` | matches the trailer line |
+| Concurrent-write race regression | `pytest tests/unit/test_pr_shape_cache.py::test_concurrent_writers_serialize -v` | exit code 0, both entries present in final cache |
+| Short-stem fallback | `pytest tests/unit/test_pr_shape_classify.py::test_short_stem_falls_back_to_feature -v` | exit code 0 |
+| Substring over-match cap | `pytest tests/unit/test_pr_shape_classify.py::test_substring_overmatch_cap -v` | exit code 0 |
+| Trailer-missing SKIP | `pytest tests/unit/test_do_merge_review_filter.py::test_safe_shape_exemption_skips_when_trailer_missing -v` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Adversary | `APPROVAL_COMMIT_SHA=$(... extract from PRIOR_APPROVAL ...)` was a placeholder; no concrete extraction logic. The whole safe-shape exemption is unimplementable without an anchor SHA. | Stale-review safe-shape exemption block | Replaced with `grep -oE 'REVIEW_CONTEXT head_sha=[a-f0-9]{40}'` extraction from the `<!-- REVIEW_CONTEXT head_sha=<SHA> ... -->` trailer that `/do-pr-review` already emits. Falls closed (skips exemption) when trailer is missing or SHA is unfetchable. |
+| CONCERN | Skeptic | `mixed`-shape detection ("relaxed allowlist" pattern) was hand-waved; no concrete pseudocode. | Solution → Classifier `mixed` detection | Replaced with deterministic 50%-threshold majority-match algorithm. Pseudocode + 4 worked examples + defended threshold constant. Unit-tested. |
+| CONCERN | Operator | `data/` gitignore claim was unverified. If the rule were absent, the cache file would be committed. | Solution → Cache file location + Step 6 Verification | Confirmed `data/` is gitignored at `.gitignore:181`. Added `git check-ignore` verification to Step 6 and Verification table. |
+| CONCERN | Adversary | Cache atomic-write race was understated. RMW pattern loses entries beyond just the writer's own; LRU-eviction-under-contention can lose two entries per race. | Cache section + Race 1 mitigation | Added `fcntl.flock(LOCK_EX)` on `data/pr_shape_verdict_cache.lock` wrapping the entire RMW critical section. 10s timeout. New unit test for concurrent-write serialization. |
+| CONCERN | Skeptic | `head_sha` vs comment-timestamp vs commit-history semantics for the approval-anchor SHA were not spelled out. Multiple ambiguous candidates. | Stale-review safe-shape exemption block (rationale paragraph) | Documented why `head_sha` from the trailer is the only stable anchor (force-push tolerance + idempotent-replay tolerance). Other candidates explicitly rejected. |
+| CONCERN | Operator | Classifier's `--diff-from`/`--diff-to` mode requires both SHAs to be in the local objects DB, but `gh pr checkout` only fetches HEAD. No fetch step was specified. | Classifier CLI mode 2 + safe-shape exemption block | Added `git cat-file -e` precondition check + `git fetch origin <sha>` fallback in the safe-shape exemption block. Classifier exits 2 with clear stderr message if SHA missing. |
+| CONCERN | User | Test-mapping glob `test_*{stem}*.py` over-matches for short stems (e.g., "db" matches 30+ files), defeating the targeted-test goal. | Solution → `map_to_tests` two-tier strategy + Risk 6 | Two-tier glob: exact `test_{stem}.py` first, substring fallback only for stems ≥4 chars and ≤8 hits. New unit test cases for short-stem fallback and over-match cap. |
 
 ---
 
