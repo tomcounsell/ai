@@ -458,22 +458,7 @@ class TestBehavioralLearningCallable:
         assert "skipped" in result["summary"]
 
 
-# ============================================================
-# reflections.daily_report
-# ============================================================
-
-
-class TestDailyReportCallable:
-    """Smoke tests for reflections/daily_report.py."""
-
-    def test_run_no_reflections(self):
-        """run() returns valid dict when no reflections have run today."""
-        from reflections.daily_report import run
-
-        with (
-            patch("models.reflection.Reflection") as mock_ref,
-            patch("reflections.daily_report.load_local_projects", return_value=[]),
-        ):
-            mock_ref.query.all.return_value = []
-            result = run_async(run())
-        assert_valid_result(result)
+# reflections.daily_report was deleted in issue #1292; the daily-log slot
+# (reflections/pm_audio_briefing/daily_log.py) is now the canonical home for
+# the aggregator/renderer/vault-writer helpers, and its end-to-end behavior
+# is exercised via tests/integration/reflections/test_pm_briefings_dispatch.py.

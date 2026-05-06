@@ -2,7 +2,7 @@
 
 Verifies that the Layer 2 (prefixed) and Layer 3 (bare 3+ digit) regexes
 imported from reflections.pm_audio_briefing.builder catch the leak patterns
-the daily-report audio brief is most likely to produce: "PR 1263",
+the daily-log audio brief is most likely to produce: "PR 1263",
 "issue #1263", "10 commits". The exempted-units list (ms, %, requests, etc.)
 must continue to pass.
 """

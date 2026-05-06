@@ -1,9 +1,13 @@
-"""Unit tests for reflections/daily_report.py aggregator (#1263).
+"""Unit tests for the daily-log aggregator (#1263, inlined per #1292).
 
 Covers the per-source collectors for AgentSession, TelegramMessage, Memory,
 crash_tracker, Reflection.run_history, and date-boundary correctness. Git/gh
 collectors are exercised via subprocess fakes (FakePopen) so the tests don't
 depend on a live shell.
+
+The aggregator originally lived in ``reflections/daily_report.py``; it was
+inlined into ``reflections.pm_audio_briefing.daily_log`` when the legacy
+``daily-report-and-notify`` registry entry was retired (issue #1292).
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-import reflections.daily_report as dr
+import reflections.pm_audio_briefing.daily_log as dr
 
 
 @pytest.fixture
@@ -344,12 +348,6 @@ def test_decision_bearing_classifications_matches_plan():
         "instruction",
         "plan-request",
     }
-
-
-def test_audio_session_id_prefix_globally_unique():
-    """Per Risk 5, the prefix must match the reflection registry name to avoid
-    collision with other reflections."""
-    assert dr.AUDIO_SESSION_ID_PREFIX == "daily-report-and-notify"
 
 
 def test_resolve_vault_path_includes_daily_logs():
