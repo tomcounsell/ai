@@ -122,7 +122,7 @@ External research skipped — this is an internal refactor with no new dependenc
 - **New types**: `AccessLevel` enum in `config/enums.py` (or equivalent canonical declaration). Members: `WORKER` (full permissions + WORKER_RULES), `PM_READONLY` (PM mode, no WORKER_RULES, with work-vault CLAUDE.md), `TEAMMATE` (conversational, no rails), `CUSTOMER_SERVICE` (action-oriented, no code writes).
 - **New function**: `compose_system_prompt(persona, access_level, channel=None, *, project=None, working_directory=None) -> str` in `agent/sdk_client.py` (or a new `agent/persona_composer.py` if extraction is preferred — the plan defaults to keeping it adjacent to the existing loaders to keep the diff focused).
 - **Removed/redirected functions**: `load_system_prompt()` and `load_pm_system_prompt()` become thin wrappers that call `compose_system_prompt(...)` with the right tuple. `_load_persona_overlay_with_log()` stays as a logging adapter but now delegates the actual composition to `compose_system_prompt`.
-- **Picker collapse**: both `sdk_client.py:3326–3395` and `session_executor.py:1430–1486` collapse to a single helper `_resolve_compose_args(session_type, project, transport, ...) -> (persona, access_level, channel)` that lives in one place and is called from both sites.
+- **Picker collapse**: both `sdk_client.py` (Block A at L3349–L3363 — persona enum resolution; Block B at L3382–L3419 — system-prompt assembly) and `session_executor.py:1563–1629` collapse to a single helper `_resolve_compose_args(session_type, project, transport, ...) -> (persona, access_level, channel)` that lives in one place and is called from both sites. Block B is replaced with one `compose_system_prompt(*args)` call per site.
 - **Channel-aware drafter**: `bridge/message_drafter.py:draft_message(raw_response, session=None, *, medium="telegram", persona=None)` already accepts `medium` (today wired through to `_validate_for_medium` only — see `bridge/message_drafter.py:1720`–1747). This plan extends `medium` from validator-only into prompt selection: the drafter system prompt splits into a medium-agnostic base section plus a per-medium format section. **No new public parameter is introduced** — `medium` already exists, defaults to `"telegram"`, and is documented as the per-medium prompt/validator discriminator. The base section keeps the drafter's current voice content in place — no shared `voice.md` segment is introduced in this plan (see Risk 4 + No-Gos; consolidation is deferred to a follow-up).
 - **Coupling**: Slightly *decreased*. Today the picker knows about three concerns (session type, project mode, transport). After: the picker knows only about resolving three values; the composer knows only about composition; the drafter knows only about channel format.
 - **Reversibility**: High. The composer is purely additive; the new enum is small; both wrappers preserve their old signatures for safety. Rollback = revert the diff.
@@ -156,6 +156,34 @@ Communication overhead is the bottleneck: the seven architectural questions each
 - **`load_system_prompt()` / `load_pm_system_prompt()` wrappers**: kept as thin shims for backward compatibility. They delegate to the composer with the appropriate tuple. New code is encouraged to call the composer directly.
 - **Voice rules consolidation: deferred (out of scope).** Voice content (banned phrases, no-empty-promises, tone) stays in its current locations — per-persona overlays + `DRAFTER_SYSTEM_PROMPT` — for this plan. Promoting voice rules into a shared `voice.md` segment is **explicitly out of scope** because adding a new segment to `manifest.json` would change the assembled prompt bytes for the existing four cells and break Risk 1's byte-stability mitigation (see Risk 4 + No-Gos). A follow-up plan, opened after this composer ships and stabilizes, will move voice content into a shared source. This plan only introduces the composer; the drafter's voice content stays exactly where it is.
 - **Medium-aware drafter**: `bridge/message_drafter.py:draft_message(...)` already accepts `medium="telegram" | "email"` (see `bridge/message_drafter.py:1720`). The drafter composes its system prompt as `BASE_DRAFTER_PROMPT + MEDIUM_RULES[medium]`. Today's behaviour is the `medium="telegram"` cell. `BASE_DRAFTER_PROMPT` retains the drafter's current voice content verbatim (no extraction to a separate file in this plan).
+
+### Composer Signature & Call Sites (Pin-Down)
+
+**Pinned signature:**
+
+```python
+def compose_system_prompt(
+    persona: PersonaType,                  # required — one of 4 enum members
+    access_level: AccessLevel,             # required — one of 4 enum members
+    channel: str | None = None,            # accepted, currently unused (forward-compat; see Question 4 / Open Q1)
+    *,
+    project: dict | None = None,           # for project.email.persona override + work-vault CLAUDE.md
+    working_directory: str | None = None,  # required when access_level == PM_READONLY (raises ValueError otherwise)
+) -> str:
+```
+
+**The four entry points that funnel through it:**
+
+| # | Today's call site | Today's behavior | Composer call after refactor |
+|---|-------------------|------------------|-------------------------------|
+| 1 | `agent/sdk_client.py:966` `load_system_prompt()` (kept as wrapper) | Builds developer + WORKER_RULES + principal + completion criteria | `compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER)` |
+| 2 | `agent/sdk_client.py:998` `load_pm_system_prompt(working_dir)` (kept as wrapper) | Builds project-manager + work-vault CLAUDE.md, no WORKER_RULES | `compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, working_directory=working_dir)` |
+| 3a | `agent/sdk_client.py:3382–3419` Block B (`get_response_via_harness` path) | Branches by `_session_type` / `project_mode` / `persona` to call one of `load_pm_system_prompt`, `_load_persona_overlay_with_log` | Replaced with: `args = _resolve_compose_args(_session_type, project, _session_extra_context.get("transport"), chat_title, is_dm); custom_system_prompt = compose_system_prompt(*args, project=project, working_directory=working_dir)` |
+| 3b | `agent/session_executor.py:1563–1629` (harness-route persona resolution) | Builds `_pm_system_prompt: str | None` via the parallel ladder (PM session → `load_pm_system_prompt`; email/teammate → `_load_persona_overlay_with_log`) | Same `_resolve_compose_args(...)` + `compose_system_prompt(...)` call. Edge case: this site can produce `None` (PM persona load failure → harness runs without overlay). The composer never returns `None` — failure modes raise. The call site catches and falls back to `None` to preserve today's "warn and degrade" behavior at log line `[pm-persona-missing]`. |
+
+(There is also `bridge/message_drafter.py` `draft_message` — a fifth funnel for the *drafter's* system prompt — but it composes a different prompt for a different model, so it does **not** call `compose_system_prompt`. It instead calls a sibling helper `_compose_drafter_prompt(medium)` introduced in this plan. See Drafter prompt assembly below.)
+
+**Net result:** four working-agent call sites collapse to two function bodies (the picker helper + the composer), called from three places (the two wrappers + the two pickers, where each picker is one location-not-two after collapse). Drafter is a parallel cleanup with its own helper, not a sub-call of the agent composer.
 
 ### Flow
 
