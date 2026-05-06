@@ -378,17 +378,42 @@ This is a one-time injection at install time; updating `.env` secrets requires r
 
 | Heartbeat age | Status | Action |
 |--------------|--------|--------|
-| < 600s | `ok` | Log debug, exit |
+| < 600s | `ok` | Log debug, exit. Reset down-tick counter if present. |
 | Missing (file absent) | `starting` | Skip — worker may be initializing |
-| Worker PID absent | `down` | Log info — launchd handles restart |
+| Worker PID absent | `down` | **Active recovery via 4-level escalation (issue #1311)** — see below |
 | ≥ 600s (10 min) | `stale` | Kill worker (SIGTERM → SIGKILL if needed) so launchd restarts |
 
 The threshold (600s = 2× health-loop interval of 300s) gives a healthy worker plenty of slack while catching genuine hangs within two watchdog ticks (240s).
+
+**Active recovery escalation** (when worker process is missing — issue #1311):
+
+Prior to issue #1311 the watchdog only logged `Worker not running — launchd handles restart` and exited, relying on launchd `KeepAlive=true` to bring the worker back. On 2026-05-06 the worker died at 08:37 UTC and KeepAlive failed to restart it for 7+ hours, leaving every layer logging the failure but none recovering. The watchdog now actively escalates.
+
+A persistent counter (`data/worker_watchdog_down_ticks`) tracks consecutive missing-worker ticks across watchdog process restarts. Each watchdog tick is a fresh launchd invocation, so the counter must survive on disk.
+
+| Level | Trigger | Action |
+|-------|---------|--------|
+| L1 | First down tick (count == 1) | Log `Worker missing — giving launchd one tick to restart` and exit. Give launchd a chance. |
+| L2 | Second consecutive down tick (count >= 2) | `launchctl kickstart -k gui/<uid>/com.valor.worker`, then poll `pgrep` for up to 10s. On success, clear counter. |
+| L3 | L2 verify failed | `launchctl enable gui/<uid>/com.valor.worker` (clears sticky-disable from `worker-disable`) + kickstart + verify. On success, clear counter. |
+| L4 | L3 verify failed AND count >= 3 | Log CRITICAL with hostname + tick count. Write `worker:watchdog:critical:{hostname}` Redis key (TTL 1h, JSON payload `{hostname, tick_count, last_attempt_at, reason}`). Counter persists; subsequent ticks repeat L4 idempotently. |
+
+**Operator-disable short-circuit**: if `data/worker-disabled` exists at the very top of `main()`, the watchdog logs `Worker disabled by operator — skipping check` and returns without touching launchctl. This protects deliberate `worker-disable` operator actions.
+
+**Tick lock**: the watchdog acquires a non-blocking `flock` on `data/worker_watchdog.lock` at the start of each tick. If the lock is held (a previous tick still running), the new tick logs `Another watchdog tick is in flight — skipping` and exits. This prevents the down-tick counter from being double-incremented when launchd fires faster than the kickstart+verify completes.
+
+**Single-handler logger**: the previous module called `logging.basicConfig()` AND attached a rotating file handler to a named logger that propagated to root, while the launchd plist redirected stdout/stderr to the same log file. Net result: every line written twice. The fix configures the named logger explicitly with `propagate = False` and exactly one rotating file handler. Regression test: `len(monitoring.worker_watchdog.logger.handlers) == 1`.
 
 **Check status**:
 ```bash
 python monitoring/worker_watchdog.py --check   # print status, exit 0=ok, 1=stale/down
 tail -f logs/worker_watchdog.log
+
+# Inspect the critical signal (L4):
+redis-cli GET worker:watchdog:critical:$(hostname)
+
+# Reset escalation counter manually (e.g. after fixing the underlying cause):
+rm -f data/worker_watchdog_down_ticks
 ```
 
 **Installed by** `scripts/install_worker.sh` as `${SERVICE_LABEL_PREFIX}.worker-watchdog`.
