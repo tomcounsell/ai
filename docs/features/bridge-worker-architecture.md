@@ -134,6 +134,15 @@ The worker's startup sequence is deterministic:
 | 7 | `_session_notify_listener()` | Background task: subscribe to `valor:sessions:new` pub/sub, wake worker on new session (~1s pickup) |
 | 8 | `run_idle_sweep()` | Background task: proactively tears down idle persistent Claude SDK clients on dormant/paused sessions before the ~48h Anthropic silent-death window (issue #1128). See [Worker-Internal Idle Sweeper](#worker-internal-idle-sweeper-issue-1128). |
 
+### Media Enrichment (issue #1297)
+
+Telegram media (photos, voice, audio, documents) requires both Telethon RPC (download) and an AI call (vision / Whisper / extraction). The two halves are split along the bridge/worker boundary:
+
+- **Bridge** runs `download_media(client, message)` synchronously at intake, with a 10-second `asyncio.wait_for` timeout. The downloaded file's absolute path is persisted on `TelegramMessage.media_local_path`. On timeout or error, `media_download_error` is populated instead. Net intake-latency cost: ~200ms-1s for media messages, zero for text-only.
+- **Worker** reads `TelegramMessage.media_local_path` from the persisted record (no Telethon import in `worker/`) and calls `bridge.media.process_downloaded_media(path, media_type)` for the AI half. The worker also handles every "skipped" branch (download failed, file unreadable, no record) and emits a single `[enrichment] Summary: media=...` log line per session.
+
+Full contract and field-level reference live in [media-enrichment.md](media-enrichment.md). The sibling reply-chain branch in `bridge/enrichment.py` still requires a Telethon client and is silently skipped in the worker until a follow-up issue lands; that is **not** considered fixed by sdlc-1297.
+
 ### Execution Harness Routing
 
 All session types (dev, pm, teammate) execute via the CLI harness (`claude -p`). There is no SDK execution branch — the `DEV_SESSION_HARNESS` feature flag was eliminated in issue #912.

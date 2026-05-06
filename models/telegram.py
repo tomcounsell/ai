@@ -36,6 +36,12 @@ class TelegramMessage(Model):
     # === Media and enrichment metadata ===
     has_media = Field(type=bool, default=False)
     media_type = Field(null=True)
+    # Bridge-side downloaded media (sdlc-1297). Absolute path to the file the
+    # bridge downloaded at intake (or None if download failed). The worker reads
+    # this file to perform AI enrichment (vision/Whisper/extraction); the worker
+    # never speaks Telethon.
+    media_local_path = Field(null=True)
+    media_download_error = Field(null=True)
     youtube_urls = Field(null=True)  # JSON-encoded list of (url, video_id) tuples
     non_youtube_urls = Field(null=True)  # JSON-encoded list of URL strings
     reply_to_msg_id = Field(type=int, null=True)

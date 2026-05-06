@@ -385,25 +385,22 @@ async def describe_image(filepath: Path) -> str | None:
 # =============================================================================
 
 
-async def process_incoming_media(client: TelegramClient, message) -> tuple[str, list[Path]]:
-    """
-    Process media in an incoming message.
+async def process_downloaded_media(downloaded: Path, media_type: str) -> tuple[str, list[Path]]:
+    """Run AI enrichment (vision/transcription/extraction) on an already-downloaded media file.
 
-    Returns (description_text, list_of_file_paths).
-    The description_text is meant to be prepended to the message for context.
+    This is the worker-side half of media processing: validate the file, then dispatch
+    to describe_image / transcribe_voice / extract_document_text based on media_type.
+    No Telethon dependency — the file path is the only input.
 
-    Files are validated after download. Invalid/corrupted files are described
-    but not referenced by path, preventing downstream API errors when the agent
-    tries to read them.
+    Args:
+        downloaded: Path to the file the bridge downloaded at intake.
+        media_type: One of "photo", "image", "voice", "audio", "document".
+
+    Returns:
+        (description_text, list_of_file_paths) — same shape as process_incoming_media.
     """
-    media_type = get_media_type(message)
     if not media_type:
         return "", []
-
-    # Download the media
-    downloaded = await download_media(client, message, prefix=media_type)
-    if not downloaded:
-        return f"[User sent a {media_type} but download failed]", []
 
     # Validate the downloaded file
     is_valid, validation_error = validate_media_file(downloaded)
@@ -433,7 +430,7 @@ async def process_incoming_media(client: TelegramClient, message) -> tuple[str, 
             description = f"[User sent a voice message - saved to {downloaded.name}]"
 
     elif media_type in ("photo", "image"):
-        # Use Ollama LLaVA to describe the image
+        # Use Claude Haiku 4.5 vision to describe the image
         image_description = await describe_image(downloaded)
         if image_description:
             description = f"[User sent an image]\nImage description: {image_description}"
@@ -460,3 +457,27 @@ async def process_incoming_media(client: TelegramClient, message) -> tuple[str, 
             description = f"[User sent a document - saved to {downloaded.name}]"
 
     return description, files
+
+
+async def process_incoming_media(client: TelegramClient, message) -> tuple[str, list[Path]]:
+    """
+    Process media in an incoming message (download + AI enrichment).
+
+    Returns (description_text, list_of_file_paths).
+    The description_text is meant to be prepended to the message for context.
+
+    Thin wrapper that combines download_media + process_downloaded_media. After
+    sdlc-1297 the bridge calls download_media at intake and the worker calls
+    process_downloaded_media; this combined entrypoint is retained for callers
+    that still have a live Telethon client (e.g. tests, ad-hoc tools).
+    """
+    media_type = get_media_type(message)
+    if not media_type:
+        return "", []
+
+    # Download the media
+    downloaded = await download_media(client, message, prefix=media_type)
+    if not downloaded:
+        return f"[User sent a {media_type} but download failed]", []
+
+    return await process_downloaded_media(downloaded, media_type)

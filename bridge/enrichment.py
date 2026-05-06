@@ -1,68 +1,57 @@
 """Deferred message enrichment for the session worker.
 
-This module contains enrichment logic that was previously executed inline
-in the Telegram event handler. By deferring these operations to the session
-worker, the event handler can enqueue messages within milliseconds instead
-of blocking on media processing, YouTube transcription, link summaries,
-and reply chain fetching.
+This module contains enrichment logic executed in the worker before agent
+invocation. The bridge owns Telegram RPC and the worker owns AI work; that
+split is reflected here:
 
-The enrich_message() function is called by the session worker in _execute_agent_session()
-before invoking the agent, so the agent still receives fully enriched text.
+* Media: the bridge downloads the file at intake and persists
+  ``TelegramMessage.media_local_path``. The worker calls
+  ``process_downloaded_media(path, media_type)`` (no Telethon dependency).
+  This restores the broken-after-bridge/worker-split contract — see #1297.
+* YouTube / link summaries: still deferred to the worker as before.
+* Reply chain: the existing branch still requires a Telethon client and is
+  silently skipped in the worker until a follow-up issue lands. Tracking:
+  companion to #1297.
+
+The :func:`enrich_message` function is called from
+``agent/session_executor.py`` in the worker process before invoking the agent,
+so the agent receives fully enriched text.
 """
 
 import json
 import logging
+import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Module-level Telegram client reference, set by the bridge at startup.
-_telegram_client = None
-
-
-def set_telegram_client(client) -> None:
-    """Register the Telegram client for use by enrichment operations.
-
-    Called once from telegram_bridge.py main() after client creation.
-    """
-    global _telegram_client
-    _telegram_client = client
-
-
-def get_telegram_client():
-    """Return the registered Telegram client, or None."""
-    return _telegram_client
-
 
 async def enrich_message(
-    telegram_client,
     message_text: str,
-    has_media: bool = False,
-    media_type: str | None = None,
-    raw_media_message_id: int | None = None,
+    *,
+    telegram_message=None,
     youtube_urls: str | None = None,
     non_youtube_urls: str | None = None,
-    reply_to_msg_id: int | None = None,
-    chat_id: str | None = None,
     sender_name: str | None = None,
+    chat_id: str | None = None,
     message_id: int | None = None,
 ) -> str:
     """Perform deferred enrichment on a message before agent invocation.
 
     Each enrichment step is independent and guarded by a try/except so that
-    a failure in one step does not prevent the others from running. If all
-    steps fail, the original message_text is returned unchanged.
+    a failure in one step does not prevent the others from running.
 
     Args:
-        telegram_client: Telethon TelegramClient (may be None if unavailable).
         message_text: The cleaned message text from the event handler.
-        has_media: Whether the original message had media attached.
-        media_type: Type string ("photo", "voice", "document", etc.).
-        raw_media_message_id: Original Telegram message ID for media download.
+        telegram_message: The persisted ``TelegramMessage`` record for this
+            message, or ``None`` for non-Telegram / legacy / manual-test
+            sessions where no record was created. When ``None``, the media
+            and reply-chain branches are skipped without warning — this is a
+            normal path, not an error.
         youtube_urls: JSON-encoded list of (url, video_id) tuples.
         non_youtube_urls: JSON-encoded list of URL strings.
-        reply_to_msg_id: Telegram message ID of the parent reply, if any.
-        chat_id: Telegram chat ID (as string) for API calls.
         sender_name: Name of the message sender.
+        chat_id: Telegram chat ID (as string) for link-summary metadata.
         message_id: Telegram message ID of the current message.
 
     Returns:
@@ -73,29 +62,63 @@ async def enrich_message(
     youtube_count = 0
     link_count = 0
 
-    # --- 1. Media processing ---
-    if has_media and telegram_client and raw_media_message_id and chat_id:
-        try:
-            from bridge.media import process_incoming_media
+    # --- 1. Media processing (worker-side AI on bridge-downloaded file) ---
+    media_summary = "no"
+    has_media = bool(getattr(telegram_message, "has_media", False)) if telegram_message else False
+    if telegram_message is None:
+        # Non-Telegram session, manual test, or pre-migration record: nothing
+        # to enrich. This is a normal path; do not log a warning.
+        media_summary = "skipped:no_record"
+    elif has_media:
+        media_local_path = getattr(telegram_message, "media_local_path", None)
+        media_download_error = getattr(telegram_message, "media_download_error", None)
+        media_type = getattr(telegram_message, "media_type", None)
 
-            # Fetch the original message object so we can process its media
-            chat_id_int = int(chat_id)
-            msg_obj = await telegram_client.get_messages(chat_id_int, ids=raw_media_message_id)
-            if msg_obj and msg_obj.media:
-                media_description, _media_files = await process_incoming_media(
-                    telegram_client, msg_obj
+        if not media_local_path:
+            # Bridge attempted the download but it failed (or the bridge ran
+            # before this code shipped, in which case the field is None).
+            if media_download_error:
+                logger.warning(
+                    f"[enrichment] media download failed at intake "
+                    f"({media_download_error}); skipping AI enrichment"
                 )
-                if media_description:
-                    if enriched_text and not enriched_text.startswith("--"):
-                        enriched_text = f"{media_description}\n\n{enriched_text}"
-                    else:
-                        enriched_text = media_description
-                    logger.info(
-                        f"Enrichment: processed media ({media_type}): {media_description[:100]}..."
+                media_summary = "skipped:download_failed"
+            else:
+                logger.warning(
+                    "[enrichment] has_media=True but media_local_path is unset; "
+                    "skipping AI enrichment (legacy record?)"
+                )
+                media_summary = "skipped:no_path"
+        else:
+            path = Path(media_local_path)
+            if not (path.exists() and os.access(path, os.R_OK)):
+                logger.warning(
+                    f"[enrichment] media file at {path} not readable; skipping AI enrichment"
+                )
+                media_summary = "skipped:file_unreadable"
+            else:
+                try:
+                    from bridge.media import process_downloaded_media
+
+                    media_description, _files = await process_downloaded_media(
+                        path, media_type or "media"
                     )
-        except Exception as e:
-            logger.warning(f"Enrichment: media processing failed: {e}")
-            failed_steps.append("media")
+                    if media_description:
+                        if enriched_text and not enriched_text.startswith("--"):
+                            enriched_text = f"{media_description}\n\n{enriched_text}"
+                        else:
+                            enriched_text = media_description
+                        logger.info(
+                            f"Enrichment: processed media ({media_type}): "
+                            f"{media_description[:100]}..."
+                        )
+                        media_summary = "yes"
+                    else:
+                        media_summary = "skipped:no_description"
+                except Exception as e:
+                    logger.warning(f"Enrichment: media AI processing failed: {e}")
+                    failed_steps.append("media")
+                    media_summary = "failed"
 
     # --- 2. YouTube URL transcription ---
     if youtube_urls:
@@ -105,8 +128,6 @@ async def enrich_message(
             parsed_urls = json.loads(youtube_urls)
             youtube_count = len(parsed_urls)
             if parsed_urls:
-                # process_youtube_urls_in_text works on raw text containing URLs,
-                # so we pass the enriched_text which should contain the URLs.
                 yt_enriched, youtube_results = await process_youtube_urls_in_text(enriched_text)
                 successful = sum(1 for r in youtube_results if r.get("success"))
                 # Always apply enriched text — failure context strings must reach the agent too
@@ -133,8 +154,6 @@ async def enrich_message(
             parsed_urls = json.loads(non_youtube_urls)
             link_count = len(parsed_urls)
             if parsed_urls:
-                # get_link_summaries expects the raw text to extract URLs from.
-                # Since we already have the URLs, we construct a text with them.
                 urls_text = " ".join(parsed_urls)
                 link_summaries = await get_link_summaries(
                     text=urls_text,
@@ -154,36 +173,16 @@ async def enrich_message(
             failed_steps.append("links")
 
     # --- 4. Reply chain context ---
-    reply_chain_count = 0
-    if reply_to_msg_id and telegram_client and chat_id:
-        try:
-            from bridge.context import fetch_reply_chain, format_reply_chain
+    # Telethon-dependent; the worker has no Telethon client. Tracked as a
+    # companion follow-up to #1297. Skipped silently here so this branch does
+    # not regress until the follow-up persists pre-fetched reply chains.
+    reply_chain_summary = "skipped:companion_issue"
 
-            chat_id_int = int(chat_id)
-            reply_chain = await fetch_reply_chain(
-                telegram_client,
-                chat_id_int,
-                reply_to_msg_id,
-                max_depth=20,
-            )
-            if reply_chain:
-                reply_chain_count = len(reply_chain)
-                reply_chain_context = format_reply_chain(reply_chain)
-                if reply_chain_context:
-                    enriched_text = f"{reply_chain_context}\n\nCURRENT MESSAGE:\n{enriched_text}"
-                    logger.info(
-                        f"Enrichment: fetched reply chain with {reply_chain_count} messages"
-                    )
-        except Exception as e:
-            logger.warning(f"Enrichment: reply chain fetch failed: {e}")
-            failed_steps.append("reply_chain")
-
-    # Log a single enrichment summary line
-    has_media_result = "yes" if (has_media and telegram_client) else "no"
+    # Single enrichment summary line
     summary = (
-        f"[enrichment] Summary: media={has_media_result}, "
+        f"[enrichment] Summary: media={media_summary}, "
         f"youtube={youtube_count}, links={link_count}, "
-        f"reply_chain={reply_chain_count} messages, "
+        f"reply_chain={reply_chain_summary}, "
         f"result_length={len(enriched_text)}"
     )
     if failed_steps:

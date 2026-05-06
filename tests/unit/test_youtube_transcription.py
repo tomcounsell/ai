@@ -193,7 +193,6 @@ async def test_enrichment_applies_yt_text_even_on_failure():
         from bridge.enrichment import enrich_message
 
         result = await enrich_message(
-            telegram_client=None,
             message_text=original_text,
             youtube_urls=json.dumps(
                 [("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ")]
@@ -229,7 +228,6 @@ async def test_enrichment_applies_yt_text_on_success():
         from bridge.enrichment import enrich_message
 
         result = await enrich_message(
-            telegram_client=None,
             message_text=original_text,
             youtube_urls=json.dumps([("https://www.youtube.com/watch?v=abc123", "abc123")]),
         )

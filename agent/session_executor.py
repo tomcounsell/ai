@@ -1320,6 +1320,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
         enrich_youtube_urls = None
         enrich_non_youtube_urls = None
         enrich_reply_to_msg_id = None
+        # sdlc-1297: hold the loaded TelegramMessage to pass into enrich_message,
+        # so the worker-side media branch can read media_local_path off the record
+        # rather than reaching for a (non-existent) Telethon client.
+        trigger_telegram_message = None
 
         if session.telegram_message_key:
             try:
@@ -1330,6 +1334,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 )
                 if trigger_msgs:
                     tm = trigger_msgs[0]
+                    trigger_telegram_message = tm
                     enrich_has_media = bool(tm.has_media)
                     enrich_media_type = tm.media_type
                     enrich_youtube_urls = tm.youtube_urls
@@ -1377,20 +1382,18 @@ async def _execute_agent_session(session: AgentSession) -> None:
             or enrich_reply_to_msg_id
         ):
             try:
-                from bridge.enrichment import enrich_message, get_telegram_client
+                from bridge.enrichment import enrich_message
 
-                tg_client = get_telegram_client()
+                # sdlc-1297: pass the loaded TelegramMessage; the worker no
+                # longer needs a Telethon client. Media files are downloaded
+                # by the bridge at intake and read from media_local_path here.
                 enriched_text = await enrich_message(
-                    telegram_client=tg_client,
                     message_text=session.message_text,
-                    has_media=enrich_has_media,
-                    media_type=enrich_media_type,
-                    raw_media_message_id=session.telegram_message_id,
+                    telegram_message=trigger_telegram_message,
                     youtube_urls=enrich_youtube_urls,
                     non_youtube_urls=enrich_non_youtube_urls,
-                    reply_to_msg_id=enrich_reply_to_msg_id,
-                    chat_id=session.chat_id,
                     sender_name=session.sender_name,
+                    chat_id=session.chat_id,
                     message_id=session.telegram_message_id,
                 )
             except Exception as e:
