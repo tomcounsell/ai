@@ -25,8 +25,8 @@ import yaml
 # Constants
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = Path(__file__).resolve().parents[4]  # .claude/skills/do-skills-audit/scripts -> repo
-SKILLS_DIR = REPO_ROOT / ".claude" / "skills"
+REPO_ROOT = Path(__file__).resolve().parents[4]  # .claude/skills-global/do-skills-audit/scripts -> repo
+SKILLS_DIR = REPO_ROOT / ".claude" / "skills-global"
 MAX_LINES = 500
 MAX_DESC_LEN = 1024
 MAX_NAME_LEN = 64

@@ -17,7 +17,7 @@ How to extend the Valor system with new capabilities.
 
 ## Adding a Claude Code Skill
 
-Skills live in `.claude/skills/<skill>/SKILL.md`:
+Skills live in `.claude/skills-global/<skill>/SKILL.md` (cross-repo) or `.claude/skills/<skill>/SKILL.md` (project-only):
 
 ```markdown
 ---
@@ -38,7 +38,7 @@ Description of what this skill does.
 Step-by-step instructions for the most common use of this skill.
 ```
 
-### Examples (in `.claude/skills/`)
+### Examples (in `.claude/skills-global/` for cross-repo, `.claude/skills/` for project-only)
 
 - `prime/SKILL.md` - Codebase onboarding
 - `pthread/SKILL.md` - Parallel thread execution
@@ -255,4 +255,4 @@ Before marking a new feature complete:
 
 - Run `/prime` for codebase orientation
 - See `docs/tools-reference.md` for tool documentation
-- Check `.claude/skills/` for skill examples
+- Check `.claude/skills-global/` for cross-repo skill examples, `.claude/skills/` for project-specific ones

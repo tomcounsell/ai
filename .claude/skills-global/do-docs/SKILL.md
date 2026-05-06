@@ -118,7 +118,8 @@ Scan these locations:
 | CLAUDE.md | Primary project guidance, architecture, rules |
 | docs/features/*.md | Feature documentation |
 | docs/plans/*.md | Plans that may reference this as prerequisite |
-| .claude/skills/*/SKILL.md | Workflow skill definitions |
+| .claude/skills-global/*/SKILL.md | Workflow skill definitions (cross-repo) |
+| .claude/skills/*/SKILL.md | Workflow skill definitions (project-only) |
 | .claude/commands/*.md | Slash commands |
 | config/identity.json | Structured identity data |
 | docs/*.md (top-level) | Deployment, tools-reference, etc. |
@@ -250,7 +251,7 @@ Using the **Retired terms** from Agent A's summary, grep across ALL docs for old
 
 ```bash
 # For each retired term, search all doc locations
-rg "<retired-term>" docs/ CLAUDE.md config/identity.json config/personas/segments/ .claude/commands/ .claude/skills/
+rg "<retired-term>" docs/ CLAUDE.md config/identity.json config/personas/segments/ .claude/commands/ .claude/skills/ .claude/skills-global/
 ```
 
 Add any new hits to the affected documents list from Step 2.

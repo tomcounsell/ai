@@ -144,7 +144,7 @@ After the PR is created, run the `/do-docs` cascade to find and surgically updat
 /do-docs {PR-number}
 ```
 
-This invokes the cascade skill defined in `.claude/skills/do-docs/SKILL.md`, which:
+This invokes the cascade skill defined in `.claude/skills-global/do-docs/SKILL.md`, which:
 - Launches parallel agents to explore the change diff and inventory all docs
 - Cross-references changes against every doc in the repo (triage questions)
 - Makes targeted surgical edits to affected docs (read before edit, preserve structure)

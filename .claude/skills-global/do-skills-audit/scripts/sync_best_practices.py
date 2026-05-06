@@ -42,8 +42,8 @@ CREATOR_FILE = REFERENCES_DIR / "anthropic-skill-creator.md"
 METADATA_FILE = REFERENCES_DIR / "metadata.json"
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-OUR_TEMPLATE = REPO_ROOT / ".claude" / "skills" / "new-skill" / "SKILL_TEMPLATE.md"
-OUR_SKILL_DOCS = REPO_ROOT / ".claude" / "skills" / "new-skill" / "SKILL.md"
+OUR_TEMPLATE = REPO_ROOT / ".claude" / "skills-global" / "new-skill" / "SKILL_TEMPLATE.md"
+OUR_SKILL_DOCS = REPO_ROOT / ".claude" / "skills-global" / "new-skill" / "SKILL.md"
 
 SKILLS_DOCS_URL = "https://code.claude.com/docs/en/skills"
 SKILL_CREATOR_URL = (
@@ -440,7 +440,7 @@ def apply_updates(report: dict) -> list[str]:
 
 def scan_skills_for_updates(report: dict) -> list[dict]:
     suggestions = []
-    skills_dir = REPO_ROOT / ".claude" / "skills"
+    skills_dir = REPO_ROOT / ".claude" / "skills-global"
 
     for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
         skill_name = skill_md.parent.name

@@ -1,4 +1,4 @@
-"""Hardlink sync for .claude/{skills,commands,hooks} to ~/.claude/."""
+"""Hardlink sync for .claude/{skills-global,commands,hooks} to ~/.claude/."""
 
 from __future__ import annotations
 
@@ -30,9 +30,9 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,
-# macOS Messages, system logs, Google Workspace). These are NOT synced to
-# ~/.claude/skills/ because they only work in the context of this project.
-# All other skills are shared cross-repo via hardlinks.
+# macOS Messages, system logs, Google Workspace). These live in .claude/skills/
+# and are NOT synced to ~/.claude/skills/ — they only work in this project.
+# All globally-shared skills live in .claude/skills-global/ and are synced.
 PROJECT_ONLY_SKILLS: set[str] = {
     "telegram",
     "reading-sms-messages",
@@ -82,9 +82,8 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     result = HardlinkSyncResult()
     user_claude = Path.home() / ".claude"
 
-    # Sync skills: each is a directory containing SKILL.md.
-    # Skills are cross-repo tools (do-test, do-plan, etc.) — always shared.
-    _sync_skills(project_dir / ".claude" / "skills", user_claude / "skills", result)
+    # Sync globally-shared skills from skills-global/ (not skills/, which is project-only).
+    _sync_skills(project_dir / ".claude" / "skills-global", user_claude / "skills", result)
 
     # Sync commands: each is a .md file.
     # Commands are slash-command aliases — always shared.
@@ -103,7 +102,7 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
 
     # Clean up stale hardlinks that no longer have a source
     _cleanup_stale_commands(project_dir / ".claude" / "commands", user_claude / "commands", result)
-    _cleanup_stale_skills(project_dir / ".claude" / "skills", user_claude / "skills", result)
+    _cleanup_stale_skills(project_dir / ".claude" / "skills-global", user_claude / "skills", result)
     _cleanup_stale_commands(project_dir / ".claude" / "agents", user_claude / "agents", result)
 
     # Sync SDLC enforcement hooks to user level

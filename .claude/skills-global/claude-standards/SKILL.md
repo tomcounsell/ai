@@ -17,7 +17,7 @@ Audits the five classes of Claude Code assets in this repo against the best-prac
 | Skills | `.claude/skills/*/SKILL.md` | [STANDARDS_SKILLS.md](STANDARDS_SKILLS.md) |
 | Slash commands | `.claude/commands/*.md` | [STANDARDS_COMMANDS.md](STANDARDS_COMMANDS.md) |
 | Subagents | `.claude/agents/*.md` | [STANDARDS_SUBAGENTS.md](STANDARDS_SUBAGENTS.md) |
-| Hooks | `.claude/settings.json` + `.claude/hooks/**` | [STANDARDS_HOOKS.md](STANDARDS_HOOKS.md) (canonical source: `.claude/skills/audit-hooks/BEST_PRACTICES.md`) |
+| Hooks | `.claude/settings.json` + `.claude/hooks/**` | [STANDARDS_HOOKS.md](STANDARDS_HOOKS.md) (canonical source: `.claude/skills-global/audit-hooks/BEST_PRACTICES.md`) |
 | MCP servers | `config/mcp_library.json` + `mcp_servers/` (if present) | [STANDARDS_MCP.md](STANDARDS_MCP.md) |
 
 Each `STANDARDS_*.md` file holds the rules. Keep those files as the single source of truth; do not inline rules here.

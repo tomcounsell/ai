@@ -10,9 +10,13 @@ This directory contains Claude Code configuration for Valor - agents, skills, ho
 # Symlinks (already configured)
 ~/.claude/agents   -> ~/src/ai/.claude/agents
 ~/.claude/commands -> ~/src/ai/.claude/commands
-~/.claude/skills   -> ~/src/ai/.claude/skills
+~/.claude/skills   -> ~/src/ai/.claude/skills-global
 ~/.claude/hooks    -> ~/src/ai/.claude/hooks
 ```
+
+**Skills are split into two directories:**
+- `.claude/skills-global/` — 45 cross-repo skills synced to `~/.claude/skills/` (available everywhere)
+- `.claude/skills/` — project-only skills (telegram, google-workspace, etc.) that only work in this repo
 
 **Cross-repo usage:**
 - Working in `~/src/popoto/`? These agents and skills are available.

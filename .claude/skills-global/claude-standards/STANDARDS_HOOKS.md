@@ -4,13 +4,13 @@ Rules the `/claude-standards` skill uses to audit Claude Code hooks.
 
 **Asset location:** `.claude/settings.json` (hook registrations) and `.claude/hooks/**` (hook scripts).
 
-**Canonical reference:** This repo already maintains a detailed hook best-practices document at `.claude/skills/audit-hooks/BEST_PRACTICES.md`, used by the `/audit-hooks` skill. To avoid drift, `/claude-standards` **defers** to that file for hook rules.
+**Canonical reference:** This repo already maintains a detailed hook best-practices document at `.claude/skills-global/audit-hooks/BEST_PRACTICES.md`, used by the `/audit-hooks` skill. To avoid drift, `/claude-standards` **defers** to that file for hook rules.
 
 ---
 
 ## Rules
 
-All hook rules live in [`.claude/skills/audit-hooks/BEST_PRACTICES.md`](../audit-hooks/BEST_PRACTICES.md). When `/claude-standards` audits hooks, it should:
+All hook rules live in [`.claude/skills-global/audit-hooks/BEST_PRACTICES.md`](../audit-hooks/BEST_PRACTICES.md). When `/claude-standards` audits hooks, it should:
 
 1. Read that file for the current rule set.
 2. Apply the same Validator vs Advisory classification described there.

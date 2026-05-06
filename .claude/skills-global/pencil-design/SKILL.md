@@ -197,4 +197,4 @@ Run `mcp__pencil__get_guidelines` early in a session — it returns the live sch
 
 ## Distribution
 
-This skill lives at `~/src/ai/.claude/skills/pencil-design/SKILL.md` and is hardlinked to `~/.claude/skills/pencil-design/` by `scripts/update/hardlinks.py` on every `/update` run. Edits in either location update both (shared inode). Project-specific overrides (e.g. cuttlefish's brand rules) live in that project's own `.claude/skills/pencil-design/` and take precedence inside that repo.
+This skill lives at `~/src/ai/.claude/skills-global/pencil-design/SKILL.md` and is hardlinked to `~/.claude/skills/pencil-design/` by `scripts/update/hardlinks.py` on every `/update` run. Edits in either location update both (shared inode). Project-specific overrides (e.g. cuttlefish's brand rules) live in that project's own `.claude/skills/pencil-design/` and take precedence inside that repo.

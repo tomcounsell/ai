@@ -30,7 +30,8 @@ Telegram → Python Bridge (Telethon) → Claude Agent SDK → Claude API
 
 ```
 ai/                          # This repo
-├── .claude/skills/          # Claude Code skills (/prime, /pthread, /sdlc)
+├── .claude/skills/          # Project-specific skills
+├── .claude/skills-global/   # Cross-repo shared skills (/prime, /pthread, /sdlc)
 ├── agent/                   # Claude Agent SDK integration
 ├── bridge/                  # Telegram bridge
 ├── config/identity.json      # Structured identity data
@@ -50,7 +51,7 @@ ai/                          # This repo
 
 ### New Claude Code Skill
 
-Create `.claude/skills/<name>/SKILL.md` with instructions for Claude Code to follow.
+Create `.claude/skills-global/<name>/SKILL.md` for cross-repo skills, or `.claude/skills/<name>/SKILL.md` for project-specific ones.
 
 ### Permission Model
 

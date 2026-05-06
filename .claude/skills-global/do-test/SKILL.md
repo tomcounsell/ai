@@ -19,7 +19,7 @@ TEST_ARGS: $ARGUMENTS
 Before running tests, scan for any additional test-related skill docs in the project:
 
 ```bash
-ls .claude/skills/*test*/*.md 2>/dev/null
+ls .claude/skills/*test*/*.md .claude/skills-global/*test*/*.md 2>/dev/null
 ```
 
 **Read any discovered files.** They may define additional test runners, targets, or configurations beyond what this skill covers (e.g., mobile tests, browser tests, performance benchmarks). Incorporate their instructions alongside the defaults below.

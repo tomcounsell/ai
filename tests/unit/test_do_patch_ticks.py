@@ -23,7 +23,7 @@ import pytest
 
 from tools import plan_checkbox_writer as pcw
 
-DO_PATCH_SKILL = Path(".claude/skills/do-patch/SKILL.md")
+DO_PATCH_SKILL = Path(".claude/skills-global/do-patch/SKILL.md")
 
 
 @pytest.fixture(scope="module")
