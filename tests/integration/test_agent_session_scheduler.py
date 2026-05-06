@@ -24,15 +24,26 @@ _PROJECT_ROOT = str(Path(__file__).parent.parent.parent)
 def _subprocess_env(**extra) -> dict:
     """Build env dict for subprocess calls that routes them to the test Redis DB.
 
-    Popoto picks up REDIS_URL at import time. By pointing subprocesses at
-    db=1 (the same DB the redis_test_db fixture uses for non-xdist runs),
-    we prevent test sessions from leaking into production db=0.
+    Popoto picks up REDIS_URL at import time. We must point subprocesses at
+    the SAME per-worker test DB that the autouse ``redis_test_db`` fixture
+    selects (``tests/conftest.py``), otherwise under ``pytest -n auto`` the
+    parent worker reads/writes one DB while its subprocess reads/writes a
+    different one, and ``gw0`` and ``gw1`` subprocesses corrupt each other
+    in db=1.
+
+    pytest-xdist sets ``PYTEST_XDIST_WORKER`` in the worker process
+    environment (e.g. ``gw0``, ``gw1``); when unset (serial run) we fall
+    back to db=1, matching the autouse fixture's serial branch.
     """
     import os
 
     env = {**os.environ, **extra}
-    # Use the same test DB that the redis_test_db conftest fixture selects
-    env["REDIS_URL"] = "redis://127.0.0.1:6379/1"
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if worker_id.startswith("gw"):
+        test_db = int(worker_id[2:]) + 1  # gw0->db1, gw1->db2, ...
+    else:
+        test_db = 1  # serial run
+    env["REDIS_URL"] = f"redis://127.0.0.1:6379/{test_db}"
     return env
 
 

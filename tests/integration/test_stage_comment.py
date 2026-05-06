@@ -2,6 +2,11 @@
 
 Posts a comment to a real GitHub issue, fetches it back, and verifies
 the format is correct. Uses the actual `gh` CLI.
+
+Every test posts to (and reads from) the SAME real GitHub issue, so the
+file relies on ``--dist=loadfile`` (set in ``pyproject.toml``) to pin all
+tests in the module to one xdist worker — concurrent posts otherwise race
+on the shared remote state.
 """
 
 import pytest

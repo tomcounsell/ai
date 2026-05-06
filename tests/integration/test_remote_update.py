@@ -1,4 +1,12 @@
-"""Tests for remote update: shell script, bridge intercept, restart flag lifecycle."""
+"""Tests for remote update: shell script, bridge intercept, restart flag lifecycle.
+
+Each test in this module exercises ``scripts/remote-update.sh`` against the
+real repository state (``data/update.lock``, ``data/restart-requested``).
+The script's lockfile and restart flag are host-global, so concurrent
+invocations would collide. ``--dist=loadfile`` (set in ``pyproject.toml``)
+keeps every test in this file on the same xdist worker so they run
+serially within the worker pool.
+"""
 
 import asyncio
 import os
