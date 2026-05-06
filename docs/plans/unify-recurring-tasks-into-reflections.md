@@ -188,9 +188,30 @@ This is the load-bearing section. The issue surfaces eight uncommitted architect
 - The 200-cap on embedded `run_history` already loses data for high-frequency reflections (e.g. `circuit-health-gate` at 60s burns through 200 entries in 3.3 hours — historical post-mortems are impossible).
 - fazm's `cron_jobs` + `cron_runs` split is proven prior art for the exact same problem.
 - Popoto's `KeyField` + filtered queries (`ReflectionExecution.query.filter(name=X, timestamp__gte=Y)`) handle "all runs of reflection X in the last 30 days" efficiently — exactly the dashboard-usability complaint.
-- `Reflection.last_run_summary` (a small dict of {ran_at, status, duration, error}) stays embedded for fast dashboard reads — the dashboard never needs full history per-row.
+- `Reflection.last_run_summary` (a small dict, schema below) stays embedded for fast dashboard reads — the dashboard never needs full history per-row.
 
-**Implementation guard:** `ReflectionExecution` records get a TTL (`Meta.ttl = 86400 * 90`, 90 days) to bound Redis growth. Cleanup happens automatically via Redis expiration, not via `cleanup_expired()` scans.
+**`mark_completed()` contract — explicit (cycle-4 B2 fix):**
+
+The current `Reflection.mark_completed(duration, error=None, projects=None)` at `models/reflection.py:85-128` does ONE save and writes a run record into `run_history` (capped at 200). Removing `run_history` cannot "preserve API surface where shape allows" because the destination field is gone. The new contract is:
+
+`Reflection.mark_completed(duration_ms: int, error: str | None = None, projects: list[dict] | None = None, *, cost_usd: float = 0.0, tokens_input: int = 0, tokens_output: int = 0) -> None`
+
+It performs **two Popoto saves** (one on `Reflection`, one on the new `ReflectionExecution` row) and updates the in-memory `last_run_summary` dict on `Reflection` *before* the Reflection save:
+
+| `Reflection.last_run_summary` field | Source | Purpose |
+|--------------------------------------|--------|---------|
+| `ran_at` | `time.time()` at call time | Fast dashboard "last ran N min ago" render |
+| `status` | `"success"` if `error is None` else `"error"` | Status pill colour on dashboard |
+| `duration_ms` | call arg | "Last run took X" badge |
+| `error_truncated` | `error[:200]` if `error` else `None` | Inline error preview without bloating the parent record |
+
+(`projects`, `cost_usd`, `tokens_input`, `tokens_output` land **only** on the `ReflectionExecution` row, not on `last_run_summary` — the summary is for fast render, not for cost reconstruction. The dashboard's per-run cost view reads from `ReflectionExecution`.)
+
+Atomicity: the two saves are **best-effort, not transactional**. Justification: Popoto/Redis offers no multi-key transaction primitive without WATCH/MULTI scripting that the project does not currently use anywhere; introducing it for one writer is over-engineering. The failure mode "summary save succeeds but execution row save fails" is documented in Race Conditions (Race 4) and self-heals on the next successful tick. The opposite "execution row succeeds, summary save fails" is benign — the dashboard simply shows the previous summary while the new execution is queryable; the next successful run overwrites the summary. Both paths preserve forward-progress.
+
+`mark_started()` continues to write only `last_status="running"` and `running_started_at` on `Reflection` (one save, unchanged shape). `mark_skipped()` writes `last_status="skipped"` on `Reflection` only (one save) — it does NOT create a `ReflectionExecution` row because skipped runs are not executions.
+
+**Implementation guard:** `ReflectionExecution` records get a TTL — see Q1 cycle-5 amendment below for the per-frequency tier (was uniform 90d in rev4; now 7d/30d/90d by interval). Cleanup happens automatically via Redis expiration, not via `cleanup_expired()` scans.
 
 **Cycle-3 ripple — `ui/data/reflections.py` must be updated in the same PR:** the dashboard reader currently calls `state.run_history` in five places (verified 2026-05-06 — drifted from rev3's three callsites because intermediate work added the `get_run_detail` fallback). Specifically:
 - Line 138: `has_history` truthiness check inside `_build_entry()`
@@ -513,6 +534,23 @@ The migration is fully reentrant — running it twice on the same machine is a n
 **Data prerequisite:** Schedule used for execution matches the schedule recorded at the time the run was scheduled
 **State prerequisite:** Updates take effect on the *next* tick, not the in-flight one
 **Mitigation:** Scheduler tick reads the entire `Reflection` record at the start of the iteration; uses that snapshot for the rest of the iteration. Update writes are atomic (Popoto save). Worst case: an in-flight tick uses the previous schedule once, then the next tick uses the new schedule. Acceptable; documented.
+
+### Race 4: `mark_completed()` split save — summary persists but execution row save fails (cycle-4 B2)
+**Location:** `models/reflection.py::Reflection.mark_completed()` (new contract per Q1)
+**Trigger:** First Popoto save (Reflection's `last_run_summary` update) succeeds; second Popoto save (`ReflectionExecution.create()`) fails — Redis hiccup, OOM, or transient network error.
+**Data prerequisite:** The dashboard fast-render path reads `Reflection.last_run_summary`; the per-execution audit path reads `ReflectionExecution.query.filter(name=...)`.
+**State prerequisite:** Forward progress is preserved on the next successful run.
+**Mitigation:** Accept the inconsistency window — the saves are **best-effort, not transactional** (justified in Q1: Popoto/Redis offers no multi-key transaction primitive without WATCH/MULTI scripting that the project does not currently use). Consequences:
+- **Summary saved, execution row missing:** the dashboard summary shows the new run; the per-execution audit view skips one entry. The `cost_usd`/`tokens_*` totals are off by one run's worth until the next successful save. Self-heals on the next successful tick because the next `mark_completed()` writes both. Documented in `models/reflection.py` docstring.
+- **Summary save fails, execution row saved:** dashboard shows the *previous* summary while the new `ReflectionExecution` is queryable. The next successful tick overwrites the summary. Benign forward-progress.
+We deliberately do NOT add a "pending_run_persist" reconciler sidecar set — per the prevention-over-cleanup feedback, "a cleanup script that should never need to run is a smell." The two saves are independent enough that natural retry on the next tick is sufficient. Tests assert: (a) a simulated mid-`mark_completed()` failure does not corrupt either record, (b) the next tick converges, (c) the `cost_usd_total` rollup eventually re-balances.
+
+### Race 5: Migration scans `last_status="running"` before stuck-detection has fired (cycle-4 B3)
+**Location:** `scripts/migrate_reflections_yaml.py` Phase 2 (delta-loop backfill) vs `agent/reflection_scheduler.py:475-487` (existing 2× interval stuck-detection)
+**Trigger:** A worker crashed mid-run an hour ago. The scheduler has not yet ticked the 2× interval window that flips `last_status="running"` → `last_status="error"` for stuck reflections. `/update` runs in this gap.
+**Data prerequisite:** `last_status="running"` accurately reflects the worker's most recent view, even though the underlying execution is dead.
+**State prerequisite:** The migration's sidecar set absorbs the stuck record without losing data; the next migration run (or worker startup drain — see B3 mitigation in Q3) cleans it up.
+**Mitigation:** The migration sees `last_status="running"`, appends the reflection's name to `reflections:migration:pending_clear`, and skips the `run_history` clear. The `run_history` bytes remain on the parent record (stale, but readable). The dashboard reader (post-cycle-3 ripple) reads from `ReflectionExecution` rows only — so the leak is bytes-only, not correctness. On the next migration run *or* the next worker startup (B3 worker-startup drain), the stuck-detection has fired (`last_status="error"`), the sidecar drains, and `run_history` is cleared. The 14-day TTL on the sidecar (Q3 cycle-5 amendment) caps the pathological case where neither the worker nor `/update` runs for a long time. Tests assert: (a) migration with simulated stuck `running` record completes Phase 1 without blocking, (b) sidecar contains the name, (c) after stuck-detection fires the next migration drains it, (d) after 14d the sidecar entry expires and the *next-next* migration re-discovers any still-pending reflections from scratch.
 
 ## No-Gos (Out of Scope)
 
