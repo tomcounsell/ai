@@ -275,6 +275,14 @@ A stale caller can at worst append a spurious `session_events` entry. It cannot 
 
 **In-process vs. standalone:** When the update script runs inside the same process as the queue (bridge in-process update), `_active_workers` is populated and fully authoritative. When it runs as a CLI subprocess, `_active_workers` will always be empty and the function logs a warning before relying on the `updated_at` recency check.
 
+## Stall Reaction Dedup Reset (issue #1313)
+
+When `monitoring/session_watchdog.py::check_stalled_sessions` queues a user-visible ⏳ reaction for a stalled session (see [Bridge Self-Healing § 4a](bridge-self-healing.md#4a-user-visible-stall-alerts-monitoringsession_watchdogpy-issue-1313)), it claims the dedup key `watchdog:stall_reaction_applied:{session_id}` so the reaction is queued at most once per stall period.
+
+**Reset on healthy observation:** the same iteration loop in `check_stalled_sessions` calls `_clear_stall_reaction_dedup(session_id)` whenever the session's duration is within its threshold. This is the only point where the dedup key is deleted — there is no lifecycle hook in `models/agent_session.py` for this, by design. The watchdog-side placement keeps the diff inside `monitoring/session_watchdog.py` only and avoids threading reaction state through the broader transition machinery in this module.
+
+**Implication:** there is a ≤5-minute window (one watchdog tick interval) where ⏳ can briefly persist on the user's message after the session recovers, before the next tick clears the dedup. The recovery message itself lands first, so the user sees the recovery before the reaction is reset for a future stall.
+
 ## Design Constraints
 
 - **Import safety**: The module uses lazy imports for `tools.session_tags` and `agent.agent_session_queue` so it can be imported from `.claude/hooks/stop.py` subprocess context where those modules may not be on `sys.path`.
