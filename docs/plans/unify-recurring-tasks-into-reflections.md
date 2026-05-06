@@ -212,7 +212,17 @@ Atomicity: the two saves are **best-effort, not transactional**. Justification: 
 
 `mark_started()` continues to write only `last_status="running"` and `running_started_at` on `Reflection` (one save, unchanged shape). `mark_skipped()` writes `last_status="skipped"` on `Reflection` only (one save) — it does NOT create a `ReflectionExecution` row because skipped runs are not executions.
 
-**Implementation guard:** `ReflectionExecution` records get a TTL — see Q1 cycle-5 amendment below for the per-frequency tier (was uniform 90d in rev4; now 7d/30d/90d by interval). Cleanup happens automatically via Redis expiration, not via `cleanup_expired()` scans.
+**Implementation guard — per-frequency TTL tier (cycle-4 C1 fix):** `ReflectionExecution` records get a TTL keyed off the parent reflection's interval, not a uniform 90d. The previous rev4 design (`Meta.ttl = 86400 * 90`) over-retained noise from high-frequency reflections (`circuit-health-gate` at 60s would generate ~129,600 rows over 90d) and wasted Redis bytes on observability checks that lose interest within a week. The cycle-5 design uses three concrete subclasses, dispatched at create time:
+
+| Subclass | Effective interval (parent) | `Meta.ttl` | Rationale |
+|----------|----------------------------|-----------|-----------|
+| `ReflectionExecutionHigh` | `every:` ≤ 300s (5 min) or `cron:` firing more often than once per 5 min | `86400 * 7` (7d) | Per-minute tick noise self-cleans within a week; post-mortems on circuit-health-gate beyond a week add no value. |
+| `ReflectionExecutionMedium` | parent interval ≤ 3600s (1 hour) | `86400 * 30` (30d) | One-month look-back is enough for hourly cadences. |
+| `ReflectionExecutionLow` | parent interval > 3600s (more than 1 hour, including all daily/weekly) | `86400 * 90` (90d) | Quarterly post-mortems on daily reflections survive holiday slowdowns. |
+
+The dispatcher is a single helper `agent/reflection_scheduler.py::_resolve_execution_class(reflection: Reflection) -> type[ReflectionExecution]` that inspects the parent's `schedule` field, computes the implied interval (using the same `compute_next_due()` logic), and returns the correct subclass. The migration script's Phase 2 backfill calls the same helper, so historical entries land in the right bucket. Net Redis growth drops by ~80% versus uniform 90d.
+
+Subclass-via-multiple-models was chosen over per-row TTL via `instance.redis_db.expire()` because (a) it stays purely declarative — no "is this raw Redis or not" question to litigate; (b) it composes cleanly with the no-raw-Redis-on-Popoto-keys invariant enforced by `.claude/hooks/validators/validate_no_raw_redis_delete.py`; (c) one extra base class per bucket is cheap. All three subclasses inherit a common base `ReflectionExecution(Model)` with the shared field schema; only `Meta.ttl` differs. Read paths (`ReflectionExecution.query.filter(name=...)`) iterate across all three subclasses via `chain()` or a tiny `query_all_executions(name=...)` helper. Cleanup happens automatically via Redis expiration, not via `cleanup_expired()` scans.
 
 **Cycle-3 ripple — `ui/data/reflections.py` must be updated in the same PR:** the dashboard reader currently calls `state.run_history` in five places (verified 2026-05-06 — drifted from rev3's three callsites because intermediate work added the `get_run_detail` fallback). Specifically:
 - Line 138: `has_history` truthiness check inside `_build_entry()`
@@ -518,7 +528,7 @@ The migration is fully reentrant — running it twice on the same machine is a n
 
 ### Risk 3: `ReflectionExecution` Redis growth is unbounded if TTL is misconfigured
 **Impact:** A high-frequency reflection (`circuit-health-gate` at 60s) generates 1,440 `ReflectionExecution` records per day. Without TTL, Redis grows ~500KB/day per reflection. Across 33 reflections this is meaningful in a year.
-**Mitigation:** `ReflectionExecution.Meta.ttl = 86400 * 90` (90 days). Tests assert TTL is set on every `ReflectionExecution.create(...)`. A weekly reflection (`reflection-runs-cleanup-watchdog`) verifies orphan rows aren't accumulating (defense in depth).
+**Mitigation (cycle-5 amendment):** Per-frequency TTL tier on three `ReflectionExecution` subclasses — `High` (≤5min, TTL 7d), `Medium` (≤1h, TTL 30d), `Low` (>1h, TTL 90d). See Q1 implementation guard for full rationale. Tests assert each subclass has the correct `Meta.ttl` and that `_resolve_execution_class()` dispatches correctly across the three tiers using `circuit-health-gate` (every: 60s → High), an hourly reflection (Medium), and `daily-log-review` (Low). A weekly reflection (`reflection-runs-cleanup-watchdog`) verifies orphan rows aren't accumulating across all three subclasses (defense in depth).
 
 ### Risk 4: MCP authorization model lets any session edit registry-loaded reflections
 **Impact:** An agent session calls `reflections_remove("daily-report-and-notify")` and the registry-loaded reflection is gone until the next scheduler restart re-creates it from YAML. Hidden state divergence from `reflections.yaml`.
@@ -629,7 +639,7 @@ Every criterion below is **executable** — it names a concrete check the valida
 
 - [ ] **All 8 architecture questions are answered in this plan with chosen path and rationale.** Proof: this document's `## Architecture Decisions` section. Already done.
 - [ ] **`models/reflection.py` carries new fields.** Proof: `python -c "from models.reflection import Reflection; r=Reflection(); [getattr(r, f) for f in ['schedule','output_sink','failure_count_consecutive','retry_policy','paused_until','cost_usd_total','tokens_input_total','tokens_output_total']]"` exits 0.
-- [ ] **`models/reflection_execution.py` exists with TTL=90 days.** Proof: `python -c "from models.reflection_execution import ReflectionExecution; assert ReflectionExecution.Meta.ttl == 86400 * 90, ReflectionExecution.Meta.ttl"` exits 0.
+- [ ] **`models/reflection_execution.py` exposes three subclasses with per-frequency TTL (cycle-5 C1).** Proof: `python -c "from models.reflection_execution import ReflectionExecutionHigh, ReflectionExecutionMedium, ReflectionExecutionLow; assert ReflectionExecutionHigh.Meta.ttl == 86400*7 and ReflectionExecutionMedium.Meta.ttl == 86400*30 and ReflectionExecutionLow.Meta.ttl == 86400*90"` exits 0. Proof: `pytest tests/unit/test_reflection_execution.py::test_resolve_execution_class_dispatches_by_interval -v` passes (covers High/Medium/Low tiers).
 - [ ] **`compute_next_due()` handles `cron:` / `every:` / `at:`; rejects `interval:`.** Proof: `pytest tests/unit/test_reflection_scheduler.py::test_compute_next_due_cron_every_at -v` passes; `pytest tests/unit/test_reflection_scheduler.py::test_compute_next_due_rejects_interval -v` passes.
 - [ ] **`~/Desktop/Valor/reflections.yaml` migrated to new grammar; idempotent.** Proof: `grep -E "^\s*interval:" ~/Desktop/Valor/reflections.yaml` exits 1 (no matches); running `python scripts/migrate_reflections_yaml.py` twice produces identical YAML on the second run (`md5 ~/Desktop/Valor/reflections.yaml` unchanged across two invocations).
 - [ ] **`dashboard.json` exposes new fields.** Proof: `curl -s localhost:8500/dashboard.json | python -c "import json,sys; d=json.load(sys.stdin); r=d['reflections'][0]; assert all(k in r for k in ('failure_count_consecutive','paused_until','cost_usd_total','output_sink'))"` exits 0.
@@ -745,7 +755,7 @@ Every criterion below is **executable** — it names a concrete check the valida
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `schedule`, `output_sink`, `failure_count_consecutive`, `retry_policy` (dict), `paused_until`, `cost_usd_total`, `tokens_input_total`, `tokens_output_total`, `created_by_session_id` to `Reflection`
-- Create `models/reflection_execution.py` with `ReflectionExecution` model and `Meta.ttl = 86400 * 90`
+- Create `models/reflection_execution.py` with three subclasses (`ReflectionExecutionHigh` TTL=7d, `ReflectionExecutionMedium` TTL=30d, `ReflectionExecutionLow` TTL=90d) sharing a common base — cycle-5 C1 per-frequency tier
 - Remove embedded `run_history` from `Reflection`; add `last_run_summary` dict for fast dashboard reads
 - Preserve existing `mark_started`, `mark_completed`, `mark_skipped` API surface where shape allows; refactor where shape changes
 
@@ -756,7 +766,7 @@ Every criterion below is **executable** — it names a concrete check the valida
 - **Agent Type**: validator
 - **Parallel**: false
 - Verify all new fields exist on the `Reflection` model
-- Verify `ReflectionExecution` Meta.ttl is 90 days
+- Verify the three `ReflectionExecution` subclasses each carry the correct `Meta.ttl` (7d/30d/90d for High/Medium/Low) and that `_resolve_execution_class()` dispatches an `every: 60s` reflection to High, an hourly reflection to Medium, and a daily reflection to Low (cycle-5 C1)
 - Verify Popoto save/load round-trips for both models without ListField descriptor issues
 - Verify `last_run_summary` is a dict, not a ListField
 
@@ -954,7 +964,7 @@ Every criterion below is **executable** — it names a concrete check the valida
 | Migration script idempotent | `python scripts/migrate_reflections_yaml.py --dry-run --check-idempotent` | exit code 0 |
 | Migration produces identical YAML on re-run | `md5 ~/Desktop/Valor/reflections.yaml` before and after a second `python scripts/migrate_reflections_yaml.py` | identical hash |
 | Dashboard surfaces new fields | `curl -s localhost:8500/dashboard.json \| python -c "import json,sys; d=json.load(sys.stdin); r=d['reflections'][0]; assert all(k in r for k in ('failure_count_consecutive','paused_until','cost_usd_total','output_sink'))"` | exit code 0 |
-| `ReflectionExecution` TTL set | `python -c "from models.reflection_execution import ReflectionExecution; assert ReflectionExecution.Meta.ttl == 86400 * 90"` | exit code 0 |
+| `ReflectionExecution` per-frequency TTL set (cycle-5 C1) | `python -c "from models.reflection_execution import ReflectionExecutionHigh, ReflectionExecutionMedium, ReflectionExecutionLow; assert ReflectionExecutionHigh.Meta.ttl == 86400*7 and ReflectionExecutionMedium.Meta.ttl == 86400*30 and ReflectionExecutionLow.Meta.ttl == 86400*90"` | exit code 0 |
 | MCP tool count = 7 | `python -c "from mcp_servers.reflections_server import _ALL_TOOLS; assert len(_ALL_TOOLS) == 7"` (or equivalent introspection per `mcp_servers/memory_server.py` pattern) | exit code 0 |
 
 ## Critique Results
