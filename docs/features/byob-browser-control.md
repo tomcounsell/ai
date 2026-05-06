@@ -57,15 +57,15 @@ No `flock(2)`. No per-process collision guard. No "MCP-vs-CLI precedence" -- the
       "type": "stdio",
       "command": "/Users/<you>/.byob/packages/mcp-server/node_modules/.bin/tsx",
       "args": ["/Users/<you>/.byob/packages/mcp-server/bin/byob-mcp.ts"],
-      "env": { "BYOB_ALLOW_EVAL": "0" }
+      "env": { "BYOB_ALLOW_EVAL": "1" }
     }
   }
 }
 ```
 
-The `command` is `tsx` (a TypeScript runner); the `args[0]` points at BYOB's TypeScript entry. This matches BYOB's own "Manual MCP registration" recipe in its README. The registrar resolves both paths from `~/.byob/` automatically.
+The `command` is `tsx` (a TypeScript runner); the `args[0]` points at BYOB's TypeScript entry. This matches BYOB's own "Manual MCP registration" recipe in its README. The registrar resolves both paths from `~/.byob/` automatically — it accepts either the workspace-root tsx (`~/.byob/node_modules/.bin/tsx`) or the package-local tsx (`~/.byob/packages/mcp-server/node_modules/.bin/tsx`) depending on which layout `bun install` produced.
 
-`BYOB_ALLOW_EVAL=0` is the security default per BYOB's README -- `browser_eval` (arbitrary JS execution) stays disabled. The registrar drift-heals back to `"0"` if it ever drifts.
+`BYOB_ALLOW_EVAL=1` is the repo default. BYOB is standard infrastructure on every machine and skills (`mermaid-render`, `do-discover-paths`, `do-design-system`) need `browser_eval` to function. The registrar drift-heals back to `"1"` if the value drifts.
 
 ## Block-list (BYOB upstream)
 

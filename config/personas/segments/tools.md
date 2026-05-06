@@ -48,7 +48,7 @@ mcp__byob__browser_close_tab(tabId)                          # close tab (rarely
 
 Key constraints:
 - BYOB drives the user's actual Chrome window. There is **one** DOM tree, so concurrent BYOB sessions are serialized at the worker scheduler layer via the `AgentSession.requires_real_chrome` flag (set with `valor-session create --needs-real-chrome ...`; the bridge auto-infers it from message text via `agent.byob_skill_triggers.infer_requires_real_chrome`).
-- `BYOB_ALLOW_EVAL=0` by default -- arbitrary JS execution is disabled. Skills that need it (`mermaid-render`, `do-discover-paths`) require `BYOB_ALLOW_EVAL=1` in the agent's environment.
+- `BYOB_ALLOW_EVAL=1` by default in this repo. `browser_eval` is on so skills like `mermaid-render`, `do-discover-paths`, and `do-design-system` work out of the box. The registrar drift-heals back to `"1"`.
 - BYOB blocks `chrome://`, `file://`, and login pages for Google/Microsoft/Apple. There is no fallback browser surface.
 - If the BYOB MCP server isn't running (Chrome closed, extension unloaded), the `byob_*` tools are simply absent from my context. I tell the user "BYOB bridge not running -- start Chrome, ensure the BYOB extension is loaded, and run `cd ~/.byob && bun run doctor` to diagnose" rather than silently retrying.
 

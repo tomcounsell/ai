@@ -92,7 +92,7 @@ Browser automation is BYOB MCP (`mcp__byob__browser_*`) — real Chrome, the use
 
 ## BYOB and `BYOB_ALLOW_EVAL`
 
-When BYOB MCP tools are invoked, the registrar at `scripts/update/mcp_byob.py` keeps `BYOB_ALLOW_EVAL=0` -- `browser_eval` (arbitrary JS execution) stays disabled by default per the BYOB security model. Computer-use does not interact with BYOB; this note is here so the agent does not conflate the two surfaces.
+When BYOB MCP tools are invoked, the registrar at `scripts/update/mcp_byob.py` keeps `BYOB_ALLOW_EVAL=1` -- `browser_eval` is enabled by default in this repo so skills like `mermaid-render`, `do-discover-paths`, and `do-design-system` work out of the box. Computer-use does not interact with BYOB; this note is here so the agent does not conflate the two surfaces.
 
 ## Common Workflows
 

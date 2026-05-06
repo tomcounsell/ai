@@ -41,17 +41,41 @@ CLAUDE_CONFIG_LOCK_PATH = Path.home() / ".claude.json.lock"
 CLAUDE_CONFIG_BACKUP_PATH = Path.home() / ".claude.json.bak"
 
 MCP_SERVER_KEY = "byob"
-# BYOB v0.3+ ships its MCP server as a TypeScript entrypoint executed via
-# tsx. Per BYOB README's "Manual MCP registration" section the canonical
-# invocation is `<tsx> <byob-mcp.ts>`. tsx lives at the workspace root
-# node_modules (not per-package) after `bun install` runs in ~/.byob/.
+# BYOB ships its MCP server as a TypeScript entrypoint executed via tsx.
+# Per BYOB README's "Manual MCP registration" section the canonical
+# invocation is `<tsx> <byob-mcp.ts>`. The tsx binary location varies by
+# BYOB layout version:
+#   * older layouts hoist tsx to the workspace root:
+#       ~/.byob/node_modules/.bin/tsx
+#   * newer layouts keep it package-local:
+#       ~/.byob/packages/mcp-server/node_modules/.bin/tsx
+# `_resolve_tsx_bin()` picks whichever exists at registration time so the
+# registrar does not silently no-op on machines where bun chose the
+# package-local layout (root-cause of the BYOB-not-loading bug).
 BYOB_HOME = Path.home() / ".byob"
 BYOB_MCP_SERVER_TS = BYOB_HOME / "packages" / "mcp-server" / "bin" / "byob-mcp.ts"
 BYOB_TSX_BIN = BYOB_HOME / "node_modules" / ".bin" / "tsx"
-# Retained for any external callers; _expected_entry() reads BYOB_TSX_BIN
-# live so monkeypatching the path during tests works without also patching
-# this constant.
+BYOB_TSX_BIN_PKG = BYOB_HOME / "packages" / "mcp-server" / "node_modules" / ".bin" / "tsx"
+# Retained for any external callers; _expected_entry() reads the resolved
+# path live so monkeypatching the path during tests works without also
+# patching this constant.
 MCP_SERVER_COMMAND = str(BYOB_TSX_BIN)
+
+
+def _resolve_tsx_bin() -> Path:
+    """Return whichever tsx binary exists, preferring the workspace-root location.
+
+    Falls back to the package-local path used by newer BYOB layouts. If
+    neither exists, returns the workspace-root path so callers see a
+    consistent (non-existent) path that ``_byob_binaries_present()`` then
+    correctly reports as missing.
+    """
+    if BYOB_TSX_BIN.exists():
+        return BYOB_TSX_BIN
+    if BYOB_TSX_BIN_PKG.exists():
+        return BYOB_TSX_BIN_PKG
+    return BYOB_TSX_BIN
+
 
 # Lock retry schedule (matches mcp_memory.py) -- in milliseconds.
 _LOCK_RETRY_BACKOFF_MS = (50, 200, 800)
@@ -71,19 +95,20 @@ class McpByobResult:
 def _expected_entry() -> dict:
     """Return the canonical shape of the BYOB MCP entry.
 
-    BYOB security default: ``BYOB_ALLOW_EVAL=0`` keeps ``browser_eval``
-    disabled (per BYOB README). Operators who need eval flip the env var
-    via their own ~/.byob configuration -- never via this registrar.
+    Repo default: ``BYOB_ALLOW_EVAL=1``. BYOB is standard infrastructure on
+    every machine and skills (`mermaid-render`, `do-discover-paths`,
+    `do-design-system`) need ``browser_eval`` to function. The historical
+    upstream-BYOB default of ``"0"`` left ``browser_eval`` disabled, which
+    surfaced as silent skill failures.
 
-    Reads ``BYOB_TSX_BIN`` live (not the cached ``MCP_SERVER_COMMAND``) so
-    monkeypatching the path in tests does not also require patching the
-    string constant.
+    Resolves the tsx path live so monkeypatching ``BYOB_TSX_BIN`` in tests
+    flows through, and the package-local fallback works on real machines.
     """
     return {
         "type": "stdio",
-        "command": str(BYOB_TSX_BIN),
+        "command": str(_resolve_tsx_bin()),
         "args": [str(BYOB_MCP_SERVER_TS)],
-        "env": {"BYOB_ALLOW_EVAL": "0"},
+        "env": {"BYOB_ALLOW_EVAL": "1"},
     }
 
 
@@ -93,9 +118,10 @@ def _byob_binaries_present() -> bool:
     Gates registration so machines that have not run ``/setup`` Step 8.5
     (BYOB clone + ``bun install``) do not get a ``mcpServers.byob`` entry
     pointing at non-existent paths -- which would make Claude Code log
-    spawn failures on every session restart.
+    spawn failures on every session restart. Accepts either the
+    workspace-root or package-local tsx layout.
     """
-    return BYOB_TSX_BIN.exists() and BYOB_MCP_SERVER_TS.exists()
+    return (BYOB_TSX_BIN.exists() or BYOB_TSX_BIN_PKG.exists()) and BYOB_MCP_SERVER_TS.exists()
 
 
 def _entry_matches(actual: object, expected: dict) -> bool:
