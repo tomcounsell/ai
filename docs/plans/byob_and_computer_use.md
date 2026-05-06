@@ -190,40 +190,62 @@ These all hardened the shipped surface; none address m13v's three open questions
 
 ## Decisions (m13v's Three Open Questions)
 
-### Decision 1 — Chrome concurrency model: scheduler-only, with a cross-process fail-fast guard
+### Decision 1 — Chrome concurrency model: lock at the MCP-server entrypoint (cycle N+1 revision)
 
 **The question:** real Chrome has one DOM tree. The shipped scheduler serializes within the worker process.
-What about other Python processes (dev sessions started manually, dashboard scripts, hooks) that touch
-BYOB MCP?
+What about other Python processes (dev sessions started manually, dashboard scripts, hooks, direct
+`claude -p "use byob_..."`, sub-agent invocations) that touch BYOB MCP?
 
-**Decision:** **Worker-scheduler serialization is the only execution lane for BYOB.** Any other Python
-process that opens a BYOB MCP client must fail-fast with a clear message rather than silently colliding.
+**Decision (revised cycle N+1):** **The lock lives in the BYOB MCP server invocation path, not at session
+creation.** Every consumer of BYOB MCP — interactive `claude` session, `claude -p "..."`, hook-spawned
+agent, manual debug script, worker session — auto-spawns the BYOB MCP child via the user-scoped
+`~/.claude.json` registration (verified at `scripts/update/mcp_byob.py:39`). The only architectural place
+that catches all of them is the MCP child itself.
 
-**Mechanism:**
+**Mechanism (revised):**
 
-1. The worker that runs sessions writes a sentinel `~/.byob/active-session.lock` containing the running
-   session's `agent_session_id` and PID **at the moment it picks a session with
-   `requires_real_chrome=True`**, and removes it on session end (success, failure, kill — all paths).
-2. `scripts/update/mcp_byob.py` is extended with a `verify_no_active_session()` helper that any
-   non-worker process can call before opening a BYOB MCP client.
-3. A new tiny shim `tools/byob/lock.py` exposes `acquire_byob_session_lock(owner_id)` /
-   `release_byob_session_lock(owner_id)` for the worker (and for the rare manual case below).
-4. **Operator escape hatch**: `python -m tools.valor_session create --needs-real-chrome --force-local` is
-   the documented way for a developer to run a manual BYOB session **outside** the worker. The CLI checks
-   `~/.byob/active-session.lock` first and refuses to start if held by another PID, with an error message
-   pointing at the dashboard to identify the holding session.
+1. **Wrapper at the MCP-server entrypoint (the only required guard).** A new Python module
+   `tools/byob/mcp_gate.py` is registered as the `command` in `_expected_entry()` (`scripts/update/mcp_byob.py:82-88`)
+   in place of the raw `tsx` invocation. The wrapper:
+   - Acquires `acquire_byob_session_lock(owner_id=f"mcp-gate-{os.getpid()}")` first.
+   - On `BYOBSessionLockHeld`: writes a JSON-RPC error response that Claude Code surfaces to the agent
+     (`{"jsonrpc":"2.0","error":{"code":-32000,"message":"BYOB busy: session X holding lock (PID Y); see http://localhost:8500/sessions/X"}}`)
+     and exits 1.
+   - On success: `os.execvp` into the real `tsx <byob-mcp.ts>` invocation so stdio passes through unchanged.
+   - The lock is released by `os.kill(pid, 0)` failing on the wrapper's PID when the parent claude session
+     exits — handled by the same liveness-check + 30-min staleness backstop that lives inside
+     `acquire_byob_session_lock` (see Decision 1's lock-leak observability addendum).
+2. **Worker session-pickup keeps its existing role** but is now defense-in-depth, not the primary guard.
+   `agent/session_pickup.py:57-69, 425` already refuses to pick a `requires_real_chrome` session when a
+   different one is running — that prevents two worker sessions from racing each other inside the same
+   process; the MCP-gate handles cross-process races.
+3. **`tools/byob/lock.py` exposes `acquire_byob_session_lock(owner_id)` / `release_byob_session_lock(owner_id)`
+   / `cleanup_stale_locks()`** as before. The MCP gate, the worker, and any test harness all use the same
+   three-function API.
+4. **No `--force-local` / `--bypass-worker` flag.** Per cycle N+1 critique C4: such a flag is misleading
+   (it actually means "skip-worker-queue", not "force-local"), narrow in scope (only meaningful with
+   `--needs-real-chrome`), and now redundant — the MCP-gate covers every entry point regardless of how
+   the parent process was spawned. A developer who needs a manual BYOB session simply runs
+   `claude -p "use byob_navigate ..."`; the MCP-gate handles serialization.
 
 **Trade-off accepted, written into `docs/features/byob-browser-control.md`:** "BYOB serializes globally on
-this machine. If you want anonymous parallel browsing, use `bowser`. If you want this exact behavior in
-two windows at once, you can't — that's by design (Chrome has one DOM tree)."
+this machine via a lock acquired by the MCP server itself. If you want anonymous parallel browsing, use
+`bowser`. If you want two BYOB-driven sessions in two windows at once, you can't — that's by design
+(Chrome has one DOM tree)."
 
-**Rejected alternatives:**
+**Rejected alternatives (unchanged):**
 - Per-agent Chrome profiles. Defeats the "use the user's logged-in browser" goal at the heart of #1256.
 - Per-agent dedicated Chrome instances. Same. Plus operator UX cost (multiple Chrome icons in the dock).
 - `flock(2)` on the BYOB Unix socket. The socket is per-device-UUID under `~/.byob/bridges/`; locking
   the socket file races against BYOB itself rotating the bridge process.
 
-### Decision 2 — MCP-vs-CLI lifecycle for `valor-computer`: keep CLI, document the budget
+**Rejected alternatives added in cycle N+1:**
+- Lock at session-creation (`tools/valor_session.py`). Misses every direct `claude -p` and hook-spawned
+  consumer that bypasses the session machinery (cycle N+1 critique B1).
+- A `--bypass-worker` operator flag. Misnamed, narrow, and made redundant by the MCP-gate (cycle N+1
+  critique C4).
+
+### Decision 2 — MCP-vs-CLI lifecycle for `valor-computer`: keep CLI (measured)
 
 **The question:** does `valor-computer` re-handshake the bcu HTTP server on every invocation?
 
@@ -231,11 +253,28 @@ two windows at once, you can't — that's by design (Chrome has one DOM tree)."
 fresh `urllib.request` connection to `127.0.0.1:<port>` → runs one HTTP call → exits. Over a sequence of N
 actions, that's N process spawns and N TCP handshakes.
 
-**Decision:** **Keep `valor-computer` as a CLI for the first cycle, document the per-invocation cost, and
-revisit if a benchmark shows it's the bottleneck.** Reasoning:
+**Decision (revised cycle N+1, with measured numbers):** **Keep `valor-computer` as a CLI.** The measurement
+ran during this revision pass — not deferred to "build phase 0" — per cycle N+1 blocker B2.
 
-- bcu's HTTP server is loopback-only. TCP-on-loopback handshake on macOS is sub-millisecond. The dominant
-  cost is Python startup + manifest read (~80–120 ms in profiling on this machine).
+**Measured baseline (cycle N+1, machine: Tom's MacBook Pro, Darwin 25.4.0, 2026-05-06):**
+
+| Mode | N | Median | p95 | p99 |
+|---|---|---|---|---|
+| Direct subprocess | 50 | 78.6 ms | 82.3 ms | 88.2 ms |
+| Via /bin/bash -c (skill path) | 50 | 81.6 ms | 86.9 ms | n/a |
+
+Captured at `tests/manual/valor_computer_latency_baseline.txt`. The 200 ms threshold is met with >2x
+headroom; the 500 ms "flip-to-MCP-now" threshold is met with >6x headroom.
+
+**Caveat:** bcu opt-in is not set on this measurement machine. The HTTP loopback round-trip when bcu
+runs adds ~1–10 ms (in-kernel zero-copy on macOS). Even at the upper end, the budget is intact.
+Re-measurement on a build machine with bcu enabled is queued as a non-blocking confirmation step
+(if real-bcu numbers blow past 200 ms, escalate to MCP-now in a followup issue — but the 6x headroom
+makes that highly unlikely).
+
+**Reasoning still standing:**
+
+- bcu's HTTP server is loopback-only. TCP-on-loopback handshake on macOS is sub-millisecond.
 - Promoting `tools/computer/` to an MCP server means ~13 new tools loaded into agent context on every
   session — meaningful token cost for a feature only used in macOS desktop workflows.
 - bcu itself is a long-running process. It does not get GC'd between calls (m13v's MCP-vs-CLI critique
@@ -247,42 +286,68 @@ calls (rare today but possible if a future skill drives a sequence in a single C
 call touches the manifest. This is forward-compat for either keeping CLI or moving to MCP later.
 
 **Trade-off accepted, written into `docs/features/computer-use.md`:** "`valor-computer` invocations have
-~100 ms startup cost each. For sequences of more than ~10 actions, expect ~1 s of overhead. If this becomes
-a bottleneck for a real workflow, file an issue requesting a persistent surface."
+~80 ms startup cost each (measured 2026-05-06: median 81.6 ms / p95 86.9 ms via shell). For sequences of
+more than ~10 actions, expect ~1 s of overhead. If this becomes a bottleneck for a real workflow, file an
+issue requesting a persistent surface."
 
 **Rejected alternative:** **moving to MCP now is rejected** because:
-- No measured workflow today is in the regime where the CLI cost matters.
+- No measured workflow today is in the regime where the CLI cost matters; spike-r2 (median 81.6 ms, p95
+  86.9 ms) is well within the 200 ms threshold.
 - The issue acceptance criteria do not specify a latency budget.
 - Adding ~13 MCP tools to context costs every session token, including non-macOS sessions.
 - The CLI surface's OS gate (exit 78 on non-darwin) is cleaner than a "tools fail at runtime on Linux"
   shape.
 
-### Decision 3 — Electron AX staleness: internal retry inside `tools/computer/__init__.py`
+### Decision 3 — Electron AX staleness: internal retry, with fail-loud tie-break (cycle N+1 revision)
 
 **The question:** Slack, VS Code, Telegram Desktop, Discord build their AX tree lazily; refs go stale
 between `get_window_state` and the next action. What's the retry strategy?
 
 **Decision:** **`tools/computer/__init__.py` retries internally exactly once on a stale-ref failure when
-the target window's `bundle_id` is in `tools/computer/electron_bundles.py`.** Concretely:
+the target window's `bundle_id` is in `tools/computer/electron_bundles.py`. When the resolver finds 2+
+candidates with equal `role` + `label` matches, it raises `MultipleSelectorMatches` rather than silently
+sorting by Euclidean distance** (cycle N+1 critique C1: silent miss-clicks were the failure mode the
+original wording allowed). Concretely:
 
 1. Each action function (`click`, `type_text`, `set_value`, `drag`, `perform_secondary_action`) takes an
-   optional `selector={'role': ..., 'label': ..., 'bounds': (x, y, w, h)}` argument.
+   optional `selector={'role': ..., 'label': ..., 'bounds': (x, y, w, h), 'tie_break': '...'}` argument.
 2. When the call returns bcu's stale-ref error code (HTTP 422 or 4xx with `{"error": "stale_ref"}` payload —
    exact shape verified in build via `tests/integration/test_computer_use_integration.py`) AND the target
    window's `bundle_id` is in the Electron list, the wrapper:
    - Re-calls `get_window_state(window_id)` to refresh the AX tree.
-   - Resolves the selector to a fresh ref by matching `role` + `label` + nearest-bounds.
+   - Resolves the selector to a fresh ref by matching `role` + `label`. If exactly one match: use it.
+   - **If 2+ matches and the selector does not contain `tie_break: 'nearest'`: raise
+     `MultipleSelectorMatches(role, label, count, candidates_summary)` (fail-loud — the original
+     Euclidean-tie-break is opt-in only).**
+   - If 2+ matches and `tie_break='nearest'`: break ties by Euclidean distance to the original `bounds`
+     center, prefer visible candidates.
    - Retries the action exactly once.
 3. If the retry fails (stale-ref or anything else), the caller sees the second-attempt error.
 4. Non-Electron windows: no retry (their AX trees are stable; a stale-ref there is genuinely an error).
 5. Caller without `selector=`: no retry on either kind of window (we have no way to resolve the ref).
 
 **The `is_electron` heuristic** is already shipped at `tools/computer/electron_bundles.py`; this plan adds
-the retry wrapper and the integration test for it.
+the retry wrapper, the fail-loud tie-break, and the integration tests for both paths.
 
-**Trade-off accepted, written into `.claude/skills/computer-use/SKILL.md`:** "For Electron apps, always pass
-`selector=` so the wrapper can heal a stale ref. For native AppKit apps, pass either ref or selector — both
-work."
+**Resolver perf — measured in cycle N+1:** the resolver (depth-first walk + role/label/bounds filter) is
+not a hot path. Measured at `tests/manual/selector_resolver_perf_baseline.txt`:
+
+| AX tree size | Median | p95 |
+|---|---|---|
+| 100 nodes (typical Slack pane) | 0.013 ms | 0.019 ms |
+| 1000 nodes (stress) | 0.15 ms | 0.16 ms |
+
+Five orders of magnitude inside the 1-second budget the cycle N+1 critique flagged. **No pre-resolved
+selector cache is needed** — the bcu HTTP `get_window_state` round-trip dominates the retry path.
+
+**Trade-off accepted, written into `.claude/skills/computer-use/SKILL.md`:**
+
+- "For Electron apps, always pass `selector=` so the wrapper can heal a stale ref. For native AppKit apps,
+  pass either ref or selector — both work."
+- "**Gotcha — multiple matching elements.** If your selector matches 2+ elements (e.g. two `Send` buttons
+  in different Slack threads, two `OK` buttons in stacked modals), the wrapper raises
+  `MultipleSelectorMatches` rather than guessing. Add a discriminator (`parent_role`, `index`, or tighter
+  `bounds`), or pass `tie_break='nearest'` explicitly to opt into Euclidean-distance tie-breaking."
 
 ---
 
@@ -296,30 +361,60 @@ work."
   process that opens an MCP client without creating an `AgentSession` row is invisible to the gate.
   Dev sessions created via `python -m tools.valor_session create` *do* create rows, but they are picked
   up by the worker, so they go through the same gate. The gap is: **a Python process that uses BYOB MCP
-  for ad-hoc work without going through the session machinery** (e.g., a dashboard script, a one-off repl
-  invocation, a hook). The shipped surface gives that process zero protection.
+  for ad-hoc work without going through the session machinery** — including a dashboard script, a one-off
+  repl invocation, a hook-spawned `claude -p`, or a developer running `claude -p "use byob_..."`
+  directly. Crucially, BYOB MCP is registered in user-scoped `~/.claude.json`
+  (`scripts/update/mcp_byob.py:39`), so **every `claude` / `claude -p` invocation auto-spawns the BYOB
+  MCP child via stdio** — that spawn is the surface area that needs gating.
 - **Confidence**: high (code-verified)
-- **Impact on plan**: Decision 1 above. Adds `~/.byob/active-session.lock` sentinel + `tools/byob/lock.py`
-  shim + the `--force-local` operator escape hatch with refusal-to-start.
+- **Impact on plan (revised cycle N+1)**: Decision 1 moves the lock to the **MCP-server entrypoint
+  itself** via `tools/byob/mcp_gate.py`, which `_expected_entry()` registers as the `command` in
+  `~/.claude.json`. This catches every consumer regardless of how the parent process was spawned. The
+  worker session-pickup gate stays as defense-in-depth.
 
-### spike-r2: Measure `valor-computer` per-invocation cost on this machine
+### spike-r2: Measure `valor-computer` per-invocation cost — RUN, NOT DEFERRED
 
-- **Assumption**: "Per-invocation overhead is small enough that CLI shape is fine for the foreseeable
-  future."
-- **Method**: Will run `time valor-computer list_apps` × 10 in build phase 0 to record a baseline.
-  If median is < 200 ms, Decision 2 holds. If > 500 ms, escalate to MCP-now in a followup issue.
-- **Confidence**: medium until baseline runs
-- **Impact on plan**: Decision 2 is the working decision; build records the baseline as a proof artifact
-  at `tests/manual/valor_computer_latency_baseline.txt`.
+- **Assumption**: "Per-invocation overhead is small enough that CLI shape is fine."
+- **Method (cycle N+1)**: 50 invocations of `valor-computer list_apps` measured two ways: direct
+  `subprocess.run` and via `/bin/bash -c` (mirrors how skills invoke the CLI through the agent's Bash
+  tool). Recorded with `time.perf_counter` for ms precision.
+- **Result (measured 2026-05-06 on Tom's MacBook Pro, Darwin 25.4.0):**
 
-### spike-r3: Confirm bcu's stale-ref response shape
+  | Mode | N | Median | p95 | p99 |
+  |---|---|---|---|---|
+  | Direct subprocess | 50 | 78.6 ms | 82.3 ms | 88.2 ms |
+  | Via /bin/bash -c | 50 | 81.6 ms | 86.9 ms | n/a |
 
-- **Assumption**: "bcu returns a structured stale-ref error code, not a generic 5xx."
-- **Method**: Will be verified in build by triggering a stale ref against Slack and capturing the response.
-- **Confidence**: medium (bcu's `/v1/routes` documents error envelopes but the exact stale-ref code needs
-  to be observed)
-- **Impact on plan**: If the response shape is *not* a clean error code, Decision 3's wrapper falls back to
-  matching on response message text — recorded as a build-time decision.
+- **Confidence**: high (measured)
+- **Impact on plan**: **Decision 2 (CLI surface) is confirmed.** No flip to MCP. The 200 ms threshold is
+  met with >2x headroom; the 500 ms flip-to-MCP-now threshold is met with >6x headroom.
+- **Caveat**: bcu opt-in is not set on this machine. The HTTP loopback round-trip when bcu runs adds
+  ~1–10 ms. Even at the upper end the budget is intact.
+- **Artifact**: `tests/manual/valor_computer_latency_baseline.txt`.
+
+### spike-r3: Selector-resolver perf — RUN, NOT DEFERRED
+
+- **Assumption**: "The selector-resolver is fast enough that no pre-resolved cache is needed."
+- **Method (cycle N+1)**: Reconstructed the resolver hot-path from `tools/computer/__init__.py`
+  (`_walk_ax_tree` + role/label/bounds filter), fed it a synthetic Slack/VSCode-shaped AX tree (mixed
+  AXButton/AXStaticText/AXGroup/AXList/AXTextField, depth ~10, realistic label pool). Ran the resolver
+  50 times each at 100-node and 1000-node tree sizes.
+- **Result (measured 2026-05-06):**
+
+  | Tree size | N | Median | p95 |
+  |---|---|---|---|
+  | 100 nodes (typical) | 50 | 0.013 ms | 0.019 ms |
+  | 1000 nodes (stress) | 50 | 0.15 ms | 0.16 ms |
+
+- **Confidence**: high (measured against the actual shipped resolver code)
+- **Impact on plan**: **Decision 3's tree re-fetch + resolver pass is confirmed.** No pre-resolved
+  selector cache is needed. The bcu HTTP `get_window_state` round-trip (~1–10 ms loopback) dominates
+  the retry path; the resolver is invisible.
+- **bcu stale-ref response shape**: still observed during build phase 0 (`tests/integration/
+  test_computer_use_integration.py` captures bcu's actual error envelope on the live machine). If the
+  shape is not HTTP 422 or `{"error": "stale_ref"}`, the wrapper falls back to text-match on the
+  response — fixture committed alongside the integration test.
+- **Artifact**: `tests/manual/selector_resolver_perf_baseline.txt`.
 
 ---
 
