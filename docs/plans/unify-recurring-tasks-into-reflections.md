@@ -251,7 +251,7 @@ The dashboard task (Task 9) gains this responsibility; integration test `tests/i
 | 60-second polling cadence | **Adapt** | We already tick every 60s inside the worker's asyncio loop; the fazm "launchd polls every 60s" pattern is not duplicated. |
 | Output threading via `taskId="routine-<id>"` chat history | **Adapt** | Generalized to a per-reflection `output_sink:` config (Q5) with four sink kinds (`log_only`, `dashboard_only`, `memory:<importance>`, `telegram:<chat>`). The fazm pattern collapses to `telegram:<chat>`. |
 | `routines_*` MCP tool surface | **Adopt** (Q7) | Mirrored as `reflections_create / list / get / update / remove / runs / pause / resume`. |
-| Per-run cost / token capture | **Adopt** (Q8) | `cost_usd`, `input_tokens`, `output_tokens`, `duration_ms` on each `ReflectionExecution`. |
+| Per-run cost / token capture | **Adopt** (Q8) | `cost_usd`, `tokens_input`, `tokens_output`, `duration_ms` on each `ReflectionExecution`; sourced from `AgentSession.total_cost_usd` / `total_input_tokens` / `total_output_tokens` (cycle-4 C3 verified at `models/agent_session.py:369-375`). |
 | SQLite-as-state-store | **Drop** | We already use Popoto/Redis everywhere; introducing SQLite would fork the data layer. |
 | launchd as the runner | **Drop** | The worker process already owns the asyncio loop; launchd would duplicate it. |
 | Event triggers (`on_event:`, `on_merge:`) | **Out of scope** | Different abstraction — event triggers, not time triggers. See No-Gos. |
@@ -423,14 +423,27 @@ This grounds the rule entirely in primitives that already exist in the codebase.
 
 ### Q8: Cost accounting and analytics
 
-**Decision:** **Capture per-run on `ReflectionExecution`: `cost_usd`, `input_tokens`, `output_tokens`, `duration_ms`. Roll up daily totals onto `Reflection.cost_usd_total` etc. Feed into the existing `analytics-rollup` reflection.**
+**Decision:** **Capture per-run on `ReflectionExecution`: `cost_usd`, `tokens_input`, `tokens_output`, `duration_ms`. Roll up daily totals onto `Reflection.cost_usd_total` etc. Feed into the existing `analytics-rollup` reflection.**
 
 **Rationale:**
 - Per-run capture is cheap (one extra field set on completion) and gives us the dashboard's "what did this run cost?" view.
 - Daily totals on `Reflection` are derived (sum of last 24h of `ReflectionExecution`) and computed by the `analytics-rollup` reflection itself when it runs. No double-bookkeeping.
-- For function-type reflections, cost is 0 (Python callable, no LLM tokens). For agent-type, cost comes from the AgentSession's existing `cost_usd` and token fields (already captured per #983).
+- For function-type reflections, cost is 0 (Python callable, no LLM tokens). For agent-type, cost comes from the AgentSession's existing fields (already captured per #983).
 
-**Implementation guard:** When the executor finishes an agent-type reflection, it reads the spawned `AgentSession.cost_usd` / `tokens_input` / `tokens_output` and writes them onto the `ReflectionExecution` row. There is exactly one source of truth per run; rollups read, never re-compute.
+**Field-mapping table — `AgentSession` → `ReflectionExecution` (cycle-4 C3 fix):**
+
+The cycle-4 critique verified the actual `AgentSession` field names against `models/agent_session.py:369-375`. The previous draft cited `cost_usd` / `tokens_input` / `tokens_output` as if they were AgentSession fields — they are **not**. The correct mapping is:
+
+| `ReflectionExecution` (destination) | `AgentSession` (source — verified at `models/agent_session.py:369-375`) | Notes |
+|--------------------------------------|--------------------------------------------------------------------------|-------|
+| `cost_usd` | `total_cost_usd` (FloatField, default=0.0) | Dollar cost of all turns combined |
+| `tokens_input` | `total_input_tokens` (IntField, default=0) | Sum of input tokens across all SDK calls |
+| `tokens_output` | `total_output_tokens` (IntField, default=0) | Sum of output tokens across all SDK calls |
+| `duration_ms` | `int((session.completed_at - session.started_at) * 1000)` | Computed at executor exit; not from a single AgentSession field |
+
+The destination side keeps the simpler local names (`cost_usd`, `tokens_input`, `tokens_output`) so Reflection-internal code doesn't have to read `total_*` everywhere — but the read from `AgentSession` MUST use `total_cost_usd` / `total_input_tokens` / `total_output_tokens`. A naive `run.cost_usd = session.cost_usd` line would silently land zero on every agent-type reflection (AttributeError on `session.cost_usd` swallowed elsewhere, or a typo treated as truthy-default), which is the C3 failure mode the cycle-4 critique caught.
+
+**Implementation guard:** When the executor finishes an agent-type reflection, it reads from `AgentSession` using the verified `total_*` field names and writes onto `ReflectionExecution` using the simpler names. The read happens after `session.status ∈ {completed, killed, failed}` (the SDK callback writes the totals on partial completion per the `total_cost_usd` docstring at `models/agent_session.py:372-374`). Tests use `getattr(session, "total_cost_usd")` etc. so a future field rename on AgentSession fails the test loudly. There is exactly one source of truth per run; rollups read, never re-compute.
 
 ### Q9 (Bonus): Bridge watchdog exception
 
@@ -504,7 +517,10 @@ The migration **never blocks on `last_status="running"`** and is fully reentrant
 - [ ] `tests/integration/test_dashboard_reflections.py` — UPDATE: dashboard JSON assertions cover new fields (`failure_count_consecutive`, `paused_until`, `cost_usd_total`); add a new case asserting `get_run_history()` and `get_run_detail()` in `ui/data/reflections.py` correctly read from `ReflectionExecution` Popoto rows after the embedded `run_history` is removed (cycle-3 ripple — verifies the dashboard doesn't break when the field disappears)
 - [ ] `tests/unit/test_ui_data_reflections.py` — UPDATE (or REPLACE if absent): assert `_build_entry`, `get_run_history`, and `get_run_detail` no longer reference `state.run_history`; assert paginated reads come from `ReflectionExecution.query.filter(name=...)` (cycle-3 ripple)
 - [ ] `tests/integration/test_mcp_reflections.py` — REPLACE: new test file; validates all 7 MCP tools and their auth model
-- [ ] `tests/integration/test_reflections_migration.py` — REPLACE: new test file; runs the migration script on a fixture YAML and asserts idempotence + content correctness
+- [ ] `tests/integration/test_reflections_migration.py` — REPLACE: new test file; runs the migration script on a fixture YAML and asserts idempotence + content correctness; covers MigrationPendingClear sidecar (TTL=14d) and worker-startup drain (cycle-4 B3)
+- [ ] `tests/unit/test_reflection_execution.py` — REPLACE (new file): assert three subclasses (`ReflectionExecutionHigh` TTL=7d, `ReflectionExecutionMedium` TTL=30d, `ReflectionExecutionLow` TTL=90d); assert `_resolve_execution_class()` dispatches every-60s → High, every-1h → Medium, every-1d → Low (cycle-4 C1)
+- [ ] `tests/unit/test_reflection_cost_mapping.py` — REPLACE (new file): assert agent-type executor reads `total_cost_usd` / `total_input_tokens` / `total_output_tokens` from `AgentSession` (verified field names per `models/agent_session.py:369-375`) and writes them onto `ReflectionExecution.cost_usd` / `tokens_input` / `tokens_output` respectively. Use `getattr(session, "total_cost_usd")` so a future AgentSession field rename fails the test loudly. Cycle-4 C3.
+- [ ] `tests/integration/test_harness_schedule_observation.py` — REPLACE (new file): assert that a session using `/loop` (ScheduleWakeup tool call) writes a `HarnessSchedule` row; assert the same for `/schedule` (`create_scheduled_task`); assert TTL=30d on the model; assert dashboard.json surfaces `harness_schedules` (cycle-4 C2 / Task 9b).
 
 ## Rabbit Holes
 
@@ -555,7 +571,9 @@ The migration is fully reentrant — running it twice on the same machine is a n
 **Trigger:** Worker crashes mid-run; restart happens; reflection's `last_status="running"` is stale; new tick sees it as in-flight and skips, but `next_due` is in the past → repeat skip forever
 **Data prerequisite:** `last_status` accurately reflects current execution state
 **State prerequisite:** A stale "running" status is detected and cleared
-**Mitigation:** On scheduler startup, scan for `Reflection.last_status == "running"` records and check `ran_at` age. Anything older than the per-reflection `timeout` (default 30 min function, 1 hour agent) gets force-marked `error` with `last_error="stale running status cleared on worker restart"`. This logic exists in PR-#1187-era code; preserve it.
+**Mitigation (cycle-4 C6 fix):** The previous draft asserted the existing PR-#1187-era logic "force-clears running" — that was wrong. Verified at `agent/reflection_scheduler.py:475-487` (the production path active today): the existing 2× interval stuck-detection sets `state.last_status = "error"` with `last_error = "Reset: appeared stuck (exceeded 2x interval)"`. It transitions `running → error`, NOT `running → idle`. With the new `failure_count_consecutive` counter (Q6), every worker crash mid-run would tick the counter and a worker that crashes 5 times in 24h would auto-pause every reflection that was in flight at crash time — even though the reflections themselves are healthy.
+
+This plan introduces a **new transition** `running → skipped` for "stale running cleared on worker restart" — distinct from `running → error` for "the reflection itself failed." On scheduler startup, scan for `Reflection.last_status == "running"` records and check `ran_at` age. Anything older than the per-reflection `timeout` (default 30 min function, 1 hour agent) is **force-marked `skipped`** via `mark_skipped(reason="stale running cleared on worker restart")`, NOT `error`. Crucially, `mark_skipped()` does NOT increment `failure_count_consecutive` (verified at `models/reflection.py:131` — the existing `mark_skipped` already declines to touch the counter). Tests assert: 5 consecutive worker-restart-induced stale clears do NOT pause the reflection. The existing `mark_completed(error=...)` path continues to increment the counter for genuine reflection-side failures. (Build phase note: the existing 2×-interval stuck-detection at `agent/reflection_scheduler.py:484-486` must be updated to call `mark_skipped()` instead of writing `last_status="error"` directly — it's three lines changed in one place.)
 
 ### Race 3: Concurrent MCP `reflections_update` and scheduler tick fire same reflection
 **Location:** `mcp_servers/reflections_server.py::update_reflection` vs `agent/reflection_scheduler.py::_run_loop`
@@ -797,7 +815,7 @@ Every criterion below is **executable** — it names a concrete check the valida
 - On error: increment `failure_count_consecutive`; on success: reset to 0
 - After `max_consecutive_failures_before_pause` (default 5): set `paused_until = now + 86400`, save Memory record at importance 7.0, category="correction"
 - Tick loop checks `paused_until > now` BEFORE `next_due` check
-- On worker restart: scan stale `last_status="running"` and force-clear (preserve PR-#1187-era logic)
+- On worker restart: scan stale `last_status="running"` and call `mark_skipped(reason="stale running cleared on worker restart")` — NOT `mark_completed(error=...)`. This is a new transition `running → skipped` introduced for this case (cycle-4 C6 fix). The existing 2×-interval stuck-detection at `agent/reflection_scheduler.py:484-486` (which currently writes `last_status="error"` directly) must be updated to call `mark_skipped()` instead. `mark_skipped()` declines to increment `failure_count_consecutive` (verified at `models/reflection.py:131`), so worker crashes do NOT trip the auto-pause threshold. Add a unit test asserting "5 consecutive worker-restart-induced stale clears do NOT pause the reflection."
 
 ### 5. Implement output-sink delivery
 - **Task ID**: build-output-sinks
@@ -870,9 +888,9 @@ Every criterion below is **executable** — it names a concrete check the valida
 - **Parallel**: true
 - `dashboard.json` reflection rows expose: `failure_count_consecutive`, `paused_until`, `cost_usd_total`, `output_sink`
 - **Update `ui/data/reflections.py` (cycle-3 ripple, mandatory in same PR):**
-  - `_build_entry()` line 129: replace `bool(state and isinstance(state.run_history, list) and state.run_history)` with `bool(ReflectionExecution.query.filter(name=name, limit=1))`
-  - `get_run_history(name, page)` lines 239-277: replace `state.run_history` reads with `ReflectionExecution.query.filter(name=name).order_by("-timestamp")` paginated
-  - `get_run_detail(name, run_index)` lines 280-306: replace `state.run_history[run_index]` with the indexed `ReflectionExecution` row in forward-timestamp order
+  - `_build_entry()` line 138 (cycle-4 C5 fix — was 129 in rev3): replace `bool(state and isinstance(state.run_history, list) and state.run_history)` with `bool(next(iter(ReflectionExecution.query.filter(name=name)[:1]), None))`
+  - `get_run_history(name, page)` lines 264 and 282 (cycle-4 C5 fix — was 239-277): replace `state.run_history` reads with `ReflectionExecution.query.filter(name=name).order_by("-timestamp")` paginated; `total_runs` becomes the result count
+  - `get_run_detail(name, run_index)` lines 310 and 322 (cycle-4 C5 fix — was 280-306): replace `state.run_history[run_index]` with the indexed `ReflectionExecution` row in forward-timestamp order
   - Caller signatures stay the same; `ui/routes/reflections.py` is unchanged
 - Dashboard remains read-only this iteration
 
@@ -937,7 +955,7 @@ Every criterion below is **executable** — it names a concrete check the valida
 - **Parallel**: false
 - Author all unit and integration tests listed in Test Impact section
 - Particularly: empty/invalid input tests, error-state rendering tests, race-condition mitigations
-- Verify cost-accounting: agent-type reflections write `cost_usd` from `AgentSession`; function-type reflections write `cost_usd=0`
+- Verify cost-accounting (cycle-4 C3): agent-type reflections write `ReflectionExecution.cost_usd` from `AgentSession.total_cost_usd`, `tokens_input` from `total_input_tokens`, `tokens_output` from `total_output_tokens` (verified field names against `models/agent_session.py:369-375`); function-type reflections write zeros for all three. Test uses `getattr(session, "total_cost_usd")` etc. so a future AgentSession field rename fails loudly.
 
 ### 14. Documentation
 - **Task ID**: document-feature
