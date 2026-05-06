@@ -264,7 +264,7 @@ The issue references fazm's [`AGENT-VOICE.md`](https://github.com/mediar-ai/fazm
 
   7. **Runtime preview / lint**: a one-off `pytest` test (`test_compose_system_prompt_invariants`) asserts at test time: (a) every cell composes without exception, (b) PM cell stays under 80K chars (cache budget), (c) no `{{identity.*}}` markers remain in the output, (d) `WORKER_RULES` precedes the persona overlay text in the `WORKER` cell. **No runtime cost** — this runs in CI, not on every compose. The validators in `_load_persona_overlay_with_log` and `load_persona_prompt` (the existing CRITIQUE/workflow-announcement substring checks) stay where they are; they catch overlay drift, not composer drift.
 
-- **Picker collapse**: extract `_resolve_compose_args` into a private helper at `agent/sdk_client.py` near `_resolve_persona`. Both call sites (sdk_client.py:3326 and session_executor.py:1430) call this helper. The helper encapsulates the email-persona override (`if transport == "email" and project.email.persona: persona = ...`).
+- **Picker collapse**: extract `_resolve_compose_args` into a private helper at `agent/sdk_client.py` near `_resolve_persona` (L1860). Both call sites (sdk_client.py:3349–3363 + 3382–3419 and session_executor.py:1563–1629) call this helper. The helper encapsulates the email-persona override (`if transport == "email" and project.email.persona: persona = ...`). **Note:** `session_executor.py` also keeps its `[persona-load-failed]` ERROR log at L1620–L1629 (when explicit `email.persona` is requested but no overlay loads); the composer does not subsume this — the call site still catches and logs.
 - **Backward compatibility**: `load_system_prompt()` and `load_pm_system_prompt(work_dir)` remain as wrappers (one-line implementations that call the composer). All existing call sites continue to work without change. New code path: `compose_system_prompt(...)` direct.
 
 ## Failure Path Test Strategy
@@ -482,9 +482,10 @@ No external docs site for this repo — skip.
 - **Assigned To**: composer-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace the `if _session_type == SessionType.PM ... elif ... elif ...` block at `agent/sdk_client.py:3326–3395` with a single `_resolve_compose_args(...)` call followed by `compose_system_prompt(*args)`
-- Replace the equivalent block at `agent/session_executor.py:1430–1486` with the same call
-- Confirm both sites produce the same `custom_system_prompt` value as before for every test cell
+- Replace `agent/sdk_client.py` Block A (L3349–L3363) with a single `_resolve_compose_args(...)` call that yields `(persona, access_level, channel)`; replace Block B (L3382–L3419) with one `compose_system_prompt(*args, project=project, working_directory=working_dir)` call
+- Replace the equivalent block at `agent/session_executor.py:1563–1629` with the same `_resolve_compose_args` + `compose_system_prompt` pair, preserving the `try/except` around the call so PM-overlay-load failures still emit `[pm-persona-missing]` and the harness still degrades to `_pm_system_prompt = None`
+- Preserve the `[persona-load-failed]` ERROR log at session_executor.py:1620–1629 — the composer raises on explicit `email.persona` overlay-missing failure but the call site logs the louder error message
+- Confirm both sites produce the same `custom_system_prompt` value (or `_pm_system_prompt` value in session_executor's case) as before for every test cell
 
 ### 4. Channel-aware drafter
 
@@ -556,7 +557,7 @@ No external docs site for this repo — skip.
 | Drafter regressions | `pytest tests/unit/test_message_drafter.py tests/unit/test_drafter_validators.py -v` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| No leftover picker ladder | `grep -E "if _session_type == SessionType\.(PM\|TEAMMATE\|DEV)" agent/sdk_client.py agent/session_executor.py \| grep -v _resolve_compose_args` | exit code 1 |
+| No leftover picker ladder in compose-only context | `grep -nE "if _session_type == SessionType\.(PM\|TEAMMATE\|DEV)" agent/sdk_client.py agent/session_executor.py \| grep -vE "(_resolve_compose_args\|wait-for-children\|enriched_message\|harness_env\|wait_for_children)"` | output empty (other `_session_type` ladders for non-prompt-composition concerns — env injection, wait-for-children, etc. — are unaffected and *expected* to remain) |
 | Byte-stability fixture present (per-machine) | `python -c "import socket; from pathlib import Path; m=socket.gethostname().replace('.','-'); assert (Path('tests/fixtures')/m/'pm_system_prompt_baseline.txt').exists() and (Path('tests/fixtures')/m/'dev_system_prompt_baseline.txt').exists(), f'missing baseline for {m}; run scripts/capture_persona_baseline.py'"` | exit code 0 |
 | Manifest unchanged | `git diff main -- config/personas/segments/manifest.json` | empty output |
 
