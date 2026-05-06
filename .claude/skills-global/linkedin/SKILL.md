@@ -290,11 +290,17 @@ lesson, not the subject.
 
 ## Structure
 
-1. Open with the lesson. One sentence, plain language. Not project context,
-   not "we just shipped X." The lesson itself.
+1. **Lead with the lesson, never with the setup.** Two legal opener
+   patterns:
+   - *Lesson-hook*: sentence one IS the takeaway, in plain language.
+   - *Promise-hook*: sentence one teases that the rest is worth your
+     time ("Here's something we keep relearning the hard way:").
+   What fails is starting with three setup sentences before the payoff.
+   Most LinkedIn readers bounce in two sentences. Get them to the
+   lesson first.
 2. Set the stage. One or two sentences naming the kind of situation where
    this lesson shows up. Use everyday framing.
-3. One concrete example — drawn from the codebase, stripped to the smallest
+3. One concrete example. Drawn from the codebase, stripped to the smallest
    amount of jargon needed to make the point. If you must use a term like
    "cache" or "model," explain it in passing or replace with a plain
    analogy. Specifics earn their place by making the lesson vivid; they do
@@ -302,6 +308,22 @@ lesson, not the subject.
 4. Land on a portable takeaway. A closing sentence the reader can apply to
    their own field. Must make sense to someone who never reads this
    codebase.
+
+## Genericize incidental specifics, keep load-bearing ones sharp
+
+The post's anchor (the actual lesson, the actual fix, the named pattern
+the post is built around) MUST stay specific. But scaffolding details
+that aren't the lesson should be genericized so the post travels beyond
+people running the same exact stack. Naming "Redis" in a post about
+shared state makes a Postgres user think it doesn't apply when it does.
+"Anything sharing state" travels; "a Redis instance" narrows.
+
+Rule of thumb: for each named third-party tool / vendor / specific tech
+in the draft, ask — would the lesson still land if I swapped this for
+a different example? If yes, the named thing is incidental scaffolding,
+not the anchor. Replace with the generic category ("any cache," "a
+database," "anything sharing state"). Keep load-bearing specifics (the
+actual tool the lesson is about, the actual fix). Strip incidentals.
 
 ## Style
 
@@ -331,10 +353,22 @@ lesson, not the subject.
    director who has never written code. Do you finish with something
    useful for your own work? Do you bounce off jargon by sentence two?
    If the post only makes sense to an AI engineer, the lesson hasn't been
-   extracted yet — start over from the lesson step.
-2. Substance. Cut anything that reads like an announcement or a feature
+   extracted yet. Start over from the lesson step.
+2. Lead test. Is the lesson in sentence one (or sentence one teases that
+   the lesson is coming)? If sentence one is project context or setup,
+   rewrite so the point is first.
+3. Substance. Cut anything that reads like an announcement or a feature
    changelog. The lesson is at the front; the example earns its place by
    making the lesson vivid.
+4. Em-dash scan. Search the draft for "—". If you find ANY, replace with
+   periods, colons, commas, or parentheses. Em-dashes are a vanilla-LLM
+   tell in 2026 and readers discount the post on sight. Zero tolerance.
+5. Genericize check. For each named third-party / vendor / specific tech
+   in the draft, ask: would the lesson still land if I swapped this for
+   a different example? If yes, the named thing is incidental
+   scaffolding. Replace with the generic category. Keep load-bearing
+   specifics (the actual tool the post is about, the actual fix). Strip
+   incidentals.
 
 ## Output
 
@@ -343,13 +377,117 @@ draft text in your reply, plus one line stating the portable lesson you
 extracted.
 ```
 
-When the subagent returns, the parent session:
-1. Reads `/tmp/linkedin-post.txt`
-2. Sanity-checks against the casual-reader test one more time (jargon creep, announcement framing, missing portable takeaway)
-3. Renders the final post inline in the response
-4. **In the same turn**, attempts to publish (see ⚠️ below)
+### Iterate: 3-4 rounds of draft + cold-read with rotating personas
 
-If the draft fails the casual-reader test, send the subagent back with specific feedback (e.g. "sentence two still uses 'API call' — translate that") rather than rewriting it inline. The whole point of the subagent is to keep the engineering context out of the draft; rewriting inline reintroduces it.
+Single-shot drafts ship mediocre posts. The first draft buries the lesson
+in setup, the second tightens the opener, the third lands the takeaway.
+Build that loop into the workflow.
+
+A *single* cold-reader spirals into agreement with the drafter after one
+round. They both end up grading drafts on whether they match the prior
+round's critique rather than whether they actually land on a stranger.
+**Fix: rotate distinct personas across rounds. Fresh subagent each time
+(no shared context).** Where two of four personas flag the same problem,
+the problem is real and the fix is mandatory.
+
+The four personas (each a fresh `general-purpose` subagent):
+
+1. **The Casual Professional Reader** — a marketing director, lawyer, or
+   PM with no engineering background. Bias: posts that require
+   engineering jargon to decode are filler for them. Bar: do they finish
+   feeling they learned something useful for *their* work?
+2. **The LLM-Tell Hunter** — hunts for vanilla-LLM register: em-dashes,
+   tricolons, "in essence," "fundamentally," "it's not just X, it's Y,"
+   "this isn't about A, it's about B," over-symmetric sentences,
+   listicle smell. Grade is binary: tells present (D or worse) or
+   absent (A possible).
+3. **The Generalist Engineer** — works in tech but a different niche
+   (mobile, data, embedded). Catches inscrutable in-niche jargon and
+   the "even pros need three reads" failure mode.
+4. **The Skeptic** — assumes the post is overstating. Hunts for the
+   unsupported claim, the "in our experience" that's one anecdote,
+   the tradeoff treated as a free lunch.
+
+**Round assignment:**
+- Round 1 cold-read: Casual Professional Reader (catches jargon and
+  buried-lead failures first; this is the post's actual audience)
+- Round 2 cold-read: LLM-Tell Hunter (strips register tells before
+  deeper iteration)
+- Round 3 cold-read: Generalist Engineer
+- Round 4 cold-read (if needed): Skeptic
+
+**Cold-read prompt template** (parameterize `{PERSONA}` and
+`{PERSONA_BIAS}` per round):
+
+```
+You are {PERSONA}. {PERSONA_BIAS}
+
+You have NO knowledge of the author, no knowledge of any specific
+codebase, and no insider context. You see this draft LinkedIn post:
+
+---
+[paste current draft]
+---
+
+Grade it strictly through your specific lens. The bar for B+ is: a
+stranger reads to the end and finishes with something useful for their
+own work. The bar for A is: a stranger considers reposting or sharing.
+
+Sympathy is the enemy. Do NOT grade on a curve. If your specific bias
+finds a problem, that grade is the grade, even if other aspects are
+fine.
+
+Answer in this exact structure:
+
+GRADE: [A / A- / B+ / B / B- / C / D / F]
+WOULD YOU READ TO THE END: [yes / no / maybe + one sentence why]
+WHAT THE POST IS SAYING: [one-sentence paraphrase in plain English]
+WHAT'S BURIED: [where the lesson actually lives if not in sentence one]
+{PERSONA}-SPECIFIC FINDING: [the one thing your bias catches best]
+TOP THREE FIXES: 1. ... 2. ... 3. ...
+
+Total under 250 words. Be blunt.
+```
+
+**Persona briefs** (substitute into the template):
+
+- **Casual Professional Reader** — *"You are a marketing director (or
+  lawyer, or PM). You've never written code. You read LinkedIn on the
+  train. Your bias: any post that needs engineering jargon to follow is
+  not for you. Decide: did you finish with something useful for your
+  own work?"*
+- **LLM-Tell Hunter** — *"You hunt for vanilla-LLM register: em-dashes,
+  tricolons, 'in essence,' 'fundamentally,' 'it's not just X, it's Y,'
+  over-symmetric sentences, listicle smell. Your grade is binary: tells
+  present (D or worse) or absent (A possible)."*
+- **Generalist Engineer** — *"You work in tech but not this niche.
+  You're smart but uninitiated. Every term that requires a Wikipedia
+  tab is a strike. If a working pro in a different specialty can't grok
+  it on first read, it failed."*
+- **Skeptic** — *"You assume the post is overstating. You hunt for the
+  unsupported claim, the 'in our experience' that's one anecdote, the
+  tradeoff treated as a free lunch. Posts without defensible specifics
+  are vibes."*
+
+**The loop:**
+
+1. Drafter subagent produces v1 to `/tmp/linkedin-post.txt`.
+2. Cold-read v1 with **Casual Professional Reader** (fresh subagent).
+3. Drafter rewrites v2 from the critique. Don't merge inline. Let the
+   drafter rewrite from scratch with the critique as input. Inline
+   patches accumulate into Frankenstein drafts.
+4. Cold-read v2 with **LLM-Tell Hunter** (fresh subagent).
+5. Draft v3 → cold-read with **Generalist Engineer**.
+6. Round 4 only if any prior round graded below B+: draft v4 →
+   cold-read with **Skeptic**.
+7. **Ship the highest-graded version.** If no version reaches B+, drop
+   the post. The premise is the problem, not the prose. Better to ship
+   nothing than a D-tier post.
+
+When the subagent returns the final draft, the parent session:
+1. Reads `/tmp/linkedin-post.txt`
+2. Renders the final post inline in the response
+3. **In the same turn**, attempts to publish (see ⚠️ below)
 
 ### Publish
 
@@ -369,6 +507,25 @@ If the draft fails the casual-reader test, send the subagent back with specific 
 ---
 
 ## Task 3: Browse Feed and Comment
+
+### Volume targets
+
+The LinkedIn feed algorithm sharpens to who you like, comment on, and
+follow. Sparse engagement keeps the feed thin. Targets per run:
+
+- **Like 15-40 posts.** Anything genuinely relevant (agentic systems,
+  memory, async pipelines, LLM tooling, dev tools, AI in production,
+  builder posts from people doing real work, plus adjacent design /
+  product / strategy posts that read as substantive). Likes are cheap
+  signal. Be liberal but not indiscriminate.
+- **Comment on up to 5.** Apply the screening gate below. Quality still
+  matters more than volume. 2-5 is the normal range; fewer is fine if
+  the feed is thin.
+- **Follow 3-10 new people you haven't connected with.** This is the
+  main feed-curation lever (see "Following new people" below).
+
+Infinite scroll means there's always more to read. Don't stop after one
+screen if the feed is yielding signal.
 
 ### Read the feed
 
@@ -390,6 +547,29 @@ In the IE list, Like buttons appear with `name: "Reaction button state: no react
 ```text
 browser_click(tabId=<linkedin_tab>, selector="byob:idx=<like_idx>")
 ```
+
+### Following new people (feed curation lever)
+
+The LinkedIn feed tunes to who you follow and engage with. To shape the
+feed toward higher-signal builders / strategists / researchers:
+
+1. **Scan the feed for authors you haven't followed yet.** Author names
+   surface in `<article>` IE `name` fields and in post permalinks.
+2. **Screen the profile before following.** Open `https://www.linkedin.com/in/{handle}/`
+   and skim recent posts:
+   - Are they posting concrete observations / shipping things, or just
+     hot takes and reposts?
+   - Do their posts read like the patterns under "What works on this
+     feed"? (sharp behavioral observation, specific numbers, real
+     examples, builder-noticing-builder)
+   - Avoid pure-influencer accounts (engagement-bait questions, listicle
+     hot-takes that just summarize others' work, "DM me for the
+     framework" patterns).
+3. **Follow if yes.** Follow buttons on LinkedIn vary by profile state.
+   Use the IE list to find the button named "Follow" (not "Connect" or
+   "Message"). Already-following accounts show "Following".
+
+Target 3-10 follows per run.
 
 ### Screen candidates (mandatory before drafting)
 
@@ -497,6 +677,9 @@ names, no internal terms.]
 - No sycophantic opener ("Great point!", "Love this!").
 - No fake authority. The grounding is the experience the parent gave
   you, not invented detail.
+- ZERO em-dashes (—). They are a vanilla-LLM tell in 2026. Use periods,
+  colons, commas, or parentheses instead. Search-and-destroy before
+  output.
 
 ## Length
 
@@ -512,17 +695,56 @@ needs the room. Hard cap 1250 (LinkedIn limit).
    name, or internal-jargon term. If present, rewrite without them.
 3. Insight-up-front check. Is the portable insight in sentence one? If
    it's the closing line, move it.
+4. Em-dash scan. Search the draft for "—". If you find ANY, replace
+   with periods, colons, commas, or parentheses. Zero tolerance.
 
 ## Output
 
 Return the final comment text. Nothing else.
 ```
 
+**Iterate: 2 rounds of draft + cold-read with rotating personas.**
+Comments are lower-stakes than posts, so 2 rounds usually beat 4. Use
+TWO different personas across the rounds, never the same one twice, to
+avoid echo-chamber convergence.
+
+- **Round 1: LLM-Tell Hunter.** Strips obvious AI register early so
+  round 2 isn't masked by it.
+- **Round 2: Audience Stand-In.** A fresh subagent role-playing the
+  post's actual audience (strategist for a strategy post, designer for
+  a design post, etc.). Asks "would this comment land for *me*?"
+
+Cold-read prompt for comments:
+
+```
+You are {PERSONA}. {PERSONA_BIAS}
+
+Original post: [paste]
+Comment candidate: [paste]
+
+Grade strictly through your lens:
+- A: genuinely sharpens, corrects, or extends the original.
+- B+: adds something a reader of the original wouldn't have thought of.
+- C: restates the original in new words.
+- D: sycophantic, generic, or wrong audience.
+
+GRADE: ...
+WHAT IT ADDS (or fails to add): one sentence
+{PERSONA}-SPECIFIC FINDING: ...
+TOP TWO FIXES: 1. ... 2. ...
+
+Total under 150 words. Be blunt.
+```
+
+After v2: ship if B+ or better. If still C-D, the comment premise is
+wrong. Drop it and pick a different post to engage.
+
 **Verify (parent session):**
-1. Read the returned draft against the audience-check, bragging-token, and insight-up-front rules
-2. If it fails any of them, send the subagent back with specific feedback ("draft still uses 'cache' in sentence one — try 'we skip a request when the inputs haven't changed'")
-3. Render the final comment inline in your response
-4. **In the same turn**, save to `/tmp/linkedin-comment-N.txt` and post via BYOB
+1. Read the final draft against audience-check, bragging-token, and
+   insight-up-front rules one more time
+2. Render the final comment inline in your response
+3. **In the same turn**, save to `/tmp/linkedin-comment-N.txt` and post
+   via BYOB
 
 ### Posting workflow (verified live)
 
