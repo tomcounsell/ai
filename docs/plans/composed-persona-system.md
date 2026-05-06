@@ -7,7 +7,7 @@ created: 2026-05-04
 tracking: https://github.com/tomcounsell/ai/issues/1268
 last_comment_id:
 revision_applied: true
-revision_cycle: 3
+revision_cycle: 4
 ---
 
 # Composed Persona System: Single (persona × access-level × channel) Builder
@@ -19,14 +19,23 @@ The agent's system-prompt assembly conflates three independent axes — *who the
 **Current behavior:**
 
 - Two parallel pickers exist:
-  - [`agent/sdk_client.py`](../../agent/sdk_client.py) L3326–L3395 (`get_response_via_harness` path)
-  - [`agent/session_executor.py`](../../agent/session_executor.py) L1430–L1486 (the harness-route persona resolution)
-  Both branch on `SessionType` plus a `transport == "email"` override that swaps in `project.email.persona`. They are similar but not identical and have drifted independently (issue cited only `sdk_client.py`; freshness check found the second site).
+  - [`agent/sdk_client.py`](../../agent/sdk_client.py) — actually **two blocks**: L3349–L3363 (resolve persona enum) + L3382–L3419 (build `custom_system_prompt`). The `get_response_via_harness` path. Email override at L3355–L3361.
+  - [`agent/session_executor.py`](../../agent/session_executor.py) L1563–L1629 — the harness-route persona resolution. Same email-vs-session-type ladder, similar but not identical.
+  Both branch on `SessionType` plus a `transport == "email"` override that swaps in `project.email.persona`. They have drifted independently (issue cited only `sdk_client.py`; freshness check found the second site).
 - Two prompt-builder functions exist with hard-baked behavior:
-  - `load_system_prompt()` — bakes in the developer persona + `WORKER_RULES` + principal context + completion criteria.
-  - `load_pm_system_prompt(working_dir)` — bakes in the project-manager persona, *omits* `WORKER_RULES`, appends work-vault `CLAUDE.md`. Documented invariant in its docstring at sdk_client.py:1022–1026.
-  - For teammate / customer-service personas, `_load_persona_overlay_with_log()` is called directly with no rails layer at all.
-- Channel awareness leaks into the working-agent prompt: persona segments (`identity.md`, `tools.md`) and the developer overlay describe Telegram-specific behaviour, even though most of those concerns only matter at message-drafting time.
+  - `load_system_prompt()` (sdk_client.py:966) — bakes in the developer persona + `WORKER_RULES` + principal context + completion criteria.
+  - `load_pm_system_prompt(working_dir)` (sdk_client.py:998) — bakes in the project-manager persona, *omits* `WORKER_RULES`, appends work-vault `CLAUDE.md`. Documented invariant in its docstring at sdk_client.py:1022–1026.
+  - For teammate / customer-service personas, `_load_persona_overlay_with_log()` (sdk_client.py:1787) is called directly with no rails layer at all.
+- Channel awareness leaks into the working-agent prompt: persona segments (`identity.md`, `tools.md`) and the developer/PM overlays describe Telegram-specific behaviour. Concrete leakage points (verified at HEAD `5576e4dc`):
+  - `config/personas/segments/identity.md` L43 (Telegram PM guide reference), L61 (empty-promises rule citing "by the time my response reaches Telegram"), L65 (drafter mention), L100 (group-chat history rule)
+  - `config/personas/segments/work-patterns.md` L98 (telegram history rule), L338 (launchd reconnect mention)
+  - `config/personas/segments/tools.md` L67–L80 (computer-use Electron app guidance with Telegram Desktop), L103–L131 (`valor-telegram` CLI section), L130–L132 (TOOL USAGE ONLY guard against `valor-telegram send` syntax leaking into responses), L134 (chat-history rule), L154 (Telethon mention)
+  - `~/Desktop/Valor/personas/customer-service.md` — 21 telegram/email mentions (this is *expected*; customer-service is fundamentally an email persona)
+  - `~/Desktop/Valor/personas/project-manager.md` (and `config/personas/project-manager.md` fallback) — L44, L220, L534 (Telegram-specific bullets)
+  - `~/Desktop/Valor/personas/developer.md` — 0 telegram/email mentions (clean)
+  - `~/Desktop/Valor/personas/teammate.md` — 0 telegram/email mentions (clean)
+
+  Most of those concerns only matter at message-drafting time.
 - Voice rules (banned phrases, "no empty promises", good/bad reply examples) are scattered across persona overlays and `bridge/message_drafter.py:1295` `DRAFTER_SYSTEM_PROMPT` with no single source of truth. This plan **observes** the duplication but does not consolidate it (see Risk 4 / No-Gos — voice consolidation is deferred to a follow-up plan to keep the byte-stability mitigation clean).
 - `email.persona` per-project override is the only "channel changes the prompt" code path and lives inline in *both* pickers, not in a composer.
 
@@ -36,21 +45,47 @@ A single `compose_system_prompt(persona, access_level, channel=None, **kwargs)` 
 
 ## Freshness Check
 
-**Baseline commit:** `5055b527c9fbe7710d7bb5dbe9a44132565e9fa6`
-**Issue filed at:** 2026-05-04T09:18:37Z (today)
-**Disposition:** Minor drift — the issue cites `sdk_client.py` L3326–L3395 as the only picker location, but a second equivalent picker exists in `agent/session_executor.py` L1430–L1486 (introduced for the harness route). The plan must collapse BOTH sites.
+**Baseline commit (issue authored against):** `5055b527c9fbe7710d7bb5dbe9a44132565e9fa6`
+**Refresh commit (this revision):** `5576e4dc907247076b3154e4f73fef96ff0e92f0`
+**Issue filed at:** 2026-05-04T09:18:37Z
+**Refresh date:** 2026-05-06
+**Disposition:** Line-number drift across all referenced sites — seven commits have touched `agent/sdk_client.py`, `agent/session_executor.py`, and adjacent files since the issue was filed. The structural shape of the picker is unchanged, but every line range needs to be re-pinned. The two-site picker finding from cycle-3 still holds and remains the most important freshness signal.
 
-**File:line references re-verified:**
+**File:line references re-verified at refresh commit:**
 
-- `agent/sdk_client.py:892` (`load_persona_prompt`) — still holds
-- `agent/sdk_client.py:966` (`load_system_prompt`) — still holds
-- `agent/sdk_client.py:998` (`load_pm_system_prompt`) — still holds
-- `agent/sdk_client.py:3326–3395` (picker) — still holds
-- `agent/sdk_client.py:3331` (email override) — still holds
-- `bridge/message_drafter.py:1295` (`DRAFTER_SYSTEM_PROMPT`) — still holds
-- `config/enums.py` `PersonaType` (4 members) and `SessionType` (3 members) — still holds
-- `config/personas/segments/manifest.json` (4 segments) — still holds
-- **NEW:** `agent/session_executor.py:1430–1486` — second picker site not cited in the issue but functionally equivalent and must be unified
+| Reference | Cycle-3 plan said | Verified at HEAD `5576e4dc` | Status |
+|-----------|-------------------|------------------------------|--------|
+| `agent/sdk_client.py` `load_persona_prompt` | L892 | L892 | unchanged |
+| `agent/sdk_client.py` `load_system_prompt` | L966 | L966 | unchanged |
+| `agent/sdk_client.py` `load_pm_system_prompt` | L998 | L998 | unchanged |
+| `agent/sdk_client.py` `_resolve_overlay_path` | L878 | L878 | unchanged |
+| `agent/sdk_client.py` `_load_persona_overlay_with_log` | L1837–1853 | L1787 (function start) | drifted up ~50 lines |
+| `agent/sdk_client.py` `_resolve_persona` | (next door) | L1860 | (drifted) |
+| `agent/sdk_client.py` picker — persona resolve block | L3326–L3395 (single block) | **TWO blocks**: L3349–L3363 (resolve persona enum) + L3382–L3419 (build `custom_system_prompt` based on persona) | Cycle-3 plan was wrong about it being one block |
+| `agent/sdk_client.py` email-persona override | L3331 | L3355–L3361 | drifted, still inline |
+| `agent/sdk_client.py` `WORKER_RULES` constant | L647 | L647 | unchanged |
+| `agent/sdk_client.py` PM-cell prompt assembly comment ("Worker rules FIRST") | L994 | L994 | unchanged |
+| `agent/session_executor.py` second picker site | L1430–L1486 | L1563–L1629 | drifted ~133 lines down |
+| `bridge/message_drafter.py` `DRAFTER_SYSTEM_PROMPT` | L1295 | L1295 | unchanged |
+| `bridge/message_drafter.py` `draft_message` signature | L1720–L1747 | L1720–L1750 | minor doc drift only |
+| `bridge/message_drafter.py` `_validate_for_medium` | L381 | L381 | unchanged |
+| `config/enums.py` `PersonaType` (4 members) | L25 | L25 | unchanged |
+| `config/enums.py` `SessionType` (3 members) | L17 | L17 | unchanged |
+| `config/personas/segments/manifest.json` (4 segments) | unchanged | unchanged | unchanged |
+
+**Commits on main since baseline that touch referenced files:**
+
+```
+5576e4dc feat(dashboard): session-detail liveness signals (#1269)
+1c50ded6 feat(skills): migrate agent-browser → BYOB per-skill (#1274)
+e336277f feat(orphan-reap): cross-process orphan reaper with worker self-suicide guard (#1271)
+d1aaaab2 guard slugless dev sessions with synthetic slug + CLI symmetry (#1272)
+dcab49b1 fix(session-executor): require worktree to exist on disk, not just in path string (#887 follow-up)
+2dfc4baf docs(persona-pm): require explicit worktrees for parallel builds + cleanup
+ce44e1e4 BYOB real-Chrome MCP + macOS computer-use skill (#1256)
+```
+
+None of these commits change the *structure* of the picker, the composer functions, or the drafter — they shift line numbers and modify the surrounding harness/session-executor scaffolding. The plan's design choices (composer signature, picker collapse, drafter `medium=` extension) are unaffected. The only ground-truth change required is the line-range table above.
 
 **Cited sibling issues/PRs re-checked:**
 
@@ -59,14 +94,16 @@ A single `compose_system_prompt(persona, access_level, channel=None, **kwargs)` 
 - #1189 — CLOSED. Added the workflow-announcement guard (loader warning at L931–939). Composer must preserve.
 - #1227 — CLOSED. Established the byte-stable PM prompt-prefix invariant for Anthropic prompt cache. Composer must preserve byte-for-byte for the PM cell.
 
-**Commits on main since issue was filed (touching referenced files):** none
-
 **Active plans in `docs/plans/` overlapping this area:**
 
 - `pm-persona-hardening.md` (#1007, In Progress) — adds three new sections to the PM overlay file. Scope is the PM overlay *content*, not the loader. **Not blocking.** Composer treats the overlay as opaque text.
 - `unify-persona-vocabulary.md` (#599, Draft) — eliminates `ChatMode` enum and renames `qa_*` to `teammate_*`. Plan touches `config/enums.py` and the picker. **Coordination signal:** if `unify-persona-vocabulary.md` lands first, this plan picks up `PersonaType` cleanly; if this plan lands first, that plan rebases against the new composer call site. Both plans agree on `PersonaType` as the canonical enum — there is no semantic conflict.
 
-**Notes:** The two-site picker is the most important freshness finding — without it the plan would only collapse one branch ladder and leave a parallel one in `session_executor.py` to drift again.
+**Notes:** Cycle-3 plan said the `sdk_client.py` picker was one contiguous block at L3326–L3395. At HEAD `5576e4dc` it is in fact **two blocks separated by ~20 lines of logging**:
+- **Block A** (L3349–L3363): map `(SessionType, project, transport)` → `PersonaType` enum value
+- **Block B** (L3382–L3419): map `(SessionType, project_mode, persona)` → `custom_system_prompt` string (calls `load_pm_system_prompt`, `_load_persona_overlay_with_log`, etc.)
+
+The composer collapses Block B into a single `compose_system_prompt(...)` call. Block A becomes the body of `_resolve_compose_args(...)`. **Both** call sites in `sdk_client.py` and the picker in `session_executor.py:1563–1629` collapse the same way.
 
 ## Prior Art
 
