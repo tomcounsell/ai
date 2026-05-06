@@ -837,6 +837,12 @@ def get_all_sessions(limit: int = 15) -> list[PipelineProgress]:
     # Convert all sessions to PipelineProgress, skipping test data
     all_pipelines = []
     for session in all_sessions:
+        if not session.id:
+            logger.warning(
+                "Skipping session with no id (partial write): "
+                f"status={session.status}, updated_at={session.updated_at}"
+            )
+            continue
         if getattr(session, "project_key", None) == "test":
             continue
         try:

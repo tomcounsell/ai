@@ -70,6 +70,16 @@ BYOB_SKILL_TRIGGERS: dict[str, list[str]] = {
         # "/linkedin foo" at the start of a turn, not embedded in URLs.
         r"(?:^|\s)/linkedin\b",
     ],
+    "x-com": [
+        # First-person intent: "my X", "my twitter", "my x.com"
+        r"\bmy\s+(?:x|x\.com|twitter)\b",
+        # Verb + X/twitter: "check X", "post on X", "browse twitter"
+        r"\b(?:check|open|browse|read|post\s+on|tweet\s+on|reply\s+(?:on|to))\s+(?:x|x\.com|twitter)\b",
+        # Object phrasing: "X DMs", "X timeline", "twitter feed", "X replies"
+        r"\b(?:x|x\.com|twitter)\s+(?:dms?|messages?|feed|timeline|notifications?|replies|mentions?)\b",
+        # Slash-skill explicit invocation — anchored to avoid URL false positives
+        r"(?:^|\s)/x-com\b",
+    ],
 }
 
 
