@@ -1,14 +1,18 @@
-"""Unit tests for reflections/daily_report.py renderer + signal mapping (#1263).
+"""Unit tests for the daily-log renderer + signal mapping (#1263, inlined per #1292).
 
 Covers _render_day_log section ordering, empty-day handling, full-named-entity
 formatting, and _activity_to_signals → builder mapping shape.
+
+The renderer originally lived in ``reflections/daily_report.py``; it was
+inlined into ``reflections.pm_audio_briefing.daily_log`` when the legacy
+``daily-report-and-notify`` registry entry was retired (issue #1292).
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import reflections.daily_report as dr
+import reflections.pm_audio_briefing.daily_log as dr
 
 
 def _basic_date():
@@ -233,31 +237,8 @@ def test_activity_to_signals_empty_activity_returns_empty_dict():
     assert dr._activity_to_signals(dr.DayActivity(date_iso="2026-05-02")) == {}
 
 
-# --- _select_target_chat_id --------------------------------------------------
-
-
-def test_select_target_chat_id_prefers_pm_group():
-    project = {
-        "telegram": {
-            "groups": {
-                "Dev: Foo": {"chat_id": -1},
-                "PM: Foo": {"chat_id": -2},
-            }
-        }
-    }
-    assert dr._select_target_chat_id(project) == -2
-
-
-def test_select_target_chat_id_falls_back_to_first():
-    project = {"telegram": {"groups": {"Dev: Foo": {"chat_id": -1}}}}
-    assert dr._select_target_chat_id(project) == -1
-
-
-def test_select_target_chat_id_returns_none_if_no_chat_id():
-    project = {"telegram": {"groups": {"PM: Foo": {"persona": "project-manager"}}}}
-    assert dr._select_target_chat_id(project) is None
-
-
-def test_select_target_chat_id_handles_no_telegram_block():
-    assert dr._select_target_chat_id({}) is None
-    assert dr._select_target_chat_id({"telegram": {}}) is None
+# Note: target-chat selection (formerly _select_target_chat_id) was removed
+# from this module when the legacy `daily_report.run()` orchestration was
+# retired (issue #1292). Per-project chat resolution now lives in the
+# dispatcher (`reflections.pm_audio_briefing.delivery`); see
+# `tests/unit/reflections/test_pm_audio_briefing_delivery.py`.
