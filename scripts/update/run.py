@@ -1073,8 +1073,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 result.warnings.append("Worker plist install failed")
 
-        # Ensure email bridge is running if configured
-        if service.is_email_configured(project_dir):
+        # Ensure email bridge is running if this machine has projects AND IMAP is configured.
+        # If the machine has no projects, stop any stray email bridge process.
+        has_projects = bool(machine_check.get("projects"))
+        if has_projects and service.is_email_configured(project_dir):
             if service.is_email_running():
                 log(f"Email bridge running (PID: {service.get_email_pid()})", v)
             else:
@@ -1085,7 +1087,25 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     log("WARN: Email bridge failed to start", v, always=True)
                     result.warnings.append("Email bridge configured but failed to start")
         else:
-            log("Email bridge: skipped (IMAP_PASSWORD not configured)", v)
+            if service.is_email_running():
+                if not has_projects:
+                    log(
+                        "Email bridge running but no projects assigned to this machine — stopping",
+                        v,
+                        always=True,
+                    )
+                else:
+                    log("Email bridge running but IMAP not configured — stopping", v, always=True)
+                service.stop_email(project_dir)
+                if not service.is_email_running():
+                    log("Email bridge stopped", v, always=True)
+                else:
+                    log("WARN: Email bridge failed to stop", v, always=True)
+                    result.warnings.append("Email bridge should not run here but failed to stop")
+            elif not has_projects:
+                log("Email bridge: skipped (no projects assigned to this machine)", v)
+            else:
+                log("Email bridge: skipped (IMAP_PASSWORD not configured)", v)
 
         # Install the user-space log-rotate LaunchAgent — replaces the prior
         # root-requiring newsyslog install. Runs every 30 minutes via launchd

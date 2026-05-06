@@ -426,6 +426,27 @@ def is_email_configured(project_dir: Path) -> bool:
     return False
 
 
+def stop_email(project_dir: Path) -> bool:
+    """Stop the email bridge. Returns True if it stopped."""
+    service_script = project_dir / "scripts" / "valor-service.sh"
+    if not service_script.exists():
+        pid = get_email_pid()
+        if pid:
+            import os
+            import signal
+
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        return not is_email_running()
+    try:
+        run_cmd([str(service_script), "email-stop"], cwd=project_dir, timeout=15)
+    except Exception:
+        pass
+    return not is_email_running()
+
+
 def ensure_email_running(project_dir: Path) -> bool:
     """Start email bridge if configured and not already running. Returns True if running."""
     if not is_email_configured(project_dir):
