@@ -73,7 +73,9 @@ Every step must follow these conventions:
 
 ## Test Pattern
 
-Add a test class to `tests/test_reflections.py`. The standard test structure covers three cases:
+Reflection tests live in `tests/unit/test_reflections_*.py` (split by topic — see `test_reflections_scheduling.py`, `test_reflections_memory.py`, `test_reflections_auditing.py`, `test_reflections_report.py`, `test_reflections_multi_repo.py`, `test_reflections_package.py`, plus `test_reflection_model.py` and `test_reflection_scheduler.py`; integration coverage lives in `tests/integration/test_reflections_redis.py`).
+
+Add a test class to whichever file in the family best matches the area your step touches. If none fit, create a new `tests/unit/test_reflections_<topic>.py`. The standard test structure covers three cases:
 
 ```python
 class TestYourStepName:
@@ -133,9 +135,9 @@ When adding a new step:
 - [ ] Create `step_<key>` method following the template above
 - [ ] Register as `(N, "Step Name", self.step_<key>)` in `self.steps`
 - [ ] Update the module docstring step list at the top of `scripts/reflections.py`
-- [ ] Add test class to `tests/test_reflections.py` with the three standard test cases
+- [ ] Add test class to the appropriate `tests/unit/test_reflections_<topic>.py` (or create a new one if none fit) with the three standard test cases
 - [ ] Update `docs/features/reflections.md` step count and table
-- [ ] Run `pytest tests/test_reflections.py -x -q` to verify
+- [ ] Run `pytest tests/unit/test_reflections_<topic>.py -x -q` to verify (or `pytest -k reflections -x -q` for the whole family)
 
 ## Reference Implementation
 
