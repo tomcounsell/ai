@@ -76,7 +76,8 @@ The Teammate persona prompt includes a DELIVERY REVIEW section explaining the ch
 ## Test Coverage
 
 - `tests/unit/test_stop_hook_review.py` — Review gate activation, transcript reading, false stop detection, choice parsing, state management, integration tests
-- `tests/unit/test_delivery_execution.py` — send/react/silent/fallthrough paths
+- `tests/unit/test_tool_call_delivery.py` — `classify_delivery_outcome`'s send/react/continue/silent outcomes (plus the legacy `send_telegram` alias) and the second-stop tool-call review-gate flow
+- `tests/unit/test_duplicate_delivery.py` — Duplicate-delivery prevention: catchup Redis dedup checks and auto-continue skips for completed sessions
 - `tests/unit/test_qa_handler.py` — Teammate prompt humility markers, review gate awareness
 - `tests/e2e/test_message_pipeline.py` — Bool classifier assertions
 
