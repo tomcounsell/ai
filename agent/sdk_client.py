@@ -3208,8 +3208,9 @@ async def get_agent_response_sdk(
                 ' --session-id "$AGENT_SESSION_ID"\n'
                 "to pause this session. Do NOT process multiple issues in a single session. "
                 "Spawn child sessions sequentially (one create call at a time) then call "
-                "wait-for-children once. Send a Telegram update before pausing so Valor "
-                "knows fan-out happened.\n\n"
+                "wait-for-children once. Stay silent through fan-out — no narration, "
+                "no '/sdlc' jargon, no session IDs. Speak only on completion or for a "
+                "real question.\n\n"
             )
 
             if _delegation == "autonomous":

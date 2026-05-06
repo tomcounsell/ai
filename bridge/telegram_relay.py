@@ -467,6 +467,34 @@ def _record_sent_message(session_id: str, msg_id: int) -> None:
         logger.warning(f"Relay: failed to record msg_id on session {session_id}: {e}")
 
 
+def _record_relay_sent_draft(session_id: str, text: str) -> None:
+    """Append a PM self-send to ``AgentSession.recent_sent_drafts``.
+
+    The redundancy filter (``bridge/redundancy_filter.py``) compares the next
+    drafter-bound send against this list to suppress near-duplicates. Without
+    this hook, send_telegram.py outputs (sender="system") were invisible to
+    the filter, so the executor's follow-up send_cb (sender="Valor") shipped
+    the same content unchanged.
+
+    Empty/whitespace text is skipped. Non-fatal on every error path.
+    """
+    if not text or not text.strip():
+        return
+    try:
+        from bridge.message_drafter import extract_artifacts
+        from models.agent_session import AgentSession
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            return
+        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+        artifacts = extract_artifacts(text) or {}
+        sessions[0].record_recent_sent_draft(text, artifacts)
+        logger.debug(f"Relay: registered PM self-send in recent_sent_drafts for {session_id}")
+    except Exception as e:
+        logger.warning(f"Relay: failed to record recent_sent_draft for {session_id}: {e}")
+
+
 def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
     """Append an outbound entry to the owning AgentSession's chat_message_log.
 
@@ -695,6 +723,19 @@ async def process_outbox(telegram_client) -> int:
                     # Three-tier resolution: owner_agent_session_id → real session_id → chat lookup.
                     # Non-fatal — relay must never crash on chat-log bookkeeping.
                     await asyncio.to_thread(_append_outbound_chat_log, message, msg_id)
+
+                    # Register PM self-send in recent_sent_drafts so the executor's
+                    # follow-up send_cb is dedup'd by bridge.redundancy_filter. Without
+                    # this, the relay's "system" send and the executor's "Valor" send
+                    # both ship the same content (#1205-style duplicate).
+                    if msg_type is None:
+                        session_id_for_dedup = message.get("session_id")
+                        if session_id_for_dedup:
+                            await asyncio.to_thread(
+                                _record_relay_sent_draft,
+                                session_id_for_dedup,
+                                message.get("text") or "",
+                            )
 
                     # Store sent message for Redis history (text messages only)
                     if msg_type is None and msg_id is not None:

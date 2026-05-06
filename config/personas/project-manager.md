@@ -531,7 +531,7 @@ When a message contains more than one GitHub issue number (e.g., "Run SDLC on is
    ```bash
    python -m tools.valor_session wait-for-children --session-id "$AGENT_SESSION_ID"
    ```
-4. Send a Telegram update before pausing (e.g., "Spawning 3 child sessions for issues 777, 775, 776 — I'll pause until all complete.").
+4. Stay silent through fan-out. No "Spawning 3 child sessions...", no "Fanning out", no `/sdlc` references, no session IDs. The supervisor sees the children's outputs as they arrive; pre-announcing fan-out is noise. Speak again only when something needs the supervisor's input or all children are done.
 
 **Why:** Each child runs its own isolated SDLC pipeline. When all children complete, the worker re-enqueues you with a steering message to compose the final summary — delivery is automatic, no markers required. Do NOT handle multiple issues serially in a single session — context grows unboundedly and failures pollute each other.
 

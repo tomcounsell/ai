@@ -2,7 +2,11 @@
 """Send a Telegram message from the PM session via Redis outbox queue.
 
 This tool is called by the PM session via Bash to compose and send its own
-Telegram messages, bypassing the drafter. The bridge relay task
+Telegram messages. The text is piped through the same message drafter the
+executor uses (``bridge.message_drafter.draft_message``) so the persona voice
+is enforced — no internal IDs, no SDLC stage labels, no markdown soup. Pass
+``--no-draft`` for the rare case where the raw text must reach Telegram
+verbatim (e.g., system-emitted notices). The bridge relay task
 (bridge/telegram_relay.py) processes the queue and sends via Telethon.
 
 Usage:
@@ -11,11 +15,13 @@ Usage:
     python tools/send_telegram.py --file /path/to/document.pdf
     python tools/send_telegram.py "Album caption" --file a.png --file b.png --file c.png
     python tools/send_telegram.py --react "excited"
+    python tools/send_telegram.py --no-draft "Verbatim: pipeline-state JSON here"
 
 Environment variables (injected by sdk_client.py for chat sessions):
     TELEGRAM_CHAT_ID   - Target Telegram chat ID
     TELEGRAM_REPLY_TO  - Message ID to reply to
     VALOR_SESSION_ID   - Session ID for queue routing
+    DRAFT_SEND_TELEGRAM - Set to "0" to globally disable the drafter pass-through.
 
 Redis queue contract:
     Key pattern: telegram:outbox:{session_id}
@@ -62,7 +68,43 @@ def _linkify_text(text: str) -> str:
         return text
 
 
-def send_message(text: str, file_paths: list[str] | None = None) -> None:
+def _draft_text(text: str) -> str:
+    """Pipe text through the message drafter to enforce the persona voice.
+
+    The drafter has its own short-output bypass (~200 chars, no artifacts,
+    no question, no code block) so already-clean PM messages skip the LLM
+    call entirely. Long, jargon-heavy outputs get rewritten to bullets +
+    outcomes and stripped of internal IDs and SDLC stage labels.
+
+    Returns the drafted text on success, or the original text on any failure
+    so a drafter outage never blocks the send.
+    """
+    if not text or not text.strip():
+        return text
+    if os.environ.get("DRAFT_SEND_TELEGRAM", "1") == "0":
+        return text
+    try:
+        import asyncio
+
+        from bridge.message_drafter import draft_message
+
+        result = asyncio.run(draft_message(text, medium="telegram", persona="pm"))
+        if result and result.text and result.text.strip():
+            return result.text
+    except Exception as exc:
+        print(
+            f"Note: drafter unavailable, sending raw text ({exc})",
+            file=sys.stderr,
+        )
+    return text
+
+
+def send_message(
+    text: str,
+    file_paths: list[str] | None = None,
+    *,
+    skip_draft: bool = False,
+) -> None:
     """Queue a Telegram message for delivery by the bridge relay.
 
     Args:
@@ -134,7 +176,14 @@ def send_message(text: str, file_paths: list[str] | None = None) -> None:
         text = ""
 
     if text:
-        # Apply linkification
+        # Pipe through the drafter first so the persona voice (no internal IDs,
+        # no SDLC stage labels, bullets+outcomes) is enforced. The drafter
+        # short-circuits for already-clean short messages, so the latency cost
+        # is bounded.
+        if not skip_draft:
+            text = _draft_text(text)
+
+        # Apply linkification (idempotent — no-op on already-linkified URLs).
         text = _linkify_text(text)
 
         # Enforce Telegram length limit
@@ -365,6 +414,14 @@ def main():
         default=None,
         help="Send a standalone emoji message matching this feeling word (e.g., 'celebration')",
     )
+    parser.add_argument(
+        "--no-draft",
+        dest="no_draft",
+        action="store_true",
+        default=False,
+        help="Bypass the message drafter and send the raw text verbatim. "
+        "Use only for system-emitted notices that must reach Telegram unchanged.",
+    )
 
     args = parser.parse_args()
 
@@ -383,7 +440,7 @@ def main():
     if not text and not args.file_paths:
         parser.error("Either message text, --file, --react, or --emoji must be provided.")
 
-    send_message(text, file_paths=args.file_paths)
+    send_message(text, file_paths=args.file_paths, skip_draft=args.no_draft)
 
 
 if __name__ == "__main__":
