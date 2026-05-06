@@ -288,16 +288,42 @@ The issue references fazm's [`AGENT-VOICE.md`](https://github.com/mediar-ai/fazm
 
 ## Test Impact
 
-- [ ] `tests/unit/test_persona_loading.py` — UPDATE: `load_system_prompt` and `load_pm_system_prompt` now delegate to `compose_system_prompt`; existing tests (lines 164–186, 301) still pass because the wrappers preserve byte output. Add a new test `test_load_system_prompt_byte_stable_through_composer` that asserts the wrapper output equals the direct composer output for the `(DEVELOPER, WORKER)` cell.
-- [ ] `tests/unit/test_sdk_client_sdlc.py` — UPDATE: `WORKER_RULES` constant unchanged; the test that asserts WORKER_RULES is prepended (currently against `load_system_prompt()`) is rewritten to assert against `compose_system_prompt(persona=DEVELOPER, access_level=WORKER)`. Add a regression: `compose_system_prompt(persona=PROJECT_MANAGER, access_level=PM_READONLY, working_directory=...)` does NOT contain `WORKER_RULES` substring (preserves the load_pm_system_prompt invariant from sdk_client.py:1023).
-- [ ] `tests/unit/test_message_drafter.py` — UPDATE: drafter system prompt is now `BASE + MEDIUM_RULES["telegram"]`. Existing tests should pass unchanged because the default `medium="telegram"` produces the same text. Add a new test asserting `draft_message(raw_response, session=None, medium="email")` uses different format rules. The tested function is `draft_message` at `bridge/message_drafter.py:1720`; signature is `async def draft_message(raw_response: str, session=None, *, medium: str = "telegram", persona: str | None = None) -> MessageDraft`.
-- [ ] `tests/unit/test_drafter_validators.py` — UPDATE: any test that imports `DRAFTER_SYSTEM_PROMPT` directly is updated to import the composed result via the new `_compose_drafter_prompt(channel)` helper.
-- [ ] `tests/unit/test_pm_persona_guards.py` — no change. The PM overlay loader-warning tests at sdk_client.py:919–948 are preserved; they're inside `load_persona_prompt`, which stays as the segment-and-overlay assembler.
-- [ ] `tests/unit/test_message_drafter_chat_log.py`, `test_message_drafter_linkify.py` — UPDATE only if they import `DRAFTER_SYSTEM_PROMPT` directly; otherwise no change.
-- [ ] **NEW** `tests/unit/test_compose_system_prompt.py` — create. Covers: (1) byte-stability for `(DEVELOPER, WORKER)` and `(PROJECT_MANAGER, PM_READONLY)` cells against the wrappers' output captured from main; (2) one test per cell of the (persona × access-level) matrix; (3) startup-lint invariants (PM under 80K chars, no `{{identity.*}}` markers, WORKER_RULES precedes overlay).
-- [ ] **NEW** `tests/unit/test_resolve_compose_args.py` — create. Covers: each `(SessionType, project_mode, transport, project.email.persona)` input cell maps to the expected `(persona, access_level, channel)` output. Replaces inline branch-by-branch testing of the two pickers.
+Audit performed at refresh commit `5576e4dc` against the actual test files in `tests/unit/`. Specific lines pinned where they affect the test mapping.
 
-No existing integration tests reference the prompt-byte content directly, so no integration test impact.
+- [ ] `tests/unit/test_persona_loading.py` (24K, last touched May 2) — UPDATE: `load_system_prompt` and `load_pm_system_prompt` now delegate to `compose_system_prompt`; existing tests at L164–L201 (`load_persona_prompt` calls), L298–L312 (`load_system_prompt`/`load_pm_system_prompt` regressions), and the WORKER_RULES + persona-content assertions still pass because the wrappers preserve byte output. **Add** a new test `test_load_system_prompt_byte_stable_through_composer` asserting `load_system_prompt() == compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER)`.
+- [ ] `tests/unit/test_sdk_client_sdlc.py` (22K, last touched Apr 12) — UPDATE: `WORKER_RULES` constant tests at L37–L71 are unchanged (the constant itself does not move). The `load_system_prompt` assertions are rewritten to also assert against `compose_system_prompt(persona=DEVELOPER, access_level=WORKER)` and produce identical output. **Add** a regression: `compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, working_directory="...")` does NOT contain `WORKER_RULES` substring (preserves the `load_pm_system_prompt` invariant from sdk_client.py:1023).
+- [ ] `tests/unit/test_message_drafter.py` (85K, last touched May 5) — UPDATE: drafter system prompt is now `BASE + MEDIUM_RULES["telegram"]`. Existing tests should pass unchanged because the default `medium="telegram"` produces the same text. The two assertions at L1574–L1587 that import `DRAFTER_SYSTEM_PROMPT` directly need to be updated: either keep them as-is (the symbol is exported and the test verifies the *current* string still includes the substrings) or rewrite to import via `_compose_drafter_prompt("telegram")`. **Add** a new test asserting `draft_message(raw_response, session=None, medium="email")` produces a system prompt that does NOT include the `• ` bullet rule from FORMAT RULES #4 (Telegram-specific). The tested function is `draft_message` at `bridge/message_drafter.py:1720`; signature `async def draft_message(raw_response: str, session=None, *, medium: str = "telegram", persona: str | None = None) -> MessageDraft`.
+- [ ] `tests/unit/test_drafter_validators.py` (8.7K, last touched Apr 20) — UPDATE: tests at L194 (`telegram` medium), L214–L217 (`email` medium) already pass `medium=` explicitly. No drafter signature changes are required. The plan reuses the existing `_validate_for_medium` validator unchanged.
+- [ ] `tests/unit/test_pm_persona_guards.py` (9.9K, last touched May 2) — **no change**. The PM overlay loader-warning tests at sdk_client.py:919–948 are preserved; they're inside `load_persona_prompt`, which stays as the segment-and-overlay assembler.
+- [ ] `tests/unit/test_message_drafter_chat_log.py` (5.7K), `tests/unit/test_message_drafter_linkify.py` (3.7K) — UPDATE only if they import `DRAFTER_SYSTEM_PROMPT` directly. Grep on refresh commit shows no such imports → **no change**.
+- [ ] `tests/unit/test_agent_session_scheduler_persona.py` (2.4K, last touched Apr 9) — REVIEW. Tests persona resolution by scheduler. Should still pass; scheduler doesn't use the composer directly. Confirm during build.
+- [ ] `tests/unit/test_pm_session_factory.py`, `tests/unit/test_pm_channels.py`, `tests/unit/test_config_driven_routing.py`, `tests/unit/test_routing_mode.py` — these contain `persona`/`PersonaType` references but operate at the session-factory/router layer above the composer. Composer is invoked downstream of these tests' subjects → **no change** unless they assert specific picker branches.
+- [ ] **NEW** `tests/unit/test_compose_system_prompt.py` — create. Covers:
+  1. **Byte-stability** for `(DEVELOPER, WORKER)` and `(PROJECT_MANAGER, PM_READONLY)` cells against the per-machine fixtures from Step 1 (Risk 1 strategy (c)). SKIPs on machines without a baseline.
+  2. **Per-cell composition** — one test per `(PersonaType, AccessLevel)` cell; the cells that don't exist in `_resolve_compose_args` mapping raise `ValueError` with a useful message.
+  3. **Executable invariants** (per Q7): `compose_system_prompt(PROJECT_MANAGER, PM_READONLY, working_directory=W)` is < 80K chars; no `{{identity.*}}` markers remain in any cell's output; `WORKER_RULES` precedes the persona overlay text in the `WORKER` cell; PM cell does NOT contain `WORKER_RULES`; channel parameter is accepted as `None` and as any string without raising.
+  4. **Concrete acceptance examples** (executable, per memory note "Acceptance criteria must be executable"):
+     - `compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, channel="email", working_directory=W)` returns a prompt that **contains** the project-manager overlay text and the work-vault `CLAUDE.md` content (when present), and does **not** contain `WORKER_RULES`.
+     - `compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER, channel="telegram")` returns a prompt that **starts with** `WORKER_RULES` (before the `\n\n---\n\n` separator) and contains the developer overlay text after the separator.
+     - `compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY)` (no `working_directory`) raises `ValueError` whose message names `working_directory` and `PM_READONLY`.
+     - `compose_system_prompt(PersonaType.DEVELOPER, "not-an-AccessLevel")` raises `TypeError`.
+     - `compose_system_prompt(persona="invalid-string", access_level=AccessLevel.WORKER)` raises `ValueError` listing valid persona names.
+- [ ] **NEW** `tests/unit/test_resolve_compose_args.py` — create. Parametrized over the input cells:
+  | session_type | project_mode | transport | project.email.persona | → expected (persona, access_level, channel) |
+  |---|---|---|---|---|
+  | PM | pm | telegram | (any) | `(PROJECT_MANAGER, PM_READONLY, "telegram")` |
+  | PM | dev | telegram | (any) | `(PROJECT_MANAGER, PM_READONLY, "telegram")` |
+  | TEAMMATE | dev | telegram | (none) | `(TEAMMATE, TEAMMATE, "telegram")` |
+  | TEAMMATE | dev | email | "customer-service" | `(CUSTOMER_SERVICE, CUSTOMER_SERVICE, "email")` |
+  | TEAMMATE | dev | email | (none/missing) | `(TEAMMATE, TEAMMATE, "email")` |
+  | TEAMMATE | dev | email | "teammate" | `(TEAMMATE, TEAMMATE, "email")` |
+  | DEV | dev | telegram | (any) | `(DEVELOPER, WORKER, "telegram")` |
+  | DEV | dev | email | "customer-service" | `(CUSTOMER_SERVICE, CUSTOMER_SERVICE, "email")` (or per Question 6 — confirm during build) |
+  | DEV | pm | telegram | (any) | `(PROJECT_MANAGER, PM_READONLY, "telegram")` (project_mode=pm overrides) |
+
+  Replaces inline branch-by-branch testing of the two pickers.
+
+No existing integration tests reference the prompt-byte content directly, so no integration test impact. The byte-stability invariant lives in unit tests.
 
 ## Rabbit Holes
 
