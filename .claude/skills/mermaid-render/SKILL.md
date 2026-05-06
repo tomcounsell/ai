@@ -2,7 +2,7 @@
 name: mermaid-render
 description: "Render Mermaid .mmd diagrams as hand-drawn style PNG exports via Excalidraw. Use when converting .mmd files to presentation-quality images with a sketch/hand-drawn aesthetic. Triggered by 'render this diagram', 'export mermaid as PNG', 'convert mmd to image', or 'excalidraw export'. Also handles .excalidraw → PNG directly."
 argument-hint: "<file.mmd|file.excalidraw> [file2 ...] [--out <dir>]"
-allowed-tools: Bash
+allowed-tools: Bash, mcp__byob__browser_navigate, mcp__byob__browser_read, mcp__byob__browser_click, mcp__byob__browser_type, mcp__byob__browser_press_key, mcp__byob__browser_eval, mcp__byob__browser_screenshot, mcp__byob__browser_close_tab
 user-invocable: true
 ---
 
@@ -10,18 +10,17 @@ user-invocable: true
 
 Convert Mermaid `.mmd` source files (or `.excalidraw` JSON files) to hand-drawn style PNGs.
 
-## Why this stays on `agent-browser` (not BYOB)
+## Browser surface
 
-The browser-driven leg of this skill targets `excalidraw.com`, which is
-**anonymous and public** — there's no benefit to driving the user's
-real Chrome here. The skill also relies on `agent-browser eval` to
-extract the scene JSON from `localStorage`, which BYOB blocks by
-default (gated by `BYOB_ALLOW_EVAL=1` for security; see
-[`docs/features/byob-browser-control.md`](../../../docs/features/byob-browser-control.md)).
-Migrating would either require flipping the eval gate (security
-regression for every other BYOB consumer) or finding an
-eval-free way to round-trip the scene through Excalidraw's UI
-(slower, more brittle, no upside). Decision recorded in #1274.
+The `.mmd → PNG` flow drives `excalidraw.com` via BYOB MCP
+(`mcp__byob__browser_*`) — the user's real Chrome. The
+`.excalidraw → PNG` flow does not touch a browser at all.
+
+The `.mmd` flow uses `mcp__byob__browser_eval` to extract scene JSON
+from `localStorage`. BYOB blocks `browser_eval` by default; set
+`BYOB_ALLOW_EVAL=1` before invoking BYOB if you need this flow. The
+gate is documented in
+[`docs/features/byob-browser-control.md`](../../../docs/features/byob-browser-control.md).
 
 ## Dependencies (install once)
 
@@ -74,50 +73,50 @@ cat <file.mmd>
 
 ### Step 2: Open excalidraw.com
 
-```bash
-agent-browser open https://excalidraw.com
-agent-browser snapshot -i
+```text
+mcp__byob__browser_navigate(url="https://excalidraw.com", waitUntil="networkidle")
+mcp__byob__browser_read(url="https://excalidraw.com", reuseTab=true, screens=1)
 ```
 
 Wait for the app to load — you should see toolbar buttons including "More tools".
 
 ### Step 3: Open the Mermaid import dialog
 
-Click "More tools" (look for it in the snapshot by label), which expands a menu:
+Click "More tools" (look for it in the IE list by `name: "More tools"`), which expands a menu:
 
-```bash
-agent-browser click @<more-tools-ref>
-agent-browser snapshot -i
-# Look for menuitem "Mermaid to Excalidraw"
-agent-browser click @<mermaid-ref>
-agent-browser snapshot -i
+```text
+mcp__byob__browser_click(tabId=<tab>, selector="byob:idx=<more_tools_idx>")
+mcp__byob__browser_read(url="https://excalidraw.com", reuseTab=true, screens=1)
+# Look for menuitem name: "Mermaid to Excalidraw"
+mcp__byob__browser_click(tabId=<tab>, selector="byob:idx=<mermaid_idx>")
+mcp__byob__browser_read(url="https://excalidraw.com", reuseTab=true, screens=1)
 # Dialog opens with a textbox and an "Insert" button
 ```
 
 ### Step 4: Paste the Mermaid content
 
-Use `fill` to replace the textbox contents entirely (works even with multiline content):
+Type into the dialog textbox (clear=true to replace existing content):
 
-```bash
-agent-browser fill @<textbox-ref> "$(cat <file.mmd>)"
+```text
+mcp__byob__browser_type(tabId=<tab>, selector="byob:idx=<textbox_idx>", text="<contents of file.mmd>", clear=true)
 ```
 
 ### Step 5: Insert
 
-```bash
-agent-browser click @<insert-button-ref>
-agent-browser screenshot   # verify diagram rendered on canvas
+```text
+mcp__byob__browser_click(tabId=<tab>, selector="byob:idx=<insert_button_idx>")
+mcp__byob__browser_screenshot(tabId=<tab>, savePath="/tmp/excalidraw-canvas.png")  # verify diagram rendered
 ```
 
 ### Step 6: Extract scene data from localStorage
 
-Excalidraw auto-saves the scene to `localStorage`. Extract it directly — this is more reliable than triggering a file download through the headless browser:
+Excalidraw auto-saves the scene to `localStorage`. Extract it directly — this is more reliable than triggering a file download. Requires `BYOB_ALLOW_EVAL=1` in the agent's environment:
 
-```bash
-agent-browser eval "localStorage.getItem('excalidraw')"
+```text
+mcp__byob__browser_eval(tabId=<tab>, expression="localStorage.getItem('excalidraw')")
 ```
 
-Save the output to disk. The eval result is a JSON-encoded string (double-encoded), so unwrap it:
+Save the returned string to disk. The eval result is a JSON-encoded string (double-encoded), so unwrap it:
 
 ```python
 import json
@@ -136,20 +135,6 @@ excalidraw_doc = {
 
 with open('/tmp/output.excalidraw', 'w') as f:
     json.dump(excalidraw_doc, f)
-```
-
-Or as a one-liner:
-
-```bash
-agent-browser eval "localStorage.getItem('excalidraw')" > /tmp/scene_raw.txt
-python3 -c "
-import json
-raw = open('/tmp/scene_raw.txt').read().strip()
-elements = json.loads(json.loads(raw))
-doc = {'type':'excalidraw','version':2,'source':'https://excalidraw.com','elements':elements,'appState':{'viewBackgroundColor':'#ffffff','gridSize':None},'files':{}}
-open('/tmp/output.excalidraw','w').write(json.dumps(doc))
-print(f'{len(elements)} elements saved')
-"
 ```
 
 ### Step 7: Render to PNG
@@ -173,12 +158,12 @@ Use the Read tool on the output PNG (Claude is multimodal and can evaluate image
 
 **If any check fails, do NOT proceed.** Fix the source `.mmd` and re-render. A bad diagram undermines the entire slide.
 
-### Step 9: Close the browser
+### Step 9: Close the Excalidraw tab
 
-**Always close when done.** This is not optional — leaving the browser open wastes resources and leaves state behind for the next task.
+When done, close the tab so the user's Chrome isn't left with an extra tab open:
 
-```bash
-agent-browser close
+```text
+mcp__byob__browser_close_tab(tabId=<tab>)
 ```
 
 ---
@@ -187,15 +172,15 @@ agent-browser close
 
 To preview the diagram before extracting scene data, use `Cmd+Shift+E`:
 
-```bash
-agent-browser key "Meta+Shift+E"
-agent-browser snapshot -i
+```text
+mcp__byob__browser_press_key(tabId=<tab>, key="Meta+Shift+E")
+mcp__byob__browser_read(url="https://excalidraw.com", reuseTab=true, screens=1)
 # Look for "Export to PNG", "Export to SVG", "Only selected" checkbox
 # Uncheck "Only selected" to export the full canvas
-agent-browser click @<export-png-ref>
+mcp__byob__browser_click(tabId=<tab>, selector="byob:idx=<export_png_idx>")
 ```
 
-Note: the PNG download goes to the system Downloads folder, which is not accessible from a headless browser. Use this for visual verification only — the localStorage extraction (Step 6) is the correct path for saving the file.
+Note: the PNG download goes to the user's Downloads folder. Use this for visual verification only — the localStorage extraction (Step 6) is the correct path for saving the file.
 
 ---
 
@@ -203,9 +188,9 @@ Note: the PNG download goes to the system Downloads folder, which is not accessi
 
 For multiple `.mmd` files, process sequentially. Clear the canvas between diagrams:
 
-```bash
-agent-browser key "Meta+a"      # select all
-agent-browser key "Backspace"   # delete
+```text
+mcp__byob__browser_press_key(tabId=<tab>, key="Meta+a")          # select all
+mcp__byob__browser_press_key(tabId=<tab>, key="Backspace")       # delete
 ```
 
 Then repeat Steps 3–7 for the next file. The localStorage key `excalidraw` always holds the current canvas state.
@@ -224,15 +209,17 @@ Then repeat Steps 3–7 for the next file. The localStorage key `excalidraw` alw
 
 ## Troubleshooting
 
-**`agent-browser` not found:** This is the primary browser tool. Check `which agent-browser`. Alternative: `playwright-cli` (if installed) uses the same command pattern but with `-s=<session-name>` flags.
+**`mcp__byob__browser_eval` returns "browser_eval is disabled":** BYOB blocks `browser_eval` by default. Set `BYOB_ALLOW_EVAL=1` in the agent's environment and restart the BYOB MCP server (`cd ~/.byob && bun run doctor`).
 
-**"More tools" not in snapshot:** Take a screenshot to see current state. The button may be labelled differently after Excalidraw UI updates. Look for a button that reveals Frame, Mermaid, and Laser pointer options.
+**BYOB transport error:** Run `cd ~/.byob && bun run doctor` to confirm the extension is loaded and the native bridge is running. If red, run `/setup` and answer "yes" to the computer-use opt-in.
 
-**`fill` not replacing content:** Some versions of Excalidraw use a CodeMirror editor in the Mermaid dialog. If `fill` doesn't work, try clicking the textbox first, then `agent-browser key "Meta+a"` and `agent-browser type "<content>"`.
+**"More tools" not in IE list:** Take a screenshot to see current state. The button may be labelled differently after Excalidraw UI updates. Look for a button that reveals Frame, Mermaid, and Laser pointer options.
 
-**Canvas blank after insert:** Mermaid rendering takes a moment. Take a screenshot and wait 2–3s. If still blank, validate the mermaid syntax first: `mmdc --input <file.mmd> --output /tmp/test.svg`.
+**`browser_type` not replacing content:** Some versions of Excalidraw use a CodeMirror editor in the Mermaid dialog. If `clear=true` doesn't work, click the textbox first, then `mcp__byob__browser_press_key(key="Meta+a")` followed by `mcp__byob__browser_type` with the new content.
 
-**localStorage returns null:** The canvas hasn't been saved yet. Insert a diagram first. If elements were inserted but localStorage is still empty, try scrolling or clicking on the canvas to trigger an auto-save, then re-eval.
+**Canvas blank after insert:** Mermaid rendering takes a moment. Screenshot and wait 2–3s. If still blank, validate the mermaid syntax first: `mmdc --input <file.mmd> --output /tmp/test.svg`.
+
+**localStorage returns null:** The canvas hasn't been saved yet. Insert a diagram first. If elements were inserted but localStorage is still empty, click on the canvas to trigger an auto-save, then re-eval.
 
 **`json.loads` fails on scene_raw.txt:** The `eval` output is double-JSON-encoded (a JSON string whose value is a JSON array). Always `json.loads(json.loads(raw))` — two unwrap steps.
 

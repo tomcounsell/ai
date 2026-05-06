@@ -26,39 +26,31 @@ I can destroy and rebuild this machine if needed. It is mine to manage.
 - Local LLMs (Ollama) for lightweight tasks: classification, labeling, test judging
 - Standard development toolchain (git, pytest, ruff, mypy)
 
-### Browser Automation
+### Browser Automation (BYOB MCP)
 
-**Decision rule** (post-#1274): If the target site needs the user's logged-in identity (LinkedIn, Gmail, internal dashboards, authenticated GitHub views), use **BYOB MCP** (`mcp__byob__*`) -- see the next section. For anonymous public-page automation use the `agent-browser` CLI below. For parallel anonymous sessions use `bowser`. The full decision matrix lives in `.claude/skills/README.md` ("When to use which browser surface?").
+The only browser surface in this repo is **BYOB MCP**
+(`mcp__byob__browser_*`) -- it drives the user's already-logged-in
+Chrome via a Chrome extension + native messaging host + MCP server.
+Public pages and authenticated dashboards both go through this surface.
+Loaded into my context when the `byob` MCP server is registered in
+`~/.claude.json` by `scripts/update/mcp_byob.py`.
 
-`agent-browser` CLI for **anonymous** web interactions, testing, screenshots, and data extraction:
-```bash
+```text
 # Core workflow
-agent-browser open <url>           # Navigate
-agent-browser snapshot -i          # Get interactive elements with refs (@e1, @e2)
-agent-browser click @e1            # Click by ref
-agent-browser fill @e2 "text"      # Fill input
-agent-browser screenshot page.png  # Capture screenshot
-agent-browser close                # Done
-
-# Common tasks
-agent-browser get text @e1         # Extract text
-agent-browser wait --text "Done"   # Wait for content
-agent-browser eval "document.title" # Run JavaScript
+mcp__byob__browser_list_tabs                                 # discover open tabs
+mcp__byob__browser_navigate(url, waitUntil="networkidle")    # navigate
+mcp__byob__browser_read(url, reuseTab=true, screens=2)       # interactiveElements + content
+mcp__byob__browser_click(tabId, selector="byob:idx=N")       # click by ref
+mcp__byob__browser_type(tabId, selector, text, clear=true)   # fill input
+mcp__byob__browser_screenshot(tabId, savePath="/tmp/x.png")  # capture
+mcp__byob__browser_close_tab(tabId)                          # close tab (rarely needed)
 ```
 
-For **logged-in** browsing, BYOB MCP supersedes the old `agent-browser connect 9222` CDP-attach recipe -- no manual Chrome relaunch required. See the BYOB section below.
-
-Full reference: `.claude/skills/agent-browser/SKILL.md`
-
-### BYOB (Real Chrome, Logged-In)
-
-For operations that need the user's **already-logged-in Chrome session** (Gmail, internal dashboards, authenticated GitHub views), I use the **BYOB MCP tools** -- `byob_navigate`, `byob_click`, `byob_screenshot`, etc. These are loaded into my context when the `byob` MCP server is registered in `~/.claude.json`.
-
 Key constraints:
-- BYOB drives the user's actual Chrome window. There is **one** DOM tree, so concurrent BYOB sessions are serialized at the worker scheduler layer via the `AgentSession.requires_real_chrome` flag (set with `valor-session create --needs-real-chrome ...`).
-- `BYOB_ALLOW_EVAL=0` by default -- arbitrary JS execution is disabled.
-- BYOB blocks `chrome://`, `file://`, and login pages. For login flows, use `bowser` with a persistent profile or CDP flags.
-- If the BYOB MCP server isn't running (Chrome closed, extension unloaded), the `byob_*` tools are simply absent from my context. I tell the user "BYOB bridge not running -- start Chrome, ensure the BYOB extension is loaded, and run `cd ~/.byob && bun run doctor` to diagnose" rather than silently retrying. **There is no Playwright fallback** in the BYOB surface.
+- BYOB drives the user's actual Chrome window. There is **one** DOM tree, so concurrent BYOB sessions are serialized at the worker scheduler layer via the `AgentSession.requires_real_chrome` flag (set with `valor-session create --needs-real-chrome ...`; the bridge auto-infers it from message text via `agent.byob_skill_triggers.infer_requires_real_chrome`).
+- `BYOB_ALLOW_EVAL=0` by default -- arbitrary JS execution is disabled. Skills that need it (`mermaid-render`, `do-discover-paths`) require `BYOB_ALLOW_EVAL=1` in the agent's environment.
+- BYOB blocks `chrome://`, `file://`, and login pages for Google/Microsoft/Apple. There is no fallback browser surface.
+- If the BYOB MCP server isn't running (Chrome closed, extension unloaded), the `byob_*` tools are simply absent from my context. I tell the user "BYOB bridge not running -- start Chrome, ensure the BYOB extension is loaded, and run `cd ~/.byob && bun run doctor` to diagnose" rather than silently retrying.
 
 Full reference: `docs/features/byob-browser-control.md`.
 

@@ -50,12 +50,9 @@ KNOWN_FIELDS = frozenset(
 INFRA_SKILLS = frozenset({"update", "setup", "reclassify", "new-skill", "new-valor-skill", "prime"})
 BACKGROUND_SKILLS = frozenset(
     {
-        "agent-browser",
-        # BYOB is exposed as MCP tools only (mcp__byob__*) — there is no
-        # SKILL.md for it. Listed here so the audit recognizes it as a
-        # legitimate model-only browser surface alongside agent-browser
-        # (issue #1274). If BYOB ever gains a user-invocable wrapper
-        # skill, that skill name belongs here too.
+        # BYOB is exposed as MCP tools only (mcp__byob__browser_*) — there
+        # is no SKILL.md for it. Listed here so the audit recognizes it
+        # as a legitimate model-only browser surface.
         "byob",
         "telegram",
         "reading-sms-messages",

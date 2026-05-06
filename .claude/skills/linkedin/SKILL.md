@@ -1,18 +1,16 @@
 ---
 name: linkedin
 description: "Use when browsing LinkedIn, reading posts, writing comments, checking DMs, or engaging with content. Triggered by requests to comment on LinkedIn, browse feed, interact with posts, or read/reply to LinkedIn messages."
-allowed-tools: mcp__byob__browser_list_tabs, mcp__byob__browser_navigate, mcp__byob__browser_read, mcp__byob__browser_get_html, mcp__byob__browser_click, mcp__byob__browser_type, mcp__byob__browser_press_key, mcp__byob__browser_scroll, mcp__byob__browser_wait_for, mcp__byob__browser_screenshot, mcp__byob__browser_close_tab, mcp__byob__browser_switch_tab, Bash(agent-browser:*), Bash(git:*), Read, Write, Edit, Grep, Glob, Agent
+allowed-tools: mcp__byob__browser_list_tabs, mcp__byob__browser_navigate, mcp__byob__browser_read, mcp__byob__browser_get_html, mcp__byob__browser_click, mcp__byob__browser_type, mcp__byob__browser_press_key, mcp__byob__browser_scroll, mcp__byob__browser_wait_for, mcp__byob__browser_screenshot, mcp__byob__browser_close_tab, mcp__byob__browser_switch_tab, Bash(git:*), Read, Write, Edit, Grep, Glob, Agent
 user-invocable: true
 ---
 
 # LinkedIn Activity
 
-**Migrated from `agent-browser` in #1274.** This skill drives the user's real,
-logged-in Chrome session via the **BYOB** stack — the Chrome extension + native
-messaging host + MCP server (`mcp__byob__browser_*`). No CDP flag, no
-`state.json`, no headless-fingerprint detection. The fallback CDP-attach path
-is still documented below for machines where BYOB is not yet installed; it
-will be removed in a followup once BYOB is verified working everywhere.
+This skill drives the user's real, logged-in Chrome session via the **BYOB**
+stack — the Chrome extension + native messaging host + MCP server
+(`mcp__byob__browser_*`). No CDP flag, no `state.json`, no
+headless-fingerprint detection.
 
 ## Default Behavior (no arguments)
 
@@ -132,31 +130,6 @@ When multiple `interactiveElements` map to the same logical control (the Like bu
 - **Post bodies often don't appear in `interactiveElements`** because they're non-interactive `<div>`s. The IE list captures author headers, action buttons, and accessibility labels — not the post text itself. To read the actual post body, use `browser_get_html(tabId, selector="main")` and parse text out, or open the post URL directly (`/feed/update/urn:li:share:<id>/`) and use `browser_read` on the dedicated post page where the body usually surfaces in chunks.
 - **Tool-result file overflow:** both `browser_read` and `browser_get_html` on rich pages routinely exceed the inline tool-result limit and dump to `tool-results/*.txt`. Be ready to parse those out via Bash/grep/jq. Set realistic `maxBytes` and `screens` defaults to keep the inline path viable when you can.
 - **Block list:** BYOB upstream blocks reading `chrome://`, `file://`, and login pages for Google/Microsoft/Apple. Not relevant for in-session LinkedIn use.
-
-### Fallback path — deprecated
-
-The recipe below pre-dates BYOB and is kept for one release cycle so
-operators on machines without BYOB still have a working LinkedIn
-skill. **Do not use this path if BYOB is installed.** It will be
-removed in a followup issue once BYOB is verified working on every
-operator machine.
-
-```bash
-# DEPRECATED — use BYOB above. CDP-attach hack:
-pkill -f "Google Chrome" && sleep 2
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
-  --remote-debugging-port=9222 \
-  --user-data-dir=/tmp/chrome-debug-profile &>/dev/null &
-sleep 5
-agent-browser connect 9222
-```
-
-When using the fallback, every `mcp__byob__browser_<verb>` call below maps to
-`agent-browser <verb>`, with the same arguments and roughly equivalent
-behavior (anonymous CDP-attached profile rather than the user's real
-Chrome). The fallback path requires the user to manually relaunch Chrome
-with debug flags before each session — which is exactly the friction
-BYOB removes.
 
 ---
 
@@ -600,5 +573,5 @@ Only use Edit to fix typos or rewrite the whole comment as a clean standalone.
 - **Wait 2-3s after navigation** for SPA hydration — `waitUntil="networkidle"` mostly handles this; add `browser_wait_for(selector, state="visible")` for specific elements.
 - **Opening a message marks it as read** — be aware of "seen" indicators if you don't intend to actually engage.
 - **Screenshots over 1MB fail** — use `format="jpeg"` and `quality=50-60` for confirmation captures.
-- **No Playwright fallback in BYOB.** If the bridge dies mid-session, the agent surfaces a clear error — don't try to reroute through `bowser` (different stack, anonymous, no LinkedIn login).
+- **No fallback browser surface.** BYOB is the only browser tool. If the bridge dies mid-session, the agent surfaces a clear error — run `cd ~/.byob && bun run doctor` to repair, then retry.
 - **If `mcp__byob__browser_*` calls return transport errors mid-session**, the Chrome extension may have lost its bridge — run `cd ~/.byob && bun run doctor` in a fresh shell to repair, then retry the failed call.

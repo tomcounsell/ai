@@ -1,34 +1,22 @@
 ---
 name: do-discover-paths
-description: "Discover happy paths on a target site using agent-browser, producing structured trace JSON for deterministic test generation."
+description: "Discover happy paths on a target site using BYOB MCP, producing structured trace JSON for deterministic test generation."
 argument-hint: "<url> [path-name]"
+allowed-tools: mcp__byob__browser_navigate, mcp__byob__browser_read, mcp__byob__browser_click, mcp__byob__browser_type, mcp__byob__browser_eval, mcp__byob__browser_screenshot, mcp__byob__browser_close_tab, Bash, Read, Write, Edit, Grep, Glob
 ---
 
 # Discover Happy Paths
 
-You are the **happy path discovery agent**. You systematically explore a target site using agent-browser, recording each interaction as structured trace JSON that can be converted into deterministic Rodney test scripts.
+You are the **happy path discovery agent**. You systematically explore a target site using BYOB MCP, recording each interaction as structured trace JSON that can be converted into deterministic Rodney test scripts.
 
-## Why this stays on `agent-browser` (not BYOB)
+## Browser surface
 
-This skill depends heavily on `agent-browser eval` — the
-JavaScript-evaluation primitive used to extract CSS selectors and DOM
-structure from explored pages. The BYOB MCP server **blocks
-`browser_eval` by default** (gated by the `BYOB_ALLOW_EVAL=1`
-environment variable, off by default for security reasons documented
-in [`docs/features/byob-browser-control.md`](../../../docs/features/byob-browser-control.md)).
-
-Migrating this skill to BYOB would require either flipping the eval
-gate (a security regression that affects all BYOB consumers, not just
-this skill) or rewriting the entire selector-extraction layer to work
-without `eval` (a multi-day rewrite for marginal value).
-
-If this skill ever needs to discover paths on a **logged-in** target
-(authenticated app, SSO-protected dashboard), the right answer is to
-spawn `agent-browser` with a profile dir that already has the session
-cookies, not to migrate to BYOB. The decision was recorded in
-issue #1274 and the followup discussion lives in
-[`docs/features/byob-browser-control.md`](../../../docs/features/byob-browser-control.md)
-under Migration Status.
+This skill drives the user's real, logged-in Chrome via BYOB MCP
+(`mcp__byob__browser_*`). It uses `mcp__byob__browser_eval` to extract
+stable CSS selectors and assert final-state values — set
+`BYOB_ALLOW_EVAL=1` in the agent's environment before invoking the
+skill. The gate is documented in
+[`docs/features/byob-browser-control.md`](../../../docs/features/byob-browser-control.md).
 
 ## Variables
 
@@ -50,12 +38,13 @@ Example:
 ## Prerequisites
 
 Before starting:
-1. Verify agent-browser is available: `which agent-browser`
-2. Verify the target URL is reachable: `agent-browser open <url>`
+1. Verify BYOB is connected: `cd ~/.byob && bun run doctor` (all green)
+2. Verify `BYOB_ALLOW_EVAL=1` is set in the agent's environment (this skill needs eval)
+3. Verify the target URL is reachable: `mcp__byob__browser_navigate(url="<url>")`
 
 ## CSS Selector Extraction Helper
 
-After EVERY interaction with a page element, extract a stable CSS selector using `agent-browser eval`. This is the critical step that produces durable selectors for Rodney scripts.
+After EVERY interaction with a page element, extract a stable CSS selector using `mcp__byob__browser_eval`. This is the critical step that produces durable selectors for Rodney scripts.
 
 **JS helper function** -- inject this after each interaction to extract the selector for the element you just interacted with:
 
@@ -94,42 +83,42 @@ After EVERY interaction with a page element, extract a stable CSS selector using
 
 For each page/flow you explore:
 
-### Step 1: Navigate and snapshot
-```bash
-agent-browser open <url>
-agent-browser snapshot -i
+### Step 1: Navigate and read
+```text
+mcp__byob__browser_navigate(url="<url>", waitUntil="networkidle")
+mcp__byob__browser_read(url="<url>", reuseTab=true, screens=2)
 ```
 
 ### Step 2: Identify interactive elements
-Review the snapshot output. Each element has an `@ref` identifier (e.g., `@e1`, `@e2`). Note the semantic description (name, role, text content).
+Review the `interactiveElements` list returned by `browser_read`. Each element has a `byob:idx=N` identifier and a semantic description (`name`, `role`, `tag`, `bounds`).
 
 ### Step 3: For each interaction
 
-1. **Extract CSS selector BEFORE interacting** using `agent-browser eval` with the JS helper above. Use the element's known attributes (tag, text, role) to locate it via `document.querySelector()`:
-   ```bash
-   agent-browser eval "(function() { function getSelector(el) { if (!el) return null; if (el.id) return '#' + CSS.escape(el.id); if (el.getAttribute('data-testid')) return '[data-testid=\"' + el.getAttribute('data-testid') + '\"]'; if (el.getAttribute('name')) return el.tagName.toLowerCase() + '[name=\"' + el.getAttribute('name') + '\"]'; var path = []; while (el && el !== document.body) { var s = el.tagName.toLowerCase(); var p = el.parentElement; if (p) { var sibs = Array.from(p.children).filter(function(c) { return c.tagName === el.tagName; }); if (sibs.length > 1) s += ':nth-of-type(' + (sibs.indexOf(el) + 1) + ')'; } path.unshift(s); el = p; } return path.join(' > '); } return getSelector(document.querySelector('button[type=submit]')); })()"
+1. **Extract CSS selector BEFORE interacting** using `mcp__byob__browser_eval` with the JS helper above. Use the element's known attributes (tag, text, role) to locate it via `document.querySelector()`:
+   ```text
+   mcp__byob__browser_eval(tabId=<tab>, expression="(function() { function getSelector(el) { if (!el) return null; if (el.id) return '#' + CSS.escape(el.id); if (el.getAttribute('data-testid')) return '[data-testid=\"' + el.getAttribute('data-testid') + '\"]'; if (el.getAttribute('name')) return el.tagName.toLowerCase() + '[name=\"' + el.getAttribute('name') + '\"]'; var path = []; while (el && el !== document.body) { var s = el.tagName.toLowerCase(); var p = el.parentElement; if (p) { var sibs = Array.from(p.children).filter(function(c) { return c.tagName === el.tagName; }); if (sibs.length > 1) s += ':nth-of-type(' + (sibs.indexOf(el) + 1) + ')'; } path.unshift(s); el = p; } return path.join(' > '); } return getSelector(document.querySelector('button[type=submit]')); })()")
    ```
 
 2. **Record the CSS selector** in your trace data.
 
-3. **Perform the interaction** using the `@ref`:
-   ```bash
-   agent-browser click @e3
+3. **Perform the interaction** using the `byob:idx=N` selector:
+   ```text
+   mcp__byob__browser_click(tabId=<tab>, selector="byob:idx=3")
    ```
    or:
-   ```bash
-   agent-browser fill @e2 "test@example.com"
+   ```text
+   mcp__byob__browser_type(tabId=<tab>, selector="byob:idx=2", text="test@example.com")
    ```
 
-4. **Snapshot again** to observe the result:
-   ```bash
-   agent-browser snapshot -i
+4. **Re-read** to observe the result and refresh `byob:idx` references:
+   ```text
+   mcp__byob__browser_read(url="<current_url>", reuseTab=true, screens=2)
    ```
 
 ### Step 4: Record assertions
 After completing the flow, record assertions about the final state:
-- Current URL (use `agent-browser eval "window.location.href"`)
-- Page title (use `agent-browser eval "document.title"`)
+- Current URL (use `mcp__byob__browser_eval(expression="window.location.href")`)
+- Page title (use `mcp__byob__browser_eval(expression="document.title")`)
 - Visible text that confirms success
 
 ## Credential Handling
@@ -218,6 +207,7 @@ After writing the trace JSON:
 
 ## Error Handling
 
-- If agent-browser fails to open the URL, report the error and do not produce a partial trace
-- If a page element cannot be found, skip that step and note it in the trace as a comment
+- If BYOB fails to navigate to the URL (transport error, blocked URL), report the error and do not produce a partial trace
+- If a page element cannot be found in `interactiveElements`, skip that step and note it in the trace as a comment
+- If `browser_eval` returns "browser_eval is disabled", confirm `BYOB_ALLOW_EVAL=1` is set and the BYOB MCP server has been restarted to pick up the new env
 - If credential placeholders are needed but the flow context is unclear, ask the user

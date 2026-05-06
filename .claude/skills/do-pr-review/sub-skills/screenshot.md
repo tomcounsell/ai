@@ -2,22 +2,12 @@
 
 Mechanical work: start the app and capture screenshots of UI changes.
 
-## Surface decision
+## Surface
 
-Updated in #1274. Inherited from `do-pr-review/SKILL.md` — see the parent
-skill's "Surface decision" section for the full allowlist and rationale.
-TL;DR:
-
-- **Allowlisted public host** (localhost, `*.vercel.app`, `*.netlify.app`,
-  `*.pages.dev`, `*.fly.dev`, `*.railway.app`, `github.com` and similar
-  known-public hosts) → use `agent-browser` (anonymous, headless).
-- **Anything else** (authenticated dashboards, internal staging,
-  SSO-protected URLs, unknown hosts) → use the BYOB MCP tools
-  (`mcp__byob__*`, real Chrome, logged-in). Default-route unknown
-  hosts to BYOB to close the public-URL-302s-to-login TOCTOU window.
-
-The examples below are written for the `agent-browser` (allowlisted)
-path. For BYOB, swap each command with its `mcp__byob__<verb>` analog.
+Screenshot capture runs against the user's real, logged-in Chrome via
+BYOB MCP (`mcp__byob__browser_*`). Public preview deploys and
+authenticated staging URLs are screenshotted the same way — there is
+no anonymous-headless fallback (retired in #1256).
 
 ## Context Variables
 
@@ -27,13 +17,13 @@ path. For BYOB, swap each command with its `mcp__byob__<verb>` analog.
 
 PR branch must already be checked out (via checkout sub-skill).
 
-For BYOB-routed URLs, the calling session must have
-`requires_real_chrome=True` (set by bridge inference for SDLC runs, or
-the `--needs-real-chrome` CLI flag for manual runs). Verify the BYOB
-extension is connected before screenshotting:
+The calling session must have `requires_real_chrome=True` (set by
+bridge inference for SDLC runs, or the `--needs-real-chrome` CLI flag
+for manual runs). Verify the BYOB extension is connected before
+screenshotting:
 
 ```text
-mcp__byob__list_tabs       # must return at least one Chrome tab
+mcp__byob__browser_list_tabs       # must return at least one Chrome tab
 ```
 
 ## Steps
@@ -64,20 +54,10 @@ sleep 3
 
 ### 4. Capture Screenshots
 
-For an allowlisted (public) host:
-
-```bash
-agent-browser open http://localhost:8000
-agent-browser snapshot -i
-agent-browser screenshot generated_images/pr-${PR_NUMBER}/01_main_view.png
-```
-
-For a non-allowlisted (logged-in / internal) host, use BYOB instead:
-
 ```text
-mcp__byob__navigate https://staging.example.internal/path
-mcp__byob__screenshot   # save the returned image to
-                        # generated_images/pr-${PR_NUMBER}/01_main_view.png
+mcp__byob__browser_navigate(url="http://localhost:8000", waitUntil="networkidle")
+mcp__byob__browser_read(url="http://localhost:8000", reuseTab=true, screens=1)
+mcp__byob__browser_screenshot(tabId=<tab>, savePath="generated_images/pr-${PR_NUMBER}/01_main_view.png")
 ```
 
 **Screenshot naming convention:**
@@ -87,15 +67,9 @@ mcp__byob__screenshot   # save the returned image to
 
 ### 5. Cleanup
 
-For the `agent-browser` path, close the browser, then stop the dev
-server if started:
-
-```bash
-agent-browser close
-```
-
-For the BYOB path, no `close` step is needed — BYOB drives the user's
-real Chrome and does not own a daemon process.
+No browser close step is needed — BYOB drives the user's real Chrome
+and does not own a daemon process. Stop the dev server if you started
+one.
 
 ## Completion
 

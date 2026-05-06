@@ -161,36 +161,33 @@ boilerplate — it needs human judgment.
 ## Step 1 — Extract moodboard images
 
 Cosmos, Pinterest, and Are.na are JavaScript-rendered SPAs. `WebFetch`
-returns the shell HTML only — it will miss the image grid. Use a
-headless browser.
+returns the shell HTML only — it will miss the image grid. Use BYOB MCP
+to drive the user's real Chrome.
 
-> **Surface choice (#1274):** This skill stays on `agent-browser` because
-> the moodboard sources (Cosmos, Pinterest, Are.na) are public — no
-> login needed, no need for the user's real Chrome session. If you ever
-> need to extract from a *logged-in* moodboard source (e.g. a
-> private Cosmos board behind your account), switch to BYOB MCP:
-> `mcp__byob__navigate <url>` then `mcp__byob__screenshot` for an image
-> grid snapshot. BYOB blocks `eval` by default, so the `JSON.stringify`
-> trick below would not transfer — use `mcp__byob__get_text` plus DOM
-> selectors instead.
+> **Browser surface:** BYOB MCP (`mcp__byob__browser_*`). The image
+> enumeration below uses `mcp__byob__browser_eval`; set
+> `BYOB_ALLOW_EVAL=1` in the agent's environment before invoking the
+> skill. The same flow works for public moodboards and for logged-in
+> sources (private Cosmos boards behind your account) — BYOB just
+> drives whichever Chrome session you're in.
 
-```bash
-agent-browser --session moodboard open "https://www.cosmos.so/<user>/<board>"
+```text
+mcp__byob__browser_navigate(url="https://www.cosmos.so/<user>/<board>", waitUntil="networkidle")
 
 # Scroll to trigger lazy-loaded tiles (twice with waits is usually enough)
-agent-browser --session moodboard scroll down 4000
-agent-browser --session moodboard wait 2000
-agent-browser --session moodboard scroll down 4000
-agent-browser --session moodboard wait 2000
+mcp__byob__browser_scroll(tabId=<tab>, y=4000)
+# (sleep 2s)
+mcp__byob__browser_scroll(tabId=<tab>, y=8000)
+# (sleep 2s)
 
-# Enumerate all images > 100px wide (skip favicons, avatars)
-agent-browser --session moodboard eval "
+# Enumerate all images > 100px wide (skip favicons, avatars). Requires BYOB_ALLOW_EVAL=1.
+mcp__byob__browser_eval(tabId=<tab>, expression="
   JSON.stringify(
     Array.from(document.querySelectorAll('img'))
       .map(i => ({src: i.src, alt: i.alt, w: i.naturalWidth, h: i.naturalHeight}))
       .filter(i => i.w > 100)
   )
-"
+")
 ```
 
 Download at usable resolution (request `?format=webp&w=800` or similar
@@ -546,7 +543,7 @@ gap-audit additions. Reference moodboard pass folder.>
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| WebFetch returns "no images found" on Cosmos | JS-rendered SPA | Use `agent-browser` (Playwright) |
+| WebFetch returns "no images found" on Cosmos | JS-rendered SPA | Use BYOB MCP (`mcp__byob__browser_*`) |
 | `mcp__pencil__batch_design` reports success but file unchanged | MCP edits don't persist without Pencil UI save | Edit `.pen` JSON directly with Python |
 | `get_screenshot` returns blank for newly-added Pencil nodes | Render cache | Not a real problem — verify via `batch_get` or `Read` the JSON |
 | New `@theme` token doesn't work in templates | Tailwind name doesn't match brand file | Ensure both files use the same token name |

@@ -1,19 +1,13 @@
 """Pillow utilities for screenshot post-processing.
 
-Unrelated to the ``agent-browser`` 3rd-party CLI on PATH and unrelated to the
-BYOB MCP surface. The only public-ish export is :func:`_downscale_if_needed`,
-used by callers (e.g. ``do-design-audit``, screenshot pipelines) that need to
-ensure captured screenshots fit within agent-friendly size budgets.
+The only public export is :func:`_downscale_if_needed`, used by callers
+(e.g. screenshot pipelines, ``tools/computer``) that need to ensure
+captured screenshots fit within agent-friendly size budgets.
 
-Browser automation in this repo is provided by:
-
-- ``agent-browser`` (3rd-party CLI on PATH) -- anonymous, headless, single-tab.
-- ``bowser`` (Playwright headless) -- anonymous, parallel.
-- BYOB MCP tools (``byob_navigate``, ``byob_click``, etc.) -- real Chrome,
-  logged-in. Registered in ``~/.claude.json`` ``mcpServers.byob`` by
-  :mod:`scripts.update.mcp_byob`.
-
-None of those surfaces route through this module.
+Browser automation in this repo is provided exclusively by the BYOB MCP
+server (``mcp__byob__browser_*``) — registered in ``~/.claude.json``
+``mcpServers.byob`` by :mod:`scripts.update.mcp_byob`. That surface
+does not route through this module.
 """
 
 import logging

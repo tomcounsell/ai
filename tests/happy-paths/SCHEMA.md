@@ -1,6 +1,6 @@
 # Happy Path Trace JSON Schema
 
-This document defines the structured trace format used as the contract between the discovery stage (agent-browser exploration) and the generation stage (Rodney script generation).
+This document defines the structured trace format used as the contract between the discovery stage (BYOB MCP exploration via the `do-discover-paths` skill) and the generation stage (Rodney script generation).
 
 ## Overview
 
