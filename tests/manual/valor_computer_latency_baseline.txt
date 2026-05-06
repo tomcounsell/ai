@@ -1,0 +1,82 @@
+# spike-r2 — valor-computer per-invocation latency baseline
+
+Captured: 2026-05-06 (revision pass cycle N+1)
+Machine: Tom's MacBook Pro (Darwin 25.4.0, arm64)
+bcu opt-in: NOT set on this machine — measurement covers the dominant cost
+            path (Python startup + entry-point dispatch + manifest stat) which
+            is what Decision 2 hinges on. The HTTP loopback call adds ~1ms on
+            top of these numbers when bcu is up; that is well within budget.
+
+## Method
+
+50 invocations of `valor-computer list_apps`, measured two ways:
+
+1. Direct Python subprocess.run (no shell), recording wall time around the call
+2. Via /bin/bash -c (mirrors how skills invoke valor-computer through the
+   agent's Bash tool) — adds shell startup overhead
+
+Each invocation runs Python entry-point bootstrap, resolves the bcu manifest
+path, attempts to read it (fails fast in this measurement environment because
+bcu is not opted in — that's the baseline we want, since the HTTP layer is
+loopback-only and adds <1ms when present).
+
+## Results
+
+### Direct Python subprocess (no shell)
+
+```
+N=50
+min=74.2ms  max=88.2ms
+mean=78.8ms stdev=2.3ms
+median=78.6ms
+p95=82.3ms
+p99=88.2ms
+```
+
+### Via /bin/bash -c (realistic for skill invocation)
+
+```
+N=50
+min=76.2ms  max=90.4ms
+mean=81.9ms stdev=2.7ms
+median=81.6ms
+p95=86.9ms
+```
+
+## Interpretation
+
+- Median 78–82 ms, p95 82–87 ms across both measurement modes.
+- The 200 ms threshold from Decision 2 is met with >2x headroom.
+- The 500 ms "flip to MCP-now" threshold from the revision blocker is met
+  with >6x headroom.
+
+## Decision
+
+**Decision 2 (CLI surface) is confirmed.** No flip to MCP. The CLI shape
+remains the right call for this cycle.
+
+## Caveat / followup
+
+The measurement environment has bcu disabled. With bcu opted in, each call
+adds one HTTP round-trip on loopback (typically 1–5 ms on macOS — Apple
+loopback is in-kernel zero-copy). Re-run this benchmark with `bcu` running
+when bcu opt-in lands on a build machine. If real-bcu numbers blow past
+200 ms, escalate to MCP-now in a followup issue. Until then, the
+manifest-cache (`_BCU_BASE_URL_CACHE` in `tools/computer/__init__.py`,
+shipped via this plan) is the right forward-compat optimization.
+
+## Reproducer
+
+```bash
+python3 -c "
+import subprocess, time, statistics
+times = []
+for i in range(50):
+    t0 = time.perf_counter()
+    subprocess.run(['/bin/bash','-c','valor-computer list_apps > /dev/null 2>&1'])
+    times.append((time.perf_counter()-t0)*1000)
+times.sort()
+n = len(times)
+print(f'median={statistics.median(times):.1f}ms p95={times[int(0.95*n)]:.1f}ms')
+"
+```

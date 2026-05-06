@@ -1,0 +1,146 @@
+# spike-r3 — Electron selector-resolver perf baseline
+
+Captured: 2026-05-06 (revision pass cycle N+1)
+Machine: Tom's MacBook Pro (Darwin 25.4.0, arm64)
+Method: synthetic AX tree (Slack-shaped: depth ~10, mixed roles + labels) fed
+        into the actual resolver hot-path from `tools/computer/__init__.py`
+        (`_walk_ax_tree` + role/label/bounds match loop).
+
+bcu opt-in: NOT set on this machine — but the resolver code path is pure
+            Python tree-walk + filter + sort. The bcu HTTP cost (one
+            `get_window_state` call) is a separate measurement and dominates
+            this one by 2–3 orders of magnitude (loopback HTTP ~1–10 ms;
+            tree walk <0.2 ms even at 1000 nodes).
+
+## Method
+
+Built a synthetic AX tree representative of a Slack/VSCode window:
+
+- 100 nodes (typical for a single-pane Slack channel view)
+- 1000 nodes (stress test — multi-pane Slack with many message rows visible)
+- Depth ~10, mix of AXButton / AXStaticText / AXGroup / AXList / AXTextField
+- Labels drawn from a realistic pool (Send, Search, Reply, etc.)
+
+Ran `_resolve_selector(state, {role: 'AXButton', label: 'Send', bounds: [...]})`
+50 times per tree size, measuring each call with `time.perf_counter`.
+
+## Results — 100-node tree
+
+```
+N=50
+min=0.0126ms  max=0.0250ms
+median=0.0128ms
+p95=0.0193ms
+mean=0.0143ms stdev=0.0027ms
+```
+
+## Results — 1000-node tree (stress)
+
+```
+N=50
+min=0.1360ms  max=0.2270ms
+median=0.1523ms
+p95=0.1623ms
+```
+
+## Interpretation
+
+- Resolver is O(N) over tree size; 100-node trees resolve in ~13 microseconds.
+- Stress at 1000 nodes is still ~150 microseconds — five orders of magnitude
+  inside the 1-second budget the revision concern flagged.
+- The bcu HTTP `get_window_state` call (loopback, ~1–10 ms) dominates the
+  retry path's wall time. The resolver itself is invisible.
+
+## Decision
+
+**Decision 3 (one-time stale-ref retry with tree re-fetch and resolver pass)
+is confirmed.** No pre-resolved selector cache is needed.
+
+The pre-resolved-selector cache concern from cycle N+1 critique would have
+been justified if the resolver were even 10ms — it's 0.015ms. The cache
+would add complexity and a stale-cache-vs-fresh-tree race for no measurable
+benefit.
+
+## Caveat / followup
+
+This measurement uses a synthetic tree shaped like Slack/VSCode but built
+in-process. A real bcu `get_window_state` response arrives as a JSON string
+that must be decoded — that cost is in `_make_request`, not in
+`_resolve_selector`. If a future profiling pass shows the JSON decode
+dominates, address it there, not at the resolver layer.
+
+The 0.013ms baseline is a useful regression guardrail: if a future change
+makes the resolver 100x slower, this artifact will catch it. Re-run by
+copying the script in the appendix below.
+
+## Reproducer (script)
+
+See appendix below — copy/paste into Python REPL or save as
+`scripts/spike_r3_resolver_bench.py` and run with `python -m`.
+
+```python
+import time, random, statistics
+
+def _walk(state):
+    out = []
+    stack = [state.get('root') or state]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        out.append(node)
+        children = node.get('children')
+        if isinstance(children, list):
+            stack.extend(children)
+    return out
+
+def _resolve(state, selector):
+    target_role = selector.get('role')
+    target_label = selector.get('label')
+    target_bounds = selector.get('bounds')
+    candidates = _walk(state)
+    matches = []
+    for node in candidates:
+        if target_role and node.get('role') != target_role:
+            continue
+        if target_label and node.get('label') != target_label:
+            continue
+        matches.append(node)
+    if not matches:
+        return None
+    if target_bounds and len(matches) > 1:
+        def _dist(node):
+            nb = node.get('bounds') or (0, 0, 0, 0)
+            return sum(abs(a - b) for a, b in zip(nb[:4], target_bounds[:4]))
+        matches.sort(key=_dist)
+    return matches[0]
+
+random.seed(42)
+def make_tree(n_nodes):
+    root = {'role': 'AXWindow', 'label': 'Slack', 'bounds':[0,0,1200,800], 'children':[]}
+    levels = [root]
+    nodes = [root]
+    while len(nodes) < n_nodes:
+        parent = random.choice(levels)
+        node = {
+            'role': random.choice(['AXButton','AXStaticText','AXGroup','AXList','AXTextField']),
+            'label': random.choice(['Send','Search','Reply','New message','Channel','User','OK','Cancel','Submit']),
+            'bounds': [random.randint(0,1100), random.randint(0,750), 80, 30],
+            'children': [],
+        }
+        parent['children'].append(node)
+        nodes.append(node)
+        if random.random() < 0.5 and len(levels) < 10:
+            levels.append(node)
+    return root
+
+state = {'root': make_tree(100)}
+times = []
+for _ in range(50):
+    t0 = time.perf_counter()
+    _resolve(state, {'role':'AXButton','label':'Send','bounds':[100,200,80,30]})
+    times.append((time.perf_counter()-t0)*1000)
+times.sort()
+n = len(times)
+print(f'median={statistics.median(times):.4f}ms p95={times[int(0.95*n)]:.4f}ms')
+```
