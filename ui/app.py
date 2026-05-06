@@ -356,7 +356,15 @@ def create_app() -> FastAPI:
         return {"status": "error", "age_s": None}
 
     def _get_email_health() -> dict:
-        """Check email bridge health from Redis last_poll_ts."""
+        """Check email bridge health: process liveness first, then Redis heartbeat age."""
+        import subprocess
+
+        proc_running = bool(
+            subprocess.run(
+                ["pgrep", "-f", "bridge.email_bridge"],
+                capture_output=True,
+            ).stdout.strip()
+        )
 
         try:
             import os
@@ -370,6 +378,8 @@ def create_app() -> FastAPI:
             ts = r.get("email:last_poll_ts")
             if ts:
                 age_s = round(time.time() - float(ts))
+                if not proc_running:
+                    return {"status": "error", "age_s": age_s}
                 if age_s < 120:
                     return {"status": "ok", "age_s": age_s}
                 elif age_s < 300:
@@ -378,7 +388,9 @@ def create_app() -> FastAPI:
                     return {"status": "error", "age_s": age_s}
         except Exception:
             pass
-        return {"status": "error", "age_s": None}
+        if not proc_running:
+            return {"status": "error", "age_s": None}
+        return {"status": "running", "age_s": None}
 
     def _session_to_json(s) -> dict:
         """Serialize a PipelineProgress to JSON dict for the dashboard API."""
