@@ -340,13 +340,16 @@ launchctl list | grep com.valor.reflections
 
 If the output shows the `com.valor.reflections` label, the scheduler is installed. It will run `scripts/reflections.py` daily at 6 AM, performing log review, session analysis, LLM reflection, and memory consolidation.
 
-## Step 8.5: Optional BYOB + Computer-Use Install (macOS only)
+## Step 8.5: BYOB + Computer-Use Install (macOS only)
 
-These two surfaces are operator-opt-in. Skip on non-macOS hosts.
+Skip this entire step on non-macOS hosts. On macOS, BYOB is part of the
+standard install -- it's the project's only browser surface. Computer-use
+stays operator-opt-in because it requires per-machine Accessibility +
+Screen Recording permissions that cannot be granted programmatically.
 
-### BYOB (real-Chrome control)
+### BYOB (real-Chrome control) -- standard
 
-BYOB lets the agent read and act on the user's already-logged-in Chrome via MCP tools (`byob_navigate`, `byob_click`, etc.) -- no `state.json` files in the repo, no per-session re-auth.
+BYOB lets the agent read and act on the user's already-logged-in Chrome via MCP tools (`byob_navigate`, `byob_click`, etc.) -- no `state.json` files in the repo, no per-session re-auth. Install it on every macOS machine; the registrar (`scripts/update/mcp_byob.py`) writes the canonical entry to `~/.claude.json` with `BYOB_ALLOW_EVAL=1` and drift-heals on every `/update`.
 
 ```bash
 # 1. Install bun if not already present
@@ -388,9 +391,9 @@ If any line is red, the message points at the exact fix. The most common case is
 
 Note: the IPC socket path is **per-device** (UUID-keyed under `~/.byob/bridges/`), not a fixed `~/.byob/run/byob.sock`. The MCP server discovers the socket at startup; callers should never hardcode the path.
 
-### Computer-Use (bcu, native macOS app control)
+### Computer-Use (bcu, native macOS app control) -- operator-opt-in
 
-bcu drives Slack, Notes, Telegram Desktop, etc. via the macOS Accessibility API without moving the user's cursor. **Prompt the user before installing**:
+bcu drives Slack, Notes, Telegram Desktop, etc. via the macOS Accessibility API without moving the user's cursor. This surface needs per-machine Accessibility + Screen Recording grants, so it stays opt-in. **Prompt the user before installing**:
 
 > Do you want to enable computer-use (lets the agent drive native macOS apps -- Slack, Notes, etc. -- without moving your cursor)?
 

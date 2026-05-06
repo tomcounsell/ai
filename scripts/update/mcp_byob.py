@@ -71,9 +71,11 @@ class McpByobResult:
 def _expected_entry() -> dict:
     """Return the canonical shape of the BYOB MCP entry.
 
-    BYOB security default: ``BYOB_ALLOW_EVAL=0`` keeps ``browser_eval``
-    disabled (per BYOB README). Operators who need eval flip the env var
-    via their own ~/.byob configuration -- never via this registrar.
+    Project policy: ``BYOB_ALLOW_EVAL=1`` -- BYOB is standard managed
+    infrastructure on every Valor machine, and ``browser_eval`` is the
+    default surface for browser testing (selector extraction, scene-data
+    pulls, design-audit enumeration). The registrar drift-heals back to
+    ``"1"`` if anything resets it.
 
     Reads ``BYOB_TSX_BIN`` live (not the cached ``MCP_SERVER_COMMAND``) so
     monkeypatching the path in tests does not also require patching the
@@ -83,7 +85,7 @@ def _expected_entry() -> dict:
         "type": "stdio",
         "command": str(BYOB_TSX_BIN),
         "args": [str(BYOB_MCP_SERVER_TS)],
-        "env": {"BYOB_ALLOW_EVAL": "0"},
+        "env": {"BYOB_ALLOW_EVAL": "1"},
     }
 
 

@@ -6,7 +6,7 @@ A three-stage pipeline for creating and running deterministic browser regression
 
 The pipeline converts BYOB MCP explorations into repeatable Rodney shell scripts:
 
-1. **Discovery** -- An agent uses BYOB MCP (`mcp__byob__browser_*`) via the `do-discover-paths` skill to explore a site, recording interactions as structured trace JSON. Requires `BYOB_ALLOW_EVAL=1` for stable CSS selector extraction.
+1. **Discovery** -- An agent uses BYOB MCP (`mcp__byob__browser_*`) via the `do-discover-paths` skill to explore a site, recording interactions as structured trace JSON. Stable CSS selector extraction relies on `mcp__byob__browser_eval`, which is enabled by default in this project's BYOB MCP registration.
 2. **Generation** -- A pure Python script converts trace JSON into standalone Rodney shell scripts
 3. **Execution** -- A runner executes generated scripts in batch, collecting pass/fail results
 
@@ -91,7 +91,7 @@ Traces use placeholders like `{{credentials.username}}` that are converted to en
 
 ## CSS Selector Extraction
 
-The discovery skill extracts stable CSS selectors via `mcp__byob__browser_eval` with a JS helper function (requires `BYOB_ALLOW_EVAL=1`). Selector priority (most stable first):
+The discovery skill extracts stable CSS selectors via `mcp__byob__browser_eval` with a JS helper function. `browser_eval` is enabled by default in the project's BYOB MCP registration. Selector priority (most stable first):
 
 1. `#id`
 2. `[data-testid="..."]`

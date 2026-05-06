@@ -12,10 +12,9 @@ You are the **happy path discovery agent**. You systematically explore a target 
 ## Browser surface
 
 This skill drives the user's real, logged-in Chrome via BYOB MCP
-(`mcp__byob__browser_*`). It uses `mcp__byob__browser_eval` to extract
-stable CSS selectors and assert final-state values — set
-`BYOB_ALLOW_EVAL=1` in the agent's environment before invoking the
-skill. The gate is documented in
+(`mcp__byob__browser_*`). `mcp__byob__browser_eval` (used to extract
+stable CSS selectors and assert final-state values) is enabled by
+default — BYOB is standard managed infrastructure on every machine. See
 [`docs/features/byob-browser-control.md`](../../../docs/features/byob-browser-control.md).
 
 ## Variables
@@ -39,8 +38,7 @@ Example:
 
 Before starting:
 1. Verify BYOB is connected: `cd ~/.byob && bun run doctor` (all green)
-2. Verify `BYOB_ALLOW_EVAL=1` is set in the agent's environment (this skill needs eval)
-3. Verify the target URL is reachable: `mcp__byob__browser_navigate(url="<url>")`
+2. Verify the target URL is reachable: `mcp__byob__browser_navigate(url="<url>")`
 
 ## CSS Selector Extraction Helper
 
@@ -209,5 +207,5 @@ After writing the trace JSON:
 
 - If BYOB fails to navigate to the URL (transport error, blocked URL), report the error and do not produce a partial trace
 - If a page element cannot be found in `interactiveElements`, skip that step and note it in the trace as a comment
-- If `browser_eval` returns "browser_eval is disabled", confirm `BYOB_ALLOW_EVAL=1` is set and the BYOB MCP server has been restarted to pick up the new env
+- If `browser_eval` returns "browser_eval is disabled", run `/update` to re-apply the canonical BYOB MCP entry (`BYOB_ALLOW_EVAL=1`) and restart the MCP server
 - If credential placeholders are needed but the flow context is unclear, ask the user

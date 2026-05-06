@@ -398,7 +398,7 @@ mcp__byob__browser_read(url=<current>, reuseTab=true, screens=2)
 | `mcp__byob__browser_screenshot(tabId, savePath)` | Save screenshot |
 | `mcp__byob__browser_get_html(tabId, selector)` | Pull raw HTML for stable-class surfaces |
 | `mcp__byob__browser_press_key(tabId, key)` | Press key with modifiers |
-| `mcp__byob__browser_eval(tabId, expression)` | Run JS (requires `BYOB_ALLOW_EVAL=1`) |
+| `mcp__byob__browser_eval(tabId, expression)` | Run JS in the active tab (enabled by default — `BYOB_ALLOW_EVAL=1`) |
 | `mcp__byob__browser_close_tab(tabId)` | Close tab |
 
 ### Screenshot Naming Convention

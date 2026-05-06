@@ -165,11 +165,11 @@ returns the shell HTML only — it will miss the image grid. Use BYOB MCP
 to drive the user's real Chrome.
 
 > **Browser surface:** BYOB MCP (`mcp__byob__browser_*`). The image
-> enumeration below uses `mcp__byob__browser_eval`; set
-> `BYOB_ALLOW_EVAL=1` in the agent's environment before invoking the
-> skill. The same flow works for public moodboards and for logged-in
-> sources (private Cosmos boards behind your account) — BYOB just
-> drives whichever Chrome session you're in.
+> enumeration below uses `mcp__byob__browser_eval`, which is enabled by
+> default in this project's BYOB MCP registration. The same flow works
+> for public moodboards and for logged-in sources (private Cosmos boards
+> behind your account) — BYOB just drives whichever Chrome session
+> you're in.
 
 ```text
 mcp__byob__browser_navigate(url="https://www.cosmos.so/<user>/<board>", waitUntil="networkidle")
@@ -180,7 +180,7 @@ mcp__byob__browser_scroll(tabId=<tab>, y=4000)
 mcp__byob__browser_scroll(tabId=<tab>, y=8000)
 # (sleep 2s)
 
-# Enumerate all images > 100px wide (skip favicons, avatars). Requires BYOB_ALLOW_EVAL=1.
+# Enumerate all images > 100px wide (skip favicons, avatars).
 mcp__byob__browser_eval(tabId=<tab>, expression="
   JSON.stringify(
     Array.from(document.querySelectorAll('img'))

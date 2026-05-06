@@ -65,10 +65,11 @@ CLI-spawned sessions pass `valor-session create --needs-real-chrome ...`.
 Skipping this guard lets two BYOB sessions race on the active tab and
 corrupt each other's DOM.
 
-**`browser_eval` gate**: BYOB blocks `mcp__byob__browser_eval` by
-default for security. Skills that need eval (`mermaid-render`,
-`do-discover-paths`) require `BYOB_ALLOW_EVAL=1` in the agent's
-environment.
+**`browser_eval`**: enabled by default. The registrar writes
+`BYOB_ALLOW_EVAL=1` and drift-heals it back if anything resets it.
+Skills that use eval (`mermaid-render`, `do-discover-paths`,
+`do-design-system`) just call `mcp__byob__browser_eval` without any
+extra opt-in.
 
 For setup and architecture, see
 [`docs/features/byob-browser-control.md`](../../docs/features/byob-browser-control.md).

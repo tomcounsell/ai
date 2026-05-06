@@ -4,7 +4,7 @@ Modeled directly on tests/unit/test_update_mcp_memory.py. Verifies:
   - idempotent verify_byob_mcp(write=True) installs the entry on a fresh
     file and is a no-op on re-run
   - drift detection in --verify mode (write=False) reports without writing
-  - drift heal: a wrong BYOB_ALLOW_EVAL value gets corrected on next run
+  - drift heal: a wrong BYOB_ALLOW_EVAL value gets corrected back to "1" on next run
   - lock contention triggers the 3-attempt backoff path
   - atomic backup -> tmp -> rename pattern
   - other mcpServers entries (e.g. memory) preserved
@@ -98,8 +98,8 @@ def test_install_on_fresh_file(claude_config_path):
     assert len(entry["args"]) == 1
     assert "byob" in entry["args"][0]
     assert entry["args"][0].endswith("/byob-mcp.ts")
-    # Security default: BYOB_ALLOW_EVAL=0
-    assert entry["env"]["BYOB_ALLOW_EVAL"] == "0"
+    # Project policy: BYOB_ALLOW_EVAL=1 (standard for browser testing)
+    assert entry["env"]["BYOB_ALLOW_EVAL"] == "1"
 
 
 def test_idempotent_no_op_when_correct(claude_config_path):
@@ -122,10 +122,10 @@ def test_idempotent_no_op_when_correct(claude_config_path):
 
 
 def test_drift_heal_corrects_eval_flag(claude_config_path):
-    """A drifted BYOB_ALLOW_EVAL=1 must be corrected back to '0' on next run."""
+    """A drifted BYOB_ALLOW_EVAL=0 must be corrected back to '1' on next run."""
     from scripts.update import mcp_byob
 
-    # Drifted entry: eval enabled.
+    # Drifted entry: eval disabled (legacy default; project now ships eval-on).
     claude_config_path.write_text(
         json.dumps(
             {
@@ -134,7 +134,7 @@ def test_drift_heal_corrects_eval_flag(claude_config_path):
                         "type": "stdio",
                         "command": str(mcp_byob.BYOB_TSX_BIN),
                         "args": [str(mcp_byob.BYOB_MCP_SERVER_TS)],
-                        "env": {"BYOB_ALLOW_EVAL": "1"},
+                        "env": {"BYOB_ALLOW_EVAL": "0"},
                     }
                 }
             }
@@ -146,7 +146,7 @@ def test_drift_heal_corrects_eval_flag(claude_config_path):
     assert result.action == "repaired"
 
     config = json.loads(claude_config_path.read_text())
-    assert config["mcpServers"]["byob"]["env"]["BYOB_ALLOW_EVAL"] == "0"
+    assert config["mcpServers"]["byob"]["env"]["BYOB_ALLOW_EVAL"] == "1"
 
 
 def test_drift_heal_corrects_command(claude_config_path):
@@ -161,7 +161,7 @@ def test_drift_heal_corrects_command(claude_config_path):
                         "type": "stdio",
                         "command": "deno",
                         "args": ["wrong"],
-                        "env": {"BYOB_ALLOW_EVAL": "0"},
+                        "env": {"BYOB_ALLOW_EVAL": "1"},
                     }
                 }
             }

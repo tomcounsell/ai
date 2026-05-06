@@ -17,9 +17,8 @@ The `.mmd → PNG` flow drives `excalidraw.com` via BYOB MCP
 `.excalidraw → PNG` flow does not touch a browser at all.
 
 The `.mmd` flow uses `mcp__byob__browser_eval` to extract scene JSON
-from `localStorage`. BYOB blocks `browser_eval` by default; set
-`BYOB_ALLOW_EVAL=1` before invoking BYOB if you need this flow. The
-gate is documented in
+from `localStorage`. `browser_eval` is enabled by default in this
+project's BYOB MCP registration — see
 [`docs/features/byob-browser-control.md`](../../../docs/features/byob-browser-control.md).
 
 ## Dependencies (install once)
@@ -110,7 +109,7 @@ mcp__byob__browser_screenshot(tabId=<tab>, savePath="/tmp/excalidraw-canvas.png"
 
 ### Step 6: Extract scene data from localStorage
 
-Excalidraw auto-saves the scene to `localStorage`. Extract it directly — this is more reliable than triggering a file download. Requires `BYOB_ALLOW_EVAL=1` in the agent's environment:
+Excalidraw auto-saves the scene to `localStorage`. Extract it directly — this is more reliable than triggering a file download:
 
 ```text
 mcp__byob__browser_eval(tabId=<tab>, expression="localStorage.getItem('excalidraw')")
@@ -209,9 +208,9 @@ Then repeat Steps 3–7 for the next file. The localStorage key `excalidraw` alw
 
 ## Troubleshooting
 
-**`mcp__byob__browser_eval` returns "browser_eval is disabled":** BYOB blocks `browser_eval` by default. Set `BYOB_ALLOW_EVAL=1` in the agent's environment and restart the BYOB MCP server (`cd ~/.byob && bun run doctor`).
+**`mcp__byob__browser_eval` returns "browser_eval is disabled":** Drift on the BYOB MCP entry. Run `/update` to re-apply the canonical entry (`BYOB_ALLOW_EVAL=1`) and restart the BYOB MCP server (`cd ~/.byob && bun run doctor`).
 
-**BYOB transport error:** Run `cd ~/.byob && bun run doctor` to confirm the extension is loaded and the native bridge is running. If red, run `/setup` and answer "yes" to the computer-use opt-in.
+**BYOB transport error:** Run `cd ~/.byob && bun run doctor` to confirm the extension is loaded and the native bridge is running. If red, follow the doctor's diagnostic output — most often the Chrome extension needs to be reloaded after a full Chrome restart.
 
 **"More tools" not in IE list:** Take a screenshot to see current state. The button may be labelled differently after Excalidraw UI updates. Look for a button that reveals Frame, Mermaid, and Laser pointer options.
 

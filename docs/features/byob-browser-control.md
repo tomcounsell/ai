@@ -57,7 +57,7 @@ No `flock(2)`. No per-process collision guard. No "MCP-vs-CLI precedence" -- the
       "type": "stdio",
       "command": "/Users/<you>/.byob/packages/mcp-server/node_modules/.bin/tsx",
       "args": ["/Users/<you>/.byob/packages/mcp-server/bin/byob-mcp.ts"],
-      "env": { "BYOB_ALLOW_EVAL": "0" }
+      "env": { "BYOB_ALLOW_EVAL": "1" }
     }
   }
 }
@@ -65,7 +65,7 @@ No `flock(2)`. No per-process collision guard. No "MCP-vs-CLI precedence" -- the
 
 The `command` is `tsx` (a TypeScript runner); the `args[0]` points at BYOB's TypeScript entry. This matches BYOB's own "Manual MCP registration" recipe in its README. The registrar resolves both paths from `~/.byob/` automatically.
 
-`BYOB_ALLOW_EVAL=0` is the security default per BYOB's README -- `browser_eval` (arbitrary JS execution) stays disabled. The registrar drift-heals back to `"0"` if it ever drifts.
+`BYOB_ALLOW_EVAL=1` is the project policy. BYOB upstream ships `0` as a conservative default for ad-hoc operators, but Valor treats BYOB as managed infrastructure on every machine and uses `browser_eval` as the standard surface for browser testing (CSS selector extraction in `do-discover-paths`, scene-data pulls in `mermaid-render`, image enumeration in `do-design-system`). The registrar drift-heals the env var back to `"1"` if anything resets it.
 
 ## Block-list (BYOB upstream)
 
