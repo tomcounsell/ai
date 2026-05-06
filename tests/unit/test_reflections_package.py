@@ -256,19 +256,6 @@ class TestMaintenanceCallables:
 class TestAuditingCallables:
     """Smoke tests for reflections/auditing.py."""
 
-    def test_run_log_review_no_projects(self):
-        """run_log_review() returns valid dict with no projects."""
-        from reflections.auditing import run_log_review
-
-        with (
-            patch("reflections.auditing.load_local_projects", return_value=[]),
-            patch("models.bridge_event.BridgeEvent") as mock_be,
-            patch("reflections.auditing.subprocess.run"),
-        ):
-            mock_be.query.filter.return_value = []
-            result = run_async(run_log_review())
-        assert_valid_result(result)
-
     def test_run_skills_audit_no_script(self, tmp_path):
         """run_skills_audit() returns ok when script not found in any project."""
         from reflections.auditing import run_skills_audit
@@ -298,51 +285,32 @@ class TestAuditingCallables:
     def test_event_loop_safe_callables_are_sync(self):
         """Regression canary (sibling of PR #1056).
 
-        These two callables did synchronous file I/O on unbounded log
-        files while being declared ``async def``. That froze the reflection
-        scheduler's event loop. They are now plain ``def`` so
-        ``ReflectionScheduler.execute_function_reflection`` dispatches them
+        ``run_hooks_audit`` does synchronous file I/O on potentially
+        unbounded log files. It must stay plain ``def`` so
+        ``ReflectionScheduler.execute_function_reflection`` dispatches it
         via ``loop.run_in_executor(None, func)`` instead of running inline.
 
-        If anyone re-declares these as ``async def`` without also guarding
+        If anyone re-declares it as ``async def`` without also guarding
         every blocking read with ``asyncio.to_thread`` + ``wait_for``, this
         canary fails loudly.
+
+        ``run_log_review`` was retired in issue #1292 (the legacy
+        ``daily-log-review`` reflection was consolidated into the
+        ``log_audit`` slot of the pm-briefings dispatcher). The same sync-
+        only invariant for the slot's ``_scan_project_logs`` is enforced by
+        the slot's pure-function contract: it returns a ``list[str]`` and
+        is called from an async dispatcher via ``await asyncio.to_thread``.
         """
         import inspect
 
-        from reflections.auditing import (
-            run_hooks_audit,
-            run_log_review,
+        from reflections.auditing import run_hooks_audit
+
+        assert not inspect.iscoroutinefunction(run_hooks_audit), (
+            "run_hooks_audit must stay sync `def` — it does blocking file I/O "
+            "that would freeze the reflection scheduler's event loop if "
+            "declared `async def`. See PR #1056 (memory_extraction) for the "
+            "async-native alternative if a rewrite is ever needed."
         )
-
-        for fn in (run_log_review, run_hooks_audit):
-            assert not inspect.iscoroutinefunction(fn), (
-                f"{fn.__name__} must stay sync `def` — it does blocking file I/O "
-                "that would freeze the reflection scheduler's event loop if "
-                "declared `async def`. See PR #1056 (memory_extraction) for the "
-                "async-native alternative if a rewrite is ever needed."
-            )
-
-    def test_read_log_text_bounded_tails_large_files(self, tmp_path):
-        """_read_log_text_bounded returns only the tail for files over the size cap."""
-        from reflections import auditing
-
-        log_file = tmp_path / "huge.log"
-        # Build a file larger than the 50 MB trip point cheaply.
-        chunk = b"x" * (1024 * 1024)  # 1 MB of 'x'
-        size_mb = 55
-        with open(log_file, "wb") as f:
-            for _ in range(size_mb):
-                f.write(chunk)
-            # Trailing marker we expect to see after the truncation header.
-            f.write(b"TAIL_MARKER\n")
-
-        text = auditing._read_log_text_bounded(log_file)
-        # Truncation notice is present and we still saw the final marker.
-        assert "truncated: showing last" in text
-        assert "TAIL_MARKER" in text
-        # The returned string is bounded: 1 MB tail + a short header, not 55 MB.
-        assert len(text) < 2 * 1024 * 1024
 
     def test_run_pr_review_audit_no_projects(self):
         """run_pr_review_audit() returns valid dict with no projects."""
