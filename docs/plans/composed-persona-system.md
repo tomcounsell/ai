@@ -197,6 +197,54 @@ Worker emits agent output → `bridge/message_drafter.py:draft_message(raw_respo
 
 **Note on naming:** the function is `draft_message` (not `format_for_chat`) and the parameter is `medium` (not `channel`). The plan uses `medium` consistently because (a) that's the existing parameter name on `draft_message`, (b) `_validate_for_medium(text, medium)` already exists at `bridge/message_drafter.py:381`, and (c) renaming `medium` to `channel` is out of scope. The composer can still be named with `channel` internally because no working-agent prompt cell uses it today (Question 4 / Open Question 1) — but the drafter's public surface stays as `medium=`.
 
+### Channel-Awareness Decision (concrete content move list)
+
+The issue's directive: "push channel-specific deltas into the drafter; minimal channel facet remains in the working agent only if a concrete need is identified." This plan resolves that into the following content-move ledger. **Voice consolidation (banned phrases, tone rules) is deferred per Risk 4** — what follows is structural channel-awareness only, not voice.
+
+| Content block | Lives today in | Move target after this plan | Rationale |
+|---------------|----------------|------------------------------|-----------|
+| `valor-telegram` CLI invocation guidance (read/send commands, group history search) | `config/personas/segments/tools.md` L103–L131 | **Stay in `tools.md`** | This is a *tool the agent calls*, not a *channel the agent outputs to*. The agent uses `valor-telegram read` to look up history regardless of where the response goes. Treat as tool documentation, not channel awareness. |
+| `valor-telegram send` syntax warning ("never include CLI syntax in responses") | `config/personas/segments/tools.md` L130–L132 | **Stay in `tools.md`** | Tool-misuse guard, lives next to the tool. Same logic. |
+| Telegram Desktop in `computer-use` Electron app list | `config/personas/segments/tools.md` L67–L80 | **Stay in `tools.md`** | One of many Electron apps in the same paragraph; not channel-specific. |
+| "By the time my response reaches Telegram, my session is OVER" (empty-promises rule) | `identity.md` L61 | **Voice content — DEFER** to follow-up voice plan. Stays in `identity.md` for this plan. | This is a *voice* rule (no empty promises), not a channel format rule. Risk 4 says voice consolidation is out of scope. |
+| "Long agent outputs are drafted before sending to Telegram. The drafter…" | `identity.md` L65 (~next 5 lines) | **Stay in `identity.md`** for this plan; flag for follow-up voice plan | Same — explains the drafter to the agent so it does not duplicate drafting work. Cross-cutting concern; do not move in this plan. |
+| Group-chat history rule ("search Telegram before asking") | `identity.md` L100, `work-patterns.md` L98, `tools.md` L134 | **Stay in segments** | Behavior rule about asking-vs-searching; applies regardless of output channel. |
+| Launchd reconnect mention | `work-patterns.md` L338 | **Stay** | Self-healing context, not channel-format. |
+| PM overlay "Replying to messages, reading state, sending Telegram messages" (L44) | `~/Desktop/Valor/personas/project-manager.md` | **Stay** in PM overlay | PM overlay is private/iCloud-synced and out of repo scope. Touching it bursts byte-stability for the PM cell (Risk 1). Defer with the rest of voice consolidation. |
+| PM overlay "send Telegram update before pausing" (L534) | `~/Desktop/Valor/personas/project-manager.md` | **Stay** | Same reason — and this is a PM workflow rule, not a channel-format rule. |
+| Telegram-length / chat-format rules (`• ` bullets, `>>` question prefix, FORMAT RULES #1–#4) | `bridge/message_drafter.py:1295` `DRAFTER_SYSTEM_PROMPT` (FORMAT RULES section) | **Move into `MEDIUM_RULES["telegram"]`** in drafter | This is *the* example of channel-format content. Plain candidate for the drafter's per-medium split. |
+| Email-specific format rules (no markdown, no inline code, plain conversational email) | Spread across `customer-service.md` overlay (L83, L148, L150 in customer-service overlay; nothing in the drafter today for email) | **Add a stub `MEDIUM_RULES["email"]`** in the drafter; **leave** the customer-service overlay alone (overlay describes *the persona*, drafter describes *the medium*) | Surfaces the deferred work cleanly: email medium gets a stub today, customer-service overlay keeps describing the persona. |
+| SDLC stage progress / link footer | `bridge/message_drafter.py:1295` (FORMAT RULES section #4) | **Move into `MEDIUM_RULES["telegram"]`** | Telegram-specific rendering conventions that don't apply to email. |
+| Structured-output `tool_use` schema (`response`, `expectations`, `context_summary`) | `bridge/message_drafter.py` (separate from `DRAFTER_SYSTEM_PROMPT`) | **No change — stays shared across mediums** | The schema is delivery-agnostic; the email medium would still want all three fields. |
+
+**Summary of structural moves:**
+
+1. **Working-agent segments + overlays:** **no content moves in this plan.** The structural change is the composer signature. Segments and overlays continue to ship Telegram-leaning content; that content's eventual relocation is a Q2/voice-consolidation follow-up.
+2. **Drafter:** `DRAFTER_SYSTEM_PROMPT` splits into `BASE_DRAFTER_PROMPT + MEDIUM_RULES[medium]`. Telegram-specific FORMAT RULES move into `MEDIUM_RULES["telegram"]`. Email gets a stub `MEDIUM_RULES["email"]` (initially identical-ish to telegram minus telegram-only formatting; concrete email format rules are an explicit follow-up). The base prompt retains all *voice* content verbatim.
+3. **Working-agent composer `channel` parameter:** accepted, ignored. Forward-compat for a future facet but unused today (see Open Question 1).
+
+This ledger is the build phase's source of truth for the content-move scope.
+
+### AGENT-VOICE.md Decision
+
+The issue references fazm's [`AGENT-VOICE.md`](https://github.com/mediar-ai/fazm/blob/main/inbox/skill/AGENT-VOICE.md) — a single canonical voice file that all channel-specific skills reference. The user request asks: **do we ship a single voice doc, and where does it live?**
+
+**Decision for this plan: NO, not in this plan.** Defer to a follow-up voice-consolidation plan after this composer ships.
+
+**Reasoning:**
+
+1. Adding a single voice source — whether as a new `voice.md` segment in `manifest.json`, a `config/personas/voices/{persona}.md` per-persona file, or a top-level `AGENT-VOICE.md` — **changes the assembled prompt bytes** for the existing four cells the moment any segment-list reordering or new content insertion happens. That breaks Risk 1's byte-stability mitigation, which is *the* invariant this plan must preserve to avoid busting #1227's prompt cache.
+2. Voice consolidation is a quality-and-content concern, not a structural one. The composer refactor is a pure structural cleanup. Coupling them risks two simultaneously-changing variables in a refactor whose entire purpose is to be a no-observable-behavior-change cleanup.
+3. The drafter `BASE_DRAFTER_PROMPT` keeps today's voice content verbatim. The composer reads voice content from where it lives today (segments + overlays + drafter prompt). No new file is introduced. The four current voice locations stay intact.
+
+**What the follow-up plan will look like (sketch, not in scope here):**
+
+- Single source: `config/personas/voice.md` referenced by both the composer (new segment in `manifest.json`, with explicit one-time cache-bust per #1227) and the drafter (read at module load, concatenated into `BASE_DRAFTER_PROMPT`).
+- Content scope: banned phrases, "no empty promises" rule, tone guidance. Good/bad reply *examples* are a separate quality plan after voice consolidation lands.
+- Cache-bust strategy for #1227: deploy during a quiet window, accept one cold-cache hit per machine per session-bucket.
+
+**Decision recorded for traceability:** the plan documents this decision so the follow-up plan has a clear starting point. If the reviewer wants the voice plan filed *now* as a placeholder issue, that is a build-phase choice (see Open Question 3 below). The default in this plan is to file the placeholder issue at PR-merge time so it can reference the actual landed composer.
+
 ### Technical Approach
 
 - **Where the composer lives**: keep it adjacent to existing loaders in `agent/sdk_client.py`, alongside `load_persona_prompt`/`load_system_prompt`/`load_pm_system_prompt`. Extracting to a new module is a follow-up if the file gets too large.
