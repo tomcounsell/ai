@@ -2,9 +2,9 @@
 status: Planning
 type: bug
 appetite: Small
-owner: Valor
+owner: Valor Engels
 created: 2026-05-06
-tracking: https://github.com/tomcounsell/ai/issues/1313
+tracking: https://github.com/valorengels/ai/issues/1313
 last_comment_id:
 ---
 
@@ -12,65 +12,74 @@ last_comment_id:
 
 ## Problem
 
-On 2026-05-06, session `tg_cuttlefish_-5295380350_9642` (a "configure customer" request for Graham Derry in the Cuttlefish project) sat in `pending` for over 5 hours. The watchdog logged 60+ `LIFECYCLE_STALL` warnings to `logs/worker.log`. The user saw nothing on Telegram — the `👀` "received" reaction the bridge applied at ingest stayed there, silence read as "agent is thinking", and the outage compounded.
+When `monitoring/session_watchdog.py` detects a stalled session (default >300s in `pending`), it emits a `LIFECYCLE_STALL` warning to the worker log and does nothing else. On 2026-05-06, session `tg_cuttlefish_-5295380350_9642` sat pending for over 5 hours; the watchdog logged 60+ stall warnings; the user (the CEO) saw silence on Telegram and assumed "agent is thinking." Silent failure compounds short outages into long ones because no human-visible signal triggers an investigation.
 
 **Current behavior:**
-- `monitoring/session_watchdog.py:262-387` (`check_stalled_sessions`) detects sessions whose duration in their current state exceeds `STALL_THRESHOLDS[status]` (300s for `pending`, 2700s for `running`, 600s for `active`).
-- Detection emits `logger.warning("LIFECYCLE_STALL ...")` at lines 367-376. That is the entire user-visible signal: a log line.
-- The watchdog runs in the **worker process**. It has no Telegram client and must not import telethon (the bridge owns Telegram I/O).
-- The bridge already runs a relay loop (`bridge/telegram_relay.py`) that consumes the `telegram:outbox:{session_id}` Redis queue and supports `type: "reaction"` payloads — see `_send_queued_reaction` at lines 84-144. `tools/react_with_emoji.py` is the existing producer pattern.
+- `monitoring/session_watchdog.py:367-376` -- `logger.warning("LIFECYCLE_STALL ...")` is the only output of the stall branch.
+- The watchdog runs in the worker process. It does not import telethon and has no Telegram client.
+- `AgentSession` already carries `chat_id` and the property `telegram_message_id` (extracted from the `initial_telegram_message` dict).
 
 **Desired outcome:**
-- When a session is detected stalled, the watchdog enqueues a single warning reaction (⏳) on the originating Telegram message via the existing outbox queue. The bridge's relay applies it.
-- Re-detection on the same stall does not re-enqueue — at most one reaction per stall period.
-- If the session ever transitions out of the stalled status and stalls again, the dedup flag resets so a new reaction can fire.
-- Sessions without an originating Telegram message (local sessions, no `initial_telegram_message`) are silently skipped — no exceptions, no log spam.
-- The existing `LIFECYCLE_STALL` log warning is preserved unchanged — this is **additional**, not a replacement.
+- When a session is stalled past its threshold AND has an originating Telegram message, the watchdog queues a warning reaction emoji on that message. Exactly once per stall period.
+- The existing `LIFECYCLE_STALL` warning log is preserved -- this is an *additional* user-visible channel.
+- Sessions without an originating Telegram message are skipped silently.
+- Re-stalls (session leaves `pending` and returns) reset the dedup so a fresh reaction lands.
 
 ## Freshness Check
 
-**Baseline commit:** `fcbb93c4`
-**Issue filed at:** 2026-05-06T10:41:56Z (today)
+**Baseline commit:** `455bfa17`
+**Issue filed at:** 2026-05-06T10:41:56Z (~6h before plan time 2026-05-06T16:29Z)
 **Disposition:** Unchanged
 
 **File:line references re-verified:**
-- `monitoring/session_watchdog.py:262-387` — `check_stalled_sessions` body — still holds; warning emitted at 367-376 as cited.
-- `monitoring/session_watchdog.py:402-498` — `_inject_watchdog_steer` — still the right shape reference for an additional escalation branch (cooldown via `SET NX EX`, fail-quiet, behind a feature gate).
-- `models/agent_session.py:973-990` — `telegram_message_id` property over `initial_telegram_message` dict — still holds.
-- `bridge/response.py:258-321` — `set_reaction(client, chat_id, msg_id, emoji)` — still holds.
-- `bridge/telegram_relay.py:84-144` — `_send_queued_reaction` already handles `type: "reaction"` payloads with `chat_id`, `reply_to`, `emoji` keys, drops non-Telegram chat_ids silently.
+- `monitoring/session_watchdog.py:367-376` -- `LIFECYCLE_STALL` warning emission point. Still holds at lines 367-376 verbatim. Correct insertion point.
+- `monitoring/session_watchdog.py:402-498` -- `_inject_watchdog_steer`. Still present, exact pattern shape to follow (env-flag gate, atomic `SET NX EX` cooldown, `logger.warning` on success, fail-quiet on exceptions).
+- `models/agent_session.py:973-990` -- `telegram_message_id` property over `initial_telegram_message` dict. Still holds. Returns `int | None`.
+- `bridge/response.py:258` -- `set_reaction` exists. Note: irrelevant to the fix because we'll write to the outbox, not call set_reaction directly.
 
 **Cited sibling issues/PRs re-checked:**
-- #777 — closed 2026-04-07 (timezone fix; `LIFECYCLE_STALL` duration now correct). No effect on this plan.
-- #402 — closed 2026-03-14 (kill-stuck-worker recovery). Orthogonal.
-- #1128 — closed 2026-04-23 (`_inject_watchdog_steer` introduced). Reference shape for this work.
-- #1250 — open; orthogonal (detects stalled SDLC PRs, different state).
+- #777 -- closed (timezone fix). No regression risk for this work.
+- #402 -- closed.
+- #1128 -- closed (added `_inject_watchdog_steer`). The pattern shape we mirror.
+- #1250 -- open. Orthogonal: detects stalled SDLC PRs, not user-facing escalation. No conflict.
 
-**Commits on main since issue was filed (touching referenced files):** none.
+**Commits on main since issue was filed (touching referenced files):**
+- `git log --since=2026-05-06T10:00:00Z` on `monitoring/session_watchdog.py models/agent_session.py bridge/telegram_relay.py agent/output_handler.py` returned no commits. Code is pristine relative to the issue.
 
-**Active plans in `docs/plans/` overlapping this area:**
-- `docs/plans/emoji-embedding-reactions.md` — orthogonal: covers AI-driven emoji selection for agent reactions, not watchdog stalls. The reaction payload shape this plan uses is the same one that plan documented (`type: "reaction"` outbox).
+**Active plans in `docs/plans/` overlapping this area:** None. `emoji-embedding-reactions.md` (similar name) is `status: Merged` and unrelated (vector-search reactions, not stall alerts).
 
-**Notes:** All claims hold. No drift.
+**Notes:** During investigation I confirmed an even cheaper path than the issue's "bridge subscriber" sketch: `agent/output_handler.py:763-820` already exposes a `_build_reaction_payload` schema and `bridge/telegram_relay.py:84-143` already drains `type:"reaction"` payloads from `telegram:outbox:{session_id}`. The watchdog can write a reaction payload directly to that outbox -- no new pubsub channel, no new bridge-side subscriber.
 
 ## Prior Art
 
-- **#1128**: "Reliability: watchdog hardening" — added `_inject_watchdog_steer` to inject steering messages on `repetition`, `error_cascade`, `token_alert`. Same insertion-point pattern (extra branch inside the watchdog tick), same fail-quiet / cooldown discipline. We mirror this shape for the stall-reaction branch.
-- **#777**: "Bug: LIFECYCLE_STALL duration inflated by UTC offset" — closed (timezone fix). Confirms the warning string and its reliability today.
-- **#344**: "Fix session stuck in pending after BUILD COMPLETED" — merged. Orthogonal: that fix unstuck a specific status-transition bug; it didn't add user-facing escalation.
-- **`docs/features/emoji-embedding-reactions.md`** / `tools/react_with_emoji.py`: established the `telegram:outbox:{session_id}` reaction-payload contract. We reuse it verbatim — no new pubsub channel.
+- **PR #344**: Fix session stuck in pending after BUILD COMPLETED -- addressed a different stall root cause (state transition bug). Does not overlap with user-facing escalation.
+- **Issue #1128**: Reliability: watchdog hardening -- added `_inject_watchdog_steer` for `repetition`, `error_cascade`, `token_alert` triggers. The shape and idempotency guarantees we mirror.
+- **Plan `emoji-embedding-reactions.md`**: shipped (Merged). Different feature (semantic embedding for reactions); shares no code with this work.
+
+No prior fixes specifically for user-visible stall alerts. Greenfield branch in the watchdog's escalation surface.
 
 ## Research
 
-No relevant external findings — proceeding with codebase context. The mechanism is fully internal: existing Redis queue, existing relay consumer, existing `set_reaction`. Nothing to look up externally.
+No external research required -- this is purely internal (Telethon API patterns, Redis outbox, in-process watchdog logic, all already-coded in the repo).
+
+## Data Flow
+
+1. **Entry point**: Watchdog tick (every ~5 minutes) calls `check_stalled_sessions()` in `monitoring/session_watchdog.py`.
+2. **Detection**: For each `pending`/`running`/`active` session, compute `duration` against per-status `threshold`. When `duration > threshold`, log the existing `LIFECYCLE_STALL` warning.
+3. **NEW -- escalation branch**: After the warning, call `_apply_stall_reaction(session)`:
+   - Atomic `SET NX EX` on `watchdog:stall_reaction_applied:{session_id}` (TTL = 1 day) -- short-circuits if already applied this stall period.
+   - Skip if `session.chat_id` and `session.telegram_message_id` aren't both populated.
+   - Write a reaction payload (`type:"reaction"`, `emoji:"⏳"`, `chat_id`, `reply_to=telegram_message_id`, `session_id=session.session_id`) to `telegram:outbox:{session.session_id}` via `RPUSH` + `EXPIRE` (TTL matches existing OUTBOX_TTL pattern in `agent/output_handler.py`).
+4. **Handoff to bridge**: The bridge process's `bridge/telegram_relay.py::_send_queued_reaction` (already running) drains the outbox key on its normal poll, calls `set_reaction` over Telethon, and the user sees ⏳ on their original message.
+5. **Stall-recovery path** (new): When a session transitions out of `pending`/`running` into a healthy or terminal state, `DELETE` the `watchdog:stall_reaction_applied:{session_id}` key so re-stalls trigger a fresh reaction.
 
 ## Architectural Impact
 
-- **New dependencies:** none. The watchdog already has Redis access (via `popoto.redis_db.POPOTO_REDIS_DB` used by `_inject_watchdog_steer`).
-- **Interface changes:** one new field on `AgentSession`: `stall_reaction_applied: bool = Field(default=False)`. Additive, backcompat-safe — `_heal_descriptor_pollution` walks all fields generically (per memory `feedback_field_backcompat_heal`), no migration needed.
-- **Coupling:** unchanged. The watchdog stays in the worker process; the bridge stays the sole telethon owner. Communication is via the **existing** Redis outbox queue — same channel `tools/react_with_emoji.py` uses.
-- **Data ownership:** the dedup flag lives on the AgentSession record, owned by the watchdog (writer) and reset when the session transitions out of the stalled status (writer: lifecycle code or a small reset hook).
-- **Reversibility:** trivially revertable. Removing the new branch from `check_stalled_sessions` and the field from `AgentSession` removes the feature.
+- **New dependencies**: None. Reuses Redis (already imported), the outbox key pattern (already used by `_rtr_queue_reaction`), and the `_build_reaction_payload` schema (already canonical in `agent/output_handler.py`).
+- **Interface changes**: None. Adds one private function `_apply_stall_reaction(session)` to `monitoring/session_watchdog.py`.
+- **Coupling**: No new coupling. Watchdog already writes to Redis (lifecycle history, cooldowns). Reaction outbox is a writer-multiple, reader-one pattern; the bridge does not need to know the watchdog is a writer.
+- **Data ownership**: Unchanged. Bridge owns Telethon I/O; watchdog stays Telethon-free.
+- **Reversibility**: Trivially reversible -- gate behind `WATCHDOG_STALL_REACTION_ENABLED` env flag (default on, mirror of `WATCHDOG_AUTO_STEER_ENABLED`). Set to `0` to disable.
 
 ## Appetite
 
@@ -79,283 +88,286 @@ No relevant external findings — proceeding with codebase context. The mechanis
 **Team:** Solo dev
 
 **Interactions:**
-- PM check-ins: 0
-- Review rounds: 1
+- PM check-ins: 0 (scope is locked by the issue)
+- Review rounds: 1 (PR review)
 
-Single-file changes in two files plus tests. No design ambiguity.
+The diff lands in one file (`monitoring/session_watchdog.py`) with one helper function, one env flag, and one Redis key. Tests are unit-level plus one integration test.
 
 ## Prerequisites
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Redis reachable from worker | `python -c "from popoto.redis_db import POPOTO_REDIS_DB; POPOTO_REDIS_DB.ping()"` | Watchdog must enqueue to outbox |
-| Bridge relay running | `./scripts/valor-service.sh status` | Relay drains the queue and applies the reaction |
-
-Run all checks: `python scripts/check_prerequisites.py docs/plans/stalled-session-user-visible-alert.md`
+| Bridge has reaction relay running | `grep -n "_send_queued_reaction" bridge/telegram_relay.py` | Confirms the outbox consumer exists |
+| Reaction payload schema | `grep -n "_build_reaction_payload" agent/output_handler.py` | Confirms schema source of truth |
+| `telegram_message_id` property | `grep -n "def telegram_message_id" models/agent_session.py` | Confirms session exposes the field |
 
 ## Solution
 
 ### Key Elements
 
-- **`AgentSession.stall_reaction_applied`**: bool flag, default False. Set True by the watchdog after enqueueing the warning reaction; reset to False when the session transitions out of the currently-stalled status.
-- **`_apply_stall_reaction(session)`** in `monitoring/session_watchdog.py`: reads `chat_id` and `telegram_message_id` from the session, builds the `type: "reaction"` payload, RPUSHes onto `telegram:outbox:{session_id}` with a 1h TTL, sets the dedup flag. Fails silently on missing fields or Redis errors.
-- **Reset hook**: when the session's status changes between watchdog ticks (it left `pending` and came back, or moved to `running` and stalled there), the watchdog clears `stall_reaction_applied` so the next stall in a new state can re-fire.
-- **Feature gate**: `WATCHDOG_STALL_REACTION_ENABLED` env var (default on), matching the `_env_flag_enabled` discipline used by `_inject_watchdog_steer`.
-- **Reaction emoji**: `⏳` (hourglass) — distinct from `👀` (received), `🤔` (processing), `🫡` (abort), and any happy-path emoji.
+- **`_apply_stall_reaction(session)`**: New private helper in `monitoring/session_watchdog.py`. Mirrors the shape of `_inject_watchdog_steer`: env-flag gate, atomic `SET NX EX` dedup, fail-quiet on exceptions.
+- **Outbox write**: Reuses `telegram:outbox:{session_id}` and the canonical reaction payload schema. Inlines the small payload literal (avoids importing async output_handler into the watchdog).
+- **Dedup key**: `watchdog:stall_reaction_applied:{session_id}` with 1-day TTL via `SET NX EX`. Idempotent under concurrent ticks.
+- **Re-stall reset**: When a session leaves `pending`/`running`/`active` and lands in a terminal state (or transitions back to a healthy state), delete the dedup key so the next stall triggers a new reaction.
+- **Emoji choice**: ⏳ (hourglass). Visually distinct from existing reactions in the bridge (👀 received/looking, 🔥 drafting, 👍 work done) and reads as "stalled / waiting too long." Verified against `bridge/update.py:98,171` and `bridge/routing.py:1087`.
 
 ### Flow
 
-Worker watchdog tick → `check_stalled_sessions` detects stall → existing `logger.warning("LIFECYCLE_STALL ...")` → **new**: `_apply_stall_reaction(session)` → if `chat_id` and `telegram_message_id` present and flag not yet set → RPUSH `{type: "reaction", chat_id, reply_to: telegram_message_id, emoji: "⏳", session_id, timestamp}` onto `telegram:outbox:{session_id}` → set `stall_reaction_applied = True` → save session.
-
-Bridge relay (already running) → polls `telegram:outbox:*` → `_send_queued_reaction` → `set_reaction(client, chat_id, msg_id, "⏳")` → user sees ⏳ on their original message.
-
-Subsequent ticks while still stalled → flag is True → `_apply_stall_reaction` returns early. No duplicate reaction.
-
-Session transitions out of stalled status (worker progresses, session moves `pending` → `running` or completes) → flag is reset (see Reset hook below) → if it stalls again later, a fresh ⏳ can fire.
+Watchdog tick → stall detected (>300s pending) → `LIFECYCLE_STALL` log emitted (unchanged) → `_apply_stall_reaction(session)` → dedup key claimed → reaction payload pushed to `telegram:outbox:{session.session_id}` → bridge relay drains → ⏳ visible on user's original message.
 
 ### Technical Approach
 
-- **Insertion point**: `monitoring/session_watchdog.py`, immediately after the existing `logger.warning("LIFECYCLE_STALL ...")` block (line 376), call `_apply_stall_reaction(session)`. Do NOT touch the warning itself.
-- **Skip silently** when `session.chat_id` is unset, when `session.telegram_message_id` returns `None`, or when `chat_id` is non-integer (matches the `_send_queued_reaction` drop-rule for local sessions). Log at `debug` level only.
-- **Dedup**: read `getattr(session, "stall_reaction_applied", False)` at the top of the helper. If True, return early. After successful enqueue, set it True and `session.save()`. If save fails, swallow — the duplicate-reaction risk on the next tick is bounded (one extra ⏳ at worst) and is preferable to a watchdog crash.
-- **Reset**: tracked the simplest way — `_apply_stall_reaction` *also* records the status it stalled in (e.g. a sibling field `stall_reaction_status: str = Field(default="")`). On each watchdog tick, before the dedup check, compare the current status against `stall_reaction_status`; if different (including empty), reset the flag. This avoids needing a separate lifecycle hook elsewhere — all the state machinery lives in the watchdog.
-- **Cooldown via flag, not Redis TTL**: unlike `_inject_watchdog_steer` which uses `SET NX EX` because steers can race across watchdog instances, the worker watchdog is a single in-process loop. The session-field flag is sufficient and the natural place for state. (Validated by reading `worker/__main__.py` — only one watchdog runs.)
-- **Feature gate**: wrap the new branch in `_env_flag_enabled("WATCHDOG_STALL_REACTION_ENABLED")`. Default on, falsy values disable.
-- **No telethon import in the worker.** Watchdog only RPUSHes JSON. Verified: `tools/react_with_emoji.py` does the same and works today.
+- **Insertion point**: `monitoring/session_watchdog.py` line 376 (immediately after the existing `logger.warning("LIFECYCLE_STALL ...")` call). One new function call: `_apply_stall_reaction(session)`.
+- **Helper function** (new, ~40 lines):
+  ```python
+  def _apply_stall_reaction(session: AgentSession) -> bool:
+      if not _env_flag_enabled("WATCHDOG_STALL_REACTION_ENABLED"):
+          return False
+      try:
+          chat_id = getattr(session, "chat_id", None)
+          msg_id = getattr(session, "telegram_message_id", None)
+          session_id = session.session_id or session.agent_session_id
+          if not (chat_id and msg_id and session_id):
+              return False  # silent skip -- local sessions, no original message
+          dedup_key = f"watchdog:stall_reaction_applied:{session_id}"
+          slot_open = POPOTO_REDIS_DB.set(dedup_key, "1", nx=True, ex=86400)
+          if not slot_open:
+              return False
+          payload = {
+              "type": "reaction",
+              "chat_id": str(chat_id),
+              "reply_to": int(msg_id),
+              "emoji": STALL_REACTION_EMOJI,  # "⏳"
+              "session_id": session_id,
+              "timestamp": time.time(),
+          }
+          queue_key = f"telegram:outbox:{session_id}"
+          POPOTO_REDIS_DB.rpush(queue_key, json.dumps(payload))
+          POPOTO_REDIS_DB.expire(queue_key, OUTBOX_TTL)
+          logger.warning("[watchdog] Stall reaction queued for %s (chat=%s msg=%s)",
+                         session_id, chat_id, msg_id)
+          return True
+      except Exception as e:
+          logger.warning("[watchdog] Failed to queue stall reaction for %s: %s",
+                         session.session_id, e)
+          return False
+  ```
+- **Re-stall reset hook**: At the existing point where session status transitions from `pending`/`running`/`active` to a healthy or terminal state, delete the dedup key. The cleanest insertion is in `monitoring/session_watchdog.py`'s `assess_session_health` (or its caller in the same module). Final placement to be selected at build time after one quick read of the recovery branch.
+- **Env flag**: `WATCHDOG_STALL_REACTION_ENABLED` (default on; falsy values: `0`, `false`, `no`). Identical semantics to `WATCHDOG_AUTO_STEER_ENABLED`.
+- **Constants**: `STALL_REACTION_EMOJI = "⏳"`, `STALL_REACTION_DEDUP_TTL = 86400` (1 day). Place at module top with other watchdog constants.
+- **Schema reuse strategy**: The payload dict matches `_build_reaction_payload` byte-for-byte. We do NOT call `_build_reaction_payload` directly because `agent/output_handler.py` is async-handler code; importing into the watchdog risks a cycle. Instead, keep the payload literal in `_apply_stall_reaction` and add a unit test asserting parity with `_build_reaction_payload(...)` so any schema drift fails CI.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] Wrap the entire `_apply_stall_reaction` body in `try/except Exception` and `logger.warning(...)` with a stable prefix (`[watchdog] stall-reaction enqueue failed for %s: %s`). Add a unit test that injects a Redis failure and asserts (a) no exception escapes, (b) the warning is logged, (c) `check_stalled_sessions` still returns the stalled list.
-- [ ] No `except Exception: pass` blocks introduced. The single existing one (`session.save()` failure) logs at `debug` and is intentional.
+- [ ] `_apply_stall_reaction` wraps the entire body in `try/except Exception`. Test asserts that on Redis failure (mocked to raise), the function returns `False`, logs a warning, and the surrounding `check_stalled_sessions` loop continues to the next session.
 
 ### Empty/Invalid Input Handling
-- [ ] Test: session with `initial_telegram_message = None` → helper returns False, no enqueue, no exception, no log spam.
-- [ ] Test: session with `initial_telegram_message = {}` (no `telegram_message_id` key) → same.
-- [ ] Test: session with non-integer `chat_id` (e.g. `"local-abc"`) → same.
-- [ ] Test: session with both `chat_id` and `telegram_message_id` valid but `stall_reaction_applied = True` already → no enqueue.
+- [ ] Test: session with no `initial_telegram_message` dict → returns `False`, no Redis writes.
+- [ ] Test: session with `chat_id` set but `telegram_message_id` is None → returns `False`, no Redis writes.
+- [ ] Test: session with valid `chat_id` and `telegram_message_id=0` → returns `False` (treat 0 as falsy).
+- [ ] Test: `session_id` is empty string → returns `False`.
 
 ### Error State Rendering
-- [ ] If the user sees no ⏳ because the relay isn't running, the watchdog log line `[watchdog] stall-reaction queued for {session_id}` still emits, so an operator can correlate. Test asserts the log line is present on successful enqueue.
+- [ ] N/A -- the watchdog renders no UI. The user-visible artifact is the reaction emoji, validated by the manual test in Success Criteria.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_stall_detection.py` — UPDATE: existing tests for `check_stalled_sessions` must continue to pass unchanged (the warning + return list behavior is preserved). Add new test cases for the reaction-enqueue branch to the same file.
-- [ ] `tests/unit/test_session_watchdog.py` — UPDATE if it touches `check_stalled_sessions` directly; otherwise no change. Verify by running it before/after.
-- [ ] No existing tests of the relay change — `bridge/telegram_relay.py` already supports `type: "reaction"`; we just feed it the same shape `tools/react_with_emoji.py` does. `tests/unit/test_bridge_relay.py` already covers reaction-dispatch and stays as-is.
-- [ ] `tests/unit/test_send_telegram.py` — no changes; we don't touch `send_telegram.py`.
-
-New tests added (no replacement):
-- [ ] `tests/unit/test_stall_detection.py::TestStallReaction` — the four empty/invalid-input cases above plus the happy path (queued payload shape matches `_send_queued_reaction`'s expectations).
-- [ ] `tests/unit/test_stall_detection.py::test_stall_reaction_dedup_resets_on_status_change` — set flag with status `pending`, change session status to `running`, tick again, assert flag reset and a new reaction enqueued if still stalled.
+- [ ] `tests/unit/test_stall_detection.py` -- UPDATE: add a test class `TestStallReaction` covering: (a) reaction queued on first stall detection, (b) reaction NOT re-queued on second tick within dedup TTL, (c) skip when no `telegram_message_id`, (d) skip when env flag is `0`, (e) Redis exception is fail-quiet, (f) payload schema matches `_build_reaction_payload`.
+- [ ] `tests/integration/test_watchdog_to_bridge.py` (NEW) -- integration: drive a real watchdog tick against a stale-pending fixture session, assert the reaction shows up in `telegram:outbox:{session_id}` with the right schema, and assert the bridge relay's drain function recognizes it as a `type:"reaction"` payload.
+- [ ] No existing tests are deleted. The change is additive: the warning log is preserved, the existing stall return value (list of dicts) is unchanged.
 
 ## Rabbit Holes
 
-- **DM the user when stalled.** The issue lists this as out of scope for v1. Skip.
-- **Configurable thresholds via env or projects.json.** Use existing `STALL_THRESHOLDS`. Tunability is a separate issue if it ever matters.
-- **Replacing the LIFECYCLE_STALL log with the reaction.** Logs stay. Reaction is additive.
-- **Pubsub / new Redis channel for stall events.** The existing outbox queue is the right channel — `tools/react_with_emoji.py` proves it works for cross-process reactions.
-- **Per-stall-category emoji (different emoji for `pending` vs `running` vs `active`).** One emoji (⏳) is enough. Differentiation belongs in the log, not the reaction.
-- **Stretch: 30-min status reply in dev chat.** The issue marks this stretch and "only if surgically simple." It is not surgically simple — it requires `dev_chat_id` resolution per project, message dedup separate from the reaction dedup, and a second outbox payload type. **Defer to a follow-up issue.**
-- **Watchdog steer (push a steering message into the session).** That is `_inject_watchdog_steer`'s job for `repetition`, `error_cascade`, `token_alert`. A stalled-pending session has no SDK process to steer — the right user-visible signal is the reaction, full stop.
+- **Don't redesign the watchdog.** This is a single-function add. Resist the temptation to refactor `check_stalled_sessions` for "clarity" -- keep the diff surgical.
+- **Don't introduce a new pubsub channel.** The outbox-based reaction queue already works cross-process. Inventing a `notifications:stall:*` Redis pubsub channel is wasted work.
+- **Don't import telethon into the watchdog.** The bridge owns Telegram I/O. The watchdog writes to the outbox; the relay calls `set_reaction`. Crossing this boundary breaks the worker/bridge separation.
+- **Don't implement the 30-min stretch goal in v1.** The issue lists it as "stretch, only if surgically simple." Posting a status reply requires deciding which chat (`dev_chat_id`?), suppressing repeats, and threading project config through the watchdog -- all non-trivial. Defer to a follow-up if user requests it.
+- **Don't add per-project tunable thresholds.** Use the existing `STALL_THRESHOLDS` constants. Tunability can be a separate issue.
+- **Don't replace the warning log.** It stays. The reaction is *additional* signal.
 
 ## Risks
 
-### Risk 1: Spurious ⏳ during legitimate slow operations (large model calls, file uploads)
-**Impact:** User sees ⏳ even though the agent is working. Reads as a false alarm.
-**Mitigation:** The existing `STALL_THRESHOLDS` (300s for `pending`, 2700s for `running`, 600s for `active`) and the existing transcript-liveness check at lines 334-342 already filter "actively-working" sessions from the stall set. The reaction only fires after the same checks the warning already passes — so if `LIFECYCLE_STALL` is sound today (which #777 closed), the reaction will be too. No new false-positive surface.
+### Risk 1: Reaction outbox key TTL races with the bridge's drain
+**Impact:** If the bridge relay is down longer than the outbox TTL, a queued stall reaction expires before delivery. User never sees ⏳.
+**Mitigation:** Use the same TTL the existing `_rtr_queue_reaction` uses (`OUTBOX_TTL` from `agent/output_handler.py`). The bridge being down for >TTL is a bigger-than-watchdog incident; the watchdog log warning still fires, and the next tick will re-queue once the bridge returns and the dedup key TTL expires.
 
-### Risk 2: Watchdog crashes on AgentSession field-add backcompat
-**Impact:** Existing AgentSession records lack `stall_reaction_applied`. If reads aren't backcompat-safe, the watchdog tick raises and stops detecting stalls entirely.
-**Mitigation:** Read with `getattr(session, "stall_reaction_applied", False)` and `getattr(session, "stall_reaction_status", "")` so missing fields default cleanly. Saves go through Popoto's `_heal_descriptor_pollution` which walks all fields generically — adding a nullable bool field needs no extra migration code (per memory `feedback_field_backcompat_heal`).
+### Risk 2: Dedup key leaks across actual session lifetimes
+**Impact:** A `session_id` is reused (rare in production, possible in test fixtures); old dedup key suppresses a fresh reaction.
+**Mitigation:** 1-day TTL bounds the leak window. The re-stall reset hook deletes the key on healthy transitions. `session_id` is timestamp-derived in production, so realistic collisions are test-only -- and tests must clean their own Redis keys.
 
-### Risk 3: Relay not running → ⏳ never appears, dedup flag still set
-**Impact:** Worst case: a stall never gets a user-visible reaction even after the relay comes back up, because the dedup flag is set on the first attempted enqueue.
-**Mitigation:** RPUSH always succeeds whether or not the relay is up — the payload waits in Redis with the existing 3600s TTL. When the relay restarts it drains the queue. So the only failure is total Redis loss, which is a separate operational problem the watchdog can't solve. Acceptable.
+### Risk 3: Schema drift between watchdog payload literal and `_build_reaction_payload`
+**Impact:** If `_build_reaction_payload`'s schema changes (e.g., a new field), the watchdog-emitted payload diverges and the bridge relay rejects it.
+**Mitigation:** Unit test asserts byte-for-byte parity between the watchdog's literal and `_build_reaction_payload(...)`. Test fails on drift; CI catches it.
 
-### Risk 4: Dedup-flag reset race between status change and tick ordering
-**Impact:** Session moves `pending` → `running` → back to `pending` between two watchdog ticks (5 min apart). The reset compares against the *current* status, not the prior, so the flag may stay set if the watchdog never sees the intermediate state.
-**Mitigation:** Acceptable. A bouncing session that re-stalls within one tick is rare; user already saw the ⏳ for the first stall. If the second stall persists, the next tick (5 min later) will show a different status (or the same status with cleared `stall_reaction_status`) and the flag resets.
+### Risk 4: ⏳ emoji not in Telegram's allowed reactions for the chat
+**Impact:** Reaction send fails silently; user sees nothing.
+**Mitigation:** ⏳ is in Telegram's standard free reaction set. The relay's `set_reaction` already handles unknown-emoji failure (logs and moves on). If a real chat rejects ⏳, swap `STALL_REACTION_EMOJI` to ⚠️ or ❗ -- a one-line change.
 
 ## Race Conditions
 
-### Race 1: Watchdog and bridge race on session.save()
-**Location:** `monitoring/session_watchdog.py` (new helper) and any bridge-side code that mutates the same AgentSession.
-**Trigger:** Watchdog sets `stall_reaction_applied = True` and saves; concurrently the bridge updates `chat_id` or `pm_sent_message_ids` on the same record.
-**Data prerequisite:** The Popoto save merges field-level — this is verified daily across the codebase (e.g. relay's `record_pm_message` runs concurrently with executor saves).
-**State prerequisite:** AgentSession's Popoto layer handles concurrent save merging; we don't read-modify-write any list fields.
-**Mitigation:** Save only the bool flag and the status string — both scalar fields. No list mutation, no read-modify-write. If two writers update different scalar fields concurrently, last-write-wins per field is acceptable for a dedup flag.
+### Race 1: Two watchdog ticks overlap on the same stalled session
+**Location:** `monitoring/session_watchdog.py::_apply_stall_reaction`
+**Trigger:** Watchdog tick latency > tick interval (rare, but possible under Redis slowness). Two ticks both observe the same session as stalled and both attempt to queue.
+**Data prerequisite:** None -- the dedup key is the synchronization primitive itself.
+**State prerequisite:** `watchdog:stall_reaction_applied:{session_id}` does not exist before the first tick.
+**Mitigation:** `SET NX EX` is atomic. The losing tick observes `slot_open=False` and short-circuits. Same pattern used by `_inject_watchdog_steer:466-473`.
+
+### Race 2: Session recovers (leaves pending) between watchdog detection and outbox write
+**Location:** `monitoring/session_watchdog.py::check_stalled_sessions` → `_apply_stall_reaction`
+**Trigger:** A session transitions out of `pending` immediately after the watchdog reads it.
+**Data prerequisite:** Session is no longer pending by the time the reaction is delivered.
+**State prerequisite:** None -- this is benign.
+**Mitigation:** No mitigation needed. A spurious "we noticed it stalled" reaction is acceptable -- the user will see the recovery in the form of a real bot message that follows. The dedup key will be cleared by the re-stall reset hook, so the next genuine stall will alert.
 
 ## No-Gos (Out of Scope)
 
-- DM-style alerts, dev-chat status replies, paging.
-- Configurable thresholds.
-- Replacing the existing log warning.
-- Adding a new Redis pubsub channel.
-- Per-status-category emoji selection (one ⏳ for all stall types).
-- Stretch goal: 30-min "still stalled" follow-up reply (deferred to a follow-up issue).
+- 30-minute "post one status reply in dev chat" stretch goal -- deferred to a follow-up issue.
+- Configurable thresholds via env / `projects.json` -- use existing `STALL_THRESHOLDS`.
+- Replacing the `LIFECYCLE_STALL` log warning with the reaction -- the log stays.
+- DM-style alerts to operators -- out of scope for v1.
+- Per-project emoji choice -- single emoji `⏳` for all stalls.
+- Building a new bridge subscriber/pubsub channel -- reuse `telegram:outbox:*`.
+- Touching `_inject_watchdog_steer` itself -- additive only.
 
 ## Update System
 
-No update system changes required. The change is purely internal to the worker and bridge processes; both already restart via `./scripts/valor-service.sh restart`. No new env vars required for default behavior (the feature gate defaults on).
+No update system changes required -- this feature is purely internal (single-file diff in `monitoring/`, no new deps, no new config files, no migration steps for existing installations). The new env flag `WATCHDOG_STALL_REACTION_ENABLED` defaults on; existing machines need no `.env` updates.
 
 ## Agent Integration
 
-No agent integration required. This is a watchdog-internal change that surfaces a user-visible signal via the existing bridge-owned reaction path. The agent never invokes this code.
+No agent integration required -- this is a watchdog-internal change that produces user-visible Telegram reactions via the existing bridge relay. No new CLI entry point, no new bridge import, no new MCP tool.
 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/bridge-self-healing.md` — add a "Stall reaction" subsection under the watchdog escalation ladder describing the new branch, the ⏳ emoji, the `WATCHDOG_STALL_REACTION_ENABLED` flag, and the dedup-via-AgentSession-flag mechanism.
-- [ ] Update `docs/features/README.md` index table if `bridge-self-healing.md` does not yet list "stall reaction" in its summary column.
+- [ ] Update `docs/features/bridge-self-healing.md` -- add a short subsection "User-visible stall alerts" describing the ⏳ reaction, the env flag, and the dedup-key Redis schema.
+- [ ] Update `docs/features/session-lifecycle.md` if it documents lifecycle transitions -- note the new dedup-key reset on healthy/terminal transitions.
 
 ### Inline Documentation
-- [ ] Module-level docstring on `_apply_stall_reaction` matching the prose style of `_inject_watchdog_steer` (cooldown contract, fail-quiet contract, feature-gate, telethon-isolation note).
-- [ ] AgentSession field docstrings on `stall_reaction_applied` and `stall_reaction_status` explaining who writes and who resets.
+- [ ] Module-level docstring in `monitoring/session_watchdog.py` -- add bullet to the watchdog actuators list (currently lists steer triggers from #1128).
+- [ ] Function docstring on `_apply_stall_reaction` -- mirror the depth and shape of `_inject_watchdog_steer`'s docstring.
 
 ## Success Criteria
 
-- [ ] When a session in `pending` exceeds 300s and has a valid `chat_id` + `telegram_message_id`, exactly one ⏳ reaction is enqueued onto `telegram:outbox:{session_id}` per stall period.
-- [ ] Sessions with no `initial_telegram_message`, no `telegram_message_id`, or non-integer `chat_id` are skipped silently — no exceptions, no warning-level log lines.
-- [ ] Re-detection on subsequent watchdog ticks while still stalled does NOT enqueue a duplicate reaction.
-- [ ] Status change between ticks (e.g. `pending` → `running` → `pending`) resets the dedup flag so a new stall in the new status can re-fire.
-- [ ] The existing `LIFECYCLE_STALL` log warning is unchanged.
-- [ ] `WATCHDOG_STALL_REACTION_ENABLED=0` disables the new branch entirely.
-- [ ] Manual test: enqueue a session with the worker stopped, wait >300s, observe ⏳ on the originating Telegram message after the next tick.
-- [ ] Manual test: with worker running normally, no false-positive ⏳.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [ ] Stalled `pending` session with originating Telegram message receives exactly one ⏳ reaction per stall period.
+- [ ] Stalled session without `initial_telegram_message` populated → no reaction queued, no exception, no log spam.
+- [ ] After the session recovers and stalls again, a new ⏳ reaction is queued (dedup key reset).
+- [ ] Existing `LIFECYCLE_STALL` log warning still emitted unchanged.
+- [ ] `WATCHDOG_STALL_REACTION_ENABLED=0` disables the new behavior with no other side effects.
+- [ ] Tests pass (`/do-test`).
+- [ ] Documentation updated (`/do-docs`).
+- [ ] Manual test: enqueue a session with the worker stopped, wait >300s, observe ⏳ on the Telegram message.
+- [ ] Manual test: with worker running normally for 5+ minutes of healthy work, no false-positive ⏳ reactions appear.
 
 ## Team Orchestration
 
 ### Team Members
 
-- **Builder (watchdog-reaction)**
-  - Name: watchdog-reaction-builder
-  - Role: Implement the AgentSession field, the `_apply_stall_reaction` helper, and the call site in `check_stalled_sessions`.
+- **Builder (watchdog-escalation)**
+  - Name: `watchdog-builder`
+  - Role: Add `_apply_stall_reaction`, env flag, dedup key, and the recovery hook to `monitoring/session_watchdog.py`. Update inline docstrings.
   - Agent Type: builder
   - Resume: true
 
-- **Validator (watchdog-reaction)**
-  - Name: watchdog-reaction-validator
-  - Role: Verify the implementation against the success criteria, run unit tests, confirm no regressions in existing watchdog tests.
-  - Agent Type: validator
+- **Test Engineer**
+  - Name: `watchdog-tester`
+  - Role: Add unit tests in `tests/unit/test_stall_detection.py` and integration test for outbox handoff.
+  - Agent Type: test-engineer
   - Resume: true
 
 - **Documentarian**
-  - Name: watchdog-reaction-docs
-  - Role: Update `docs/features/bridge-self-healing.md` and the index.
+  - Name: `watchdog-doc`
+  - Role: Update `docs/features/bridge-self-healing.md` and `docs/features/session-lifecycle.md` with the new escalation surface.
   - Agent Type: documentarian
+  - Resume: true
+
+- **Validator**
+  - Name: `watchdog-validator`
+  - Role: Verify the diff is single-file (plus tests/docs), the env flag works, and the schema parity test passes.
+  - Agent Type: validator
   - Resume: true
 
 ## Step by Step Tasks
 
-### 1. Add AgentSession fields
-- **Task ID**: build-agentsession-fields
+### 1. Implement `_apply_stall_reaction` and wire it into `check_stalled_sessions`
+- **Task ID**: build-stall-reaction
 - **Depends On**: none
-- **Validates**: tests/unit/test_stall_detection.py (existing tests still pass), new field-default tests
-- **Informed By**: memory `feedback_field_backcompat_heal` (Popoto handles new nullable fields without extra backcompat code)
-- **Assigned To**: watchdog-reaction-builder
+- **Validates**: `tests/unit/test_stall_detection.py` (TestStallReaction class -- to be added)
+- **Assigned To**: watchdog-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `stall_reaction_applied = Field(default=False)` to `models/agent_session.py`.
-- Add `stall_reaction_status = Field(default="")` to `models/agent_session.py`.
-- Add docstrings explaining writer (watchdog) and reset semantics.
+- Add module constants `STALL_REACTION_EMOJI = "⏳"` and `STALL_REACTION_DEDUP_TTL = 86400`.
+- Add `_apply_stall_reaction(session)` mirroring the shape of `_inject_watchdog_steer`.
+- Insert call site immediately after the `logger.warning("LIFECYCLE_STALL ...")` block (around line 376).
+- Add the env flag `WATCHDOG_STALL_REACTION_ENABLED` (default on) using `_env_flag_enabled`.
+- Identify the recovery branch and add `POPOTO_REDIS_DB.delete(f"watchdog:stall_reaction_applied:{session_id}")` when a session transitions out of stall.
+- Update module docstring to include the new escalation surface.
 
-### 2. Add `_apply_stall_reaction` helper
-- **Task ID**: build-helper
-- **Depends On**: build-agentsession-fields
-- **Validates**: tests/unit/test_stall_detection.py::TestStallReaction (new)
-- **Assigned To**: watchdog-reaction-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Implement `_apply_stall_reaction(session)` in `monitoring/session_watchdog.py`, modeled on `_inject_watchdog_steer`'s structure (feature-gate check, fail-quiet, debug-on-skip).
-- Skip silently when `chat_id` or `telegram_message_id` missing or non-integer.
-- Read dedup flag with `getattr(...)` for backcompat.
-- Reset flag when current status differs from `stall_reaction_status`.
-- RPUSH `{type: "reaction", chat_id, reply_to, emoji: "⏳", session_id, timestamp}` onto `telegram:outbox:{session_id}` with `expire(key, 3600)`.
-- Set both fields and `session.save()`. Swallow save errors at debug level.
-- Wrap entire body in `try/except Exception` with a single warning log on failure.
-
-### 3. Wire helper into check_stalled_sessions
-- **Task ID**: build-call-site
-- **Depends On**: build-helper
-- **Validates**: tests/unit/test_stall_detection.py
-- **Assigned To**: watchdog-reaction-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Insert `_apply_stall_reaction(session)` immediately after the `logger.warning("LIFECYCLE_STALL ...")` block at `monitoring/session_watchdog.py:376`.
-- Do not modify the warning itself.
-
-### 4. Tests for helper and integration
-- **Task ID**: build-tests
-- **Depends On**: build-call-site
-- **Validates**: tests/unit/test_stall_detection.py
-- **Assigned To**: watchdog-reaction-builder
+### 2. Add unit tests for stall reaction behavior
+- **Task ID**: test-stall-reaction-unit
+- **Depends On**: build-stall-reaction
+- **Assigned To**: watchdog-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Add `TestStallReaction` class to `tests/unit/test_stall_detection.py`:
-  - happy path: stalled pending session with valid Telegram fields → payload RPUSHed, flag set
-  - missing `initial_telegram_message` → no enqueue
-  - missing `telegram_message_id` key → no enqueue
-  - non-integer `chat_id` (e.g. `"local-abc"`) → no enqueue
-  - already-flagged session → no duplicate enqueue
-  - flag reset on status change → re-enqueue allowed
-  - feature gate `WATCHDOG_STALL_REACTION_ENABLED=0` → no enqueue
-  - Redis RPUSH failure → no exception, warning logged
-- Mock `POPOTO_REDIS_DB.rpush` and verify call args directly. Do NOT touch the live bridge in unit tests.
+- Add `TestStallReaction` class to `tests/unit/test_stall_detection.py`.
+- Cover all 6 cases listed in Test Impact (queued first time, deduped second time, skip-no-msg-id, skip-flag-disabled, fail-quiet on Redis exception, schema parity).
+- Use `fakeredis` or the existing test Redis fixture; never touch production keys.
+- Verify tests pass with `pytest tests/unit/test_stall_detection.py -v`.
 
-### 5. Validate
-- **Task ID**: validate-watchdog-reaction
-- **Depends On**: build-tests
-- **Assigned To**: watchdog-reaction-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Run `pytest tests/unit/test_stall_detection.py tests/unit/test_session_watchdog.py -v`.
-- Run `python -m ruff check monitoring/session_watchdog.py models/agent_session.py tests/unit/test_stall_detection.py`.
-- Confirm all success criteria are met.
-- Verify the existing `LIFECYCLE_STALL` warning string is unchanged (grep for it).
+### 3. Add integration test for outbox handoff
+- **Task ID**: test-stall-reaction-integration
+- **Depends On**: build-stall-reaction
+- **Assigned To**: watchdog-tester
+- **Agent Type**: test-engineer
+- **Parallel**: true
+- Create `tests/integration/test_watchdog_to_bridge.py`.
+- Drive a real watchdog tick against a stale-pending fixture session.
+- Assert the reaction payload lands in `telegram:outbox:{session_id}` with `type:"reaction"`, correct `chat_id`, `reply_to`, `emoji:"⏳"`.
+- Assert `bridge.telegram_relay._send_queued_reaction` (called as a unit, not via real Telethon) accepts the payload shape without warning.
 
-### 6. Documentation
-- **Task ID**: document-feature
-- **Depends On**: validate-watchdog-reaction
-- **Assigned To**: watchdog-reaction-docs
+### 4. Update feature docs
+- **Task ID**: document-stall-reaction
+- **Depends On**: build-stall-reaction
+- **Assigned To**: watchdog-doc
 - **Agent Type**: documentarian
-- **Parallel**: false
-- Update `docs/features/bridge-self-healing.md` with a "Stall reaction" subsection.
-- Update `docs/features/README.md` if needed.
+- **Parallel**: true
+- Add "User-visible stall alerts" subsection to `docs/features/bridge-self-healing.md`.
+- Update `docs/features/session-lifecycle.md` with the dedup-key reset note.
+- Verify both docs render and link correctly.
 
-### 7. Final Validation
+### 5. Final validation
 - **Task ID**: validate-all
-- **Depends On**: document-feature
-- **Assigned To**: watchdog-reaction-validator
+- **Depends On**: build-stall-reaction, test-stall-reaction-unit, test-stall-reaction-integration, document-stall-reaction
+- **Assigned To**: watchdog-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run all unit tests touching watchdog: `pytest tests/unit/ -k "watchdog or stall" -v`.
-- Run lint and format checks.
-- Verify success criteria checklist is complete.
+- Confirm diff is one source file (`monitoring/session_watchdog.py`) plus tests and docs.
+- Confirm `WATCHDOG_STALL_REACTION_ENABLED=0` disables behavior.
+- Confirm schema parity test passes.
+- Confirm `pytest tests/unit/test_stall_detection.py tests/integration/test_watchdog_to_bridge.py` is green.
+- Confirm `python -m ruff check . && python -m ruff format --check .` is green.
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Stall-detection tests pass | `pytest tests/unit/test_stall_detection.py -x -q` | exit code 0 |
-| Watchdog tests pass | `pytest tests/unit/test_session_watchdog.py tests/unit/test_watchdog_loop_break_steer.py tests/unit/test_watchdog_token_alert.py -x -q` | exit code 0 |
-| Lint clean | `python -m ruff check monitoring/ models/ tests/unit/test_stall_detection.py` | exit code 0 |
-| Format clean | `python -m ruff format --check monitoring/ models/ tests/unit/test_stall_detection.py` | exit code 0 |
-| Existing warning preserved | `grep -n 'LIFECYCLE_STALL' monitoring/session_watchdog.py` | output contains LIFECYCLE_STALL |
-| New helper present | `grep -n '_apply_stall_reaction' monitoring/session_watchdog.py` | output contains _apply_stall_reaction |
-| AgentSession field present | `grep -n 'stall_reaction_applied' models/agent_session.py` | output contains stall_reaction_applied |
-| Reaction emoji distinct from existing | `grep -n 'REACTION_RECEIVED\|REACTION_PROCESSING\|REACTION_ABORT' bridge/response.py` | does not include ⏳ |
+| Tests pass | `pytest tests/unit/test_stall_detection.py tests/integration/test_watchdog_to_bridge.py -x -q` | exit code 0 |
+| Lint clean | `python -m ruff check monitoring/session_watchdog.py` | exit code 0 |
+| Format clean | `python -m ruff format --check monitoring/session_watchdog.py` | exit code 0 |
+| Helper exists | `grep -n "_apply_stall_reaction" monitoring/session_watchdog.py` | output contains `def _apply_stall_reaction` |
+| Env flag wired | `grep -n "WATCHDOG_STALL_REACTION_ENABLED" monitoring/session_watchdog.py` | output > 0 |
+| Schema parity | `pytest tests/unit/test_stall_detection.py::TestStallReaction::test_payload_matches_build_reaction_payload -x -q` | exit code 0 |
+| Existing warning preserved | `grep -n "LIFECYCLE_STALL" monitoring/session_watchdog.py` | output > 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique. Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 
 ---
 
 ## Open Questions
 
-1. **Reaction emoji choice**: ⏳ (hourglass) vs ⚠️ (warning) vs 🐌 (slow). The issue suggests ⏳ or ⚠️. ⏳ reads as "still working / slow", ⚠️ reads as "broken — operator action needed". For a 5-min stall on `pending` (which may be a transient queue backup), ⏳ is more honest. For a 5-hour stall (which is what motivated the issue), ⚠️ would be more accurate but the watchdog has no native concept of "elevated severity." Acceptable answer: start with ⏳ — escalation to ⚠️ at e.g. 2× threshold could be a follow-up if the data shows people miss ⏳.
-2. **Should the dedup field live on AgentSession or in a Redis cooldown key (matching `_inject_watchdog_steer`)?** Plan picks AgentSession because (a) it's the natural place for per-session state, (b) the watchdog is single-threaded so no cross-instance race exists, (c) it survives Redis-key TTL expiry. If we ever shard the watchdog across processes, we'd revisit.
-3. **Should non-`pending` stalls get the reaction too (`running` and `active` states)?** The issue's acceptance criteria only mentions `pending`. The plan applies the reaction to *any* stall (since the helper is called from the existing warning branch, which fires on all three statuses). Confirm this is desired — if not, gate by `status_val == "pending"` inside the helper.
+1. **Re-stall reset placement**: should the dedup key be cleared in the watchdog's recovery branch (next tick observes session as healthy → delete) or at the lifecycle-history append point (status transition → delete)? The watchdog-side option is simpler (one file changed) but introduces a ≤5-minute window where the user sees ⏳ briefly after recovery before the next tick. The lifecycle-side option is cleaner but touches more files. Default for build: watchdog-side.
+2. **Emoji robustness**: confirm ⏳ is in Telegram's free reaction set for the chats Valor's bridge serves. Fallback: ⚠️. Acceptable to ship with ⏳ and swap if a real-world test fails.
+3. **Stretch (30-min status reply)**: explicitly out of scope per No-Gos; confirm no objection before a follow-up issue is filed.
