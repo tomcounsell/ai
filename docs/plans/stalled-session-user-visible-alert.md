@@ -363,7 +363,27 @@ No agent integration required -- this is a watchdog-internal change that produce
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Cycle 1 verdict:** READY TO BUILD (with concerns) — recorded 2026-05-06T16:42Z by `/do-plan-critique`.
+
+The war-room verdict cleared the structural review (sections present, no internal contradictions, dependencies resolve, no plan-overlap, no schema-drift between the watchdog payload literal and `_build_reaction_payload`). No revision-blocking concerns were raised; the verdict's "with concerns" qualifier flagged the plan for builder attention on the items already enumerated in the plan itself rather than for re-planning.
+
+### Implementation Notes (builder, read before starting)
+
+These embed the war-room follow-ups directly into the plan so the builder does not need to re-derive them:
+
+1. **Re-stall reset placement (Open Question 1) — decision**: implement on the **watchdog side** (delete the `watchdog:stall_reaction_applied:{session_id}` dedup key when the next tick observes the session in a healthy / non-stall state). This keeps the diff inside `monitoring/session_watchdog.py` only. The ≤5-minute window where ⏳ briefly persists after recovery is acceptable — the user will see the bot's recovery message land before the next tick clears the reaction. Do **not** thread this through `models/agent_session.py` lifecycle hooks.
+
+2. **Emoji robustness (Open Question 2) — decision**: ship with `STALL_REACTION_EMOJI = "⏳"`. If a real-chat send fails, the relay's existing `set_reaction` error handling logs and moves on (no crash). Swap to `"⚠️"` is a one-line change behind the same constant if needed post-merge.
+
+3. **Stretch goal (Open Question 3) — decision**: explicitly out of scope. Do **not** post a 30-min status reply in the dev chat in this PR. If the user wants it, file a follow-up issue after merge.
+
+4. **Schema parity test is non-negotiable**: the `test_payload_matches_build_reaction_payload` unit test (Test Impact item f) MUST be implemented and green before PR. This is the only mechanical defense against schema drift between the watchdog's inlined payload literal and `agent/output_handler.py::_build_reaction_payload`. If `_build_reaction_payload` cannot be imported into the unit test cleanly (cycles), reconstruct the canonical payload via a thin helper in a test fixture rather than skipping the assertion.
+
+5. **Recovery branch insertion**: the recovery hook in Step 1 of the task list says "Identify the recovery branch and add `POPOTO_REDIS_DB.delete(...)`". The cleanest insertion point is inside `check_stalled_sessions` itself: when iterating sessions, if a session is observed in a healthy state and a dedup key exists for it, delete the key in the same loop. This avoids creating a new entry point and keeps the change watchdog-internal.
+
+6. **Manual test fidelity**: the manual test "enqueue a session with the worker stopped, wait >300s, observe ⏳" requires the bridge relay to remain running while the worker is stopped. Verify the bridge is up (`./scripts/valor-service.sh status` shows `bridge running`) before declaring the manual test passed. Otherwise the outbox accumulates and the reaction never delivers — that's not a code bug, but it WILL produce a false negative.
+
+No structural revisions were applied to the plan body — every concern above is a build-time directive, not a re-design.
 
 ---
 
