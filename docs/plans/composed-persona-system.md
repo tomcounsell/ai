@@ -629,3 +629,121 @@ These are the top-3 design questions remaining for `/do-plan-critique` to decide
     - **(A) File at PR-merge time** (plan default). Follow-up issue references the actual landed composer, including post-build line numbers, so it has accurate ground truth.
     - **(B) File at plan-commit time as a placeholder**. Tracks the deferred work earlier; reduces risk of the deferred decision being forgotten. Issue body would need a "to be updated post-build" note for line numbers.
     - **Default in plan: A**. Reviewer can flip to B if traceability beats accuracy at this stage.
+
+---
+
+## Critique Results — Cycle 5
+
+War-room critique against `revision_cycle: 4`, plan commit `84488a30`, HEAD `5576e4dc`. Six critic perspectives + automated structural checks. All cited line numbers verified at HEAD.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections (Documentation, Update System, Agent Integration, Test Impact) | PASS | All four present and non-empty. |
+| Task numbering | PASS | 8 tasks, no gaps. |
+| Dependencies valid | PASS | All Depends-On targets resolve to existing task IDs; no cycles. |
+| File paths exist (HEAD `5576e4dc`) | PASS | All cited paths verified present, including private overlays at `~/Desktop/Valor/personas/`. |
+| Cited line numbers match HEAD | PASS | Sampled across `agent/sdk_client.py` (L647, L878, L892, L919–948, L966, L994, L998, L1023, L1037, L1787, L1860, L3349–3363, L3382–3419), `agent/session_executor.py` (L1563–1629), `bridge/message_drafter.py` (L381, L1295, L1720–1750), `config/enums.py` L17, L25 — all correct. |
+| Prerequisites met | PASS | Both manifest.json and the PM overlay (private + repo-fallback) load. |
+| Cross-references consistent | PASS | Every Success Criterion maps to at least one task; No-Gos do not contradict the Solution. |
+
+### Findings
+
+#### BLOCKERS
+
+None.
+
+#### CONCERNS
+
+##### C1. `_resolve_compose_args` semantic drops per-group/dm persona resolution today routed through `_resolve_persona`
+
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Adversary, Consistency Auditor (all flagged the same gap)
+- **Location**: Solution → "Composer Signature & Call Sites" + Step 3 + Test Impact `test_resolve_compose_args.py` table (L313–L322)
+- **Finding**: The plan's resolver table covers `(session_type, project_mode, transport, email.persona) → (persona, access_level, channel)` but elides the third axis the existing picker depends on: today's `_resolve_persona(project, chat_title, is_dm)` at `agent/sdk_client.py:1860` returns persona values driven by **DM-vs-group + per-group config** (`telegram_config.groups[<title>].persona` at L1900–1904, `telegram_config.dm_persona` at L1888). Block A at sdk_client.py:3363 falls through to that resolver for DEV sessions. The cycle-4 resolver table only enumerates `session_type × project_mode × transport × email.persona`, so a Telegram group whose `groups[<chat>].persona = "customer-service"` (today picked up by `_resolve_persona`) maps to `DEVELOPER` under the new table.
+- **Suggestion**: Add a row family to the table for `(DEV, dev, telegram, no email override) → call _resolve_persona(project, chat_title, is_dm)` and parametrize the test over at least: DM with `dm_persona=teammate`, group with `groups[<title>].persona=customer-service`, group with no persona key (default DEVELOPER), and project=None (returns DEVELOPER for non-DM). Either keep `_resolve_persona` as the inner DM/group resolver and document `_resolve_compose_args` as a thin wrapper around it, or inline its logic and delete the function — but do not silently drop it.
+- **Implementation Note**: `_resolve_compose_args(session_type, project, transport, chat_title, is_dm, email_persona_requested)` — when `session_type == DEV` and no email override, delegate to `_resolve_persona(project, chat_title, is_dm)` for the persona value (then map to `(persona, AccessLevel.WORKER, channel)`). The session_executor.py call site does NOT have `chat_title`/`is_dm` as locals at L1563 — they live on `session.chat_title` and need `is_dm = session.chat_title is None` synthesized at call site (mirrors the pattern at sdk_client.py:3348). The resolver must return the same persona enum value the existing `_resolve_persona` returns for every (project, chat_title, is_dm) triple — covered by an additional parametrized test that calls both old and new resolvers and asserts equality.
+
+##### C2. Email-persona override semantics differ between sdk_client.py and session_executor.py — collapse must pick one
+
+- **Severity**: CONCERN
+- **Critics**: Adversary, Consistency Auditor
+- **Location**: Solution → Technical Approach picker-collapse bullet (L267) + Step 3 (L516–L527)
+- **Finding**: The two pickers are not merely "drifted but equivalent." At `agent/sdk_client.py:3352–3361` the email-persona override fires **only when `_session_type == SessionType.TEAMMATE`**. At `agent/session_executor.py:1576–1585` the override fires when **`_transport == "email"` OR `_email_persona_requested` is set, regardless of session_type** (excluding PM, which is matched first). For a hypothetical `(DEV, transport=email, email.persona=customer-service)` session (currently impossible because `bridge/email_bridge.py:716` only emits PM or TEAMMATE — verified), the two pickers would produce **different** personas. The plan's collapse target inherits the executor's looser rule (Test Impact table row "DEV | dev | email | customer-service → CUSTOMER_SERVICE") without naming the divergence. The byte-stability fixture won't catch this because both PM and TEAMMATE paths agree today; the divergence only surfaces if a future caller emits a DEV email session.
+- **Suggestion**: Either (a) document explicitly in `_resolve_compose_args` and the resolver test that the executor's behavior is canonical and the sdk_client.py behavior was an unintended subset, with a one-line comment citing this rationale, or (b) tighten the resolver to match sdk_client.py's narrower rule (only TEAMMATE + email triggers the override) and adjust the test row accordingly. Picking either is fine; silently picking one is the failure mode.
+- **Implementation Note**: At the point of collapse, write the rule as `if _email_persona_requested and (session_type == SessionType.TEAMMATE or transport == "email"): persona = _email_persona_requested` (the union of the two sites' rules; verified safe today because email_bridge.py:716 only emits PM/TEAMMATE). Add a docstring line to `_resolve_compose_args` recording the choice and citing `bridge/email_bridge.py:716` as why DEV+email doesn't actually appear today. The Step 3 task acceptance check `Confirm both sites produce the same custom_system_prompt value (or _pm_system_prompt value) as before for every test cell` then needs a second clause: "for every cell **that the existing pickers AGREE on today**." Cells where they would disagree (DEV+email+override) are explicitly delegated to the new canonical rule, and the deviation is logged in the picker-collapse PR description.
+
+##### C3. Test Impact missing 5 existing test files that import the soon-to-be-wrapper functions
+
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Operator
+- **Location**: Test Impact (L289–L326)
+- **Finding**: Grep across the repo at HEAD shows `load_system_prompt` / `load_pm_system_prompt` are imported by these test files NOT listed in Test Impact:
+  - `tests/unit/test_sdk_client.py` (imports `load_system_prompt`, asserts non-empty)
+  - `tests/unit/test_pm_channels.py` (imports both; the plan calls it "no change unless they assert specific picker branches" — but it does call both functions directly at L33, L38, L46, L52, L61, L66 and the regression test at L65 specifically depends on `load_system_prompt()` returning a string with WORKER_RULES)
+  - `tests/unit/test_load_principal_context.py` (imports `load_system_prompt`, asserts principal context integration)
+  - `tests/unit/test_sdk_permissions.py` (imports `load_system_prompt`, asserts content)
+  - `tests/unit/test_agent_session_hierarchy.py` (`@patch("agent.sdk_client.load_system_prompt", ...)` at L433, L444 — patches the *function path*; if the wrapper is rewritten, the patch target must still be the same module attribute or these tests break)
+  - `tests/unit/test_cross_repo_gh_resolution.py` (`patch("agent.sdk_client.load_system_prompt", ...)` at L22 — same patch-target concern)
+  - `tests/integration/test_harness_env_pm_injection.py` (calls `load_pm_system_prompt(str(wd))` at L97, L230 — integration test, the plan claims "no integration tests reference the prompt-byte content")
+- **Suggestion**: Either explicitly mark each of these in Test Impact as **NO CHANGE because the wrappers preserve their public signatures and module paths** (which is the plan's actual invariant), or audit each file for any assumption that breaks under the wrapper rewrite (patch targets are the highest-risk class). The integration test claim "No existing integration tests reference the prompt-byte content directly" is false as worded — `test_harness_env_pm_injection.py::test_load_pm_system_prompt_failure_does_not_crash` directly tests the function's failure mode.
+- **Implementation Note**: Add to Test Impact: a single line per file with disposition NO CHANGE + "wrappers preserve `load_system_prompt`/`load_pm_system_prompt` symbol path; mock.patch targets `agent.sdk_client.load_system_prompt` continue to resolve." For `test_harness_env_pm_injection.py`, add a one-line update to the integration-test claim: "**Update**: `tests/integration/test_harness_env_pm_injection.py` calls `load_pm_system_prompt` directly at L97, L230. Test must continue to pass; covered by the byte-stability invariant since the wrapper delegates."
+
+##### C4. Per-machine baseline strategy degrades to "no enforcement" on every fresh CI machine
+
+- **Severity**: CONCERN
+- **Critics**: Operator, Skeptic
+- **Location**: Risk 1 + Step 1 + Update System + Verification table "Byte-stability fixture present (per-machine)" check
+- **Finding**: The mitigation strategy makes the byte-stability test SKIP when no per-machine fixture exists. CI runners are typically ephemeral (each PR may run on a fresh GH Actions / launchd worker with a different `socket.gethostname()`), so the test will SKIP on every CI run for any machine that hasn't pre-committed a fixture. The Verification table has a fixture-present check, but it only checks the *current* machine — it cannot detect that the byte-stability assertion never actually ran on the CI machine that gated the merge. The Risk 1 mitigation defends against false positives but introduces a silent false-negative path: a real byte regression on the dev machine that committed its baseline gets caught; the same regression on a different machine after merge does not. This is the trade-off the plan accepted with strategy (c), but it should be explicit that **the byte-stability invariant is only enforced for the developer who builds the feature**, with no machine-agnostic gate.
+- **Suggestion**: Either (a) accept and document that limitation explicitly in Risk 1 (one sentence: "byte stability is enforced on the developer's local machine; bridge machines and fresh CI runners SKIP — this is the cost of strategy (c) and is acceptable because cache stability is itself a per-machine, per-session invariant"), or (b) add a *machine-agnostic* structural check that runs everywhere — e.g. assert the segment-list ordering in the composed prompt matches `manifest.json` order, assert WORKER_RULES is the first ~13 lines of the WORKER cell, assert `\n\n---\n\n` separators occur at expected fence positions. Strategy (b) does not replace byte stability but covers the failure modes that byte stability would catch (segment reordering, separator drop, missing WORKER_RULES) on every machine. The plan rejected structural equality as a *replacement* for byte stability; it can still be a *backup* on machines where byte stability SKIPs.
+- **Implementation Note**: Add to `test_compose_system_prompt.py` two test classes: `TestByteStability` (current plan, SKIPs without baseline) and `TestStructuralInvariants` (always runs). The structural test asserts: (i) WORKER cell starts with the exact `WORKER_RULES` constant followed by `\n\n---\n\n`, (ii) PM cell does NOT contain `WORKER_RULES`, (iii) for both cells, segment-content substrings appear in the same order as `manifest.json["segments"]` (use a list-of-find-indices monotonicity check, not full substring equality), (iv) no `{{identity.*}}` templating residue. This catches the >90% of "structural regression" failure modes on any machine without requiring per-machine fixtures. Update Risk 1 to add one paragraph: "Strategy (c) is byte-exact on the dev machine; structural invariants run everywhere as a defense-in-depth against the regressions byte stability is meant to catch."
+
+##### C5. Drafter `BASE + MEDIUM_RULES["telegram"]` byte-equality is not asserted at module load time
+
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Operator
+- **Location**: Step 4 (L529–L542) + Success Criteria drafter bullet (L443) + Risk 3
+- **Finding**: The plan's invariant for the drafter split is "concatenating `BASE + MEDIUM_RULES['telegram']` reproduces today's prompt byte-for-byte (snapshot test using captured-from-main string)." But Step 4 does not actually require the snapshot to be captured *before* the refactor begins (parallel to the per-machine baseline capture in Step 1). If the developer refactors `DRAFTER_SYSTEM_PROMPT` and then writes a snapshot test against the *post-refactor* concatenation, the test is tautological — it asserts that the new code equals itself. The PM-cell baseline gets explicit "capture from main *before* the composer ships" treatment in Step 1; the drafter does not.
+- **Suggestion**: Add a sub-step to Task 1 (or a sibling task) to capture `tests/fixtures/drafter_system_prompt_baseline.txt` from `bridge/message_drafter.py:DRAFTER_SYSTEM_PROMPT` on `main` *before* the refactor lands. The snapshot test then asserts `_compose_drafter_prompt("telegram") == fixture_text`. This fixture is machine-agnostic (the drafter prompt embeds no machine-specific paths or identity values) so a single repo-committed file works.
+- **Implementation Note**: Capture script can be `python -c "from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT; open('tests/fixtures/drafter_system_prompt_baseline.txt','w').write(DRAFTER_SYSTEM_PROMPT)"` run on `main` before checking out `plan/composed-persona-1268`. Commit the fixture file in Task 1's PR. Step 4 then asserts `_compose_drafter_prompt("telegram") == open('tests/fixtures/drafter_system_prompt_baseline.txt').read()`. This is a single fixture, not per-machine — drafter prompt has no machine-stable axis problem.
+
+#### NITS
+
+##### N1. Open Question 1 (channel parameter) — recommend (B) drop the parameter
+
+- **Severity**: NIT
+- **Critics**: Simplifier, User
+- **Location**: Open Question 1 (L618–L621)
+- **Finding**: The plan keeps `channel=None` on the composer for forward-compat despite Question 4 resolving "no channel awareness in the working agent." A parameter that is accepted, ignored, and has zero callers asserting on it will rot. The Channel-Awareness Decision ledger explicitly records that nothing moves into a channel facet in this plan; if that's true, the parameter has no current consumer and "the issue title literally calls it out as a tuple member" is documentation, not justification. Adding the parameter when a real use surfaces is one line of diff and a deprecation-free addition.
+- **Suggestion**: Flip Question 1 to (B) — drop `channel=` from `compose_system_prompt`. Resolves Simplifier's "abstractions for a single use case." Keep `medium=` on the drafter unchanged (that one has a current use).
+
+##### N2. Open Question 2 (CUSTOMER_SERVICE access level) — keep 4-level mapping (A)
+
+- **Severity**: NIT
+- **Critics**: Simplifier, User
+- **Location**: Open Question 2 (L623–L626)
+- **Finding**: The argument for collapsing to a 3-level `CONVERSATIONAL` umbrella is tighter design, but the cost is a non-trivial migration in `_resolve_compose_args` to map `(persona=customer-service)` → `(access_level=CONVERSATIONAL)` and an asymmetry where the persona overlay carries action-orientation while the access level is mute. The 1:1 mapping today is in fact the simpler invariant: each persona has exactly one access level it ever runs with. Forcing orthogonality before a real second-cell use case (e.g. teammate-with-customer-service-rails) exists is the same future-proofing pattern Question 1 resolves against in the other direction.
+- **Suggestion**: Keep (A) — 4 access levels, 1:1 mapping. Document explicitly in `AccessLevel`'s docstring: "today maps 1:1 with PersonaType; orthogonality is structural intent for future expansion, not a current invariant." When a real second-cell use case appears, a follow-up plan handles the consolidation (it is a small change to a small enum).
+
+##### N3. Open Question 3 (voice follow-up issue timing) — file at PR-merge (A)
+
+- **Severity**: NIT
+- **Critics**: Operator
+- **Location**: Open Question 3 (L628–L631)
+- **Finding**: The placeholder-now option (B) trades accuracy for traceability. Given the cycle-4 plan already drifted line numbers across multiple sites in 14 days, a placeholder issue filed *now* with line numbers will be stale within weeks. The follow-up plan is invariant-bound (Risk 1 / cache invariant) regardless of whether an issue exists; placeholder issues do not increase the chance of action. PR-merge timing means the issue body cites real shipped line numbers and links the merged PR.
+- **Suggestion**: Keep (A) — file at PR-merge time. Add to Step 7 (Documentation) a checklist item: "After PR merges, file follow-up issue 'voice consolidation: shared voice.md segment' with link to merged PR and line citations from landed code."
+
+##### N4. Risk 2 mitigation could add the optional grep-based test it mentions
+
+- **Severity**: NIT
+- **Critics**: Operator
+- **Location**: Risk 2 (L362–L365)
+- **Finding**: The risk says "Optional: a grep-based test asserts no `if _session_type == SessionType` ladder remains in either file outside the helper." The Verification table has a similar grep but as a manual diff inspection. Promoting the grep to an automated test (`tests/unit/test_no_picker_ladder.py`) makes Risk 2's mitigation enforced on every CI run, not just at merge.
+- **Suggestion**: Add to Step 5 a one-line test that opens `agent/sdk_client.py` and `agent/session_executor.py` as text, asserts that lines matching `r"^\s*(if|elif)\s+_session_type\s*==\s*SessionType\.(PM|TEAMMATE|DEV)\b"` outside the `_resolve_compose_args` body are zero. Keep the existing Verification grep as a belt-and-suspenders check.
+
+### Aggregated Verdict
+
+5 CONCERNs (all with concrete Implementation Notes), 4 NITs, 0 BLOCKERs. The plan is structurally sound at cycle 4: every cited line number verifies, all required sections are present and substantive, the byte-stability strategy is well-reasoned, and the cycle-4 refresh correctly identified line drift. The CONCERNs are about *completeness* rather than *correctness* — three (C1, C2, C3) are gaps in the resolver/test coverage that the build phase needs to embed before writing code; two (C4, C5) are missing baseline-capture steps that prevent tautological tests.
+
+**Verdict**: READY TO BUILD (with concerns). Trigger one revision pass to embed the five Implementation Notes into Step 1, Step 3, Step 4, Test Impact, and Risk 1 before `/do-build`. NITs are guidance for the reviewer's three open questions; they do not block.
