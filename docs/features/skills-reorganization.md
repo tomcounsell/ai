@@ -13,7 +13,7 @@ Oversized SKILL.md files were split into a concise navigator + sub-files:
 ### Frontmatter Classification
 Every skill now has proper frontmatter fields:
 - `disable-model-invocation: true` on infrastructure skills (update, setup, reclassify)
-- `user-invocable: false` on background reference skills (agent-browser, telegram, reading-sms, checking-system-logs, google-workspace)
+- `user-invocable: false` on background reference skills (telegram, reading-sms, checking-system-logs, google-workspace)
 - `context: fork` on skills that spawn parallel work (do-build, do-pr-review, docs-auditor (substrate))
 
 ### Commands Consolidated

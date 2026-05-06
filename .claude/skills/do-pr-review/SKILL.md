@@ -2,51 +2,25 @@
 name: do-pr-review
 description: "Use when reviewing a pull request. Analyzes code changes, validates against plan requirements, and captures visual proof via screenshots. Triggered by 'review this PR', 'check the pull request', 'do a PR review', or a PR URL."
 context: fork
-allowed-tools: Bash(agent-browser:*), mcp__byob__*, Bash(gh:*), Bash(git:*), Bash(python:*), Bash(jq:*), Bash(sdlc-tool:*), Read, Write, Edit, Grep, Glob
+allowed-tools: mcp__byob__*, Bash(gh:*), Bash(git:*), Bash(python:*), Bash(jq:*), Bash(sdlc-tool:*), Read, Write, Edit, Grep, Glob
 ---
 
 # PR Review
 
 Review a pull request by analyzing its changes against the plan, checking code quality, validating tests, and capturing screenshots of UI changes.
 
-## Surface decision
+## Surface
 
-Updated in #1274. Screenshot capture in this skill is **dual-surface** —
-PR previews can be either public preview-deploy URLs (anonymous,
-`agent-browser`) or private staging URLs that require login (real Chrome,
-BYOB MCP). The choice is determined by the URL host:
+Screenshot capture in this skill runs against the user's real, logged-in
+Chrome via BYOB MCP (`mcp__byob__browser_*`). Public preview deploys
+and authenticated staging URLs are screenshotted the same way — BYOB
+just shows you the page the user would see. There is no
+anonymous-headless fallback; that surface was retired in #1256.
 
-**Public-domain allowlist → use `agent-browser` (anonymous, headless):**
-
-- `github.com` paths
-- `*.vercel.app` (any subdomain, any preview slug)
-- `*.netlify.app`, `*.pages.dev`
-- `*.fly.dev`, `*.railway.app`, `*.render.com`
-- Local dev servers: `http://localhost:*`, `http://127.0.0.1:*`,
-  `http://0.0.0.0:*`
-
-**Anything not on the allowlist → use BYOB MCP tools (real Chrome,
-logged-in):** internal staging URLs, authenticated dashboards, anything
-behind SSO. **Default-route unknown hosts to BYOB**, not
-`agent-browser` — a "public" preview URL that 302s to a login page
-returns wrong-shaped output on the anonymous surface (the screenshot
-shows a sign-in form instead of the PR's actual UI), and the review is
-silently invalid. Defaulting to BYOB closes that TOCTOU window.
-
-When BYOB is used, the calling session must have
-`requires_real_chrome=True` set. For SDLC pipeline runs, the bridge
-auto-infers from message content; for manual review runs, pass
-`valor-session create --needs-real-chrome ...`. Two concurrent
-real-Chrome sessions race on the active tab.
-
-The screenshot examples in `## 3. Screenshot Capture` and
-`sub-skills/screenshot.md` show the public-allowlist (`agent-browser`)
-form. For a non-allowlisted URL, swap each `agent-browser <verb>` for
-the BYOB equivalent: `agent-browser open` → `mcp__byob__navigate`,
-`agent-browser screenshot <path>` → `mcp__byob__screenshot` (saves to
-the agent's working directory; reposition the file as needed),
-`agent-browser snapshot -i` → `mcp__byob__screenshot` (BYOB returns the
-accessibility tree alongside the image).
+The calling session must have `requires_real_chrome=True` set. For
+SDLC pipeline runs, the bridge auto-infers from message content; for
+manual review runs, pass `valor-session create --needs-real-chrome
+...`. Two concurrent real-Chrome sessions race on the active tab.
 
 ## Cross-Repo Resolution
 
@@ -254,10 +228,11 @@ gh pr diff $PR_NUMBER --name-only
 mkdir -p generated_images/pr-$PR_NUMBER
 
 # PR branch was already checked out in Step 1.
-# Use /prepare_app to ensure app is running, then capture with agent-browser:
-agent-browser open http://localhost:8000
-agent-browser snapshot -i
-agent-browser screenshot generated_images/pr-$PR_NUMBER/01_main_view.png
+# Use /prepare_app to ensure app is running, then capture via BYOB MCP:
+# (replace bash with mcp__byob__browser_* tool calls)
+#   mcp__byob__browser_navigate(url="http://localhost:8000", waitUntil="networkidle")
+#   mcp__byob__browser_read(url="http://localhost:8000", reuseTab=true, screens=1)
+#   mcp__byob__browser_screenshot(tabId=<tab>, savePath="generated_images/pr-$PR_NUMBER/01_main_view.png")
 ```
 
 **Screenshot naming convention:**
@@ -500,7 +475,7 @@ Save this URL as `{review_url}` for the output summary.
 **Works with:**
 - `/do-build` - Reviews PRs created by the build workflow
 - `/prepare_app` - Ensures app is running before screenshots
-- `agent-browser` - Handles browser automation and screenshot capture
+- BYOB MCP (`mcp__byob__browser_*`) - Handles browser automation and screenshot capture
 - `gh` CLI - Fetches PR data and posts reviews
 
 **Screenshot storage:**

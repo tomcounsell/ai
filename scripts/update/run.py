@@ -888,11 +888,13 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # Step 4.9: Verify BYOB MCP registration in ~/.claude.json (idempotent).
     # Same lock + atomic-write pattern as the memory MCP step above. The
     # registrar self-heals drift on every /update invocation regardless of
-    # whether ~/.byob is being rebuilt this run. Failure is non-fatal --
-    # BYOB is a convenience surface; the agent still has agent-browser /
-    # bowser as parallel browser surfaces. macOS-only by ergonomics (BYOB
-    # ships a Chrome MV3 extension) but the registrar itself is platform-
-    # agnostic; the BYOB binary install is gated separately.
+    # whether ~/.byob is being rebuilt this run. Failure is non-fatal at
+    # the update level, but BYOB is the *only* browser surface (#1256), so
+    # downstream skills that screenshot or drive the browser will surface
+    # an explicit "BYOB bridge not running" error if it isn't registered.
+    # macOS-only by ergonomics (BYOB ships a Chrome MV3 extension) but the
+    # registrar itself is platform-agnostic; the BYOB binary install is
+    # gated separately.
     log("Verifying BYOB MCP registration...", v)
     _mcp_byob_write = config.do_service_restart  # full/cron only
     mcp_byob_result = mcp_byob.verify_byob_mcp(write=_mcp_byob_write)

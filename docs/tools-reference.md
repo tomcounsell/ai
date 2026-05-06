@@ -475,40 +475,39 @@ valor-image-analyze --help                               # Show options
 
 ## Browser Automation
 
-Three browser surfaces coexist — `agent-browser` (anonymous CLI), `bowser` (parallel anonymous), and **BYOB MCP tools** (real Chrome, the user's logged-in session). Pick the right one before reaching for any of the snippets below; see [`docs/features/byob-browser-control.md`](features/byob-browser-control.md) and the "When to use which browser surface?" section in [`.claude/skills/README.md`](../.claude/skills/README.md) for the canonical decision rule. The remainder of this section covers the anonymous `agent-browser` CLI; for logged-in operations (Gmail, LinkedIn, internal dashboards, authenticated GitHub views) use BYOB MCP (`mcp__byob__*`) instead.
-
-`agent-browser` - Installed globally via npm.
-
-Headless browser automation for web testing, form filling, screenshots, and data extraction.
+Browser automation runs through **BYOB MCP** (`mcp__byob__browser_*`) — a Chrome extension + native messaging host + MCP server that drives the user's already-logged-in Chrome. Public pages and authenticated dashboards both use this surface; the legacy `agent-browser` and `bowser` skills were retired in #1256. See [`docs/features/byob-browser-control.md`](features/byob-browser-control.md) for setup and architecture.
 
 ### Core Workflow
 
-```bash
-# 1. Navigate to page
-agent-browser open https://example.com
+```text
+# 1. Navigate
+mcp__byob__browser_navigate(url="https://example.com", waitUntil="networkidle")
 
-# 2. Get interactive snapshot with element refs (@e1, @e2, etc.)
-agent-browser snapshot -i
+# 2. Read content + interactiveElements (each has byob:idx=N + name + role + bounds)
+mcp__byob__browser_read(url="https://example.com", reuseTab=true, screens=2)
 
-# 3. Interact using refs
-agent-browser click @e1
-agent-browser fill @e2 "search text"
+# 3. Interact using byob:idx selectors
+mcp__byob__browser_click(tabId=<tab>, selector="byob:idx=3")
+mcp__byob__browser_type(tabId=<tab>, selector="byob:idx=4", text="search text", clear=true)
 
-# 4. Re-snapshot after page changes
-agent-browser snapshot -i
+# 4. Re-read after DOM-mutating actions (byob:idx values invalidate)
+mcp__byob__browser_read(url=<current>, reuseTab=true, screens=2)
 ```
 
-### Common Commands
+### Common Tools
 
-| Command | Description |
-|---------|-------------|
-| `agent-browser open <url>` | Navigate to URL |
-| `agent-browser snapshot -i` | Interactive snapshot with element refs |
-| `agent-browser click @e1` | Click element by reference |
-| `agent-browser fill @e2 "text"` | Fill input field |
-| `agent-browser screenshot output.png` | Take screenshot |
-| `agent-browser extract` | Extract page content |
-| `agent-browser --help` | Full command list |
+| Tool | Description |
+|------|-------------|
+| `mcp__byob__browser_list_tabs` | Discover open Chrome tabs |
+| `mcp__byob__browser_navigate(url, ...)` | Navigate to URL |
+| `mcp__byob__browser_read(url, ...)` | Read page content + interactiveElements |
+| `mcp__byob__browser_click(tabId, selector)` | Click element by `byob:idx=N` or CSS selector |
+| `mcp__byob__browser_type(tabId, selector, text)` | Fill input field |
+| `mcp__byob__browser_screenshot(tabId, savePath)` | Save screenshot |
+| `mcp__byob__browser_get_html(tabId, selector)` | Pull raw HTML for stable-class surfaces |
+| `mcp__byob__browser_press_key(tabId, key)` | Press key with modifiers |
+| `mcp__byob__browser_eval(tabId, expression)` | Run JS (requires `BYOB_ALLOW_EVAL=1`) |
+| `mcp__byob__browser_close_tab(tabId)` | Close tab |
 
 ### Screenshot Naming Convention
 
@@ -539,7 +538,7 @@ Steps:
 1. Detect branch and workflow ID
 2. Find matching spec in `specs/*.md`
 3. Start app with `/prepare_app`
-4. Capture screenshots — `agent-browser` for `localhost`/public preview hosts, BYOB MCP (`mcp__byob__*`) for auth dashboards / unknown hosts (see `.claude/skills/do-pr-review/SKILL.md` for the allowlist)
+4. Capture screenshots via BYOB MCP (`mcp__byob__browser_*`) — see `.claude/skills/do-pr-review/SKILL.md`
 5. Compare implementation vs spec
 6. Classify issues (blocker/tech_debt/skippable)
 7. Generate report at `agents/{workflow_id}/review/report.json`

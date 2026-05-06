@@ -15,7 +15,7 @@ user-invocable: false
 - Inspecting accessibility-tree state of any visible window
 
 Do **not** use for:
-- Browser automation -- that's `agent-browser`, `bowser`, or BYOB MCP tools (`byob_navigate`, etc.)
+- Browser automation -- that's BYOB MCP tools (`mcp__byob__browser_*`)
 - Keyboard/mouse simulation that should move the user's actual cursor -- bcu drives windows headlessly via the macOS Accessibility API, deliberately leaving the user's pointer alone
 
 ## Platform Constraint
@@ -86,17 +86,9 @@ The `bounds` field (a `[x, y, w, h]` list) tie-breaks when multiple AX nodes mat
 
 The bcu HTTP server binds to `127.0.0.1` only. There is no remote control surface. All requests go through `urllib.request` to the loopback URL stored in `$TMPDIR/background-computer-use/runtime-manifest.json`.
 
-## Browser Surfaces (do not confuse)
+## Browser vs Desktop
 
-Three distinct browser surfaces coexist in this repo. `computer-use` is **not** one of them:
-
-| Surface | Tool | When |
-|---------|------|------|
-| `agent-browser` | CLI (3rd-party, anonymous, headless, single-tab) | Existing skills that already use it (do-pr-review, do-design-audit, etc.) |
-| `bowser` | Playwright CLI (anonymous, headless, parallel) | Untrusted-link previews, parallel CI-style runs |
-| BYOB MCP | `byob_navigate`, `byob_click`, etc. (real Chrome, logged-in) | Logged-in operations on the user's actual Chrome session |
-
-`computer-use` operates on **native macOS apps**, not browsers. If the agent asks "click this button on a webpage", route to BYOB or `bowser`.
+Browser automation is BYOB MCP (`mcp__byob__browser_*`) — real Chrome, the user's logged-in session. `computer-use` operates on **native macOS apps**, not browsers. If the agent asks "click this button on a webpage", route to BYOB.
 
 ## BYOB and `BYOB_ALLOW_EVAL`
 

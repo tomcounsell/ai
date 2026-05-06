@@ -34,9 +34,6 @@ If the PR modifies `bridge/`, `agent/`, or `worker/`, flag for restart-after-dep
 
 ## UI Screenshots
 
-For any PR that touches `ui/`, include before/after screenshots of the actual running app (not mockups). Pick the surface using the dual-surface allowlist documented in `.claude/skills/do-pr-review/SKILL.md` and `sub-skills/screenshot.md`:
+For any PR that touches `ui/`, include before/after screenshots of the actual running app (not mockups). Capture via BYOB MCP (`mcp__byob__browser_*`) — the only browser surface — so the screenshot reflects the user's real, logged-in Chrome session. See `.claude/skills/do-pr-review/SKILL.md` and `sub-skills/screenshot.md`.
 
-- **Local dev (`localhost:8500`), public preview hosts** (`*.vercel.app`, `*.netlify.app`, `*.pages.dev`, `*.fly.dev`, `*.railway.app`, `github.com`) → `agent-browser` or `bowser` (anonymous).
-- **Anything else (auth dashboards, private staging, unknown hosts)** → BYOB MCP (`mcp__byob__*`) so the screenshot reflects the user's logged-in session. Default-to-BYOB closes the public-URL-302s-to-login window.
-
-For background on the three surfaces, see [`docs/features/byob-browser-control.md`](../features/byob-browser-control.md).
+For background, see [`docs/features/byob-browser-control.md`](../features/byob-browser-control.md).

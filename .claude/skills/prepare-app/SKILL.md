@@ -12,7 +12,7 @@ Prepare the application for review by starting necessary services and ensuring t
 - Before running `/do-pr-review` command with UI validation
 - Before manual testing of web applications
 - When setting up local development environment for testing
-- Before browser automation with `agent-browser` (anonymous, headless) or BYOB MCP tools (`mcp__byob__*`, real Chrome, logged-in)
+- Before browser automation with BYOB MCP tools (`mcp__byob__browser_*`, real Chrome, logged-in)
 
 ## Instructions
 
@@ -271,7 +271,7 @@ lsof -ti:3000 | xargs kill
 
 **Works with:**
 - `/do-pr-review` - Ensures app is running before screenshots
-- `agent-browser` (anonymous, headless) and BYOB MCP tools (real Chrome, logged-in) - Prepares environment for either browser surface; pick per `.claude/skills/README.md` decision rule
+- BYOB MCP tools (`mcp__byob__browser_*`, real Chrome, logged-in) - The browser surface this skill prepares the app for
 - Local development workflow
 
 **Server lifecycle:**

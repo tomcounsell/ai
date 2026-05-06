@@ -200,7 +200,7 @@ The pattern is clear: Valor provides deep built-in integrations for its specific
 | Capability | Valor | Paperclip |
 |-----------|-------|-----------|
 | Web search | Perplexity API link summarization | Via agent adapter |
-| Browser automation | Playwright via agent-browser skill | Via agent adapter |
+| Browser automation | BYOB MCP (real Chrome, logged-in) | Via agent adapter |
 | Screenshot capture | PR review workflow | Via agent adapter |
 | Form filling | Playwright automation | Via agent adapter |
 

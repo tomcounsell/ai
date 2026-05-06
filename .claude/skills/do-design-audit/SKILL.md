@@ -1,7 +1,7 @@
 ---
 name: do-design-audit
 description: "Audit an existing web UI against premium design criteria. Screenshots pages and evaluates visual hierarchy, typography, color, spacing, consistency, and more. Use when the user wants to evaluate design quality, audit a UI, or says 'review this design', 'check the UI', 'audit this page', 'scan the interface', or provides a URL for design feedback."
-allowed-tools: Bash(agent-browser:*), mcp__byob__*
+allowed-tools: mcp__byob__browser_navigate, mcp__byob__browser_read, mcp__byob__browser_click, mcp__byob__browser_screenshot, mcp__byob__browser_close_tab, mcp__byob__browser_list_tabs, mcp__byob__browser_wait_for
 context: fork
 ---
 
@@ -9,47 +9,19 @@ This skill evaluates existing web interfaces against premium design criteria. It
 
 Be opinionated. Call out what fails clearly. "Acceptable" is not a compliment.
 
-## Surface decision
+## Surface
 
-Updated in #1274. This skill is **dual-surface** — it runs against both
-public marketing pages (anonymous, headless) and authenticated app
-surfaces (logged in, real Chrome). The choice is not the audit author's;
-it is determined by the URL host:
+This skill runs against the user's real, logged-in Chrome via the BYOB
+MCP server (`mcp__byob__browser_*`). Public marketing pages and
+authenticated dashboards are audited the same way — BYOB just shows
+you the page the user would see. There is no anonymous-headless
+fallback; that surface was retired in #1256.
 
-**Public-domain allowlist → use `agent-browser` (anonymous, headless):**
-
-- Public marketing TLDs: `*.com`, `*.io`, `*.dev`, `*.ai` when served at
-  `/`, `/pricing`, `/about`, `/blog/*`, or any path that is publicly
-  reachable without a login wall
-- Local dev servers: `http://localhost:*`, `http://127.0.0.1:*`,
-  `http://0.0.0.0:*`
-- Known-public preview hosts: `*.vercel.app`, `*.netlify.app`,
-  `*.pages.dev`, `*.fly.dev`, `*.railway.app` (public preview deployments)
-
-**Anything not on the allowlist → use BYOB MCP tools (real Chrome,
-logged-in):** authenticated dashboards, private staging URLs, internal
-admin panels, anything behind SSO. **Default-route unknown hosts to
-BYOB**, not to `agent-browser` — a "public" URL that 302s to a login
-page returns wrong-shaped output on the anonymous surface, and the
-audit is silently invalid. Defaulting to BYOB closes that TOCTOU
-window: BYOB just shows you the logged-in page (correct), while
-anonymous returns the redirect target (wrong-shaped, hard to detect).
-
-When BYOB is used, the calling session **must** have
-`requires_real_chrome=True` set (bridge auto-infers from message text
-for "design audit" patterns; CLI users pass
-`valor-session create --needs-real-chrome ...`). Two concurrent
-real-Chrome sessions race on the active tab and corrupt each other's
-DOM.
-
-Examples below show the public-allowlist (`agent-browser`) form. For a
-non-allowlisted URL, swap each `agent-browser <verb>` for the BYOB
-equivalent: `agent-browser open` → `mcp__byob__navigate`,
-`agent-browser screenshot` → `mcp__byob__screenshot`,
-`agent-browser snapshot -i` → `mcp__byob__screenshot` (BYOB returns the
-accessibility tree alongside the image), `agent-browser click @e<ref>`
-→ `mcp__byob__click <target>`, `agent-browser close` is unnecessary
-under BYOB (no daemon to close — the user's Chrome stays open).
+The calling session **must** have `requires_real_chrome=True` set
+(bridge auto-infers from message text for "design audit" patterns;
+CLI users pass `valor-session create --needs-real-chrome ...`). Two
+concurrent real-Chrome sessions race on the active tab and corrupt
+each other's DOM.
 
 ## When to Use
 
@@ -68,9 +40,9 @@ Trigger this skill when the user:
 
 ### Step 1: Open and Screenshot the Starting Page
 
-```bash
-agent-browser open <url>
-agent-browser screenshot
+```text
+mcp__byob__browser_navigate(url="<url>", waitUntil="networkidle")
+mcp__byob__browser_screenshot(tabId=<tab>, savePath="/tmp/design-audit-01.png")
 ```
 
 Take a screenshot immediately after opening. Do not interact yet — capture the first impression.
@@ -79,37 +51,29 @@ Take a screenshot immediately after opening. Do not interact yet — capture the
 
 **If `--pages` was provided:** Navigate to each listed path in turn and screenshot each one.
 
-```bash
-agent-browser open <url>/about
-agent-browser screenshot
+```text
+mcp__byob__browser_navigate(url="<url>/about", tabId=<tab>, waitUntil="networkidle")
+mcp__byob__browser_screenshot(tabId=<tab>, savePath="/tmp/design-audit-about.png")
 # repeat for each path
 ```
 
-**If `--pages` was NOT provided:** Take a snapshot to find navigation elements, then follow nav links to discover reachable pages. Screenshot each unique page. Stop after visiting 6 pages or exhausting navigation links, whichever comes first.
+**If `--pages` was NOT provided:** Read the page to surface its `interactiveElements`, follow nav links to discover reachable pages, and screenshot each one. Stop after visiting 6 pages or exhausting navigation links, whichever comes first.
 
-```bash
-agent-browser snapshot -i
-# identify nav links in the snapshot
-agent-browser click @e<nav-link-ref>
-agent-browser screenshot
+```text
+mcp__byob__browser_read(url="<url>", reuseTab=true, screens=1)
+# identify nav-link entries in interactiveElements (role="link" + name="<nav label>")
+mcp__byob__browser_click(tabId=<tab>, selector="byob:idx=<nav_link_idx>")
+mcp__byob__browser_screenshot(tabId=<tab>, savePath="/tmp/design-audit-<slug>.png")
 # repeat for each navigation destination
 ```
 
 Desktop viewport only. Do not resize for mobile in v1.
 
-### Step 3: Close the Browser
-
-```bash
-agent-browser close
-```
-
-The daemon persists indefinitely if not closed — always run this before moving to evaluation.
-
-### Step 4: Evaluate
+### Step 3: Evaluate
 
 Evaluate ALL collected screenshots against the 10 rubric dimensions below. Do not rush — look carefully at each screenshot before scoring.
 
-### Step 5: Produce the Report
+### Step 4: Produce the Report
 
 Output the structured report format defined in the Output Format section. Every row in the evaluation table must have a specific finding, not a generic one.
 

@@ -35,7 +35,7 @@ User request
           v
 /do-pr-review (fork context)
   |---> /prepare-app           start services
-  \---> agent-browser          take screenshots
+  \---> mcp__byob__browser_*   take screenshots (real Chrome)
 ```
 
 ## Skill-to-Skill References
@@ -52,7 +52,7 @@ do-build ------> do-test
 do-patch -------> (direct pytest + lint, no longer invokes do-test)
 
 do-pr-review ---> prepare-app
-              \-> agent-browser
+              \-> mcp__byob__browser_* (BYOB MCP)
 
 new-valor-skill -> new-skill  (reads SKILL.md + SKILL_TEMPLATE.md)
 
@@ -121,23 +121,19 @@ These 6 skills form the autonomous development loop. Everything else is support.
 ### Model-Only Background Skills (never user-invoked)
 | Skill | What it does |
 |-------|-------------|
-| agent-browser | Browser automation (3rd-party CLI, anonymous, headless) |
-| bowser | Playwright headless (anonymous, parallel) |
 | computer-use | Native macOS desktop control via bcu (Slack, Notes, Telegram Desktop, etc.); see [Computer Use](computer-use.md) |
 | telegram | Read/send Telegram |
 | reading-sms-messages | Read SMS/iMessage |
 | checking-system-logs | Query bridge logs |
 | google-workspace | Google API guide |
 
-### Browser/Desktop Automation Surfaces (post issue #1256)
-Three browser surfaces + one desktop surface coexist. Decision guide:
+### Browser/Desktop Automation Surfaces
+One browser surface + one desktop surface (post issue #1256):
 
-| Surface | Anonymous? | Headless? | Logged-in? | When |
-|---------|-----------|-----------|------------|------|
-| `agent-browser` skill | yes | yes | no | Anonymous public-page automation. Per-skill outcomes from the #1274 migration are captured in [`byob-browser-control.md`](byob-browser-control.md#migration-status). |
-| `bowser` skill | yes | yes | optional (CDP) | Untrusted-link previews, parallel runs |
-| BYOB MCP tools (`mcp__byob__*`) | no | no (real Chrome) | yes (user's session) | Logged-in Gmail/GitHub/LinkedIn/etc. Serialized at scheduler layer via `AgentSession.requires_real_chrome`. Bridge-spawned sessions get the flag inferred from message text via `agent/byob_skill_triggers.py` (#1274). |
-| `computer-use` skill | -- | -- | -- | **Native macOS apps** (not browsers) |
+| Surface | Notes |
+|---------|-------|
+| BYOB MCP tools (`mcp__byob__browser_*`) | Real Chrome, the user's logged-in session. Public pages and authenticated dashboards both use this surface. Serialized at scheduler layer via `AgentSession.requires_real_chrome` — bridge-spawned sessions get the flag inferred from message text via `agent/byob_skill_triggers.py`. |
+| `computer-use` skill | Native macOS apps (not browsers). |
 
 ### Meta Skills (create other skills)
 ```
@@ -169,4 +165,4 @@ new-skill (generic) <--- new-valor-skill (wraps with Valor patterns)
 
 ### Missing Edges
 - **do-build** references `documentarian` agent but doesn't invoke `/do-docs` for the agent — it calls do-docs as a skill separately. Two doc paths exist.
-- **do-pr-review** references `agent-browser` but not as a Task tool agent — it's invoked via bash commands.
+- **do-pr-review** invokes BYOB MCP tools (`mcp__byob__browser_*`) directly, not through a Task-tool subagent.
