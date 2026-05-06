@@ -7,7 +7,7 @@ created: 2026-05-04
 tracking: https://github.com/tomcounsell/ai/issues/1268
 last_comment_id:
 revision_applied: true
-revision_cycle: 4
+revision_cycle: 5
 ---
 
 # Composed Persona System: Single (persona × access-level × channel) Builder
@@ -159,27 +159,28 @@ Communication overhead is the bottleneck: the seven architectural questions each
 
 ### Composer Signature & Call Sites (Pin-Down)
 
-**Pinned signature:**
+**Pinned signature (cycle-5: `channel=` dropped per Open Question 1 resolution):**
 
 ```python
 def compose_system_prompt(
     persona: PersonaType,                  # required — one of 4 enum members
     access_level: AccessLevel,             # required — one of 4 enum members
-    channel: str | None = None,            # accepted, currently unused (forward-compat; see Question 4 / Open Q1)
     *,
     project: dict | None = None,           # for project.email.persona override + work-vault CLAUDE.md
     working_directory: str | None = None,  # required when access_level == PM_READONLY (raises ValueError otherwise)
 ) -> str:
 ```
 
+**Note:** Cycle 4 carried a `channel: str | None = None` forward-compat parameter; cycle-5 critique (NIT N1) flagged it as rot bait — no current cell consumes it, no test asserts on it, and adding it later is a one-line additive change. The drafter still receives `medium=` (its existing parameter) and routes through its own helper `_compose_drafter_prompt(medium)`. The two surfaces are intentionally different: composer for working-agent prompts (no channel axis today), drafter for output formatting (channel-aware today via `medium=`).
+
 **The four entry points that funnel through it:**
 
 | # | Today's call site | Today's behavior | Composer call after refactor |
 |---|-------------------|------------------|-------------------------------|
-| 1 | `agent/sdk_client.py:966` `load_system_prompt()` (kept as wrapper) | Builds developer + WORKER_RULES + principal + completion criteria | `compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER)` |
-| 2 | `agent/sdk_client.py:998` `load_pm_system_prompt(working_dir)` (kept as wrapper) | Builds project-manager + work-vault CLAUDE.md, no WORKER_RULES | `compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, working_directory=working_dir)` |
-| 3a | `agent/sdk_client.py:3382–3419` Block B (`get_response_via_harness` path) | Branches by `_session_type` / `project_mode` / `persona` to call one of `load_pm_system_prompt`, `_load_persona_overlay_with_log` | Replaced with: `args = _resolve_compose_args(_session_type, project, _session_extra_context.get("transport"), chat_title, is_dm); custom_system_prompt = compose_system_prompt(*args, project=project, working_directory=working_dir)` |
-| 3b | `agent/session_executor.py:1563–1629` (harness-route persona resolution) | Builds `_pm_system_prompt: str | None` via the parallel ladder (PM session → `load_pm_system_prompt`; email/teammate → `_load_persona_overlay_with_log`) | Same `_resolve_compose_args(...)` + `compose_system_prompt(...)` call. Edge case: this site can produce `None` (PM persona load failure → harness runs without overlay). The composer never returns `None` — failure modes raise. The call site catches and falls back to `None` to preserve today's "warn and degrade" behavior at log line `[pm-persona-missing]`. |
+| 1 | `agent/sdk_client.py:966` `load_system_prompt()` (kept as wrapper) | Builds developer + WORKER_RULES + principal + completion criteria | `compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER)` (no `channel=`) |
+| 2 | `agent/sdk_client.py:998` `load_pm_system_prompt(working_dir)` (kept as wrapper) | Builds project-manager + work-vault CLAUDE.md, no WORKER_RULES | `compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, working_directory=working_dir)` (no `channel=`) |
+| 3a | `agent/sdk_client.py:3382–3419` Block B (`get_response_via_harness` path) | Branches by `_session_type` / `project_mode` / `persona` to call one of `load_pm_system_prompt`, `_load_persona_overlay_with_log` | Replaced with: `persona, access_level = _resolve_compose_args(_session_type, project, _session_extra_context.get("transport"), chat_title=chat_title, is_dm=is_dm); custom_system_prompt = compose_system_prompt(persona, access_level, project=project, working_directory=working_dir)` |
+| 3b | `agent/session_executor.py:1563–1629` (harness-route persona resolution) | Builds `_pm_system_prompt: str | None` via the parallel ladder (PM session → `load_pm_system_prompt`; email/teammate → `_load_persona_overlay_with_log`) | Same `_resolve_compose_args(...)` + `compose_system_prompt(...)` call. The session_executor.py call site does NOT have `chat_title`/`is_dm` as locals at L1563 — they live on `session.chat_title` and need `is_dm = session.chat_title is None` synthesized at the call site (mirrors the pattern at sdk_client.py:3348). Edge case: this site can produce `None` (PM persona load failure → harness runs without overlay). The composer never returns `None` — failure modes raise. The call site catches and falls back to `None` to preserve today's "warn and degrade" behavior at log line `[pm-persona-missing]`. |
 
 (There is also `bridge/message_drafter.py` `draft_message` — a fifth funnel for the *drafter's* system prompt — but it composes a different prompt for a different model, so it does **not** call `compose_system_prompt`. It instead calls a sibling helper `_compose_drafter_prompt(medium)` introduced in this plan. See Drafter prompt assembly below.)
 
@@ -189,13 +190,13 @@ def compose_system_prompt(
 
 **Working-agent prompt assembly:**
 
-Session arrives at executor → `_resolve_compose_args(session_type, project, transport)` returns `(persona, access_level, channel)` → `compose_system_prompt(persona, access_level, channel, project=project, working_directory=working_dir)` returns the full prompt string → string passed to `claude -p` via `--append-system-prompt`.
+Session arrives at executor → `_resolve_compose_args(session_type, project, transport, chat_title=..., is_dm=...)` returns `(persona, access_level)` → `compose_system_prompt(persona, access_level, project=project, working_directory=working_dir)` returns the full prompt string → string passed to `claude -p` via `--append-system-prompt`. **(Cycle-5: `channel` is no longer part of the resolver tuple or composer signature.)**
 
 **Drafter prompt assembly:**
 
 Worker emits agent output → `bridge/message_drafter.py:draft_message(raw_response, session=None, *, medium="telegram", persona=None)` (the existing public entry point at `bridge/message_drafter.py:1720`) → drafter composes `BASE_DRAFTER_PROMPT + MEDIUM_RULES["telegram"]` (or `"email"`, etc.) → calls Haiku via `client.messages.create(system=composed_prompt, ...)`.
 
-**Note on naming:** the function is `draft_message` (not `format_for_chat`) and the parameter is `medium` (not `channel`). The plan uses `medium` consistently because (a) that's the existing parameter name on `draft_message`, (b) `_validate_for_medium(text, medium)` already exists at `bridge/message_drafter.py:381`, and (c) renaming `medium` to `channel` is out of scope. The composer can still be named with `channel` internally because no working-agent prompt cell uses it today (Question 4 / Open Question 1) — but the drafter's public surface stays as `medium=`.
+**Note on naming:** the function is `draft_message` (not `format_for_chat`) and the parameter is `medium` (not `channel`). The plan uses `medium` consistently because (a) that's the existing parameter name on `draft_message`, (b) `_validate_for_medium(text, medium)` already exists at `bridge/message_drafter.py:381`, and (c) renaming `medium` to `channel` is out of scope. **The working-agent composer no longer carries any channel/medium parameter at all (cycle-5 resolution).** The two surfaces are intentionally asymmetric: composer ignores channel because no working-agent cell needs it today; drafter consumes `medium=` because output formatting genuinely depends on it.
 
 ### Channel-Awareness Decision (concrete content move list)
 
@@ -221,7 +222,7 @@ The issue's directive: "push channel-specific deltas into the drafter; minimal c
 
 1. **Working-agent segments + overlays:** **no content moves in this plan.** The structural change is the composer signature. Segments and overlays continue to ship Telegram-leaning content; that content's eventual relocation is a Q2/voice-consolidation follow-up.
 2. **Drafter:** `DRAFTER_SYSTEM_PROMPT` splits into `BASE_DRAFTER_PROMPT + MEDIUM_RULES[medium]`. Telegram-specific FORMAT RULES move into `MEDIUM_RULES["telegram"]`. Email gets a stub `MEDIUM_RULES["email"]` (initially identical-ish to telegram minus telegram-only formatting; concrete email format rules are an explicit follow-up). The base prompt retains all *voice* content verbatim.
-3. **Working-agent composer `channel` parameter:** accepted, ignored. Forward-compat for a future facet but unused today (see Open Question 1).
+3. **Working-agent composer `channel` parameter:** **NOT introduced (cycle-5).** Adding a parameter that has zero current consumers and zero tests asserting on it is rot bait. If a future cell needs channel awareness, adding the parameter is a one-line additive change with no public API regression. The drafter retains `medium=` because it has a real consumer.
 
 This ledger is the build phase's source of truth for the content-move scope.
 
@@ -256,7 +257,7 @@ The issue references fazm's [`AGENT-VOICE.md`](https://github.com/mediar-ai/fazm
 
   3. **Medium extraction into the drafter**: `bridge/message_drafter.py` composes its system prompt **at module load** as `BASE + MEDIUM_RULES[medium]`. The structured-output `tool_use` schema is unchanged — it stays shared across mediums. The `medium` parameter on `draft_message` already exists (defaults to `"telegram"`); only the future email-medium case needs to pass `medium="email"` and that call site is also already wired. `BASE_DRAFTER_PROMPT` keeps the drafter's existing voice content verbatim — voice consolidation is deferred (see Question 2). The plan uses `medium` (not `channel`) on the drafter's public surface because that is the existing parameter name; renaming is out of scope.
 
-  4. **Minimum channel-awareness for the working agent**: **None.** The working agent does not need channel context in its system prompt. Reachability/emoji-react decisions are made by the agent based on tool output (e.g., reading recent Telegram chat state via `valor-telegram read`), not encoded in the prompt. This drops the `channel=` parameter from the composer's required signature; it remains as an optional facet **only if a concrete need is proven during build** (Open Question 1 below pins this).
+  4. **Minimum channel-awareness for the working agent**: **None.** The working agent does not need channel context in its system prompt. Reachability/emoji-react decisions are made by the agent based on tool output (e.g., reading recent Telegram chat state via `valor-telegram read`), not encoded in the prompt. **Cycle-5 resolution: `channel=` is dropped from the composer signature entirely** (not retained as a forward-compat optional). Adding it back when a real cell appears is a one-line additive change.
 
   5. **Composition order and overrides**: **strict additive layering, no redaction.** Order is fixed: `WORKER_RULES (if WORKER) → identity → work-patterns → tools → private-tag → persona overlay → principal context (if WORKER) → completion criteria (if WORKER) → work-vault CLAUDE.md (if PM_READONLY)`. The order matches today's `manifest.json` exactly; **no new segments are added** in this plan (see Question 2 — voice.md is deferred). If two layers contradict, the source documents must be fixed; the composer does not silently mediate. A startup lint pass (Question 7) detects contradictions.
 
@@ -297,33 +298,53 @@ Audit performed at refresh commit `5576e4dc` against the actual test files in `t
 - [ ] `tests/unit/test_pm_persona_guards.py` (9.9K, last touched May 2) — **no change**. The PM overlay loader-warning tests at sdk_client.py:919–948 are preserved; they're inside `load_persona_prompt`, which stays as the segment-and-overlay assembler.
 - [ ] `tests/unit/test_message_drafter_chat_log.py` (5.7K), `tests/unit/test_message_drafter_linkify.py` (3.7K) — UPDATE only if they import `DRAFTER_SYSTEM_PROMPT` directly. Grep on refresh commit shows no such imports → **no change**.
 - [ ] `tests/unit/test_agent_session_scheduler_persona.py` (2.4K, last touched Apr 9) — REVIEW. Tests persona resolution by scheduler. Should still pass; scheduler doesn't use the composer directly. Confirm during build.
-- [ ] `tests/unit/test_pm_session_factory.py`, `tests/unit/test_pm_channels.py`, `tests/unit/test_config_driven_routing.py`, `tests/unit/test_routing_mode.py` — these contain `persona`/`PersonaType` references but operate at the session-factory/router layer above the composer. Composer is invoked downstream of these tests' subjects → **no change** unless they assert specific picker branches.
-- [ ] **NEW** `tests/unit/test_compose_system_prompt.py` — create. Covers:
-  1. **Byte-stability** for `(DEVELOPER, WORKER)` and `(PROJECT_MANAGER, PM_READONLY)` cells against the per-machine fixtures from Step 1 (Risk 1 strategy (c)). SKIPs on machines without a baseline.
-  2. **Per-cell composition** — one test per `(PersonaType, AccessLevel)` cell; the cells that don't exist in `_resolve_compose_args` mapping raise `ValueError` with a useful message.
-  3. **Executable invariants** (per Q7): `compose_system_prompt(PROJECT_MANAGER, PM_READONLY, working_directory=W)` is < 80K chars; no `{{identity.*}}` markers remain in any cell's output; `WORKER_RULES` precedes the persona overlay text in the `WORKER` cell; PM cell does NOT contain `WORKER_RULES`; channel parameter is accepted as `None` and as any string without raising.
-  4. **Concrete acceptance examples** (executable, per memory note "Acceptance criteria must be executable"):
-     - `compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, channel="email", working_directory=W)` returns a prompt that **contains** the project-manager overlay text and the work-vault `CLAUDE.md` content (when present), and does **not** contain `WORKER_RULES`.
-     - `compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER, channel="telegram")` returns a prompt that **starts with** `WORKER_RULES` (before the `\n\n---\n\n` separator) and contains the developer overlay text after the separator.
+- [ ] `tests/unit/test_pm_session_factory.py`, `tests/unit/test_config_driven_routing.py`, `tests/unit/test_routing_mode.py` — these contain `persona`/`PersonaType` references but operate at the session-factory/router layer above the composer. Composer is invoked downstream of these tests' subjects → **no change** unless they assert specific picker branches.
+- [ ] **C3 — newly audited test files (cycle 5):** Grep across the repo at HEAD `5576e4dc` shows `load_system_prompt` / `load_pm_system_prompt` are also imported by these files (cycle-4 plan claim "no integration tests reference the prompt-byte content" was FALSE). Disposition: NO CHANGE — wrappers preserve `load_system_prompt`/`load_pm_system_prompt` symbol path; `mock.patch` targets continue to resolve at `agent.sdk_client.load_system_prompt`:
+    - [ ] `tests/unit/test_sdk_client.py` — NO CHANGE: imports `load_system_prompt`, asserts non-empty. Wrapper preserves return contract.
+    - [ ] `tests/unit/test_pm_channels.py` — NO CHANGE: calls `load_system_prompt()` and `load_pm_system_prompt()` directly at L33, L38, L46, L52, L61, L66; the regression test at L65 depends on `load_system_prompt()` returning a string with WORKER_RULES. Wrapper preserves the WORKER_RULES content via `compose_system_prompt(DEVELOPER, WORKER)`.
+    - [ ] `tests/unit/test_load_principal_context.py` — NO CHANGE: imports `load_system_prompt`, asserts principal context integration. Wrapper preserves principal-context concatenation.
+    - [ ] `tests/unit/test_sdk_permissions.py` — NO CHANGE: imports `load_system_prompt`, asserts content. Wrapper preserves content.
+    - [ ] `tests/unit/test_agent_session_hierarchy.py` — NO CHANGE: `@patch("agent.sdk_client.load_system_prompt", ...)` at L433, L444 patches the function path; the wrapper retains the same module attribute name, so the patch target continues to resolve.
+    - [ ] `tests/unit/test_cross_repo_gh_resolution.py` — NO CHANGE: `patch("agent.sdk_client.load_system_prompt", ...)` at L22; same patch-target preservation.
+    - [ ] `tests/integration/test_harness_env_pm_injection.py` — UPDATE the cycle-4 claim line. The integration test calls `load_pm_system_prompt(str(wd))` directly at L97, L230. Disposition: NO CHANGE — must continue to pass; covered by the byte-stability invariant since the wrapper delegates. The cycle-4 plan said "No existing integration tests reference the prompt-byte content directly" — that claim is now retracted; this file does. Test is expected to pass unchanged because the wrapper preserves the byte output.
+- [ ] **NEW** `tests/unit/test_compose_system_prompt.py` — create. Two test classes:
+  - **`TestByteStability`** (cycle-5: split out per C4 implementation note; SKIPs on machines without a baseline):
+    1. Byte-stability for `(DEVELOPER, WORKER)` and `(PROJECT_MANAGER, PM_READONLY)` cells against the per-machine fixtures from Step 1 (Risk 1 strategy (c)).
+  - **`TestStructuralInvariants`** (cycle-5 C4: machine-agnostic, runs everywhere):
+    1. WORKER cell starts with the exact `WORKER_RULES` constant followed by `\n\n---\n\n`.
+    2. PM cell does NOT contain `WORKER_RULES`.
+    3. For both cells, segment-content substrings appear in the same order as `manifest.json["segments"]` (use a list-of-find-indices monotonicity check, not full substring equality).
+    4. No `{{identity.*}}` templating residue in any cell's output.
+    5. `compose_system_prompt(PROJECT_MANAGER, PM_READONLY, working_directory=W)` is < 80K chars (cache budget).
+  - **Per-cell composition** — one test per `(PersonaType, AccessLevel)` cell; the cells that don't exist in `_resolve_compose_args` mapping raise `ValueError` with a useful message.
+  - **Concrete acceptance examples** (executable, per memory note "Acceptance criteria must be executable"):
+     - `compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, working_directory=W)` returns a prompt that **contains** the project-manager overlay text and the work-vault `CLAUDE.md` content (when present), and does **not** contain `WORKER_RULES`.
+     - `compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER)` returns a prompt that **starts with** `WORKER_RULES` (before the `\n\n---\n\n` separator) and contains the developer overlay text after the separator.
      - `compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY)` (no `working_directory`) raises `ValueError` whose message names `working_directory` and `PM_READONLY`.
      - `compose_system_prompt(PersonaType.DEVELOPER, "not-an-AccessLevel")` raises `TypeError`.
      - `compose_system_prompt(persona="invalid-string", access_level=AccessLevel.WORKER)` raises `ValueError` listing valid persona names.
-- [ ] **NEW** `tests/unit/test_resolve_compose_args.py` — create. Parametrized over the input cells:
-  | session_type | project_mode | transport | project.email.persona | → expected (persona, access_level, channel) |
-  |---|---|---|---|---|
-  | PM | pm | telegram | (any) | `(PROJECT_MANAGER, PM_READONLY, "telegram")` |
-  | PM | dev | telegram | (any) | `(PROJECT_MANAGER, PM_READONLY, "telegram")` |
-  | TEAMMATE | dev | telegram | (none) | `(TEAMMATE, TEAMMATE, "telegram")` |
-  | TEAMMATE | dev | email | "customer-service" | `(CUSTOMER_SERVICE, CUSTOMER_SERVICE, "email")` |
-  | TEAMMATE | dev | email | (none/missing) | `(TEAMMATE, TEAMMATE, "email")` |
-  | TEAMMATE | dev | email | "teammate" | `(TEAMMATE, TEAMMATE, "email")` |
-  | DEV | dev | telegram | (any) | `(DEVELOPER, WORKER, "telegram")` |
-  | DEV | dev | email | "customer-service" | `(CUSTOMER_SERVICE, CUSTOMER_SERVICE, "email")` (or per Question 6 — confirm during build) |
-  | DEV | pm | telegram | (any) | `(PROJECT_MANAGER, PM_READONLY, "telegram")` (project_mode=pm overrides) |
+     - `compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER, channel="telegram")` raises `TypeError` (cycle-5: `channel=` is not a valid parameter).
+  - **`_resolve_persona` equivalence** (cycle-5 C1): for every `(project, chat_title, is_dm)` triple representing today's DM/group config, `_resolve_compose_args(SessionType.DEV, project, transport=None, chat_title=chat_title, is_dm=is_dm)[0]` returns the same `PersonaType` value as today's `_resolve_persona(project, chat_title, is_dm)` at sdk_client.py:1860. Test cases: (a) DM with `dm_persona=teammate` → `TEAMMATE`, (b) group with `groups[<title>].persona=customer-service` → `CUSTOMER_SERVICE`, (c) group with no persona key → `DEVELOPER`, (d) project=None → `DEVELOPER`.
+- [ ] **NEW** `tests/unit/test_resolve_compose_args.py` — create. Parametrized over the input cells. Resolver returns 2-tuple `(persona, access_level)` (cycle-5: `channel` dropped per Open Question 1):
 
-  Replaces inline branch-by-branch testing of the two pickers.
+  | session_type | project_mode | transport | project.email.persona | chat_title / is_dm | → expected (persona, access_level) |
+  |---|---|---|---|---|---|
+  | PM | pm | telegram | (any) | (any) | `(PROJECT_MANAGER, PM_READONLY)` |
+  | PM | dev | telegram | (any) | (any) | `(PROJECT_MANAGER, PM_READONLY)` |
+  | TEAMMATE | dev | telegram | (none) | (any) | `(TEAMMATE, TEAMMATE)` |
+  | TEAMMATE | dev | email | "customer-service" | (any) | `(CUSTOMER_SERVICE, CUSTOMER_SERVICE)` |
+  | TEAMMATE | dev | email | (none/missing) | (any) | `(TEAMMATE, TEAMMATE)` |
+  | TEAMMATE | dev | email | "teammate" | (any) | `(TEAMMATE, TEAMMATE)` |
+  | DEV | dev | telegram | (any) | DM, dm_persona=teammate | `(TEAMMATE, WORKER)` (cycle-5 C1: delegates to `_resolve_persona` for DM/group axis; access_level=WORKER stays because DEV session) |
+  | DEV | dev | telegram | (any) | group, groups[<title>].persona=customer-service | `(CUSTOMER_SERVICE, WORKER)` (cycle-5 C1) |
+  | DEV | dev | telegram | (any) | group, no persona key | `(DEVELOPER, WORKER)` (cycle-5 C1: default fallthrough) |
+  | DEV | dev | telegram | (any) | project=None | `(DEVELOPER, WORKER)` (cycle-5 C1: defensive default) |
+  | DEV | dev | email | "customer-service" | (any) | `(CUSTOMER_SERVICE, CUSTOMER_SERVICE)` (cycle-5 C2: union rule — see Step 3 implementation note) |
+  | DEV | pm | telegram | (any) | (any) | `(PROJECT_MANAGER, PM_READONLY)` (project_mode=pm overrides) |
 
-No existing integration tests reference the prompt-byte content directly, so no integration test impact. The byte-stability invariant lives in unit tests.
+  Replaces inline branch-by-branch testing of the two pickers. The DEV+DM/group rows specifically exercise the cycle-5 C1 fix where the resolver delegates to `_resolve_persona(project, chat_title, is_dm)` for the third axis.
+
+**Cycle-5 correction:** The cycle-4 claim "No existing integration tests reference the prompt-byte content directly" was FALSE — `tests/integration/test_harness_env_pm_injection.py` calls `load_pm_system_prompt` directly at L97, L230 (covered above as NO CHANGE). The byte-stability invariant lives in unit tests; the integration test exercises the wrapper's call shape (input → output non-empty), which the wrapper preserves.
 
 ## Rabbit Holes
 
@@ -427,20 +448,21 @@ No external docs site for this repo — skip.
 
 Each criterion is **executable** — written as an assertion the validator can run, not a vague description.
 
-- [ ] `compose_system_prompt(persona, access_level, channel=None, **kwargs)` exists at `agent/sdk_client.py` (or `agent/persona_composer.py` if extracted) and is the only path that produces a fully assembled agent system prompt; `load_system_prompt` and `load_pm_system_prompt` are thin wrappers (≤ 5 lines each, single delegation call).
+- [ ] `compose_system_prompt(persona, access_level, *, project=None, working_directory=None)` exists at `agent/sdk_client.py` (or `agent/persona_composer.py` if extracted) and is the only path that produces a fully assembled agent system prompt; `load_system_prompt` and `load_pm_system_prompt` are thin wrappers (≤ 5 lines each, single delegation call). **No `channel=` parameter** (dropped per cycle-5 Open Question 1 resolution); attempting `compose_system_prompt(..., channel="telegram")` raises `TypeError`.
 - [ ] `AccessLevel` enum is defined in `config/enums.py` with members `WORKER`, `PM_READONLY`, `TEAMMATE`, `CUSTOMER_SERVICE`. Verified by `python -c "from config.enums import AccessLevel; assert {e.name for e in AccessLevel} == {'WORKER', 'PM_READONLY', 'TEAMMATE', 'CUSTOMER_SERVICE'}"`.
-- [ ] `_resolve_compose_args(session_type, project, transport, chat_title=None, is_dm=False)` helper exists and is the **only** branch ladder mapping `SessionType + project + transport → (persona, access_level, channel)`. Both `agent/sdk_client.py` (the prompt-assembly site, formerly L3382–L3419) and `agent/session_executor.py` (the harness-route site, formerly L1563–L1629) call it. Verified by grep (see Verification table — no leftover ladder).
+- [ ] `_resolve_compose_args(session_type, project, transport, *, chat_title=None, is_dm=False, email_persona_requested=None)` helper exists and is the **only** branch ladder mapping `SessionType + project + transport + chat_title + is_dm → (persona, access_level)` (note: returns a 2-tuple, not 3-tuple — `channel` was dropped per cycle-5 Open Question 1). Both `agent/sdk_client.py` (the prompt-assembly site, formerly L3382–L3419) and `agent/session_executor.py` (the harness-route site, formerly L1563–L1629) call it. Verified by grep (see Verification table — no leftover ladder).
 - [ ] **Byte-stability (per-machine)**: on the local machine, fixture-equality holds:
     - `compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER)` is byte-identical to `load_system_prompt()` from main.
     - `compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, working_directory=W)` is byte-identical to `load_pm_system_prompt(W)` from main.
     - Asserted via fixtures at `tests/fixtures/{machine_name}/{dev,pm}_system_prompt_baseline.txt`. Test SKIPs (not FAILs) on machines without a captured baseline (clear pointer to `scripts/capture_persona_baseline.py`).
-- [ ] **Concrete persona × access × channel cells** (executable assertions, in `tests/unit/test_compose_system_prompt.py`):
-    - `compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, channel="email", working_directory=W)` returns a string that **contains** the project-manager overlay text and (if `Path(W)/CLAUDE.md` exists) the work-vault CLAUDE.md text, and **does not contain** `WORKER_RULES`.
-    - `compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER, channel="telegram")` returns a string that **starts with** `WORKER_RULES` (before the `\n\n---\n\n` separator) and contains the developer overlay text after the separator.
+- [ ] **Concrete persona × access cells** (executable assertions, in `tests/unit/test_compose_system_prompt.py`):
+    - `compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, working_directory=W)` returns a string that **contains** the project-manager overlay text and (if `Path(W)/CLAUDE.md` exists) the work-vault CLAUDE.md text, and **does not contain** `WORKER_RULES`.
+    - `compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER)` returns a string that **starts with** `WORKER_RULES` (before the `\n\n---\n\n` separator) and contains the developer overlay text after the separator.
     - `compose_system_prompt(PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY)` (no `working_directory=`) raises `ValueError` whose message names both `working_directory` and `PM_READONLY`.
     - `compose_system_prompt(PersonaType.DEVELOPER, "not-an-AccessLevel")` raises `TypeError`.
     - `compose_system_prompt(persona="invalid-string", access_level=AccessLevel.WORKER)` raises `ValueError` listing valid persona names.
-- [ ] Drafter `medium` parameter (already exists on `draft_message` at `bridge/message_drafter.py:1720`) now drives prompt selection. Verified by `_compose_drafter_prompt("telegram")` reproducing today's `DRAFTER_SYSTEM_PROMPT` byte-for-byte (snapshot test using captured-from-main string), and `_compose_drafter_prompt("email") != _compose_drafter_prompt("telegram")` (substantive difference).
+    - `compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER, channel="telegram")` raises `TypeError` (unexpected keyword argument). The signature must NOT silently accept `channel=`.
+- [ ] Drafter `medium` parameter (already exists on `draft_message` at `bridge/message_drafter.py:1720`) now drives prompt selection. Verified by `_compose_drafter_prompt("telegram")` reproducing today's `DRAFTER_SYSTEM_PROMPT` byte-for-byte against the **pre-refactor baseline** at `tests/fixtures/drafter_system_prompt_baseline.txt` (cycle-5 C5: must be captured from `main` BEFORE the refactor lands), and `_compose_drafter_prompt("email") != _compose_drafter_prompt("telegram")` (substantive difference).
 - [ ] `email.persona` per-project override flows through `_resolve_compose_args` (not as inline branches in either picker site). Verified by the parametrized table in `tests/unit/test_resolve_compose_args.py`.
 - [ ] All seven open architectural questions are answered in the plan body (above) with rationale.
 - [ ] PM/Dev/Teammate/Customer-Service sessions continue to work with no observable behaviour change for the existing four overlays. Verified by running an actual PM session locally via `python -m tools.valor_session create --role pm --message "ping"` and inspecting the worker log for `[persona-compose-failed]` (must be absent) and `Persona overlay loaded: name=project-manager` (must be present with the same prompt_chars as before).
@@ -613,22 +635,13 @@ Each criterion is **executable** — written as an assertion the validator can r
 
 ## Open Questions
 
-These are the top-3 design questions remaining for `/do-plan-critique` to decide. All blocking architectural questions from the original issue (the seven Solution-Sketch questions) are resolved in Technical Approach above; what remains here are reviewer judgment calls.
+All three reviewer judgment-call questions from cycle 4 have been **resolved by cycle-5 critic verdicts**. They are recorded below as decisions, not open questions, for traceability.
 
-1. **Keep `channel=` parameter on the composer despite no current cell using it?** The plan resolves Question 4 as "no channel awareness in the working agent." Two options:
-    - **(A) Keep the parameter** (plan default). `compose_system_prompt(persona, access_level, channel=None, ...)` accepts but ignores `channel`. Adds 1 parameter to the signature, no behavior. Forward-compat for the moment a real use surfaces. Adds a tiny risk that the parameter rots and gets misused.
-    - **(B) Drop the parameter**. `compose_system_prompt(persona, access_level, ...)`. Cleaner now; the picker passes only `(persona, access_level)`. If channel-awareness becomes needed, add the parameter then. Tighter design, no rot risk.
-    - **Default in plan: A**, on the grounds that the issue title literally calls it out as a tuple member. Reviewer can flip to B.
+1. **Resolved — DROP `channel=` parameter on the composer.** No current cell consumes it; forward-compat for zero consumers is rot bait (Simplifier verdict, cycle-5 NIT N1). Composer signature is now `compose_system_prompt(persona: PersonaType, access_level: AccessLevel, *, project=None, working_directory=None) -> str`. The drafter retains its existing `medium=` parameter (real consumer) and gets a separate `_compose_drafter_prompt(medium)` helper — channel/medium awareness lives there exclusively. Build phase must NOT add `channel=` to the working-agent composer.
 
-2. **`AccessLevel.CUSTOMER_SERVICE` vs collapsing to a `CONVERSATIONAL` umbrella**: the customer-service overlay today is loaded via `_load_persona_overlay_with_log("customer-service", ...)` with no rails. Two options:
-    - **(A) 1:1 access level per overlay** (plan default). Four AccessLevel members. Trivial mapping, but argues against the orthogonality goal — `(persona × access_level)` looks square but is actually 4 cells along a diagonal.
-    - **(B) Collapse `TEAMMATE` + `CUSTOMER_SERVICE` into `CONVERSATIONAL`**. Three AccessLevel members. The persona overlay carries the action-orientation difference (customer-service.md is action-heavy; teammate.md is conversational-only). Tighter design, surfaces the orthogonality intent, but breaks the simple 1:1 mapping today and requires a small migration in `_resolve_compose_args`.
-    - **Default in plan: A**. Reviewer should evaluate B because it's the cleaner expression of the actual axes.
+2. **Resolved — KEEP 4 AccessLevel members (1:1 with personas).** `WORKER`, `PM_READONLY`, `TEAMMATE`, `CUSTOMER_SERVICE`. The simpler invariant ("each persona has exactly one access level it ever runs with") beats pre-paying for a hypothetical second cell (Simplifier verdict, cycle-5 NIT N2). The `AccessLevel` docstring records that today's mapping is 1:1; orthogonality is structural intent, not a current invariant. When a real second-cell use case appears, a follow-up plan handles consolidation (small change to a small enum).
 
-3. **File the voice-consolidation follow-up issue at plan-commit or at PR-merge?** This plan defers voice consolidation entirely (see Risk 4 / AGENT-VOICE.md Decision). Two options:
-    - **(A) File at PR-merge time** (plan default). Follow-up issue references the actual landed composer, including post-build line numbers, so it has accurate ground truth.
-    - **(B) File at plan-commit time as a placeholder**. Tracks the deferred work earlier; reduces risk of the deferred decision being forgotten. Issue body would need a "to be updated post-build" note for line numbers.
-    - **Default in plan: A**. Reviewer can flip to B if traceability beats accuracy at this stage.
+3. **Resolved — File voice-consolidation follow-up issue at PR-merge time.** The placeholder-now option trades accuracy for traceability; the cycle-4 plan already drifted line numbers in 14 days, so a placeholder filed at plan-commit would be stale within weeks (Operator verdict, cycle-5 NIT N3). Step 7 (Documentation) carries the explicit checklist item: after PR merges, file follow-up issue *"voice consolidation: shared voice.md segment"* with link to merged PR and line citations from landed code. Build phase must NOT file the placeholder issue mid-build.
 
 ---
 
