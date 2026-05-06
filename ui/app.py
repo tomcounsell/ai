@@ -56,7 +56,7 @@ def _filter_format_duration(seconds: float | None) -> str:
     if seconds is None:
         return "-"
     if seconds < 1:
-        return f"{round(seconds * 1000)}ms"
+        return "1s"
     if seconds < 60:
         return f"{round(seconds)}s"
     if seconds < 3600:

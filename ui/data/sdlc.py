@@ -880,7 +880,7 @@ def get_all_sessions(limit: int = 15) -> list[PipelineProgress]:
         else:
             inactive.append(p)
 
-    active.sort(key=lambda p: p.updated_at or p.created_at or 0, reverse=True)
+    active.sort(key=lambda p: p.started_at or p.created_at or 0, reverse=True)
     inactive.sort(key=_best_timestamp, reverse=True)
 
     return active + inactive[:limit]

@@ -229,27 +229,39 @@ h3 {
     font-size: 11px;
 }
 
+.status-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.status-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.status-meta {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
 .priority-icon {
-    display: inline-block;
-    width: 16px;
-    text-align: left;
     font-size: 12px;
+    flex-shrink: 0;
 }
 
 .status-label {
-    display: inline-block;
-    width: 48px;
-    text-align: left;
     font-size: 13px;
     font-weight: 500;
+    flex-shrink: 0;
 }
 
 .duration-label {
-    display: inline-block;
-    width: 32px;
-    text-align: left;
     font-size: 11px;
     color: var(--text-muted);
+    flex-shrink: 0;
 }
 
 /* Freshness chip — age since last_evidence_at (#1269).
@@ -258,8 +270,10 @@ h3 {
 .freshness-chip {
     display: inline-block;
     padding: 1px 6px;
-    margin: 0 4px;
+    min-width: 3ch;
+    text-align: center;
     font-size: 10px;
+    font-variant-numeric: tabular-nums;
     font-weight: 600;
     border-radius: 8px;
     line-height: 1.4;
@@ -283,7 +297,6 @@ h3 {
 .ghost-badge {
     display: inline-block;
     padding: 1px 6px;
-    margin: 0 4px;
     font-size: 10px;
     font-weight: 700;
     border-radius: 8px;
