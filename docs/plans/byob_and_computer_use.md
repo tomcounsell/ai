@@ -1,10 +1,12 @@
 ---
-status: Refresh
+status: Refresh (cycle N+1 revision)
 type: feature
 appetite: Medium
 owner: Valor
 created: 2026-05-02
 refreshed: 2026-05-06
+revision_cycle: N+1
+revised_for_critique: docs/plans/critique/byob_and_computer_use.md
 tracking: https://github.com/tomcounsell/ai/issues/1256
 last_comment_id: IC_kwDOEYGa088AAAABA-geYQ
 followups:
@@ -62,11 +64,13 @@ The work remaining under issue #1256 is **the three architectural questions m13v
 resolve, plus the executable-acceptance gap on the issue's user-facing criteria**. Specifically:
 
 1. **Multi-process real-Chrome serialization gap.** The shipped scheduler (`agent/session_pickup.py`) only
-   serializes within the worker process. If a developer runs a one-off session manually
-   (`python -m tools.valor_session create --needs-real-chrome ...`) while the worker is also picking up a
-   BYOB session, both processes can speak to the same Chrome DOM tree concurrently. PR #1277 explicitly punted
-   this case to "single-user serial discipline" without a guard. Per memory `feedback_prevention_over_cleanup`,
-   that's a gap, not a feature.
+   serializes within the worker process. Any consumer of BYOB MCP that bypasses the session machinery —
+   `claude -p "use byob_..."` directly, hook-spawned agents, dashboard maintenance scripts, sub-agent
+   invocations — collides silently with a worker-running session on the same Chrome tab. Per memory
+   `feedback_prevention_over_cleanup`, that's a gap, not a feature. **Cycle N+1 revision**: the lock
+   moves from session-creation (which only catches `valor-session create` callers) to the BYOB MCP
+   server entrypoint itself (which catches every consumer regardless of how the parent process was
+   spawned).
 2. **Chrome concurrency model decision is not documented in the SKILL/feature docs as a contract.** Operators
    reading `byob-browser-control.md` today see a description of *what serialization does* but not *what they
    may safely run concurrently*. The decision below makes that contract explicit.
@@ -422,31 +426,39 @@ selector cache is needed** — the bcu HTTP `get_window_state` round-trip domina
 
 The end-to-end data flow is unchanged from the shipped surface; this refresh adds three guards.
 
-### Track 1 — BYOB browser automation (post-refresh)
+### Track 1 — BYOB browser automation (post-refresh, cycle N+1 revision)
 
 ```
-agent (Claude Code) ──MCP──▶ byob MCP server (~/.byob via tsx)
+agent (Claude Code) ──MCP stdio──▶ python -m tools.byob.mcp_gate
+                                      │  (NEW: lock-acquire wrapper)
                                       │
-                                      ▼
-                              byob-bridge (~/.byob/bridges/<deviceId>.sock)
-                                      │
-                              Native Messaging
-                                      ▼
-                         Chrome MV3 extension (active tab)
-                                      │
-                                      ▼
-                            DOM/screenshot result up the chain
+                                      ▼ (lock free) os.execvp ──▶ tsx <byob-mcp.ts>
+                                                                          │
+                                                                          ▼
+                                                                  byob-bridge socket
+                                                                          │
+                                                                  Native Messaging
+                                                                          ▼
+                                                           Chrome MV3 extension (active tab)
+                                                                          │
+                                                                          ▼
+                                                                DOM/screenshot result up the chain
 
-Worker session-pick:
+mcp_gate flow on EVERY claude / claude -p invocation:
+  1. acquire_byob_session_lock(owner_id=f"mcp-gate-{os.getpid()}")
+  2. on BYOBSessionLockHeld → write JSON-RPC error → exit 1
+     (claude surfaces the message to the agent: "BYOB busy: session X
+      holding lock; see http://localhost:8500/sessions/X")
+  3. on success → os.execvp into real tsx invocation; stdio passes through
+  4. on parent claude exit → lock holder PID dies → liveness check + 30-min
+     staleness backstop reaps the lock on the next acquire attempt
+
+Worker session-pick (defense-in-depth, unchanged behavior):
   1. Read AgentSession.requires_real_chrome
-  2. If True, check no other running session has it True (shipped gate)
-  3. NEW (Decision 1): write ~/.byob/active-session.lock with PID + agent_session_id
-  4. On session end, remove lock (try/finally — always)
-
-Non-worker BYOB caller (dev session via --force-local):
-  1. Read ~/.byob/active-session.lock
-  2. If present and PID is alive, refuse to start with clear error
-  3. If present and PID is dead, log a warning + clean up + proceed
+  2. If True, check no other running session has it True (shipped gate at
+     agent/session_pickup.py:57-69, 425)
+  3. The mcp_gate handles the cross-process race; this gate handles the
+     within-process race
 ```
 
 ### Track 2 — Computer-use (post-refresh)
@@ -477,24 +489,43 @@ Electron-app retry path (Decision 3):
 
 ## Architectural Impact
 
-- **New files**: `tools/byob/lock.py` (~30 lines, two functions); two manual smoke artifacts under
-  `tests/manual/`; one integration test for the Electron retry path.
-- **Modified files**:
-  - `tools/computer/__init__.py` — add manifest-cache + Electron retry wrapper.
+- **New files (cycle N+1 revision)**:
+  - `tools/byob/__init__.py` (empty marker).
+  - `tools/byob/lock.py` (~50 lines: `acquire_byob_session_lock`, `release_byob_session_lock`,
+    `cleanup_stale_locks`, `BYOBSessionLockHeld` exception, plus a 30-min staleness backstop).
+  - `tools/byob/mcp_gate.py` (~40 lines: lock-acquire wrapper that `os.execvp`s into the real `tsx`
+    invocation; this is the file `_expected_entry()` registers as the BYOB MCP `command`).
+  - Three manual smoke artifacts under `tests/manual/`.
+  - `tests/unit/test_byob_lock.py`, `tests/unit/test_byob_mcp_gate.py`,
+    `tools/computer/tests/test_computer_use_integration.py::test_send_button_disambiguation_in_slack`.
+- **Modified files (cycle N+1 revision)**:
+  - `scripts/update/mcp_byob.py` — `_expected_entry()` registers `python -m tools.byob.mcp_gate`
+    as the `command`, with `tsx <byob-mcp.ts>` as its args (the gate `os.execvp`s after lock-acquire).
+  - `tools/computer/__init__.py` — manifest-cache + Electron retry wrapper + fail-loud
+    `MultipleSelectorMatches` exception in `_resolve_selector`.
   - `tools/computer/cli.py` — pass `selector=` through.
-  - `agent/session_pickup.py` — write/release `~/.byob/active-session.lock` around the BYOB-flagged
-    session run.
-  - `tools/valor_session.py` (CLI surface) — add `--force-local` flag with lock check.
-  - `docs/features/byob-browser-control.md` — document the global-serialization contract +
-    `--force-local` operator path.
-  - `docs/features/computer-use.md` — document the per-invocation budget + Electron retry.
-  - `.claude/skills/computer-use/SKILL.md` — document the `selector=` rule for Electron.
-- **No new dependencies.** All three decisions reuse stdlib (`fcntl`, `urllib.request`) and existing
-  modules.
-- **Coupling**: low. The lock file is filesystem-state, not a new model field. The Electron retry is
-  internal to `tools/computer/`. The CLI flag is additive.
-- **Reversibility**: full. Each guard is a pure addition; deleting `tools/byob/lock.py` and the wrapper
-  reverts to the shipped behavior with no cleanup cost.
+  - `agent/session_pickup.py` — kept as-is for defense-in-depth (no lock-write needed; the
+    mcp_gate covers it). Document the changed responsibility in the docstring.
+  - `tools/doctor.py` — add `check_byob_lock_freshness()` returning WARN if the lock is held but
+    stale or no backing AgentSession exists.
+  - `ui/app.py` (`/dashboard.json`) — add `byob_lock` keys: `holder_pid`, `holder_owner_id`,
+    `held_since_ts`, `is_stale`.
+  - `docs/features/byob-browser-control.md` — document the MCP-gate concurrency contract +
+    lock-file format + 30-min staleness backstop + dashboard URL for identifying holders.
+  - `docs/features/computer-use.md` — document the per-invocation budget (with measured numbers)
+    + Electron retry + fail-loud tie-break.
+  - `.claude/skills/computer-use/SKILL.md` — document the `selector=` rule for Electron and the
+    "Multiple matching elements" gotcha.
+- **Removed (cycle N+1 revision)**:
+  - The previously-planned `--force-local` / `--bypass-worker` flag on `tools/valor_session.py` is
+    NOT added. The MCP-gate covers every entry point regardless of how the parent process was
+    spawned, making the flag redundant (cycle N+1 critique C4).
+- **No new dependencies.** All changes reuse stdlib (`fcntl`, `urllib.request`, `os.kill`,
+  `os.execvp`) and existing modules.
+- **Coupling**: low. The lock file is filesystem-state, not a new model field. The Electron retry
+  is internal to `tools/computer/`. The MCP-gate is a transparent stdio wrapper.
+- **Reversibility**: full. Restoring the previous shipped behavior is `_expected_entry()` writing
+  `tsx` directly (one revert), plus deleting `tools/byob/`.
 
 ## Appetite
 
@@ -531,63 +562,140 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/byob_and_compu
 
 ### Key Elements
 
-- **`tools/byob/lock.py`**: New module. Two public functions —
-  `acquire_byob_session_lock(owner_id: str) -> None` (writes `~/.byob/active-session.lock` containing
-  `f"{os.getpid()}\n{owner_id}\n"` atomically; raises `BYOBSessionLockHeld(holding_pid, owner_id)` if
-  another live PID holds it) and `release_byob_session_lock(owner_id: str) -> None` (removes the file
-  iff its content matches our PID + owner_id; logs a warning otherwise). PID liveness check uses
-  `os.kill(pid, 0)` with `ProcessLookupError` swallowed.
-- **`agent/session_pickup.py` integration**: at the moment the worker picks a `requires_real_chrome=True`
-  session, call `acquire_byob_session_lock(agent_session.id)` *immediately before* the executor starts.
-  Wrap the entire session run in `try/finally` and call `release_byob_session_lock(agent_session.id)` in
-  the `finally`. **Idempotency**: if lock acquisition fails (already held by *this* same session — e.g.
-  resume case), proceed; if held by a different PID, abandon the pick (log + put session back in queue).
-- **`tools/valor_session.py --force-local`**: new flag. Refuses to run when `requires_real_chrome=True`
-  unless the lock is free or held by this PID. Error message:
-  `"BYOB session in progress: agent_session_id=X, pid=Y. View on dashboard: http://localhost:8500/sessions/X"`.
-- **`tools/computer/__init__.py` manifest cache + Electron retry**:
+- **`tools/byob/lock.py`**: New module. Three public functions —
+  - `acquire_byob_session_lock(owner_id: str) -> None`: writes `~/.byob/active-session.lock` containing
+    `f"{os.getpid()}\n{owner_id}\n{datetime.utcnow().isoformat()}\n"` atomically; raises
+    `BYOBSessionLockHeld(holding_pid, owner_id)` if another live PID holds it.
+  - `release_byob_session_lock(owner_id: str) -> None`: removes the file iff its content matches our
+    PID + owner_id; logs a warning otherwise.
+  - `cleanup_stale_locks() -> None`: idempotent reaper used at worker startup and `/update`.
+  - **PID liveness check** uses `os.kill(pid, 0)` with `ProcessLookupError` swallowed.
+  - **30-min staleness backstop (cycle N+1 critique C2)**: if the lock file's `mtime` is older than
+    30 minutes AND `os.kill(pid, 0)` succeeds (PID is alive — could be PID reuse) AND no
+    `AgentSession.query.filter(id == owner_id, status == "running").first()`, treat as orphaned
+    (log warning with both PIDs, remove, proceed). This addresses PID-reuse (a stale lock holding
+    PID 12345, where 12345 is now Spotlight or any unrelated process).
+- **`tools/byob/mcp_gate.py`**: New module. The lock-acquire wrapper registered as the BYOB MCP
+  `command` in `~/.claude.json`. Concretely:
+  ```python
+  # tools/byob/mcp_gate.py
+  import os, sys, json
+  from tools.byob.lock import acquire_byob_session_lock, BYOBSessionLockHeld
+
+  def main():
+      try:
+          acquire_byob_session_lock(owner_id=f"mcp-gate-{os.getpid()}")
+      except BYOBSessionLockHeld as e:
+          err = {
+              "jsonrpc": "2.0",
+              "error": {
+                  "code": -32000,
+                  "message": (
+                      f"BYOB busy: session {e.owner_id} holding lock "
+                      f"(PID {e.holding_pid}); see http://localhost:8500/sessions/{e.owner_id}"
+                  ),
+              },
+          }
+          sys.stdout.write(json.dumps(err) + "\n")
+          sys.exit(1)
+      # Hand off to real BYOB MCP; stdio passes through unchanged.
+      os.execvp(sys.argv[1], sys.argv[1:])
+  ```
+- **`scripts/update/mcp_byob.py::_expected_entry()` change**:
+  ```python
+  return {
+      "type": "stdio",
+      "command": sys.executable,  # the venv python
+      "args": ["-m", "tools.byob.mcp_gate", str(BYOB_TSX_BIN), str(BYOB_MCP_SERVER_TS)],
+      "env": {"BYOB_ALLOW_EVAL": "0"},
+  }
+  ```
+  The drift-heal already in place keeps `BYOB_ALLOW_EVAL=0` enforced. Existing tests covering this
+  function are updated (one assertion change).
+- **`agent/session_pickup.py` (defense-in-depth, unchanged behavior)**: keeps the existing within-process
+  `requires_real_chrome` gate. The MCP-gate handles cross-process. **Removed from cycle N+1 plan**: the
+  previously-planned `acquire_byob_session_lock(agent_session.id)` inside session_pickup is no longer
+  needed — every BYOB consumer goes through the MCP-gate which acquires the lock at MCP-spawn time.
+- **`tools/computer/__init__.py` manifest cache + Electron retry + fail-loud tie-break**:
   - Module-level `_BCU_BASE_URL_CACHE: str | None = None`. First call reads
     `$TMPDIR/background-computer-use/runtime-manifest.json` and caches `base_url`. Cache invalidates on
     `ConnectionRefusedError` (signal that bcu restarted and the URL may have changed).
   - Each action function gains an `if bundle_id in ELECTRON_BUNDLES and selector and is_stale_ref(resp): retry_once(...)`
     branch. Retry is exactly once; second failure returns the second-attempt error to the caller.
+  - **`_resolve_selector` change (cycle N+1 critique C1)**: when the role+label filter yields 2+
+    candidates and the selector does NOT contain `tie_break: "nearest"`, raise
+    `MultipleSelectorMatches(role, label, count, candidates_summary)` — fail-loud. Callers who want
+    Euclidean tie-break opt in via `selector["tie_break"] = "nearest"`.
+- **`tools/doctor.py` (cycle N+1 critique C2)**: new `check_byob_lock_freshness()` that returns WARN
+  if `~/.byob/active-session.lock` exists but (a) `mtime > 30 min ago`, OR (b) the lock's `owner_id`
+  has no running `AgentSession` row. Includes the holder PID and a copy-pasteable cleanup command in
+  the warning message.
+- **`ui/app.py` `/dashboard.json` (cycle N+1 critique C2)**: new top-level `byob_lock` block:
+  `{"holder_pid": int, "holder_owner_id": str, "held_since_ts": str, "is_stale": bool}` (or
+  `{"is_held": false}` when free). Surfaces the holder so the operator can see who's blocking BYOB
+  without trying to use it and getting refused.
 - **Smoke artifacts**:
   - `tests/manual/byob_authenticated_smoke.txt` — captured run of the agent calling `byob_navigate` to
     `https://github.com/notifications` + `byob_get_title` + `byob_screenshot` showing the user's logged-in
     notifications page. No `state.json` files in repo (verified by `git ls-files | grep state.json` →
-    empty). Captures the BYOB-down failure mode (kill `byob-bridge`, retry — operator-readable error).
+    empty).
+  - `tests/manual/byob_down_clarity_smoke.txt` — captures the BYOB-down failure mode (kill
+    `byob-bridge`, retry — operator-readable error). Split out from the authenticated smoke per cycle
+    N+1 nit N1.
+  - `tests/manual/byob_concurrent_mcp_smoke.txt` — captures the cycle N+1 B1 reproducer: spawn
+    `claude -p "use byob_get_title"` while a worker session holds the lock; assert the second
+    invocation surfaces the JSON-RPC error from the MCP-gate rather than silently colliding.
   - `tests/manual/bcu_no_cursor_smoke.txt` — captured run of `valor-computer click` against Notes.app
-    while the operator is actively typing in Mail.app; transcript shows operator's keystrokes continued
-    landing in Mail and the cursor did not jump.
-  - `tests/manual/valor_computer_latency_baseline.txt` — `time valor-computer list_apps` × 10 with
-    median + p95 captured.
+    while the operator is actively typing in Mail.app.
+  - `tests/manual/valor_computer_latency_baseline.txt` — already captured this cycle; see Spike Results.
+  - `tests/manual/selector_resolver_perf_baseline.txt` — already captured this cycle; see Spike
+    Results.
+  - `tests/manual/bcu_electron_retry_smoke.txt` — captures the Decision 3 retry path on a real Slack
+    window.
 - **`.claude/skills/computer-use/SKILL.md`**: add an "Electron app rule" subsection — always pass
-  `selector=` for known-Electron windows. List the Electron `bundle_id` set inline.
-- **`docs/features/byob-browser-control.md`**: new "Concurrency contract" subsection — global serial,
-  `--force-local` escape hatch, lock file path, dashboard link to identify holders.
-- **`docs/features/computer-use.md`**: new "Latency budget" + "Electron retry" subsections.
+  `selector=` for known-Electron windows; list the Electron `bundle_id` set inline. **Add a "Gotcha —
+  multiple matching elements" subsection (cycle N+1 critique C1)** describing the
+  `MultipleSelectorMatches` failure mode and how to disambiguate.
+- **`docs/features/byob-browser-control.md`**: new "Concurrency contract" subsection — global serial via
+  the MCP-gate, lock file path + format, 30-min staleness backstop, dashboard URL for identifying
+  holders.
+- **`docs/features/computer-use.md`**: new "Latency budget" subsection (citing measured spike-r2
+  numbers) + "Electron retry" subsection (citing the fail-loud tie-break and spike-r3 numbers).
 
 ### Flow
 
 **BYOB session (worker path):**
-1. Worker picks session with `requires_real_chrome=True`.
-2. Calls `acquire_byob_session_lock(agent_session.id)`. If held by a different live PID, abandons pick.
-3. Runs the session.
-4. `finally`: `release_byob_session_lock(agent_session.id)`.
+1. Worker picks session with `requires_real_chrome=True`. The within-process gate at
+   `agent/session_pickup.py:57-69` ensures no other worker session is running with the flag.
+2. Worker spawns `claude -p "..."` to execute the session.
+3. `claude` reads `~/.claude.json` and spawns the BYOB MCP child via the registered command:
+   `python -m tools.byob.mcp_gate <tsx> <byob-mcp.ts>`.
+4. The mcp_gate calls `acquire_byob_session_lock("mcp-gate-<pid>")`. **First spawn**: lock is free, gate
+   `os.execvp`s into `tsx <byob-mcp.ts>`; stdio passes through.
+5. When `claude` exits, the MCP child is reaped; the lock-holder PID dies; the next acquire reaps via
+   liveness check.
 
-**BYOB session (manual `--force-local` path):**
-1. Operator runs `python -m tools.valor_session create --needs-real-chrome --force-local --message "..."`.
-2. CLI calls `acquire_byob_session_lock("manual-{os.getpid()}")`. If held, prints error + exits 1.
-3. Runs in-process (no worker handoff).
-4. `finally`: releases lock.
+**BYOB collision (any cross-process attacker):**
+1. Operator (or hook, or sub-agent) runs `claude -p "use byob_get_title ..."` while the worker is
+   holding the lock.
+2. `claude` spawns the BYOB MCP child via the registered command: `python -m tools.byob.mcp_gate ...`.
+3. The mcp_gate calls `acquire_byob_session_lock` and gets `BYOBSessionLockHeld` (PID is alive, lock
+   is fresh).
+4. The gate writes a JSON-RPC error to stdout: `"BYOB busy: session X holding lock (PID Y); see
+   http://localhost:8500/sessions/X"` and exits 1.
+5. The agent in the second `claude` invocation sees the error message and can surface it to the user.
+   No silent collision.
 
 **Computer-use call (Electron app):**
 1. Skill invokes `valor-computer click <window_id> --selector '{"role":"button","label":"Send"}'`.
 2. CLI calls `tools.computer.click(window_id, selector=...)`.
 3. First HTTP attempt → bcu returns stale_ref.
-4. Wrapper detects `bundle_id` is Electron (Slack), re-fetches `get_window_state`, resolves selector to
-   fresh ref, retries action.
-5. Second attempt succeeds → result returned.
+4. Wrapper detects `bundle_id` is Electron (Slack), re-fetches `get_window_state`, runs
+   `_resolve_selector`. **If exactly one match**: retries action, returns result.
+5. **If 2+ matches and no `tie_break`**: raises `MultipleSelectorMatches` — caller sees an actionable
+   error listing the candidates rather than a silent miss-click on the wrong element.
+6. **If 2+ matches and `tie_break="nearest"`**: picks closest by Euclidean distance to original bounds,
+   retries action.
 
 ### Technical Approach
 
@@ -597,19 +705,35 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/byob_and_compu
 - **PID liveness check**: `os.kill(pid, 0)` — raises `ProcessLookupError` if dead, `PermissionError` if
   alive but owned by another user (treat as alive). On `ProcessLookupError`, the lock is stale; log
   warning, remove, proceed.
+- **30-min staleness backstop (cycle N+1 C2)**: parse the lock file's ISO timestamp; if `(now - ts) >
+  30 min` AND `os.kill(pid, 0)` succeeds (PID is alive but ancient — could be PID reuse) AND
+  `AgentSession.query.filter(id == owner_id, status == "running").first() is None`, treat as
+  orphaned: log warning with both PIDs and the staleness duration, remove, proceed. Real BYOB sessions
+  do not legitimately hold the lock for 30+ minutes without releasing it.
 - **No `fcntl` lock on the file itself**: a single file rename is atomic. Holding `flock` over the
   duration of an entire session is fragile (unhandled crash leaves the lock; we'd need a stale-flock
-  cleanup step anyway). Liveness check + atomic rename is simpler and matches the failure mode
-  (worker crash → `finally` releases; orphan reaper on next worker start cleans up via the same
-  liveness check at session-pick time).
+  cleanup step anyway). Liveness check + atomic rename + 30-min staleness backstop is simpler and
+  matches the failure mode (claude exit → child reap → liveness check on next acquire reaps the lock;
+  worker startup runs `cleanup_stale_locks`; `/update` runs `cleanup_stale_locks` post-worker-restart).
+- **MCP-gate stdio passthrough**: `os.execvp` is the simplest correct primitive. The gate is the same
+  process as `tsx <byob-mcp.ts>` after exec — Claude Code's MCP client sees one PID; stdio file
+  descriptors persist across the exec; environment is inherited from the gate's process (which
+  inherits from `claude`, which inherits the `BYOB_ALLOW_EVAL=0` env from `~/.claude.json`'s
+  `mcpServers.byob.env`).
 - **Manifest cache invalidation**: on `ConnectionRefusedError`, set `_BCU_BASE_URL_CACHE = None` and
   retry the manifest read once. If the retry also fails, raise `ComputerUseUnavailableError`.
 - **Stale-ref detection**: parse the bcu response. Initial implementation: HTTP status 422 OR JSON body
-  containing `{"error": "stale_ref"}`. Validated in build by spike-r3.
-- **Selector → fresh-ref resolution**: walk the AX tree returned by `get_window_state`, match by
-  `role` first, then `label` exact match, then nearest-bounds (Euclidean distance from selector's
-  `bounds` center to the candidate's center). If multiple candidates tie, prefer the visible one. If
-  none match, return `{"error": "selector_no_match", "selector": ..., "tree_size": N}`.
+  containing `{"error": "stale_ref"}`. Validated in build by capturing bcu's actual response shape
+  against a real Slack window (build-phase observation; if the shape differs, fall back to
+  text-match on the response message and check in the captured fixture).
+- **Selector → fresh-ref resolution (cycle N+1 revision)**: walk the AX tree returned by
+  `get_window_state`, match by `role` first, then `label` exact match. **Then**:
+  - If exactly one candidate matches: return it.
+  - If 2+ match and `selector["tie_break"] == "nearest"`: sort by Euclidean distance from selector's
+    `bounds` center to candidate's center, prefer the visible one, return the first.
+  - If 2+ match and no `tie_break` key: raise `MultipleSelectorMatches(role, label, count,
+    candidates_summary)` — fail-loud (cycle N+1 C1).
+  - If none match: return `{"error": "selector_no_match", "selector": ..., "tree_size": N}`.
 
 ### What's NOT in scope
 
@@ -632,20 +756,33 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/byob_and_compu
 - [ ] **Lock held by dead PID**: same module silently cleans up the stale lock and proceeds. Test:
   write a lock containing PID `999999` (very unlikely to be live), call acquire, assert success and
   the lock file now contains the test's PID.
-- [ ] **Worker crash mid-session**: simulate by killing the worker process while a BYOB session is
-  running; assert that on next worker start, the orphan-reaper sees the dead-PID lock, cleans it up,
-  and the session is retried.
-- [ ] **Electron stale-ref retry succeeds**: integration test against a live Slack window — query
-  `get_window_state`, scroll to invalidate AX, click via selector, assert second attempt succeeds.
+- [ ] **Lock held by stale-but-alive PID (cycle N+1 C2 PID-reuse)**: write a lock dated 31 minutes ago
+  with `os.getpid()` (alive PID, mtime > 30 min, no backing AgentSession). Call acquire, assert
+  success and a `WARN`-level log line containing both the holder PID and the staleness duration.
+- [ ] **Concurrent `claude -p` racing the worker (cycle N+1 B1 reproducer)**: spawn the worker holding
+  a BYOB session (which means the MCP-gate spawned by that worker holds the lock), then run
+  `subprocess.run(["claude", "-p", "use byob_get_title"])` from a separate shell. Assert the second
+  invocation's MCP child surfaces the JSON-RPC error from the gate (`"BYOB busy: session ..."`) rather
+  than touching Chrome. Pytest test in `tests/integration/test_byob_mcp_gate_concurrency.py`.
+- [ ] **MCP-gate exec passthrough**: with the lock free, run the gate with a fake `tsx` (an
+  `argv[1]` pointing at a small Python script that prints a known marker to stdout). Assert the
+  marker appears on the gate's stdout — proves `os.execvp` correctly hands off stdio.
+- [ ] **Electron stale-ref retry succeeds (single match)**: integration test against a live Slack
+  window — query `get_window_state`, scroll to invalidate AX, click via selector, assert second
+  attempt succeeds.
 - [ ] **Electron stale-ref retry fails twice**: integration test where the target element is removed
   between calls; assert the wrapper returns the second-attempt error to the caller (does not retry
   a third time).
+- [ ] **Selector matches multiple elements, no `tie_break` (cycle N+1 C1)**: integration test where
+  two matching elements exist (e.g. two `Send` buttons in the AX tree). Assert
+  `_resolve_selector` raises `MultipleSelectorMatches` and the action wrapper surfaces it to the
+  caller as `{"error": "multiple_selector_matches", "candidates": [...]}` rather than picking one.
+- [ ] **Selector matches multiple elements, `tie_break='nearest'` (opt-in)**: same fixture as above
+  but with `selector["tie_break"] = "nearest"`. Assert the resolver picks the closest by Euclidean
+  distance and the action proceeds.
 - [ ] **Non-Electron stale-ref**: assert wrapper does NOT retry (returns the first-attempt error).
 - [ ] **Manifest-cache invalidation**: mock bcu to return ConnectionRefusedError on first call after a
   cached read; assert the wrapper re-reads the manifest exactly once and retries.
-- [ ] **`--force-local` lock collision**: with worker holding the lock, run
-  `tools.valor_session create --needs-real-chrome --force-local`; assert exit 1 with the error message
-  containing the holding session id and dashboard URL.
 
 ### Empty/Invalid Input Handling
 
@@ -655,32 +792,72 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/byob_and_compu
   (label is optional in selector dicts; documented in SKILL).
 - [ ] `acquire_byob_session_lock(owner_id="")` → `ValueError` (empty owner_id is a programmer error,
   fail loudly).
+- [ ] `acquire_byob_session_lock(owner_id="x" * 1024)` → `ValueError` (oversized owner_id, fail
+  loudly — prevents lock-file abuse).
 
 ### Error State Rendering
 
 - [ ] `BYOBSessionLockHeld` exception's `__str__` includes the holding PID, the holding owner_id, and
   the dashboard URL `http://localhost:8500/sessions/<owner_id>` so the operator can see who's holding
   it.
+- [ ] `MultipleSelectorMatches` exception's `__str__` includes the role, label, count, and a summary
+  of each candidate's bounds + visibility. Helps the developer see what their selector actually
+  matched.
 - [ ] `valor-computer` Electron-retry-failed error includes the original stale-ref response and the
   selector that didn't resolve, so debugging shows what was searched for vs. what was in the tree.
+- [ ] `tools/doctor.py` BYOB-lock-stale warning includes the holder PID, the staleness duration in
+  minutes, the owner_id, and a copy-pasteable cleanup command (`rm ~/.byob/active-session.lock`).
 
 ## Test Impact
 
-- [ ] `tests/integration/test_byob_scheduler.py` — **UPDATE**: extend with a multi-process test that
-  spawns a child process attempting to acquire the lock while the parent holds it. Assert child raises
-  `BYOBSessionLockHeld`. Existing same-process serialization tests stay unchanged.
-- [ ] `tests/unit/test_mcp_byob_registrar.py` — **NO CHANGE**.
+- [ ] `tests/integration/test_byob_scheduler.py` — **NO CHANGE in cycle N+1 revision**: the within-process
+  scheduler gate at `agent/session_pickup.py` keeps its existing behavior. The cross-process race is
+  now covered by the new `test_byob_mcp_gate_concurrency.py` (below) — keeping these tests separated
+  by responsibility.
+- [ ] `tests/unit/test_mcp_byob_registrar.py` — **UPDATE**: `_expected_entry()` now returns
+  `{"command": sys.executable, "args": ["-m", "tools.byob.mcp_gate", str(BYOB_TSX_BIN),
+  str(BYOB_MCP_SERVER_TS)], ...}`. Existing assertion on `command == str(BYOB_TSX_BIN)` flips to
+  the new shape; existing drift-heal tests still pass once the assertion is updated.
 - [ ] `tests/unit/test_byob_skill_triggers.py` — **NO CHANGE**.
 - [ ] `tools/computer/tests/test_computer_use.py` — **UPDATE**: add cases for the manifest cache
-  (first call reads, second call uses cache, ConnectionRefusedError invalidates) and for the
-  Electron retry path (mocked bcu returns stale_ref then success on second call).
+  (first call reads, second call uses cache, ConnectionRefusedError invalidates), the Electron retry
+  path (mocked bcu returns stale_ref then success on second call), and **the fail-loud tie-break
+  cycle N+1 critique C1**: `test_resolve_selector_raises_multiple_selector_matches` and
+  `test_resolve_selector_tie_break_nearest_opts_in`.
 - [ ] `tools/computer/tests/test_computer_use_integration.py` — **UPDATE**: add live Slack
-  Electron-retry test (skipped when bcu+Slack not available, marked `@pytest.mark.integration`).
+  Electron-retry test, plus `test_send_button_disambiguation_in_slack` (cycle N+1 C1) — exercises
+  the failure mode against a real Slack window with two thread-Send buttons in the AX tree. Both
+  marked `@pytest.mark.integration`; skipped when bcu+Slack not available.
 - [ ] **New: `tests/unit/test_byob_lock.py`** — covers `tools/byob/lock.py`:
-  acquire/release happy path, dead-PID cleanup, live-PID refusal, atomic-rename behavior under
-  filesystem-fault simulation.
+  acquire/release happy path, dead-PID cleanup, live-PID refusal, **30-min staleness backstop with
+  PID-reuse simulation (cycle N+1 C2)**, atomic-rename behavior under filesystem-fault simulation,
+  `cleanup_stale_locks` idempotency.
+- [ ] **New: `tests/unit/test_byob_mcp_gate.py`** — covers `tools/byob/mcp_gate.py`:
+  - Lock-free path: gate `os.execvp`s into a fake `tsx` (a Python script printing a known marker);
+    assert marker appears on stdout.
+  - Lock-held path: pre-write a lock with this PID; run the gate; assert it writes the JSON-RPC error
+    envelope to stdout and exits 1.
+- [ ] **New: `tests/integration/test_byob_mcp_gate_concurrency.py` (cycle N+1 B1 reproducer)** —
+  the test the cycle N+1 critique explicitly asked for:
+  spawn process A acquiring the lock; from process B, run a `subprocess.run` that executes the
+  gate with a fake tsx; assert process B's stdout contains the JSON-RPC error and exit code is 1.
+  Marked `@pytest.mark.slow` because it spawns subprocesses.
+- [ ] **New: `tests/unit/test_doctor_byob_lock.py`** — covers `tools/doctor.py::check_byob_lock_freshness`:
+  no-lock returns OK; fresh-lock returns OK; stale-lock returns WARN with the holder PID + cleanup
+  command in the message; lock with no backing AgentSession returns WARN.
+- [ ] **New: dashboard `byob_lock` block tests** — extend `tests/unit/test_dashboard.py` (or the
+  closest existing dashboard test) with: free state returns `{"is_held": false}`; held state returns
+  `{"holder_pid": ..., "holder_owner_id": ..., "held_since_ts": ..., "is_stale": ...}`.
 - [ ] **New manual smoke artifacts** (not pytest-runnable; checked into `tests/manual/`):
-  `byob_authenticated_smoke.txt`, `bcu_no_cursor_smoke.txt`, `valor_computer_latency_baseline.txt`.
+  - `byob_authenticated_smoke.txt` (AC-1).
+  - `byob_down_clarity_smoke.txt` (AC-3, split out per cycle N+1 nit N1).
+  - `byob_concurrent_mcp_smoke.txt` (cycle N+1 B1 manual reproducer).
+  - `bcu_no_cursor_smoke.txt` (AC-2).
+  - `bcu_electron_retry_smoke.txt` (AC-5).
+  - `valor_computer_latency_baseline.txt` (AC-4) — already captured this cycle.
+  - `selector_resolver_perf_baseline.txt` (cycle N+1 C3) — already captured this cycle.
+- [ ] **DELETED from prior plan revision**: `tests/unit/test_valor_session_force_local.py`.
+  Per cycle N+1 critique C4, the `--force-local` flag is no longer added; this test is not created.
 
 ## Rabbit Holes
 
@@ -696,14 +873,33 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/byob_and_compu
 
 ## Risks
 
-### Risk 1: Lock file leaks if both the worker and `--force-local` sessions crash on the same machine
+### Risk 1: Lock file leaks (cycle N+1 C2 — addressed with PID-reuse + 30-min backstop + observability)
 
-**Impact:** A stale `~/.byob/active-session.lock` blocks all future BYOB sessions until manually
-removed.
-**Mitigation:** Liveness check at every `acquire_byob_session_lock` call uses `os.kill(pid, 0)`. On
-`ProcessLookupError`, the wrapper logs a warning and removes the stale lock. The orphan-reaper that
-runs on every worker startup also calls `acquire_byob_session_lock("orphan-cleanup")` which
-exercises the same path. Stale locks heal automatically within one worker startup cycle.
+**Impact:** A stale `~/.byob/active-session.lock` blocks all future BYOB MCP spawns until manually
+removed. Three failure modes:
+1. Process holding the lock crashed without `finally`-cleanup (the MCP-gate's lock release happens
+   when the gate's PID dies; SIGKILL kills the process before any cleanup can run).
+2. **PID reuse**: a stale lock containing PID 12345 — that PID is now held by an unrelated process
+   (Spotlight, bash, anything). Naive `os.kill(pid, 0)` returns 0 because the PID is alive, so the
+   lock looks held forever.
+3. Long-running dev machine never invokes `/update`, so the `cleanup_stale_locks` step in
+   `scripts/update/run.py` never fires.
+
+**Mitigation (cycle N+1 C2):**
+
+- **Liveness check** (`os.kill(pid, 0)`) catches case 1 — dead PIDs reap immediately on next acquire.
+- **30-min staleness backstop** catches case 2: if the lock's mtime is older than 30 minutes AND the
+  PID is alive AND no `AgentSession.query.filter(id == owner_id, status == "running").first()`, the
+  lock is treated as orphaned regardless of `os.kill` result. Real BYOB sessions never legitimately
+  hold the lock for 30+ minutes without a release. Reap with `WARN`-level log including both PIDs.
+- **`tools/doctor.py::check_byob_lock_freshness`** surfaces the leak proactively: any operator
+  running `python -m tools.doctor` sees a WARN line with the holder PID, staleness duration, and a
+  copy-pasteable cleanup command.
+- **Dashboard `byob_lock` widget at `/dashboard.json`** shows the holder + age live; the operator can
+  spot a leaked lock without trying to use BYOB and getting refused.
+- **`cleanup_stale_locks` runs at worker startup** (already planned) AND **at every
+  `acquire_byob_session_lock` call** (the staleness check is part of the acquire path itself).
+  No reliance on `/update` — case 3 above is fixed by making cleanup intrinsic to the acquire path.
 
 ### Risk 2: Manifest cache returns wrong URL after bcu restart with port change
 
@@ -713,26 +909,32 @@ fresh manifest.
 restarts (rare, only on update or manual stop/start) trigger this naturally. Long-lived processes
 calling `tools.computer` (the worker, in particular) recover within one failed call.
 
-### Risk 3: Electron retry masks a genuine "the button you wanted disappeared" failure
+### Risk 3: Electron retry masks a genuine "the button you wanted disappeared" failure (cycle N+1 C1)
 
-**Impact:** A skill thinks it clicked Send when in fact the message UI navigated away and Send no
-longer exists.
-**Mitigation:** Selector resolution prefers exact `role` + `label` match; nearest-bounds is only used
-to break ties between equal `role`+`label` matches. Documented in SKILL: "if your selector matches
-multiple elements after re-query, the wrapper picks the closest to the original bounds — pass tighter
-selectors if that's wrong." On second-attempt failure, the wrapper returns `{"error": ...}` with the
-fresh tree size so the caller can see how big the AX tree got between attempts.
+**Impact:** A skill thinks it clicked Send when in fact the message UI navigated away, the AX tree
+re-rendered, and a different `Send` button (e.g. in a different thread or modal) is now closest to the
+original bounds. The shipped behavior at `tools/computer/__init__.py:193` silently picks that one.
+
+**Mitigation (cycle N+1 C1):** Selector tie-break is **fail-loud by default**. When 2+ candidates
+match equal `role` + `label`, `_resolve_selector` raises `MultipleSelectorMatches(role, label,
+count, candidates_summary)` rather than guessing. Callers who knowingly want Euclidean tie-breaking
+opt in via `selector["tie_break"] = "nearest"`. The SKILL.md "Multiple matching elements" gotcha
+section documents the failure mode with a concrete example (two `Send` buttons in stacked Slack
+threads). Integration test
+`tools/computer/tests/test_computer_use_integration.py::test_send_button_disambiguation_in_slack`
+exercises the failure mode against a real Slack window.
 
 ## Race Conditions
 
-### Race 1: Two processes try to write `~/.byob/active-session.lock` simultaneously
+### Race 1: Two processes try to acquire the lock simultaneously
 
 **Location:** `tools/byob/lock.py::acquire_byob_session_lock`
-**Trigger:** Worker picks a BYOB session at the same instant a developer types
-`--force-local` on their CLI.
+**Trigger:** Two `claude -p` invocations spawn their MCP-gate children at the same instant. Both
+gates call `acquire_byob_session_lock` in parallel.
 **Mitigation:** Atomic `os.rename` over a `tempfile.NamedTemporaryFile` in the same directory means
-exactly one of the two writes wins. The loser of the race re-reads the lock and sees the winner's
-PID — and refuses cleanly.
+exactly one of the two writes wins. The loser re-reads the lock and sees the winner's PID — and
+refuses cleanly with `BYOBSessionLockHeld`. Each gate then writes its JSON-RPC error (winner doesn't,
+loser does) and exits.
 
 ### Race 2: bcu restarts between the manifest read and the HTTP call
 
@@ -747,9 +949,26 @@ recovers.
 **Location:** `tools/computer/__init__.py` — Electron retry path
 **Trigger:** Slack receives a new message between the re-fetch and the retry click; the AX tree
 shifts down.
-**Mitigation:** The retry uses `bounds`-based tie-breaking; a small downward shift still resolves to
-the same target. A large shift (modal opens) means the selector probably no longer corresponds to the
-intended element — the second attempt fails and the caller sees the fresh-tree error.
+**Mitigation (cycle N+1 revised):** The resolver is fail-loud on 2+ matches by default — a small
+downward shift that still produces a unique role+label match resolves cleanly; a large shift that
+duplicates the match (modal opens with another `Send` button) raises `MultipleSelectorMatches`
+rather than guessing. Callers see an actionable error listing the candidates. If the caller wants
+the historical Euclidean-distance tie-break, they pass `selector["tie_break"] = "nearest"` (opt-in
+exactly like the original implementation).
+
+### Race 4 (cycle N+1 new): Lock holder dies between `os.kill` check and atomic rename
+
+**Location:** `tools/byob/lock.py::acquire_byob_session_lock` — the staleness-reclaim path
+**Trigger:** Lock holder is alive at the moment of the `os.kill(pid, 0)` check, dies between that
+check and the atomic rename, and a different process (PID reuse) takes its PID before our rename
+lands.
+**Mitigation:** This race is benign because of the staleness backstop. If the original holder dies
+and the lock's mtime is < 30 min, our acquire returns `BYOBSessionLockHeld` (we believe the new
+PID is the holder; it isn't, but the next acquire after the new PID dies — or after 30 min, if it
+turns out to be a long-lived unrelated process — will reap). If the lock's mtime is > 30 min and
+the lock has no backing AgentSession, the staleness backstop reaps regardless. The race window is
+narrow and the failure mode degrades to "next BYOB invocation gets a fast error and tries again",
+not silent corruption.
 
 ## No-Gos (Out of Scope)
 
@@ -775,71 +994,131 @@ intended element — the second attempt fails and the caller sees the fresh-tree
 ## Update System
 
 The shipped `/update` flow already covers BYOB pin bumps (`config/byob_pin.json`), bcu pin bumps
-(`config/bcu_pin.json`), and the `mcp_byob` registrar. This refresh adds:
+(`config/bcu_pin.json`), and the `mcp_byob` registrar. This refresh adds (cycle N+1 revisions in
+**bold**):
 
-1. **Orphan-lock cleanup step** in `scripts/update/run.py`: after the worker restart, run a
+1. **`mcp_byob.verify_byob_mcp` re-runs on the new `_expected_entry()` shape**. The drift-heal
+   already in place will detect that any older `command: "<tsx>"` registration is wrong and
+   rewrite it to `command: <python>`, `args: ["-m", "tools.byob.mcp_gate", <tsx>, <byob-mcp.ts>]`.
+   No new code needed in `scripts/update/run.py` — the registrar's existing repair path covers it.
+2. **Orphan-lock cleanup step** in `scripts/update/run.py`: after the worker restart, run a
    one-shot `python -c "from tools.byob.lock import cleanup_stale_locks; cleanup_stale_locks()"`
-   that removes `~/.byob/active-session.lock` if its PID is dead. **Why here**: a crashed worker
-   leaves a lock; `/update` is the natural recovery point. Failure of this step is non-fatal
-   (warning, not error).
-2. **No new pin files.** Decisions 1–3 are pure code changes; nothing pinned.
-3. **No `/setup` changes.** Operators who already ran the existing setup are good to go; the new
+   that removes `~/.byob/active-session.lock` if its PID is dead OR if it's older than 30 minutes
+   without a backing running AgentSession. **Why here**: belt-and-suspenders alongside the
+   intrinsic staleness check at every acquire — operators who pull updates regularly get prompt
+   cleanup; operators who don't are still covered by the acquire-time check. Failure of this step
+   is non-fatal (warning, not error).
+3. **No new pin files.** Decisions 1–3 are pure code changes; nothing pinned.
+4. **No `/setup` changes.** Operators who already ran the existing setup are good to go; the new
    surface is additive on top.
-4. **No new dependencies for `/update` to install.** All stdlib.
+5. **No new dependencies for `/update` to install.** All stdlib.
 
 ## Agent Integration
 
-- **No new MCP tools.** Decision 2 explicitly keeps `valor-computer` on CLI.
-- **No new CLI entry points.** `tools/byob/lock.py` is internal; agents do not call it directly.
+- **No new MCP tools surfaced to agents.** Decision 2 explicitly keeps `valor-computer` on CLI.
+  `tools/byob/mcp_gate.py` is registered as the BYOB MCP `command` but it `os.execvp`s into the
+  real BYOB MCP server immediately; from the agent's perspective the BYOB tool surface
+  (`byob_navigate`, `byob_get_title`, `byob_screenshot`, etc.) is unchanged.
+- **No new CLI entry points.** `tools/byob/lock.py` and `tools/byob/mcp_gate.py` are internal —
+  the gate is invoked by Claude Code's MCP loader via `~/.claude.json`, never by an agent
+  directly. `python -m tools.byob.mcp_gate` is intentionally not declared in `pyproject.toml
+  [project.scripts]` because it is not a user-facing surface.
 - **`valor-computer click/type_text/...` surface gains a `--selector` flag** (already declared in
   `pyproject.toml [project.scripts]` as `valor-computer = "tools.computer.cli:main"`). The flag
-  takes a JSON string: `--selector '{"role": "button", "label": "Send"}'`. The `computer-use`
-  SKILL body is updated to reference this in the Electron section.
-- **`tools/valor_session.py` gains `--force-local`**, an opt-in operator flag for the rare manual
-  BYOB session that bypasses the worker. Documented in `docs/features/byob-browser-control.md`'s
-  Concurrency Contract section. **Not added to bridge-side enqueue paths** — bridges should never
-  bypass the worker.
-- **Integration test the agent can actually invoke**:
+  takes a JSON string: `--selector '{"role": "button", "label": "Send"}'`. **`tie_break`** is
+  optional inside the JSON (cycle N+1 critique C1): omit it for fail-loud behavior on 2+ matches,
+  set it to `"nearest"` to opt into Euclidean tie-breaking. The `computer-use` SKILL body is
+  updated to reference this in the Electron section.
+- **`tools/valor_session.py` is NOT modified in cycle N+1 revision.** The previously-planned
+  `--force-local` / `--bypass-worker` flag is removed (cycle N+1 critique C4): with the MCP-gate
+  in place, every BYOB consumer is gated regardless of how the parent process was spawned, so a
+  CLI flag for "manual BYOB sessions" is redundant. Operators who need a manual BYOB session run
+  `claude -p "use byob_navigate ..."` directly — the MCP-gate handles serialization.
+- **Integration tests the agent can actually invoke**:
   - `valor-computer click 12345 --selector '{"role":"button","label":"Send","bounds":[100,200,80,30]}'`
     against Slack, with the AX tree shifted between query and click — assert the click landed on
     the right element. Lives in `tools/computer/tests/test_computer_use_integration.py`.
+  - `valor-computer click 12345 --selector '{"role":"button","label":"Send"}'` against a Slack
+    window with two `Send` buttons in stacked threads — assert the wrapper raises
+    `MultipleSelectorMatches` rather than picking one. Same test file (cycle N+1 C1 reproducer).
+  - Spawn `claude -p "use byob_get_title"` while a worker BYOB session holds the lock — assert
+    the second invocation surfaces the MCP-gate JSON-RPC error rather than touching Chrome
+    (cycle N+1 B1 reproducer in
+    `tests/integration/test_byob_mcp_gate_concurrency.py`).
 
 ## Documentation
 
 - [ ] Update `docs/features/byob-browser-control.md` with a new "Concurrency Contract" section
-  documenting the global-machine-serialization model, the `~/.byob/active-session.lock` file
-  format, the `--force-local` operator escape hatch, and the dashboard URL for identifying lock
-  holders.
+  documenting:
+  - The MCP-gate model (every `claude` / `claude -p` invocation passes through
+    `tools/byob/mcp_gate.py` which acquires `~/.byob/active-session.lock` before exec'ing into
+    `tsx <byob-mcp.ts>`).
+  - The `~/.byob/active-session.lock` file format (`pid\nowner_id\niso_timestamp`).
+  - The 30-min staleness backstop and PID-reuse-resilience semantics (cycle N+1 C2).
+  - The `python -m tools.doctor` health check that surfaces stale locks.
+  - The dashboard `byob_lock` widget at `/dashboard.json`.
+  - **Removed from this section in cycle N+1**: the `--force-local` operator escape hatch is no
+    longer in scope (critique C4).
 - [ ] Update `docs/features/computer-use.md` with a new "Latency Budget" subsection (Decision 2 +
-  baseline numbers from the smoke artifact) and a new "Electron Retry" subsection (Decision 3,
-  including the explicit list of retried `bundle_id`s).
-- [ ] Update `.claude/skills/computer-use/SKILL.md` with the "Always pass `selector=` for Electron
-  apps" rule, including the canonical `bundle_id` set inline.
+  measured spike-r2 numbers: median 81.6 ms / p95 86.9 ms via /bin/bash on the build machine) and
+  a new "Electron Retry" subsection (Decision 3, including the explicit list of retried
+  `bundle_id`s and the fail-loud tie-break semantics).
+- [ ] Update `.claude/skills/computer-use/SKILL.md` with:
+  - The "Always pass `selector=` for Electron apps" rule, including the canonical `bundle_id` set
+    inline.
+  - **A "Gotcha — multiple matching elements" subsection (cycle N+1 C1)** showing the two-Send-buttons
+    failure mode, the `MultipleSelectorMatches` exception, and the `tie_break='nearest'` opt-in.
 - [ ] Update `docs/features/README.md` index entries for BYOB and computer-use to reflect the
-  refresh's additions (concurrency contract, Electron retry).
+  refresh's additions (concurrency contract via MCP-gate, lock observability, Electron retry,
+  fail-loud selector matching).
 - [ ] Cross-link this refresh ↔ #1256 in both directions; update issue #1256 with a comment that
-  Decisions 1–3 are now resolved.
+  Decisions 1–3 are now resolved (with the cycle N+1 revisions to Decision 1 + Decision 3
+  highlighted).
 - [ ] Migrate this plan to `docs/plans/done/byob_and_computer_use.md` post-merge of the refresh PR
   (per repo plan-migration policy).
 
 ## Success Criteria
 
-**Technical:**
+**Technical (cycle N+1 revisions in **bold**):**
 - [ ] `tools/byob/lock.py` exists; `acquire_byob_session_lock` / `release_byob_session_lock` /
-  `cleanup_stale_locks` covered by `tests/unit/test_byob_lock.py`.
-- [ ] `agent/session_pickup.py` writes the lock at session-pick time and releases in `finally`.
-  Verified by `tests/integration/test_byob_scheduler.py`'s new multi-process case.
-- [ ] `tools/valor_session.py --force-local` flag refuses to start when the lock is held by a live
-  PID, with an error message containing the holding session id and a dashboard link.
+  `cleanup_stale_locks` covered by `tests/unit/test_byob_lock.py`. **Includes the 30-min staleness
+  backstop and PID-reuse handling (cycle N+1 C2).**
+- [ ] **`tools/byob/mcp_gate.py` exists; lock-held + lock-free paths covered by
+  `tests/unit/test_byob_mcp_gate.py`.** The gate `os.execvp`s into the real `tsx <byob-mcp.ts>` on
+  the lock-free path; emits a JSON-RPC error envelope and exits 1 on the lock-held path.
+- [ ] **`scripts/update/mcp_byob.py::_expected_entry()` returns the new shape with
+  `command=sys.executable` and `args=["-m", "tools.byob.mcp_gate", <tsx>, <byob-mcp.ts>]`.**
+  Drift-heal in place rewrites any older registration. Covered by an updated assertion in
+  `tests/unit/test_mcp_byob_registrar.py`.
+- [ ] **Cross-process collision reproducer**: spawn worker session holding the BYOB lock; spawn a
+  separate `claude -p` invocation; assert the second's MCP child surfaces the JSON-RPC error from
+  the gate. Covered by `tests/integration/test_byob_mcp_gate_concurrency.py`.
+- [ ] `agent/session_pickup.py` keeps its existing within-process `requires_real_chrome` gate. **No
+  new lock-write inside session_pickup** (cycle N+1 revision: the MCP-gate handles the lock; the
+  scheduler stays defense-in-depth).
+- [ ] **The `--force-local` flag is NOT added to `tools/valor_session.py`** (cycle N+1 critique
+  C4). Verified by absence of the flag in `python -m tools.valor_session create --help`.
 - [ ] `tools/computer/__init__.py` caches the manifest read across calls in the same Python
   process; `ConnectionRefusedError` invalidates the cache. Covered by
   `tools/computer/tests/test_computer_use.py`.
 - [ ] `tools/computer/__init__.py` retries exactly once on stale-ref for known-Electron windows
   with a `selector=` argument; non-Electron windows do not retry. Covered by
   `tools/computer/tests/test_computer_use_integration.py`.
+- [ ] **`tools/computer/__init__.py::_resolve_selector` raises `MultipleSelectorMatches` when 2+
+  candidates match equal role+label and `tie_break` is not set; opts in to Euclidean tie-break
+  when `tie_break="nearest"`** (cycle N+1 C1). Covered by both unit tests
+  (`tools/computer/tests/test_computer_use.py`) and the live-Slack integration test
+  (`test_send_button_disambiguation_in_slack`).
+- [ ] **`tools/doctor.py::check_byob_lock_freshness` returns WARN when the lock is stale or its
+  owner_id has no running AgentSession** (cycle N+1 C2). Covered by
+  `tests/unit/test_doctor_byob_lock.py`.
+- [ ] **`/dashboard.json` exposes a top-level `byob_lock` block** (cycle N+1 C2). Covered by an
+  extended dashboard test.
 - [ ] All shipped tests still pass (`pytest tests/unit/test_mcp_byob_registrar.py
   tests/unit/test_byob_skill_triggers.py tests/integration/test_byob_scheduler.py`).
-- [ ] `pytest tests/unit/test_byob_lock.py tools/computer/tests/test_computer_use.py
+- [ ] `pytest tests/unit/test_byob_lock.py tests/unit/test_byob_mcp_gate.py
+  tests/integration/test_byob_mcp_gate_concurrency.py tests/unit/test_doctor_byob_lock.py
+  tools/computer/tests/test_computer_use.py
   tools/computer/tests/test_computer_use_integration.py` passes.
 
 **Executable user-facing acceptance criteria (proof artifacts required):**
@@ -870,14 +1149,35 @@ command and a captured proof artifact path.
     --needs-real-chrome --message "navigate to about:blank"`.
   - Assert: the agent's response includes "BYOB bridge not running — start Chrome and run
     `~/.byob/start.sh`" or equivalent.
-  - Captured in `tests/manual/byob_authenticated_smoke.txt` as the trailing failure-mode appendix.
+  - **Proof artifact (cycle N+1 nit N1, split out): `tests/manual/byob_down_clarity_smoke.txt`**
+    (separate from the AC-1 authenticated smoke).
 
-- [ ] **AC-4 (Decision 2 budget): `time valor-computer list_apps` median across 10 runs is < 200 ms
-  on this machine.**
-  - Run: `for i in $(seq 1 10); do time valor-computer list_apps > /dev/null; done`.
-  - Capture median + p95 in `tests/manual/valor_computer_latency_baseline.txt`.
-  - If median ≥ 200 ms: file followup issue requesting MCP-now evaluation; this AC is recorded as
-    "deferred decision" and the plan still ships.
+- [ ] **AC-4 (Decision 2 budget): `valor-computer list_apps` median across 50 runs is < 200 ms.**
+  - **Captured in cycle N+1 revision pass**: median 81.6 ms / p95 86.9 ms via /bin/bash on Tom's
+    MacBook Pro (Darwin 25.4.0). Well under the 200 ms threshold (>2x headroom) and the 500 ms
+    flip-to-MCP-now threshold (>6x headroom).
+  - **Caveat**: bcu opt-in not set on the measurement machine. Re-measurement on a build machine
+    with bcu enabled is queued as a non-blocking confirmation step. If real-bcu numbers blow past
+    200 ms, escalate to MCP-now in a followup issue.
+  - Proof artifact: `tests/manual/valor_computer_latency_baseline.txt` (already committed).
+
+- [ ] **AC-6 (cycle N+1 B1 reproducer): "concurrent `claude -p` BYOB call is refused with an
+  actionable JSON-RPC error"**
+  - Setup: a worker session is running with `requires_real_chrome=True` (lock is held by the
+    MCP-gate child of that session).
+  - Run: `claude -p "use byob_get_title"` from a separate shell.
+  - Assert: stdout contains `"BYOB busy: session ..."` and exit code is 1; Chrome's active tab is
+    untouched.
+  - Proof artifact: `tests/manual/byob_concurrent_mcp_smoke.txt`.
+
+- [ ] **AC-7 (cycle N+1 C1 reproducer): "selector matching 2+ elements raises `MultipleSelectorMatches`"**
+  - Setup: a Slack window with two stacked threads, both showing a `Send` button in their
+    respective compose areas.
+  - Run: `valor-computer click <slack_window_id> --selector '{"role":"button","label":"Send"}'`.
+  - Assert: the command exits non-zero with an error message naming both candidates and their
+    bounds; Chrome/Slack state is unchanged.
+  - Proof artifact: captured inline in `tools/computer/tests/test_computer_use_integration.py`'s
+    test name (the test exists; this AC verifies the manual reproducer with a real Slack window).
 
 - [ ] **AC-5 (Decision 3 Electron retry): "click into Slack via selector after AX tree shifts and
   succeed on the first wrapper call (which internally retries once)"**
@@ -899,66 +1199,98 @@ command and a captured proof artifact path.
 
 ## Team Orchestration
 
-### Team Members
+### Team Members (cycle N+1 revision)
 
-- **Builder (decision-1-lock)**
+- **Builder (lock + MCP-gate)**
   - Name: byob-lock-builder
-  - Role: `tools/byob/lock.py`, `agent/session_pickup.py` integration, `tools/valor_session.py
-    --force-local`, multi-process integration test extension.
+  - Role: `tools/byob/__init__.py`, `tools/byob/lock.py`, `tools/byob/mcp_gate.py`,
+    `scripts/update/mcp_byob.py::_expected_entry()` change (registers the gate as `command`),
+    unit tests for both new modules, integration test for cross-process reproducer, registrar
+    test update. **Does NOT touch `tools/valor_session.py`** (cycle N+1 critique C4).
   - Agent Type: builder
   - Resume: true
 
-- **Builder (decision-2-3-computer-use)**
+- **Builder (computer-use changes)**
   - Name: computer-use-refresh-builder
-  - Role: `tools/computer/__init__.py` manifest cache + Electron retry, `--selector` flag in
-    `tools/computer/cli.py`, unit + integration tests for both, capture latency baseline artifact.
+  - Role: `tools/computer/__init__.py` manifest cache + Electron retry + **fail-loud
+    `MultipleSelectorMatches` (cycle N+1 C1)**, `--selector` flag in `tools/computer/cli.py`,
+    unit + integration tests for all three changes (mocked unit + live-Slack integration).
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (observability — cycle N+1 C2)**
+  - Name: byob-observability-builder
+  - Role: `tools/doctor.py::check_byob_lock_freshness`, dashboard `byob_lock` block in
+    `ui/app.py`, unit tests for both. Depends on byob-lock-builder for `tools/byob/lock.py`'s API.
   - Agent Type: builder
   - Resume: true
 
 - **Builder (docs + smoke artifacts)**
   - Name: docs-smoke-builder
-  - Role: Capture three manual smoke artifacts, update `docs/features/byob-browser-control.md` and
-    `docs/features/computer-use.md`, update `.claude/skills/computer-use/SKILL.md`.
+  - Role: Capture remaining manual smoke artifacts (latency + resolver baselines already done in
+    revision pass), update `docs/features/byob-browser-control.md`,
+    `docs/features/computer-use.md`, `.claude/skills/computer-use/SKILL.md`,
+    `docs/features/README.md`.
   - Agent Type: builder
   - Resume: true
 
 ### Coordination
 
-- Decision-1-lock and Decision-2-3-computer-use builders run in **parallel worktrees** (per memory
+- byob-lock-builder and computer-use-refresh-builder run in **parallel worktrees** (per memory
   `feedback_parallel_builds_need_worktrees`):
   - byob-lock-builder: `.worktrees/byob-lock-1256/`
   - computer-use-refresh-builder: `.worktrees/computer-use-refresh-1256/`
-- docs-smoke-builder runs **after** both code builders merge, in `.worktrees/byob-docs-smoke-1256/`.
-- One PR per worktree; merge order: byob-lock → computer-use-refresh → docs-smoke.
+- byob-observability-builder runs **after byob-lock-builder merges** (depends on
+  `tools.byob.lock`'s API), in `.worktrees/byob-observability-1256/`.
+- docs-smoke-builder runs **after** all three code builders merge, in
+  `.worktrees/byob-docs-smoke-1256/`.
+- One PR per worktree; merge order: byob-lock → (computer-use-refresh in parallel) →
+  byob-observability → docs-smoke.
 
 ## Step by Step Tasks
 
-### Task 1: `tools/byob/lock.py` + cross-process guard
+### Task 1: `tools/byob/{lock,mcp_gate}.py` + MCP-server entrypoint registration
 
 **Worktree:** `.worktrees/byob-lock-1256/`
 
 1. Create `tools/byob/__init__.py` (empty) and `tools/byob/lock.py` with the three public functions
    (`acquire_byob_session_lock`, `release_byob_session_lock`, `cleanup_stale_locks`) and the
-   `BYOBSessionLockHeld` exception.
+   `BYOBSessionLockHeld` exception. **Includes 30-min staleness backstop and PID-reuse handling**
+   per cycle N+1 critique C2.
 2. Write `tests/unit/test_byob_lock.py` covering: happy-path acquire/release, dead-PID cleanup,
-   live-PID refusal, atomic-rename behavior under simulated failure, `cleanup_stale_locks` idempotency.
-3. Wire `acquire_byob_session_lock` / `release_byob_session_lock` into `agent/session_pickup.py`
-   around the BYOB-flagged session run. Add a multi-process integration test in
-   `tests/integration/test_byob_scheduler.py` that spawns a child subprocess attempting the acquire.
-4. Add `--force-local` flag to `tools/valor_session.py`'s `create` subcommand. Wire the lock check.
-   Add a CLI-level test (`tests/unit/test_valor_session_force_local.py` or extend an existing test).
-5. Wire `cleanup_stale_locks` into `scripts/update/run.py` as a non-fatal post-worker-restart step.
+   live-PID refusal, **30-min staleness reclaim with PID-reuse simulation**, atomic-rename
+   behavior under simulated failure, `cleanup_stale_locks` idempotency.
+3. **Create `tools/byob/mcp_gate.py`**: lock-acquire wrapper that emits a JSON-RPC error envelope
+   on `BYOBSessionLockHeld` and otherwise `os.execvp`s into `argv[1:]` (passing stdio through
+   unchanged).
+4. **Write `tests/unit/test_byob_mcp_gate.py`**: lock-free path execs into a fake `tsx` script
+   that prints a known marker; lock-held path writes the JSON-RPC error envelope to stdout and
+   exits 1.
+5. **Update `scripts/update/mcp_byob.py::_expected_entry()`**: change `command` from
+   `str(BYOB_TSX_BIN)` to `sys.executable`, change `args` to
+   `["-m", "tools.byob.mcp_gate", str(BYOB_TSX_BIN), str(BYOB_MCP_SERVER_TS)]`. Update the
+   matching assertion in `tests/unit/test_mcp_byob_registrar.py`. The drift-heal already in
+   place will rewrite older registrations on the next `/update`.
+6. **Write `tests/integration/test_byob_mcp_gate_concurrency.py`** (cycle N+1 B1 reproducer):
+   pre-write a lock containing this PID; spawn a `subprocess.run(["python", "-m",
+   "tools.byob.mcp_gate", ...])`; assert stdout contains the JSON-RPC error and exit code is 1.
+7. Wire `cleanup_stale_locks` into `scripts/update/run.py` as a non-fatal post-worker-restart step
+   (belt-and-suspenders alongside the intrinsic acquire-time staleness check).
+8. **NOT in scope (cycle N+1 critique C4)**: `tools/valor_session.py --force-local` /
+   `--bypass-worker` flag is not added. The MCP-gate covers every entry point.
 
-### Task 2: `tools/computer/__init__.py` manifest cache + Electron retry
+### Task 2: `tools/computer/__init__.py` manifest cache + Electron retry + fail-loud tie-break
 
 **Worktree:** `.worktrees/computer-use-refresh-1256/`
 
-1. Add `_BCU_BASE_URL_CACHE` module-level cache to `tools/computer/__init__.py`. Update the manifest
-   read to populate / read from cache. Add `ConnectionRefusedError` invalidation.
-2. Add the Electron retry wrapper to each action function (`click`, `type_text`, `set_value`, `drag`,
-   `perform_secondary_action`). Use `electron_bundles.py` for the bundle_id check.
-3. Implement selector → fresh-ref resolution: walk AX tree from `get_window_state`, match by role +
-   label + nearest-bounds.
+1. Add `_BCU_BASE_URL_CACHE` module-level cache to `tools/computer/__init__.py`. Update the
+   manifest read to populate / read from cache. Add `ConnectionRefusedError` invalidation.
+2. Add the Electron retry wrapper to each action function (`click`, `type_text`, `set_value`,
+   `drag`, `perform_secondary_action`). Use `electron_bundles.py` for the bundle_id check.
+3. **Update `_resolve_selector` (cycle N+1 critique C1)**: when 2+ candidates match equal
+   role+label and `selector["tie_break"]` is not `"nearest"`, raise `MultipleSelectorMatches(role,
+   label, count, candidates_summary)` rather than silently sorting by Euclidean distance.
+   Define the exception class at module top alongside `ComputerUseUnavailableError`.
 4. Add `--selector` flag to `tools/computer/cli.py` for each affected subcommand.
 5. Update `tools/computer/tests/test_computer_use.py`:
    - manifest cache hit/miss tests
@@ -966,50 +1298,172 @@ command and a captured proof artifact path.
    - mocked Electron retry path (stale_ref → success on retry)
    - non-Electron stale_ref does NOT retry
    - empty selector → ValueError
+   - **`test_resolve_selector_raises_multiple_selector_matches` (cycle N+1 C1)**: build an AX tree
+     with two equal-role+label nodes; assert `_resolve_selector` raises.
+   - **`test_resolve_selector_tie_break_nearest_opts_in`**: same fixture; pass
+     `selector["tie_break"]="nearest"`; assert it returns the closest match.
 6. Update `tools/computer/tests/test_computer_use_integration.py`:
    - live Slack stale-ref retry (skipped if Slack/bcu unavailable)
-7. Capture `tests/manual/valor_computer_latency_baseline.txt`:
-   `for i in $(seq 1 10); do { time valor-computer list_apps > /dev/null; } 2>> /tmp/lat.txt; done`
-   then median + p95.
+   - **`test_send_button_disambiguation_in_slack` (cycle N+1 C1)**: open two Slack threads with
+     visible compose areas; assert `valor-computer click --selector '{"role":"button","label":"Send"}'`
+     surfaces `MultipleSelectorMatches` rather than picking one.
 
-### Task 3: Smoke artifacts + docs
+### Task 3: Observability — doctor check + dashboard widget (cycle N+1 C2)
 
-**Worktree:** `.worktrees/byob-docs-smoke-1256/` (runs after Tasks 1 & 2 merge)
+**Worktree:** `.worktrees/byob-observability-1256/` (runs after Task 1 merges)
 
-1. Capture `tests/manual/byob_authenticated_smoke.txt` per AC-1 + AC-3.
-2. Capture `tests/manual/bcu_no_cursor_smoke.txt` per AC-2.
-3. Capture `tests/manual/bcu_electron_retry_smoke.txt` per AC-5.
-4. Update `docs/features/byob-browser-control.md`:
-   - Add "Concurrency Contract" section with `~/.byob/active-session.lock` format, `--force-local`
-     escape hatch, dashboard link template.
-5. Update `docs/features/computer-use.md`:
-   - Add "Latency Budget" section citing the baseline numbers from Task 2's artifact.
+1. Add `tools/doctor.py::check_byob_lock_freshness()`: returns OK when no lock; OK when fresh and
+   backed by a running AgentSession; WARN when stale (mtime > 30 min) or missing-AgentSession.
+   Warning message includes the holder PID, owner_id, staleness duration, and copy-pasteable
+   `rm` cleanup command.
+2. Write `tests/unit/test_doctor_byob_lock.py`: covers no-lock, fresh-lock, stale-lock,
+   missing-AgentSession.
+3. Add `byob_lock` block to `/dashboard.json` in `ui/app.py`. Surface fields: `is_held`,
+   `holder_pid`, `holder_owner_id`, `held_since_ts`, `is_stale`. Reads
+   `~/.byob/active-session.lock` lazily on each dashboard request (cheap; lock file is small).
+4. Extend `tests/unit/test_dashboard.py` with the byob_lock block tests.
+
+### Task 4: Smoke artifacts + docs
+
+**Worktree:** `.worktrees/byob-docs-smoke-1256/` (runs after Tasks 1, 2, 3 merge).
+**Depends On**: Task 1 (lock + mcp_gate), Task 2 (computer-use changes), Task 3 (observability).
+
+1. Capture `tests/manual/byob_authenticated_smoke.txt` per AC-1.
+2. **Capture `tests/manual/byob_down_clarity_smoke.txt` per AC-3** (cycle N+1 nit N1: split out
+   from the authenticated smoke into its own artifact for reviewer clarity).
+3. **Capture `tests/manual/byob_concurrent_mcp_smoke.txt` per AC-6** (cycle N+1 B1 manual
+   reproducer): pre-spawn a worker BYOB session; from a separate shell run
+   `claude -p "use byob_get_title"`; capture the JSON-RPC error and exit code.
+4. Capture `tests/manual/bcu_no_cursor_smoke.txt` per AC-2.
+5. Capture `tests/manual/bcu_electron_retry_smoke.txt` per AC-5.
+6. **`tests/manual/valor_computer_latency_baseline.txt`** — already captured this revision pass.
+   Verify it's checked in and referenced from `docs/features/computer-use.md`.
+7. **`tests/manual/selector_resolver_perf_baseline.txt`** — already captured this revision pass.
+   Verify it's checked in and referenced from `docs/features/computer-use.md`.
+8. Update `docs/features/byob-browser-control.md`:
+   - Add "Concurrency Contract" section with the MCP-gate model, the
+     `~/.byob/active-session.lock` format, the 30-min staleness backstop, the doctor check, and
+     the dashboard widget.
+   - **Removed (cycle N+1 C4)**: the `--force-local` operator escape hatch is not documented
+     because it is not added.
+9. Update `docs/features/computer-use.md`:
+   - Add "Latency Budget" section citing measured numbers from
+     `valor_computer_latency_baseline.txt`.
    - Add "Electron Retry" section listing the bundle_ids and the once-only retry semantics.
-6. Update `.claude/skills/computer-use/SKILL.md` with the Electron `selector=` rule.
-7. Update `docs/features/README.md` index entries for BYOB and computer-use.
-8. Post a comment on issue #1256 referencing this refresh plan and the three Decisions, then close
-   the issue at PR merge.
+   - **Add a "Selector matching — fail-loud" subsection (cycle N+1 C1)** with the
+     `MultipleSelectorMatches` example and the `tie_break='nearest'` opt-in.
+10. Update `.claude/skills/computer-use/SKILL.md`:
+    - Electron `selector=` rule.
+    - **"Gotcha — multiple matching elements" subsection (cycle N+1 C1)**.
+11. Update `docs/features/README.md` index entries for BYOB and computer-use.
+12. Post a comment on issue #1256 referencing this refresh plan and the three Decisions plus the
+    cycle N+1 revisions, then close the issue at PR merge.
 
 ## Verification
 
-- [ ] `pytest tests/unit/test_byob_lock.py tests/integration/test_byob_scheduler.py
-  tools/computer/tests/test_computer_use.py tools/computer/tests/test_computer_use_integration.py`
-  all pass.
+- [ ] `pytest tests/unit/test_byob_lock.py tests/unit/test_byob_mcp_gate.py
+  tests/integration/test_byob_mcp_gate_concurrency.py tests/unit/test_doctor_byob_lock.py
+  tests/unit/test_mcp_byob_registrar.py tools/computer/tests/test_computer_use.py
+  tools/computer/tests/test_computer_use_integration.py` all pass.
 - [ ] `python scripts/check_prerequisites.py docs/plans/byob_and_computer_use.md` reports green.
-- [ ] All three smoke artifacts present and non-empty under `tests/manual/`.
+- [ ] All five smoke artifacts present and non-empty under `tests/manual/`:
+  `byob_authenticated_smoke.txt`, `byob_down_clarity_smoke.txt`,
+  `byob_concurrent_mcp_smoke.txt`, `bcu_no_cursor_smoke.txt`, `bcu_electron_retry_smoke.txt`.
+  Plus the two already-committed baselines: `valor_computer_latency_baseline.txt`,
+  `selector_resolver_perf_baseline.txt`.
 - [ ] `python -m ruff format .` and `python -m ruff check .` are clean on the changed files.
 - [ ] Doc validators (`validate_documentation_section.py`, `validate_test_impact_section.py`) pass
   on this plan file.
-- [ ] Issue #1256 closed with a comment summarizing the three Decisions and linking the smoke
-  artifacts.
+- [ ] Issue #1256 closed with a comment summarizing the three Decisions, the cycle N+1 revisions
+  (B1 lock-at-MCP-entry, B2 measured spike, C1 fail-loud tie-break, C2 lock observability, C4
+  flag removal), and the smoke artifacts.
 
 ## Open Questions
 
-None blocking. Two recorded for the build phase:
+None blocking. Two recorded for the build phase (downgraded from the prior cycle's "deferred to
+build" framing per cycle N+1 critique B2: spike-r2 + spike-r3 ran during this revision pass):
 
 1. **bcu's exact stale-ref response shape** (HTTP status code + JSON body) — to be observed during
-   spike-r3 in build phase 0. If the shape differs from the expectation in Decision 3, the wrapper
-   falls back to text-match on the response message.
-2. **Median latency of `valor-computer list_apps`** on the build machine — to be measured during
-   build phase 0. If ≥ 500 ms, file followup issue for MCP-now evaluation; this plan still ships
-   with the CLI surface.
+   build phase 0 against a real Slack window. If the shape differs from the expectation in
+   Decision 3 (HTTP 422 OR `{"error": "stale_ref"}`), the wrapper falls back to text-match on the
+   response message and the captured fixture is committed in
+   `tools/computer/tests/test_computer_use.py::test_stale_ref_detection_real_response`.
+2. **Real-bcu confirmation of the `valor-computer list_apps` latency** — the cycle N+1 spike-r2
+   measurement ran with bcu disabled (median 81.6 ms / p95 86.9 ms via /bin/bash, well under the
+   200 ms threshold). The bcu HTTP loopback adds ~1–10 ms on top. Re-run the same benchmark on a
+   build machine with bcu opted in to confirm the budget. If real-bcu numbers blow past 200 ms,
+   file a followup issue for MCP-now evaluation; this plan still ships with the CLI surface.
+
+---
+
+## Revision Pass — Cycle N+1
+
+This revision pass addressed the cycle-N critique (`docs/plans/critique/byob_and_computer_use.md`):
+verdict NEEDS REVISION with 2 blockers, 4 concerns. All 6 findings are addressed below; one nit
+(N1) was also addressed because it was cheap. Nit N2 (Task 3 dependency declaration) is addressed
+by the new Task 4 explicit `Depends On` line.
+
+### Blockers resolved
+
+- **B1 — Lock-guard layer**: Decision 1 was rewritten. The lock is now acquired by
+  `tools/byob/mcp_gate.py`, registered as the BYOB MCP `command` in `~/.claude.json` via
+  `_expected_entry()`. Every consumer of BYOB MCP — interactive `claude`, `claude -p`, hook-spawned
+  agents, dashboard scripts, sub-agents — passes through the gate. The previously-planned lock
+  acquisition at `agent/session_pickup.py` and `tools/valor_session.py --force-local` is replaced by
+  this single architecturally-correct site. `agent/session_pickup.py` keeps its existing within-process
+  scheduler gate as defense-in-depth. New integration test
+  `tests/integration/test_byob_mcp_gate_concurrency.py` is the cycle N+1 reproducer the critique
+  asked for.
+
+- **B2 — Spikes ran NOW, not deferred**: Both spike-r2 (CLI latency) and spike-r3 (selector-resolver
+  perf) were measured during this revision pass and committed as artifacts at
+  `tests/manual/valor_computer_latency_baseline.txt` and
+  `tests/manual/selector_resolver_perf_baseline.txt`. The measured numbers are pasted into the
+  Decisions section.
+  - Spike-r2 result: median 81.6 ms / p95 86.9 ms via /bin/bash (the realistic skill path). >2x
+    headroom on the 200 ms threshold; >6x headroom on the 500 ms flip-to-MCP-now threshold.
+  - Spike-r3 result: 100-node tree resolves in 0.013 ms median; 1000-node stress in 0.15 ms. The
+    bcu HTTP `get_window_state` round-trip dominates the retry path; pre-resolved selector
+    caching is NOT needed.
+  - Decision 2 (CLI surface) and Decision 3 (one-time retry with tree re-fetch + resolver pass)
+    are confirmed with real numbers.
+
+### Concerns resolved
+
+- **C1 — Selector tie-break silent miss-click**: `_resolve_selector` is now fail-loud by default.
+  When 2+ candidates match equal role+label and `selector["tie_break"]` is not `"nearest"`, the
+  resolver raises `MultipleSelectorMatches(role, label, count, candidates_summary)`. Callers opt in
+  to Euclidean tie-break by passing `selector["tie_break"]="nearest"` explicitly. The SKILL.md
+  gains a "Gotcha — multiple matching elements" subsection. New integration test
+  `test_send_button_disambiguation_in_slack` exercises the failure mode against a real Slack window.
+
+- **C2 — Lock-leak observability**: Three new mitigations:
+  - 30-minute staleness backstop inside `acquire_byob_session_lock` (resilient to PID reuse).
+  - `tools/doctor.py::check_byob_lock_freshness` surfaces stale locks with copy-pasteable cleanup.
+  - Dashboard `byob_lock` widget at `/dashboard.json` shows holder PID, owner, age, and is_stale.
+  No reliance on `/update`-gated cleanup; the staleness check is intrinsic to every acquire.
+
+- **C3 — Selector-resolver perf**: Resolved by running spike-r3 (above). Resolver is invisible
+  against the bcu HTTP cost; no pre-resolved cache needed.
+
+- **C4 — `--force-local` misnamed and redundant**: The flag is removed entirely from the plan.
+  With the MCP-gate covering every entry point (B1's fix), there is no need for a CLI flag whose
+  purpose is to wire a lock check around manual BYOB invocations — the lock check now lives at
+  the MCP-server entrypoint regardless of how the parent process was spawned.
+
+### Nits resolved
+
+- **N1 — AC-3 artifact split**: `byob_down_clarity_smoke.txt` is now its own file (separate from
+  `byob_authenticated_smoke.txt`) so the Test Impact section's artifact list aligns with what
+  reviewers actually see.
+
+- **N2 — Task dependency declaration**: Task 4 (formerly Task 3) now starts with an explicit
+  `**Depends On**: Task 1 (lock + mcp_gate), Task 2 (computer-use changes), Task 3
+  (observability)` line.
+
+### Build readiness
+
+The plan is now build-ready. All 2 blockers and 4 concerns from the cycle-N critique are
+addressed; the architectural direction (lock-at-MCP-entry, fail-loud selector matching, intrinsic
+staleness backstop, measured spike numbers) is concrete and testable. Builders can pick up Tasks
+1, 2, 3, 4 in the orchestration order specified above.
