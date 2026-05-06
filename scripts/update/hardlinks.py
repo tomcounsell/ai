@@ -82,6 +82,18 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     result = HardlinkSyncResult()
     user_claude = Path.home() / ".claude"
 
+    # Migrate old directory-symlink layout: ~/.claude/skills used to be a symlink
+    # to .claude/skills/. Now .claude/skills/ is project-only and globally-shared
+    # skills live in .claude/skills-global/. If the symlink is still in place,
+    # remove it so _sync_skills can create a real directory with proper hardlinks.
+    user_skills = user_claude / "skills"
+    if user_skills.is_symlink():
+        user_skills.unlink()
+        result.actions.append(
+            LinkAction("", "~/.claude/skills", "removed", "migrated from dir-symlink to hardlinks")
+        )
+        result.removed += 1
+
     # Sync globally-shared skills from skills-global/ (not skills/, which is project-only).
     _sync_skills(project_dir / ".claude" / "skills-global", user_claude / "skills", result)
 
