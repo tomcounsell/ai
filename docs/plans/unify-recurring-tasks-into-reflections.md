@@ -316,13 +316,17 @@ That means there is no in-place "merge" available. The framing is:
 | **(A) Subsume their state** | Override `/loop` and `/schedule` in our `.claude/skills/loop/` and `.claude/skills/schedule/`, intercept the prompt, write a `Reflection` record, and let our scheduler take over. The harness skill becomes a thin shim. | The agent's existing muscle memory keeps working. **But:** harness updates can ship a new `/loop` that breaks our shim; we own backwards-compat for a third-party surface. We also can't actually intercept `ScheduleWakeup` (the harness tool that powers `/loop` self-pacing) — it runs inside the harness process. So the "subsume" is partial: only the prompt-shape, not the wakeup engine. |
 | **(B) Wrap transparently** | Leave `/loop` and `/schedule` alone. Add a first-party MCP surface (`reflections_create / list / update / remove / runs`). The agent picks first-party for durable work and harness for ephemeral self-pacing. | Two surfaces coexist forever; the agent has to know which to pick. **But:** zero coupling to harness internals; harness updates can't break us; the choice is explicit and reviewable. |
 | **(C) Deprecate in our docs** | Same as (B) but actively discourage `/loop` / `/schedule` in our agent persona and skill-selection guidance, recommending `reflections_*` instead. | Cleanest separation. Doesn't try to shadow files we don't own. |
+| **(D) Bridge-side passive observation (cycle-5 C2)** | Leave `/loop` and `/schedule` untouched but add a small passive listener bridge-side: when a session emits a `ScheduleWakeup` or `create_scheduled_task` tool call in its transcript, write a lightweight `HarnessSchedule` Popoto row `(session_id, tool_name, schedule_repr, observed_at)` with TTL=30d. Surface a read-only "Harness scheduling" panel on `dashboard.json`. | Answers "what recurring AI work is configured on this machine" *fully* — including harness-scheduled work that B+C alone leaves invisible. Harness keeps owning scheduling; our system owns the observation log. Cost: one passive listener + one small Popoto model. No control plane, no reverse routing. |
 
-**Decision:** **(B) + (C) — wrap with first-party MCP, no skill-file overrides.** Specifically:
+**Decision (cycle-5 amendment):** **(B) + (C) + (D) — wrap with first-party MCP, deprecate in docs, AND passively observe harness use bridge-side.** Specifically:
 
 - **Do NOT add skill files under `.claude/skills/loop/` or `.claude/skills/schedule/`.** Verified via `ls -la .claude/skills/loop/ .claude/skills/schedule/ 2>&1` returning "No such file or directory." Adding them would risk collision with harness updates and is the opposite of "no in-place merge available."
 - **Do add the first-party MCP surface** (Q7). Tool descriptions make `reflections_create` the obvious choice for durable, machine-persisted recurring work.
 - **Do update agent persona / skill-selection guidance** in `docs/features/reflections.md` and the relevant persona segment to say: "When the work should persist past the current conversation and be visible on `dashboard.json`, use `reflections_create`. When the work is genuinely ephemeral self-pacing during a single conversation (e.g. 'check the deploy every 5 minutes for the next hour'), `/loop` is fine."
 - **Do NOT attempt to migrate `/schedule`'s remote routines (`create_scheduled_task`) into our system.** Those live on Anthropic's harness servers; we have no access to migrate them.
+- **Do add bridge-side passive observation (cycle-5 C2 fix).** A small bridge-side listener inspects session transcripts for `ScheduleWakeup` / `create_scheduled_task` tool calls and writes `HarnessSchedule` Popoto rows. The dashboard surfaces these read-only. See Task 9b below; this sub-task is genuinely separable from the migration scope and can ship independently.
+
+**Why (D) is added (cycle-5 C2):** the rev4 framing "harness scheduling stays invisible to dashboard/memory/analytics forever" was over-conservative. The bridge already inspects every session's tool-call stream (the nudge loop's existing pattern), so observing two specific tool calls is a small additive change, not a new architectural layer. The benefit is the user's stated outcome #1 ("answer 'what recurring AI work is configured on this machine'") becomes *actually* answerable — without (D), `dashboard.json` returns a partial answer that quietly drops harness-scheduled work. The cost is one passive listener and one Popoto model with TTL=30d. No control plane: the harness keeps owning scheduling; our system owns the observation log only.
 
 **Why not (A):** the partial-subsume is a half-fix. We'd own a shim we couldn't fully back, and the user's mental model would still split between "the `/loop` that writes to your Redis" (via our shim) and "the `/loop` that uses `ScheduleWakeup`" (when our shim isn't loaded — e.g., a Claude Code session in a different repo). That's worse than the current state.
 
@@ -331,10 +335,9 @@ That means there is no in-place "merge" available. The framing is:
 - Building thin wrappers in our skill space (e.g., `.claude/skills/loop/`) that override harness skills risks fragility — harness updates could clash.
 - Instead, the MCP surface (Q7) gives the agent **first-party** tools (`reflections_create / list / update / remove / runs`) it can prefer over the harness skills. The agent's persona and skill-selection guidance is updated to nudge "use `reflections_create` over `/loop` / `/schedule` when the work should persist on this machine."
 - `docs/features/reflections.md` documents the harness-skill fallback for cases where ephemeral harness-side state is genuinely desired (one-off self-pacing during a single conversation).
+- Bridge-side passive observation (D) closes the dashboard visibility gap without taking ownership of scheduling.
 
-**Implementation guard:** No skill files under `.claude/skills/loop/` or `.claude/skills/schedule/` are added or deleted. The decision lives in (a) the MCP server's tool descriptions making first-party reflections the obvious choice, and (b) a single new docs section in `docs/features/reflections.md` that explicitly contrasts in-repo Reflections vs. harness `/loop` / `/schedule`. Verification: `[ ! -d .claude/skills/loop ] && [ ! -d .claude/skills/schedule ] && echo PASS` after the build phase.
-
-**Open question for the war room:** does the user want harness `/loop` / `/schedule` calls to also be **observable** on our side (e.g., a passive log in Redis when a session uses them)? Today they're invisible. If yes, that's a separate bridge-side instrumentation — not part of this plan, but worth flagging so the critique can challenge the "leave them alone entirely" stance. (Surfaced in `## Open Questions`.)
+**Implementation guard:** No skill files under `.claude/skills/loop/` or `.claude/skills/schedule/` are added or deleted. Bridge-side observation lives in `bridge/telegram_bridge.py`'s existing tool-call inspection path (precedent: nudge loop). The new model is `HarnessSchedule` (`bridge/models/harness_schedule.py` or `models/harness_schedule.py` — final placement decided in build) with `Meta.ttl = 86400 * 30`. Verification: `[ ! -d .claude/skills/loop ] && [ ! -d .claude/skills/schedule ] && echo PASS` after the build phase, AND `python -c "from models.harness_schedule import HarnessSchedule; assert HarnessSchedule.Meta.ttl == 86400 * 30"` exits 0.
 
 ### Q5: Run-output policy
 
@@ -872,6 +875,20 @@ Every criterion below is **executable** — it names a concrete check the valida
   - `get_run_detail(name, run_index)` lines 280-306: replace `state.run_history[run_index]` with the indexed `ReflectionExecution` row in forward-timestamp order
   - Caller signatures stay the same; `ui/routes/reflections.py` is unchanged
 - Dashboard remains read-only this iteration
+
+### 9b. Bridge-side passive observation of harness `/loop` and `/schedule` (cycle-5 C2)
+- **Task ID**: build-harness-observation
+- **Depends On**: build-model-schema (for the Popoto model pattern)
+- **Validates**: tests/integration/test_harness_schedule_observation.py (create)
+- **Informed By**: Q4 option (D) — bridge-side passive observation
+- **Assigned To**: dashboard-builder (or a dedicated bridge-builder if dispatched separately)
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `models/harness_schedule.py` (Popoto model) with fields `(session_id: KeyField, tool_name: str, schedule_repr: str, observed_at: float)` and `Meta.ttl = 86400 * 30`
+- Add a passive listener in `bridge/telegram_bridge.py` (precedent: existing tool-call inspection in the nudge loop). When a session emits a tool call with `name in {"ScheduleWakeup", "create_scheduled_task"}`, write a `HarnessSchedule(session_id=..., tool_name=..., schedule_repr=str(args), observed_at=time.time())` row. Failures are non-fatal warnings.
+- `dashboard.json` gains a `harness_schedules` key (last N=20 entries, filtered by TTL) — read-only.
+- Tests assert: (a) a session that uses `/loop` produces a `HarnessSchedule` row, (b) a session that uses `/schedule` produces a `HarnessSchedule` row, (c) the dashboard surfaces both, (d) TTL of 30d is enforced.
+- This task is genuinely separable from the migration scope; if it slips, the rest of the plan still ships.
 
 ### 10. Validate scheduler behavior
 - **Task ID**: validate-scheduler
