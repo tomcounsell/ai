@@ -40,33 +40,83 @@ A single canonical **Reflection** system, owned by this repo, that:
 4. Threads run output back into the appropriate sink (Telegram chat, Memory record, dashboard, log) per-reflection.
 5. Survives a worker restart with no data loss, no silent skipped runs, and a clear dead-letter path for repeated failures.
 
+## Preconditions / Sequencing
+
+This plan extends the **existing** `Reflection` scheduler. It does not replace it; it widens it. That means whatever shape the legacy entries are in **at the moment this plan starts building** will be the foundation we generalize.
+
+**Hard dependency: issue #1292 (pm-briefings cutover) lands first.**
+
+Why: Issue #1292 finishes the cutover from the three legacy daily reflections (`daily-log-review`, `daily-report-and-notify`, plus the `pm-audio-briefing` rename) onto the new slot-driven dispatcher in `reflections/pm_audio_briefing/`. Per `docs/plans/daily-reflections-unification.md` lines 546–564, five deferred items remain:
+
+1. Inline `daily_report.py` helpers into `reflections/pm_audio_briefing/daily_log.py`, then **delete `reflections/daily_report.py`**.
+2. Inline `reflections.auditing.run_log_review` helpers into `reflections/pm_audio_briefing/log_audit.py`, then **delete `run_log_review`**.
+3. Rename registry entry `pm-audio-briefing` → `pm-briefings` in `~/Desktop/Valor/reflections.yaml`.
+4. Flip `daily-log-review` and `daily-report-and-notify` to `enabled: false`.
+5. Delete `logs/reflections/report_2026-*.md` orphan stubs.
+
+Until those land, the **vault YAML carries five entries that contradict the new state of the world**. If we run this plan's migration script (Q3) on top of the un-cutover YAML, the migration will:
+
+- Rewrite `interval: 86400` → `every: 86400s` on `daily-log-review` and `daily-report-and-notify` even though those entries are scheduled for deletion. Cosmetic mess; not destructive but wastes a migration cycle.
+- Have no way to distinguish "this legacy entry is about to be deleted" from "this legacy entry is canonical." The plan's migration semantics assume every YAML entry is a Reflection we want to keep.
+- Inherit `_FALLBACK_PARENTS["pm-briefings"] -> "pm-audio-briefing"` in `ui/data/reflections.py`, which is a temporary shim from #1292 that should be gone before our dashboard refactor (Task 9) lands.
+
+**Sequencing rule:** Build does not start on this plan until issue #1292 is either merged or has its Step A (vault yaml + projects.json + `_FALLBACK_PARENTS` removal) shipped. Issue #1292 Step B (the helper-inlining + module deletion) is not blocking — it's pure dedup and can land in parallel with this plan's build.
+
+**Verification before build kickoff:**
+
+```bash
+# 1. Vault yaml has been cut over (no daily-log-review / daily-report-and-notify enabled).
+grep -E "^- name: (daily-log-review|daily-report-and-notify)$" ~/Desktop/Valor/reflections.yaml
+# Followed by the next non-blank line — must show `enabled: false` for both, or no match at all.
+
+# 2. Registry entry rename has happened.
+grep -E "^- name: pm-(audio-briefing|briefings)$" ~/Desktop/Valor/reflections.yaml
+# Must show `pm-briefings`, not `pm-audio-briefing`.
+
+# 3. UI fallback shim is gone.
+grep -n '"pm-briefings"' ui/data/reflections.py
+# Must NOT appear inside `_FALLBACK_PARENTS`. (The prefix-expansion entries at lines 43, 47, 83 stay — they're separate.)
+```
+
+If any of those checks still match the pre-cutover state, this plan stays in `Planning` status and `/do-build` does not dispatch. The kickoff issue comment on #1273 must reference the resolution of #1292 before progressing.
+
 ## Freshness Check
 
-**Baseline commit:** `5055b527c9fbe7710d7bb5dbe9a44132565e9fa6`
+**Baseline commit:** `f80f9894` (origin/main as of 2026-05-06)
 **Issue filed at:** 2026-05-04T09:19:52Z
-**Disposition:** Unchanged — issue was filed today; baseline `git log` shows no relevant commits between issue filing and plan time.
+**Refresh pass:** 2026-05-06 — re-verified file paths, line numbers, dependency on issue #1292.
 
-**File:line references re-verified:**
-- `agent/reflection_scheduler.py` (whole file) — present, 23,230 bytes, asyncio scheduler with vault-first `_resolve_registry_path()` confirmed
-- `models/reflection.py` (whole file) — present, 5,452 bytes, `Reflection` Popoto model with embedded `run_history` capped at 200 confirmed (`_RUN_HISTORY_CAP = 200`)
-- `tools/agent_session_scheduler.py` (whole file) — present, 45,481 bytes, `--after <ISO>` one-shot delay confirmed at top-of-file usage docs
-- `~/Desktop/Valor/reflections.yaml` — symlinked into `config/reflections.yaml` per recent `d47d5a81` commit (mode now `100644`); 330 lines; all entries use `interval:` seconds (no cron, no `at:`, no `every:` yet)
-- `docs/features/reflections.md` — present, 40,095 bytes (substantial, recently updated 2026-05-04)
-- `docs/features/reflections-dashboard.md` — present, 3,243 bytes
-- `docs/features/agent-session-scheduling.md` — present, 7,574 bytes
+**File:line references re-verified (2026-05-06):**
+- `agent/reflection_scheduler.py` (whole file) — present, 23,230 bytes, asyncio scheduler with vault-first `_resolve_registry_path()` confirmed at line 45.
+- `models/reflection.py` (whole file) — present, 5,452 bytes, `Reflection` Popoto model with embedded `run_history` capped at 200 confirmed (`_RUN_HISTORY_CAP = 200` at line 49).
+- `tools/agent_session_scheduler.py` (whole file) — present, 45,481 bytes, `--after <ISO>` one-shot delay confirmed at top-of-file usage docs.
+- `~/Desktop/Valor/reflections.yaml` — symlinked into `config/reflections.yaml`; 13,605 bytes (the file has grown since rev3 due to ongoing reflections work — entries still use `interval:` seconds, no cron/at/every yet).
+- `docs/features/reflections.md` — present, 40,319 bytes (recently updated 2026-05-05).
+- `docs/features/reflections-dashboard.md` — present, 3,243 bytes.
+- `docs/features/agent-session-scheduling.md` — present, 7,574 bytes.
+- `ui/data/reflections.py` — present; **`state.run_history` references now at lines 138, 264, 282, 310, 322** (drift from rev3's lines 129/239-277/280-306 — Q1's "cycle-3 ripple" callsites are updated below).
+- `scripts/update/run.py` — present, 1,479 lines; **drifted line numbers**: `uv sync` block now at line 463 (was 462), `Step 3.6` at 623 (was 622), `Step 3.7` at 638 (was 637), `Step 4.7` (sdlc-tool gate) at 840 (was 839), `Step 4.8` (memory MCP) at 862 (was 861), `mcp_memory_result` write at 870 (was 868), `Step 5` (service management) at 907 (was 887), `Step 1.66` (sync_reflections_yaml) at 404 (was 403). All step boundaries are unchanged; the migration insertion at **Step 3.65** still lands between Step 3.6 and Step 3.7 as planned.
+- `agent/sdk_client.py` env-var injection lines confirmed at **1380** (`VALOR_SESSION_ID`) and **1385** (`AGENT_SESSION_ID`) — no drift.
+- `.claude/skills/loop/` and `.claude/skills/schedule/` — verified absent on this branch (`ls -la` → "No such file or directory"). Q4 implementation guard holds.
+- `mcp_servers/memory_server.py` — present, 5,787 bytes. `scripts/update/mcp_memory.py` — present, 9,875 bytes. Both confirm Q7's "model the new MCP register helper on `mcp_memory.py`" pattern.
 
-**Cited sibling issues/PRs re-checked:**
-- #1249 (Ingest docs/* into memory) — open; will inherit the new schema when this lands
-- #748, #967, #933, #991, #978 — all closed/merged; precedents for Reflection refactors
+**Cited sibling issues/PRs re-checked (2026-05-06):**
+- **#1292 (pm-briefings cutover) — OPEN, BLOCKING.** This plan now sequences explicitly behind it (see `## Preconditions / Sequencing`). #1292 finishes the legacy → slot-driven cutover; without that, the migration in this plan operates on a YAML that still names entries scheduled for deletion.
+- #1249 (Ingest docs/* into memory) — open; will inherit the new schema when this lands.
+- #748, #967, #933, #991, #978, #1187 — all closed/merged; precedents for Reflection refactors.
 
-**Commits on main since issue was filed:** None at plan time (baseline is the merge commit immediately preceding plan).
+**Commits on main since rev3:**
+- `5576e4dc` feat(dashboard): session-detail liveness signals (#1269) — touches `ui/data/` but not `ui/data/reflections.py` directly.
+- `bc4406c3` / `a38640f9` Docs: auditor pass for `agent-definition-fallback` (Docs reverted then reapplied; no impact on this plan's surfaces).
+- `37e6ca2d` Bump deps: anthropic 0.98.1→0.99.0 (no impact).
+- `f06737d4` (#1291) feat: pre-commit guard blocks session/* commits outside .worktrees — relevant for this plan's branch hygiene only.
 
 **Active plans in `docs/plans/` overlapping this area:**
-- `daily-reflections-unification.md`, `reflections-modular.md`, `reflections-dashboard.md`, `reflections-quality-pass.md`, `reflections-dead-import.md`, `per-project-audit-reflections.md` — all touch the same surface but at different layers (dashboard rendering, modularization, daily-cluster consolidation). None of them tackles the four-system unification.
+- `daily-reflections-unification.md`, `reflections-modular.md`, `reflections-dashboard.md`, `reflections-quality-pass.md`, `reflections-dead-import.md`, `per-project-audit-reflections.md` — all touch the same surface but at different layers (dashboard rendering, modularization, daily-cluster consolidation). None tackles the four-system unification.
 - **Specific overlap with `reflections-modular.md`** (status: Ready, owner: Valor): that plan moves each callable into its own file under `reflections/{group}/` and uses YAML `group:` as single source of truth. **This plan must not regress that work.** Concretely: any registry-schema change here must keep `group:` working; the per-file callable layout is unchanged.
-- **Specific overlap with `daily-reflections-unification.md`** (status: Ready): consolidates daily reflections per-project. Schedule grammar adopted here must not invalidate that plan's `interval: 86400` declarations — the migration step rewrites them to `every: 1d` losslessly.
+- **Specific overlap with `daily-reflections-unification.md`** (status: Ready): consolidates daily reflections per-project. Schedule grammar adopted here must not invalidate that plan's `interval: 86400` declarations — the migration step rewrites them to `every: 1d` losslessly. **#1292 is the cutover side of this overlap and is now an explicit precondition.**
 
-**Notes:** No drift. Plan's premises are intact.
+**Notes:** Plan's premises are intact. Line-number drift in `scripts/update/run.py` and `ui/data/reflections.py` updated above; downstream sections (Q1 ripple, Q3 implementation guard, Update System) are corrected in this revision cycle.
 
 ## Prior Art
 
@@ -142,16 +192,37 @@ This is the load-bearing section. The issue surfaces eight uncommitted architect
 
 **Implementation guard:** `ReflectionRun` records get a TTL (`Meta.ttl = 86400 * 90`, 90 days) to bound Redis growth. Cleanup happens automatically via Redis expiration, not via `cleanup_expired()` scans.
 
-**Cycle-3 ripple — `ui/data/reflections.py` must be updated in the same PR:** the dashboard reader currently calls `state.run_history` in three places (verified at `ui/data/reflections.py:129` for `has_history`, `:257` for `get_run_history`, `:297` for `get_run_detail`). Removing the embedded `run_history` field without updating these reads would break the dashboard at the moment the PR lands. Disposition: **option (b) — update `ui/data/reflections.py` in the same PR** (chosen over option (a) "keep `run_history` and just deprecate writes" because deprecation leaves dead state on every Reflection record, contradicting the project's NO LEGACY CODE TOLERANCE principle, and over option (c) "compat shim" because a shim that "should never need to run" is a smell per the prevention-over-cleanup feedback). Specifically:
-- `_build_entry()` line 129: `has_history` becomes `bool(ReflectionRun.query.filter(name=name, limit=1))` — checks for the existence of any run row, not embedded list truthiness.
-- `get_run_history(name, page)` lines 239-277: replace `state.run_history` reads with `ReflectionRun.query.filter(name=name).order_by("-timestamp")` paginated; total_runs becomes the result count.
-- `get_run_detail(name, run_index)` lines 280-306: replace `state.run_history[run_index]` with `ReflectionRun.query.filter(name=name).order_by("timestamp")[run_index]`.
+**Cycle-3 ripple — `ui/data/reflections.py` must be updated in the same PR:** the dashboard reader currently calls `state.run_history` in five places (verified 2026-05-06 — drifted from rev3's three callsites because intermediate work added the `get_run_detail` fallback). Specifically:
+- Line 138: `has_history` truthiness check inside `_build_entry()`
+- Line 264: `get_run_history(name, page=1)` reads `state.run_history`
+- Line 282: paginated history read inside `get_run_history`
+- Line 310: `get_run_detail(name, run_index)` reads `state.run_history`
+- Line 322: index-based access inside `get_run_detail`
+
+Removing the embedded `run_history` field without updating these reads would break the dashboard at the moment the PR lands. Disposition: **option (b) — update `ui/data/reflections.py` in the same PR** (chosen over option (a) "keep `run_history` and just deprecate writes" because deprecation leaves dead state on every Reflection record, contradicting the project's NO LEGACY CODE TOLERANCE principle, and over option (c) "compat shim" because a shim that "should never need to run" is a smell per the prevention-over-cleanup feedback). Specifically:
+- `_build_entry()` line 138: `has_history` becomes `bool(next(iter(ReflectionRun.query.filter(name=name)[:1]), None))` — checks for the existence of any run row, not embedded list truthiness.
+- `get_run_history(name, page)` lines 264-302 (encompassing the page-skipping logic at line 282): replace `state.run_history` reads with `ReflectionRun.query.filter(name=name).order_by("-timestamp")` paginated; `total_runs` becomes the result count.
+- `get_run_detail(name, run_index)` lines 310-326 (encompassing the index access at line 322): replace `state.run_history[run_index]` with the indexed `ReflectionRun` row in forward-timestamp order.
 - Reader signature stays the same; callers (`ui/routes/reflections.py`) are unchanged.
 The dashboard task (Task 9) gains this responsibility; integration test `tests/integration/test_dashboard_reflections.py` gets a new case asserting the dashboard correctly reads from `ReflectionRun` rows.
 
 ### Q2: Schedule grammar — adopt fazm's triplet verbatim, extend, or custom?
 
 **Decision:** **Adopt fazm's `cron:` / `every:` / `at:` triplet verbatim. No extensions in this scope.**
+
+**Adopt vs adapt — explicit:**
+
+| Concept (fazm) | Disposition | Notes |
+|----------------|-------------|-------|
+| Two-table split (`cron_jobs` + `cron_runs`) | **Adopt** (Q1) | Mirrors as `Reflection` + `ReflectionRun` Popoto models. Bounded by Popoto's KeyField + TTL. |
+| `cron:` / `every:` / `at:` schedule grammar | **Adopt verbatim** (Q2) | These three cover every existing reflection in our YAML. |
+| 60-second polling cadence | **Adapt** | We already tick every 60s inside the worker's asyncio loop; the fazm "launchd polls every 60s" pattern is not duplicated. |
+| Output threading via `taskId="routine-<id>"` chat history | **Adapt** | Generalized to a per-reflection `output_sink:` config (Q5) with four sink kinds (`log_only`, `dashboard_only`, `memory:<importance>`, `telegram:<chat>`). The fazm pattern collapses to `telegram:<chat>`. |
+| `routines_*` MCP tool surface | **Adopt** (Q7) | Mirrored as `reflections_create / list / get / update / remove / runs / pause / resume`. |
+| Per-run cost / token capture | **Adopt** (Q8) | `cost_usd`, `input_tokens`, `output_tokens`, `duration_ms` on each `ReflectionRun`. |
+| SQLite-as-state-store | **Drop** | We already use Popoto/Redis everywhere; introducing SQLite would fork the data layer. |
+| launchd as the runner | **Drop** | The worker process already owns the asyncio loop; launchd would duplicate it. |
+| Event triggers (`on_event:`, `on_merge:`) | **Out of scope** | Different abstraction — event triggers, not time triggers. See No-Gos. |
 
 **Rationale:**
 - Adopting verbatim minimizes invention. Cron handles cron, `every` handles intervals, `at` handles one-shots — these three cover every existing reflection in `reflections.yaml`.
@@ -173,7 +244,7 @@ The dashboard task (Task 9) gains this responsibility; integration test `tests/i
 - The script is idempotent: running it twice on already-migrated YAML is a no-op.
 - Migration mapping is mechanical: every `interval: N` → `every: Ns`. No semantic changes. No reflection is lost.
 - Pre-flight: the migration script asserts every entry has a valid post-migration `cron:`/`every:`/`at:` field; if any entry is malformed it aborts before writing.
-- The `/update` skill gains **Step 3.65** (immediately after Step 3.6's existing data-migration phase at `run.py:622` and before Step 3.7's binary installs at `run.py:637`, **after Step 3's `uv sync` at line 462**) that invokes the migration script. The migration imports `croniter`, which is added in this PR; placing the step after `uv sync` ensures the dep is installed before the migration's import. The YAML was already synced at Step 1.66 (line 403), so by the time Step 3.65 runs, the canonical file is in place. After a single successful update on each machine, the registry is permanently in the new shape.
+- The `/update` skill gains **Step 3.65** (immediately after Step 3.6's existing data-migration phase at `run.py:623` and before Step 3.7's binary installs at `run.py:638`, **after Step 3's `uv sync` at line 463**) that invokes the migration script. The migration imports `croniter`, which is added in this PR; placing the step after `uv sync` ensures the dep is installed before the migration's import. The YAML was already synced at Step 1.66 (line 404), so by the time Step 3.65 runs, the canonical file is in place. After a single successful update on each machine, the registry is permanently in the new shape. (Line numbers re-verified against `f80f9894` 2026-05-06; rev3's numbers were 622/637/462/403, now 623/638/463/404.)
 
 **Coexistence-with-running-reflections design (replaces the original "wait 60 s for last_status='running' to clear" approach, which would routinely starve under normal load — long-running reflections like `analytics-rollup` and `docs-auditor` regularly run for several minutes, so the wait would abort the migration on a healthy worker):**
 
@@ -185,11 +256,28 @@ The migration is decomposed into three idempotent phases, each safe to run while
 
 This design **never blocks on `last_status="running"`** and never aborts on healthy long-running reflections.
 
-**Implementation guard:** The migration script is `scripts/migrate_reflections_yaml.py` and is invoked from `scripts/update/run.py` **Step 3.65** (immediately after Step 3.6's existing data-migration phase at line 622 and before Step 3.7's binary installs at line 637). The insertion point is chosen because (a) it runs **after Step 3's `uv sync` at line 462**, so the newly-added `croniter` dependency is installed before the migration imports it (cycle-2 blocker fix); (b) the YAML symlink was freshly synced from the vault at Step 1.66 (line 403), so the canonical file is already in place; (c) it precedes Step 5's service-restart logic at line 887, so the worker restarts onto migrated state; (d) Step 1.67 (the cycle-2 draft's slot) was wrong because it ran before `uv sync` and would ImportError on `croniter`; (e) Step 4.7 is already occupied by the sdlc-tool wrapper validation gate (`run.py:839`). On migration failure, the update halts and the bridge keeps serving on the previously-validated config (the YAML temp-file + atomic-rename pattern means a failed rewrite never leaves a partial file behind).
+**Implementation guard:** The migration script is `scripts/migrate_reflections_yaml.py` and is invoked from `scripts/update/run.py` **Step 3.65** (immediately after Step 3.6's existing data-migration phase at line 623 and before Step 3.7's binary installs at line 638). The insertion point is chosen because (a) it runs **after Step 3's `uv sync` at line 463**, so the newly-added `croniter` dependency is installed before the migration imports it (cycle-2 blocker fix); (b) the YAML symlink was freshly synced from the vault at Step 1.66 (line 404), so the canonical file is already in place; (c) it precedes Step 5's service-restart logic at line 907, so the worker restarts onto migrated state; (d) Step 1.67 (the cycle-2 draft's slot) was wrong because it ran before `uv sync` and would ImportError on `croniter`; (e) Step 4.7 is already occupied by the sdlc-tool wrapper validation gate (`run.py:840`). On migration failure, the update halts and the bridge keeps serving on the previously-validated config (the YAML temp-file + atomic-rename pattern means a failed rewrite never leaves a partial file behind).
 
-### Q4: `/loop` and `/schedule` collapse
+### Q4: `/loop` and `/schedule` collapse — subsume their state, or wrap them transparently?
 
-**Decision:** **Shadow with first-party MCP tools. Do NOT actively redirect harness skills.**
+**This is the highest-risk decision in the plan** — flagged for the war-room critique. `/loop` and `/schedule` are Claude Code **harness** skills (live under `~/Library/Application Support/Claude/.../skills/`). They run **inside the conversation transcript**, not inside our worker process. They have no Redis row, no `Reflection` record, and no awareness of our scheduler. The harness owns their state machine entirely.
+
+That means there is no in-place "merge" available. The framing is:
+
+| Option | What it means | Tradeoff |
+|--------|---------------|----------|
+| **(A) Subsume their state** | Override `/loop` and `/schedule` in our `.claude/skills/loop/` and `.claude/skills/schedule/`, intercept the prompt, write a `Reflection` record, and let our scheduler take over. The harness skill becomes a thin shim. | The agent's existing muscle memory keeps working. **But:** harness updates can ship a new `/loop` that breaks our shim; we own backwards-compat for a third-party surface. We also can't actually intercept `ScheduleWakeup` (the harness tool that powers `/loop` self-pacing) — it runs inside the harness process. So the "subsume" is partial: only the prompt-shape, not the wakeup engine. |
+| **(B) Wrap transparently** | Leave `/loop` and `/schedule` alone. Add a first-party MCP surface (`reflections_create / list / update / remove / runs`). The agent picks first-party for durable work and harness for ephemeral self-pacing. | Two surfaces coexist forever; the agent has to know which to pick. **But:** zero coupling to harness internals; harness updates can't break us; the choice is explicit and reviewable. |
+| **(C) Deprecate in our docs** | Same as (B) but actively discourage `/loop` / `/schedule` in our agent persona and skill-selection guidance, recommending `reflections_*` instead. | Cleanest separation. Doesn't try to shadow files we don't own. |
+
+**Decision:** **(B) + (C) — wrap with first-party MCP, no skill-file overrides.** Specifically:
+
+- **Do NOT add skill files under `.claude/skills/loop/` or `.claude/skills/schedule/`.** Verified via `ls -la .claude/skills/loop/ .claude/skills/schedule/ 2>&1` returning "No such file or directory." Adding them would risk collision with harness updates and is the opposite of "no in-place merge available."
+- **Do add the first-party MCP surface** (Q7). Tool descriptions make `reflections_create` the obvious choice for durable, machine-persisted recurring work.
+- **Do update agent persona / skill-selection guidance** in `docs/features/reflections.md` and the relevant persona segment to say: "When the work should persist past the current conversation and be visible on `dashboard.json`, use `reflections_create`. When the work is genuinely ephemeral self-pacing during a single conversation (e.g. 'check the deploy every 5 minutes for the next hour'), `/loop` is fine."
+- **Do NOT attempt to migrate `/schedule`'s remote routines (`create_scheduled_task`) into our system.** Those live on Anthropic's harness servers; we have no access to migrate them.
+
+**Why not (A):** the partial-subsume is a half-fix. We'd own a shim we couldn't fully back, and the user's mental model would still split between "the `/loop` that writes to your Redis" (via our shim) and "the `/loop` that uses `ScheduleWakeup`" (when our shim isn't loaded — e.g., a Claude Code session in a different repo). That's worse than the current state.
 
 **Rationale:**
 - `/loop` and `/schedule` live in the Claude Code harness (`~/Library/Application Support/Claude/.../skills/`); we cannot edit or delete them.
@@ -197,7 +285,9 @@ This design **never blocks on `last_status="running"`** and never aborts on heal
 - Instead, the MCP surface (Q7) gives the agent **first-party** tools (`reflections_create / list / update / remove / runs`) it can prefer over the harness skills. The agent's persona and skill-selection guidance is updated to nudge "use `reflections_create` over `/loop` / `/schedule` when the work should persist on this machine."
 - `docs/features/reflections.md` documents the harness-skill fallback for cases where ephemeral harness-side state is genuinely desired (one-off self-pacing during a single conversation).
 
-**Implementation guard:** No skill files under `.claude/skills/loop/` or `.claude/skills/schedule/` are added or deleted. The decision lives in (a) the MCP server's tool descriptions making first-party reflections the obvious choice, and (b) a single new docs section in `docs/features/reflections.md` that explicitly contrasts in-repo Reflections vs. harness `/loop` / `/schedule`.
+**Implementation guard:** No skill files under `.claude/skills/loop/` or `.claude/skills/schedule/` are added or deleted. The decision lives in (a) the MCP server's tool descriptions making first-party reflections the obvious choice, and (b) a single new docs section in `docs/features/reflections.md` that explicitly contrasts in-repo Reflections vs. harness `/loop` / `/schedule`. Verification: `[ ! -d .claude/skills/loop ] && [ ! -d .claude/skills/schedule ] && echo PASS` after the build phase.
+
+**Open question for the war room:** does the user want harness `/loop` / `/schedule` calls to also be **observable** on our side (e.g., a passive log in Redis when a session uses them)? Today they're invisible. If yes, that's a separate bridge-side instrumentation — not part of this plan, but worth flagging so the critique can challenge the "leave them alone entirely" stance. (Surfaced in `## Open Questions`.)
 
 ### Q5: Run-output policy
 
@@ -254,7 +344,7 @@ This design **never blocks on `last_status="running"`** and never aborts on heal
 
 **Auth implementation (concrete; no invented helpers):**
 
-The MCP server resolves the calling session's identity from the env primitives that `agent/sdk_client.py:1380-1385` already injects when spawning a Claude Code subprocess:
+The MCP server resolves the calling session's identity from the env primitives that `agent/sdk_client.py:1380` (`VALOR_SESSION_ID`) and `agent/sdk_client.py:1385` (`AGENT_SESSION_ID`) already inject when spawning a Claude Code subprocess (verified 2026-05-06):
 
 - `VALOR_SESSION_ID` — the bridge-level session id (always present for bridge-spawned sessions)
 - `AGENT_SESSION_ID` — the canonical AgentSession FK (`agt_xxx`); set for all sessions tracked by the worker
@@ -329,7 +419,7 @@ No spikes needed. The architecture questions all resolve via prior art (fazm, th
 
 ### Migration path: `/update` first-run on a machine
 
-1. **`scripts/update/run.py` Step 3.65** runs `scripts/migrate_reflections_yaml.py` immediately after Step 3.6's existing data migrations (line 622) and before Step 3.7's binary installs (line 637). It runs **after Step 3's `uv sync`** (line 462) so the newly-added `croniter` dependency is installed before the migration imports it. The YAML was already synced at Step 1.66 (line 403), so the migration operates on the freshly-synced canonical file.
+1. **`scripts/update/run.py` Step 3.65** runs `scripts/migrate_reflections_yaml.py` immediately after Step 3.6's existing data migrations (line 623) and before Step 3.7's binary installs (line 638). It runs **after Step 3's `uv sync`** (line 463) so the newly-added `croniter` dependency is installed before the migration imports it. The YAML was already synced at Step 1.66 (line 404), so the migration operates on the freshly-synced canonical file.
 2. **Phase 1 — atomic YAML rewrite.** Read `~/Desktop/Valor/reflections.yaml`, rewrite every `interval: N` → `every: Ns` in memory, write to a sibling temp file in the same directory, then `os.replace(temp, target)`. POSIX-atomic; concurrent readers see either the old or new full file.
 3. **Phase 2 — `run_history` → `ReflectionRun` delta-loop backfill.** Walk every `Reflection` record. For each `run_history` entry, compute key `(name, timestamp_unix)` and call `ReflectionRun.get_or_create(...)`. If `last_status == "running"` at scan time, record the name in `reflections:migration:pending_clear` (Popoto-managed sidecar set) and skip the clear step. After the scan, walk the sidecar; for each name, re-fetch the Reflection and clear `run_history` only if it has stopped running. Reflections still running at exit are handled on the next migration run (no data loss).
 4. **Phase 3 — schema validation.** Re-load the registry via `load_registry()` and call `compute_next_due()` on every entry. Any parse error aborts and surfaces a loud failure to `/update`.
@@ -440,7 +530,7 @@ The migration is fully reentrant — running it twice on the same machine is a n
 The `/update` skill needs three changes:
 
 1. **Add `croniter` to `pyproject.toml`** — `uv sync` picks it up on next update.
-2. **Add Step 3.65 to `scripts/update/run.py`** — invoke `scripts/migrate_reflections_yaml.py` immediately after Step 3.6's existing data-migration phase (currently at `run.py:622`) and before Step 3.7's binary installs (`run.py:637`). Halt update on migration error. **Insertion point rationale (cycle-3 fix):** the cycle-2 draft proposed Step 1.67 (right after `sync_reflections_yaml` at line 403), but Step 1.67 runs **before** Step 3's `uv sync` (line 462). The migration imports `croniter`, which this PR adds to `pyproject.toml` — running migration before `uv sync` would `ImportError`. Step 3.65 is the correct slot because (a) it runs **after `uv sync`**, so `croniter` is installed before import; (b) the YAML was synced at Step 1.66 (line 403), so the canonical file is already in place; (c) it runs in the same Step 3.x band as the existing data-migration phase (Step 3.6), keeping migrations grouped; (d) it precedes Step 5's service-restart logic (`run.py:887`), so the worker restarts onto migrated state; (e) Step 4.7 is already occupied by the sdlc-tool wrapper validation gate (`run.py:839`). Atomic temp-file + rename means a failed migration leaves no partial file behind, and the bridge keeps serving on the previously-validated YAML if validation aborts the rewrite.
+2. **Add Step 3.65 to `scripts/update/run.py`** — invoke `scripts/migrate_reflections_yaml.py` immediately after Step 3.6's existing data-migration phase (currently at `run.py:623`) and before Step 3.7's binary installs (`run.py:638`). Halt update on migration error. **Insertion point rationale (cycle-3 fix, line numbers refreshed 2026-05-06):** the cycle-2 draft proposed Step 1.67 (right after `sync_reflections_yaml` at line 404), but Step 1.67 runs **before** Step 3's `uv sync` (line 463). The migration imports `croniter`, which this PR adds to `pyproject.toml` — running migration before `uv sync` would `ImportError`. Step 3.65 is the correct slot because (a) it runs **after `uv sync`**, so `croniter` is installed before import; (b) the YAML was synced at Step 1.66 (line 404), so the canonical file is already in place; (c) it runs in the same Step 3.x band as the existing data-migration phase (Step 3.6), keeping migrations grouped; (d) it precedes Step 5's service-restart logic (`run.py:907`), so the worker restarts onto migrated state; (e) Step 4.7 is already occupied by the sdlc-tool wrapper validation gate (`run.py:840`). Atomic temp-file + rename means a failed migration leaves no partial file behind, and the bridge keeps serving on the previously-validated YAML if validation aborts the rewrite.
 3. **Update `scripts/update/__init__.py`** preflight to import-test `croniter` (the deps-installed assertion).
 
 `docs/features/reflections.md` gains a "Migration Notes" section documenting:
@@ -454,7 +544,7 @@ The `/update` skill prose itself (`.claude/skills/update/SKILL.md`) does not nee
 
 This work introduces a new MCP server. The agent reaches Reflections via:
 
-- **New MCP server**: `mcp_servers/reflections_server.py` exposes seven tools (Q7). **Cycle-3 fix:** the cycle-2 draft said this server is "registered in `.mcp.json` at the repo root," but `.mcp.json` does not exist in this repo (verified via `ls -la .mcp.json` → "No such file or directory"). The actual MCP registration mechanism is `~/.claude.json`'s `mcpServers` map, self-healed by `scripts/update/mcp_memory.py` at update Step 4.8 (`run.py:861`) under an `fcntl.flock` to coexist with Claude Code's own writes to that file. The plan adds **`scripts/update/mcp_reflections.py`** modeled on `mcp_memory.py` (same lock + atomic-rename pattern) that registers `reflections` under `mcpServers` with `command="python3"` and `module="mcp_servers.reflections_server"`. It is invoked from a new **Step 4.85** in `run.py` immediately after Step 4.8's memory MCP verification. The Dev session, the PM session, and the Teammate session all inherit the registration via `~/.claude.json` because the harness reads from there at session spawn.
+- **New MCP server**: `mcp_servers/reflections_server.py` exposes seven tools (Q7). **Cycle-3 fix (line numbers refreshed 2026-05-06):** the cycle-2 draft said this server is "registered in `.mcp.json` at the repo root," but `.mcp.json` does not exist in this repo (verified via `ls -la .mcp.json` → "No such file or directory"). The actual MCP registration mechanism is `~/.claude.json`'s `mcpServers` map, self-healed by `scripts/update/mcp_memory.py` at update Step 4.8 (`run.py:862`) under an `fcntl.flock` to coexist with Claude Code's own writes to that file. The plan adds **`scripts/update/mcp_reflections.py`** modeled on `mcp_memory.py` (same lock + atomic-rename pattern) that registers `reflections` under `mcpServers` with `command="python3"` and `module="mcp_servers.reflections_server"`. It is invoked from a new **Step 4.85** in `run.py` immediately after Step 4.8's memory MCP verification (the `mcp_memory_result` write happens at line 870). The Dev session, the PM session, and the Teammate session all inherit the registration via `~/.claude.json` because the harness reads from there at session spawn.
 - **Bridge does NOT import reflection code directly.** Bridge stays I/O-only. All scheduling decisions happen in the worker.
 - **`tools/agent_session_scheduler.py` `--after <ISO>`** becomes a thin CLI that calls `Reflection.create(schedule="at:<ISO>", execution_type="agent", command=...)`. This keeps the existing CLI users (humans, scripts) working without flag changes; they just write to a new model under the hood.
 - **No new `pyproject.toml [project.scripts]` entry needed.** The MCP server is launched as `python3 -m mcp_servers.reflections_server` (the standard MCP module pattern, identical to `mcp_servers.memory_server`); the migration script is invoked by `scripts/update/run.py` as a direct `python` call. Both are launched as `python -m ...` commands, which the existing tooling handles.
@@ -481,19 +571,26 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 
 ## Success Criteria
 
-- [ ] All 8 architecture questions are answered in this plan with chosen path and rationale (DONE — see Architecture Decisions section)
-- [ ] `models/reflection.py` carries new fields: `schedule`, `output_sink`, `failure_count_consecutive`, `retry_policy`, `paused_until`, `cost_usd_total`, `tokens_input_total`, `tokens_output_total`
-- [ ] New `models/reflection_run.py` (`ReflectionRun` Popoto model) exists with TTL=90 days
-- [ ] `agent/reflection_scheduler.py::compute_next_due()` handles `cron:`, `every:`, `at:` grammar; pre-migration `interval:` field is rejected with a clear error
-- [ ] `~/Desktop/Valor/reflections.yaml` is migrated to the new grammar via `scripts/migrate_reflections_yaml.py`; idempotent
-- [ ] `dashboard.json` exposes `failure_count_consecutive`, `paused_until`, `cost_usd_total` per reflection
-- [ ] `mcp_servers/reflections_server.py` exposes 7 MCP tools and is registered in `~/.claude.json`'s `mcpServers` map via `scripts/update/mcp_reflections.py` (modeled on `scripts/update/mcp_memory.py`), invoked from `run.py` Step 4.85
-- [ ] `tools/agent_session_scheduler.py --after <ISO>` writes a `Reflection`, not a delayed `AgentSession`
-- [ ] Failure-tracking semantics implemented: max 5 consecutive failures pauses for 24h and writes a Memory record at importance 7.0
-- [ ] `docs/features/reflections.md` is the single source of truth; sibling docs reconciled
-- [ ] All `interval:` references in YAML and code are gone (grep confirms)
-- [ ] Tests pass (`pytest tests/`, especially the integration tests listed in Test Impact)
-- [ ] Documentation updated (`/do-docs`)
+Every criterion below is **executable** — it names a concrete check the validator must run, and a proof artifact (file, command output, dashboard value) the reviewer can inspect. Per the project memory `feedback_acceptance_criteria_must_be_executable`, criteria that name a CLI command must be runnable with a proof artifact, not flipped to `[x]` based on test counts.
+
+- [ ] **All 8 architecture questions are answered in this plan with chosen path and rationale.** Proof: this document's `## Architecture Decisions` section. Already done.
+- [ ] **`models/reflection.py` carries new fields.** Proof: `python -c "from models.reflection import Reflection; r=Reflection(); [getattr(r, f) for f in ['schedule','output_sink','failure_count_consecutive','retry_policy','paused_until','cost_usd_total','tokens_input_total','tokens_output_total']]"` exits 0.
+- [ ] **`models/reflection_run.py` exists with TTL=90 days.** Proof: `python -c "from models.reflection_run import ReflectionRun; assert ReflectionRun.Meta.ttl == 86400 * 90, ReflectionRun.Meta.ttl"` exits 0.
+- [ ] **`compute_next_due()` handles `cron:` / `every:` / `at:`; rejects `interval:`.** Proof: `pytest tests/unit/test_reflection_scheduler.py::test_compute_next_due_cron_every_at -v` passes; `pytest tests/unit/test_reflection_scheduler.py::test_compute_next_due_rejects_interval -v` passes.
+- [ ] **`~/Desktop/Valor/reflections.yaml` migrated to new grammar; idempotent.** Proof: `grep -E "^\s*interval:" ~/Desktop/Valor/reflections.yaml` exits 1 (no matches); running `python scripts/migrate_reflections_yaml.py` twice produces identical YAML on the second run (`md5 ~/Desktop/Valor/reflections.yaml` unchanged across two invocations).
+- [ ] **`dashboard.json` exposes new fields.** Proof: `curl -s localhost:8500/dashboard.json | python -c "import json,sys; d=json.load(sys.stdin); r=d['reflections'][0]; assert all(k in r for k in ('failure_count_consecutive','paused_until','cost_usd_total','output_sink'))"` exits 0.
+- [ ] **MCP server registered in `~/.claude.json`.** Proof: `python -c "import json,os; d=json.load(open(os.path.expanduser('~/.claude.json'))); assert d.get('mcpServers',{}).get('reflections',{}).get('command')=='python3'"` exits 0.
+- [ ] **All 7 MCP tools work end-to-end.** Proof: `pytest tests/integration/test_mcp_reflections.py -v` passes; output shows one passing case per tool.
+- [ ] **MCP auth model enforced.** Proof: `pytest tests/integration/test_mcp_reflections.py -k "auth" -v` passes; the four auth states (creator allowed, foreign session blocked, no-env-var allowed for registry-loaded, agent-session blocked for registry-loaded) each have a passing test.
+- [ ] **`tools/agent_session_scheduler.py --after <ISO>` writes a `Reflection`, not a delayed `AgentSession`.** Proof: integration test asserts a fresh `--after <ISO>` invocation creates a `Reflection` row with `schedule="at:<ISO>"` and **no** delayed `AgentSession` row.
+- [ ] **Failure tracking implemented.** Proof: `pytest tests/unit/test_reflection_scheduler.py::test_failure_tracking_pauses_after_threshold -v` passes; the test simulates 5 consecutive errors and asserts (a) `paused_until = now + 86400`, (b) a Memory record at importance 7.0, category="correction" was written.
+- [ ] **`docs/features/reflections.md` is single source of truth.** Proof: `grep -l "Reflection" docs/features/agent-session-scheduling.md docs/features/reflections-dashboard.md | xargs -I{} grep -c "see reflections.md\|see \[reflections.md\]" {}` returns ≥1 for each sibling doc.
+- [ ] **No legacy `interval:` references anywhere.** Proof: `grep -rn "^\s*interval:" config/reflections.yaml ~/Desktop/Valor/reflections.yaml` exits 1; `grep -rn "interval=" agent/reflection_scheduler.py models/reflection.py` exits 1.
+- [ ] **Dashboard reader migrated off embedded `run_history`.** Proof: `grep -n "state\.run_history" ui/data/reflections.py` exits 1.
+- [ ] **`/loop` and `/schedule` skill files NOT shadowed.** Proof: `[ ! -d .claude/skills/loop ] && [ ! -d .claude/skills/schedule ] && echo PASS` prints PASS.
+- [ ] **#1292 cutover landed before this plan was built.** Proof: `gh issue view 1292 --json state -q .state` returns `CLOSED`, OR the build kickoff comment on #1273 cites the merged PR closing #1292's Step A items.
+- [ ] **All tests pass.** Proof: `pytest tests/ -x -q` exits 0.
+- [ ] **Documentation updated.** Proof: `/do-docs` ran and produced no new diffs needed; `docs/features/reflections.md` modification timestamp is within the build window.
 
 ## Team Orchestration
 
@@ -657,12 +754,12 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 - **Agent Type**: mcp-specialist
 - **Parallel**: false
 - Create `mcp_servers/reflections_server.py` exposing 7 tools: `reflections_create / list / get / update / remove / runs / pause / resume`
-- Auth via env primitives the SDK client already injects (`agent/sdk_client.py:1380-1385`):
+- Auth via env primitives the SDK client already injects (`agent/sdk_client.py:1380` for `VALOR_SESSION_ID`, line 1385 for `AGENT_SESSION_ID`):
   - `_caller_id()` returns `os.environ.get("AGENT_SESSION_ID") or os.environ.get("VALOR_SESSION_ID")`
   - `_can_mutate(reflection)` returns `True` if `caller is None` (registry-source / migration / direct CLI) or `caller == reflection.created_by_session_id`
   - **No `is_root_operator()` helper is created** — the rule is grounded entirely in the existing env primitives
 - Registry-loaded reflections (`created_by_session_id=None`) are mutable only by no-env-var callers (migration script, scheduler reload, direct shell)
-- **Cycle-3 fix — register via `~/.claude.json`, not `.mcp.json`:** Create `scripts/update/mcp_reflections.py` modeled on `scripts/update/mcp_memory.py` (same `fcntl.flock(LOCK_EX | LOCK_NB)` + retry schedule + atomic-rename + `~/.claude.json.bak` backup pattern). The helper writes a `reflections` entry under `~/.claude.json`'s `mcpServers` map with `command="python3"` and `args=["-m", "mcp_servers.reflections_server"]`. Add a new **Step 4.85** to `scripts/update/run.py` immediately after Step 4.8's memory MCP verification (line 868), invoking the new helper with the same `_mcp_memory_write = config.do_service_restart` write-gating pattern. The repo-root `.mcp.json` referenced in the cycle-2 draft does not exist — verified via `ls -la .mcp.json` returning "No such file or directory."
+- **Cycle-3 fix — register via `~/.claude.json`, not `.mcp.json`:** Create `scripts/update/mcp_reflections.py` modeled on `scripts/update/mcp_memory.py` (same `fcntl.flock(LOCK_EX | LOCK_NB)` + retry schedule + atomic-rename + `~/.claude.json.bak` backup pattern). The helper writes a `reflections` entry under `~/.claude.json`'s `mcpServers` map with `command="python3"` and `args=["-m", "mcp_servers.reflections_server"]`. Add a new **Step 4.85** to `scripts/update/run.py` immediately after Step 4.8's memory MCP verification (the `mcp_memory_result` write happens at line 870 as of 2026-05-06; Step 4.8 starts at line 862), invoking the new helper with the same `_mcp_memory_write = config.do_service_restart` write-gating pattern. The repo-root `.mcp.json` referenced in the cycle-2 draft does not exist — verified via `ls -la .mcp.json` returning "No such file or directory."
 - Validate schedule grammar at create-time using `compute_next_due()`
 - Tests use `monkeypatch.setenv("AGENT_SESSION_ID", ...)` and `monkeypatch.delenv(...)` to drive the auth states explicitly
 
@@ -693,7 +790,7 @@ This work introduces a new MCP server. The agent reaches Reflections via:
   - **Phase 3 (schema validation):** Re-load the registry via `load_registry()`, call `compute_next_due()` on every entry, abort with a clear error message on parse failure.
   - **Idempotent:** detects post-migration shape (every entry already has `cron:`/`every:`/`at:`) and exits cleanly without rewriting; `ReflectionRun.get_or_create` ensures no double-write on re-runs.
   - **No raw Redis:** all sidecar set operations go through Popoto (`Model.query.filter()`, `instance.save()`, etc.), per the project's no-raw-Redis-on-Popoto-keys invariant.
-- Add **Step 3.65** to `scripts/update/run.py` (immediately after Step 3.6's data-migration phase at line 622 and before Step 3.7's binary installs at line 637) invoking the script. Step 3.65 runs **after Step 3's `uv sync` at line 462**, so the newly-added `croniter` dependency is installed before the migration imports it (cycle-3 ordering fix). Step 4.7 is already occupied by sdlc-tool wrapper validation; Step 1.67 (the cycle-2 draft slot) was wrong because it ran before `uv sync`.
+- Add **Step 3.65** to `scripts/update/run.py` (immediately after Step 3.6's data-migration phase at line 623 and before Step 3.7's binary installs at line 638) invoking the script. Step 3.65 runs **after Step 3's `uv sync` at line 463**, so the newly-added `croniter` dependency is installed before the migration imports it (cycle-3 ordering fix; line numbers refreshed 2026-05-06). Step 4.7 (line 840) is already occupied by sdlc-tool wrapper validation; Step 1.67 (the cycle-2 draft slot) was wrong because it ran before `uv sync`.
 
 ### 9. Surface new fields in dashboard + repoint `ui/data/reflections.py` reads off embedded `run_history`
 - **Task ID**: build-dashboard
@@ -785,17 +882,22 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 
 | Check | Command | Expected |
 |-------|---------|----------|
+| **Precondition: #1292 cutover landed** | `gh issue view 1292 --json state -q .state` | `CLOSED` (or build kickoff comment cites the merged Step A PR) |
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| No legacy `interval:` in YAML | `grep -r "^\s*interval:" config/reflections.yaml` | exit code 1 |
+| No legacy `interval:` in YAML | `grep -rn "^\s*interval:" config/reflections.yaml ~/Desktop/Valor/reflections.yaml` | exit code 1 |
 | No legacy `interval=` in scheduler | `grep -rn "interval=" agent/reflection_scheduler.py models/reflection.py` | exit code 1 |
 | `croniter` importable | `python -c "import croniter"` | exit code 0 |
 | MCP server importable | `python -c "import mcp_servers.reflections_server"` | exit code 0 |
-| MCP server registered in `~/.claude.json` | `python -c "import json; d=json.load(open(__import__('os').path.expanduser('~/.claude.json'))); assert 'reflections' in d.get('mcpServers', {})"` | exit code 0 |
+| MCP server registered in `~/.claude.json` | `python -c "import json,os; d=json.load(open(os.path.expanduser('~/.claude.json'))); assert d.get('mcpServers',{}).get('reflections',{}).get('command')=='python3'"` | exit code 0 |
 | Dashboard reader migrated off embedded `run_history` | `grep -n "state\.run_history" ui/data/reflections.py` | exit code 1 (no matches) |
+| `/loop` / `/schedule` skill files not shadowed | `[ ! -d .claude/skills/loop ] && [ ! -d .claude/skills/schedule ] && echo PASS` | prints `PASS` |
 | Migration script idempotent | `python scripts/migrate_reflections_yaml.py --dry-run --check-idempotent` | exit code 0 |
-| Dashboard surfaces new fields | `curl -s localhost:8500/dashboard.json \| python -c "import json,sys; d=json.load(sys.stdin); r=d['reflections'][0]; assert 'failure_count_consecutive' in r and 'paused_until' in r and 'cost_usd_total' in r"` | exit code 0 |
+| Migration produces identical YAML on re-run | `md5 ~/Desktop/Valor/reflections.yaml` before and after a second `python scripts/migrate_reflections_yaml.py` | identical hash |
+| Dashboard surfaces new fields | `curl -s localhost:8500/dashboard.json \| python -c "import json,sys; d=json.load(sys.stdin); r=d['reflections'][0]; assert all(k in r for k in ('failure_count_consecutive','paused_until','cost_usd_total','output_sink'))"` | exit code 0 |
+| `ReflectionRun` TTL set | `python -c "from models.reflection_run import ReflectionRun; assert ReflectionRun.Meta.ttl == 86400 * 90"` | exit code 0 |
+| MCP tool count = 7 | `python -c "from mcp_servers.reflections_server import _ALL_TOOLS; assert len(_ALL_TOOLS) == 7"` (or equivalent introspection per `mcp_servers/memory_server.py` pattern) | exit code 0 |
 
 ## Critique Results
 
