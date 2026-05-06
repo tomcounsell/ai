@@ -271,5 +271,4 @@ pytest tools/<name>/tests/ -v
 
 ### Examples
 
-- **Browser automation** → `tools/browser/` (we configure and test it)
-- **Agent-browser skill prompt** → `.claude/skills/agent-browser/` (Claude Code uses it)
+- **Screenshot post-processing helper** → `tools/browser/` (Pillow downscale used by `tools/computer/`; the BYOB MCP server provides the actual browser surface)

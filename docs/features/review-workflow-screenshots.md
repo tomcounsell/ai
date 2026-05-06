@@ -6,19 +6,17 @@ implemented: 2026-02-04
 
 # Feature: Review Workflow with Screenshots
 
-> **Surface note (post-#1274):** The original proposal below assumed `agent-browser` for all
-> screenshot capture. The shipped review workflow is now **dual-surface** — `agent-browser`
-> for `localhost` and public preview hosts (`*.vercel.app`, `*.netlify.app`, `*.pages.dev`,
-> `*.fly.dev`, `*.railway.app`, `github.com`); BYOB MCP (`mcp__byob__*`) for auth dashboards,
-> private staging URLs, and any unknown host. The allowlist lives in
-> `.claude/skills/do-pr-review/SKILL.md` and `sub-skills/screenshot.md`. See
-> [`byob-browser-control.md`](byob-browser-control.md) for the full decision rule.
+> **Surface note (post-#1256):** Screenshot capture runs through BYOB MCP
+> (`mcp__byob__browser_*`) — the user's real, logged-in Chrome. Public
+> preview deploys and authenticated staging URLs are screenshotted the
+> same way; the legacy `agent-browser` and `bowser` surfaces were
+> retired. See [`byob-browser-control.md`](byob-browser-control.md).
 
 ## Overview
 
 The `/do-pr-review` command validates implementations against specifications and captures visual proof via screenshots.
 
-**Status:** ✅ Implemented (dual-surface since #1274)
+**Status:** ✅ Implemented (BYOB-only since #1256)
 **Implementation files:**
 - `.claude/commands/do-pr-review.md` - Review workflow command
 - `.claude/commands/prepare_app.md` - App preparation command
@@ -54,7 +52,7 @@ Create a `/do-pr-review` command that:
 2. Find spec file (specs/*.md matching branch)
 3. Read spec requirements
 4. Run git diff to see changes
-5. If UI changes: capture screenshots via agent-browser
+5. If UI changes: capture screenshots via BYOB MCP (`mcp__byob__browser_*`)
 6. Compare implementation vs spec
 7. Categorize issues:
    - blocker: Must fix before release
@@ -128,11 +126,11 @@ spec_file: $2
 }
 ```
 
-### Integration with agent-browser
+### Integration with BYOB MCP
 
-Use existing `agent-browser` skill for screenshots:
-- Navigate to URLs
-- Capture full page or element screenshots
+Use the BYOB MCP browser tools (`mcp__byob__browser_*`) for screenshots:
+- Navigate to URLs (`browser_navigate`)
+- Capture full-page or element screenshots (`browser_screenshot` with `savePath`)
 - Store with descriptive names: `01_login_form.png`, `02_dashboard.png`
 
 ### Screenshot Naming Convention
@@ -151,7 +149,7 @@ Examples:
 1. Create `.claude/commands/do-pr-review.md` with review logic
 2. Create `.claude/commands/prepare_app.md` for app setup
 3. Add screenshot storage to `agents/{id}/review/review_img/`
-4. Integrate with agent-browser for captures
+4. Integrate with BYOB MCP (`mcp__byob__browser_*`) for captures
 5. Add review report schema
 6. Update CLAUDE.md with review workflow documentation
 7. Optional: Add cloud upload for screenshots (R2/S3)
@@ -166,11 +164,11 @@ Examples:
 
 ## Estimated Effort
 
-Medium - Requires agent-browser integration
+Medium - Requires BYOB MCP integration
 
 ## Dependencies
 
-- agent-browser skill (already available)
+- BYOB MCP server registered in `~/.claude.json` (see [byob-browser-control.md](byob-browser-control.md))
 - Spec files from planning phase (from issue-classification-commands plan)
 
 ## Risks

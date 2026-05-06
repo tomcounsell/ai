@@ -98,8 +98,8 @@ def test_install_on_fresh_file(claude_config_path):
     assert len(entry["args"]) == 1
     assert "byob" in entry["args"][0]
     assert entry["args"][0].endswith("/byob-mcp.ts")
-    # Security default: BYOB_ALLOW_EVAL=0
-    assert entry["env"]["BYOB_ALLOW_EVAL"] == "0"
+    # Repo default: BYOB_ALLOW_EVAL=1 (BYOB is standard infra; skills need eval)
+    assert entry["env"]["BYOB_ALLOW_EVAL"] == "1"
 
 
 def test_idempotent_no_op_when_correct(claude_config_path):
@@ -122,10 +122,14 @@ def test_idempotent_no_op_when_correct(claude_config_path):
 
 
 def test_drift_heal_corrects_eval_flag(claude_config_path):
-    """A drifted BYOB_ALLOW_EVAL=1 must be corrected back to '0' on next run."""
+    """A drifted BYOB_ALLOW_EVAL=0 must be corrected to '1' on next run.
+
+    The repo default is BYOB_ALLOW_EVAL=1; the registrar drift-heals any
+    other value (most commonly an inherited '0' from upstream BYOB).
+    """
     from scripts.update import mcp_byob
 
-    # Drifted entry: eval enabled.
+    # Drifted entry: eval disabled (the old upstream default).
     claude_config_path.write_text(
         json.dumps(
             {
@@ -134,7 +138,7 @@ def test_drift_heal_corrects_eval_flag(claude_config_path):
                         "type": "stdio",
                         "command": str(mcp_byob.BYOB_TSX_BIN),
                         "args": [str(mcp_byob.BYOB_MCP_SERVER_TS)],
-                        "env": {"BYOB_ALLOW_EVAL": "1"},
+                        "env": {"BYOB_ALLOW_EVAL": "0"},
                     }
                 }
             }
@@ -146,7 +150,7 @@ def test_drift_heal_corrects_eval_flag(claude_config_path):
     assert result.action == "repaired"
 
     config = json.loads(claude_config_path.read_text())
-    assert config["mcpServers"]["byob"]["env"]["BYOB_ALLOW_EVAL"] == "0"
+    assert config["mcpServers"]["byob"]["env"]["BYOB_ALLOW_EVAL"] == "1"
 
 
 def test_drift_heal_corrects_command(claude_config_path):
@@ -161,7 +165,7 @@ def test_drift_heal_corrects_command(claude_config_path):
                         "type": "stdio",
                         "command": "deno",
                         "args": ["wrong"],
-                        "env": {"BYOB_ALLOW_EVAL": "0"},
+                        "env": {"BYOB_ALLOW_EVAL": "1"},
                     }
                 }
             }
@@ -416,3 +420,44 @@ def test_verify_mode_ok_when_binaries_missing_and_no_entry(byob_not_installed):
     result = mcp_byob.verify_byob_mcp(write=False)
     assert result.ok is True
     assert result.action == "skipped"
+
+
+# --- tsx path fallback resolution -------------------------------------------
+#
+# Newer BYOB layouts keep tsx package-local at
+# ~/.byob/packages/mcp-server/node_modules/.bin/tsx instead of hoisting it
+# to the workspace-root ~/.byob/node_modules/.bin/tsx. The registrar must
+# detect either layout; previously it silently no-op'd on the package-local
+# layout because the existence gate only checked the workspace-root path.
+
+
+def test_resolves_package_local_tsx_when_root_missing(tmp_path, monkeypatch):
+    """Package-local tsx exists but workspace-root does not: registrar uses package-local."""
+    from scripts.update import mcp_byob
+
+    cfg = tmp_path / "claude.json"
+    lock = tmp_path / "claude.json.lock"
+    bak = tmp_path / "claude.json.bak"
+    monkeypatch.setattr(mcp_byob, "CLAUDE_CONFIG_PATH", cfg)
+    monkeypatch.setattr(mcp_byob, "CLAUDE_CONFIG_LOCK_PATH", lock)
+    monkeypatch.setattr(mcp_byob, "CLAUDE_CONFIG_BACKUP_PATH", bak)
+
+    fake_byob = tmp_path / ".byob"
+    fake_byob.mkdir()
+    # Workspace-root tsx absent; package-local tsx present.
+    root_tsx = fake_byob / "root_tsx_does_not_exist"
+    pkg_tsx = fake_byob / "pkg_tsx"
+    pkg_tsx.touch()
+    fake_ts = fake_byob / "byob-mcp.ts"
+    fake_ts.touch()
+    monkeypatch.setattr(mcp_byob, "BYOB_TSX_BIN", root_tsx)
+    monkeypatch.setattr(mcp_byob, "BYOB_TSX_BIN_PKG", pkg_tsx)
+    monkeypatch.setattr(mcp_byob, "BYOB_MCP_SERVER_TS", fake_ts)
+
+    cfg.write_text(json.dumps({"mcpServers": {}}))
+    result = mcp_byob.verify_byob_mcp(write=True)
+    assert result.ok is True
+    assert result.action == "installed"
+
+    config = json.loads(cfg.read_text())
+    assert config["mcpServers"]["byob"]["command"] == str(pkg_tsx)

@@ -59,10 +59,44 @@
     <td>
         {% if s.status %}
         {% set terminal = s.status in ('failed', 'error', 'abandoned', 'killed', 'completed', 'superseded') %}
-        {% if not terminal %}{% if s.priority == 'urgent' %}<span class="priority-icon" style="color:#f97316" title="Urgent">⬆⬆</span>{% elif s.priority == 'high' %}<span class="priority-icon" style="color:#f97316" title="High priority">⬆</span>{% elif s.priority == 'low' %}<span class="priority-icon" style="color:#3b82f6" title="Low priority">⬇</span>{% endif %}{% endif %}<span class="status-label status-{{ s.status }}{% if s.is_stale %} stale{% endif %}" title="{{ s.status }}{% if s.is_stale %} (stale){% endif %}">{% if s.status == 'running' %}▶▶{% elif s.status == 'pending' %}<span style="font-size:1.5em;line-height:1">⏸</span>{% elif s.status == 'paused' %}<span style="font-size:1.5em;line-height:1" title="paused">⏸</span>{% elif s.status == 'paused_circuit' %}<span style="font-size:1.5em;line-height:1" title="paused (circuit breaker)">⛌</span>{% elif s.status == 'superseded' %}<span title="superseded">→</span>{% elif s.status == 'dormant' %}dormant{% elif s.status in ('waiting_for_children', 'active') %}▶{% elif s.status == 'completed' %}<span style="font-size:1.5em;line-height:1">✔</span>{% else %}{{ s.status }}{% endif %}{% if s.is_stale %} ·{% endif %}</span>{# Ghost badge — sessions claiming running/active/paused/paused_circuit but the harness PID is dead. Pairs with freshness chip; tooltip explains the recycled-PID caveat. #}{% if not terminal and s.process_alive == False %}<span class="ghost-badge" title="ghost — harness process dead">ghost</span>{% endif %}{# Freshness chip — age since last_evidence_at. Color tiers: green <60s, amber 60s-10min, red >10min. Skipped for terminal-status sessions (no need to show "3 days ago" on a completed session). #}{% if not terminal and s.last_evidence_at %}{% set _age = s.last_evidence_at | freshness_age %}{% if _age is not none %}<span class="freshness-chip {% if _age < 60 %}freshness-fresh{% elif _age < 600 %}freshness-warm{% else %}freshness-stale{% endif %}" title="last evidence {{ _age | format_duration }} ago">{{ _age | format_duration }}</span>{% endif %}{% endif %}<span class="duration-label mono">{{ s.duration | format_duration }}</span>
-        {% if s.watchdog_unhealthy %}
-        <span class="badge badge-warning" title="{{ s.watchdog_unhealthy }}">!</span>
-        {% endif %}
+        <div class="status-cell">
+            <div class="status-row">
+                {% if not terminal %}
+                    {% if s.priority == 'urgent' %}<span class="priority-icon" style="color:#f97316" title="Urgent">⬆⬆</span>
+                    {% elif s.priority == 'high' %}<span class="priority-icon" style="color:#f97316" title="High priority">⬆</span>
+                    {% elif s.priority == 'low' %}<span class="priority-icon" style="color:#3b82f6" title="Low priority">⬇</span>
+                    {% endif %}
+                {% endif %}
+                <span class="status-label status-{{ s.status }}{% if s.is_stale %} stale{% endif %}" title="{{ s.status }}{% if s.is_stale %} (stale){% endif %}">
+                    {% if s.status == 'running' %}▶▶
+                    {% elif s.status == 'pending' %}<span style="font-size:1.5em;line-height:1">⏸</span>
+                    {% elif s.status == 'paused' %}<span style="font-size:1.5em;line-height:1" title="paused">⏸</span>
+                    {% elif s.status == 'paused_circuit' %}<span style="font-size:1.5em;line-height:1" title="paused (circuit breaker)">⛌</span>
+                    {% elif s.status == 'superseded' %}<span title="superseded">→</span>
+                    {% elif s.status == 'dormant' %}dormant
+                    {% elif s.status in ('waiting_for_children', 'active') %}▶
+                    {% elif s.status == 'completed' %}<span style="font-size:1.5em;line-height:1">✔</span>
+                    {% else %}{{ s.status }}
+                    {% endif %}
+                    {% if s.is_stale %} ·{% endif %}
+                </span>
+                {% if not terminal and s.process_alive == False %}
+                <span class="ghost-badge" title="ghost — harness process dead">ghost</span>
+                {% endif %}
+                <span class="duration-label mono">{{ s.duration | format_duration }}</span>
+                {% if s.watchdog_unhealthy %}
+                <span class="badge badge-warning" title="{{ s.watchdog_unhealthy }}">!</span>
+                {% endif %}
+            </div>
+            {% if not terminal and s.last_evidence_at %}
+                {% set _age = s.last_evidence_at | freshness_age %}
+                {% if _age is not none %}
+                <div class="status-meta">
+                    <span class="freshness-chip {% if _age < 60 %}freshness-fresh{% elif _age < 600 %}freshness-warm{% else %}freshness-stale{% endif %}" title="last evidence {{ _age | format_duration }} ago">{{ _age | format_duration }}</span>
+                </div>
+                {% endif %}
+            {% endif %}
+        </div>
         {% else %}
         <span class="text-muted">-</span>
         {% endif %}

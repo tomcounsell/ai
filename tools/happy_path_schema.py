@@ -1,9 +1,9 @@
 """Trace JSON schema for the happy path testing pipeline.
 
 Defines the structured trace format that serves as the contract between
-the discovery stage (agent-browser exploration) and the generation stage
-(Rodney script generation). Each trace file represents one happy path
-as an ordered list of steps.
+the discovery stage (BYOB MCP exploration via the do-discover-paths
+skill) and the generation stage (Rodney script generation). Each trace
+file represents one happy path as an ordered list of steps.
 """
 
 from __future__ import annotations

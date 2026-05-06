@@ -24,8 +24,8 @@ import pytest
 
 from tools import plan_checkbox_writer as pcw
 
-POST_REVIEW = Path(".claude/skills/do-pr-review/sub-skills/post-review.md")
-CODE_REVIEW = Path(".claude/skills/do-pr-review/sub-skills/code-review.md")
+POST_REVIEW = Path(".claude/skills-global/do-pr-review/sub-skills/post-review.md")
+CODE_REVIEW = Path(".claude/skills-global/do-pr-review/sub-skills/code-review.md")
 
 
 @pytest.fixture(scope="module")

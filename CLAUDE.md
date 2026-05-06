@@ -143,10 +143,10 @@ valor-email threads
 | `./scripts/valor-service.sh email-dead-letter list` | List failed SMTP sends in dead-letter queue |
 | `./scripts/valor-service.sh email-dead-letter replay --all` | Replay all dead-lettered emails |
 | `tail -f logs/bridge.log` | Stream bridge logs |
-| `pytest tests/` | Run all tests |
-| `pytest tests/unit/` | Run unit tests only (fast, ~60s) |
-| `pytest tests/unit/ -n auto` | Run unit tests in parallel |
-| `pytest tests/integration/` | Run integration tests only |
+| `pytest tests/` | Run all tests (parallel by default — `-n auto --dist=loadfile` from `pyproject.toml`) |
+| `pytest tests/unit/` | Run unit tests only (~40s parallel) |
+| `pytest tests/unit/ -n0` | Force serial unit run (e.g. for debugging) |
+| `pytest tests/integration/` | Run integration tests only (~125s parallel) |
 | `pytest -m sdlc` | Run tests for a specific feature (see `tests/README.md`) |
 | `python -m ruff format . && python -m ruff check .` | Format and lint |
 | `python -m ui.app` | Start web UI server on localhost:8500 |

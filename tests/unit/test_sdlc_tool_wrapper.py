@@ -29,8 +29,8 @@ WRAPPER = REPO_ROOT / "scripts" / "sdlc-tool"
 # include set is ignored (tests, archived docs/plans/**, the wrapper itself,
 # tools/** which IS the underlying module, etc.).
 PARITY_INCLUDE_GLOBS = (
-    ".claude/skills/**/SKILL.md",
-    ".claude/skills/**/sub-skills/**/*.md",
+    ".claude/skills-global/**/SKILL.md",
+    ".claude/skills-global/**/sub-skills/**/*.md",
     ".claude/hooks/post_compact.py",
     "config/personas/project-manager.md",
 )

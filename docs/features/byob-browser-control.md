@@ -3,49 +3,11 @@
 **Issue:** [#1256](https://github.com/tomcounsell/ai/issues/1256)
 **Plan:** [`docs/plans/byob_and_computer_use.md`](../plans/byob_and_computer_use.md)
 
-## Migration Status
-
-The `agent-browser` → BYOB skill migration tracked by
-[#1274](https://github.com/tomcounsell/ai/issues/1274) shipped with the
-following per-skill state. The canonical decision matrix lives in
-[`docs/plans/agent_browser_to_byob_skill_migration.md`](../plans/agent_browser_to_byob_skill_migration.md);
-this section is the post-build summary.
-
-| Skill | Post-build state | Notes |
-|-------|------------------|-------|
-| `linkedin` | **migrated to BYOB** | First canonical migration. Frontmatter declares both `mcp__byob__*` and `Bash(agent-browser:*)` for one release cycle so machines without BYOB still have a working linkedin skill. The retained CDP-attach block is prefixed with an explicit "Fallback path" callout (verified by build-time grep). |
-| `do-design-audit` | **dual-surface** | Public-domain allowlist routes to `agent-browser`; everything else (auth dashboards, unknown hosts) routes to BYOB. Default-to-BYOB closes the public-URL-302s-to-login TOCTOU window. |
-| `do-pr-review` (incl. `sub-skills/screenshot.md`) | **dual-surface** | Allowlist: `localhost`, `*.vercel.app`, `*.netlify.app`, `*.pages.dev`, `*.fly.dev`, `*.railway.app`, `github.com`. Anything else routes to BYOB. |
-| `do-design-system` | doc-only update | Cosmos / Pinterest / Are.na are public; stays on `agent-browser`. Note added explaining BYOB is the alternative for any future logged-in moodboard source. |
-| `prepare-app` | doc-only update | Now mentions both surfaces in "When to Use" and "Integration Notes". |
-| `do-test` | doc-only update | The `frontend-tester` agent's `agent-browser` use is unchanged; sentence appended noting BYOB is a future option for that agent. |
-| `.claude/skills/README.md` | doc-only update | Added "When to use which browser surface?" section with the canonical decision rule (1: needs login? 2: needs parallelism? 3: ambiguous → default-to-BYOB). |
-| `do-skills-audit/scripts/audit_skills.py` | one-line update | `byob` added to `BACKGROUND_SKILLS` allowlist so the audit recognizes the BYOB MCP surface (no SKILL.md exists for BYOB by design — it is MCP-only). |
-| `agent-browser` | stays | The skill *is* the wrapper for the 3rd-party anonymous CLI. Pointer added: "When to use BYOB instead?" |
-| `bowser` | stays | Already its own skill. No `agent-browser` references. Documentation-status row only. |
-| `do-discover-paths` | stays | Depends on `agent-browser eval` which BYOB blocks by default. Documented "Why this stays on `agent-browser`" section added. |
-| `mermaid-render` | stays | Excalidraw is anonymous and public; uses `agent-browser eval` which BYOB blocks. Documented "Why this stays on `agent-browser`" section added. |
-
-**Bridge inference**: `agent/byob_skill_triggers.py` exposes
-`BYOB_SKILL_TRIGGERS` (registry) and `infer_requires_real_chrome(text)`
-(case-insensitive regex match with first-person/intent phrasing).
-Both Telegram and email bridge enqueue paths call this before
-`enqueue_agent_session()` so bridge-spawned sessions get the
-`requires_real_chrome` scheduler gate engaged automatically.
-**Adding a new BYOB-migrated skill = add a row to
-`BYOB_SKILL_TRIGGERS`.** No bridge edit required.
-
-CLI users continue to set the flag explicitly:
-`valor-session create --needs-real-chrome ...`.
-
-**Behavioral smoke test**: the operator must verify the canonical
-`linkedin` migration drives real Chrome end-to-end via
-`tests/manual/linkedin_byob_smoke.txt`. See the plan's Success
-Criteria for the executable proof artifact.
-
 ## What it is
 
-BYOB (Bring Your Own Browser) is a Chrome extension + native messaging host + MCP server stack that lets the agent read and act on the user's already-logged-in Chrome session via MCP tools (`byob_navigate`, `byob_click`, `byob_screenshot`, etc.) -- no `state.json` files in the repo, no per-session re-auth, no headless-fingerprint detection.
+BYOB (Bring Your Own Browser) is a Chrome extension + native messaging host + MCP server stack that lets the agent read and act on the user's already-logged-in Chrome session via MCP tools (`mcp__byob__browser_navigate`, `mcp__byob__browser_click`, `mcp__byob__browser_screenshot`, etc.) -- no `state.json` files in the repo, no per-session re-auth, no headless-fingerprint detection.
+
+It is the **only** browser surface in this repo. The legacy `agent-browser` and `bowser` skills, plus the `bowser` subagent, were retired in #1256. Public pages and authenticated dashboards both go through BYOB.
 
 Communication chain:
 
@@ -55,17 +17,11 @@ agent (Claude Code) -> byob MCP server (node) -> byob-bridge -> Chrome extension
 
 All communication is local (Unix socket + native messaging). The Chrome extension key is unique per install; nothing is shared across machines.
 
-## Decision Guide: which browser surface?
+## Bridge inference
 
-Three surfaces coexist after this work shipped:
+`agent/byob_skill_triggers.py` exposes `BYOB_SKILL_TRIGGERS` (registry) and `infer_requires_real_chrome(text)` (case-insensitive regex match with first-person/intent phrasing). Both Telegram and email bridge enqueue paths call this before `enqueue_agent_session()` so bridge-spawned sessions get the `requires_real_chrome` scheduler gate engaged automatically.
 
-| Surface | Anonymous? | Headless? | Parallel-safe? | Logged-in? | Use when |
-|---|---|---|---|---|---|
-| `agent-browser` (3rd-party CLI on PATH) | yes | yes | no (single-tab) | no | Anonymous public-page automation. Per-skill migration outcomes captured in the Migration Status section above (#1274). |
-| `bowser` (Playwright headless) | yes | yes | yes (`-s=` named sessions) | optional (CDP/profile flags) | Untrusted-link previews, parallel CI-style tests |
-| **BYOB MCP** (`byob_*` tools) | no | no (real Chrome) | no (one DOM tree) | yes -- the user's actual session | Logged-in operations (Gmail, GitHub notifications, internal dashboards). Requires scheduler defer. |
-
-If the agent needs to read Gmail or click a button on the user's logged-in GitHub, route to BYOB. If it just needs to capture an unauthenticated webpage screenshot, use `bowser` or `agent-browser`.
+CLI users set the flag explicitly: `valor-session create --needs-real-chrome ...`.
 
 ## Scheduler-layer serialization (Decision 2)
 
@@ -101,19 +57,19 @@ No `flock(2)`. No per-process collision guard. No "MCP-vs-CLI precedence" -- the
       "type": "stdio",
       "command": "/Users/<you>/.byob/packages/mcp-server/node_modules/.bin/tsx",
       "args": ["/Users/<you>/.byob/packages/mcp-server/bin/byob-mcp.ts"],
-      "env": { "BYOB_ALLOW_EVAL": "0" }
+      "env": { "BYOB_ALLOW_EVAL": "1" }
     }
   }
 }
 ```
 
-The `command` is `tsx` (a TypeScript runner); the `args[0]` points at BYOB's TypeScript entry. This matches BYOB's own "Manual MCP registration" recipe in its README. The registrar resolves both paths from `~/.byob/` automatically.
+The `command` is `tsx` (a TypeScript runner); the `args[0]` points at BYOB's TypeScript entry. This matches BYOB's own "Manual MCP registration" recipe in its README. The registrar resolves both paths from `~/.byob/` automatically — it accepts either the workspace-root tsx (`~/.byob/node_modules/.bin/tsx`) or the package-local tsx (`~/.byob/packages/mcp-server/node_modules/.bin/tsx`) depending on which layout `bun install` produced.
 
-`BYOB_ALLOW_EVAL=0` is the security default per BYOB's README -- `browser_eval` (arbitrary JS execution) stays disabled. The registrar drift-heals back to `"0"` if it ever drifts.
+`BYOB_ALLOW_EVAL=1` is the repo default. BYOB is standard infrastructure on every machine and skills (`mermaid-render`, `do-discover-paths`, `do-design-system`) need `browser_eval` to function. The registrar drift-heals back to `"1"` if the value drifts.
 
 ## Block-list (BYOB upstream)
 
-BYOB upstream blocks reading `chrome://` and `file://` URLs and login pages for Google / Microsoft / Apple accounts. For **login** pages, use `bowser --cdp` with a persistent profile instead -- BYOB is for already-authenticated operations on already-logged-in sessions.
+BYOB upstream blocks reading `chrome://` and `file://` URLs and login pages for Google / Microsoft / Apple accounts. BYOB is for already-authenticated operations on already-logged-in sessions; if a target requires a fresh login flow, the user signs in interactively and BYOB picks up the resulting session.
 
 ## Tests
 
@@ -130,7 +86,7 @@ When `config/byob_pin.json` changes, `/update --full` rebuilds the BYOB workspac
 
 ## Failure modes
 
-- **BYOB MCP server fails to start** (bridge not running, socket missing, extension not loaded): Claude Code surfaces the MCP startup failure. `byob_*` tools are absent from the agent context. The agent surfaces "BYOB bridge not running -- run `cd ~/.byob && bun run doctor` to diagnose, most commonly the Chrome extension needs to be loaded" rather than silently retrying. **There is no Playwright fallback** in the BYOB surface -- anonymous Playwright work belongs to `bowser`.
+- **BYOB MCP server fails to start** (bridge not running, socket missing, extension not loaded): Claude Code surfaces the MCP startup failure. `byob_*` tools are absent from the agent context. The agent surfaces "BYOB bridge not running -- run `cd ~/.byob && bun run doctor` to diagnose, most commonly the Chrome extension needs to be loaded" rather than silently retrying. **There is no fallback browser surface** — BYOB is the only one.
 - **Lock contention on `~/.claude.json.lock`**: 3-attempt backoff (50/200/800ms). On exhaustion, the registrar returns `action="skipped"` and `/update` logs a warning; next `/update` invocation retries.
 - **Two real-Chrome sessions queued at once**: scheduler defers the second; first runs to completion; pop loop picks the second on the next cycle.
 
@@ -153,4 +109,4 @@ These are the realities of BYOB's actual on-disk layout. Verified during PR #127
 
 - [Computer Use](computer-use.md) -- sibling feature for native macOS desktop automation via bcu
 - [Agent Session Queue](agent-session-queue.md) -- pickup-loop architecture
-- [Issue #1274](https://github.com/tomcounsell/ai/issues/1274) -- per-skill migration of `agent-browser`-using skills to BYOB
+- [Issue #1256](https://github.com/tomcounsell/ai/issues/1256) -- BYOB adoption + retirement of legacy `agent-browser`/`bowser` surfaces

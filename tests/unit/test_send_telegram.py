@@ -26,6 +26,18 @@ def _bypass_promise_gate(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _bypass_drafter(monkeypatch):
+    """Make the drafter a passthrough for queueing tests.
+
+    The drafter pass-through (introduced when send_telegram.py stopped
+    bypassing the drafter) would otherwise call Haiku for any non-trivial
+    input. Tests that exercise the drafter explicitly
+    (``TestSendTelegramDrafter``) override this fixture.
+    """
+    monkeypatch.setattr("tools.send_telegram._draft_text", lambda t: t)
+
+
 class TestSendTelegramValidation:
     """Test input validation and environment variable checks."""
 
@@ -769,3 +781,140 @@ class TestSendTelegramPromiseGate:
         assert "--no-promise-gate" not in help_output
         assert "VALOR_OPERATOR_MODE" not in help_output
         assert "PROMISE_GATE_ENABLED" not in help_output
+
+
+class TestSendTelegramDrafter:
+    """Drafter pass-through: send_telegram.py runs text through the drafter
+    by default so the persona voice is enforced. Override the autouse
+    ``_bypass_drafter`` fixture to actually exercise the call path.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _bypass_drafter(self):
+        """Override the module-level autouse fixture so ``_draft_text`` runs
+        for real in this class. Individual tests patch ``draft_message`` to
+        control what the drafter returns.
+        """
+        # Intentional no-op — the override neutralizes the module fixture.
+        return
+
+    def test_drafter_rewrites_text_before_queueing(self, monkeypatch):
+        """Long text gets piped through draft_message; rewritten text is queued."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+        }
+        mock_redis = MagicMock()
+
+        async def fake_draft_message(raw_response, session=None, *, medium, persona):
+            # Verify the call shape — drafter is called with medium=telegram, persona=pm.
+            assert medium == "telegram"
+            assert persona == "pm"
+            from bridge.message_drafter import MessageDraft
+
+            return MessageDraft(text="• Drafted bullet outcome", was_drafted=True)
+
+        # Long, jargon-heavy raw text that would normally bypass the drafter's
+        # 200-char short-output gate.
+        raw = (
+            "Session transitioned to waiting_for_children. "
+            "Done for this turn — the runtime will steer this session back "
+            "when each child PM session completes its SDLC pipeline. "
+            "Internal IDs: 0_1777997141604, tg_cuttlefish_..._140."
+        )
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+            patch("tools.send_telegram._linkify_text", side_effect=lambda t: t),
+            patch("bridge.message_drafter.draft_message", side_effect=fake_draft_message),
+        ):
+            from tools.send_telegram import send_message
+
+            send_message(raw)
+
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["text"] == "• Drafted bullet outcome"
+
+    def test_skip_draft_keyword_bypasses_drafter(self, monkeypatch):
+        """skip_draft=True must NOT invoke the drafter; raw text is queued verbatim."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+        }
+        mock_redis = MagicMock()
+        draft_call_count = {"n": 0}
+
+        async def fake_draft_message(*args, **kwargs):  # pragma: no cover
+            draft_call_count["n"] += 1
+            from bridge.message_drafter import MessageDraft
+
+            return MessageDraft(text="MUTATED", was_drafted=True)
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+            patch("tools.send_telegram._linkify_text", side_effect=lambda t: t),
+            patch("bridge.message_drafter.draft_message", side_effect=fake_draft_message),
+        ):
+            from tools.send_telegram import send_message
+
+            send_message("Verbatim system notice", skip_draft=True)
+
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["text"] == "Verbatim system notice"
+        assert draft_call_count["n"] == 0
+
+    def test_drafter_failure_falls_back_to_raw_text(self, monkeypatch):
+        """If draft_message raises, the original text is queued (graceful degrade)."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+        }
+        mock_redis = MagicMock()
+
+        async def fake_draft_message(*args, **kwargs):
+            raise RuntimeError("simulated drafter outage")
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+            patch("tools.send_telegram._linkify_text", side_effect=lambda t: t),
+            patch("bridge.message_drafter.draft_message", side_effect=fake_draft_message),
+        ):
+            from tools.send_telegram import send_message
+
+            send_message("Original text survives drafter outage")
+
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["text"] == "Original text survives drafter outage"
+
+    def test_draft_send_telegram_env_disables_drafter(self, monkeypatch):
+        """DRAFT_SEND_TELEGRAM=0 must disable the drafter pass-through."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+            "DRAFT_SEND_TELEGRAM": "0",
+        }
+        mock_redis = MagicMock()
+        draft_call_count = {"n": 0}
+
+        async def fake_draft_message(*args, **kwargs):  # pragma: no cover
+            draft_call_count["n"] += 1
+            from bridge.message_drafter import MessageDraft
+
+            return MessageDraft(text="MUTATED", was_drafted=True)
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+            patch("tools.send_telegram._linkify_text", side_effect=lambda t: t),
+            patch("bridge.message_drafter.draft_message", side_effect=fake_draft_message),
+        ):
+            from tools.send_telegram import send_message
+
+            send_message("Long enough to be drafted by default " * 10)
+
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["text"].startswith("Long enough to be drafted by default")
+        assert draft_call_count["n"] == 0

@@ -837,6 +837,12 @@ def get_all_sessions(limit: int = 15) -> list[PipelineProgress]:
     # Convert all sessions to PipelineProgress, skipping test data
     all_pipelines = []
     for session in all_sessions:
+        if not session.id:
+            logger.warning(
+                "Skipping session with no id (partial write): "
+                f"status={session.status}, updated_at={session.updated_at}"
+            )
+            continue
         if getattr(session, "project_key", None) == "test":
             continue
         try:
@@ -874,7 +880,7 @@ def get_all_sessions(limit: int = 15) -> list[PipelineProgress]:
         else:
             inactive.append(p)
 
-    active.sort(key=lambda p: p.updated_at or p.created_at or 0, reverse=True)
+    active.sort(key=lambda p: p.started_at or p.created_at or 0, reverse=True)
     inactive.sort(key=_best_timestamp, reverse=True)
 
     return active + inactive[:limit]

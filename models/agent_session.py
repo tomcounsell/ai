@@ -434,14 +434,14 @@ class AgentSession(Model):
     # large enough to be informative. Throttled to one save per 5s.
     recent_thinking_excerpt = Field(null=True, default=None)
 
-    # === PM self-report behavior (issue #1172, Phase 1) ===
-    # Timestamp the PM session emitted its single mid-work self-report via
-    # `valor-telegram send`. Set by `agent/session_completion.py::
-    # _emit_pm_self_report` after a successful subprocess invocation
-    # (`returncode == 0`). The `is None` check on this field is the
-    # frequency-cap state: at most one self-report per session lifetime.
-    # Failure to send leaves this None — retry is bounded by the next
-    # dev-child completion event firing, never by the detector.
+    # === PM self-report behavior — retired 2026-05-06 ===
+    # Originally written by `_emit_pm_self_report` (issue #1172) to enforce a
+    # one-message-per-session frequency cap on the templated "Working on: X
+    # — Dev session running." mid-work message. That message read as
+    # system-log noise to human supervisors and the helper was removed; the
+    # field is retained here to avoid a migration on the AgentSession schema.
+    # No live caller writes or reads this field. Future callers should not
+    # repurpose it without renaming.
     self_report_sent_at = DatetimeField(null=True)
 
     # === Chat message log (issue #1192) ===

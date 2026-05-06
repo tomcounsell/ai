@@ -7,9 +7,17 @@
 This feature replaces inferred-from-staleness session kills with two
 complementary changes: the detector kills only on **evidence** of failure
 (Pillar B), and the agent + dashboard surface live state so operators can see
-what the agent is doing right now (Pillar A). PM sessions also emit one
-short mid-work self-report so the chat is neither silent nor spammy
-("goldilocks" mode).
+what the agent is doing right now (Pillar A).
+
+**Note (2026-05-06):** the templated mid-work self-report ("Working on:
+{snippet} — Dev session running.") was removed. In production it leaked
+internal vocabulary — issue numbers, the literal "Dev session running"
+phrase — into supervisor chats and read like system-log noise. The PM
+persona already covers when to send Telegram updates via
+`tools/send_telegram.py`, which now flows through the message drafter
+(`bridge/message_drafter.py`) and inherits the persona voice.
+Silence between meaningful events is correct; the dashboard's live-state
+surface (Pillar A below) is the canonical "is the agent alive" signal.
 
 ## Detector philosophy
 
@@ -86,32 +94,18 @@ their recovery depends solely on per-turn freshness in sub-check A.
 resets `reprieve_count=0` when transitioning sessions back to pending, preventing
 the escalation guard from triggering immediately after a worker restart.
 
-## PM self-report behavior
+## PM self-report behavior — removed
 
-PM sessions emit at most one short status message via `valor-telegram send`
-between the first dev-child completion and the final delivery — and only one.
+The mid-work self-report (`_emit_pm_self_report` in
+`agent/session_completion.py`) was removed on 2026-05-06. Its templated
+output ("Working on: {snippet} — Dev session running.") read as
+system-log noise to human supervisors and competed with the PM's own
+voice-filtered messages. The `AgentSession.self_report_sent_at` field is
+retained to avoid a migration but is no longer written or read by any
+caller.
 
-### Trigger conditions (all must hold)
-
-1. `parent.session_type == "pm"` — only PM sessions self-report.
-2. `parent.self_report_sent_at is None` — frequency cap state.
-3. `project_name` resolved from `parent.project_config["name"]` is a
-   non-empty string. Without it, the send is skipped (the wrong channel
-   is worse than no message).
-
-### Channel and content
-
-- **Channel:** `PM: {project_name}` via the `valor-telegram send` CLI.
-  Reuses the subprocess pattern from `agent/sustainability.py:_send_telegram`.
-- **Content:** Short templated string composed from `parent.message_text[:200]`.
-  Templated, NOT LLM-generated — past experiments drift into spam mode.
-  Example: `"Working on: Run the build for issue #1172 — Dev session running."`
-
-### Failure handling
-
-- Subprocess raise OR `returncode != 0` → log WARNING and leave
-  `self_report_sent_at = None` so the next dev-child completion can retry.
-- The helper itself never raises; PM final delivery is unaffected.
+If a future replacement is added, route it through the message drafter —
+do not template raw `parent.message_text` snippets into the chat.
 
 ## Pillar A — In-flight visibility
 
@@ -193,7 +187,6 @@ specific cost ceiling becomes operationally necessary.
 - `tests/unit/test_pre_tool_use_liveness_writes.py` — hook writer
   behavior + fail-closed + cooldown.
 - `tests/unit/test_dashboard_pillar_a_fields.py` — dashboard JSON shape.
-- `tests/unit/test_pm_self_report.py` — frequency cap + failure paths.
 - `tests/unit/test_health_check_recovery_finalization.py::TestHasProgressPerTurnSignal` — per-turn
   SDK signal tests: sub-check A (`last_tool_use_at`/`last_turn_at`), sub-check B
   (startup-window `last_heartbeat_at`), and `last_sdk_heartbeat_at` exclusion from Tier 1 (#1226).
@@ -204,8 +197,6 @@ specific cost ceiling becomes operationally necessary.
   startup recovery resets `reprieve_count=0` to prevent immediate escalation (#1226 Risk 4).
 - `tests/integration/test_pm_long_run_no_kill.py` — acceptance test for
   a 4+ hour PM with active tool use and no result event.
-- `tests/integration/test_pm_goldilocks_messaging.py` — acceptance test
-  for the one-mid-work-message-then-final-delivery cadence.
 
 ## See Also
 

@@ -121,8 +121,8 @@ def full_project(tmp_path: Path, monkeypatch):
     project = tmp_path / "project"
     home = tmp_path / "home"
 
-    # Set up project skills dir (minimal)
-    skills_dir = project / ".claude" / "skills" / "do-test"
+    # Set up project skills-global dir (minimal) — sync reads from here, not skills/
+    skills_dir = project / ".claude" / "skills-global" / "do-test"
     skills_dir.mkdir(parents=True)
     (skills_dir / "SKILL.md").write_text("# test")
 
@@ -136,7 +136,7 @@ def full_project(tmp_path: Path, monkeypatch):
     (home_cmds / "do-build.md").write_text("old command")
     (home_cmds / "sdlc.md").write_text("old command")
 
-    # Also set up home skills dir
+    # Also set up home skills dir (real directory, post-migration state)
     (home / ".claude" / "skills").mkdir(parents=True)
 
     # Patch Path.home to return our tmp home
@@ -154,3 +154,58 @@ def test_sync_removes_retired_commands(full_project):
     assert not (home / ".claude" / "commands" / "do-build.md").exists()
     assert not (home / ".claude" / "commands" / "sdlc.md").exists()
     assert result.removed >= 2
+
+
+# ---------------------------------------------------------------------------
+# Symlink migration: old ~/.claude/skills dir-symlink → real hardlinked dir
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def symlink_migration_project(tmp_path: Path, monkeypatch):
+    """Project layout where ~/.claude/skills is still the old directory symlink."""
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+
+    # skills-global/ has the global skill
+    skills_global = project / ".claude" / "skills-global" / "do-test"
+    skills_global.mkdir(parents=True)
+    (skills_global / "SKILL.md").write_text("# do-test")
+
+    # skills/ has only project-only skills (new layout)
+    (project / ".claude" / "skills" / "telegram").mkdir(parents=True)
+    (project / ".claude" / "skills" / "telegram" / "SKILL.md").write_text("# telegram")
+
+    (project / ".claude" / "commands").mkdir(parents=True)
+    (project / ".claude" / "agents").mkdir(parents=True)
+
+    # Old layout: ~/.claude/skills is a directory symlink to .claude/skills/
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "skills").symlink_to(project / ".claude" / "skills")
+    (home / ".claude" / "commands").mkdir(parents=True)
+
+    monkeypatch.setattr(Path, "home", lambda: home)
+    return project, home
+
+
+def test_sync_migrates_skills_dir_symlink(symlink_migration_project):
+    """sync_claude_dirs removes the old dir-symlink and replaces with hardlinked real dir."""
+    project, home = symlink_migration_project
+    user_skills = home / ".claude" / "skills"
+
+    assert user_skills.is_symlink(), "precondition: starts as symlink"
+
+    result = sync_claude_dirs(project)
+
+    # Symlink is gone, replaced by a real directory
+    assert not user_skills.is_symlink()
+    assert user_skills.is_dir()
+
+    # Global skill was hardlinked in
+    assert (user_skills / "do-test" / "SKILL.md").exists()
+
+    # Project-only skill was NOT synced (telegram is in PROJECT_ONLY_SKILLS)
+    assert not (user_skills / "telegram").exists()
+
+    # Migration removal counted
+    assert result.removed >= 1

@@ -426,6 +426,27 @@ def is_email_configured(project_dir: Path) -> bool:
     return False
 
 
+def stop_email(project_dir: Path) -> bool:
+    """Stop the email bridge. Returns True if it stopped."""
+    service_script = project_dir / "scripts" / "valor-service.sh"
+    if not service_script.exists():
+        pid = get_email_pid()
+        if pid:
+            import os
+            import signal
+
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        return not is_email_running()
+    try:
+        run_cmd([str(service_script), "email-stop"], cwd=project_dir, timeout=15)
+    except Exception:
+        pass
+    return not is_email_running()
+
+
 def ensure_email_running(project_dir: Path) -> bool:
     """Start email bridge if configured and not already running. Returns True if running."""
     if not is_email_configured(project_dir):
@@ -461,20 +482,26 @@ def get_caffeinate_status() -> CaffeinateStatus:
     return CaffeinateStatus(installed=installed, running=running)
 
 
-def get_webui_pid() -> int | None:
-    """Get PID of running web UI process (ui.app on port 8500)."""
+def get_webui_pids() -> list[int]:
+    """Get all PIDs using port 8500 (uvicorn spawns main + worker)."""
     try:
         result = run_cmd(["lsof", "-ti", ":8500"])
         if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
+            return [int(p) for p in result.stdout.strip().split()]
     except Exception:
         pass
-    return None
+    return []
+
+
+def get_webui_pid() -> int | None:
+    """Get PID of running web UI process (ui.app on port 8500)."""
+    pids = get_webui_pids()
+    return pids[0] if pids else None
 
 
 def is_webui_running() -> bool:
     """Check if web UI is running."""
-    return get_webui_pid() is not None
+    return bool(get_webui_pids())
 
 
 def restart_webui(project_dir: Path, force: bool = False) -> bool:
@@ -486,13 +513,14 @@ def restart_webui(project_dir: Path, force: bool = False) -> bool:
     """
     import time
 
-    pid = get_webui_pid()
-    if pid and not force:
+    pids = get_webui_pids()
+    if pids and not force:
         return True
 
-    if pid:
+    if pids:
         try:
-            run_cmd(["kill", "-9", str(pid)])
+            # Kill all PIDs (main + uvicorn worker) so the port is fully released
+            run_cmd(["kill", "-9"] + [str(p) for p in pids])
             time.sleep(1)
         except Exception:
             pass
