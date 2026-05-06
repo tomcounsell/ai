@@ -11,6 +11,8 @@ last_comment_id:
 
 # Stalled Session User-Visible Alert
 
+_Tracks #1313._
+
 ## Problem
 
 When `monitoring/session_watchdog.py` detects a stalled session (default >300s in `pending`), it emits a `LIFECYCLE_STALL` warning to the worker log and does nothing else. On 2026-05-06, session `tg_cuttlefish_-5295380350_9642` sat pending for over 5 hours; the watchdog logged 60+ stall warnings; the user (the CEO) saw silence on Telegram and assumed "agent is thinking." Silent failure compounds short outages into long ones because no human-visible signal triggers an investigation.
