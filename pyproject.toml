@@ -118,7 +118,16 @@ python_files = ["test_*.py"]
 python_functions = ["test_*"]
 # -p no:postgresql: disable pytest-postgresql plugin which crashes on systems where
 # psycopg/libpq is not installed (see issue #265)
-addopts = "--tb=short -p no:postgresql"
+# -n auto: parallelize via pytest-xdist (workers per CPU). Tests that require
+# raw Redis access must use the per-worker `redis_test_url` fixture or read
+# `PYTEST_XDIST_WORKER` to pick the matching db (see tests/conftest.py).
+# --dist=loadfile: keep all tests in one file on the same worker. Three
+# integration files (test_design_system_pipeline.py, test_remote_update.py,
+# test_stage_comment.py) share global resources between their tests (npm
+# caches, host lockfiles, a single GitHub issue) and would otherwise fail
+# under inter-test parallelism. Loadfile is the simplest scheduler that
+# fixes that while preserving inter-file parallelism.
+addopts = "--tb=short -p no:postgresql -n auto --dist=loadfile"
 asyncio_mode = "auto"
 markers = [
     "unit: Pure logic tests, no external dependencies",

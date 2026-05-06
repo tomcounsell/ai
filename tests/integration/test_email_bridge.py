@@ -10,7 +10,8 @@ Design:
   in tests — the unit under test is the routing/dispatch logic in
   _process_inbound_email(), not Popoto internals.
 - Thread-continuation Redis lookups are exercised against the real test Redis
-  db (via a patched _get_redis() that points at db=1).
+  db (via a patched _get_redis() that points at the per-worker test db,
+  matching the autouse ``redis_test_db`` fixture).
 - Unknown sender, active-project guard, and extra_context propagation are
   all verified by inspecting mock call args.
 """
@@ -67,8 +68,23 @@ def _projects_json(project_key: str = "test-project") -> dict:
 
 
 def _test_redis() -> redis.Redis:
-    """Return a Redis connection to the test db (db=1, matching conftest fixture)."""
-    return redis.Redis(db=1, decode_responses=True)
+    """Return a Redis connection to the per-worker test db (matching conftest's
+    autouse ``redis_test_db`` fixture).
+
+    pytest-xdist sets ``PYTEST_XDIST_WORKER`` (e.g. ``gw0``, ``gw1``) inside
+    each worker process, mirroring the worker_id used by the autouse
+    fixture. Hardcoding ``db=1`` here causes ``-n auto`` collisions when
+    ``gw1+`` workers run this test against db=1 while their popoto state
+    lives in db=2+.
+    """
+    import os
+
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if worker_id.startswith("gw"):
+        test_db = int(worker_id[2:]) + 1  # gw0->db1, gw1->db2, ...
+    else:
+        test_db = 1  # serial run
+    return redis.Redis(db=test_db, decode_responses=True)
 
 
 # ---------------------------------------------------------------------------

@@ -5,12 +5,15 @@ Organized by test level and tagged by feature. Run `pytest --collect-only -q` fo
 ## Running Tests
 
 ```bash
-# By level
-pytest tests/unit/               # Unit tests (~60s)
-pytest tests/unit/ -n auto       # Unit tests in parallel
-pytest tests/integration/        # Integration tests (needs Redis)
+# By level (parallel by default — `-n auto --dist=loadfile` from pyproject.toml)
+pytest tests/unit/               # Unit tests (~40s parallel, ~250s serial)
+pytest tests/integration/        # Integration tests (~125s parallel, ~330s serial; needs Redis)
 pytest -m e2e                    # E2E tests
 pytest -m slow                   # Performance benchmarks
+
+# Force serial (for debugging xdist races or running with breakpoints)
+pytest tests/unit/ -n0
+pytest tests/integration/ -n0
 
 # By feature (works across all levels)
 pytest -m sdlc                   # All SDLC pipeline tests (516)
@@ -22,6 +25,13 @@ pytest -m "sdlc or sessions"     # Combine features
 pytest tests/unit/test_observer.py           # Single file
 pytest tests/unit/test_observer.py::TestX    # Single class
 ```
+
+### Parallel Execution Notes
+
+`pytest-xdist` runs tests across N worker subprocesses (one per CPU). Two patterns matter when authoring tests:
+
+1. **Per-worker Redis db.** The autouse `redis_test_db` fixture (`tests/conftest.py`) maps each worker to its own db (`gw0` → db=1, `gw1` → db=2, …). Tests that build a raw `redis.Redis(...)` client or set `REDIS_URL` for a subprocess must use the per-worker db, not a hardcoded `db=1`. Use the `redis_test_url` fixture or read `PYTEST_XDIST_WORKER` to derive it (`gw{N}` → db={N+1}, default db=1 when unset).
+2. **File-level grouping (`--dist=loadfile`).** All tests in one file land on the same worker. Files whose tests share global resources (npm/npx caches, host-level lockfiles, a single GitHub issue, an in-process module variable) rely on this — they otherwise collide under inter-test parallelism.
 
 ## Feature Markers
 
