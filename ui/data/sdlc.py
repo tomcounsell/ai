@@ -28,6 +28,51 @@ DASHBOARD_RETENTION_HOURS = int(os.environ.get("DASHBOARD_RETENTION_HOURS", "48"
 # Cache GitHub issue/PR titles to avoid repeated subprocess calls
 _github_title_cache: dict[str, str] = {}
 
+# Non-terminal session statuses where a live-process probe is meaningful (#1269).
+# Sessions in any other status (completed/failed/abandoned/killed/etc.) skip the
+# probe entirely — there's no PID to probe and no operator question to answer.
+_NON_TERMINAL_PROBE_STATUSES = frozenset({"running", "active", "paused", "paused_circuit"})
+
+
+def _check_process_alive(pid: int | None) -> bool | None:
+    """Return liveness for ``pid`` via a non-blocking ``os.kill(pid, 0)`` probe.
+
+    Returns:
+        ``True``  — process exists in the OS process table (alive).
+        ``False`` — ``ProcessLookupError`` raised; the PID is not a live process
+                    (ghost — the harness subprocess died but the session record
+                    still claims running).
+        ``None``  — uncertain. Returned when ``pid`` is None or ``pid <= 0``,
+                    or when the kernel returned ``PermissionError`` / generic
+                    ``OSError``. Caller should render "unknown" rather than lie.
+
+    Why ``pid <= 0`` returns None instead of probing:
+        ``kill(0, sig)`` and ``kill(-pid, sig)`` have process-group semantics on
+        Linux/macOS — refuse to probe rather than risk a wrong answer.
+
+    Recycled-PID caveat:
+        ``os.kill(pid, 0)`` returns success for whatever process now holds the
+        PID. The dashboard mitigates this by pairing the probe result with the
+        ``last_evidence_at`` freshness chip — a recycled-PID "alive" still pairs
+        with a stale freshness chip the operator can see.
+
+    Performance:
+        ``os.kill(pid, 0)`` is a single syscall (no IPC, no blocking on the
+        target process). Spike-2 in `docs/plans/dashboard-session-detail-liveness.md`
+        confirmed it's safe inline in request handlers without a timeout wrapper.
+    """
+    if pid is None or pid <= 0:
+        # kill(0, ...) and kill(-pid, ...) have process-group semantics on
+        # Linux/macOS — refuse to probe rather than risk a wrong answer.
+        return None
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return None  # uncertain — don't lie
+
 
 def _fetch_github_title(url: str) -> str | None:
     """Return the title of a GitHub issue or PR URL, using a process-level cache."""
@@ -265,6 +310,22 @@ class PipelineProgress(BaseModel):
     # deferred when another holds the slot. Default False keeps the
     # field invisible for ordinary sessions.
     requires_real_chrome: bool = False
+
+    # === Liveness signals (issue #1269) ===
+    # Surfaced from AgentSession heartbeat / recovery fields so the dashboard
+    # modal can answer "is this session actually progressing right now?" without
+    # the operator running `valor-session status --id <id>`. ``harness_pid`` is
+    # subprocess-scoped (cleared at proc.communicate() return) so the
+    # ``process_alive`` probe is meaningful. ``process_alive`` is None for
+    # terminal-status sessions (probe skipped) and for sessions where the probe
+    # was uncertain (PID None, negative, or PermissionError).
+    harness_pid: int | None = None
+    last_heartbeat_at: float | None = None
+    last_sdk_heartbeat_at: float | None = None
+    last_stdout_at: float | None = None
+    recovery_attempts: int = 0
+    reprieve_count: int = 0
+    process_alive: bool | None = None
 
     # SDLC state
     stages: list[StageState] = []
@@ -652,6 +713,28 @@ def _session_to_pipeline(session) -> PipelineProgress:
     evidence_present = [t for t in evidence_candidates if t is not None]
     last_evidence_at = max(evidence_present) if evidence_present else None
 
+    # === Liveness fields (issue #1269) ===
+    # Read the new ORM fields and probe the harness PID for non-terminal
+    # sessions only. The probe is a single os.kill(pid, 0) syscall — no IPC,
+    # no blocking, no cache (spike-3 ruled it out).
+    raw_pid = getattr(session, "harness_pid", None)
+    try:
+        harness_pid = int(raw_pid) if raw_pid is not None else None
+    except (TypeError, ValueError):
+        harness_pid = None
+    last_heartbeat_at = _safe_float(getattr(session, "last_heartbeat_at", None))
+    last_sdk_heartbeat_at = _safe_float(getattr(session, "last_sdk_heartbeat_at", None))
+    last_stdout_at = _safe_float(getattr(session, "last_stdout_at", None))
+    recovery_attempts = _to_int(getattr(session, "recovery_attempts", 0))
+    reprieve_count = _to_int(getattr(session, "reprieve_count", 0))
+
+    # Probe only for non-terminal status — completed/failed/etc. sessions have
+    # no live process to interrogate, and surfacing a probe result would be
+    # misleading. None means "not probed" (or probe was uncertain).
+    process_alive: bool | None = None
+    if status in _NON_TERMINAL_PROBE_STATUSES:
+        process_alive = _check_process_alive(harness_pid)
+
     # Resolve issue/PR links with a history fallback. When do-build /
     # do-issue run, they shell out to `gh` which emits the URL to stdout
     # but doesn't always make it back onto the AgentSession model fields.
@@ -708,6 +791,13 @@ def _session_to_pipeline(session) -> PipelineProgress:
         recent_thinking_excerpt=recent_thinking_excerpt,
         last_evidence_at=last_evidence_at,
         requires_real_chrome=bool(getattr(session, "requires_real_chrome", False)),
+        harness_pid=harness_pid,
+        last_heartbeat_at=last_heartbeat_at,
+        last_sdk_heartbeat_at=last_sdk_heartbeat_at,
+        last_stdout_at=last_stdout_at,
+        recovery_attempts=recovery_attempts,
+        reprieve_count=reprieve_count,
+        process_alive=process_alive,
     )
 
 

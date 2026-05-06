@@ -9,6 +9,7 @@ Start with: python -m ui.app
 import datetime
 import logging
 import os
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -76,6 +77,22 @@ def _filter_format_interval(seconds: int | None) -> str:
     return f"{seconds // 86400}d"
 
 
+def _filter_freshness_age(ts: float | None) -> float | None:
+    """Jinja2 filter: return age in seconds since ``ts``, or None when ts is None.
+
+    Used by the row freshness chip (#1269) to compute age-since-``last_evidence_at``
+    for color tier selection (green <60s, amber <600s, red >=600s) and for the
+    chip label rendered via ``format_duration``. Returns None when ``ts`` is in
+    the future (clock skew) so the template can drop the chip silently.
+    """
+    if ts is None:
+        return None
+    age = time.time() - float(ts)
+    if age < 0:
+        return None
+    return age
+
+
 def _filter_format_relative(seconds: float | None) -> str:
     """Jinja2 filter: format seconds as relative time."""
     if seconds is None:
@@ -117,6 +134,7 @@ def create_app() -> FastAPI:
     templates.env.filters["format_duration"] = _filter_format_duration
     templates.env.filters["format_interval_filter"] = _filter_format_interval
     templates.env.filters["format_relative"] = _filter_format_relative
+    templates.env.filters["freshness_age"] = _filter_freshness_age
 
     # Store templates in app state for access by routers
     app.state.templates = templates
@@ -302,7 +320,6 @@ def create_app() -> FastAPI:
 
     def _get_bridge_health() -> dict:
         """Check bridge health from last_connected file freshness."""
-        import time
 
         last_connected_file = Path(__file__).parent.parent / "data" / "last_connected"
         try:
@@ -322,7 +339,6 @@ def create_app() -> FastAPI:
 
     def _get_worker_health() -> dict:
         """Check worker health from last_worker_connected file freshness."""
-        import time
 
         heartbeat_file = Path(__file__).parent.parent / "data" / "last_worker_connected"
         try:
@@ -341,7 +357,6 @@ def create_app() -> FastAPI:
 
     def _get_email_health() -> dict:
         """Check email bridge health from Redis last_poll_ts."""
-        import time
 
         try:
             import os
@@ -417,6 +432,15 @@ def create_app() -> FastAPI:
             # session. Surfaced here so operators can see why a pending
             # session is being deferred.
             "requires_real_chrome": getattr(s, "requires_real_chrome", False),
+            # Liveness signals (issue #1269). harness_pid is subprocess-scoped;
+            # process_alive is None for terminal-status sessions (probe skipped).
+            "harness_pid": s.harness_pid,
+            "last_heartbeat_at": s.last_heartbeat_at,
+            "last_sdk_heartbeat_at": s.last_sdk_heartbeat_at,
+            "last_stdout_at": s.last_stdout_at,
+            "recovery_attempts": s.recovery_attempts,
+            "reprieve_count": s.reprieve_count,
+            "process_alive": s.process_alive,
             "children": [_session_to_json(c) for c in s.children],
             "events": [
                 {

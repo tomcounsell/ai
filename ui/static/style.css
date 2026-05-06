@@ -252,6 +252,48 @@ h3 {
     color: var(--text-muted);
 }
 
+/* Freshness chip — age since last_evidence_at (#1269).
+   Three color tiers: green <60s, amber 60s-10min, red >10min.
+   Matches existing is_stale 10-min threshold for the red tier. */
+.freshness-chip {
+    display: inline-block;
+    padding: 1px 6px;
+    margin: 0 4px;
+    font-size: 10px;
+    font-weight: 600;
+    border-radius: 8px;
+    line-height: 1.4;
+    vertical-align: middle;
+}
+.freshness-fresh {
+    color: var(--green, #4caf50);
+    background: var(--green-bg, rgba(76, 175, 80, 0.15));
+}
+.freshness-warm {
+    color: var(--orange, #f97316);
+    background: var(--orange-bg, rgba(249, 115, 22, 0.15));
+}
+.freshness-stale {
+    color: var(--red, #ef4444);
+    background: var(--red-bg, rgba(239, 68, 68, 0.15));
+}
+
+/* Ghost badge — sessions claiming running/active/paused but the harness
+   PID is dead per os.kill(pid, 0) probe (#1269). */
+.ghost-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    margin: 0 4px;
+    font-size: 10px;
+    font-weight: 700;
+    border-radius: 8px;
+    color: var(--red, #ef4444);
+    background: var(--red-bg, rgba(239, 68, 68, 0.18));
+    border: 1px dashed var(--red, #ef4444);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
 .badge-ok, .badge-success {
     color: var(--green);
     background: var(--green-bg);

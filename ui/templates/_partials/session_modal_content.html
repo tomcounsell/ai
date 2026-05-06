@@ -81,6 +81,63 @@
             </div>
         </div>
 
+        {# Liveness sub-table (#1269) — surfaces all heartbeat/evidence
+           timestamps + counters + PID probe so an operator can answer
+           "is this session actually progressing right now?" without
+           leaving the dashboard. Renders only when at least one signal
+           is available; old sessions with all-None fields skip the section. #}
+        {% set _has_liveness = pipeline.harness_pid is not none or pipeline.last_heartbeat_at or pipeline.last_sdk_heartbeat_at or pipeline.last_stdout_at or pipeline.last_evidence_at or pipeline.last_tool_use_at or pipeline.last_turn_at or pipeline.recovery_attempts or pipeline.reprieve_count or pipeline.current_tool_name or pipeline.watchdog_unhealthy %}
+        {% if _has_liveness %}
+        <h3>Liveness</h3>
+        <table class="data-table compact mb-4">
+            {% if pipeline.harness_pid is not none %}
+            <tr>
+                <td class="text-secondary">PID</td>
+                <td class="mono">
+                    {{ pipeline.harness_pid }}
+                    {% if pipeline.process_alive == True %}
+                    <span class="freshness-chip freshness-fresh" title="alive — process exists; PID may be recycled across worker restarts. Cross-check the freshness chip if the row looks stale.">alive</span>
+                    {% elif pipeline.process_alive == False %}
+                    <span class="ghost-badge" title="ghost — harness process dead; the dashboard reaper will sweep this shortly">ghost</span>
+                    {% elif pipeline.process_alive is none %}
+                    <span class="freshness-chip freshness-warm" title="probe uncertain — PID may have insufficient permissions or be unknown">unknown</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endif %}
+            {% if pipeline.current_tool_name %}
+            <tr><td class="text-secondary">Current tool</td><td class="mono">{{ pipeline.current_tool_name }}</td></tr>
+            {% endif %}
+            {% if pipeline.last_evidence_at %}
+            <tr><td class="text-secondary">Last evidence</td><td class="mono">{{ pipeline.last_evidence_at | format_timestamp }}</td></tr>
+            {% endif %}
+            {% if pipeline.last_heartbeat_at %}
+            <tr><td class="text-secondary">Last heartbeat</td><td class="mono">{{ pipeline.last_heartbeat_at | format_timestamp }}</td></tr>
+            {% endif %}
+            {% if pipeline.last_sdk_heartbeat_at %}
+            <tr><td class="text-secondary">Last SDK heartbeat</td><td class="mono">{{ pipeline.last_sdk_heartbeat_at | format_timestamp }}</td></tr>
+            {% endif %}
+            {% if pipeline.last_stdout_at %}
+            <tr><td class="text-secondary">Last stdout</td><td class="mono">{{ pipeline.last_stdout_at | format_timestamp }}</td></tr>
+            {% endif %}
+            {% if pipeline.last_tool_use_at %}
+            <tr><td class="text-secondary">Last tool use</td><td class="mono">{{ pipeline.last_tool_use_at | format_timestamp }}</td></tr>
+            {% endif %}
+            {% if pipeline.last_turn_at %}
+            <tr><td class="text-secondary">Last turn</td><td class="mono">{{ pipeline.last_turn_at | format_timestamp }}</td></tr>
+            {% endif %}
+            {% if pipeline.recovery_attempts %}
+            <tr><td class="text-secondary">Recovery attempts</td><td class="mono">{{ pipeline.recovery_attempts }}</td></tr>
+            {% endif %}
+            {% if pipeline.reprieve_count %}
+            <tr><td class="text-secondary">Reprieves</td><td class="mono">{{ pipeline.reprieve_count }}</td></tr>
+            {% endif %}
+            {% if pipeline.watchdog_unhealthy %}
+            <tr><td class="text-secondary">Watchdog</td><td class="mono"><span class="badge badge-warning">{{ pipeline.watchdog_unhealthy }}</span></td></tr>
+            {% endif %}
+        </table>
+        {% endif %}
+
         {% if pipeline.stages %}
         <h3>SDLC</h3>
         <div class="stage-indicator mt-2 mb-4" style="flex-wrap: wrap; gap: 6px;">
