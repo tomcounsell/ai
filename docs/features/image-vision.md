@@ -25,7 +25,7 @@ Automatically processes images in these formats:
 Uses **Claude Haiku 4.5** vision (cloud API, via `bridge.media.describe_image`):
 - Same model the agent uses elsewhere — consistent quality, no extra setup
 - Strong descriptions for screenshots, photos, whiteboards, diagrams
-- Authoritative: no `ollama`/`llava` runtime dependency
+- Authoritative: no separate vision runtime to install or maintain
 
 ### Media Storage
 
@@ -90,7 +90,7 @@ The enrichment-summary log line in the worker reports one of `media={no, yes, sk
 
 - `anthropic` — Claude Haiku 4.5 vision is invoked via the standard Anthropic SDK already in the project.
 
-No `ollama` / `llava` runtime is required.
+No separate local vision runtime is required.
 
 ### Storage
 
