@@ -44,6 +44,33 @@ python .claude/skills-global/do-skills-audit/scripts/audit_skills.py $ARGUMENTS
 **Classification (WARN):** infrastructure/background/fork skills have correct frontmatter flags
 **Content (WARN):** no duplicate descriptions across skills
 
+## Description Budget Target
+
+The skill listing budget is `skillListingBudgetFraction` (currently 2% of context ≈ 4,000 chars). With 49 skills the per-skill target is **≤80 chars** to stay comfortably under budget without raising the fraction. The hard ceiling per description is 1,536 chars (Claude Code truncates beyond that).
+
+**Goal:** total description chars across all skills ≤ 4,000 (currently ~13,000 — needs trimming).
+
+### What a good description looks like
+
+The description field is a **trigger**, not documentation. The body loads after invocation; the description only needs to fire it.
+
+**Bad** (verbose, explains what it does):
+```
+"Audit all Claude Code skills for compliance with canonical template standards. Use when checking skill quality, validating skill structure, linting SKILL.md files, verifying frontmatter, or scanning for skill issues."
+```
+
+**Good** (punchy, trigger-first):
+```
+"Audit skill quality: frontmatter, descriptions, structure. Triggered by 'audit skills', 'check skill', 'lint SKILL.md'."
+```
+
+**Rules for effective descriptions:**
+1. Lead with what it does (≤10 words) — the model reads left-to-right
+2. List exact trigger phrases if the skill name isn't self-evident
+3. Add one "do NOT trigger on X" only if false positives are a real problem
+4. Never explain implementation details, file paths, or step counts — that's body content
+5. Target 60–120 chars; 200+ is a signal the description is doing documentation work
+
 
 ## After the Audit
 
