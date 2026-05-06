@@ -356,7 +356,9 @@ That means there is no in-place "merge" available. The framing is:
 - Memory-as-output covers the `daily-reflections-unification.md` plan's per-project-recap need without invention.
 - Default for unmigrated reflections is `log_only` — preserves current behavior on cutover.
 
-**Implementation guard:** Output sink resolution is in one helper, `agent/reflection_output.py::deliver(reflection: Reflection, run: ReflectionExecution, output: str | dict) -> None`. Each sink kind is a small handler. Telegram delivery uses the existing Redis outbox (does NOT call Telegram directly from the scheduler).
+**Restriction (cycle-4 C4 fix): `output_sink:` applies to `execution_type: function` reflections only.** The `system-health-digest` reflection at `~/Desktop/Valor/reflections.yaml` is currently `execution_type: agent` with a `command:` prompt that says "send the daily sustainability digest" — the agent itself, given the prompt, picks up the existing Telegram tools and delivers the message. Adding `output_sink: telegram:Dev: Valor` on top of that creates two delivery paths (the agent's own tool calls AND the post-completion sink handler) and a duplicate-delivery race. For agent-type reflections, the prompt continues to drive the delivery surface — the agent uses the existing Telegram/Memory tools as it does today. At parse time in `agent/reflection_scheduler.py::_parse_yaml_entry()`, reject `output_sink:` when `execution_type: agent` is set with a clear ValueError mentioning "for agent-type reflections, the prompt declares delivery." The four-handler `agent/reflection_output.py` collapses to three (`log_only`, `dashboard_only`, `memory:<importance>`); `telegram:<chat>` becomes function-type-only. Existing agent-type reflections do not get an `output_sink:` field added during migration.
+
+**Implementation guard:** Output sink resolution is in one helper, `agent/reflection_output.py::deliver(reflection: Reflection, run: ReflectionExecution, output: str | dict) -> None`. Each sink kind is a small handler. Telegram delivery uses the existing Redis outbox (does NOT call Telegram directly from the scheduler). The `deliver()` helper asserts `reflection.execution_type == "function"` for `telegram:<chat>` sink — this is a redundant runtime check; the parse-time validator is the primary guard.
 
 ### Q6: Failure tracking and dead letter
 
@@ -821,14 +823,16 @@ Every criterion below is **executable** — it names a concrete check the valida
 - **Task ID**: build-output-sinks
 - **Depends On**: build-model-schema
 - **Validates**: tests/unit/test_reflection_output.py (create)
-- **Informed By**: Q5 (per-reflection sink config)
+- **Informed By**: Q5 (per-reflection sink config; cycle-4 C4 — function-type only for telegram sink)
 - **Assigned To**: output-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `agent/reflection_output.py` with `deliver(reflection, run, output)` and four sink handlers
-- `log_only` (default), `dashboard_only`, `memory:<importance>`, `telegram:<chat>`
+- Create `agent/reflection_output.py` with `deliver(reflection, run, output)` and four sink handlers (cycle-4 C4: telegram sink rejects agent-type reflections)
+- `log_only` (default), `dashboard_only`, `memory:<importance>`, `telegram:<chat>` — the last applies only to `execution_type: function`
+- Add a parse-time validator in `agent/reflection_scheduler.py::_parse_yaml_entry()`: reject `output_sink:` when `execution_type: agent` is set with a clear ValueError mentioning "for agent-type reflections, the prompt declares delivery"
 - Telegram delivery via existing Redis outbox (do NOT call Telegram API directly)
 - Each handler exception path logs at WARNING with reflection name + sink kind
+- Tests assert: (a) `output_sink: telegram:X` on an agent-type reflection raises ValueError at parse time, (b) `output_sink: telegram:X` on a function-type reflection delivers via the outbox, (c) the existing `system-health-digest` (agent-type) does NOT get an `output_sink:` field added during migration
 
 ### 6. Build MCP server
 - **Task ID**: build-mcp-server
