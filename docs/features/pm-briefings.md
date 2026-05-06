@@ -1,22 +1,31 @@
 # PM Briefings (slot-driven)
 
-One reflection (`pm-audio-briefing` registry entry — the package name
-`pm_audio_briefing/` is preserved because the import path is referenced
-widely) owns ALL PM-facing slot-driven daily content. Each project declares
-zero-or-more **briefing slots** in `projects.json`; at every 5-minute tick
-the dispatcher fans out (project × slot), runs the slot-specific
-`build()`, and delivers ONE Telegram message per (project × slot) per day.
+One reflection — `pm-briefings` in the registry, callable
+`reflections.pm_audio_briefing.run` (the package name `pm_audio_briefing/`
+is preserved because the import path is referenced widely) — owns ALL
+PM-facing slot-driven daily content. Each project declares zero-or-more
+**briefing slots** in `projects.json`; at every 5-minute tick the
+dispatcher fans out (project × slot), runs the slot-specific `build()`,
+and delivers ONE Telegram message per (project × slot) per day.
 
 This consolidates three previously-fragmented reflections:
 
-| Old reflection             | New slot type | Status                        |
-|----------------------------|---------------|-------------------------------|
-| `pm-audio-briefing`        | `morning`     | Still the registry entry name |
-| `daily-log-review`         | `log_audit`   | Disable in registry on rollout |
-| `daily-report-and-notify`  | `daily_log`   | Already disabled              |
+| Old reflection             | New slot type | Status                              |
+|----------------------------|---------------|-------------------------------------|
+| `pm-audio-briefing`        | `morning`     | Renamed to `pm-briefings` (issue #1292 cutover) |
+| `daily-log-review`         | `log_audit`   | Retired (issue #1292); helpers inlined into the slot |
+| `daily-report-and-notify`  | `daily_log`   | Retired (issue #1292); helpers inlined into the slot |
 
-See issue #1276 and `docs/plans/daily-reflections-unification.md` for the
-rationale.
+See issues #1276 (consolidation) and #1292 (cutover) and
+`docs/plans/daily-reflections-unification.md` for the rationale.
+
+**Operator note (deploy-coupled):** the `pm-briefings` rename, the
+`enabled: false` flips, and a project-level `pm_briefing.enabled: true`
+block live in vault-only config (`~/Desktop/Valor/reflections.yaml` and
+`~/Desktop/Valor/projects.json`). PR #1292 documents the exact yaml/json
+snippets in its body. Until those operator steps land alongside the merge,
+the new dispatcher stays dormant: the `pm-briefings` registry entry runs
+~1,100 no-op ticks per day until at least one project has slots configured.
 
 ## Why this exists
 
@@ -133,10 +142,16 @@ The dispatcher owns the SETNX lifecycle:
 ## Dashboard rendering
 
 The `_PREFIX_EXPANDED_REFLECTIONS` tuple in `ui/data/reflections.py` carries
-both `pm-briefings` (new prefix for per-(project × slot) records named
+both `pm-briefings` (the prefix for per-(project × slot) records named
 `pm-briefings-{slug}-{slot}`) and `pm-audio-briefing` (legacy prefix for
 pre-rename per-project records still in Redis). Both surface their per-
 record rows under the parent registry entry's group.
+
+The `_PREFIX_FALLBACK_PARENTS` shim in the same module is **deploy-
+coupled**: it maps `pm-briefings` → `pm-audio-briefing` so per-record
+rows surface on the dashboard before the operator renames the registry
+entry. After issue #1292's vault-yaml rename lands, the shim is no longer
+load-bearing and can be removed in a small follow-up cleanup.
 
 ## Aggregate result shape
 

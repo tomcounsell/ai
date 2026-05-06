@@ -41,9 +41,12 @@ REFLECTION_GROUPS: dict[str, str] = {
     "session-intelligence": GROUP_AGENTS,
     "system-health-digest": GROUP_AGENTS,
     "pm-audio-briefing": GROUP_AUDITS,  # consolidated PM briefings (issue #1276)
-    # ``pm-briefings`` is reserved for the future registry rename. Mapping it
-    # here ensures any pre-rename per-(project x slot) record surfaces in the
-    # correct group via ``_classify_group``.
+    # ``pm-briefings`` is the prefix the dispatcher writes per-(project x slot)
+    # records under. Mapping it here ensures those records surface in the
+    # correct group via ``_classify_group``. After the deploy-coupled
+    # registry rename (issue #1292 deferred item #3), the legacy
+    # ``pm-audio-briefing`` key above can be removed; both stay during the
+    # cutover window.
     "pm-briefings": GROUP_AUDITS,
     "redis-index-cleanup": GROUP_HOUSEKEEPING,
     "redis-ttl-cleanup": GROUP_HOUSEKEEPING,
@@ -140,11 +143,17 @@ def _build_entry(name: str, config: dict, state, now: float) -> dict:
 
 
 _PREFIX_FALLBACK_PARENTS: dict[str, str] = {
+    # Deploy-coupled shim — REMOVE when the vault yaml registry entry is
+    # renamed from "pm-audio-briefing" to "pm-briefings" (issue #1292
+    # deferred item #3, operator step on the bridge machine). After the
+    # rename, ``registry.get("pm-briefings")`` resolves directly and this
+    # fallback no longer matters.
+    #
     # The pm-briefings consolidation (#1276) writes per-(project x slot)
-    # records under the "pm-briefings-" prefix, but the registry entry name
-    # remains "pm-audio-briefing" until the vault yaml is renamed in a
-    # follow-up. Map the new prefix to the legacy registry parent so the
-    # records surface on the dashboard immediately.
+    # records under the "pm-briefings-" prefix, but the registry entry
+    # name remains "pm-audio-briefing" until the vault yaml is renamed.
+    # Map the new prefix to the legacy registry parent so the records
+    # surface on the dashboard during the cutover window.
     "pm-briefings": "pm-audio-briefing",
 }
 

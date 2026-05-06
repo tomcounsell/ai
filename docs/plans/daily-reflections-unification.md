@@ -510,27 +510,27 @@ When this plan is executed, the lead agent orchestrates work using Task tools.
 
 ## Verification
 
-> **Build-time addendum (2026-05-04):** The plan called for deletion of
-> `reflections/daily_report.py` and `reflections.auditing.run_log_review`,
-> but the new slot modules wrap their internal helpers (`_collect_day_activity`,
-> `_build_audio_brief`, `_write_vault_log`, `_activity_to_signals`,
-> `_collect_sentry_counts`, `_read_log_text_bounded`, etc). Wholesale
-> deletion would break the wrappers; inline-copying every helper into the
-> slot modules would balloon the diff. The deletion is deferred to a
-> follow-up PR where the helpers can be inlined and the file removed
-> cleanly. The legacy `run()` and `run_log_review()` entry points will be
-> disabled in `~/Desktop/Valor/reflections.yaml` (the registry is
-> machine-local, gitignored) at deploy time. Verification rows for those
-> two checks below carry a `(deferred)` annotation.
+> **Build-time addendum (2026-05-04):** PR #1281 deferred two file
+> deletions (`reflections/daily_report.py`,
+> `reflections.auditing.run_log_review`) because the new slot modules
+> still wrapped their internal helpers and a clean inline + delete was
+> too large for the same diff.
 >
-> Similarly, `config/reflections.yaml` is a symlink into the iCloud-synced
-> vault and is gitignored; the registry rename to `pm-briefings` happens
-> on the deploy side, not via this PR. The `pm-audio-briefing` registry
-> entry continues to drive the new dispatcher (callable path is unchanged).
+> **Cutover update (2026-05-06, PR #1292):** Both deletions have now
+> shipped. The helpers are inlined into the slot modules. The two operator
+> steps (registry rename and `enabled: false` flips on the bridge machine's
+> vault yaml) are still pending — see the *Deferred to deploy / follow-up
+> PR* section below for current status.
 >
-> Orphan stubs at `logs/reflections/report_2026-*.md` were deleted from
-> the local machine (`logs/` is gitignored). Other machines will need to
-> run the same `rm -f` once after deploy.
+> `config/reflections.yaml` is a symlink into the iCloud-synced vault and
+> is gitignored. The registry entry rename to `pm-briefings` and the
+> `enabled: false` flips for `daily-log-review` and `daily-report-and-notify`
+> remain operator steps on the bridge machine. PR #1292's body documents
+> the exact yaml snippets to apply.
+>
+> Orphan stubs at `logs/reflections/report_2026-*.md` are per-machine
+> cleanup (`logs/` is gitignored). Each active machine must run
+> `rm -f logs/reflections/report_2026-*.md` once after deploy.
 
 ### In-PR checks (deterministic verification)
 
@@ -543,25 +543,42 @@ When this plan is executed, the lead agent orchestrates work using Task tools.
 | New slot modules exist | `test -f reflections/pm_audio_briefing/morning.py && test -f reflections/pm_audio_briefing/daily_log.py && test -f reflections/pm_audio_briefing/log_audit.py` | exit code 0 |
 | Plan superseded note | `grep -c 'superseded by' docs/plans/daily-log-overhaul.md` | output > 0 |
 
-### Deferred to deploy / follow-up PR (not enforceable in this PR)
+### Deferred to deploy / follow-up PR (cutover status — issue #1292)
 
-- **Delete `reflections/daily_report.py`** *(follow-up PR)* — New slot modules
-  wrap its helpers (`_collect_day_activity`, `_build_audio_brief`,
-  `_write_vault_log`, `_activity_to_signals`). Inline the helpers into
-  `daily_log.py`, then delete.
-- **Delete `reflections.auditing.run_log_review`** *(follow-up PR)* — New
-  `log_audit.py` slot wraps `_collect_sentry_counts`, `_read_log_tail_lines`,
-  `_read_log_text_bounded`. Inline, then delete.
-- **Rename registry entry to `pm-briefings`** *(deploy)* —
-  `~/Desktop/Valor/reflections.yaml` (vault file, gitignored). The
-  `pm-audio-briefing` callable path is unchanged so the rename is cosmetic
-  and lifts the dashboard's fallback-parents shim.
-- **Disable `daily-log-review` and `daily-report-and-notify` in registry**
-  *(deploy)* — Same vault yaml. Already-disabled `daily-report-and-notify`
-  stays; `daily-log-review` should be flipped to `enabled: false`.
-- **Delete `logs/reflections/report_2026-*.md` orphan stubs** *(per machine)*
-  — `logs/` is gitignored. Run `rm -f logs/reflections/report_2026-*.md`
-  once after deploy.
+The five items below were left out of PR #1281 deliberately and tracked
+under issue #1292 / PR (`session/pm-briefings-cutover-1292`). Status as
+of the cutover PR:
+
+- **[Done — PR #1292]** **Delete `reflections/daily_report.py`** — Helpers
+  (`_collect_day_activity`, `_build_audio_brief`, `_write_vault_log`,
+  `_activity_to_signals`, et al.) inlined into
+  `reflections/pm_audio_briefing/daily_log.py`. The legacy module is
+  deleted. The legacy `run()` orchestration (audio enqueue, target chat
+  selection) was retired entirely — the slot dispatcher in
+  `pm_audio_briefing.delivery` owns delivery now.
+- **[Done — PR #1292]** **Delete `reflections.auditing.run_log_review`** —
+  Helpers (`_collect_sentry_counts`, `_read_log_tail_lines`,
+  `_read_log_text_bounded`) inlined into
+  `reflections/pm_audio_briefing/log_audit.py`. The function and its
+  Telegram-send sibling (`_send_log_review_telegram`) are deleted from
+  `reflections/auditing.py`. `extract_structured_errors` stays in
+  `reflections.utils` (still used by `run_hooks_audit`).
+- **[Operator step — bridge machine]** **Rename registry entry to
+  `pm-briefings`** — `~/Desktop/Valor/reflections.yaml` (vault file,
+  gitignored). The `pm-audio-briefing` callable path is unchanged so the
+  rename is cosmetic and lifts the dashboard's fallback-parents shim
+  (`ui/data/reflections.py:_PREFIX_FALLBACK_PARENTS`). PR #1292's body
+  contains the exact yaml diff.
+- **[Operator step — bridge machine]** **Disable `daily-log-review` and
+  `daily-report-and-notify` in registry** — Same vault yaml. Without this
+  flip, the scheduler will log ImportError each tick because the
+  callables (`reflections.daily_report.run`,
+  `reflections.auditing.run_log_review`) no longer exist after PR #1292
+  merges. Operator MUST flip both to `enabled: false` together with merge.
+- **[Per-machine — operator step]** **Delete
+  `logs/reflections/report_2026-*.md` orphan stubs** — `logs/` is
+  gitignored. Run `rm -f logs/reflections/report_2026-*.md` once after
+  deploy on each active machine.
 
 ## Critique Results
 
