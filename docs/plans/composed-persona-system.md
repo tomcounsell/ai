@@ -391,6 +391,17 @@ Concretely:
 
 **Build gate:** the build cannot proceed until the byte-stability test passes on the local machine. The fixture(s) committed by the dev are sufficient for local CI; bridge-machine fixtures are captured during deploy and not blockers for the PR.
 
+**Cycle-5 C4 — Implementation Note (machine-agnostic structural invariants as defense-in-depth):** Strategy (c) is byte-exact on the dev machine that captured the baseline; on machines without a baseline the byte-stability test SKIPs (not FAILs). A real byte regression on the dev machine that committed its baseline gets caught; the same regression on a different machine after merge does not. **The byte-stability invariant is only enforced for the developer who builds the feature.** This is the cost of strategy (c) and is acceptable because cache stability is itself a per-machine, per-session invariant. To plug the gap on machines where byte stability SKIPs, the test file MUST also include a machine-agnostic `TestStructuralInvariants` class that runs everywhere (no per-machine baseline required):
+
+- WORKER cell starts with the exact `WORKER_RULES` constant followed by `\n\n---\n\n` (catches segment-reordering / WORKER_RULES-position regressions).
+- PM cell does NOT contain `WORKER_RULES` (catches the rails-leak failure mode).
+- For both cells, segment-content substrings appear in the same order as `manifest.json["segments"]` — use a list-of-find-indices monotonicity check, not full substring equality (catches segment reordering on any machine, no baseline needed).
+- `\n\n---\n\n` separators occur at expected fence positions between segments.
+- No `{{identity.*}}` templating residue in any cell's output (catches identity-substitution regressions on machines without the override file).
+- PM cell stays under 80K chars (cache-budget invariant).
+
+This catches the > 90% of "structural regression" failure modes on any machine without requiring per-machine fixtures. The plan rejected structural equality as a *replacement* for byte stability (it doesn't satisfy the cache invariant), but it serves as a *backup* on machines where byte stability SKIPs. **Build phase wires both classes into `tests/unit/test_compose_system_prompt.py`** — see Test Impact for full test breakdown.
+
 The mitigation also includes a check that the `--exclude-dynamic-system-prompt-sections` integration is unaffected (the runtime prompt the composer hands to `get_response_via_harness` must still trigger that flag's stripping behavior; tested by inspecting argv in a unit test).
 
 ### Risk 2: Two-site picker drift returns
@@ -401,7 +412,7 @@ The mitigation also includes a check that the `--exclude-dynamic-system-prompt-s
 ### Risk 3: Drafter format rules break when the channel split lands
 
 **Impact:** Drafter output silently changes — bullets vs prose, "no empty promises" warnings change, format regressions ship to production.
-**Mitigation:** `BASE_DRAFTER_PROMPT` keeps today's `DRAFTER_SYSTEM_PROMPT` text verbatim (minus the medium-specific format rules that move into `MEDIUM_RULES["telegram"]`). The split is purely structural — concatenating `BASE + MEDIUM_RULES["telegram"]` reproduces today's prompt byte-for-byte. Tests in `test_drafter_validators.py` already cover format invariants — they must remain green. (Note: voice consolidation is **not** part of this plan; see Risk 4 and No-Gos.)
+**Mitigation:** `BASE_DRAFTER_PROMPT` keeps today's `DRAFTER_SYSTEM_PROMPT` text verbatim (minus the medium-specific format rules that move into `MEDIUM_RULES["telegram"]`). The split is purely structural — concatenating `BASE + MEDIUM_RULES["telegram"]` reproduces today's prompt byte-for-byte. **Cycle-5 C5:** The byte-equality assertion uses a pre-refactor baseline at `tests/fixtures/drafter_system_prompt_baseline.txt` (captured from `main` BEFORE the refactor begins — see Step 4 Sub-step 4.0); without the pre-refactor capture, the snapshot test is tautological. Tests in `test_drafter_validators.py` already cover format invariants — they must remain green. (Note: voice consolidation is **not** part of this plan; see Risk 4 and No-Gos.)
 
 ### Risk 4: A new shared voice segment would change prompt bytes for existing cells
 
@@ -571,12 +582,27 @@ Each criterion is **executable** — written as an assertion the validator can r
 - **Assigned To**: drafter-builder
 - **Agent Type**: builder
 - **Parallel**: true
+
+**Cycle-5 C5 — Sub-step 4.0 (MUST run BEFORE the refactor lands):** Capture `tests/fixtures/drafter_system_prompt_baseline.txt` from `bridge/message_drafter.py:DRAFTER_SYSTEM_PROMPT` on `main` *before* checking out `plan/composed-persona-1268`. Without this pre-refactor capture, the snapshot test in this step is **tautological** — it asserts that the new code equals itself. Capture command (run from `main`):
+
+```bash
+git checkout main
+python -c "from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT; open('tests/fixtures/drafter_system_prompt_baseline.txt','w').write(DRAFTER_SYSTEM_PROMPT)"
+git checkout plan/composed-persona-1268
+git add tests/fixtures/drafter_system_prompt_baseline.txt
+git commit -m "Plan: capture pre-refactor drafter baseline (cycle-5 C5)"
+```
+
+The fixture is **machine-agnostic** (the drafter prompt embeds no machine-specific paths or identity values), so a single repo-committed file works — unlike the per-machine PM/dev composer baselines from Step 1. This fixture is the diff baseline for verifying the drafter split is byte-exact.
+
 - The drafter entry point is `draft_message` at `bridge/message_drafter.py:1720`; the `medium: str = "telegram"` parameter already exists (no signature change required)
 - Refactor `DRAFTER_SYSTEM_PROMPT` into `BASE_DRAFTER_PROMPT` (medium-agnostic, retains today's voice content verbatim) + `MEDIUM_RULES = {"telegram": ..., "email": ...}` (initially: `"telegram"` is today's exact format-rules text, `"email"` is a stub identical to `"telegram"` minus Telegram-only format rules)
 - Add helper `_compose_drafter_prompt(medium: str) -> str` that returns `BASE_DRAFTER_PROMPT + MEDIUM_RULES[medium]`
 - Wire `_compose_drafter_prompt(medium)` into the system prompt passed to `client.messages.create(...)` inside `draft_message` (today the drafter loads `DRAFTER_SYSTEM_PROMPT` directly; replace that load with the helper call, parameterized by the existing `medium` argument)
 - All drafter call sites that don't pass `medium=` get `"telegram"` by default — no behaviour change
-- Verify `BASE + MEDIUM_RULES["telegram"]` reproduces today's `DRAFTER_SYSTEM_PROMPT` byte-for-byte (snapshot test)
+- **Cycle-5 C5 byte-equality assertion (uses the pre-refactor baseline above):** add a snapshot test in `tests/unit/test_message_drafter.py` asserting `_compose_drafter_prompt("telegram") == open('tests/fixtures/drafter_system_prompt_baseline.txt').read()`. This is the genuine pre/post-refactor diff check — without the pre-refactor capture in Sub-step 4.0, this assertion is tautological.
+
+**Cycle-5 C4 — Implementation Note (no per-machine snapshot for drafter):** The drafter prompt is machine-agnostic. **Do NOT** create per-machine drafter baselines analogous to the composer fixtures in Step 1 — they would always SKIP in CI (the path-segregation pattern is unnecessary here because the prompt has no machine-stable axis problem). The single repo-committed `tests/fixtures/drafter_system_prompt_baseline.txt` is the only fixture needed for the drafter; it runs on every machine. If a per-machine drafter baseline is committed, it is rot bait that will SKIP everywhere — the plan **prohibits** that pattern for the drafter.
 
 ### 5. Byte-stability and matrix tests
 
