@@ -1,11 +1,13 @@
 # Image Vision Support
 
 **Status**: Implemented
-**Implemented**: 2026-01-20
+**Last revised**: 2026-05-07 (sdlc-1297)
 
 ## Overview
 
-When users send images to Valor via Telegram, the bridge downloads the image, uses Ollama's LLaVA vision model to generate a detailed description, and includes that description in the message context. This allows Claude to understand and respond to image content intelligently.
+When users send images to Valor via Telegram, the bridge downloads the file at intake and the worker runs Claude Haiku 4.5 vision over it to generate a detailed description. The description is prepended to the message text the agent sees.
+
+This split — bridge does Telethon I/O, worker does AI — was made explicit by [sdlc-1297](https://github.com/tomcounsell/ai/issues/1297). Before that change the worker held a (always-`None`) Telegram client reference and silently dropped every photo. The current contract is described in [media-enrichment.md](media-enrichment.md).
 
 ## Features
 
@@ -20,16 +22,16 @@ Automatically processes images in these formats:
 
 ### Vision Model
 
-Uses Ollama with the `llama3.2-vision:11b` model for local, free image understanding:
-- Runs entirely on local machine (no API costs)
-- Fast processing for most images
-- Good quality descriptions for screenshots, photos, diagrams
+Uses **Claude Haiku 4.5** vision (cloud API, via `bridge.media.describe_image`):
+- Same model the agent uses elsewhere — consistent quality, no extra setup
+- Strong descriptions for screenshots, photos, whiteboards, diagrams
+- Authoritative: no separate vision runtime to install or maintain
 
 ### Media Storage
 
-Downloaded images are stored in `data/media/` with timestamped filenames:
-- Format: `{type}_{YYYYMMDD}_{HHMMSS}_{message_id}.{ext}`
-- Example: `photo_20260120_143022_12345.jpg`
+The bridge downloads incoming media to `data/media/` with timestamped filenames:
+- Format: `{prefix}_{YYYYMMDD}_{HHMMSS}_{name}` (see `bridge/media.py::download_media`)
+- The absolute path is persisted on `TelegramMessage.media_local_path` so the worker can read it later.
 
 ## Message Flow
 
@@ -37,88 +39,87 @@ Downloaded images are stored in `data/media/` with timestamped filenames:
 User sends image (with or without caption)
     |
     v
-Bridge detects photo/image media type
+Bridge handler:
+  - persists TelegramMessage(has_media=True, media_type="photo")
+  - awaits download_media(client, msg)  [10s timeout, cf. sdlc-1297]
+  - updates TelegramMessage.media_local_path = absolute_path
+  - enqueues AgentSession
     |
     v
-Downloads image to data/media/
+Worker pops session, calls bridge.enrichment.enrich_message(...)
+  - reads media_local_path off the persisted TelegramMessage
+  - calls bridge.media.process_downloaded_media(path, "photo")
+  - process_downloaded_media -> describe_image (Claude Haiku 4.5 vision)
     |
     v
-Calls Ollama LLaVA: "Describe this image in detail"
+Enriched text: "[User sent an image]
+                Image description: A screenshot showing a terminal..."
     |
     v
-[If description succeeds]
-Creates enriched message:
-  "[User sent an image]
-   Image description: A screenshot showing a terminal window
-   with Python code that defines a function called..."
-    |
-    v
-Passes to agent with visual context
-    |
-    v
-Claude can discuss image content intelligently
+Agent receives enriched text and can discuss the image directly.
 ```
 
 ## Edge Case Handling
 
 | Case | Behavior |
 |------|----------|
-| Ollama not installed | Falls back to basic message: "[User sent an image - saved to filename]" |
-| LLaVA model not available | Falls back to basic message with filename |
-| Vision model error | Logs error, falls back to basic message |
-| Very large images | May be slower but still processed |
-| Corrupt/invalid images | Ollama may fail, falls back gracefully |
+| Bridge download timeout (10s) | `media_download_error="timeout after 10s"`; worker logs WARNING and proceeds with bare caption. |
+| Bridge download exception | `media_download_error=<exc>`; same as above. |
+| Worker can't read the file | Logs `[enrichment] media file at {path} not readable` and proceeds with bare caption. |
+| Vision model error | Logged in worker; falls back to `[User sent an image - saved to {filename}]`. |
+| Corrupt/invalid images | `validate_media_file` rejects; worker tries text extraction or returns a corrupted-file marker. |
+| No `TelegramMessage` record (manual / non-Telegram session) | Normal path — branch skipped silently, summary `media=skipped:no_record`. |
+
+The enrichment-summary log line in the worker reports one of `media={no, yes, skipped:no_record, skipped:download_failed, skipped:no_path, skipped:file_unreadable, skipped:no_description, failed}` so log scrapers can distinguish each case.
 
 ## Implementation Files
 
-- `bridge/telegram_bridge.py`: Core image handling
-  - `get_media_type()` - Detect image vs voice vs document
-  - `download_media()` - Download Telegram media to local storage
-  - `describe_image()` - Use Ollama LLaVA for image description
-  - `process_incoming_media()` - Orchestrate media processing pipeline
+- `bridge/telegram_bridge.py` — handler, runs `download_media` synchronously at intake (with timeout), persists `media_local_path`/`media_download_error` on the `TelegramMessage`.
+- `bridge/media.py`
+  - `download_media()` — Telethon RPC, bridge-only.
+  - `describe_image()` — Claude Haiku 4.5 vision API.
+  - `process_downloaded_media(path, media_type)` — pure AI half (vision/Whisper/extract). No Telethon dependency. Worker-callable.
+  - `process_incoming_media(client, message)` — thin wrapper kept for callers that still hold a live Telethon client.
+- `bridge/enrichment.py::enrich_message` — worker-side dispatch; reads `media_local_path` off the persisted `TelegramMessage`.
+- `models/telegram.py::TelegramMessage` — fields `media_local_path`, `media_download_error` (both nullable, additive).
+- `agent/session_executor.py` — passes the loaded `TelegramMessage` to `enrich_message`.
 
 ## Dependencies
 
 ### Python Packages
-- `ollama` - Python client for Ollama API
 
-### System Requirements
-- **Ollama** - Local LLM runtime
-  - macOS: `brew install ollama`
-  - Linux: `curl -fsSL https://ollama.com/install.sh | sh`
+- `anthropic` — Claude Haiku 4.5 vision is invoked via the standard Anthropic SDK already in the project.
 
-- **LLaVA Vision Model**
-  ```bash
-  ollama pull llama3.2-vision:11b
-  ```
+No separate local vision runtime is required.
 
 ### Storage
-- Requires disk space in `data/media/` for downloaded images
-- Images are retained for potential future reference
+
+- Disk space under `data/media/` for downloaded media. The bridge does not currently clean these up; eviction policy is tracked separately.
 
 ## Configuration
 
-### Constants (in telegram_bridge.py)
+Defaults live in code; nothing project-specific is required:
 
 ```python
-# Media storage directory
-MEDIA_DIR = Path(__file__).parent.parent / "data" / "media"
+# Bridge handler download timeout (sdlc-1297)
+DOWNLOAD_TIMEOUT_SECONDS = 10.0  # asyncio.wait_for at intake
 
-# Supported vision extensions
-VISION_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
-
-# Vision model
-MODEL = 'llama3.2-vision:11b'
+# Media storage
+MEDIA_DIR = Path(__file__).parent.parent / "data" / "media"  # historical constant
+# Live path used by download_media() is data/media/ at the repo root.
 ```
 
 ## Testing
 
-1. Send photo with no caption -> Valor should describe what's in it
-2. Send screenshot of code -> Valor should be able to discuss the code
-3. Send meme -> Valor should understand the humor/context
-4. Send photo of whiteboard -> Valor should describe/transcribe content
-5. Send image with caption -> Both description and caption should be included
-6. Send image when Ollama is unavailable -> Should gracefully fall back
+- `tests/unit/test_enrichment_media.py` — covers happy path, download-failure path, file-unreadable path, no-`TelegramMessage` path, and the no-media path.
+- `tests/integration/test_media_enrichment_pipeline.py` — drives a real `TelegramMessage` record through `enrich_message` end-to-end (with `process_downloaded_media` mocked so the test doesn't burn a vision API call).
+
+Manual smoke test:
+
+1. Send photo with no caption -> Valor should describe what's in it.
+2. Send screenshot of code -> Valor can discuss the code.
+3. Send image with caption -> Description and caption both reach the agent.
+4. Send a photo while the network is flaky -> Bridge logs a `[media] download timeout` warning and the agent receives the bare caption.
 
 ## Example Interactions
 
@@ -132,7 +133,6 @@ from handle_request() in routes.py.
 
 What's causing this error?
 ```
-Valor can now discuss the specific error without user having to type it out.
 
 **User sends photo of whiteboard:**
 ```
@@ -144,4 +144,3 @@ to Database via "PostgreSQL". There's a note saying "Add Redis cache here?"
 
 Can you help me think through this architecture?
 ```
-Valor can discuss the diagram contents directly.

@@ -996,14 +996,19 @@ async def main():
         catch_up=True,
     )
 
-    # Register client for deferred enrichment (media, reply chains)
-    from bridge.enrichment import set_telegram_client
-
-    set_telegram_client(client)
+    # sdlc-1297: media download moved to the bridge handler synchronously; the
+    # worker no longer needs a Telethon client reference. Module-level client
+    # registration on bridge.enrichment is removed.
 
     @client.on(events.NewMessage)
     async def handler(event):
         """Handle incoming messages."""
+        # sdlc-1297: capture intake start time for handler latency telemetry.
+        # Logged at end of handler when the session is enqueued.
+        import time as _intake_time
+
+        _intake_t0 = _intake_time.monotonic()
+
         # Skip outgoing messages
         if event.out:
             return
@@ -1136,6 +1141,47 @@ async def main():
                             pass
             except Exception as e:
                 logger.warning(f"Memory save failed (non-fatal): {e}")
+
+        # === sdlc-1297: bridge-side media download ===
+        # The bridge owns Telethon RPC; the worker owns AI work. We download the
+        # media file synchronously here (with a 10s timeout) and persist the
+        # absolute path on the TelegramMessage record so the worker can run
+        # vision/Whisper/extraction without ever touching Telethon.
+        if message.media and stored_msg_id is not None:
+            _media_type_for_download = get_media_type(message) or "media"
+            _local_path: Path | None = None
+            _download_error: str | None = None
+            try:
+                _local_path = await asyncio.wait_for(
+                    download_media(client, message, prefix=_media_type_for_download),
+                    timeout=10.0,
+                )
+            except TimeoutError:
+                _download_error = "timeout after 10s"
+                logger.warning(
+                    f"[media] download timeout after 10s "
+                    f"(chat_id={event.chat_id}, msg_id={message.id})"
+                )
+            except Exception as e:
+                _download_error = f"{type(e).__name__}: {e}"
+                logger.warning(
+                    f"[media] download failed (chat_id={event.chat_id}, msg_id={message.id}): {e}"
+                )
+
+            try:
+                from models.telegram import TelegramMessage
+
+                _record = TelegramMessage.query.get(stored_msg_id)
+                if _record is not None:
+                    if _local_path is not None:
+                        # Persist as absolute path so the worker can read it
+                        # regardless of cwd.
+                        _record.media_local_path = str(Path(_local_path).resolve())
+                    if _download_error is not None:
+                        _record.media_download_error = _download_error
+                    _record.save()
+            except Exception as e:
+                logger.warning(f"[media] failed to persist media_local_path: {e}")
 
         # Extract and store links from whitelisted senders
         if sender_username and sender_username.lower() in LINK_COLLECTORS:
@@ -2211,6 +2257,16 @@ async def main():
         )
         logger.info(
             f"[{project_name}] Queued session for {sender_name} (msg {message_id}, depth={depth})"
+        )
+
+        # sdlc-1297: emit handler latency telemetry. Read by ops/log-scrape; the
+        # success criterion is p95 < 2s for media-bearing intake.
+        _intake_dur_ms = int((_intake_time.monotonic() - _intake_t0) * 1000)
+        logger.info(
+            f"[bridge] intake_duration_ms={_intake_dur_ms} "
+            f"has_media={bool(message.media)} "
+            f"has_reply={bool(message.reply_to_msg_id)} "
+            f"chat_id={event.chat_id}"
         )
 
     # Dedup cache for edit events: (chat_id, message_id, text_hash) -> timestamp
