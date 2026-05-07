@@ -123,6 +123,49 @@ loops emit many tool calls per minute.
 **Feature gate.** `WATCHDOG_AUTO_STEER_ENABLED=false` disables loop-break
 steering without disabling detection (still logged at WARNING).
 
+## User-Visible Stall Reaction (issue #1313)
+
+When `check_stalled_sessions()` observes an active session past its stall
+threshold, the watchdog also calls `_apply_stall_reaction(session)` to queue
+a ⏳ reaction emoji on the user's originating Telegram message. Until #1313,
+stalls were `LIFECYCLE_STALL`-logged only — the user saw silence and
+assumed "agent is thinking," compounding short outages into long ones. The
+existing warning log is preserved unchanged; the reaction is an *additional*
+user-visible channel.
+
+**How it's wired.** The watchdog stays Telethon-free. It writes a reaction
+payload (`type: "reaction"`, `chat_id`, `reply_to`, `emoji: "⏳"`,
+`session_id`, `timestamp`) directly to `telegram:outbox:{session_id}` via
+`RPUSH` + `EXPIRE STALL_REACTION_OUTBOX_TTL` (3600s, matches
+`OutputHandler.OUTBOX_TTL`). The payload schema is byte-for-byte identical
+to `agent/output_handler.py::_build_reaction_payload`; a unit test
+(`test_payload_matches_build_reaction_payload`) enforces parity. The
+bridge's existing `bridge/telegram_relay.py::_send_queued_reaction` drain
+delivers the reaction on its next poll.
+
+**Idempotency.** A single atomic `SET NX EX` on
+`watchdog:stall_reaction_applied:{session_id}` (TTL =
+`STALL_REACTION_DEDUP_TTL` = 1 day) ensures exactly one reaction per stall
+period. When the next watchdog tick observes the session in a healthy
+(non-stall) state, `_clear_stall_reaction_dedup()` `DELETE`s the dedup key
+so a re-stall queues a fresh reaction. There is a ≤5-minute window
+(one watchdog tick) where ⏳ can briefly persist after recovery before the
+next tick clears the dedup; the recovery message lands first, so this is
+acceptable.
+
+**Skip conditions** (return False, no Redis writes, no log spam): feature
+flag falsy, session has no `chat_id`, no `telegram_message_id`, or no
+resolvable `session_id`/`agent_session_id`.
+
+**Failure modes.** Redis exception → fail-quiet `logger.warning`, watchdog
+loop continues. Bridge relay down >`OUTBOX_TTL` → outbox key expires,
+reaction lost; the warning log still fires, and the next tick re-queues
+once the dedup TTL expires.
+
+**Feature gate.** `WATCHDOG_STALL_REACTION_ENABLED=false` disables the
+reaction without disabling stall detection (still logged at WARNING).
+Mirrors `WATCHDOG_AUTO_STEER_ENABLED`.
+
 ## Configuration
 
 All thresholds are module-level constants in `monitoring/session_watchdog.py`:
@@ -140,6 +183,9 @@ All thresholds are module-level constants in `monitoring/session_watchdog.py`:
 | `STEER_COOLDOWN` | 900 (15 min) | Per-reason cooldown for repetition/cascade steers |
 | `TOKEN_ALERT_THRESHOLD` | 5,000,000 | Soft-threshold on `input + output` tokens |
 | `TOKEN_ALERT_COOLDOWN` | 3600 (1 hr) | Cooldown for token-alert steers |
+| `STALL_REACTION_EMOJI` | `⏳` | Emoji queued on the user's message when a session stalls (issue #1313) |
+| `STALL_REACTION_DEDUP_TTL` | 86400 (1 day) | Dedup key TTL for one-reaction-per-stall-period |
+| `STALL_REACTION_OUTBOX_TTL` | 3600 | Outbox key TTL; matches `OutputHandler.OUTBOX_TTL` |
 
 **Environment variables (issue #1128):** every constant above that
 participates in loop-break / token-alert behavior is env-tunable and the
@@ -148,6 +194,7 @@ behavior itself is toggleable:
 | Env var | Purpose | Default |
 |---------|---------|---------|
 | `WATCHDOG_AUTO_STEER_ENABLED` | Toggle auto-steer on/off | on |
+| `WATCHDOG_STALL_REACTION_ENABLED` | Toggle user-visible ⏳ reaction on stall (issue #1313) | on |
 | `WATCHDOG_TOKEN_TRACKING_ENABLED` | Toggle per-session token accumulation | on |
 | `WATCHDOG_IDLE_TEARDOWN_ENABLED` | Toggle worker idle-sweeper | on |
 | `WATCHDOG_TOKEN_ALERT_THRESHOLD` | Soft-threshold tokens | 5000000 |
@@ -217,6 +264,8 @@ full topology.
 | `tests/unit/test_session_watchdog.py` | Detection + steer-actuator assertions |
 | `tests/unit/test_watchdog_loop_break_steer.py` | `_inject_watchdog_steer` cooldown + sender attribution |
 | `tests/unit/test_watchdog_token_alert.py` | Token threshold → steer wiring |
+| `tests/unit/test_stall_detection.py` | `_apply_stall_reaction` payload, dedup, skip conditions (issue #1313) |
+| `tests/integration/test_watchdog_to_bridge.py` | End-to-end: watchdog outbox write → bridge relay drain (issue #1313) |
 | `tests/unit/test_session_token_accumulator.py` | `accumulate_session_tokens` end-to-end |
 | `tests/unit/test_harness_token_capture.py` | Harness-path B3 fix (usage + cost from `result` event) |
 | `tests/unit/test_worker_idle_sweeper.py` | Worker-internal idle teardown |

@@ -102,6 +102,36 @@ Zombie cleanup is integrated into recovery levels 2+ to free memory before resta
 
 This is distinct from the loop-level crash guard (which marks sessions as `failed`). The `_safe_abandon_session()` helper handles the common case of race conditions during the abandon flow itself.
 
+### 4a. User-Visible Stall Alerts (`monitoring/session_watchdog.py`, issue #1313)
+
+**Problem**: When `check_stalled_sessions()` detected a stalled session, it logged a `LIFECYCLE_STALL` warning to `worker.log` and did nothing else. The user (CEO) saw silence on Telegram and assumed "agent is thinking." Silent failure compounded short outages into long ones because no human-visible signal triggered an investigation.
+
+**Solution**: After the existing `LIFECYCLE_STALL` warning fires, the watchdog also calls `_apply_stall_reaction(session)`, which queues a ⏳ reaction emoji on the user's originating Telegram message. The bridge's existing `bridge/telegram_relay.py::_send_queued_reaction` drain delivers it on the next poll. The warning log is preserved unchanged — the reaction is an *additional* user-visible channel.
+
+**How the queueing works**:
+- The watchdog stays Telethon-free. It writes a reaction payload (`type: "reaction"`, `chat_id`, `reply_to`, `emoji: "⏳"`, `session_id`, `timestamp`) directly to `telegram:outbox:{session_id}` via `RPUSH` + `EXPIRE` (3600s TTL, matches `OutputHandler.OUTBOX_TTL`).
+- The payload schema is byte-for-byte identical to `agent/output_handler.py::_build_reaction_payload`. A unit test (`test_payload_matches_build_reaction_payload`) enforces this so any drift fails CI.
+- The bridge relay drains the same outbox key on its normal poll loop and calls `set_reaction` over Telethon.
+
+**Idempotency**:
+- A single atomic `SET NX EX` on `watchdog:stall_reaction_applied:{session_id}` (TTL = 1 day, `STALL_REACTION_DEDUP_TTL`) ensures exactly one reaction per stall period. Same shape as the per-reason cooldowns from issue #1128.
+- When the next watchdog tick observes the session in a healthy (non-stall) state, the dedup key is `DELETE`d so a re-stall queues a fresh reaction. There is a ≤5-minute window where ⏳ can briefly persist after recovery before the next tick clears the dedup; the user will see the bot's recovery message land before the reaction is reset, so this is acceptable.
+
+**Skip conditions** (return False, no Redis writes, no log spam):
+- `WATCHDOG_STALL_REACTION_ENABLED` env var is set falsy (`0`, `false`, `no`). Default is on.
+- Session has no `chat_id` (e.g. local Claude Code sessions, no Telegram origin).
+- Session has no `telegram_message_id` (originating message not captured).
+- Session has no resolvable `session_id`/`agent_session_id`.
+
+**Failure modes**:
+- Redis exception → fail-quiet `logger.warning`, watchdog loop continues.
+- Bridge relay down longer than `OUTBOX_TTL` → outbox key expires, reaction lost. The warning log still fires, and the next tick re-queues once the bridge returns and the dedup key TTL expires. A bridge-down >TTL is a bigger-than-watchdog incident.
+- ⏳ not in Telegram's allowed reactions for a chat → the relay's `set_reaction` already handles unknown-emoji failure (logs and moves on). Swap `STALL_REACTION_EMOJI = "⚠️"` is a one-line change.
+
+**Configuration**:
+- `WATCHDOG_STALL_REACTION_ENABLED`: default on. Set to `0`/`false`/`no` to disable, mirror of `WATCHDOG_AUTO_STEER_ENABLED`.
+- Constants live at the top of `monitoring/session_watchdog.py` near `STEER_COOLDOWN`: `STALL_REACTION_EMOJI`, `STALL_REACTION_DEDUP_TTL`, `STALL_REACTION_OUTBOX_TTL`.
+
 ### 5. Log Rotation
 
 Log rotation uses a three-layer approach: Python-managed rotation for application logs, shell rotation at service startup for launchd-managed stderr/stdout logs, and a user-space LaunchAgent for between-restart coverage. See [Log Rotation](log-rotation.md) for the full design.

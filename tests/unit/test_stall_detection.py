@@ -299,3 +299,217 @@ class TestToTimestamp:
 
     def test_unrecognized_type_returns_none(self):
         assert _to_timestamp("not-a-datetime") is None
+
+
+# ===================================================================
+# _apply_stall_reaction (issue #1313)
+# ===================================================================
+
+
+def _make_stall_session(
+    session_id="tg_user_-100_42",
+    chat_id="-100",
+    telegram_message_id=42,
+    agent_session_id="as-001",
+):
+    """Build a SimpleNamespace mimicking AgentSession for stall-reaction tests."""
+    return SimpleNamespace(
+        session_id=session_id,
+        agent_session_id=agent_session_id,
+        chat_id=chat_id,
+        telegram_message_id=telegram_message_id,
+    )
+
+
+class _FakeRedis:
+    """Minimal in-memory Redis stub supporting set NX EX, rpush, expire, delete."""
+
+    def __init__(self):
+        self.store: dict[str, str] = {}
+        self.lists: dict[str, list[str]] = {}
+        self.expires: dict[str, int] = {}
+
+    def set(self, key, value, nx=False, ex=None):
+        if nx and key in self.store:
+            return None
+        self.store[key] = value
+        if ex is not None:
+            self.expires[key] = ex
+        return True
+
+    def rpush(self, key, value):
+        self.lists.setdefault(key, []).append(value)
+        return len(self.lists[key])
+
+    def expire(self, key, ttl):
+        self.expires[key] = ttl
+        return True
+
+    def delete(self, key):
+        self.store.pop(key, None)
+        self.lists.pop(key, None)
+        self.expires.pop(key, None)
+        return 1
+
+
+@pytest.fixture
+def fake_redis(monkeypatch):
+    fr = _FakeRedis()
+    monkeypatch.setattr("popoto.redis_db.POPOTO_REDIS_DB", fr)
+    return fr
+
+
+class TestStallReaction:
+    def test_reaction_queued_on_first_stall(self, fake_redis, monkeypatch):
+        from monitoring.session_watchdog import _apply_stall_reaction
+
+        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
+        session = _make_stall_session()
+        result = _apply_stall_reaction(session)
+        assert result is True
+        # Dedup key claimed
+        assert "watchdog:stall_reaction_applied:tg_user_-100_42" in fake_redis.store
+        # Outbox payload written
+        queue_key = "telegram:outbox:tg_user_-100_42"
+        assert queue_key in fake_redis.lists
+        import json as _json
+
+        payload = _json.loads(fake_redis.lists[queue_key][0])
+        assert payload["type"] == "reaction"
+        assert payload["chat_id"] == "-100"
+        assert payload["reply_to"] == 42
+        assert payload["emoji"] == "⏳"
+        assert payload["session_id"] == "tg_user_-100_42"
+        assert "timestamp" in payload
+        # TTL set on the queue
+        assert fake_redis.expires[queue_key] == 3600
+
+    def test_reaction_deduped_on_second_call(self, fake_redis, monkeypatch):
+        from monitoring.session_watchdog import _apply_stall_reaction
+
+        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
+        session = _make_stall_session()
+        first = _apply_stall_reaction(session)
+        second = _apply_stall_reaction(session)
+        assert first is True
+        assert second is False
+        # Only one payload was queued
+        queue_key = "telegram:outbox:tg_user_-100_42"
+        assert len(fake_redis.lists[queue_key]) == 1
+
+    def test_skip_when_no_telegram_message_id(self, fake_redis, monkeypatch):
+        from monitoring.session_watchdog import _apply_stall_reaction
+
+        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
+        session = _make_stall_session(telegram_message_id=None)
+        assert _apply_stall_reaction(session) is False
+        assert fake_redis.store == {}
+        assert fake_redis.lists == {}
+
+    def test_skip_when_no_chat_id(self, fake_redis, monkeypatch):
+        from monitoring.session_watchdog import _apply_stall_reaction
+
+        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
+        session = _make_stall_session(chat_id=None)
+        assert _apply_stall_reaction(session) is False
+        assert fake_redis.store == {}
+
+    def test_skip_when_telegram_message_id_zero(self, fake_redis, monkeypatch):
+        from monitoring.session_watchdog import _apply_stall_reaction
+
+        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
+        # 0 is treated as falsy -- no real Telegram message id is 0.
+        session = _make_stall_session(telegram_message_id=0)
+        assert _apply_stall_reaction(session) is False
+        assert fake_redis.store == {}
+
+    def test_skip_when_session_id_empty(self, fake_redis, monkeypatch):
+        from monitoring.session_watchdog import _apply_stall_reaction
+
+        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
+        session = _make_stall_session(session_id="", agent_session_id=None)
+        assert _apply_stall_reaction(session) is False
+
+    def test_skip_when_flag_disabled(self, fake_redis, monkeypatch):
+        from monitoring.session_watchdog import _apply_stall_reaction
+
+        monkeypatch.setenv("WATCHDOG_STALL_REACTION_ENABLED", "0")
+        session = _make_stall_session()
+        assert _apply_stall_reaction(session) is False
+        # No Redis writes when disabled
+        assert fake_redis.store == {}
+        assert fake_redis.lists == {}
+
+    def test_redis_exception_is_fail_quiet(self, monkeypatch):
+        from monitoring.session_watchdog import _apply_stall_reaction
+
+        class _BoomRedis:
+            def set(self, *a, **kw):
+                raise RuntimeError("redis down")
+
+            def rpush(self, *a, **kw):
+                raise RuntimeError("redis down")
+
+            def expire(self, *a, **kw):
+                raise RuntimeError("redis down")
+
+            def delete(self, *a, **kw):
+                raise RuntimeError("redis down")
+
+        monkeypatch.setattr("popoto.redis_db.POPOTO_REDIS_DB", _BoomRedis())
+        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
+        session = _make_stall_session()
+        # Must not raise
+        assert _apply_stall_reaction(session) is False
+
+    def test_payload_matches_build_reaction_payload(self, fake_redis, monkeypatch):
+        """Schema parity test: the watchdog's inlined payload literal must match
+        agent.output_handler.OutputHandler._build_reaction_payload byte-for-byte.
+
+        This is the ONLY mechanical defense against schema drift between the
+        two outbox writers. If this test fails, either reconcile the watchdog's
+        literal or update _build_reaction_payload (and probably the bridge relay).
+        """
+        from agent.output_handler import TelegramRelayOutputHandler
+        from monitoring.session_watchdog import _apply_stall_reaction
+
+        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
+        session = _make_stall_session()
+        assert _apply_stall_reaction(session) is True
+        import json as _json
+
+        queue_key = "telegram:outbox:tg_user_-100_42"
+        actual = _json.loads(fake_redis.lists[queue_key][0])
+
+        expected = TelegramRelayOutputHandler._build_reaction_payload(
+            chat_id=str(session.chat_id),
+            reply_to_msg_id=session.telegram_message_id,
+            emoji="⏳",
+            session_id=session.session_id,
+            timestamp=actual["timestamp"],
+        )
+        assert actual == expected
+
+    def test_clear_dedup_removes_key(self, fake_redis, monkeypatch):
+        from monitoring.session_watchdog import (
+            _apply_stall_reaction,
+            _clear_stall_reaction_dedup,
+        )
+
+        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
+        session = _make_stall_session()
+        # Apply once, then clear, then apply again -- should succeed twice.
+        assert _apply_stall_reaction(session) is True
+        _clear_stall_reaction_dedup(session.session_id)
+        assert "watchdog:stall_reaction_applied:tg_user_-100_42" not in fake_redis.store
+        # Second apply succeeds because the dedup key was cleared.
+        assert _apply_stall_reaction(session) is True
+        queue_key = "telegram:outbox:tg_user_-100_42"
+        assert len(fake_redis.lists[queue_key]) == 2
+
+    def test_clear_dedup_empty_session_id_is_noop(self, fake_redis):
+        from monitoring.session_watchdog import _clear_stall_reaction_dedup
+
+        # Should not raise, no Redis call needed.
+        _clear_stall_reaction_dedup("")
+        _clear_stall_reaction_dedup(None)  # type: ignore[arg-type]

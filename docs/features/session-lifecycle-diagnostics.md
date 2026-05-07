@@ -48,6 +48,7 @@ For active sessions, `updated_at` is checked first — if recent activity exists
 When a stall is detected:
 - A `LIFECYCLE_STALL` warning is logged with session ID, status, duration, and last history entry
 - The stalled session info is returned for potential alerting
+- **User-visible reaction** (#1313): for active sessions with an originating Telegram message, `_apply_stall_reaction()` queues a ⏳ reaction emoji on the user's message via `telegram:outbox:{session_id}`. The bridge relay drains the same key and delivers the reaction. Idempotent per stall period via `watchdog:stall_reaction_applied:{session_id}`; cleared on healthy-state observation so re-stalls re-fire. See [Bridge Self-Healing § 4a](bridge-self-healing.md#4a-user-visible-stall-alerts-monitoringsession_watchdogpy-issue-1313).
 - **Pending stalls** (#342, #402): `_recover_stalled_pending()` kills the stuck worker via `_kill_stalled_worker()`, applies exponential backoff, and re-enqueues via `_enqueue_stall_retry()`. After `STALL_MAX_RETRIES` exhausted, the session is abandoned with a Telegram notification. See [stall-retry.md](stall-retry.md) for full details.
 
 ### Stale Save Guard (#342)

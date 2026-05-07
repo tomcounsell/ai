@@ -16,6 +16,11 @@ When issues are detected, the watchdog FIXES them automatically:
   AUTOMATICALLY enqueues a steering message via `_inject_watchdog_steer`.
   Per-reason atomic Redis cooldowns (SET NX EX) prevent floods. No longer
   "detected but logged only" — detections now drive actuation.
+- For stalled sessions with an originating Telegram message (issue #1313):
+  AUTOMATICALLY queues a ⏳ reaction emoji on the user's original message
+  via `_apply_stall_reaction`. Atomic `SET NX EX` dedup key per session
+  prevents repeats within a stall period. Reset on healthy-state observation
+  so re-stalls trigger a fresh reaction.
 
 NO ALERTS ARE SENT for recoverable stalls. Either retry, fix, or create an issue.
 
@@ -100,6 +105,21 @@ TOKEN_ALERT_COOLDOWN = int(os.environ.get("WATCHDOG_TOKEN_ALERT_COOLDOWN", "3600
 # reason). 900s = 3 watchdog ticks; gives the agent room to respond to a
 # steer before the next one fires.
 STEER_COOLDOWN = int(os.environ.get("WATCHDOG_STEER_COOLDOWN", "900"))
+
+# === User-visible stall alert (issue #1313) ===
+# Reaction emoji queued on the originating Telegram message when a session
+# is observed stalled. ⏳ chosen for "stalled / waiting too long"; visually
+# distinct from existing bridge reactions (👀 received, 🔥 drafting, 👍 done).
+STALL_REACTION_EMOJI = "⏳"
+# Dedup TTL: the reaction is queued at most once per session per stall
+# period. 1 day is well over any realistic stall lifetime; the key is also
+# explicitly DELETEd when the session is observed in a healthy state, so
+# this TTL is just a safety bound for orphaned keys.
+STALL_REACTION_DEDUP_TTL = 86400
+# OUTBOX TTL: matches `agent/output_handler.py::OutputHandler.OUTBOX_TTL`
+# (3600s) — the bridge's reaction relay drains the same key with this TTL
+# applied via EXPIRE on each rpush.
+STALL_REACTION_OUTBOX_TTL = 3600
 
 
 # Transcript liveness: if transcript.txt was modified within this many minutes,
@@ -374,6 +394,16 @@ def check_stalled_sessions() -> list[dict]:
                         getattr(session, "project_key", "?"),
                         last_history,
                     )
+
+                    # Issue #1313: queue a user-visible ⏳ reaction on the
+                    # originating Telegram message. Idempotent within the
+                    # stall period; cleared below when the session recovers.
+                    _apply_stall_reaction(session)
+                else:
+                    # Session observed in a healthy (non-stall) state. Clear
+                    # the dedup key so a future re-stall triggers a fresh
+                    # reaction. Cheap no-op when the key doesn't exist.
+                    _clear_stall_reaction_dedup(session_id)
             except Exception as e:
                 logger.error("[watchdog] Error checking session for stall: %s", e)
 
@@ -496,6 +526,124 @@ def _inject_watchdog_steer(
             e,
         )
         return False
+
+
+def _apply_stall_reaction(session: AgentSession) -> bool:
+    """Queue a user-visible ⏳ reaction on the originating Telegram message.
+
+    Issue #1313: when `check_stalled_sessions` observes a session past its
+    stall threshold, this helper writes a reaction payload to
+    ``telegram:outbox:{session_id}`` so the bridge relay's existing
+    `_send_queued_reaction` drain delivers the emoji on the user's
+    original message. The existing ``LIFECYCLE_STALL`` warning log is
+    preserved unchanged — this is an *additional* user-visible channel,
+    not a replacement.
+
+    Idempotency: a single atomic ``SET NX EX`` on
+    ``watchdog:stall_reaction_applied:{session_id}`` (TTL =
+    ``STALL_REACTION_DEDUP_TTL``) ensures exactly one reaction per
+    session per stall period. The key is DELETEd elsewhere when the
+    session is observed in a healthy state so re-stalls trigger a fresh
+    reaction.
+
+    Skip conditions (return ``False``, no Redis writes, no warning):
+      * Feature flag ``WATCHDOG_STALL_REACTION_ENABLED`` is set falsy.
+      * Session has no ``chat_id`` (e.g. local sessions, no Telegram origin).
+      * Session has no ``telegram_message_id`` (originating message not
+        captured — typical for non-Telegram session creators).
+      * Session has no resolvable ``session_id`` / ``agent_session_id``.
+      * Dedup key already exists for this stall period.
+
+    Schema parity: the inlined payload literal MUST stay byte-for-byte
+    identical to ``agent/output_handler.OutputHandler._build_reaction_payload``
+    so the bridge relay accepts both writers' messages from the same outbox.
+    The unit test ``test_payload_matches_build_reaction_payload`` enforces
+    this. We do NOT import `_build_reaction_payload` directly because that
+    module is async-handler code and the import path risks cycles; the test
+    is the only mechanical defense against schema drift.
+
+    Args:
+        session: The AgentSession observed as stalled. Must expose
+            ``session_id`` (or ``agent_session_id``), ``chat_id``, and
+            ``telegram_message_id``.
+
+    Returns:
+        True when a reaction payload was queued. False on any skip
+        condition or any caught exception (fail-quiet so the watchdog
+        loop never crashes on reaction errors).
+    """
+    if not _env_flag_enabled("WATCHDOG_STALL_REACTION_ENABLED"):
+        return False
+
+    try:
+        chat_id = getattr(session, "chat_id", None)
+        msg_id = getattr(session, "telegram_message_id", None)
+        session_id = getattr(session, "session_id", None) or getattr(
+            session, "agent_session_id", None
+        )
+        if not (chat_id and msg_id and session_id):
+            return False
+
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        dedup_key = f"watchdog:stall_reaction_applied:{session_id}"
+        slot_open = POPOTO_REDIS_DB.set(
+            dedup_key,
+            "1",
+            nx=True,
+            ex=STALL_REACTION_DEDUP_TTL,
+        )
+        if not slot_open:
+            return False
+
+        payload = {
+            "type": "reaction",
+            "chat_id": str(chat_id),
+            "reply_to": int(msg_id),
+            "emoji": STALL_REACTION_EMOJI,
+            "session_id": session_id,
+            "timestamp": time.time(),
+        }
+        queue_key = f"telegram:outbox:{session_id}"
+        POPOTO_REDIS_DB.rpush(queue_key, json.dumps(payload))
+        POPOTO_REDIS_DB.expire(queue_key, STALL_REACTION_OUTBOX_TTL)
+        logger.warning(
+            "[watchdog] Stall reaction queued for %s (chat=%s msg=%s emoji=%s)",
+            session_id,
+            chat_id,
+            msg_id,
+            STALL_REACTION_EMOJI,
+        )
+        return True
+    except Exception as e:
+        logger.warning(
+            "[watchdog] Failed to queue stall reaction for %s: %s",
+            getattr(session, "session_id", "?"),
+            e,
+        )
+        return False
+
+
+def _clear_stall_reaction_dedup(session_id: str) -> None:
+    """Delete the stall-reaction dedup key so re-stalls trigger a fresh reaction.
+
+    Called from the iteration loop in `check_stalled_sessions` whenever a
+    session is observed in a healthy (non-stall) state. Fail-quiet: any
+    Redis exception is swallowed; orphaned keys age out via
+    ``STALL_REACTION_DEDUP_TTL``.
+    """
+    if not session_id:
+        return
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        POPOTO_REDIS_DB.delete(f"watchdog:stall_reaction_applied:{session_id}")
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug(
+            "[watchdog] Failed to clear stall reaction dedup for %s: %s",
+            session_id,
+            e,
+        )
 
 
 def assess_session_health(session: AgentSession) -> dict[str, Any]:
