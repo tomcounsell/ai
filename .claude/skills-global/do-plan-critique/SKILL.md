@@ -251,6 +251,25 @@ Where `$VERDICT_STRING` is the exact verdict string emitted in Step 5 (e.g. `"NE
 
 The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state.
 
+### Step 5.6: Set plan-revising lock (mandatory when revision is needed)
+
+After recording the verdict, set the `plan_revising` lock on the PM session whenever the verdict requires a revision pass AND `revision_applied` is not already set in the plan frontmatter. This lock activates guard G7 in the SDLC router, which blocks `/do-build` until `/do-plan` completes the revision and clears the lock.
+
+Set the lock when the verdict is one of:
+- `NEEDS REVISION`
+- `MAJOR REWORK`
+- `READY TO BUILD (with concerns)` — and `revision_applied` is not already `true` in the plan frontmatter
+
+```bash
+# Set plan_revising lock after verdict record, when revision is needed
+sdlc-tool meta-set --key plan_revising --value true \
+  --issue-number $ISSUE_NUMBER 2>/dev/null || true
+```
+
+**Do NOT set the lock** when the verdict is `READY TO BUILD (no concerns)` — no revision pass is needed and the lock would incorrectly block build dispatch.
+
+**Do NOT set the lock** when `revision_applied: true` is already in the plan frontmatter — the revision has already been applied and the lock would be immediately self-healed by G7 anyway.
+
 ## Outcome Contract
 
 The skill returns a structured verdict that the SDLC pipeline can use:

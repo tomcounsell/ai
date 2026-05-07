@@ -124,6 +124,19 @@ If `TARGET_REPO == ORCHESTRATOR_REPO`, this is a same-repo build and no special 
    ```
    This is idempotent: if the worktree already exists (e.g., from an interrupted session), it returns the existing path. If not, it creates a fresh one. It also handles stale worktrees from crashed sessions, missing directories with lingering git references, and branch-already-in-use errors. Settings files are copied automatically.
    All subsequent agent work happens inside `$TARGET_REPO/.worktrees/{slug}/`, NOT the orchestrator repo directory.
+
+   **Record the plan hash at build start** (defense-in-depth against mid-build plan revisions — see guard G7):
+   ```bash
+   # PLAN_REPO may differ from TARGET_REPO for cross-repo builds (e.g. cuttlefish).
+   # Always resolve the plan's owning repo separately.
+   PLAN_REPO=$(git -C "$(dirname "$PLAN_PATH")" rev-parse --show-toplevel)
+   git -C "$PLAN_REPO" fetch origin main 2>/dev/null || true
+   PLAN_REL=$(python -c "import os; print(os.path.relpath('$PLAN_PATH', '$PLAN_REPO'))")
+   PLAN_HASH=$(git -C "$PLAN_REPO" log -1 --format=%H origin/main -- "$PLAN_REL")
+   sdlc-tool meta-set --key plan_hash_at_build_start --value "$PLAN_HASH" \
+     --issue-number {issue_number} 2>/dev/null || true
+   ```
+   If `PLAN_HASH` is empty (e.g. the plan file is not tracked by git), the `meta-set` call writes an empty string, and the Step 21 check becomes a no-op (guarded by `STORED_HASH` non-empty check).
 8. **Initialize pipeline state** - For fresh builds (no prior state), initialize now:
    ```bash
    python -c "from agent.build_pipeline import initialize; initialize('{slug}', 'session/{slug}', '$TARGET_REPO/.worktrees/{slug}', target_repo='$TARGET_REPO')"
@@ -175,6 +188,20 @@ If `TARGET_REPO == ORCHESTRATOR_REPO`, this is a same-repo build and no special 
     python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'pr')"
     ```
 21. **Verify commits exist before PR** - Run `git -C $TARGET_REPO/.worktrees/{slug} log --oneline main..HEAD` and count the output lines. If zero commits exist on the session branch, **ABORT with error**: "BUILD FAILED: No commits on session/{slug}. Builder agents produced no code changes." Do NOT proceed to push or PR creation.
+
+   **Defense-in-depth: verify plan hash has not changed mid-build** (G7 second layer — catches revisions that committed during build execution):
+   ```bash
+   git -C "$PLAN_REPO" fetch origin main 2>/dev/null || true
+   CURRENT_HASH=$(git -C "$PLAN_REPO" log -1 --format=%H origin/main -- "$PLAN_REL")
+   STORED_HASH=$(sdlc-tool stage-query --issue-number {issue_number} \
+     | python -c "import sys,json; print(json.load(sys.stdin).get('_meta',{}).get('plan_hash_at_build_start') or '')")
+   if [ -n "$STORED_HASH" ] && [ "$CURRENT_HASH" != "$STORED_HASH" ]; then
+     echo "BUILD ABORT: plan revised mid-build (was=$STORED_HASH, now=$CURRENT_HASH, path=$PLAN_PATH)"
+     sdlc-tool stage-marker --stage BUILD --status failed --issue-number {issue_number} 2>/dev/null || true
+     exit 1
+   fi
+   ```
+   This check is a no-op when `STORED_HASH` is empty (sessions that pre-date this feature, or when the plan is not git-tracked). A non-empty mismatch means the plan was revised by a concurrent critique/plan cycle — abort so the router can re-route via G7 to a fresh revision round.
 22. **Push and open a PR** - `git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}` then `gh pr create --repo $TARGET_GH_REPO` (use `--repo` only for cross-repo builds)
 23. **Run documentation cascade** - Invoke `/do-docs {PR-number}` to surgically update affected docs
 24. **Plan stays until merge** - Do NOT delete the plan here; `do-merge` deletes it after the PR merges (issue closes automatically via `Closes #N`)
