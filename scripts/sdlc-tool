@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-ALLOWED_SUBCOMMANDS=(verdict dispatch stage-marker stage-query session-ensure next-skill)
+ALLOWED_SUBCOMMANDS=(verdict dispatch stage-marker stage-query session-ensure next-skill meta-set)
 
 usage() {
     cat <<EOF >&2
@@ -29,6 +29,7 @@ Subcommands:
   stage-query      Query current SDLC pipeline state (best-effort)
   session-ensure   Ensure an AgentSession exists for the issue (best-effort)
   next-skill       Compute the next dispatch decision (production routing)
+  meta-set         Set a whitelisted _meta key on the PM session (best-effort)
 
 Environment:
   AI_REPO_ROOT     Path to the ai/ repo (default: \$HOME/src/ai).

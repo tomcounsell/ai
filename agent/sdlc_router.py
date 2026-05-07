@@ -46,6 +46,12 @@ logger = logging.getLogger(__name__)
 # without the pipeline state changing; the fourth would trip G4.
 MAX_SAME_STAGE_DISPATCHES = 3
 
+# Maximum number of router turns that G7 will wait for a /do-plan dispatch
+# after the plan_revising lock is set. After this many turns with no /do-plan
+# in the recent dispatch history, G7 escalates to Blocked so a human can
+# intervene. Value of 2 allows one self-healing turn before escalating.
+MAX_PLAN_REVISING_DISPATCHES = 2
+
 # Maximum number of entries retained in ``_sdlc_dispatches``. Older entries are
 # FIFO-evicted. Picked to be comfortably larger than ``MAX_SAME_STAGE_DISPATCHES``
 # so G4 has enough history to detect sustained oscillation while still bounding
@@ -381,6 +387,93 @@ def guard_g5_artifact_hash_cache(
     return None
 
 
+def guard_g7_plan_revising(
+    stage_states: dict, meta: dict, context: dict
+) -> Dispatch | Blocked | None:
+    """G7: block /do-build while the plan-revising lock is set.
+
+    The lock (``_meta["plan_revising"]``) is set by ``/do-plan-critique`` when
+    its verdict is NEEDS REVISION, MAJOR REWORK, or READY TO BUILD (with
+    concerns) and the revision pass has not yet run. It is cleared by
+    ``/do-plan`` in the same step that writes ``revision_applied: true``.
+
+    **Predicate (evaluated in order):**
+    1. If ``pr_number`` is set → return None (G3/G6 own PR-stage routing; an
+       already-shipped PR is never blocked by plan revisions).
+    2. If ``plan_revising`` is falsy → return None (lock not set, fall through).
+    3. Self-heal: if ``plan_revising`` is truthy AND ``revision_applied`` is also
+       truthy → return None (plan was revised but the lock-clear step never ran,
+       e.g. skill crashed mid-step; revision_applied is the source of truth).
+    4. If lock is set AND ``last_dispatched_skill`` is ``/do-plan-critique``
+       (critique just finished) → return Dispatch(/do-plan): the obvious next
+       step is to apply the revision.
+    5. If lock is set AND no ``/do-plan`` appears in the last
+       ``MAX_PLAN_REVISING_DISPATCHES + 1`` dispatch history entries → return
+       Blocked: the lock has been set for multiple turns with no plan dispatch,
+       indicating the pipeline is stuck and a human should intervene.
+    6. Otherwise → return None: a plan dispatch is already in the recent history;
+       allow the dispatch table to route normally (the plan may still be in
+       flight).
+
+    **Ordering:** G7 is evaluated AFTER G6 (terminal merge fast-path) so that
+    an already-mergeable PR is never blocked by a stale plan_revising flag.
+    G7 is gated on ``pr_number is None`` for the same reason.
+
+    **Deadlock backstop:** If the lock leaks (critique crashes after setting it
+    but before /do-plan runs), G7 escalates to Blocked after
+    ``MAX_PLAN_REVISING_DISPATCHES`` turns. The operator can clear the lock
+    manually via ``sdlc-tool meta-set --key plan_revising --value false``.
+    """
+    # Gate 1: PR exists — G3/G6 own routing at this stage.
+    if meta.get("pr_number"):
+        return None
+
+    # Gate 2: Lock not set — nothing to do.
+    if not meta.get("plan_revising"):
+        return None
+
+    # Gate 3: Self-heal — revision_applied supersedes the lock.
+    if meta.get("revision_applied"):
+        return None
+
+    # The lock is set and the plan has not been marked as revised.
+    last_skill = meta.get("last_dispatched_skill") or ""
+    history = stage_states.get("_sdlc_dispatches") or []
+    if not isinstance(history, list):
+        history = []
+
+    # Gate 4: Critique just finished — route to plan revision.
+    if last_skill == SKILL_DO_PLAN_CRITIQUE:
+        return Dispatch(
+            skill=SKILL_DO_PLAN,
+            reason=(
+                "G7: plan_revising lock is set and critique just ran — "
+                "apply the revision pass before building"
+            ),
+            row_id="G7",
+        )
+
+    # Gate 5: Check recent dispatch history for a /do-plan entry.
+    # Look back MAX_PLAN_REVISING_DISPATCHES + 1 entries so one self-healing
+    # turn is allowed before escalating.
+    recent = history[-(MAX_PLAN_REVISING_DISPATCHES + 1) :]
+    recent_skills = [e.get("skill") for e in recent if isinstance(e, dict)]
+    if SKILL_DO_PLAN not in recent_skills:
+        return Blocked(
+            reason=(
+                f"G7: plan_revising lock set but no /do-plan dispatched in the "
+                f"last {MAX_PLAN_REVISING_DISPATCHES + 1} turns. "
+                f"Pipeline may be stuck. Clear the lock manually via "
+                f"'sdlc-tool meta-set --key plan_revising --value false' if the "
+                f"revision is already complete."
+            ),
+            guard_id="G7",
+        )
+
+    # A plan dispatch is already in the recent history — let dispatch table route.
+    return None
+
+
 def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict) -> Dispatch | None:
     """G6: PR is mergeable, CI green, DOCS done, review APPROVED — fast-path to /do-merge.
 
@@ -430,6 +523,7 @@ GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | None]] = [
     guard_g4_oscillation,
     guard_g5_artifact_hash_cache,
     guard_g6_terminal_merge_ready,
+    guard_g7_plan_revising,
 ]
 
 

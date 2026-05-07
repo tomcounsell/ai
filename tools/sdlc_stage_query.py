@@ -292,6 +292,14 @@ def _compute_meta(
         plan_path = _find_plan_path(issue_number)
         revision_applied = _parse_revision_applied(plan_path)
 
+    # Plan-revising lock (G7): set by critique skill, cleared by plan skill.
+    plan_revising_raw = raw_states.get("_plan_revising")
+    plan_revising = bool(plan_revising_raw) if plan_revising_raw is not None else False
+
+    plan_hash_at_build_start = raw_states.get("_plan_hash_at_build_start") or None
+    if isinstance(plan_hash_at_build_start, str) and not plan_hash_at_build_start:
+        plan_hash_at_build_start = None
+
     return {
         "patch_cycle_count": int(raw_states.get("_patch_cycle_count", 0) or 0),
         "critique_cycle_count": int(raw_states.get("_critique_cycle_count", 0) or 0),
@@ -303,6 +311,8 @@ def _compute_meta(
         "ci_all_passing": ci_all_passing,
         "same_stage_dispatch_count": int(same_stage_count),
         "last_dispatched_skill": last_skill,
+        "plan_revising": plan_revising,
+        "plan_hash_at_build_start": plan_hash_at_build_start,
     }
 
 
@@ -319,6 +329,8 @@ def _default_meta() -> dict:
         "ci_all_passing": None,
         "same_stage_dispatch_count": 0,
         "last_dispatched_skill": None,
+        "plan_revising": False,
+        "plan_hash_at_build_start": None,
     }
 
 
