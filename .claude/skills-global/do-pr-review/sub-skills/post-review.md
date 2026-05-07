@@ -14,6 +14,45 @@ the mergeability preflight short-circuited (see §2b and §2c below).
 
 ## Steps
 
+### 0. Identity Setup
+
+Resolve the token to use for the review-post subprocess. This runs BEFORE
+any `gh pr review` or `gh pr comment` call.
+
+```bash
+GH_TOKEN_FOR_REVIEW=""
+
+if [ "${CLAUDE_AGENT_REVIEW:-0}" = "1" ]; then
+  # Pipeline context — must use bot identity.
+  if [ -z "${SDLC_AGENT_GH_TOKEN:-}" ]; then
+    echo "ERROR: agent context (CLAUDE_AGENT_REVIEW=1) but SDLC_AGENT_GH_TOKEN is unset or empty." >&2
+    echo "Refusing to post review under operator identity in pipeline context." >&2
+    cat <<'OUTCOME'
+<!-- OUTCOME {"status":"fail","stage":"REVIEW","verdict":"IDENTITY_MISSING","artifacts":{},"notes":"SDLC_AGENT_GH_TOKEN not set in pipeline context","failure_reason":"agent context but bot token missing — refusing to post under operator identity","next_skill":null} -->
+OUTCOME
+    exit 1
+  fi
+  GH_TOKEN_FOR_REVIEW="$SDLC_AGENT_GH_TOKEN"
+
+  # Resolve HEAD SHA for the marker
+  HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+fi
+```
+
+**Rules:**
+- When `GH_TOKEN_FOR_REVIEW` is non-empty: wrap EVERY `gh pr review` and
+  `gh pr comment` call in `env GH_TOKEN="$GH_TOKEN_FOR_REVIEW" gh ...`
+- When `GH_TOKEN_FOR_REVIEW` is empty: call `gh` directly (operator credential)
+- Never pass an empty `GH_TOKEN` to `gh` — that would corrupt the stored credential
+
+**Marker:** When `GH_TOKEN_FOR_REVIEW` is non-empty, prepend this line at the
+very top of every review body (before all other content):
+```
+<!-- SDLC-AGENT-REVIEW v1 sha=$HEAD_SHA -->
+```
+The marker is omitted for `BLOCKED_ON_CONFLICT` / `PR_CLOSED` comment-only paths
+(those are informational, not code-review verdicts).
+
 ### 1. Detect Self-Authored PR
 
 ```bash
@@ -298,25 +337,40 @@ always use `gh pr comment`, even on non-self-authored PRs.
 
 ### 3. Post the Review
 
+**This section is the single source of truth for the review-post decision.**
+The preflight short-circuit paths are checked FIRST — `gh pr review` is
+unreachable when `PREFLIGHT_VERDICT` is `BLOCKED_ON_CONFLICT` or `PR_CLOSED`.
+
 **Decision tree (apply in order, first match wins):**
-1. **Preflight: `PR_CLOSED`** → post §2c comment via `gh pr comment`.
-2. **Preflight: `BLOCKED_ON_CONFLICT`** → post §2b comment via `gh pr comment`.
+1. **Preflight: `PR_CLOSED`** → post §2c comment via `gh pr comment`. NEVER call `gh pr review`.
+2. **Preflight: `BLOCKED_ON_CONFLICT`** (includes `mergeable=UNKNOWN` after retry) → post §2b comment via `gh pr comment`. NEVER call `gh pr review`.
 3. **Blockers found** → `--request-changes` (or `gh pr comment` for self-authored).
 4. **No blockers, but tech_debt or nits** → `--request-changes` (or `gh pr comment`).
 5. **Zero findings** → `--approve` (or `gh pr comment`).
 
 ```bash
+# Helper: invoke gh with optional bot identity injection
+# Usage: _gh_post <review|comment> [args...]
+_gh_post() {
+  if [ -n "$GH_TOKEN_FOR_REVIEW" ]; then
+    env GH_TOKEN="$GH_TOKEN_FOR_REVIEW" gh "$@"
+  else
+    gh "$@"
+  fi
+}
+
 if [ "$PREFLIGHT_VERDICT" = "PR_CLOSED" ] || [ "$PREFLIGHT_VERDICT" = "BLOCKED_ON_CONFLICT" ]; then
   # Preflight short-circuit — always post as a plain comment.
-  gh pr comment "$PR_NUMBER" --body "$REVIEW_BODY"
+  # gh pr review is UNREACHABLE on this path.
+  _gh_post pr comment "$PR_NUMBER" --body "$REVIEW_BODY"
 elif [ "$SELF_AUTHORED" = "true" ]; then
-  gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
+  _gh_post pr comment "$PR_NUMBER" --body "$REVIEW_BODY"
 elif [ "$HAS_ANY_FINDINGS" = "true" ]; then
   # Blockers, tech_debt, or nits — all require changes
-  gh pr review $PR_NUMBER --request-changes --body "$REVIEW_BODY"
+  _gh_post pr review "$PR_NUMBER" --request-changes --body "$REVIEW_BODY"
 else
   # Zero findings — the ONLY path to approval
-  gh pr review $PR_NUMBER --approve --body "$REVIEW_BODY"
+  _gh_post pr review "$PR_NUMBER" --approve --body "$REVIEW_BODY"
 fi
 ```
 

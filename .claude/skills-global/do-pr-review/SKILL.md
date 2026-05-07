@@ -22,6 +22,87 @@ SDLC pipeline runs, the bridge auto-infers from message content; for
 manual review runs, pass `valor-session create --needs-real-chrome
 ...`. Two concurrent real-Chrome sessions race on the active tab.
 
+## Review Identity
+
+### Bot Account Model
+
+Pipeline-driven reviews (invoked from the SDLC pipeline) MUST post under a
+dedicated service-account identity, not the operator's personal `gh` credential.
+This prevents agent `APPROVED` reviews from satisfying human-gated branch-protection
+rules and provides a clear forensic signal separating agent reviews from human ones.
+
+**Environment variables:**
+
+| Variable | Purpose | When set |
+|----------|---------|----------|
+| `CLAUDE_AGENT_REVIEW` | `1` when running in pipeline context | Set by `sdk_client.py` at session spawn |
+| `SDLC_AGENT_GH_TOKEN` | PAT for the bot account (e.g. `yudame-sdlc-bot`) | Set in `~/Desktop/Valor/.env` |
+
+**Rules:**
+- When `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is non-empty: inject
+  `GH_TOKEN=$SDLC_AGENT_GH_TOKEN` for the single `gh pr review` / `gh pr comment`
+  subprocess that posts the review. All other `gh` calls (read-only queries) use
+  the operator's credential.
+- When `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is empty or unset: HARD
+  FAIL with a clear error message ("agent context but bot token missing — refusing
+  to post under operator identity") and emit `status:"fail"` OUTCOME. Never silently
+  fall back to the operator credential in pipeline context.
+- When `CLAUDE_AGENT_REVIEW` is unset or `0`: post under the operator's normal `gh`
+  credential. No `GH_TOKEN` override, no marker. Local developer behavior unchanged.
+
+**Important:** The `env GH_TOKEN=...` wrapper is ONLY applied when `SDLC_AGENT_GH_TOKEN`
+is non-empty. Passing an empty `GH_TOKEN` to `gh` would corrupt the stored credential.
+
+### Machine-Readable Marker
+
+Every agent-posted review body starts with the following line (before all other content):
+```
+<!-- SDLC-AGENT-REVIEW v1 sha=<HEAD_SHA> -->
+```
+
+Where `<HEAD_SHA>` is the PR head SHA at review time, resolved via:
+```bash
+HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+```
+
+The marker:
+- Is present when `CLAUDE_AGENT_REVIEW=1` and the review body is composed
+- Is absent for local developer runs (no `CLAUDE_AGENT_REVIEW`)
+- Is absent for `BLOCKED_ON_CONFLICT` / `PR_CLOSED` comment-only paths (those are
+  informational, not code-review verdicts)
+- Survives GitHub UI rendering as an invisible HTML comment
+- Is queryable via `gh api repos/.../pulls/$N/reviews --jq '.[].body'` for forensics
+
+**The marker is forensic only.** It does NOT prevent the bot's `APPROVED` from
+satisfying branch protection. You must configure branch protection separately (see below).
+
+### Branch-Protection Configuration
+
+To prevent the bot's approval from satisfying the "N approving reviews required" gate:
+
+**Pattern A — CODEOWNERS:**
+1. Create `.github/CODEOWNERS` assigning critical paths to a human-only team
+   (e.g. `* @yudame/human-reviewers`).
+2. Enable "Require review from Code Owners" in branch protection.
+3. The bot's approval satisfies the general approval count but not the CODEOWNERS gate
+   (assuming the bot is not in the `human-reviewers` team).
+
+**Pattern B — GitHub Rulesets (recommended for new repos):**
+1. Create a Ruleset requiring N approvals.
+2. Set `bypass_actors` to include the bot account.
+3. Invert: add the bot account to the `actors_can_approve = false` list so its
+   approvals do not count toward the N-review gate.
+
+See `docs/features/do-pr-review-bot-identity.md` for the full provisioning runbook.
+
+### Historical Posture
+
+Existing reviews (e.g. on yudame/cuttlefish PR #354) that were posted under the
+operator credential before this fix are left untouched. The cutover applies only
+to reviews posted after this change is deployed. Backfilling markers retroactively
+is out of scope (GitHub's API does not support editing review bodies via the
+standard REST surface).
+
 ## Cross-Repo Resolution
 
 For cross-project work, the `GH_REPO` environment variable is automatically set by `sdk_client.py`. The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
@@ -163,8 +244,12 @@ Apply the decision table from `sub-skills/checkout.md`:
   `BLOCKED_ON_CONFLICT` comment citing the `mergeStateStatus`, emit
   `status:"fail"` OUTCOME with `verdict:"BLOCKED_ON_CONFLICT"`, exit
   immediately.
-- Otherwise (including `BEHIND`, `UNSTABLE`, `HAS_HOOKS`, `CLEAN`, unresolved
-  `UNKNOWN`) → proceed to the checkout and full review below.
+- `mergeable == "UNKNOWN"` after retry → treat conservatively as `CONFLICTING`:
+  emit `BLOCKED_ON_CONFLICT` verdict, post `gh pr comment` only, and stop. Do
+  NOT post a code review when mergeability is unresolved. This prevents approving
+  a PR that GitHub hasn't finished evaluating.
+- Otherwise (including `BEHIND`, `UNSTABLE`, `HAS_HOOKS`, `CLEAN`) → proceed to
+  the checkout and full review below.
 
 **Fetch PR details:**
 ```bash
@@ -334,97 +419,17 @@ Cruft findings are advisory, not blockers. See `.claude/agents/cruft-auditor.md`
 
 ### 6. Post Review
 
-**First, detect if this is a self-authored PR:**
-```bash
-PR_AUTHOR=$(gh pr view $PR_NUMBER --json author --jq .author.login)
-CURRENT_USER=$(gh api user --jq .login)
-SELF_AUTHORED=$( [ "$PR_AUTHOR" = "$CURRENT_USER" ] && echo "true" || echo "false" )
-```
+All review-posting logic lives in `sub-skills/post-review.md §3`. That
+sub-skill is the **single source of truth** for the review-post decision tree.
+It handles:
 
-Self-authored PRs cannot use `gh pr review --approve` or `--request-changes` (GitHub rejects these). Use `gh pr comment` as fallback.
+- Preflight short-circuit paths (`BLOCKED_ON_CONFLICT`, `PR_CLOSED`) → `gh pr comment` only
+- Bot identity injection (`GH_TOKEN_FOR_REVIEW`) when `CLAUDE_AGENT_REVIEW=1`
+- Self-authored PR detection → `gh pr comment` fallback
+- Normal code-review paths (blockers / tech_debt / zero findings) → `gh pr review`
+- `<!-- SDLC-AGENT-REVIEW v1 sha=... -->` marker injection when agent context
 
-**Three-tier decision tree (apply in order):**
-
-#### Tier 1: Blockers found → Request Changes
-```bash
-REVIEW_BODY="$(cat <<'EOF'
-## Review: Changes Requested
-
-[summary of blockers]
-
-### Blockers
-- [ ] **`file.py:42`** — `actual_code()` — [description of issue]
-- [ ] **`file.py:87`** — `actual_code()` — [description of issue]
-
-### Tech Debt
-- **`file.py:15`** — `code()` — [description]
-
-### Screenshots
-[screenshot references if captured]
-EOF
-)"
-
-if [ "$SELF_AUTHORED" = "true" ]; then
-  gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
-else
-  gh pr review $PR_NUMBER --request-changes --body "$REVIEW_BODY"
-fi
-```
-
-#### Tier 2: No blockers, but has tech_debt or nits → Request Changes
-```bash
-REVIEW_BODY="$(cat <<'EOF'
-## Review: Changes Requested — Tech Debt
-
-[summary — no blockers, but outstanding tech debt/nits must be resolved before merge]
-
-### Verified
-- [x] Code correctness
-- [x] Security (no vulnerabilities found)
-- [x] Plan requirements met
-
-### Tech Debt
-- [ ] **`file.py:15`** — `code()` — [description]
-
-### Nits
-- [ ] **`file.py:30`** — `code()` — [description]
-
-### Screenshots
-[screenshot references if captured]
-EOF
-)"
-
-if [ "$SELF_AUTHORED" = "true" ]; then
-  gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
-else
-  gh pr review $PR_NUMBER --request-changes --body "$REVIEW_BODY"
-fi
-```
-
-#### Tier 3: Zero findings → Approve
-```bash
-REVIEW_BODY="$(cat <<'EOF'
-## Review: Approved
-
-[summary of review]
-
-### Verified
-- [x] Code correctness
-- [x] Test coverage
-- [x] Security (no vulnerabilities found)
-- [x] Plan requirements met
-
-### Screenshots
-[screenshot references if captured]
-EOF
-)"
-
-if [ "$SELF_AUTHORED" = "true" ]; then
-  gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
-else
-  gh pr review $PR_NUMBER --approve --body "$REVIEW_BODY"
-fi
-```
+See `sub-skills/post-review.md §0` (Identity Setup) and `§3` (Post the Review).
 
 ### 6.5. Verify Review Was Posted
 
@@ -556,6 +561,9 @@ The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator 
 2. **Tech debt and nits get patched.** `/do-patch` fixes all tech debt and non-subjective nits. Only purely subjective nits may be skipped — and that requires human approval.
 3. **Never approve and skip issues.** If you found tech debt or nits, they appear in the review body. The pipeline will patch them. Don't omit findings to make the review look clean.
 4. **Approval is reserved for zero-finding reviews ONLY.** If ANY tech_debt or nits exist, use `--request-changes`, never `--approve`. GitHub approval is a meaningful quality gate — it signals the PR is truly ready to merge with no outstanding work.
+5. **Pipeline-driven reviews MUST post under the bot identity.** When `CLAUDE_AGENT_REVIEW=1`, the review subprocess MUST use `GH_TOKEN=$SDLC_AGENT_GH_TOKEN`. If the token is missing, HARD FAIL — never post under the operator credential in pipeline context.
+6. **The `<!-- SDLC-AGENT-REVIEW v1 -->` marker MUST appear** in every review body when `CLAUDE_AGENT_REVIEW=1`. Reviews missing this marker in pipeline context are a bug.
+7. **`BLOCKED_ON_CONFLICT` and `PR_CLOSED` MUST NEVER call `gh pr review`.** These preflight short-circuit paths use `gh pr comment` exclusively. A formal review API call on a conflicted or closed PR encodes a false code-review verdict.
 
 ## Best Practices
 
