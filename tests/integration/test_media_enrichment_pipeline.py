@@ -23,10 +23,10 @@ pytestmark = [pytest.mark.integration, pytest.mark.sdlc]
 @pytest.fixture
 def media_fixture(tmp_path: Path) -> Path:
     """Copy the repo PNG fixture to a unique path under the worktree's
-    media/incoming/ so the test mirrors production layout."""
+    data/media/ so the test mirrors production layout."""
     src = Path("tests/fixtures/sample.png")
     assert src.exists(), f"missing fixture: {src.resolve()}"
-    dst_dir = Path("media/incoming")
+    dst_dir = Path("data/media")
     dst_dir.mkdir(parents=True, exist_ok=True)
     dst = dst_dir / f"photo_test_{uuid.uuid4().hex}.png"
     shutil.copy(src, dst)

@@ -29,7 +29,7 @@ Uses **Claude Haiku 4.5** vision (cloud API, via `bridge.media.describe_image`):
 
 ### Media Storage
 
-The bridge downloads incoming media to `media/incoming/` with timestamped filenames:
+The bridge downloads incoming media to `data/media/` with timestamped filenames:
 - Format: `{prefix}_{YYYYMMDD}_{HHMMSS}_{name}` (see `bridge/media.py::download_media`)
 - The absolute path is persisted on `TelegramMessage.media_local_path` so the worker can read it later.
 
@@ -94,7 +94,7 @@ No separate local vision runtime is required.
 
 ### Storage
 
-- Disk space under `media/incoming/` for downloaded media. The bridge does not currently clean these up; eviction policy is tracked separately.
+- Disk space under `data/media/` for downloaded media. The bridge does not currently clean these up; eviction policy is tracked separately.
 
 ## Configuration
 
@@ -106,7 +106,7 @@ DOWNLOAD_TIMEOUT_SECONDS = 10.0  # asyncio.wait_for at intake
 
 # Media storage
 MEDIA_DIR = Path(__file__).parent.parent / "data" / "media"  # historical constant
-# Live path used by download_media() is media/incoming/ at the repo root.
+# Live path used by download_media() is data/media/ at the repo root.
 ```
 
 ## Testing
