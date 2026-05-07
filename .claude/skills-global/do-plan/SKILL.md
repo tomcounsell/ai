@@ -441,25 +441,6 @@ After receiving answers:
 
 1. **Update plan** - Incorporate feedback, remove Open Questions section
 2. **Mark as finalized** - Update frontmatter: `status: Ready`
-
-**If this is a revision pass** (critique returned NEEDS REVISION / MAJOR REWORK / READY TO BUILD with concerns AND the plan has been revised based on critique findings):
-
-2a. **Set `revision_applied: true`** in the plan frontmatter — this is the canonical signal that the plan has settled and the lock is no longer needed:
-```bash
-# In the plan frontmatter, set revision_applied: true
-# Then commit and push
-git add docs/plans/{slug}.md && git commit -m "Plan revision ({slug}): address critique findings"
-git push
-```
-
-2b. **Clear the plan-revising lock** — immediately after committing and pushing, clear the lock so the SDLC router can route to build. The lock and `revision_applied` must move together; both reflect "plan is settled":
-```bash
-# Clear the plan_revising lock (G7 guard will self-heal even if this is skipped,
-# but clearing explicitly is the correct signal that the revision is complete)
-sdlc-tool meta-set --key plan_revising --value false \
-  --issue-number {issue_number} 2>/dev/null || true
-```
-
 3. **Invite discussion**:
 
 ```
