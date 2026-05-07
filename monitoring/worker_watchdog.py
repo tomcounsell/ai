@@ -2,11 +2,36 @@
 """Worker watchdog — external health monitor for the standalone worker.
 
 Runs as a separate launchd service (StartInterval: 120s) so it can detect
-and recover from a hung worker (process alive but event loop frozen).
+and recover from a hung worker (process alive but event loop frozen) AND
+from a missing worker (process gone, launchd KeepAlive failed to restart).
 
-The worker writes data/last_worker_connected every 300s (health loop interval).
-If that file is older than HEARTBEAT_THRESHOLD, the worker is considered hung:
-kill the process so launchd restarts it cleanly.
+Two recovery paths:
+
+1. Stale-heartbeat recovery (existing): when the worker process is alive but
+   `data/last_worker_connected` is older than HEARTBEAT_THRESHOLD, kill it so
+   launchd respawns it cleanly via KeepAlive.
+
+2. Missing-worker active recovery (new, issue #1311): when the worker process
+   is gone for >2 consecutive ticks, escalate via:
+     L1 (count == 1): log and wait one tick — give launchd a chance.
+     L2 (count >= 2): `launchctl kickstart -k gui/<uid>/com.valor.worker`,
+                      then verify a PID returns within 10s.
+     L3 (L2 verify failed): `launchctl enable` + kickstart + verify (handles
+                            sticky-disable from `worker-disable`).
+     L4 (L3 verify failed, count >= 3): write `worker:watchdog:critical:{host}`
+                                        Redis key + log CRITICAL.
+
+Down-tick counter: Redis key `worker:watchdog:down_ticks:{hostname}` maintained
+via `POPOTO_REDIS_DB.incr` + `expire(3600)` (atomic by Redis semantics).
+Reset by `DEL` on a healthy tick. Each watchdog tick is a fresh launchd
+invocation so the counter lives outside the process — Redis is the natural fit.
+
+Operator-disable short-circuit: detects sticky-disable via
+`launchctl print-disabled gui/<uid>` — checks whether
+`"com.valor.worker" => disabled` appears in the output. This is the only
+source of truth; `worker-disable` in valor-service.sh calls `launchctl disable`
+directly (no sidecar flag file). When disabled, clear the down-tick counter
+(so a future re-enable starts fresh) and return before any L1/L2/L3 dispatch.
 
 Usage:
     python monitoring/worker_watchdog.py           # Run once (for launchd)
@@ -14,10 +39,12 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import logging.handlers
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -30,12 +57,49 @@ HEARTBEAT_FILE = PROJECT_DIR / "data" / "last_worker_connected"
 HEARTBEAT_THRESHOLD = 600  # 10 min — 2× health-loop interval (300s) with buffer
 LOG_FILE = PROJECT_DIR / "logs" / "worker_watchdog.log"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
-LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-_fh = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
-_fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-logger.addHandler(_fh)
+# launchd service label (mirrors scripts/install_worker.sh)
+SERVICE_LABEL_PREFIX = os.environ.get("SERVICE_LABEL_PREFIX", "com.valor")
+WORKER_LAUNCHD_LABEL = f"{SERVICE_LABEL_PREFIX}.worker"
+
+# Verification poll budget
+VERIFY_GRACE_SECONDS = 10
+VERIFY_POLL_INTERVAL = 0.5
+
+# Critical Redis key TTL (1 hour — written on every L4 tick, refresh keeps it live)
+CRITICAL_KEY_TTL = 3600
+
+# Down-tick Redis key TTL (1 hour — auto-clears stale state across launchd restarts)
+DOWN_TICKS_KEY_TTL = 3600
+
+
+def _configure_logger() -> logging.Logger:
+    """Configure the named logger with a single rotating file handler.
+
+    Issue #1311: previously `logging.basicConfig` attached a StreamHandler to
+    root, the named logger added another file handler, and the named logger
+    propagated to root → every line written twice. The plist also redirects
+    stdout/stderr to the same log file, compounding the duplication.
+
+    Fix: configure the named logger explicitly. No basicConfig. Set
+    `propagate = False` so root never sees these messages. Attach exactly one
+    rotating file handler. The plist's StandardOutPath/StandardErrorPath still
+    capture any uncaught Python exceptions (printed by the interpreter, not
+    via the logger) — those are operationally rare and not duplicated.
+    """
+    log = logging.getLogger("monitoring.worker_watchdog")
+    # Idempotent: clear any handlers attached by prior imports/test runs.
+    for h in list(log.handlers):
+        log.removeHandler(h)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fh = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    log.addHandler(fh)
+    return log
+
+
+logger = _configure_logger()
 
 
 def _get_worker_pid() -> int | None:
@@ -72,7 +136,7 @@ def check() -> dict:
             "status": "down",
             "pid": None,
             "heartbeat_age": age,
-            "message": "worker process not running (launchd will restart)",
+            "message": "worker process not running",
         }
 
     if age is None:
@@ -126,12 +190,226 @@ def recover(status: dict) -> None:
         logger.error("Failed to kill worker PID %s: %s", pid, e)
 
 
+# --- Active-recovery helpers (issue #1311) -------------------------------
+
+
+def _service_target() -> str:
+    """Return the launchctl service target string for the worker."""
+    return f"gui/{os.getuid()}/{WORKER_LAUNCHD_LABEL}"
+
+
+def _down_ticks_key() -> str:
+    """Return the Redis key for the per-host down-tick counter."""
+    return f"worker:watchdog:down_ticks:{socket.gethostname()}"
+
+
+def _read_down_ticks() -> int:
+    """Read the down-tick counter from Redis. Returns 0 on any failure."""
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        val = _R.get(_down_ticks_key())
+        return int(val) if val else 0
+    except Exception as e:
+        logger.warning("Could not read down-tick counter from Redis (%s) — treating as 0", e)
+        return 0
+
+
+def _increment_down_ticks() -> int:
+    """Atomically increment and return the new down-tick counter value."""
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        key = _down_ticks_key()
+        count = _R.incr(key)
+        _R.expire(key, DOWN_TICKS_KEY_TTL)
+        return int(count)
+    except Exception as e:
+        logger.warning("Could not increment down-tick counter in Redis (%s) — defaulting to 1", e)
+        return 1
+
+
+def _clear_down_ticks() -> None:
+    """Delete the down-tick counter key from Redis. Best-effort."""
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        _R.delete(_down_ticks_key())
+    except Exception as e:
+        logger.warning("Could not clear down-tick counter from Redis: %s", e)
+
+
+def _is_operator_disabled() -> bool:
+    """Return True if the worker service is sticky-disabled via launchctl.
+
+    Parses `launchctl print-disabled gui/<uid>` output for the line:
+        "com.valor.worker" => disabled
+    This is the only authoritative source — `worker-disable` in valor-service.sh
+    calls `launchctl disable` directly (no sidecar flag file exists).
+    """
+    target_domain = f"gui/{os.getuid()}"
+    try:
+        result = subprocess.run(
+            ["launchctl", "print-disabled", target_domain],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            if f'"{WORKER_LAUNCHD_LABEL}"' in line and "disabled" in line:
+                return True
+        return False
+    except Exception as e:
+        logger.warning("Could not check launchctl print-disabled (%s) — assuming enabled", e)
+        return False
+
+
+def _kickstart_worker() -> bool:
+    """Run `launchctl kickstart -k <target>`. Returns True on returncode 0."""
+    target = _service_target()
+    try:
+        result = subprocess.run(
+            ["launchctl", "kickstart", "-k", target],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            logger.info("launchctl kickstart succeeded for %s", target)
+            return True
+        logger.error(
+            "launchctl kickstart failed (rc=%s, stderr=%s)",
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return False
+    except subprocess.TimeoutExpired:
+        logger.error("launchctl kickstart timed out for %s", target)
+        return False
+    except Exception as e:
+        logger.error("launchctl kickstart raised: %s", e)
+        return False
+
+
+def _enable_worker() -> bool:
+    """Run `launchctl enable <target>` to clear sticky-disable. Returns success."""
+    target = _service_target()
+    try:
+        result = subprocess.run(
+            ["launchctl", "enable", target],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            logger.info("launchctl enable succeeded for %s", target)
+            return True
+        logger.error(
+            "launchctl enable failed (rc=%s, stderr=%s)",
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return False
+    except subprocess.TimeoutExpired:
+        logger.error("launchctl enable timed out for %s", target)
+        return False
+    except Exception as e:
+        logger.error("launchctl enable raised: %s", e)
+        return False
+
+
+def _verify_worker_alive(grace_seconds: int = VERIFY_GRACE_SECONDS) -> int | None:
+    """Poll for a worker PID until grace_seconds expires. Returns PID or None."""
+    deadline = time.time() + grace_seconds
+    while time.time() < deadline:
+        pid = _get_worker_pid()
+        if pid is not None:
+            return pid
+        time.sleep(VERIFY_POLL_INTERVAL)
+    return _get_worker_pid()
+
+
+def _record_critical_status(reason: str, tick_count: int) -> None:
+    """Write `worker:watchdog:critical:{hostname}` Redis key. Best-effort."""
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        host = socket.gethostname()
+        key = f"worker:watchdog:critical:{host}"
+        payload = json.dumps(
+            {
+                "hostname": host,
+                "tick_count": tick_count,
+                "last_attempt_at": int(time.time()),
+                "reason": reason,
+            }
+        )
+        _R.set(key, payload, ex=CRITICAL_KEY_TTL)
+        logger.info("Wrote critical Redis key %s", key)
+    except Exception as e:
+        # Never raise — Redis is the secondary surface; CRITICAL log is primary.
+        logger.warning("Could not write critical Redis key: %s", e)
+
+
+def _handle_missing_worker() -> None:
+    """Active recovery for `status == down` — escalate L1 → L4."""
+    count = _increment_down_ticks()
+
+    if count == 1:
+        # L1: give launchd one tick to restart on its own.
+        logger.info("Worker missing — giving launchd one tick to restart (count=1)")
+        return
+
+    # L2: kickstart + verify
+    logger.warning("Worker missing for %s ticks — running launchctl kickstart -k", count)
+    if _kickstart_worker():
+        pid = _verify_worker_alive()
+        if pid is not None:
+            logger.info("Worker revived via kickstart (PID=%s) — clearing counter", pid)
+            _clear_down_ticks()
+            return
+
+    # L3: enable + kickstart + verify (handles sticky-disable)
+    logger.warning("Kickstart did not bring worker back — trying launchctl enable + kickstart")
+    if _enable_worker() and _kickstart_worker():
+        pid = _verify_worker_alive()
+        if pid is not None:
+            logger.info("Worker revived via enable+kickstart (PID=%s) — clearing counter", pid)
+            _clear_down_ticks()
+            return
+
+    # L4: critical
+    if count >= 3:
+        host = socket.gethostname()
+        reason = f"kickstart+enable both failed after {count} ticks"
+        logger.critical(
+            "WORKER WATCHDOG CRITICAL on %s: %s — manual intervention required",
+            host,
+            reason,
+        )
+        _record_critical_status(reason, count)
+    else:
+        # count == 2 and L3 failed — wait one more tick before declaring critical.
+        logger.warning(
+            "Recovery attempts failed at count=%s — escalating to CRITICAL on next tick",
+            count,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Worker watchdog")
     parser.add_argument(
         "--check", action="store_true", help="Print status and exit (0=ok, 1=stale/down)"
     )
     args = parser.parse_args()
+
+    # Operator-disable short-circuit: skip ALL checks if the operator deliberately
+    # took the worker down via `worker-disable` (which calls `launchctl disable`).
+    # Clear the down-tick counter so a future re-enable starts fresh.
+    if not args.check and _is_operator_disabled():
+        logger.info("Worker disabled by operator (launchctl print-disabled) — skipping check")
+        _clear_down_ticks()
+        return
 
     status = check()
 
@@ -141,17 +419,19 @@ def main() -> None:
 
     if status["status"] == "ok":
         logger.debug("Worker healthy (heartbeat %ss ago)", f"{status['heartbeat_age']:.0f}")
+        # Reset down-tick counter on any healthy tick.
+        _clear_down_ticks()
         return
 
     if status["status"] == "down":
-        logger.info("Worker not running — launchd handles restart")
+        _handle_missing_worker()
         return
 
     if status["status"] == "starting":
         logger.info("Worker starting (no heartbeat yet) — skipping")
         return
 
-    # status == "stale"
+    # status == "stale" — preserve existing recover() behavior.
     logger.warning(status["message"])
     recover(status)
 

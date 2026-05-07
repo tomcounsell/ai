@@ -159,9 +159,9 @@ Log rotation uses a three-layer approach: Python-managed rotation for applicatio
 
 #### Cross-Process Orphan Reap (#1271)
 
-**Problem**: When a worker dies ungracefully (panic, SIGKILL, restart-without-graceful-shutdown), its `claude_agent_sdk/_bundled/claude` child and the 4+ `mcp_servers/*.py` grandchildren are reparented to launchd (PID 1) and persist indefinitely. They hold file handles, consume RAM/CPU, and keep an Anthropic API session warm. The pre-#1271 startup-only `_cleanup_orphaned_claude_processes()` only reaped between worker restarts — orphans accumulated for hours or days at a time.
+**Problem**: When a worker dies ungracefully (panic, SIGKILL, restart-without-graceful-shutdown), its `claude_agent_sdk/_bundled/claude` child and the 4+ `mcp_servers/*.py` grandchildren are reparented to launchd (PID 1) and persist indefinitely. They hold file handles, consume RAM/CPU, and keep an Anthropic API session warm. Reaping only between worker restarts allowed orphans to accumulate for hours or days at a time.
 
-**Solution**: `_reap_orphan_session_processes()` (in `agent/session_health.py`) runs hourly inside the `agent-session-cleanup` reflection (and is the body of the legacy startup shim). It scans the OS process table via psutil for processes whose `cmdline` matches `claude_agent_sdk/_bundled/claude` or `mcp_servers/*.py` AND whose `PPID == 1`, then for each candidate:
+**Solution**: `_reap_orphan_session_processes()` (in `agent/session_health.py`) runs hourly inside the `agent-session-cleanup` reflection (and is also the body of the worker startup shim). It scans the OS process table via psutil for processes whose `cmdline` matches `claude_agent_sdk/_bundled/claude` or `mcp_servers/*.py` AND whose `PPID == 1`, then for each candidate:
 
 1. **Self-suicide guard** — builds a skip-set from `os.getpid()` plus every value under the `worker:registered_pid:*` Redis key prefix (TTL 24h, written by `register_worker_pid()` at worker startup and refreshed every health-loop tick). Any worker whose PID is in the skip-set is never touched. This is structural — even if the cmdline regex were ever extended to match the worker pattern, live workers cannot be self-killed. Required because under `launchd KeepAlive=true` every live worker has `PPID == 1` by design.
 2. **Per-PID heartbeat gate** — looks up the owning `AgentSession` via the indexed `claude_pid` field (set in `_on_sdk_started`, cleared in `finalize_session`). If the owning session has `last_heartbeat_at` younger than `ORPHAN_PROCESS_HEARTBEAT_GRACE_SECONDS` (1800s = 30 min), the kill is skipped. MCP candidates without a direct `claude_pid` mapping inherit their parent process's session via `proc.parent().pid`.
@@ -408,18 +408,44 @@ This is a one-time injection at install time; updating `.env` secrets requires r
 
 | Heartbeat age | Status | Action |
 |--------------|--------|--------|
-| < 600s | `ok` | Log debug, exit |
+| < 600s | `ok` | Log debug, exit. Reset down-tick counter if present. |
 | Missing (file absent) | `starting` | Skip — worker may be initializing |
-| Worker PID absent | `down` | Log info — launchd handles restart |
+| Worker PID absent | `down` | **Active recovery via 4-level escalation (issue #1311)** — see below |
 | ≥ 600s (10 min) | `stale` | Kill worker (SIGTERM → SIGKILL if needed) so launchd restarts |
 
 The threshold (600s = 2× health-loop interval of 300s) gives a healthy worker plenty of slack while catching genuine hangs within two watchdog ticks (240s).
 
+**Active recovery escalation** (when worker process is missing — issue #1311):
+
+Prior to issue #1311 the watchdog only logged `Worker not running — launchd handles restart` and exited, relying on launchd `KeepAlive=true` to bring the worker back. On 2026-05-06 the worker died at 08:37 UTC and KeepAlive failed to restart it for 7+ hours, leaving every layer logging the failure but none recovering. The watchdog now actively escalates.
+
+A Redis counter (`worker:watchdog:down_ticks:{hostname}`) tracks consecutive missing-worker ticks using `POPOTO_REDIS_DB.incr` + `expire(3600)` (atomic by Redis semantics, no file-lock needed). Each watchdog tick is a fresh launchd invocation so the counter must survive outside the process — Redis is the natural fit. TTL of 1h auto-clears stale state (e.g. after a prolonged outage where the counter was never explicitly cleared).
+
+| Level | Trigger | Action |
+|-------|---------|--------|
+| L1 | First down tick (count == 1) | Log `Worker missing — giving launchd one tick to restart` and exit. Give launchd a chance. |
+| L2 | Second consecutive down tick (count >= 2) | `launchctl kickstart -k gui/<uid>/com.valor.worker`, then poll `pgrep` for up to 10s. On success, clear counter. |
+| L3 | L2 verify failed | `launchctl enable gui/<uid>/com.valor.worker` (clears sticky-disable from `worker-disable`) + kickstart + verify. On success, clear counter. |
+| L4 | L3 verify failed AND count >= 3 | Log CRITICAL with hostname + tick count. Write `worker:watchdog:critical:{hostname}` Redis key (TTL 1h, JSON payload `{hostname, tick_count, last_attempt_at, reason}`). Counter persists; subsequent ticks repeat L4 idempotently. |
+
+**Operator-disable short-circuit**: the watchdog detects sticky-disable via `launchctl print-disabled gui/<uid>` at the very top of `main()`. If `"com.valor.worker" => disabled` appears in the output, it logs `Worker disabled by operator (launchctl print-disabled) — skipping check`, clears the down-tick counter (so a future re-enable starts fresh), and returns without touching launchctl. This is the only authoritative source — `worker-disable` in `valor-service.sh` calls `launchctl disable` directly; no sidecar flag file exists. Operator check precedes the down-counter increment so a disabled worker never accumulates ticks.
+
+**Single-handler logger**: the previous module called `logging.basicConfig()` AND attached a rotating file handler to a named logger that propagated to root, while the launchd plist redirected stdout/stderr to the same log file. Net result: every line written twice. The fix configures the named logger explicitly with `propagate = False` and exactly one rotating file handler. Regression test: `len(monitoring.worker_watchdog.logger.handlers) == 1`.
+
 **Check status**:
 ```bash
-python monitoring/worker_watchdog.py --check   # print status, exit 0=ok, 1=stale/down
+./scripts/valor-service.sh worker-status   # surfaces watchdog recovery state inline (Task 4b)
+python monitoring/worker_watchdog.py --check   # standalone: print status, exit 0=ok, 1=stale/down
 tail -f logs/worker_watchdog.log
+
+# Inspect the critical signal (L4):
+redis-cli GET worker:watchdog:critical:$(hostname)
+
+# Reset escalation counter manually (e.g. after fixing the underlying cause):
+redis-cli DEL "worker:watchdog:down_ticks:$(hostname)"
 ```
+
+**`worker-status` watchdog surface** (Task 4b): `./scripts/valor-service.sh worker-status` now reads the Redis down-tick counter (`worker:watchdog:down_ticks:{hostname}`) and critical-state key (`worker:watchdog:critical:{hostname}`) and prints a one-line summary alongside the process/heartbeat info. Best-effort — Redis unavailability is silently ignored so `worker-status` always completes.
 
 **Installed by** `scripts/install_worker.sh` as `${SERVICE_LABEL_PREFIX}.worker-watchdog`.
 
@@ -687,7 +713,7 @@ The runner-entry guard in `agent/session_completion.py` (`_deliver_pipeline_comp
 |------|---------|
 | `monitoring/crash_tracker.py` | Crash event logging and pattern detection |
 | `monitoring/bridge_watchdog.py` | External health monitor (bridge process) |
-| `monitoring/worker_watchdog.py` | External health monitor (worker process — heartbeat-based hung detection) |
+| `monitoring/worker_watchdog.py` | External health monitor (worker process — heartbeat-based hung detection + active recovery via launchctl kickstart) |
 | `bridge/hibernation.py` | Auth-expiry hibernation: classifier, flag file, replay |
 | `scripts/auto-revert.sh` | Git revert and restart |
 | `data/recovery-in-progress` | Recovery lock file |
