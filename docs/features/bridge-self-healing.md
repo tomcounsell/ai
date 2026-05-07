@@ -389,7 +389,7 @@ The threshold (600s = 2× health-loop interval of 300s) gives a healthy worker p
 
 Prior to issue #1311 the watchdog only logged `Worker not running — launchd handles restart` and exited, relying on launchd `KeepAlive=true` to bring the worker back. On 2026-05-06 the worker died at 08:37 UTC and KeepAlive failed to restart it for 7+ hours, leaving every layer logging the failure but none recovering. The watchdog now actively escalates.
 
-A persistent counter (`data/worker_watchdog_down_ticks`) tracks consecutive missing-worker ticks across watchdog process restarts. Each watchdog tick is a fresh launchd invocation, so the counter must survive on disk.
+A Redis counter (`worker:watchdog:down_ticks:{hostname}`) tracks consecutive missing-worker ticks using `POPOTO_REDIS_DB.incr` + `expire(3600)` (atomic by Redis semantics, no file-lock needed). Each watchdog tick is a fresh launchd invocation so the counter must survive outside the process — Redis is the natural fit. TTL of 1h auto-clears stale state (e.g. after a prolonged outage where the counter was never explicitly cleared).
 
 | Level | Trigger | Action |
 |-------|---------|--------|
@@ -398,9 +398,7 @@ A persistent counter (`data/worker_watchdog_down_ticks`) tracks consecutive miss
 | L3 | L2 verify failed | `launchctl enable gui/<uid>/com.valor.worker` (clears sticky-disable from `worker-disable`) + kickstart + verify. On success, clear counter. |
 | L4 | L3 verify failed AND count >= 3 | Log CRITICAL with hostname + tick count. Write `worker:watchdog:critical:{hostname}` Redis key (TTL 1h, JSON payload `{hostname, tick_count, last_attempt_at, reason}`). Counter persists; subsequent ticks repeat L4 idempotently. |
 
-**Operator-disable short-circuit**: if `data/worker-disabled` exists at the very top of `main()`, the watchdog logs `Worker disabled by operator — skipping check` and returns without touching launchctl. This protects deliberate `worker-disable` operator actions.
-
-**Tick lock**: the watchdog acquires a non-blocking `flock` on `data/worker_watchdog.lock` at the start of each tick. If the lock is held (a previous tick still running), the new tick logs `Another watchdog tick is in flight — skipping` and exits. This prevents the down-tick counter from being double-incremented when launchd fires faster than the kickstart+verify completes.
+**Operator-disable short-circuit**: the watchdog detects sticky-disable via `launchctl print-disabled gui/<uid>` at the very top of `main()`. If `"com.valor.worker" => disabled` appears in the output, it logs `Worker disabled by operator (launchctl print-disabled) — skipping check`, clears the down-tick counter (so a future re-enable starts fresh), and returns without touching launchctl. This is the only authoritative source — `worker-disable` in `valor-service.sh` calls `launchctl disable` directly; no sidecar flag file exists. Operator check precedes the down-counter increment so a disabled worker never accumulates ticks.
 
 **Single-handler logger**: the previous module called `logging.basicConfig()` AND attached a rotating file handler to a named logger that propagated to root, while the launchd plist redirected stdout/stderr to the same log file. Net result: every line written twice. The fix configures the named logger explicitly with `propagate = False` and exactly one rotating file handler. Regression test: `len(monitoring.worker_watchdog.logger.handlers) == 1`.
 
@@ -413,7 +411,7 @@ tail -f logs/worker_watchdog.log
 redis-cli GET worker:watchdog:critical:$(hostname)
 
 # Reset escalation counter manually (e.g. after fixing the underlying cause):
-rm -f data/worker_watchdog_down_ticks
+redis-cli DEL "worker:watchdog:down_ticks:$(hostname)"
 ```
 
 **Installed by** `scripts/install_worker.sh` as `${SERVICE_LABEL_PREFIX}.worker-watchdog`.
@@ -682,7 +680,7 @@ The runner-entry guard in `agent/session_completion.py` (`_deliver_pipeline_comp
 |------|---------|
 | `monitoring/crash_tracker.py` | Crash event logging and pattern detection |
 | `monitoring/bridge_watchdog.py` | External health monitor (bridge process) |
-| `monitoring/worker_watchdog.py` | External health monitor (worker process — heartbeat-based hung detection) |
+| `monitoring/worker_watchdog.py` | External health monitor (worker process — heartbeat-based hung detection + active recovery via launchctl kickstart) |
 | `bridge/hibernation.py` | Auth-expiry hibernation: classifier, flag file, replay |
 | `scripts/auto-revert.sh` | Git revert and restart |
 | `data/recovery-in-progress` | Recovery lock file |
