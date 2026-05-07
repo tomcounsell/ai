@@ -147,6 +147,7 @@ markers = [
     "classifiers: Message classification, intake, work requests",
     "context: Context modes, session tags, enrichment",
     "monitoring: Health checks, telemetry, resource monitoring",
+    "macos_only: Tests that require macOS (launchctl, pgrep Darwin semantics)",
     "summarizer: Response summarization, coaching, message quality",
     "sdk: Claude SDK client, permissions, SDLC enforcement",
     "impact: Code and documentation impact analysis",

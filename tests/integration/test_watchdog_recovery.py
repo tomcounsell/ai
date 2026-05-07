@@ -39,8 +39,13 @@ requirement.
 import subprocess
 import sys
 import time
+from unittest.mock import MagicMock, patch
 
-from monitoring.worker_watchdog import HEARTBEAT_THRESHOLD, check, recover
+import pytest
+
+from monitoring.worker_watchdog import HEARTBEAT_THRESHOLD, _handle_missing_worker, check, recover
+
+pytestmark = [pytest.mark.integration, pytest.mark.macos_only]
 
 WATCHDOG_TICK_SECONDS = 120  # StartInterval in com.valor.worker-watchdog.plist
 GRACE_SECONDS = 10
@@ -140,9 +145,7 @@ class TestWatchdogDetectsUnexpectedExit:
 
         assert status["status"] == "down"
         # pgrep + stat should complete well under 5 seconds in any CI environment
-        assert elapsed_ms < 5000, (
-            f"check() took {elapsed_ms:.0f} ms — unexpectedly slow"
-        )
+        assert elapsed_ms < 5000, f"check() took {elapsed_ms:.0f} ms — unexpectedly slow"
 
     def test_recover_down_does_not_raise(self):
         """recover() on a 'down' status dict logs cleanly without raising.
@@ -166,13 +169,15 @@ class TestWatchdogDetectsUnexpectedExit:
         recover(stale_status)
 
     def test_full_tick_logic_dispatches_correctly_on_down(self):
-        """Simulate the full main()-equivalent tick: check → dispatch.
-
-        Reproduces the exact logic in worker_watchdog.main() without --check:
-          if status == "down":  log and return (launchd handles)
+        """Simulate the full main()-equivalent tick: check → _handle_missing_worker().
 
         Uses a real unexpectedly-exited worker subprocess so the code path through
-        check() is real (pgrep), not mocked.
+        check() is real (pgrep), not mocked.  Then calls _handle_missing_worker()
+        — the actual active-recovery function introduced by issue #1311 — instead
+        of re-implementing dispatch logic inline.  This provides real regression
+        protection: if _handle_missing_worker() ever calls _kickstart_worker on a
+        first-down-tick (an L1 violation), the mocked kickstart would record the call
+        and the assertion would catch the regression.
         """
         proc = _spawn_fake_worker()
         time.sleep(0.3)
@@ -183,23 +188,18 @@ class TestWatchdogDetectsUnexpectedExit:
         status = check()
         assert status["status"] == "down"
 
-        # Dispatch logic from main() — reproduce inline to confirm correct branch
-        recovery_invoked = False
-        launchd_note_logged = False
+        # _handle_missing_worker() uses Redis INCR — mock Redis for isolation.
+        mock_r = MagicMock()
+        mock_r.incr.return_value = 1  # first down tick → L1 path
 
-        if status["status"] == "ok":
-            pass
-        elif status["status"] == "down":
-            # This is the correct branch: launchd handles restart, no recover() call
-            launchd_note_logged = True
-        elif status["status"] == "starting":
-            pass
-        else:
-            # stale → would call recover(status)
-            recovery_invoked = True
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
+            with patch("monitoring.worker_watchdog._kickstart_worker") as kickstart_mock:
+                _handle_missing_worker()
 
-        assert launchd_note_logged, "Expected 'down' branch to be taken"
-        assert not recovery_invoked, "recover() should NOT be invoked for 'down' status"
+        # L1: first tick → watchdog must NOT call kickstart (launchd gets a chance)
+        kickstart_mock.assert_not_called()
+        # Redis counter was incremented
+        mock_r.incr.assert_called_once()
 
     def test_watchdog_tick_timing_satisfies_acceptance_criterion(self):
         """Full end-to-end timing: exit → detection < 130 s (one tick + 10s grace).

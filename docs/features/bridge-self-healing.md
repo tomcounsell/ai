@@ -404,7 +404,8 @@ A Redis counter (`worker:watchdog:down_ticks:{hostname}`) tracks consecutive mis
 
 **Check status**:
 ```bash
-python monitoring/worker_watchdog.py --check   # print status, exit 0=ok, 1=stale/down
+./scripts/valor-service.sh worker-status   # surfaces watchdog recovery state inline (Task 4b)
+python monitoring/worker_watchdog.py --check   # standalone: print status, exit 0=ok, 1=stale/down
 tail -f logs/worker_watchdog.log
 
 # Inspect the critical signal (L4):
@@ -413,6 +414,8 @@ redis-cli GET worker:watchdog:critical:$(hostname)
 # Reset escalation counter manually (e.g. after fixing the underlying cause):
 redis-cli DEL "worker:watchdog:down_ticks:$(hostname)"
 ```
+
+**`worker-status` watchdog surface** (Task 4b): `./scripts/valor-service.sh worker-status` now reads the Redis down-tick counter (`worker:watchdog:down_ticks:{hostname}`) and critical-state key (`worker:watchdog:critical:{hostname}`) and prints a one-line summary alongside the process/heartbeat info. Best-effort — Redis unavailability is silently ignored so `worker-status` always completes.
 
 **Installed by** `scripts/install_worker.sh` as `${SERVICE_LABEL_PREFIX}.worker-watchdog`.
 

@@ -874,6 +874,9 @@ status_worker() {
             echo "Launchd: NOT INSTALLED (manual start only)"
         fi
 
+        # Watchdog recovery state (Task 4b, issue #1311) — best-effort, Redis outage safe
+        _show_watchdog_recovery_state
+
         if [ "$HEARTBEAT_AGE" -gt "$HEARTBEAT_THRESHOLD" ]; then
             return 2
         fi
@@ -883,8 +886,60 @@ status_worker() {
         if launchctl list | grep -q "$WORKER_PLIST_NAME"; then
             echo "Launchd: INSTALLED (will auto-start)"
         fi
+
+        # Watchdog recovery state — show even when stopped so operators can see escalation level
+        _show_watchdog_recovery_state
+
         return 1
     fi
+}
+
+_show_watchdog_recovery_state() {
+    # Surface watchdog recovery state for operators (issue #1311, Task 4b).
+    # Reads worker:watchdog:down_ticks:{hostname} and worker:watchdog:critical:{hostname}
+    # from Redis via python3. Best-effort — silently skips on any failure so a Redis
+    # outage never breaks worker-status.
+    local HOST
+    HOST=$(hostname)
+    python3 -c "
+import sys
+try:
+    from popoto.redis_db import POPOTO_REDIS_DB as _R
+    host = '$HOST'
+    ticks_key = f'worker:watchdog:down_ticks:{host}'
+    critical_key = f'worker:watchdog:critical:{host}'
+
+    # Down-tick counter
+    ticks = _R.get(ticks_key)
+    ticks_val = int(ticks) if ticks else 0
+    if ticks_val == 0:
+        print(f'Watchdog Recovery: OK (0 down-ticks)')
+    else:
+        ttl = _R.ttl(ticks_key)
+        print(f'Watchdog Recovery: {ticks_val} consecutive missing-worker tick(s) (key TTL: {ttl}s)')
+
+    # Critical state key
+    critical = _R.get(critical_key)
+    if critical:
+        import json
+        try:
+            c = json.loads(critical)
+            import time
+            age = int(time.time()) - c.get('last_attempt_at', 0)
+            print(f'Watchdog CRITICAL: {c.get(\"reason\",\"unknown\")} — {age}s ago, tick_count={c.get(\"tick_count\",\"?\")}')
+        except Exception:
+            print(f'Watchdog CRITICAL: key present (could not parse)')
+    # Last watchdog log line
+    import os
+    log_path = os.path.join('$PROJECT_DIR', 'logs', 'worker_watchdog.log')
+    if os.path.exists(log_path):
+        with open(log_path) as f:
+            lines = f.readlines()
+        if lines:
+            print(f'Watchdog last log: {lines[-1].rstrip()}')
+except Exception:
+    pass  # Redis unavailable — skip silently
+" 2>/dev/null || true
 }
 
 tail_worker_logs() {
