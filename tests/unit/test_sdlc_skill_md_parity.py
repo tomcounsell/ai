@@ -25,7 +25,7 @@ from pathlib import Path
 from agent.sdlc_router import DISPATCH_RULES, GUARDS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-SKILL_MD = REPO_ROOT / ".claude" / "skills" / "sdlc" / "SKILL.md"
+SKILL_MD = REPO_ROOT / ".claude" / "skills-global" / "sdlc" / "SKILL.md"
 
 
 # ---------------------------------------------------------------------------

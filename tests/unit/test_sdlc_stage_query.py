@@ -409,6 +409,91 @@ class TestEnrichedPayload:
         assert meta["pr_merge_state"] is None
         assert meta["ci_all_passing"] is None
 
+    def test_default_meta_includes_plan_revising_and_hash(self):
+        """_default_meta includes plan_revising (False) and plan_hash_at_build_start (None)."""
+        from tools.sdlc_stage_query import _default_meta
+
+        meta = _default_meta()
+        assert "plan_revising" in meta
+        assert "plan_hash_at_build_start" in meta
+        assert meta["plan_revising"] is False
+        assert meta["plan_hash_at_build_start"] is None
+
+    def test_compute_meta_plan_revising_defaults_false_when_absent(self):
+        """_compute_meta surfaces plan_revising=False when _plan_revising key is absent."""
+        from tools.sdlc_stage_query import query_enriched
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps({"ISSUE": "completed"})
+        mock_session.pr_number = None
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+                with patch(
+                    "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)
+                ):
+                    with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                        result = query_enriched(session_id="sid")
+
+        assert result["_meta"]["plan_revising"] is False
+
+    def test_compute_meta_plan_revising_true_when_set(self):
+        """_compute_meta surfaces plan_revising=True when _plan_revising=True in stage_states."""
+        from tools.sdlc_stage_query import query_enriched
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps({"ISSUE": "completed", "_plan_revising": True})
+        mock_session.pr_number = None
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+                with patch(
+                    "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)
+                ):
+                    with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                        result = query_enriched(session_id="sid")
+
+        assert result["_meta"]["plan_revising"] is True
+
+    def test_compute_meta_plan_hash_at_build_start_surfaced(self):
+        """_compute_meta surfaces plan_hash_at_build_start from raw stage_states."""
+        from tools.sdlc_stage_query import query_enriched
+
+        test_hash = "abc123def456"
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps(
+            {"ISSUE": "completed", "_plan_hash_at_build_start": test_hash}
+        )
+        mock_session.pr_number = None
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+                with patch(
+                    "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)
+                ):
+                    with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                        result = query_enriched(session_id="sid")
+
+        assert result["_meta"]["plan_hash_at_build_start"] == test_hash
+
+    def test_compute_meta_plan_hash_defaults_none_when_absent(self):
+        """_compute_meta returns plan_hash_at_build_start=None when key is absent."""
+        from tools.sdlc_stage_query import query_enriched
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps({"ISSUE": "completed"})
+        mock_session.pr_number = None
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+                with patch(
+                    "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)
+                ):
+                    with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                        result = query_enriched(session_id="sid")
+
+        assert result["_meta"]["plan_hash_at_build_start"] is None
+
 
 class TestFetchPrMergeState:
     """Tests for the _fetch_pr_merge_state helper."""
