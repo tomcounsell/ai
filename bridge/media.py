@@ -245,6 +245,43 @@ def get_media_type(message) -> str | None:
 # =============================================================================
 
 
+# Baseline timeout when size is unknown or non-positive.
+_DOWNLOAD_TIMEOUT_BASELINE_S = 10.0
+# Hard cap for a single download attempt; protects against extreme files
+# blocking the bridge intake path.
+_DOWNLOAD_TIMEOUT_CAP_S = 120.0
+# Per-MB allowance added on top of a 5s startup constant.
+_DOWNLOAD_TIMEOUT_PER_MB_S = 1.0
+_DOWNLOAD_TIMEOUT_BASE_OVERHEAD_S = 5.0
+
+
+def compute_media_timeout(size_bytes: int | None) -> float:
+    """Compute a per-attempt download timeout that scales with declared size.
+
+    Formula (when ``size_bytes`` is a positive int)::
+
+        max(10.0, min(120.0, 5.0 + size_bytes / (1024*1024)))
+
+    Returns the 10s baseline for ``None``, ``0``, and negative inputs so the
+    behaviour matches the pre-#1322 hard-coded timeout when Telethon's
+    ``message.file.size`` is missing (e.g. some photo thumbnails).
+
+    Examples (approximate):
+        - None / 0 / negative -> 10s (baseline)
+        - 1MB                 -> 10s (floored)
+        - 10MB                -> 15s
+        - 100MB               -> 105s
+        - 200MB+              -> 120s (cap)
+
+    See issue #1322 / docs/plans/sdlc-1322.md.
+    """
+    if size_bytes is None or size_bytes <= 0:
+        return _DOWNLOAD_TIMEOUT_BASELINE_S
+    mb = size_bytes / (1024 * 1024)
+    raw = _DOWNLOAD_TIMEOUT_BASE_OVERHEAD_S + _DOWNLOAD_TIMEOUT_PER_MB_S * mb
+    return max(_DOWNLOAD_TIMEOUT_BASELINE_S, min(_DOWNLOAD_TIMEOUT_CAP_S, raw))
+
+
 async def download_media(client: TelegramClient, message, prefix: str = "media") -> Path | None:
     """
     Download media from a Telegram message.
