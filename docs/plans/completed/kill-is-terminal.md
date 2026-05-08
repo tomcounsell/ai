@@ -503,3 +503,12 @@ No agent integration changes required — `valor-session` CLI is unchanged from 
 The following work is intentionally **out of scope** for this plan but should be filed as a separate GitHub issue once this plan ships:
 
 - **Index-staleness investigation for `waiting_for_children` (Q2 deferral, originally Fix E in earlier drafts of this plan).** Determine why a `killed` parent matches `AgentSession.query.filter(status="waiting_for_children")` after kill. Likely candidates: Popoto IndexedField corruption (analogous to #1006, which only fixed the `running` index path), or a lazy-load timing artifact where the query returns a cached object whose in-memory status disagrees with the hash. Operational mitigation already in place via Fix B (the re-read guard at the hierarchy health check); this follow-up addresses the underlying corruption itself. Suggested instrumentation: snapshot `r.smembers("agent_session:status:waiting_for_children")` before and after kill, diff the membership, and compare to each session's `r.hget(key, "status")`. Title suggestion: "Investigate `waiting_for_children` index staleness for killed parents (follow-up to #1208)". This issue will be filed *after* the kill-is-terminal plan ships, not as part of this build.
+
+
+<!--
+Audited 2026-05-08, see #1325 audit comment for status.
+
+Punt at line 207 (Fix E - waiting_for_children index-staleness investigation):
+filed as #1335 (label: bug,investigation). Diagnosis requires Popoto-layer
+instrumentation; appetite-incompatible with the audit chore.
+-->

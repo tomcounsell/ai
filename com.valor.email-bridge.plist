@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Email Bridge launchd template.
+
+  Source-of-truth template — installed copy is rendered by
+  scripts/install_email_bridge.sh into ~/Library/LaunchAgents/.
+
+  The installer:
+    1. Substitutes __PROJECT_DIR__/__HOME_DIR__/__SERVICE_LABEL__ tokens.
+    2. Injects .env values into EnvironmentVariables via dotenv_values()
+       so launchd never has to open ~/Desktop/Valor/.env (macOS TCC
+       blocks launchd agents from reading ~/Desktop files).
+    3. Runs `launchctl bootout` then `bootstrap` (idempotent install).
+
+  KeepAlive=true gives launchd-level restart on crash. There is no
+  separate watchdog — the email bridge does not have the Telethon
+  session-lock failure mode that necessitates com.valor.bridge-watchdog.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>__SERVICE_LABEL__</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PROJECT_DIR__/.venv/bin/python</string>
+        <string>-m</string>
+        <string>bridge.email_bridge</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__HOME_DIR__/.local/bin:__PROJECT_DIR__/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin</string>
+        <key>HOME</key>
+        <string>__HOME_DIR__</string>
+        <key>VALOR_LAUNCHD</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>__PROJECT_DIR__/logs/email_bridge.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PROJECT_DIR__/logs/email_bridge.error.log</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>

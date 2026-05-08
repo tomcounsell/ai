@@ -902,3 +902,13 @@ If a concern maps to a category not in this table, the builder surfaces it in th
 The two nits are addressed as normal polish during the build — no separate step required. General directive for nits in this plan: if a sentence is ambiguous, the builder rewrites it in the same commit as the adjacent code change.
 
 A re-critique is **not dispatched** after this revision (per Row 4b directive). The SDLC router detects `revision_applied: true` in the frontmatter and advances to `/do-build` (Row 4c).
+
+
+<!--
+Audited 2026-05-08, see #1325 audit comment for status.
+
+D5c (line 827, schema field cleanup) and D5d (line 829, MESSAGE_DRAFTER_IN_HANDLER
+removal): both already done in PR #1118 (closed #1073) on 2026-04-22. Verified:
+  grep -rn "delivery_text\|delivery_action\|delivery_emoji\|MESSAGE_DRAFTER_IN_HANDLER" models/ bridge/ agent/
+returns zero matches.
+-->

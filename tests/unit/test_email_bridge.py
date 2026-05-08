@@ -518,8 +518,17 @@ class TestPollImapBatchCap:
 class TestMainEnvLoading:
     """main() loads .env files via load_dotenv before starting the async loop."""
 
-    def test_main_calls_load_dotenv_with_correct_paths(self):
-        """main() calls load_dotenv twice: repo .env and vault .env."""
+    def test_main_calls_load_dotenv_with_correct_paths(self, monkeypatch):
+        """main() calls load_dotenv twice: repo .env and vault .env.
+
+        Defensive guard (Cycle-3 critique S-1): explicitly clear VALOR_LAUNCHD
+        so this test continues to assert the dotenv-call expectation even when
+        CI or a developer's shell has VALOR_LAUNCHD=1 set. Without this guard,
+        the new gate added for #1325 makes the existing test order-dependent
+        on environment state.
+        """
+        monkeypatch.delenv("VALOR_LAUNCHD", raising=False)
+
         with patch("dotenv.load_dotenv") as mock_load:
             with patch("bridge.email_bridge.asyncio.run"):
                 from bridge.email_bridge import main
@@ -537,6 +546,28 @@ class TestMainEnvLoading:
         second_path = mock_load.call_args_list[1][0][0]
         assert "Desktop" in str(second_path) and "Valor" in str(second_path)
         assert str(second_path).endswith(".env")
+
+    def test_main_skips_dotenv_under_launchd(self, monkeypatch):
+        """Under VALOR_LAUNCHD=1, main() must NOT call load_dotenv.
+
+        Regression guard for the macOS TCC failure mode: launchd agents are
+        blocked from reading ~/Desktop files, so unconditional dotenv reads
+        would hang the bridge process at startup. Mirrors the same gate in
+        bridge/telegram_bridge.py:42-48. See #1325 audit and #1338 installer.
+        """
+        monkeypatch.setenv("VALOR_LAUNCHD", "1")
+
+        with patch("dotenv.load_dotenv") as mock_load:
+            with patch("bridge.email_bridge.asyncio.run"):
+                from bridge.email_bridge import main
+
+                main()
+
+        assert mock_load.call_count == 0, (
+            "load_dotenv must not run when VALOR_LAUNCHD is set; launchd "
+            "injects env vars directly into the plist, so dotenv reads of the "
+            "iCloud-synced ~/Desktop/Valor/.env would block on macOS TCC."
+        )
 
 
 # ---------------------------------------------------------------------------
