@@ -12,6 +12,8 @@ last_comment_id: none
 
 # Terminus Classifier: Imperative Fast-Path + Few-Shot Examples
 
+Tracking issue: #1318
+
 ## Problem
 
 The terminus classifier (`classify_conversation_terminus` in `bridge/routing.py:556`) guards against bot reply loops in Telegram. When a human reply to a prior Valor message contains an explicit action directive ("Continue to finish all stage of SDLC", "Go ahead and merge"), the Ollama-backed zero-shot prompt misclassifies it as `SILENT`. The message is dropped with no reply and no indication to the human that anything went wrong.
