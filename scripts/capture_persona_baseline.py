@@ -66,7 +66,9 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = Path(__file__).resolve().parent.parent
     machine = _slug_hostname()
-    out_dir = Path(args.output_dir) if args.output_dir else repo_root / "tests" / "fixtures" / machine
+    out_dir = (
+        Path(args.output_dir) if args.output_dir else repo_root / "tests" / "fixtures" / machine
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     dev_prompt = load_system_prompt()

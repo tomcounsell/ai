@@ -1050,9 +1050,7 @@ def compose_system_prompt(
         criteria_section = f"\n\n---\n\n{criteria}" if criteria else ""
 
         principal = load_principal_context(condensed=True)
-        principal_section = (
-            f"\n\n---\n\n## Principal Context\n\n{principal}" if principal else ""
-        )
+        principal_section = f"\n\n---\n\n## Principal Context\n\n{principal}" if principal else ""
 
         # Worker rules FIRST — safety rails take precedence over persona.
         return f"{WORKER_RULES}\n\n---\n\n{persona_prompt}{principal_section}{criteria_section}"
@@ -1064,9 +1062,7 @@ def compose_system_prompt(
             project_instructions = project_claude_path.read_text()
             logger.info(f"Loaded PM instructions from {project_claude_path}")
             return f"{persona_prompt}\n\n---\n\n{project_instructions}"
-        logger.info(
-            f"No CLAUDE.md found at {project_claude_path}, using persona only for PM mode"
-        )
+        logger.info(f"No CLAUDE.md found at {project_claude_path}, using persona only for PM mode")
         return persona_prompt
 
     # TEAMMATE / CUSTOMER_SERVICE: no rails, no appendices — return persona as-is.
@@ -1109,11 +1105,7 @@ def _resolve_compose_args(
     - ``DEVELOPER`` (and any other) → ``WORKER``
     """
     # Email override: per-project persona swap for email-spawned sessions.
-    if (
-        session_type == SessionType.TEAMMATE
-        and transport == "email"
-        and project
-    ):
+    if session_type == SessionType.TEAMMATE and transport == "email" and project:
         email_persona_str = (project.get("email") or {}).get("persona") or ""
         if email_persona_str and email_persona_str != "teammate":
             try:

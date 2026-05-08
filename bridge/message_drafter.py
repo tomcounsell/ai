@@ -1416,6 +1416,44 @@ Fix: eagerly decode only certain field values during internal model creation."
 - If the original text contains internal code references, translate them into \
 stakeholder-friendly language describing the feature or behavior affected."""
 
+
+# Medium-aware drafter prompt assembly (issue #1268).
+#
+# Today the drafter has a single combined prompt (DRAFTER_SYSTEM_PROMPT above).
+# To support per-medium format rules without rewriting the prompt, we treat the
+# existing prompt as the ``"telegram"`` cell of a MEDIUM_RULES table:
+#
+#     prompt_for_medium = BASE_DRAFTER_PROMPT + MEDIUM_RULES[medium]
+#
+# - BASE_DRAFTER_PROMPT is empty for now — keeps the byte-stable invariant
+#   (BASE + MEDIUM_RULES["telegram"] == DRAFTER_SYSTEM_PROMPT verbatim).
+# - MEDIUM_RULES["telegram"] = today's full prompt verbatim.
+# - MEDIUM_RULES["email"] = same prompt as a stub; future work can extract the
+#   Telegram-specific format rules into MEDIUM_RULES["telegram"]-only and have
+#   "email" diverge.
+#
+# Voice consolidation (banned phrases, tone, no-empty-promises) into a shared
+# segment is **deferred** to a follow-up plan to keep the byte-stability
+# mitigation clean — see Risk 4 / No-Gos in
+# docs/plans/composed-persona-system.md.
+BASE_DRAFTER_PROMPT = ""
+MEDIUM_RULES: dict[str, str] = {
+    "telegram": DRAFTER_SYSTEM_PROMPT,
+    "email": DRAFTER_SYSTEM_PROMPT,
+}
+
+
+def _compose_drafter_prompt(medium: str = "telegram") -> str:
+    """Return the drafter system prompt for the given medium.
+
+    Falls back to the ``"telegram"`` cell when ``medium`` is unknown — the
+    drafter has historically only been wired for Telegram and a typo on the
+    caller side should not produce a no-prompt drafter call.
+    """
+    rules = MEDIUM_RULES.get(medium, MEDIUM_RULES["telegram"])
+    return BASE_DRAFTER_PROMPT + rules
+
+
 # Blocker flag logic explained:
 # The ⚠️ flag is meant to alert the PM only when human intervention is truly required.
 # Genuine blockers: missing API keys, need admin access to a service, policy/legal decisions,
@@ -1444,7 +1482,7 @@ SELF_DRAFT_INSTRUCTION = (
 STEERING_DEFERRED = "STEERING_DEFERRED"
 
 
-async def _draft_with_haiku(prompt: str) -> StructuredDraft | None:
+async def _draft_with_haiku(prompt: str, medium: str = "telegram") -> StructuredDraft | None:
     """Try structured drafting via Anthropic Haiku API using tool_use.
 
     Returns a StructuredDraft with context_summary, response, and expectations
@@ -1452,6 +1490,7 @@ async def _draft_with_haiku(prompt: str) -> StructuredDraft | None:
     Haiku if tool_use fails, wrapping the result in a StructuredDraft with
     empty routing fields.
     """
+    system_prompt = _compose_drafter_prompt(medium)
     try:
         api_key = get_anthropic_api_key()
         if not api_key:
@@ -1464,7 +1503,7 @@ async def _draft_with_haiku(prompt: str) -> StructuredDraft | None:
                 response = await client.messages.create(
                     model=MODEL_FAST,
                     max_tokens=1024,
-                    system=DRAFTER_SYSTEM_PROMPT,
+                    system=system_prompt,
                     messages=[{"role": "user", "content": prompt}],
                     tools=[STRUCTURED_DRAFT_TOOL],
                     tool_choice={"type": "tool", "name": "structured_draft"},
@@ -1490,7 +1529,7 @@ async def _draft_with_haiku(prompt: str) -> StructuredDraft | None:
             response = await client.messages.create(
                 model=MODEL_FAST,
                 max_tokens=512,
-                system=DRAFTER_SYSTEM_PROMPT,
+                system=system_prompt,
                 messages=[{"role": "user", "content": prompt}],
             )
         text_result = response.content[0].text
@@ -1504,13 +1543,14 @@ async def _draft_with_haiku(prompt: str) -> StructuredDraft | None:
         return None
 
 
-async def _draft_with_openrouter(prompt: str) -> StructuredDraft | None:
+async def _draft_with_openrouter(prompt: str, medium: str = "telegram") -> StructuredDraft | None:
     """Fallback: draft via OpenRouter API (Haiku model).
 
     Uses the OpenRouter chat completions endpoint with tool_use for structured
     output. Falls back to text-only if tool_use fails. Requires OPENROUTER_API_KEY
     environment variable.
     """
+    system_prompt = _compose_drafter_prompt(medium)
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         logger.warning("No OPENROUTER_API_KEY found for drafting fallback")
@@ -1537,7 +1577,7 @@ async def _draft_with_openrouter(prompt: str) -> StructuredDraft | None:
             payload = {
                 "model": OPENROUTER_HAIKU,
                 "messages": [
-                    {"role": "system", "content": DRAFTER_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
                 "tools": [openrouter_tool],
@@ -1573,7 +1613,7 @@ async def _draft_with_openrouter(prompt: str) -> StructuredDraft | None:
         payload = {
             "model": OPENROUTER_HAIKU,
             "messages": [
-                {"role": "system", "content": DRAFTER_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
             "max_tokens": 512,
@@ -1797,10 +1837,10 @@ async def draft_message(
     prompt = _build_draft_prompt(cleaned_response, artifacts, session=session)
 
     # Try Haiku first, then OpenRouter
-    structured = await _draft_with_haiku(prompt)
+    structured = await _draft_with_haiku(prompt, medium=medium)
     if structured is None:
         logger.info("Falling back to OpenRouter for drafting")
-        structured = await _draft_with_openrouter(prompt)
+        structured = await _draft_with_openrouter(prompt, medium=medium)
 
     if structured is not None:
         summary_text = structured.response
