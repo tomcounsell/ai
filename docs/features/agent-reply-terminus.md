@@ -1,7 +1,7 @@
 # Agent Reply Terminus Detection
 
 **Status:** Shipped  
-**Issues:** [#911](https://github.com/tomcounsell/ai/issues/911) (initial), [#1090](https://github.com/tomcounsell/ai/issues/1090) (question-aware Fast-Path 2)
+**Issues:** [#911](https://github.com/tomcounsell/ai/issues/911) (initial), [#1090](https://github.com/tomcounsell/ai/issues/1090) (question-aware Fast-Path 2), [#1318](https://github.com/tomcounsell/ai/issues/1318) (imperative Fast-Path 0 + few-shot prompt)
 
 ## Problem
 
@@ -41,6 +41,9 @@ async def classify_conversation_terminus(
 
 Fast-paths are checked before any LLM call, in this exact order:
 
+0. **Human sender + imperative continuation verb at start of any line** → `RESPOND`  
+   Added in [#1318](https://github.com/tomcounsell/ai/issues/1318). Short-circuits explicit action directives ("Continue to finish all stage of SDLC", "Go ahead and merge", "Proceed with the plan") to RESPOND before any LLM call. Bot-only — never fires for bot senders, so loop suppression is unaffected. See [Fast-Path 0: Imperative Verbs](#fast-path-0-imperative-verbs) below.
+
 1. **Bot sender + no standalone `?`** → `SILENT`  
    The primary loop-break signal. If the sender is a bot and the message contains no question, it's a loop continuation — silence it immediately.
 
@@ -49,6 +52,69 @@ Fast-paths are checked before any LLM call, in this exact order:
 
 3. **Standalone `?` in text** → `RESPOND`  
    Fast exit before any LLM call. Uses regex `(?<![=&\w])\?|(?<![=&])\?(?!\w+=)` to exclude URL query-string parameters like `?q=1`.
+
+#### Fast-Path 0: Imperative Verbs
+
+Added in [#1318](https://github.com/tomcounsell/ai/issues/1318) to fix a recurring SILENT misclassification: when a human replied to a Valor message with an explicit directive ("Continue to finish all stage of SDLC"), the zero-shot Ollama prompt frequently returned SILENT and the message was dropped.
+
+The fix is a module-scope compiled regex `_IMPERATIVE_LINE_RE` that matches a deliberately narrow set of high-precision continuation imperatives at the start of any line:
+
+```
+continue, proceed, resume, retry, redo,
+go ahead, ship it, do it, send it, try again,
+keep going, finish it, do this, handle it, move on
+```
+
+**Anchor:** `(?:^|\n)\s*<verb>\b` — the imperative must lead a line (start of message or after a newline). Mid-sentence usage like "I would just continue this automatically" does NOT match, because there is no preceding newline-or-start. This is critical for the May 7 motivating incident, where the directive appeared on line 2 of a multi-line reply:
+
+```
+I left a comment on PR 1316
+
+Continue to finish all stage of SDLC
+```
+
+A regex anchored only to message start (`^\s*`) would have missed this — the imperative is on line 2.
+
+**Verbs deliberately excluded:** `run`, `fix`, `merge`, `start`, `deploy`, `execute`, `push`, `complete`. These appear too frequently in declarative speech to anchor a deterministic short-circuit ("the run was successful", "fix the bug at your leisure", "start of the meeting"). The few-shot LLM prompt covers them via examples instead.
+
+**Bot-sender guard:** Fast-Path 0 is gated by `not sender_is_bot`. Bot loop suppression (Fast-Path 1) is unaffected. A bot saying "Continue with deployment" still hits Fast-Path 1 and returns SILENT.
+
+#### Few-Shot LLM Prompt
+
+The previous zero-shot prompt produced SILENT for explicit imperatives that didn't hit Fast-Path 0 (e.g., "merge it", "run it again"). The local Ollama model (`gemma4:e2b`) lacks the precision to distinguish continuation imperatives from conversation closers without examples.
+
+The prompt now includes 14 labeled few-shot examples drawn from real misclassified messages and canonical patterns:
+
+```
+"Continue to finish all stage of SDLC" → RESPOND
+"Go ahead and merge" → RESPOND
+"Run it again" → RESPOND
+"Proceed with the plan" → RESPOND
+"merge it" → RESPOND
+"deploy when ready" → RESPOND
+"fix the failing test" → RESPOND
+"I left a comment on PR 1316\n\nContinue to finish all stage of SDLC" → RESPOND
+"ok great" → REACT
+"sounds good" → REACT
+"nice work" → REACT
+"👍" → SILENT
+"thanks" → SILENT
+"got it" → SILENT
+```
+
+Cost: ~200 extra tokens per LLM call. Ollama is local — no $$ cost; latency impact is negligible.
+
+#### DEBUG Log for Future Mining
+
+After every LLM classification (i.e., when no fast-path fires), the function logs:
+
+```python
+logger.debug(f"terminus: {result!r} — {text_stripped[:80]!r}")
+```
+
+This is the operational feedback loop for verb-list drift. When a new SILENT misclassification surfaces, grep `logs/bridge.log` for `terminus: 'SILENT'` patterns, identify the missed imperative, extend `_IMPERATIVE_VERBS` and add a few-shot example. The verb list is a starting point, not a final list.
+
+To enable: set log level to DEBUG for the `bridge.routing` logger.
 
 ### LLM Classification
 
@@ -111,6 +177,18 @@ Unit tests in `tests/unit/test_routing.py` cover all required scenarios:
 - `test_classify_terminus_human_short_reply_no_question_still_silent` — human "Yes" + declarative thread → SILENT (regression guard)
 - `test_classify_terminus_bot_short_reply_to_valor_question_still_silent` — bot "Yes" + Valor question → SILENT via Fast-Path 1 (pins fast-path ordering)
 - `test_classify_terminus_url_query_in_thread_not_treated_as_question` — URL `?q=1` in thread_messages → SILENT (URL query strings stay excluded)
+
+**Fast-Path 0 imperative tests** (issue [#1318](https://github.com/tomcounsell/ai/issues/1318)):
+
+- `test_classify_terminus_imperative_single_line_returns_respond` — "Continue to finish all stage of SDLC" → RESPOND
+- `test_classify_terminus_imperative_multi_line_returns_respond` — multi-line, imperative on line 2 → RESPOND (the May 7 incident)
+- `test_classify_terminus_imperative_go_ahead_returns_respond` — "Go ahead and merge it" → RESPOND
+- `test_classify_terminus_imperative_proceed_returns_respond` — "Proceed with the plan" → RESPOND
+- `test_classify_terminus_imperative_single_word_returns_respond` — single-word "continue" → RESPOND (overrides Fast-Path 2 ≤1-word silencing)
+- `test_classify_terminus_ok_great_does_not_respond_via_fast_path_0` — "ok great" must not match `_IMPERATIVE_LINE_RE`
+- `test_classify_terminus_thanks_still_silent` — "thanks" → SILENT (regression guard)
+- `test_classify_terminus_bot_imperative_still_silent` — bot saying "Continue with deployment" → SILENT (Fast-Path 1 wins)
+- `test_imperative_line_re_does_not_match_mid_sentence` — "I would just continue this automatically" must not match (mid-line falls through to LLM)
 
 ## Related
 

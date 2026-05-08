@@ -257,3 +257,117 @@ async def test_classify_terminus_url_query_in_thread_not_treated_as_question():
         sender_is_bot=False,
     )
     assert result == "SILENT"
+
+
+# =============================================================================
+# Fast-Path 0: imperative verb tests (issue #1318)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_imperative_single_line_returns_respond():
+    """Fast-Path 0: explicit imperative on its own line → RESPOND, no LLM call."""
+    result = await classify_conversation_terminus(
+        text="Continue to finish all stage of SDLC",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_imperative_multi_line_returns_respond():
+    """Fast-Path 0: imperative on line 2 of a multi-line message → RESPOND.
+
+    This is the May 7 motivating incident from issue #1318. The reply contained
+    a status line followed by a blank line followed by the directive. Without
+    multi-line awareness, the imperative would have been missed.
+    """
+    text = "I left a comment on PR 1316\n\nContinue to finish all stage of SDLC"
+    result = await classify_conversation_terminus(
+        text=text,
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_imperative_go_ahead_returns_respond():
+    """Fast-Path 0: multi-word imperative 'go ahead' → RESPOND."""
+    result = await classify_conversation_terminus(
+        text="Go ahead and merge it",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_imperative_proceed_returns_respond():
+    """Fast-Path 0: 'Proceed with the plan' → RESPOND."""
+    result = await classify_conversation_terminus(
+        text="Proceed with the plan",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_imperative_single_word_returns_respond():
+    """Fast-Path 0: single-word imperative 'continue' → RESPOND.
+
+    Without Fast-Path 0, this would hit Fast-Path 2 (≤1 word) and return SILENT.
+    """
+    result = await classify_conversation_terminus(
+        text="continue",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_ok_great_does_not_respond_via_fast_path_0():
+    """Regression: Fast-Path 0 must NOT over-fire on conversation closers.
+
+    'ok great' contains no imperative verb, so Fast-Path 0 must not match. The
+    actual classification of 'ok great' (REACT vs SILENT) is decided by the
+    LLM and is not pinned here — what we guard against is Fast-Path 0
+    incorrectly returning RESPOND.
+    """
+    assert routing._IMPERATIVE_LINE_RE.search("ok great") is None
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_thanks_still_silent():
+    """Regression: 'thanks' must still return SILENT."""
+    result = await classify_conversation_terminus(
+        text="thanks",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "SILENT"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_bot_imperative_still_silent():
+    """Fast-Path 0 is human-only: a bot saying 'Continue with deployment'
+    must still hit Fast-Path 1 and return SILENT (loop break preserved)."""
+    result = await classify_conversation_terminus(
+        text="Continue with deployment",
+        thread_messages=[],
+        sender_is_bot=True,
+    )
+    assert result == "SILENT"
+
+
+def test_imperative_line_re_does_not_match_mid_sentence():
+    """Mid-sentence imperatives must NOT trigger Fast-Path 0.
+
+    'I would just continue this automatically' contains 'continue' but not as
+    the leading word of any line, so the regex must not match. The message
+    falls through to the LLM for full classification.
+    """
+    assert routing._IMPERATIVE_LINE_RE.search("I would just continue this automatically") is None

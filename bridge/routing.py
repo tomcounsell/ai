@@ -552,6 +552,47 @@ async def classify_needs_response_async(text: str) -> bool:
 # Lookahead: not followed by \w+= (query param name=value pattern)
 _STANDALONE_QUESTION_RE = re.compile(r"(?<![=&\w])\?|(?<![=&])\?(?!\w+=)")
 
+# Fast-Path 0: imperative continuation verbs that must always RESPOND.
+#
+# These few-shot examples are mined from real misclassified messages where the
+# zero-shot Ollama prompt incorrectly returned SILENT. The motivating incident
+# (May 7, issue #1318): a multi-line reply to Valor where line 2 was an
+# explicit directive ("Continue to finish all stage of SDLC") was dropped by
+# the LLM. Fast-Path 0 short-circuits these to RESPOND before any LLM call.
+#
+# Verb list is deliberately narrow — only high-precision continuation
+# imperatives. Common verbs that frequently appear non-imperatively at message
+# starts (run, fix, merge, start, deploy, execute, push) are EXCLUDED here and
+# handled by the few-shot LLM prompt instead.
+#
+# Mined examples (real dropped messages, paraphrased for log privacy):
+#   ("Continue to finish all stage of SDLC", RESPOND)            # May 7, issue #1318
+#   ("I left a comment on PR 1316\n\nContinue to finish all stage of SDLC", RESPOND)
+#   ("Go ahead and merge", RESPOND)                              # May 6 cluster
+#   ("Proceed with the plan", RESPOND)                           # May 6 cluster
+#   ("retry the failed step", RESPOND)                           # May 6 cluster
+_IMPERATIVE_VERBS = (
+    "continue",
+    "proceed",
+    "resume",
+    "retry",
+    "redo",
+    "go ahead",
+    "ship it",
+    "do it",
+    "send it",
+    "try again",
+    "keep going",
+    "finish it",
+    "do this",
+    "handle it",
+    "move on",
+)
+_IMPERATIVE_LINE_RE = re.compile(
+    r"(?:^|\n)\s*(?:" + "|".join(re.escape(v) for v in _IMPERATIVE_VERBS) + r")\b",
+    re.IGNORECASE,
+)
+
 
 async def classify_conversation_terminus(
     text: str,
@@ -566,6 +607,8 @@ async def classify_conversation_terminus(
     - "SILENT"  — bot loop or acknowledgment; do nothing
 
     Fast-path order (critical — checked before LLM):
+    0. human sender + imperative continuation verb at start of any line → RESPOND
+       (issue #1318 — prevents SILENT misclassification of explicit directives)
     1. sender_is_bot + no question → SILENT  (primary loop-break signal)
     2. acknowledgment token or very short (≤1 word) → SILENT
        (unless thread_messages contains a question — then fall through, so a
@@ -583,6 +626,14 @@ async def classify_conversation_terminus(
 
     text_stripped = text.strip()
     text_lower = text_stripped.lower()
+
+    # Fast-path 0: human-sender imperative continuation verb → RESPOND.
+    # Multi-line aware: matches imperatives at the start of ANY line, so the
+    # motivating May 7 incident (line 1 = status update, line 2 = "Continue ...")
+    # short-circuits to RESPOND without an LLM call. Bot-sender check is below,
+    # so this never interferes with bot loop suppression.
+    if not sender_is_bot and _IMPERATIVE_LINE_RE.search(text_stripped):
+        return "RESPOND"
 
     # Fast-path 1: bot sender with no question → SILENT (strongest signal for loop break)
     if sender_is_bot and not _STANDALONE_QUESTION_RE.search(text_stripped):
@@ -619,6 +670,21 @@ async def classify_conversation_terminus(
         "Recent thread context (may be empty):\n"
         f"{thread_context[:400] if thread_context else '(none)'}\n\n"
         f"Sender is a bot: {sender_is_bot}\n\n"
+        "Examples:\n"
+        '"Continue to finish all stage of SDLC" → RESPOND\n'
+        '"Go ahead and merge" → RESPOND\n'
+        '"Run it again" → RESPOND\n'
+        '"Proceed with the plan" → RESPOND\n'
+        '"merge it" → RESPOND\n'
+        '"deploy when ready" → RESPOND\n'
+        '"fix the failing test" → RESPOND\n'
+        '"I left a comment on PR 1316\\n\\nContinue to finish all stage of SDLC" → RESPOND\n'
+        '"ok great" → REACT\n'
+        '"sounds good" → REACT\n'
+        '"nice work" → REACT\n'
+        '"👍" → SILENT\n'
+        '"thanks" → SILENT\n'
+        '"got it" → SILENT\n\n'
         "Instructions:\n"
         "- If the message contains a question or requests action → reply RESPOND\n"
         "- If the message is a natural conversation closer (completion language,\n"
@@ -670,6 +736,10 @@ async def classify_conversation_terminus(
     # Conservative default on any failure
     if result is None:
         result = "RESPOND"
+
+    # DEBUG log: surface classified text for future few-shot mining (issue #1318).
+    # Truncated to 80 chars to stay within log line size limits.
+    logger.debug(f"terminus: {result!r} — {text_stripped[:80]!r}")
 
     # Collapse REACT → SILENT for bot senders (no emoji spam in bot loops)
     if sender_is_bot and result == "REACT":
