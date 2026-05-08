@@ -61,14 +61,28 @@ class TestBuildTeammateInstructions:
         assert "evidence" in result.lower() or "cite" in result.lower()
 
     def test_review_gate_awareness(self):
-        """Teammate prompt should mention the delivery review gate."""
+        """Teammate prompt should mention the delivery review gate and the
+        tool-call delivery contract introduced in PR #1072.
+
+        The legacy SEND / EDIT: <text> / REACT: <emoji> / SILENT / CONTINUE
+        prefix protocol was removed; the parser and the drafter scrubber
+        no longer recognise those tokens, so any literal prefix in agent
+        output leaks verbatim through the outbox path.
+        """
         result = build_teammate_instructions()
         assert "DELIVERY REVIEW" in result
-        assert "SEND" in result
-        assert "EDIT" in result
-        assert "REACT" in result
-        assert "SILENT" in result
-        assert "CONTINUE" in result
+        # Tool-call delivery contract (mirrors agent/hooks/stop.py:163-199).
+        assert "tools/send_message.py" in result
+        assert "tools/react_with_emoji.py" in result
+        # Conceptual options are still mentioned (silent / continue) but
+        # not as parseable prefixes the agent should emit.
+        assert "Silent" in result
+        assert "Continue" in result
+        # Stale legacy prefix protocol must NOT appear as instructions.
+        assert "SEND — deliver" not in result
+        assert "EDIT: <your revised text>" not in result
+        assert "REACT: <emoji>" not in result
+        assert "SILENT — send nothing" not in result
 
 
 class TestTeammateConstants:
