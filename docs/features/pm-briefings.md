@@ -1,57 +1,43 @@
 # PM Briefings (slot-driven)
 
 One reflection — `pm-briefings` in the registry, callable
-`reflections.pm_audio_briefing.run` (the package name `pm_audio_briefing/`
-is preserved because the import path is referenced widely) — owns ALL
-PM-facing slot-driven daily content. Each project declares zero-or-more
-**briefing slots** in `projects.json`; at every 5-minute tick the
-dispatcher fans out (project × slot), runs the slot-specific `build()`,
-and delivers ONE Telegram message per (project × slot) per day.
+`reflections.pm_briefings.run` — owns ALL PM-facing slot-driven daily
+content. Each project declares zero-or-more **briefing slots** in
+`projects.json`; at every 5-minute tick the dispatcher fans out
+(project × slot), runs the slot-specific `build()`, and delivers ONE
+Telegram message per (project × slot) per day.
 
-This consolidates three previously-fragmented reflections:
+The dispatcher exposes three slot types under a single entry point:
 
-| Old reflection             | New slot type | Status                              |
-|----------------------------|---------------|-------------------------------------|
-| `pm-audio-briefing`        | `morning`     | Renamed to `pm-briefings` (issue #1292 cutover) |
-| `daily-log-review`         | `log_audit`   | Retired (issue #1292); helpers inlined into the slot |
-| `daily-report-and-notify`  | `daily_log`   | Retired (issue #1292); helpers inlined into the slot |
-
-See issues #1276 (consolidation) and #1292 (cutover) and
-`docs/plans/daily-reflections-unification.md` for the rationale.
-
-**Operator note (deploy-coupled):** the `pm-briefings` rename, the
-`enabled: false` flips, and a project-level `pm_briefing.enabled: true`
-block live in vault-only config (`~/Desktop/Valor/reflections.yaml` and
-`~/Desktop/Valor/projects.json`). PR #1292 documents the exact yaml/json
-snippets in its body. Until those operator steps land alongside the merge,
-the new dispatcher stays dormant: the `pm-briefings` registry entry runs
-~1,100 no-op ticks per day until at least one project has slots configured.
+| Slot type   | Output         | Default `skip_when_empty` |
+|-------------|----------------|---------------------------|
+| `morning`   | voice + text   | from `pm_briefing.skip_when_empty` |
+| `daily_log` | voice + text   | True                      |
+| `log_audit` | text only      | True                      |
 
 ## Why this exists
 
-Three separate reflections meant the same project owner could receive 2–3
-Telegram deliveries per day per project, none of which respected each
+Multiple PM-facing reflections meant the same project owner could receive
+2–3 Telegram deliveries per day per project, none of which respected each
 project's local timezone or owner machine. The slot-driven dispatch model
 unifies machine-ownership gating, SETNX idempotency, per-(project × slot)
 Reflection records, and skip-when-empty silence into one code path.
 
 ## Slot types
 
-| `type`       | Module path                                    | Output          | Default `skip_when_empty` |
-|--------------|------------------------------------------------|-----------------|---------------------------|
-| `morning`    | `reflections.pm_audio_briefing.morning`        | voice + text    | from `pm_briefing.skip_when_empty` |
-| `daily_log`  | `reflections.pm_audio_briefing.daily_log`      | voice + text    | True                      |
-| `log_audit`  | `reflections.pm_audio_briefing.log_audit`      | text only       | True                      |
+| `type`      | Module path                              | Output       |
+|-------------|------------------------------------------|--------------|
+| `morning`   | `reflections.pm_briefings.morning`       | voice + text |
+| `daily_log` | `reflections.pm_briefings.daily_log`     | voice + text |
+| `log_audit` | `reflections.pm_briefings.log_audit`     | text only    |
 
 Each slot's `build(project, slot_config)` returns
 `(transcript, followup_markdown, raw_signals)`. Slot builders are pure —
 they do NOT touch Redis, Telegram, or Reflection state. The dispatcher
-(`reflections.pm_audio_briefing.run` in `__init__.py`) owns lock acquire,
+(`reflections.pm_briefings.run` in `__init__.py`) owns lock acquire,
 delivery, and the per-record `mark_completed()` call.
 
 ## Configuration
-
-### New v1 schema (multi-slot)
 
 ```json
 "pm_briefing": {
@@ -96,29 +82,16 @@ A slot dict supports:
   ensures one machine owns this flag.
 - `skip_when_empty` (optional) — default `True` for `daily_log` and
   `log_audit`; default `False` for `morning` (so the morning user always
-  gets a message even on a quiet day, modulo the legacy
+  gets a message even on a quiet day, modulo the
   `pm_briefing.skip_when_empty` override).
 - `angles` (optional, only for `morning`) — falls back to
   `pm_briefing.angles`.
 - `fallback_message` (optional) — used when `skip_when_empty` is `False`
   and the collector returned nothing.
 
-### Legacy single-morning shape (auto-migrated)
-
-Existing users with the pre-#1276 shape get a one-element `morning` slot
-synthesized automatically. **No `projects.json` edit required**:
-
-```json
-"pm_briefing": {
-  "enabled": true,
-  "schedule": "08:30",
-  "timezone": "America/Los_Angeles",
-  "target_groups": ["PM: My Project"],
-  "angles": {"include": ["merges", "open-bugs"]}
-}
-```
-
-The shim lives in `reflections.pm_audio_briefing._load_slots()`.
+A project with `pm_briefing.enabled=true` but no `slots` (or an empty
+list) is logged at warning level and skipped — operators must opt in
+explicitly per slot.
 
 ## Lock-release policy (split between dispatcher and slot)
 
@@ -141,17 +114,10 @@ The dispatcher owns the SETNX lifecycle:
 
 ## Dashboard rendering
 
-The `_PREFIX_EXPANDED_REFLECTIONS` tuple in `ui/data/reflections.py` carries
-both `pm-briefings` (the prefix for per-(project × slot) records named
-`pm-briefings-{slug}-{slot}`) and `pm-audio-briefing` (legacy prefix for
-pre-rename per-project records still in Redis). Both surface their per-
-record rows under the parent registry entry's group.
-
-The `_PREFIX_FALLBACK_PARENTS` shim in the same module is **deploy-
-coupled**: it maps `pm-briefings` → `pm-audio-briefing` so per-record
-rows surface on the dashboard before the operator renames the registry
-entry. After issue #1292's vault-yaml rename lands, the shim is no longer
-load-bearing and can be removed in a small follow-up cleanup.
+The `_PREFIX_EXPANDED_REFLECTIONS` tuple in `ui/data/reflections.py`
+carries `pm-briefings`, the prefix for per-(project × slot) records named
+`pm-briefings-{slug}-{slot}`. Records under that prefix surface as
+per-record rows under the parent registry entry's group on the dashboard.
 
 ## Aggregate result shape
 
@@ -172,20 +138,20 @@ load-bearing and can be removed in a small follow-up cleanup.
 ```
 
 The per-record `date_iso` field is included so a Tuesday-LA row and a
-Wednesday-LA row don't overwrite each other when projects span timezones
-(per the plan critique). `duration` is the wall-clock seconds spent in
-`_run_slot` for this (project × slot). `findings_count` is the number of
-items in the slot's `raw_signals["findings"]` (currently the `log_audit`
-slot — `morning` and `daily_log` always report 0).
+Wednesday-LA row don't overwrite each other when projects span timezones.
+`duration` is the wall-clock seconds spent in `_run_slot` for this
+(project × slot). `findings_count` is the number of items in the slot's
+`raw_signals["findings"]` (currently the `log_audit` slot — `morning` and
+`daily_log` always report 0).
 
 `summary.succeeded + summary.failed` may be less than `considered * slots`
-because schedule-miss / lock-held / already-succeeded slots are reported as
-`status: "skipped"` and intentionally excluded from both counters (they
-aren't run-attempts).
+because schedule-miss / lock-held / already-succeeded slots are reported
+as `status: "skipped"` and intentionally excluded from both counters
+(they aren't run-attempts).
 
 ## Rollback
 
-If the new dispatcher misbehaves on day 1, the rollback path is:
+If the dispatcher misbehaves, the rollback path is:
 
 ```bash
 git revert <merge-sha>
@@ -198,9 +164,6 @@ records remain in Redis and surface on the dashboard until they age out.
 
 ## See also
 
-- `docs/features/pm-audio-briefing.md` — the original morning-only design
-  (kept as historical reference)
-- `docs/plans/daily-reflections-unification.md` — full plan
 - `docs/features/reflections.md` — top-level reflections index
 - `docs/features/single-machine-ownership.md` — vault-writer ownership
   invariant

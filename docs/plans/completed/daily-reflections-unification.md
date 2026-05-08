@@ -593,3 +593,5 @@ of the cutover PR:
 ## Open Questions
 
 All five direction-defining questions raised during planning have been answered — see **Decisions Recorded** at the top of this document. No open questions remain. Ready for `/do-plan-critique` then `/do-build`.
+
+> Completed by issue #1306 / PR for session/pm-briefings-cutover-finish. Cutover finished 2026-05-08.

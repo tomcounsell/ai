@@ -6,7 +6,7 @@ collectors are exercised via subprocess fakes (FakePopen) so the tests don't
 depend on a live shell.
 
 The aggregator originally lived in ``reflections/daily_report.py``; it was
-inlined into ``reflections.pm_audio_briefing.daily_log`` when the legacy
+inlined into ``reflections.pm_briefings.daily_log`` when the legacy
 ``daily-report-and-notify`` registry entry was retired (issue #1292).
 """
 
@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-import reflections.pm_audio_briefing.daily_log as dr
+import reflections.pm_briefings.daily_log as dr
 
 
 @pytest.fixture

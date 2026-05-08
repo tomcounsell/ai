@@ -64,16 +64,12 @@ REFLECTION_GROUPS: dict[str, str] = {
 }
 
 # Prefix-expanded reflections render per-project rows on the dashboard.
-# These reflections write Reflection records named `<prefix>-<project_key>`
-# (e.g. `pm-audio-briefing-psyoptimal`). The dashboard surfaces the parent
-# registry entry AND each per-project record, all classified into the parent's
-# group. Hard-coded as a tuple at module-load so there is exactly one place to
-# update when adding a new prefix-expanded reflection (per plan C1-R2).
-# The ``pm-audio-briefing`` registry entry (kept as the import path is widely
-# referenced) now produces per-(project x slot) Reflection records named
-# ``pm-briefings-<slug>-<slot>`` after issue #1276. Both prefixes are listed so
-# any pre-rename ``pm-audio-briefing-<slug>`` records still in Redis continue
-# to surface on the dashboard.
+# These reflections write Reflection records named ``<prefix>-<project_key>``
+# (or ``<prefix>-<project_key>-<slot>`` for slot-driven reflections like
+# ``pm-briefings``). The dashboard surfaces the parent registry entry AND
+# every matching per-project / per-slot record, all classified into the
+# parent's group. Hard-coded as a tuple at module-load so there is exactly
+# one place to update when adding a new prefix-expanded reflection.
 _PREFIX_EXPANDED_REFLECTIONS: tuple[str, ...] = ("pm-briefings",)
 
 
@@ -141,7 +137,7 @@ def _expand_prefix_records(
 ) -> list[dict]:
     """Return per-project rows for any record matching a prefix-expanded name.
 
-    A record like `pm-audio-briefing-psyoptimal` is rendered using its parent
+    A record like `pm-briefings-psyoptimal` is rendered using its parent
     registry entry's description, interval, and group classification, but with
     the per-project name and live state. The parent entry's group is reused so
     per-project rows cluster with the parent on the dashboard.
@@ -178,7 +174,7 @@ def get_all_reflections() -> list[dict]:
     ran_at + config interval (not stored as a field).
 
     Per-project records whose name starts with a prefix in
-    `_PREFIX_EXPANDED_REFLECTIONS` (e.g. `pm-audio-briefing-psyoptimal`) are
+    `_PREFIX_EXPANDED_REFLECTIONS` (e.g. `pm-briefings-psyoptimal`) are
     appended as additional rows using the parent entry's config.
 
     Returns:

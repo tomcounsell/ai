@@ -1,5 +1,5 @@
 """
-reflections/pm_audio_briefing/daily_log.py — Daily-log slot.
+reflections/pm_briefings/daily_log.py — Daily-log slot.
 
 End-of-day per-project recap delivered as an audio brief plus written
 follow-up. The dispatcher in ``__init__.py`` calls ``build(project,
@@ -34,7 +34,7 @@ from typing import Any
 
 from reflections.utils import load_local_projects
 
-logger = logging.getLogger("reflections.pm_audio_briefing.daily_log")
+logger = logging.getLogger("reflections.pm_briefings.daily_log")
 
 
 SLOT_TYPE = "daily_log"
@@ -922,12 +922,12 @@ def build(project: dict, slot_config: dict) -> tuple[str, str, dict[str, Any]]:
         (no activity for the target day), returns ``("", "", {})``.
     """
     from bridge.utc import utc_now
-    from reflections.pm_audio_briefing import builder
+    from reflections.pm_briefings import builder
 
     target_date = utc_now() - timedelta(days=1)
 
     # Run the async collector. In production we are inside a running event
-    # loop: the parent ``pm_audio_briefing.run()`` is ``async def`` and the
+    # loop: the parent ``pm_briefings.run()`` is ``async def`` and the
     # reflection scheduler awaits it directly (see
     # ``agent/reflection_scheduler.py``), so the ``loop.is_running()`` branch
     # is the production path. ``asyncio.run`` cannot run inside an existing

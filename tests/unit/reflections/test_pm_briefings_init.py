@@ -1,4 +1,4 @@
-"""Unit tests for reflections/pm_audio_briefing/__init__.py orchestration.
+"""Unit tests for reflections/pm_briefings/__init__.py orchestration.
 
 Updated for the slot-driven dispatch model (issue #1276):
 - Slot-match absolute-minute arithmetic (handles hour rollover at HH:58)
@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from reflections import pm_audio_briefing as briefing
+from reflections import pm_briefings as briefing
 
 pytestmark = [pytest.mark.unit]
 
@@ -140,7 +140,7 @@ class TestPreSideEffectFailureReleasesLock:
                 {"morning": MagicMock(side_effect=RuntimeError("builder boom"))},
             ),
             patch(
-                "reflections.pm_audio_briefing.delivery._get_redis_connection",
+                "reflections.pm_briefings.delivery._get_redis_connection",
                 return_value=MagicMock(),
             ),
             patch.object(Reflection, "get_or_create") as _gc,
@@ -162,7 +162,7 @@ class TestPreSideEffectFailureReleasesLock:
 class TestPostSideEffectFailureHoldsLock:
     def test_delivery_raises_after_enqueue_lock_held(self):
         from models.reflection import Reflection
-        from reflections.pm_audio_briefing.delivery import BriefingTtsFailedError
+        from reflections.pm_briefings.delivery import BriefingTtsFailedError
 
         with (
             patch.object(briefing, "_now_in_project_tz") as _now,
@@ -173,11 +173,11 @@ class TestPostSideEffectFailureHoldsLock:
                 {"morning": MagicMock(return_value=("Shipped a thing.", "", {"merges": [{}]}))},
             ),
             patch(
-                "reflections.pm_audio_briefing.delivery.send",
+                "reflections.pm_briefings.delivery.send",
                 side_effect=BriefingTtsFailedError("tts boom"),
             ),
             patch(
-                "reflections.pm_audio_briefing.delivery._get_redis_connection",
+                "reflections.pm_briefings.delivery._get_redis_connection",
                 return_value=MagicMock(),
             ),
             patch.object(Reflection, "get_or_create") as _gc,
@@ -209,7 +209,7 @@ class TestSkipWhenEmpty:
                 {"morning": MagicMock(return_value=("", "", {}))},
             ),
             patch(
-                "reflections.pm_audio_briefing.delivery._get_redis_connection",
+                "reflections.pm_briefings.delivery._get_redis_connection",
                 return_value=MagicMock(),
             ),
             patch.object(Reflection, "get_or_create") as _gc,
@@ -239,7 +239,7 @@ class TestUnknownSlotType:
             patch.object(briefing, "_try_acquire_lock", return_value=True),
             patch.object(briefing, "_release_lock") as _release,
             patch(
-                "reflections.pm_audio_briefing.delivery._get_redis_connection",
+                "reflections.pm_briefings.delivery._get_redis_connection",
                 return_value=MagicMock(),
             ),
             patch.object(Reflection, "get_or_create") as _gc,

@@ -15,7 +15,7 @@ import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
-from reflections.pm_audio_briefing import log_audit
+from reflections.pm_briefings import log_audit
 
 
 class TestCollectSentryCounts:
@@ -23,7 +23,7 @@ class TestCollectSentryCounts:
 
     def test_returns_none_when_sentry_cli_missing(self):
         """Missing sentry-cli on PATH → None (no subprocess invocation)."""
-        with patch("reflections.pm_audio_briefing.log_audit.shutil.which", return_value=None):
+        with patch("reflections.pm_briefings.log_audit.shutil.which", return_value=None):
             result = log_audit._collect_sentry_counts(
                 {"slug": "proj-a", "working_directory": "/tmp"}
             )
@@ -33,7 +33,7 @@ class TestCollectSentryCounts:
         """Project with no SENTRY_DSN in .env → None."""
         # Make sentry-cli "available" but ensure no .env file exists.
         with patch(
-            "reflections.pm_audio_briefing.log_audit.shutil.which",
+            "reflections.pm_briefings.log_audit.shutil.which",
             return_value="/usr/local/bin/sentry-cli",
         ):
             result = log_audit._collect_sentry_counts(
@@ -46,7 +46,7 @@ class TestCollectSentryCounts:
         env = tmp_path / ".env"
         env.write_text("SENTRY_DSN=\nOTHER=value\n")
         with patch(
-            "reflections.pm_audio_briefing.log_audit.shutil.which",
+            "reflections.pm_briefings.log_audit.shutil.which",
             return_value="/usr/local/bin/sentry-cli",
         ):
             result = log_audit._collect_sentry_counts(
@@ -60,11 +60,11 @@ class TestCollectSentryCounts:
         env.write_text("SENTRY_DSN=https://abc@sentry.io/123\n")
         with (
             patch(
-                "reflections.pm_audio_briefing.log_audit.shutil.which",
+                "reflections.pm_briefings.log_audit.shutil.which",
                 return_value="/usr/local/bin/sentry-cli",
             ),
             patch(
-                "reflections.pm_audio_briefing.log_audit.subprocess.run",
+                "reflections.pm_briefings.log_audit.subprocess.run",
                 side_effect=subprocess.TimeoutExpired(cmd="sentry-cli", timeout=10),
             ),
         ):
@@ -79,11 +79,11 @@ class TestCollectSentryCounts:
         env.write_text("SENTRY_DSN=https://abc@sentry.io/123\n")
         with (
             patch(
-                "reflections.pm_audio_briefing.log_audit.shutil.which",
+                "reflections.pm_briefings.log_audit.shutil.which",
                 return_value="/usr/local/bin/sentry-cli",
             ),
             patch(
-                "reflections.pm_audio_briefing.log_audit.subprocess.run",
+                "reflections.pm_briefings.log_audit.subprocess.run",
                 return_value=MagicMock(returncode=1, stdout="", stderr="auth failed"),
             ),
         ):
@@ -98,11 +98,11 @@ class TestCollectSentryCounts:
         env.write_text("SENTRY_DSN=https://abc@sentry.io/123\n")
         with (
             patch(
-                "reflections.pm_audio_briefing.log_audit.shutil.which",
+                "reflections.pm_briefings.log_audit.shutil.which",
                 return_value="/usr/local/bin/sentry-cli",
             ),
             patch(
-                "reflections.pm_audio_briefing.log_audit.subprocess.run",
+                "reflections.pm_briefings.log_audit.subprocess.run",
                 return_value=MagicMock(returncode=0, stdout="not json{{{", stderr=""),
             ),
         ):
@@ -118,11 +118,11 @@ class TestCollectSentryCounts:
         issues = [{"id": "i1"}, {"id": "i2"}, {"id": "i3"}]
         with (
             patch(
-                "reflections.pm_audio_briefing.log_audit.shutil.which",
+                "reflections.pm_briefings.log_audit.shutil.which",
                 return_value="/usr/local/bin/sentry-cli",
             ),
             patch(
-                "reflections.pm_audio_briefing.log_audit.subprocess.run",
+                "reflections.pm_briefings.log_audit.subprocess.run",
                 return_value=MagicMock(returncode=0, stdout=json.dumps(issues), stderr=""),
             ),
         ):
@@ -139,11 +139,11 @@ class TestCollectSentryCounts:
         env.write_text("SENTRY_DSN=https://abc@sentry.io/123\n")
         with (
             patch(
-                "reflections.pm_audio_briefing.log_audit.shutil.which",
+                "reflections.pm_briefings.log_audit.shutil.which",
                 return_value="/usr/local/bin/sentry-cli",
             ),
             patch(
-                "reflections.pm_audio_briefing.log_audit.subprocess.run",
+                "reflections.pm_briefings.log_audit.subprocess.run",
                 return_value=MagicMock(returncode=0, stdout="[]", stderr=""),
             ),
         ):

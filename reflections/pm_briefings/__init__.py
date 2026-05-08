@@ -1,5 +1,5 @@
 """
-reflections/pm_audio_briefing — Slot-driven PM briefings reflection.
+reflections/pm_briefings — Slot-driven PM briefings reflection.
 
 One reflection (registered as ``pm-briefings``) owns ALL PM-facing slot-
 driven content. Each project declares any number of "briefing slots" in its
@@ -7,11 +7,9 @@ driven content. Each project declares any number of "briefing slots" in its
 (project x slot), runs the slot-specific ``build()``, and delivers ONE
 Telegram message per (project, slot) per day.
 
-Backward compatibility: a project with the legacy
-``pm_briefing.angles + pm_briefing.schedule`` shape (single morning brief)
-is interpreted as a one-element slot list ``[{name: "morning", type:
-"morning", schedule: <existing>, angles: <existing>}]`` -- zero
-``projects.json`` edits required for existing morning-brief users.
+A project with ``pm_briefing.enabled=true`` but no ``pm_briefing.slots`` (or
+an empty list) is logged at warning level and skipped — operators must opt
+in explicitly per slot.
 
 Slot types and their builders are wired in ``_SLOT_BUILDERS``:
 - ``morning`` -> ``morning.build``
@@ -39,10 +37,10 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from reflections.pm_audio_briefing import daily_log, log_audit, morning
+from reflections.pm_briefings import daily_log, log_audit, morning
 from reflections.utils import load_local_projects
 
-logger = logging.getLogger("reflections.pm_audio_briefing")
+logger = logging.getLogger("reflections.pm_briefings")
 
 # One-shot startup logging gate (logs project counts on first tick after
 # process start, never again).
@@ -122,50 +120,6 @@ def _release_lock(redis_conn, key: str) -> None:
         logger.debug("Failed to release lock %s: %s", key, e)
 
 
-def _load_slots(project: dict) -> list[dict]:
-    """Resolve the slot list for a project.
-
-    Backward-compat: if ``pm_briefing.slots`` is missing but the legacy
-    ``pm_briefing.angles + pm_briefing.schedule`` keys are present,
-    synthesize a single ``morning`` slot. Existing morning-brief users do
-    NOT need to edit ``projects.json``.
-
-    A slot dict has the following recognized keys:
-        - ``name`` (str, required) -- unique identifier within the project
-        - ``type`` (str, required) -- must be a key of ``_SLOT_BUILDERS``
-        - ``schedule`` (str, "HH:MM", required) -- local-time match
-        - ``target_groups`` (list[str], optional) -- Telegram groups to
-          deliver to; falls back to ``pm_briefing.target_groups``
-        - ``voice`` (str, optional) -- TTS voice override
-        - ``vault_writer`` (bool, optional) -- only for ``daily_log`` slot;
-          default False. Single-machine-ownership invariant ensures one
-          machine owns this flag for any given (project, date).
-        - ``skip_when_empty`` (bool, optional) -- default True
-        - ``angles`` (dict, optional) -- for ``morning`` slot; fallback to
-          ``pm_briefing.angles``
-    """
-    pm = project.get("pm_briefing") or {}
-    slots = pm.get("slots")
-    if isinstance(slots, list) and slots:
-        return [dict(s) for s in slots if isinstance(s, dict)]
-
-    # Legacy single-morning-brief shape.
-    if pm.get("schedule"):
-        return [
-            {
-                "name": "morning",
-                "type": "morning",
-                "schedule": pm.get("schedule"),
-                "angles": pm.get("angles") or {},
-                "target_groups": list(pm.get("target_groups") or []),
-                "voice": pm.get("voice"),
-                "skip_when_empty": bool(pm.get("skip_when_empty", False)),
-                "fallback_message": pm.get("fallback_message"),
-            }
-        ]
-    return []
-
-
 def _resolve_target_groups(project: dict, slot_config: dict) -> list[str]:
     pm = project.get("pm_briefing") or {}
     return list(slot_config.get("target_groups") or pm.get("target_groups") or [])
@@ -177,11 +131,11 @@ def _send_text_only(
     """Enqueue a plain text Telegram payload to each target group.
 
     Mirrors the text-payload pattern from
-    ``reflections.pm_audio_briefing.delivery._text_payload``.
+    ``reflections.pm_briefings.delivery._text_payload``.
     """
     import json
 
-    from reflections.pm_audio_briefing.delivery import _resolve_chat_id, _text_payload
+    from reflections.pm_briefings.delivery import _resolve_chat_id, _text_payload
 
     session_id = f"pm-briefings-text-{uuid.uuid4().hex[:8]}"
     queue_key = f"telegram:outbox:{session_id}"
@@ -215,7 +169,7 @@ def _run_slot(
     NOT touch Redis, Telegram, or Reflection state.
     """
     from models.reflection import Reflection
-    from reflections.pm_audio_briefing.delivery import (
+    from reflections.pm_briefings.delivery import (
         BriefingTtsFailedError,
         _get_redis_connection,
         send,
@@ -412,8 +366,10 @@ async def run() -> dict:
 
     for project in owned:
         slug = project.get("slug") or "unknown"
-        slots = _load_slots(project)
+        raw_slots = (project.get("pm_briefing") or {}).get("slots") or []
+        slots = [dict(s) for s in raw_slots if isinstance(s, dict)]
         if not slots:
+            logger.warning("pm-briefings: project %s has no slots configured; skipping", slug)
             results[slug] = {"status": "skipped", "reason": "no_slots"}
             continue
         for slot in slots:

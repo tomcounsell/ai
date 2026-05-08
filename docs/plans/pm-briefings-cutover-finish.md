@@ -1,9 +1,10 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor
 created: 2026-05-06
+revised: 2026-05-08
 tracking: https://github.com/tomcounsell/ai/issues/1306
 last_comment_id:
 ---
@@ -12,39 +13,41 @@ last_comment_id:
 
 ## Problem
 
-PR #1295 inlined helpers and deleted `reflections/daily_report.py` + `reflections.auditing.run_log_review`, but it left the rest of the daily-reflections cutover in a parallel-run state.
+PR #1295 inlined helpers and deleted `reflections/daily_report.py` + `reflections.auditing.run_log_review`. Commit `bee105d5` then cleaned up vault dead entries and the UI single-source plumbing. The remaining gap is the Python package rename, the vault `callable:` field, the `_load_slots()` shim, and a doc-rewrite cluster.
 
-**Current behavior:**
-- Package directory still named `reflections/pm_audio_briefing/`; the new feature name `pm-briefings` only appears in docs and in `ui/data/reflections.py` aliasing.
-- `_load_slots()` shim at `reflections/pm_audio_briefing/__init__.py:125` synthesizes `pm_briefing.slots` from legacy `pm_briefing.angles + pm_briefing.schedule` config. No project actually uses the legacy keys today (verified: 0 of 13 projects in `~/Desktop/Valor/projects.json` carry either shape), so the shim is dead weight.
-- Vault `~/Desktop/Valor/reflections.yaml` (lines 196, 280, 340) still has registry entries `daily-log-review` (calls deleted `reflections.auditing.run_log_review`), `daily-report-and-notify` (calls deleted `reflections.daily_report.run`), and `pm-audio-briefing` (legacy registry name). Every scheduler tick logs ImportError on the first two until the operator removes them.
-- `docs/features/pm-audio-briefing.md` and `docs/plans/daily-reflections-unification.md` describe the migration in transition tense rather than the post-cutover status quo.
-- Orphan `logs/reflections/report_2026-*.md` files may remain on bridge machines other than the dev machine (zero on dev today).
+**Current behavior (after `bee105d5`):**
+- Package directory still named `reflections/pm_audio_briefing/`; the new feature name `pm-briefings` is the registry name in vault and the canonical UI prefix, but the import path is unchanged.
+- `_load_slots()` shim at `reflections/pm_audio_briefing/__init__.py:125` synthesizes `pm_briefing.slots` from legacy `pm_briefing.angles + pm_briefing.schedule` config. No project carries either legacy shape today (verified: 0 of 13 projects in `~/Desktop/Valor/projects.json`), so the shim is dead weight.
+- Vault `~/Desktop/Valor/reflections.yaml` line 327 still has `callable: "reflections.pm_audio_briefing.run"` (the registry `name:` field is already `pm-briefings`).
+- `docs/features/pm-audio-briefing.md` still exists as a parallel-run document; `docs/features/pm-briefings.md` and `docs/features/reflections.md` both contain transition-tense narrative and stale `pm_audio_briefing` import path references (6+ live references in `reflections.md` alone, including a registry table row).
 
-**Desired outcome:** Single coherent post-cutover state. Package renamed, shim deleted, vault registry cleaned, legacy doc deleted, transition narrative gone, and propagation routed through `/update` for all bridge machines.
+**Desired outcome:** Single coherent post-cutover state. Package renamed, shim deleted, vault `callable:` field updated, legacy doc deleted, transition narrative gone, and a re-export shim guards the iCloud/code propagation race during the deploy window.
 
 ## Freshness Check
 
-**Baseline commit:** `75e9d3c6` (main at plan time)
-**Issue filed at:** 2026-05-06T10:19:48Z (today)
-**Disposition:** Unchanged
+**Baseline commit:** `bee105d5` (main at revision time, 2026-05-08)
+**Issue filed at:** 2026-05-06T10:19:48Z
+**Revision date:** 2026-05-08
+**Disposition:** Updated to current state — `bee105d5` already removed dead vault entries (`daily-log-review`, `daily-report-and-notify`, three other unrelated stale callables) and trimmed `_PREFIX_EXPANDED_REFLECTIONS` in `ui/data/reflections.py` to `("pm-briefings",)`. Tasks 3 and 5 in the original plan are mostly done; only the comment-block cleanup in `ui/data/reflections.py` (lines 66-76) and the vault `callable:` field remain.
 
-**File:line references re-verified:**
+**File:line references re-verified (2026-05-08):**
 - `reflections/pm_audio_briefing/__init__.py:125` — `_load_slots()` shim — still holds at line 125; called from line 415 in the dispatcher's `run()`.
-- `~/Desktop/Valor/reflections.yaml` lines 196 / 280 / 340 — `daily-log-review`, `daily-report-and-notify`, `pm-audio-briefing` registry entries — all three still present.
+- `~/Desktop/Valor/reflections.yaml` line 321 — `name: pm-briefings`; line 327 — `callable: "reflections.pm_audio_briefing.run"`. The two dead callable entries (`daily-log-review`, `daily-report-and-notify`) are GONE — already removed by `bee105d5`.
 - 7-module `reflections/pm_audio_briefing/` package — directory exists exactly as the issue describes (`__init__.py`, `builder.py`, `collector.py`, `daily_log.py`, `delivery.py`, `log_audit.py`, `morning.py`).
+- `ui/data/reflections.py:77` — `_PREFIX_EXPANDED_REFLECTIONS: tuple[str, ...] = ("pm-briefings",)` — single-source already done. Comment block at lines 66-76 still mentions the legacy prefix in commentary; needs final scrub.
 
 **Cited sibling issues/PRs re-checked:**
-- #1292 — closed, completed by #1295 (today's PR being followed up).
-- #1295 — merged 2026-05-06 (`feat(#1292): pm-briefings cutover — inline helpers, retire legacy modules`); confirmed it deleted the two callables and left the rest.
+- #1292 — closed, completed by #1295.
+- #1295 — merged 2026-05-06.
+- `bee105d5` (2026-05-08) — non-PR commit on main: dead-callable purge + UI single-source.
 - #1281 — original consolidation, still merged.
 - #1276 — tracking issue for `daily-reflections-unification.md`; still open.
 
-**Commits on main since issue was filed:** None (plan written same day as issue file).
+**Commits on main since issue was filed:** `bee105d5` (2026-05-08) is the relevant one; folded into this plan revision.
 
 **Active plans in `docs/plans/` overlapping this area:** `docs/plans/daily-reflections-unification.md` (status: Ready, tracking #1276). This plan finishes that one and moves it to `completed/`.
 
-**Notes:** Issue accurately reports the orphan-log situation as "may differ on other machines" — verified zero `report_2026-*.md` files on the dev machine today. Cleanup step is a no-op on the dev machine but still needed for any other active bridge machine.
+**Notes:** Q1 (orphan-log step) is mooted by critique — dropped from this revision. Q2 (deploy ordering race) resolved by shipping a re-export shim (see Solution / Risk 5). Q3 (no-slots warning surface) is non-blocking — worker log warning sufficient.
 
 ## Prior Art
 
@@ -101,27 +104,52 @@ This is a mechanical rename + a single-function deletion + a per-machine propaga
 ### Key Elements
 
 - **Package rename**: `reflections/pm_audio_briefing/` → `reflections/pm_briefings/` via `git mv` so history is preserved.
-- **Shim removal**: Delete `_load_slots()` and call sites that pre-process; `run()` reads `(project.get("pm_briefing") or {}).get("slots") or []` directly. If a project has `pm_briefing.enabled=true` but no `slots`, log a warning and skip — no synthesis.
+- **Re-export shim** (deploy-race guard): ship a thin `reflections/pm_audio_briefing.py` module (NOT a package — replaces the directory) that does `from reflections.pm_briefings import *` and re-exports `run`. This makes the vault `callable:` edit independent of code propagation order: regardless of whether the vault edit or the code rename lands first on a given machine, `reflections.pm_audio_briefing.run` and `reflections.pm_briefings.run` both resolve. The shim is removed in a follow-up PR after every machine has pulled this change AND the vault edit (≥1 day window).
+- **Shim removal** (`_load_slots()`): Delete `_load_slots()` and call sites that pre-process; `run()` reads `(project.get("pm_briefing") or {}).get("slots") or []` directly. If a project has `pm_briefing.enabled=true` but no `slots`, log a warning and skip — no synthesis.
 - **Test cleanup**: Delete `tests/unit/reflections/test_pm_briefings_legacy_config_migration.py`. Update imports in remaining test files to `reflections.pm_briefings`.
-- **UI cleanup**: `ui/data/reflections.py` — drop the `_PREFIX_EXPANDED_REFLECTIONS` dual-listing of legacy name, drop the `"pm-briefings": "pm-audio-briefing"` parent-mapping. Single-source `pm-briefings` only.
-- **Doc cleanup**: Delete `docs/features/pm-audio-briefing.md`. Rewrite `docs/features/pm-briefings.md` and `docs/features/reflections.md` to describe only the post-cutover state — no "previously", no "transitioning", no "kept for backward compatibility" framing. Move `docs/plans/daily-reflections-unification.md` to `docs/plans/completed/` with a one-line completion note pointing at this issue + PR #1295.
-- **Vault edit**: `~/Desktop/Valor/reflections.yaml` — REMOVE `daily-log-review` and `daily-report-and-notify` blocks; RENAME `pm-audio-briefing` → `pm-briefings` and update its `callable:` to `reflections.pm_briefings.run`.
-- **Per-machine cleanup**: orphan `logs/reflections/report_2026-*.md` removal added to `/update` skill (one-shot step).
-- **Deploy**: run `/update` on every active bridge machine listed in `projects.json`.
+- **UI cleanup**: `ui/data/reflections.py` — comment block at lines 66-76 still references the legacy prefix in narrative; rewrite it to describe only the post-cutover state. (`_PREFIX_EXPANDED_REFLECTIONS` and the parent-mapping deletion are already done by `bee105d5`.)
+- **Doc cleanup**: Delete `docs/features/pm-audio-briefing.md`. Rewrite `docs/features/pm-briefings.md` and overhaul `docs/features/reflections.md` to describe only the post-cutover state — no "previously", "transitioning", "kept for backward compatibility", or `pm_audio_briefing` import-path mentions. Update `docs/features/README.md` index. Move `docs/plans/daily-reflections-unification.md` to `docs/plans/completed/` with a one-line completion note pointing at this issue + PR #1295.
+- **Vault edit**: `~/Desktop/Valor/reflections.yaml` — update line 327 `callable: "reflections.pm_audio_briefing.run"` → `callable: "reflections.pm_briefings.run"`. (Two dead-callable entries already removed by `bee105d5`; registry `name:` already renamed.)
+- **Deploy**: run `/update` on every active bridge machine listed in `projects.json`. Re-export shim removes the iCloud-vs-code race; no ordering required.
 
 ### Flow
 
-Pre-cutover state → `git mv` package + import sweep → shim deletion → test/UI/doc cleanup → vault edit (dev machine) → /update skill deployment to every other bridge machine → post-cutover steady state.
+Current (post-`bee105d5`) state → `git mv` package + import sweep → add re-export shim `reflections/pm_audio_briefing.py` → shim removal (`_load_slots`) → test/UI-comment/doc cleanup → vault `callable:` edit (dev machine) → `/update` deploy on every other bridge machine → post-cutover steady state. Re-export shim survives one cycle, then is deleted in a follow-up PR.
 
 ### Technical Approach
 
-- **Mechanical sweep**: `git mv reflections/pm_audio_briefing reflections/pm_briefings`, then a single `find … -exec sed -i ''` sweep replacing `pm_audio_briefing` → `pm_briefings` and `pm-audio-briefing` → `pm-briefings` across `reflections/`, `tests/`, `ui/data/reflections.py`, `agent/`, `scripts/`, and any docstrings. Runs in `tests/unit/reflections/` to verify no string survived in test fixture data.
-- **Shim removal**: Replace `slots = _load_slots(project)` (line 415) with `slots = (project.get("pm_briefing") or {}).get("slots") or []`; if empty, log `"pm-briefings: project %s has no slots configured; skipping"` and continue. Delete `_load_slots()` body. Verify `run()` still passes type checks on the simplified path.
-- **Single-source UI**: in `ui/data/reflections.py`, replace `_PREFIX_EXPANDED_REFLECTIONS = ("pm-briefings", "pm-audio-briefing")` with `("pm-briefings",)`. Delete the `"pm-briefings": "pm-audio-briefing"` mapping entry. Delete the comment block discussing the dual-listing rationale (lines 77-86 area).
-- **Vault yaml**: edit `~/Desktop/Valor/reflections.yaml` directly (the symlink target). Remove the two legacy blocks; rename the third block's `name:` field and `callable:` field. Validate by running `python -c "import yaml; yaml.safe_load(open('config/reflections.yaml'))"`.
-- **Doc rewrite**: pm-briefings.md and reflections.md drop transition framing. pm-audio-briefing.md is `git rm`-ed entirely.
-- **Plan move**: `git mv docs/plans/daily-reflections-unification.md docs/plans/completed/` and append a one-line completion note: `> Completed by issue #1306 / PR #<this-PR>. Cutover finished 2026-05-06.`
-- **/update skill addition**: Add a one-shot `rm -f logs/reflections/report_2026-*.md` step gated on `[ -d logs/reflections ]` to `.claude/skills/update/SKILL.md` (or equivalent step file). Idempotent on machines where files don't exist.
+- **Mechanical sweep**: `git mv reflections/pm_audio_briefing reflections/pm_briefings`, then a `grep -rl pm_audio_briefing` enumeration followed by per-file `sed -i ''` replacing `pm_audio_briefing` → `pm_briefings` across `reflections/`, `tests/`, `ui/data/reflections.py`, `agent/`, `scripts/`, and any docstrings. The string `pm-audio-briefing` (hyphenated) appears mainly in archived plans (`docs/plans/critiques/`, `docs/plans/daily-log-overhaul.md`, completed plan dir) and must NOT be rewritten there — those are historical artifacts. Verify with: `grep -r "pm_audio_briefing\|pm-audio-briefing" . --exclude-dir=.git --exclude-dir=.venv --exclude-dir=docs/plans/completed --exclude-dir=docs/plans/critiques --exclude=docs/plans/daily-log-overhaul.md --exclude=docs/plans/pm-briefings-cutover-finish.md` returns only the re-export shim file.
+- **Re-export shim**: create `reflections/pm_audio_briefing.py` (single module, after the `git mv` removed the directory). Body:
+  ```python
+  """Compat re-export shim for issue #1306 deploy window. Remove after every
+  bridge machine has pulled this commit AND the vault has propagated.
+  Tracking: follow-up issue created when this PR merges."""
+  from reflections.pm_briefings import *  # noqa: F401,F403
+  from reflections.pm_briefings import run  # noqa: F401
+  ```
+- **`_load_slots` shim removal**: Replace `slots = _load_slots(project)` (line 415) with `slots = (project.get("pm_briefing") or {}).get("slots") or []`; if empty, log `"pm-briefings: project %s has no slots configured; skipping"` and continue. Delete `_load_slots()` body. Verify `run()` still passes type checks on the simplified path.
+- **UI comment cleanup**: in `ui/data/reflections.py`, the tuple at line 77 is already `("pm-briefings",)` (per `bee105d5`). Rewrite the comment block at lines 66-76 so it describes the post-cutover state without invoking the legacy prefix in commentary.
+- **Vault yaml**: edit `~/Desktop/Valor/reflections.yaml` line 327 directly. Change `callable: "reflections.pm_audio_briefing.run"` → `callable: "reflections.pm_briefings.run"`. Validate by running `python -c "import yaml; yaml.safe_load(open('config/reflections.yaml'))"` and the existing `bridge.config_validation` reflections check.
+- **Doc rewrite (full scope)**: All references must reflect the post-cutover state.
+  - `git rm docs/features/pm-audio-briefing.md` (whole file gone).
+  - Rewrite `docs/features/pm-briefings.md`:
+    - Replace `reflections.pm_audio_briefing.run` (line 4, line 49) with `reflections.pm_briefings.run`.
+    - Drop the table row at line 15 referencing the legacy registry name.
+    - Update the slot-callable table (lines 42-44) to `reflections.pm_briefings.{morning,daily_log,log_audit}`.
+    - Drop `_load_slots()` mention (line 121) — shim deleted.
+    - Drop the `pm-audio-briefing` legacy prefix mention (lines 146, 151).
+    - Drop the "see pm-audio-briefing.md" cross-link (line 201).
+  - Rewrite `docs/features/reflections.md` for ALL six+ live references:
+    - Lines 93, 113 — drop the "Retired" rows for `daily-log-review` and `daily-report-and-notify` (already gone from vault); reference is now historical-only and out of date; either remove rows or move into a "Removed reflections" appendix with a one-line note.
+    - Line 114 — registry table row: rename to `pm-briefings` callable `reflections.pm_briefings.run`. Drop transition-tense text ("registry-renamed from", "package name preserved", "auto-migrated").
+    - Line 146 — `reflections/pm_audio_briefing/{daily_log,log_audit}.py` → `reflections/pm_briefings/{daily_log,log_audit}.py`.
+    - Line 168 — `pm_audio_briefing.delivery` → `pm_briefings.delivery`.
+    - Line 267 — module reference table row: `reflections.pm_audio_briefing` → `reflections.pm_briefings`. Drop "registry entry" qualifier and slot-driven transition framing.
+    - Line 592 — directory tree row: `reflections/pm_audio_briefing/` → `reflections/pm_briefings/`. Drop transition framing.
+  - `docs/features/README.md`:
+    - Line 96 — delete the `[PM Audio Briefing](pm-audio-briefing.md)` row entirely.
+    - Line 97 — rewrite `[PM Briefings (slot-driven)](pm-briefings.md)` to drop the parenthetical transition narrative; describe only the steady-state.
+- **Plan move**: `git mv docs/plans/daily-reflections-unification.md docs/plans/completed/` and append a one-line completion note: `> Completed by issue #1306 / PR #<this-PR>. Cutover finished 2026-05-08.`
 
 ## Failure Path Test Strategy
 
@@ -150,8 +178,15 @@ Pre-cutover state → `git mv` package + import sweep → shim deletion → test
 - [ ] `tests/unit/reflections/test_pm_briefings_slot_match.py` — UPDATE: same import change.
 - [ ] `tests/unit/reflections/test_daily_log_renderer.py` — UPDATE: change `import reflections.pm_audio_briefing.daily_log as dr` → `import reflections.pm_briefings.daily_log as dr`. Drop the comment about the inlining transition.
 - [ ] `tests/unit/reflections/test_daily_log_audio_guard.py` — UPDATE: change `from reflections.pm_audio_briefing.builder import …` → `from reflections.pm_briefings.builder import …`. Rename test `test_regexes_importable_from_pm_audio_briefing` → `test_regexes_importable_from_pm_briefings`.
-- [ ] `tests/integration/reflections/` — UPDATE: any file importing `reflections.pm_audio_briefing.*` updated; mechanical sweep covers them.
+- [ ] `tests/unit/reflections/test_log_audit_sentry.py` — UPDATE: import sweep to `reflections.pm_briefings.log_audit`.
+- [ ] `tests/unit/reflections/test_daily_log_aggregator.py` — UPDATE: import sweep to `reflections.pm_briefings.daily_log`.
+- [ ] `tests/unit/test_ui_reflections_data.py` — UPDATE: any `pm-audio-briefing` literal in test fixtures swapped for `pm-briefings` per ui/data/reflections.py current state; assertions updated.
+- [ ] `tests/unit/test_reflections_package.py` — UPDATE: package-discovery assertions now resolve `reflections.pm_briefings` only; legacy module name drops out.
+- [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE: any registry-entry fixture using `pm_audio_briefing` callable string updated.
+- [ ] `tests/integration/reflections/test_pm_audio_briefing_e2e.py` — UPDATE: rename file to `test_pm_briefings_e2e.py`; update all `reflections.pm_audio_briefing.*` imports → `reflections.pm_briefings.*`. Pre-existing test name like `test_*_pm_audio_briefing_*` renamed to `pm_briefings`.
+- [ ] `tests/integration/reflections/test_pm_briefings_dispatch.py` — UPDATE: import sweep to `reflections.pm_briefings`.
 - [ ] **NEW** `tests/unit/reflections/test_pm_briefings_no_slots_configured.py` — REPLACE the deleted legacy-config-migration test with a test asserting the no-slots warning + clean return path.
+- [ ] **NEW** `tests/unit/reflections/test_pm_audio_briefing_reexport_shim.py` — assert that `reflections.pm_audio_briefing.run is reflections.pm_briefings.run` so the deploy-window shim doesn't silently regress.
 
 ## Rabbit Holes
 
@@ -174,9 +209,9 @@ Pre-cutover state → `git mv` package + import sweep → shim deletion → test
 **Impact:** Shim removal breaks briefings on that machine until operator adds explicit slots.
 **Mitigation:** Verified zero projects in the iCloud-synced `projects.json` carry `pm_briefing.enabled=true` today, and `projects.json` is shared across machines via iCloud. Even if a divergent local copy exists, the new "no slots configured; skipping" warning is non-fatal — scheduler keeps ticking.
 
-### Risk 4: /update skill orphan-log-cleanup step accidentally deletes user data
-**Impact:** A wrong glob deletes legitimate logs.
-**Mitigation:** Pin the glob exactly to `logs/reflections/report_2026-*.md` (literal year prefix). Run `ls` first, then `rm -f`. Idempotent on machines where files don't exist.
+### Risk 4: Deploy-window iCloud-vs-code race ImportError
+**Impact:** Vault `~/Desktop/Valor/reflections.yaml` is iCloud-synced; once edited on the dev machine it propagates to every other bridge machine within seconds — possibly before the operator runs `/update` to pull the code rename. During that window, vault says `callable: reflections.pm_briefings.run` but worker code only has `reflections.pm_audio_briefing`. Each scheduler tick logs an ImportError until `/update` lands.
+**Mitigation:** Ship a re-export shim — a single-file module `reflections/pm_audio_briefing.py` that re-exports `run` (and everything else) from `reflections.pm_briefings`. After this change merges, BOTH import paths resolve regardless of vault state. The shim is removed in a follow-up PR (≥1 day after this PR merges and every machine has run `/update` at least once). A unit test (`test_pm_audio_briefing_reexport_shim.py`) asserts identity of the two `run` callables so the shim cannot silently rot.
 
 ## Race Conditions
 
@@ -192,11 +227,12 @@ No race conditions identified — all changes are static (file rename, code dele
 
 ## Update System
 
-This is half the work. The `/update` skill at `.claude/skills/update/SKILL.md` runs on every bridge machine via `scripts/remote-update.sh`.
+The version-controlled update entry points are `scripts/remote-update.sh` (per-machine driver) and `scripts/update/run.py` (the Python pipeline it invokes). There is no `.claude/skills/update/SKILL.md` in this repo — the prior plan revision targeted a non-existent file.
 
-- **Vault propagation**: vault is iCloud-synced; once the dev-machine `~/Desktop/Valor/reflections.yaml` edit propagates, every other machine has it after iCloud sync. /update should re-read the vault yaml after pull. No script change required for the yaml itself.
-- **Orphan-log cleanup**: add a one-shot step to `/update` that runs `find logs/reflections -maxdepth 1 -name 'report_2026-*.md' -delete` (or equivalent `rm -f`). Idempotent. Document inline that this is a one-time post-cutover step that can stay in /update permanently as a no-op afterward.
-- **Worker restart**: existing /update step already restarts the worker after pulling, which picks up the new package name. No change required.
+- **Vault propagation**: vault is iCloud-synced; once the dev-machine `~/Desktop/Valor/reflections.yaml` edit propagates, every other machine has it within seconds. The existing `env_sync.sync_reflections_yaml()` step (Step 1.66 in `run.py`) already ensures the symlink resolves, and the worker restart at the end of `run.py` re-reads the vault. **No script change is required** for the yaml itself.
+- **Race coverage**: handled in code, not in update — the `reflections/pm_audio_briefing.py` re-export shim ensures the vault edit and the code rename can land in either order on each machine.
+- **Orphan-log cleanup**: dropped from this plan (Q1 mooted by critique).
+- **Worker restart**: existing `/update` step already restarts the worker after pulling, which picks up the new package name. No change required.
 
 ## Agent Integration
 
@@ -222,18 +258,19 @@ No agent integration required — this is a bridge-internal / scheduler-internal
 
 ## Success Criteria
 
-- [ ] `grep -r "pm_audio_briefing\|pm-audio-briefing" .` returns zero hits in tracked files (excluding `docs/plans/completed/` and commit-message references).
+- [ ] `grep -r "pm_audio_briefing\|pm-audio-briefing" . --exclude-dir=.git --exclude-dir=.venv --exclude-dir=docs/plans/completed --exclude-dir=docs/plans/critiques --exclude=docs/plans/daily-log-overhaul.md --exclude=docs/plans/pm-briefings-cutover-finish.md` matches only `reflections/pm_audio_briefing.py` (the re-export shim).
 - [ ] `reflections/pm_audio_briefing/` directory does not exist; `reflections/pm_briefings/` does, with all 7 modules and preserved git history.
+- [ ] `reflections/pm_audio_briefing.py` (single file) exists and re-exports `run` from `reflections.pm_briefings`.
 - [ ] `_load_slots()` not present in `reflections/pm_briefings/__init__.py`; `tests/unit/reflections/test_pm_briefings_legacy_config_migration.py` deleted.
-- [ ] `docs/features/pm-audio-briefing.md` deleted; `docs/features/pm-briefings.md` and `docs/features/reflections.md` describe only the post-cutover state (no "legacy", "previously", "transition" tokens).
+- [ ] `docs/features/pm-audio-briefing.md` deleted; `docs/features/pm-briefings.md`, `docs/features/reflections.md`, `docs/features/README.md` describe only the post-cutover state (no `pm_audio_briefing` import paths, no "previously", "transitioning", "backward compat" framing).
 - [ ] `docs/plans/daily-reflections-unification.md` is in `docs/plans/completed/` with completion note.
-- [ ] On the dev machine: `~/Desktop/Valor/reflections.yaml` has neither `daily-log-review` nor `daily-report-and-notify`; the third entry's `name:` is `pm-briefings` and `callable:` is `reflections.pm_briefings.run`.
+- [ ] On the dev machine: `~/Desktop/Valor/reflections.yaml` `pm-briefings` entry has `callable: "reflections.pm_briefings.run"`.
 - [ ] `python -c "import yaml; yaml.safe_load(open('config/reflections.yaml'))"` exits 0.
-- [ ] `ls logs/reflections/report_2026-*.md 2>/dev/null` returns nothing on the dev machine.
 - [ ] One worker scheduler tick post-deploy produces no `ImportError` in `logs/worker.log`.
 - [ ] `/update` deploy completed on every active bridge machine listed in `projects.json`.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
+- [ ] Follow-up issue filed for "remove `reflections/pm_audio_briefing.py` re-export shim" (≥1 day after merge once every machine has updated).
 
 ## Team Orchestration
 
@@ -257,19 +294,21 @@ builder + validator (Tier 1 only — Small appetite, mechanical work).
 
 ## Step by Step Tasks
 
-### 1. Rename package + sweep imports
+### 1. Rename package + sweep imports + add re-export shim
 - **Task ID**: build-rename
 - **Depends On**: none
 - **Validates**: `tests/unit/reflections/`, `tests/integration/reflections/`
 - **Assigned To**: cutover-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- `git mv reflections/pm_audio_briefing reflections/pm_briefings`
-- Sweep `pm_audio_briefing` → `pm_briefings` and `pm-audio-briefing` → `pm-briefings` across `reflections/`, `tests/`, `ui/data/reflections.py`, any other tracked file. Use `grep -rl pm_audio_briefing` to enumerate, then per-file `sed`.
-- Rename test files `test_pm_audio_briefing_*.py` → `test_pm_briefings_*.py` via `git mv`.
-- Run `pytest tests/unit/reflections/ -x -q` to confirm imports resolve.
+- `git mv reflections/pm_audio_briefing reflections/pm_briefings`.
+- Sweep `pm_audio_briefing` → `pm_briefings` across `reflections/`, `tests/`, `ui/data/reflections.py`, `agent/`, `scripts/`, plus any docstrings. Use `grep -rl pm_audio_briefing` to enumerate, then per-file `sed`. **Do not** sweep `docs/plans/critiques/`, `docs/plans/daily-log-overhaul.md`, `docs/plans/completed/`, or this plan file — those are historical.
+- Rename test files `test_pm_audio_briefing_*.py` → `test_pm_briefings_*.py` (unit + integration) via `git mv`. Update `tests/integration/reflections/test_pm_audio_briefing_e2e.py` → `test_pm_briefings_e2e.py`.
+- Create `reflections/pm_audio_briefing.py` (single-file shim, NOT a package) re-exporting from `reflections.pm_briefings` (see Technical Approach).
+- Add `tests/unit/reflections/test_pm_audio_briefing_reexport_shim.py` asserting `reflections.pm_audio_briefing.run is reflections.pm_briefings.run`.
+- Run `pytest tests/unit/reflections/ tests/integration/reflections/ -x -q` to confirm imports resolve.
 
-### 2. Delete shim and add no-slots warning
+### 2. Delete `_load_slots` shim and add no-slots warning
 - **Task ID**: build-shim-removal
 - **Depends On**: build-rename
 - **Validates**: `tests/unit/reflections/test_pm_briefings_no_slots_configured.py` (new), existing `test_pm_briefings_skip_when_empty.py`
@@ -281,57 +320,46 @@ builder + validator (Tier 1 only — Small appetite, mechanical work).
 - Delete `tests/unit/reflections/test_pm_briefings_legacy_config_migration.py`.
 - Add `tests/unit/reflections/test_pm_briefings_no_slots_configured.py` covering enabled-without-slots warning path.
 
-### 3. Single-source UI plumbing
-- **Task ID**: build-ui-cleanup
+### 3. UI comment-block cleanup
+- **Task ID**: build-ui-comment
 - **Depends On**: build-rename
-- **Validates**: dashboard renders pm-briefings entries (manual: `curl -s localhost:8500/dashboard.json | jq .reflections`)
+- **Validates**: `grep -n pm-audio-briefing ui/data/reflections.py` returns no matches.
 - **Assigned To**: cutover-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `ui/data/reflections.py`: replace `_PREFIX_EXPANDED_REFLECTIONS = ("pm-briefings", "pm-audio-briefing")` with `("pm-briefings",)`.
-- Delete the `"pm-briefings": "pm-audio-briefing"` parent-mapping entry.
-- Delete the comment block (~lines 77-86) explaining dual-listing.
+- In `ui/data/reflections.py` lines 66-76, rewrite the comment block describing `_PREFIX_EXPANDED_REFLECTIONS` so it documents the post-cutover state without invoking the legacy prefix in narrative. (The tuple itself and the parent-mapping deletion are already done by `bee105d5`.)
 
 ### 4. Doc cleanup + plan archival
 - **Task ID**: build-docs
 - **Depends On**: build-rename
-- **Validates**: `grep -rn "previously\|transitioning\|backward compat" docs/features/pm-briefings.md docs/features/reflections.md` returns no matches (excluding code blocks)
+- **Validates**: `grep -rn "pm_audio_briefing\|pm-audio-briefing\|previously\|transitioning\|backward compat" docs/features/pm-briefings.md docs/features/reflections.md docs/features/README.md` returns no matches.
 - **Assigned To**: cutover-builder
 - **Agent Type**: documentarian
 - **Parallel**: true
 - `git rm docs/features/pm-audio-briefing.md`.
-- Rewrite `docs/features/pm-briefings.md` to describe only the post-cutover state.
-- Update `docs/features/reflections.md` to drop transition narrative.
-- Update `docs/features/README.md` index entries if needed.
+- Rewrite `docs/features/pm-briefings.md` per the Technical Approach line list (lines 4, 15, 42-44, 49, 121, 146, 151, 201).
+- Rewrite `docs/features/reflections.md` per the Technical Approach line list (lines 93, 113, 114, 146, 168, 267, 592).
+- Update `docs/features/README.md` lines 96-97 (delete legacy row; rewrite slot-driven row).
 - `git mv docs/plans/daily-reflections-unification.md docs/plans/completed/` and append the one-line completion note.
 
 ### 5. Vault yaml edit (dev machine)
 - **Task ID**: build-vault
-- **Depends On**: build-shim-removal
+- **Depends On**: build-shim-removal, build-rename
 - **Validates**: `python -c "import yaml; yaml.safe_load(open('config/reflections.yaml'))"`
 - **Assigned To**: cutover-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Edit `~/Desktop/Valor/reflections.yaml` directly. Remove `daily-log-review` block. Remove `daily-report-and-notify` block. Rename `pm-audio-briefing` → `pm-briefings`. Update its `callable:` to `reflections.pm_briefings.run`.
-- Validate yaml parses cleanly.
-- This change is on the dev machine only; iCloud sync + /update propagates it to other machines.
+- Edit `~/Desktop/Valor/reflections.yaml` line 327: change `callable: "reflections.pm_audio_briefing.run"` → `callable: "reflections.pm_briefings.run"`. (The dead-callable entries and the `name:` rename were already done by `bee105d5`.)
+- Validate yaml parses cleanly via `python -c "import yaml; yaml.safe_load(open('config/reflections.yaml'))"`.
+- The re-export shim from Task 1 ensures iCloud propagation to other machines is safe even before they run `/update`.
 
-### 6. /update skill orphan-log step
-- **Task ID**: build-update-step
-- **Depends On**: build-vault
-- **Validates**: re-running /update is a no-op on a clean machine
-- **Assigned To**: cutover-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Add a one-shot orphan-log cleanup step to `.claude/skills/update/SKILL.md` (or its step files): `rm -f logs/reflections/report_2026-*.md` gated on directory existence. Idempotent.
-
-### 7. Validate cutover
+### 6. Validate cutover
 - **Task ID**: validate-cutover
-- **Depends On**: build-rename, build-shim-removal, build-ui-cleanup, build-docs, build-vault, build-update-step
+- **Depends On**: build-rename, build-shim-removal, build-ui-comment, build-docs, build-vault
 - **Assigned To**: cutover-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `grep -r "pm_audio_briefing\|pm-audio-briefing" .` excluding `docs/plans/completed/` and `.git/` — assert zero hits.
+- Run `grep -r "pm_audio_briefing\|pm-audio-briefing" . --exclude-dir=.git --exclude-dir=.venv --exclude-dir=docs/plans/completed --exclude-dir=docs/plans/critiques --exclude=docs/plans/daily-log-overhaul.md --exclude=docs/plans/pm-briefings-cutover-finish.md` — assert only the re-export shim file `reflections/pm_audio_briefing.py` matches.
 - Run `pytest tests/unit/reflections/ tests/integration/reflections/ -q` — assert green.
 - Run `python -m ruff check . && python -m ruff format --check .` — assert green.
 - Validate `config/reflections.yaml` yaml.
@@ -339,7 +367,7 @@ builder + validator (Tier 1 only — Small appetite, mechanical work).
 - Confirm dashboard `/dashboard.json` shows `pm-briefings` entries (no `pm-audio-briefing` legacy alias).
 - Report pass/fail.
 
-### 8. Final validation
+### 7. Final validation
 - **Task ID**: validate-all
 - **Depends On**: validate-cutover
 - **Assigned To**: cutover-validator
@@ -353,9 +381,11 @@ builder + validator (Tier 1 only — Small appetite, mechanical work).
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| No legacy refs | `grep -r "pm_audio_briefing\|pm-audio-briefing" . --exclude-dir=.git --exclude-dir=docs/plans/completed --exclude-dir=.venv` | exit code 1 |
+| No legacy refs (excl. shim + historical) | `grep -r "pm_audio_briefing\|pm-audio-briefing" . --exclude-dir=.git --exclude-dir=.venv --exclude-dir=docs/plans/completed --exclude-dir=docs/plans/critiques --exclude=docs/plans/daily-log-overhaul.md --exclude=docs/plans/pm-briefings-cutover-finish.md \| grep -v '^./reflections/pm_audio_briefing.py:'` | exit code 1 |
 | New package present | `test -d reflections/pm_briefings && test -f reflections/pm_briefings/__init__.py` | exit code 0 |
-| Old package gone | `test ! -d reflections/pm_audio_briefing` | exit code 0 |
+| Old package gone (directory) | `test ! -d reflections/pm_audio_briefing` | exit code 0 |
+| Re-export shim present | `test -f reflections/pm_audio_briefing.py` | exit code 0 |
+| Shim re-exports run | `python -c "import reflections.pm_audio_briefing as a, reflections.pm_briefings as b; assert a.run is b.run"` | exit code 0 |
 | Shim deleted | `grep -n "_load_slots" reflections/pm_briefings/__init__.py` | exit code 1 |
 | Legacy doc gone | `test ! -f docs/features/pm-audio-briefing.md` | exit code 0 |
 | Plan archived | `test -f docs/plans/completed/daily-reflections-unification.md` | exit code 0 |
@@ -373,6 +403,8 @@ builder + validator (Tier 1 only — Small appetite, mechanical work).
 
 ## Open Questions
 
-1. **/update orphan-log step persistence**: should the `rm -f logs/reflections/report_2026-*.md` step stay in `/update` permanently as a defensive no-op, or be a one-time cleanup we delete after every machine has been updated once? My default is "keep permanently as no-op" because it's safer than tracking which machines ran it; confirm.
-2. **Worker restart timing**: vault edit + iCloud sync + /update on each machine is not atomic. During the propagation window, some machines run new vault yaml against old code (pre-rename) and vice versa. Acceptable to accept a few-minute window of ImportError on machines that pull the vault edit before they pull the code, or do we coordinate via deploy ordering (code first via git, vault edit second)?
-3. **`pm_briefing.enabled=true` projects**: confirmed zero today. If you intend to opt projects in soon, do you want the no-slots warning surfaced in the dashboard / Telegram alert, or is a worker log warning sufficient?
+All resolved by critique cycle 2 (2026-05-08):
+
+1. ~~/update orphan-log step persistence~~ — **MOOTED.** Critique dropped the orphan-log task entirely. Bridge machines may or may not have these files; not worth a `/update` step. If they accumulate they can be hand-cleaned per-machine.
+2. ~~Worker restart timing / vault-vs-code race~~ — **RESOLVED via re-export shim.** `reflections/pm_audio_briefing.py` re-exports `run` from `reflections.pm_briefings`, so vault and code can land in any order on each machine without ImportError. Shim is removed in a follow-up PR ≥1 day after merge.
+3. ~~No-slots warning surface~~ — **NOT BLOCKING.** Worker log warning is sufficient for now; a dashboard / Telegram surface is a separate decision once any project actually opts in.

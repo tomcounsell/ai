@@ -1,4 +1,4 @@
-"""Unit tests for reflections/pm_audio_briefing/collector.py.
+"""Unit tests for reflections/pm_briefings/collector.py.
 
 Covers:
 - The 3 v1 collectors only fire for known categories (unknown logs+skips)
@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from reflections.pm_audio_briefing import collector
+from reflections.pm_briefings import collector
 
 pytestmark = [pytest.mark.unit]
 

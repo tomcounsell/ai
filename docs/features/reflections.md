@@ -1,6 +1,6 @@
 # Reflections: Autonomous Maintenance System
 
-The reflections system is a unified framework for all recurring non-issue work. A single lightweight scheduler (`agent/reflection_scheduler.py`) reads from a declarative registry (`config/reflections.yaml`), tracks state in Redis, and executes reflections on schedule. This replaces the previously scattered scheduling mechanisms (launchd plists, asyncio loops, startup hooks).
+The reflections system is a unified framework for all recurring non-issue work. A single lightweight scheduler (`agent/reflection_scheduler.py`) reads from a declarative registry (`config/reflections.yaml`), tracks state in Redis, and executes reflections on schedule.
 
 ## Unified Reflection Scheduler
 
@@ -90,7 +90,6 @@ each update run. This ensures the scheduler always reads the vault version.
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `daily-log-review` | `reflections.auditing.run_log_review` *(deleted)* | **Retired** by issue #1292. The `pm-briefings` `log_audit` slot is now canonical; the `run_log_review` callable was deleted and its helpers (`_collect_sentry_counts`, bounded log readers) were inlined into `reflections.pm_audio_briefing.log_audit`. Vault registry entry should be flipped to `enabled: false` — see [pm-briefings.md](pm-briefings.md). |
 | `docs-auditor` | `reflections.docs_auditor.run_docs_auditor` | Unified docs auditor: rotates least-recently-audited primary doc, applies auto-fixes, opens `docs-audit/*` PR (see [Docs Auditor](docs-auditor.md)) |
 | `do-docs-branch-sweeper` | `reflections.docs_auditor.run_docs_branch_sweeper` | Delete stale `docs-audit/*` branches >7d with no PR; close open `docs-audit/*` PRs >14d |
 | `skills-audit` | `reflections.auditing.run_skills_audit` | Validate all SKILL.md files (see [Skills Audit](do-skills-audit.md)) |
@@ -110,8 +109,7 @@ each update run. This ensures the scheduler always reads the vault version.
 |------|----------|-------------|
 | `session-intelligence` | `reflections.session_intelligence.run` | Session Analysis → LLM Reflection → Bug Issue Filing **(disabled — calls gh CLI and spawns agent)** |
 | `behavioral-learning` | `reflections.behavioral_learning.run` | Episode Cycle-Close → Pattern Crystallization |
-| `daily-report-and-notify` | `reflections.daily_report.run` *(deleted)* | **Retired** by issue #1292. The `pm-briefings` `daily_log` slot is now canonical; the daily-report module (`reflections/daily_report.py`) was deleted and its aggregator/renderer/vault-writer helpers were inlined into `reflections.pm_audio_briefing.daily_log`. Vault registry entry should be flipped to `enabled: false` — see [pm-briefings.md](pm-briefings.md). |
-| `pm-briefings` | `reflections.pm_audio_briefing.run` | Slot-driven PM briefings dispatcher (registry-renamed from `pm-audio-briefing` per issue #1292; package name `pm_audio_briefing/` preserved because the import path is referenced widely). Each project declares slots (`morning`, `daily_log`, `log_audit`) in `projects.json`; legacy single-morning shape is auto-migrated. See [pm-briefings.md](pm-briefings.md). |
+| `pm-briefings` | `reflections.pm_briefings.run` | Slot-driven PM briefings dispatcher. Each project declares slots (`morning`, `daily_log`, `log_audit`) in `projects.json`. See [pm-briefings.md](pm-briefings.md). |
 
 **Memory management:**
 
@@ -121,17 +119,15 @@ each update run. This ensures the scheduler always reads the vault version.
 | `memory-quality-audit` | `reflections.memory_management.run_memory_quality_audit` | 4-layer audit: baseline quality flags (Layer 0) + deterministic supersede of refusal/JSON-shrapnel (Layer 1) + heuristic anomaly detection (Layer 2) + Gemma classification fail-soft (Layer 3); files investigation issues for Layer-2/3 candidates |
 | `embedding-orphan-sweep` | `reflections.memory_management.run_embedding_orphan_sweep` | Reconcile Memory `.npy` embedding files against live records via Popoto `garbage_collect` + `sweep_stale_tempfiles` (dry-run default; opt-in via `EMBEDDING_ORPHAN_SWEEP_APPLY=true`; requires popoto >= 1.6.0) |
 
-### Daily PM-facing slots (consolidated)
+### Daily PM-facing slots
 
-The two daily reflections that used to run separately — `daily-log-review`
-and `daily-report-and-notify` — are now slot types under the single
-`pm-briefings` dispatcher (issue #1276 consolidation; issue #1292 cutover).
-They answer different questions and ship via different output channels but
-live in one code path.
+Two daily PM-facing slot types ship under the single `pm-briefings`
+dispatcher. They answer different questions and ship via different output
+channels but live in one code path.
 
 | Slot type | Surface scanned | Output channel | Consumer |
 |-----------|-----------------|----------------|----------|
-| `log_audit` | Server logs (`logs/bridge.log`, etc.) per project | Telegram text summary to the slot's `target_groups` (legacy default was `Dev: Valor`) | Engineer triage of error-rate spikes / regressions |
+| `log_audit` | Server logs (`logs/bridge.log`, etc.) per project | Telegram text summary to the slot's `target_groups` | Engineer triage of error-rate spikes / regressions |
 | `daily_log` | System activity (commits, PRs, issues, sessions, Telegram decisions, memories, crashes, reflection runs) | Markdown day log written to `~/work-vault/AI Valor Engels System/daily-logs/{date}.md` (gated by per-slot `vault_writer: true`) plus a `~70-word` audio brief to the slot's first configured PM Telegram chat | Knowledge search ("what happened on day X?") + spoken executive update |
 
 **Why both exist:** they answer different questions. `log_audit` answers
@@ -142,10 +138,8 @@ iCloud-synced work vault. The vault file is auto-indexed by
 `tools/valor_ingest.py` so the agent's knowledge base picks it up without
 extra wiring.
 
-Both slots' helpers now live in
-`reflections/pm_audio_briefing/{daily_log,log_audit}.py`. The legacy
-`reflections/daily_report.py` module and `reflections.auditing.run_log_review`
-function were deleted in #1292.
+Both slots' helpers live in
+`reflections/pm_briefings/{daily_log,log_audit}.py`.
 
 **daily_log slot pipeline (per project, gated by slot config):**
 
@@ -165,7 +159,7 @@ function were deleted in #1292.
    `builder.build()` raw_signals shape. Pass A (LLM) + Pass B (word-count
    cut) + Layer 2/3 number-guard regex are applied uniformly via the
    builder pipeline shared with the `morning` slot.
-5. The dispatcher in `pm_audio_briefing.delivery` synthesizes the audio via
+5. The dispatcher in `pm_briefings.delivery` synthesizes the audio via
    `tools.tts.synthesize()` (Kokoro local primary, OpenAI tts-1 fallback)
    and RPUSHes the voice-note payload to `telegram:outbox:{session_id}`.
    On TTS failure, no plaintext fallback is sent — the vault file is
@@ -264,7 +258,7 @@ The package modules:
 | `reflections.task_management` | 2 task management callables (task check, principal staleness) |
 | `reflections.session_intelligence` | Pipeline: session analysis → LLM reflection → bug issue filing |
 | `reflections.behavioral_learning` | Pipeline: episode cycle-close → pattern crystallization |
-| `reflections.pm_audio_briefing` | Slot-driven dispatcher (`pm-briefings` registry entry): `morning`, `daily_log`, `log_audit` per (project × slot) — see [pm-briefings.md](pm-briefings.md) |
+| `reflections.pm_briefings` | Slot-driven `pm-briefings` dispatcher: `morning`, `daily_log`, `log_audit` per (project × slot) — see [pm-briefings.md](pm-briefings.md) |
 | `reflections.memory_management` | 3 memory management callables (decay prune, quality audit, knowledge reindex) |
 
 ## State & Persistence
@@ -585,17 +579,17 @@ The reflection scheduler starts automatically as part of the standalone worker p
 | `reflections/__init__.py` | Package: all callables return `{"status", "findings", "summary"}` |
 | `reflections/utils.py` | Shared helpers: `load_local_projects()`, `is_ignored()`, `run_llm_reflection()`, `extract_structured_errors()` |
 | `reflections/maintenance.py` | 6 maintenance callables |
-| `reflections/auditing.py` | 5 auditing callables + PR review audit helpers (`run_log_review` retired in #1292) |
+| `reflections/auditing.py` | 5 auditing callables + PR review audit helpers |
 | `reflections/task_management.py` | 2 task management callables |
 | `reflections/session_intelligence.py` | Session analysis → LLM reflection → bug issue pipeline |
 | `reflections/behavioral_learning.py` | Episode cycle-close → pattern crystallization pipeline |
-| `reflections/pm_audio_briefing/` | Slot-driven `pm-briefings` dispatcher: `morning`, `daily_log`, `log_audit` slot modules + builder + delivery |
+| `reflections/pm_briefings/` | Slot-driven `pm-briefings` dispatcher: `morning`, `daily_log`, `log_audit` slot modules + builder + delivery |
 | `reflections/memory_management.py` | 3 memory management callables |
 | `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
 | `models/reflection_ignore.py` | ReflectionIgnore: auto-fix suppression with TTL-based expiry |
 | `models/pr_review_audit.py` | PRReviewAudit: PR review finding deduplication |
 | `models/reflections.py` | Re-export shim: `ReflectionIgnore`, `PRReviewAudit` |
-| `scripts/reflections_report.py` | GitHub issue creation module (legacy; was used by retired `daily_report`) |
+| `scripts/reflections_report.py` | GitHub issue creation module (legacy; not currently wired into any active reflection) |
 | `scripts/update/env_sync.py` | `sync_reflections_yaml()`: creates vault symlink on update |
 | `~/Desktop/Valor/projects.json` | Multi-repo project registry |
 | `~/Desktop/Valor/reflections.yaml` | Vault copy of the registry (canonical source) |
