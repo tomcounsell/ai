@@ -55,7 +55,7 @@ the checkout, diff, or any Read of PR files.
    | `mergeable == "CONFLICTING"` OR `mergeStateStatus == "DIRTY"` | Emit `BLOCKED_ON_CONFLICT` verdict. Post a comment that explicitly cites the `mergeStateStatus` value and asks the author to rebase/resolve. Skip checkout, diff reading, and code review. | `BLOCKED_ON_CONFLICT` | NO |
    | `mergeStateStatus == "BEHIND"` | Note it in the preflight log — the branch is behind base but has no conflicts. Proceed with full code review; the branch will be mergeable once updated. | (informational) | YES |
    | `mergeable == "MERGEABLE"` AND `mergeStateStatus IN ("CLEAN", "HAS_HOOKS", "UNSTABLE", "BLOCKED")` | Normal path — proceed with checkout and full code review. `BLOCKED` here is a GitHub status for missing-required-review/check, which IS what this review is supposed to produce. `UNSTABLE` means non-required checks failed; surface in findings but do not short-circuit. | (informational) | YES |
-   | `mergeable == "UNKNOWN"` after retry | Log a warning and proceed conservatively — GitHub may not have finished computing. Do not emit a short-circuit verdict purely on UNKNOWN. | (informational) | YES |
+   | `mergeable == "UNKNOWN"` after retry | Treat conservatively as `CONFLICTING`: emit `BLOCKED_ON_CONFLICT` verdict, post `gh pr comment` only (§2b template), and stop. Do NOT proceed to checkout or code review when GitHub cannot confirm mergeability. | `BLOCKED_ON_CONFLICT` | NO |
 
 4. **Short-circuit verdict emission (if preflight fails):**
 

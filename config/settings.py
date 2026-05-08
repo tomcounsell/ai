@@ -272,6 +272,16 @@ class Settings(BaseSettings):
     )
     debug: bool = Field(default=False, description="Enable debug mode")
 
+    # SDLC bot identity for /do-pr-review pipeline-driven reviews (issue #1300).
+    # PAT for the bot account (e.g. yudame-sdlc-bot) that posts reviews under a
+    # non-human identity. When set, sdk_client.py forwards this into the agent env
+    # so the skill uses GH_TOKEN=$SDLC_AGENT_GH_TOKEN for the review-post subprocess.
+    # See docs/features/do-pr-review-bot-identity.md for provisioning instructions.
+    sdlc_agent_gh_token: str | None = Field(
+        default=None,
+        description="GitHub PAT for SDLC bot account used by /do-pr-review in pipeline context",
+    )
+
     # Component settings
     api: APISettings = Field(default_factory=APISettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)

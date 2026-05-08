@@ -1425,6 +1425,19 @@ class ValorAgent:
             sdlc_env = _extract_sdlc_env_vars(session_id, self.gh_repo)
             env.update(sdlc_env)
 
+        # /do-pr-review bot identity injection (issue #1300).
+        # When running in SDLC pipeline context (PM/Teammate sessions spawning
+        # review tasks), inject CLAUDE_AGENT_REVIEW=1 and forward SDLC_AGENT_GH_TOKEN
+        # so the skill posts reviews under the bot identity rather than the operator's
+        # gh credential. SDLC_AGENT_GH_TOKEN is read from the vault .env at startup;
+        # see .env.example and docs/features/do-pr-review-bot-identity.md for
+        # provisioning instructions.
+        if self.session_type in (SessionType.PM, SessionType.TEAMMATE):
+            env["CLAUDE_AGENT_REVIEW"] = "1"
+            sdlc_agent_gh_token = os.environ.get("SDLC_AGENT_GH_TOKEN", "")
+            if sdlc_agent_gh_token:
+                env["SDLC_AGENT_GH_TOKEN"] = sdlc_agent_gh_token
+
         system_prompt = self.system_prompt
 
         # Only continue a conversation if we have evidence of a prior session.
