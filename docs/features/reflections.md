@@ -90,7 +90,6 @@ each update run. This ensures the scheduler always reads the vault version.
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `daily-log-review` | `reflections.auditing.run_log_review` *(deleted)* | **Retired** by issue #1292. The `pm-briefings` `log_audit` slot is now canonical; the `run_log_review` callable was deleted and its helpers (`_collect_sentry_counts`, bounded log readers) were inlined into `reflections.pm_audio_briefing.log_audit`. Vault registry entry should be flipped to `enabled: false` — see [pm-briefings.md](pm-briefings.md). |
 | `docs-auditor` | `reflections.docs_auditor.run_docs_auditor` | Unified docs auditor: rotates least-recently-audited primary doc, applies auto-fixes, opens `docs-audit/*` PR (see [Docs Auditor](docs-auditor.md)) |
 | `do-docs-branch-sweeper` | `reflections.docs_auditor.run_docs_branch_sweeper` | Delete stale `docs-audit/*` branches >7d with no PR; close open `docs-audit/*` PRs >14d |
 | `skills-audit` | `reflections.auditing.run_skills_audit` | Validate all SKILL.md files (see [Skills Audit](do-skills-audit.md)) |
@@ -110,8 +109,7 @@ each update run. This ensures the scheduler always reads the vault version.
 |------|----------|-------------|
 | `session-intelligence` | `reflections.session_intelligence.run` | Session Analysis → LLM Reflection → Bug Issue Filing **(disabled — calls gh CLI and spawns agent)** |
 | `behavioral-learning` | `reflections.behavioral_learning.run` | Episode Cycle-Close → Pattern Crystallization |
-| `daily-report-and-notify` | `reflections.daily_report.run` *(deleted)* | **Retired** by issue #1292. The `pm-briefings` `daily_log` slot is now canonical; the daily-report module (`reflections/daily_report.py`) was deleted and its aggregator/renderer/vault-writer helpers were inlined into `reflections.pm_audio_briefing.daily_log`. Vault registry entry should be flipped to `enabled: false` — see [pm-briefings.md](pm-briefings.md). |
-| `pm-briefings` | `reflections.pm_audio_briefing.run` | Slot-driven PM briefings dispatcher (registry-renamed from `pm-audio-briefing` per issue #1292; package name `pm_audio_briefing/` preserved because the import path is referenced widely). Each project declares slots (`morning`, `daily_log`, `log_audit`) in `projects.json`; legacy single-morning shape is auto-migrated. See [pm-briefings.md](pm-briefings.md). |
+| `pm-briefings` | `reflections.pm_briefings.run` | Slot-driven PM briefings dispatcher. Each project declares slots (`morning`, `daily_log`, `log_audit`) in `projects.json`. See [pm-briefings.md](pm-briefings.md). |
 
 **Memory management:**
 
@@ -142,10 +140,8 @@ iCloud-synced work vault. The vault file is auto-indexed by
 `tools/valor_ingest.py` so the agent's knowledge base picks it up without
 extra wiring.
 
-Both slots' helpers now live in
-`reflections/pm_audio_briefing/{daily_log,log_audit}.py`. The legacy
-`reflections/daily_report.py` module and `reflections.auditing.run_log_review`
-function were deleted in #1292.
+Both slots' helpers live in
+`reflections/pm_briefings/{daily_log,log_audit}.py`.
 
 **daily_log slot pipeline (per project, gated by slot config):**
 
@@ -165,7 +161,7 @@ function were deleted in #1292.
    `builder.build()` raw_signals shape. Pass A (LLM) + Pass B (word-count
    cut) + Layer 2/3 number-guard regex are applied uniformly via the
    builder pipeline shared with the `morning` slot.
-5. The dispatcher in `pm_audio_briefing.delivery` synthesizes the audio via
+5. The dispatcher in `pm_briefings.delivery` synthesizes the audio via
    `tools.tts.synthesize()` (Kokoro local primary, OpenAI tts-1 fallback)
    and RPUSHes the voice-note payload to `telegram:outbox:{session_id}`.
    On TTS failure, no plaintext fallback is sent — the vault file is
@@ -264,7 +260,7 @@ The package modules:
 | `reflections.task_management` | 2 task management callables (task check, principal staleness) |
 | `reflections.session_intelligence` | Pipeline: session analysis → LLM reflection → bug issue filing |
 | `reflections.behavioral_learning` | Pipeline: episode cycle-close → pattern crystallization |
-| `reflections.pm_audio_briefing` | Slot-driven dispatcher (`pm-briefings` registry entry): `morning`, `daily_log`, `log_audit` per (project × slot) — see [pm-briefings.md](pm-briefings.md) |
+| `reflections.pm_briefings` | Slot-driven dispatcher (`pm-briefings` registry entry): `morning`, `daily_log`, `log_audit` per (project × slot) — see [pm-briefings.md](pm-briefings.md) |
 | `reflections.memory_management` | 3 memory management callables (decay prune, quality audit, knowledge reindex) |
 
 ## State & Persistence
@@ -589,7 +585,7 @@ The reflection scheduler starts automatically as part of the standalone worker p
 | `reflections/task_management.py` | 2 task management callables |
 | `reflections/session_intelligence.py` | Session analysis → LLM reflection → bug issue pipeline |
 | `reflections/behavioral_learning.py` | Episode cycle-close → pattern crystallization pipeline |
-| `reflections/pm_audio_briefing/` | Slot-driven `pm-briefings` dispatcher: `morning`, `daily_log`, `log_audit` slot modules + builder + delivery |
+| `reflections/pm_briefings/` | Slot-driven `pm-briefings` dispatcher: `morning`, `daily_log`, `log_audit` slot modules + builder + delivery |
 | `reflections/memory_management.py` | 3 memory management callables |
 | `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
 | `models/reflection_ignore.py` | ReflectionIgnore: auto-fix suppression with TTL-based expiry |

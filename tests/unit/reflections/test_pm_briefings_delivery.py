@@ -1,4 +1,4 @@
-"""Unit tests for reflections/pm_audio_briefing/delivery.py.
+"""Unit tests for reflections/pm_briefings/delivery.py.
 
 Covers:
 - Happy path: synthesize succeeds, voice-note enqueued before written followup
@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from reflections.pm_audio_briefing import delivery
+from reflections.pm_briefings import delivery
 
 pytestmark = [pytest.mark.unit]
 

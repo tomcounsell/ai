@@ -1,5 +1,5 @@
 """
-reflections/pm_audio_briefing/morning.py — Morning brief slot.
+reflections/pm_briefings/morning.py — Morning brief slot.
 
 Wraps the existing collector + builder + delivery scaffolding so the slot
 dispatch loop in ``__init__.py`` can call a uniform interface across all
@@ -20,9 +20,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from reflections.pm_audio_briefing import builder, collector
+from reflections.pm_briefings import builder, collector
 
-logger = logging.getLogger("reflections.pm_audio_briefing.morning")
+logger = logging.getLogger("reflections.pm_briefings.morning")
 
 
 SLOT_TYPE = "morning"

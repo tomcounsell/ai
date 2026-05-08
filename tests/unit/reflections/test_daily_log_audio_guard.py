@@ -1,7 +1,7 @@
 """Unit tests for the audio guard regex (#1263).
 
 Verifies that the Layer 2 (prefixed) and Layer 3 (bare 3+ digit) regexes
-imported from reflections.pm_audio_briefing.builder catch the leak patterns
+imported from reflections.pm_briefings.builder catch the leak patterns
 the daily-log audio brief is most likely to produce: "PR 1263",
 "issue #1263", "10 commits". The exempted-units list (ms, %, requests, etc.)
 must continue to pass.
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from reflections.pm_audio_briefing.builder import (
+from reflections.pm_briefings.builder import (
     _NUMBERS_BARE_RE,
     _NUMBERS_PREFIXED_RE,
     BriefingNumbersDetectedError,
@@ -87,7 +87,7 @@ def test_audio_guard_blocks_pr_with_decimal():
 # --- Direct regex sanity ----------------------------------------------------
 
 
-def test_regexes_importable_from_pm_audio_briefing():
+def test_regexes_importable_from_pm_briefings():
     """The plan requires direct import of the named regexes from builder.py."""
     assert _NUMBERS_PREFIXED_RE is not None
     assert _NUMBERS_BARE_RE is not None

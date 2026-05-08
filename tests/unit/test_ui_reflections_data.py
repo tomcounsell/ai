@@ -19,13 +19,13 @@ class TestReflectionsDataLayer:
         assert len(result) > 0
 
     def test_prefix_expanded_reflections_tuple_is_wired(self):
-        """The pm-audio-briefing prefix is registered for per-project expansion."""
+        """The pm-briefings prefix is registered for per-project expansion."""
         from ui.data.reflections import _PREFIX_EXPANDED_REFLECTIONS
 
-        assert "pm-audio-briefing" in _PREFIX_EXPANDED_REFLECTIONS
+        assert "pm-briefings" in _PREFIX_EXPANDED_REFLECTIONS
 
     def test_prefix_merge_renders_per_project_rows(self):
-        """When Reflection records exist for `pm-audio-briefing-<key>`, the
+        """When Reflection records exist for `pm-briefings-<key>`, the
         helper appends per-project rows that reuse the parent's group."""
         from ui.data import reflections as reflections_module
 
@@ -34,14 +34,14 @@ class TestReflectionsDataLayer:
             "timeout": 1500,
             "priority": "low",
             "execution_type": "function",
-            "callable": "reflections.pm_audio_briefing.run",
+            "callable": "reflections.pm_briefings.run",
             "enabled": True,
             "description": "Daily PM voice briefing",
         }
 
         # Build mock states (post-#1273: no run_history field).
         state_parent = MagicMock()
-        state_parent.name = "pm-audio-briefing"
+        state_parent.name = "pm-briefings"
         state_parent.ran_at = 1_700_000_000.0
         state_parent.run_count = 1
         state_parent.last_status = "success"
@@ -53,7 +53,7 @@ class TestReflectionsDataLayer:
         state_parent.output_sink = "log_only"
 
         state_a = MagicMock()
-        state_a.name = "pm-audio-briefing-psyoptimal"
+        state_a.name = "pm-briefings-psyoptimal"
         state_a.ran_at = 1_700_000_100.0
         state_a.run_count = 1
         state_a.last_status = "success"
@@ -65,7 +65,7 @@ class TestReflectionsDataLayer:
         state_a.output_sink = "log_only"
 
         state_b = MagicMock()
-        state_b.name = "pm-audio-briefing-otherproj"
+        state_b.name = "pm-briefings-otherproj"
         state_b.ran_at = 1_700_000_200.0
         state_b.run_count = 1
         state_b.last_status = "success"
@@ -80,7 +80,7 @@ class TestReflectionsDataLayer:
             patch.object(
                 reflections_module,
                 "_get_registry_map",
-                return_value={"pm-audio-briefing": parent_entry},
+                return_value={"pm-briefings": parent_entry},
             ),
             patch(
                 "models.reflection.Reflection.get_all_states",
@@ -91,13 +91,13 @@ class TestReflectionsDataLayer:
             rows = reflections_module.get_all_reflections()
 
         names = [r["name"] for r in rows]
-        assert "pm-audio-briefing" in names  # parent registry entry
-        assert "pm-audio-briefing-psyoptimal" in names  # per-project row
-        assert "pm-audio-briefing-otherproj" in names  # per-project row
+        assert "pm-briefings" in names  # parent registry entry
+        assert "pm-briefings-psyoptimal" in names  # per-project row
+        assert "pm-briefings-otherproj" in names  # per-project row
 
         # Per-project rows reuse the parent's group classification
-        per_proj_row = next(r for r in rows if r["name"] == "pm-audio-briefing-psyoptimal")
-        parent_row = next(r for r in rows if r["name"] == "pm-audio-briefing")
+        per_proj_row = next(r for r in rows if r["name"] == "pm-briefings-psyoptimal")
+        parent_row = next(r for r in rows if r["name"] == "pm-briefings")
         assert per_proj_row["group"] == parent_row["group"]
 
     def test_prefix_merge_handles_zero_per_project_records(self):
@@ -108,13 +108,13 @@ class TestReflectionsDataLayer:
             "interval": 300,
             "priority": "low",
             "execution_type": "function",
-            "callable": "reflections.pm_audio_briefing.run",
+            "callable": "reflections.pm_briefings.run",
             "enabled": True,
             "description": "Daily PM voice briefing",
         }
 
         state_parent = MagicMock()
-        state_parent.name = "pm-audio-briefing"
+        state_parent.name = "pm-briefings"
         state_parent.ran_at = 1_700_000_000.0
         state_parent.run_count = 1
         state_parent.last_status = "success"
@@ -129,7 +129,7 @@ class TestReflectionsDataLayer:
             patch.object(
                 reflections_module,
                 "_get_registry_map",
-                return_value={"pm-audio-briefing": parent_entry},
+                return_value={"pm-briefings": parent_entry},
             ),
             patch("models.reflection.Reflection.get_all_states", return_value=[state_parent]),
             patch.object(reflections_module, "_has_run_history", return_value=False),
@@ -137,9 +137,9 @@ class TestReflectionsDataLayer:
             rows = reflections_module.get_all_reflections()
 
         names = [r["name"] for r in rows]
-        assert "pm-audio-briefing" in names
+        assert "pm-briefings" in names
         # No per-project rows because only the parent record exists
-        assert len([n for n in names if n.startswith("pm-audio-briefing-")]) == 0
+        assert len([n for n in names if n.startswith("pm-briefings-")]) == 0
 
     def test_reflection_entry_has_required_fields(self):
         from ui.data.reflections import get_all_reflections

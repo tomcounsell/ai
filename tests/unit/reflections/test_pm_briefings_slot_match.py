@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from reflections import pm_audio_briefing as briefing
+from reflections import pm_briefings as briefing
 
 pytestmark = [pytest.mark.unit]
 

@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from reflections import pm_audio_briefing as briefing
+from reflections import pm_briefings as briefing
 
 pytestmark = [pytest.mark.unit]
 
@@ -54,11 +54,11 @@ def test_empty_build_returns_noop():
         patch.object(briefing, "_release_lock") as _release,
         patch.dict(briefing._SLOT_BUILDERS, {"morning": MagicMock(return_value=("", "", {}))}),
         patch(
-            "reflections.pm_audio_briefing.delivery._get_redis_connection",
+            "reflections.pm_briefings.delivery._get_redis_connection",
             return_value=MagicMock(),
         ),
         patch(
-            "reflections.pm_audio_briefing.delivery.send",
+            "reflections.pm_briefings.delivery.send",
         ) as _send,
         patch.object(Reflection, "get_or_create") as _gc,
     ):
@@ -92,7 +92,7 @@ def test_log_audit_empty_findings_returns_noop():
         patch.object(briefing, "_try_acquire_lock", return_value=True),
         patch.dict(briefing._SLOT_BUILDERS, {"log_audit": MagicMock(return_value=("", "", {}))}),
         patch(
-            "reflections.pm_audio_briefing.delivery._get_redis_connection",
+            "reflections.pm_briefings.delivery._get_redis_connection",
             return_value=MagicMock(),
         ),
         patch.object(Reflection, "get_or_create") as _gc,

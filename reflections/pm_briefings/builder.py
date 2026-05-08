@@ -1,5 +1,5 @@
 """
-reflections/pm_audio_briefing/builder.py — Brief construction (Pass A + Pass B).
+reflections/pm_briefings/builder.py — Brief construction (Pass A + Pass B).
 
 Implements the deterministic phases of /do-debrief: Categorize -> Pass A draft
 (LLM via direct anthropic.Anthropic() call) -> Pass B word-count cut -> hard
@@ -24,7 +24,7 @@ import os
 import re
 from typing import Any
 
-logger = logging.getLogger("reflections.pm_audio_briefing.builder")
+logger = logging.getLogger("reflections.pm_briefings.builder")
 
 
 class BriefingNumbersDetectedError(RuntimeError):

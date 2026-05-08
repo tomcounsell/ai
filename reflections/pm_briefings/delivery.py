@@ -1,5 +1,5 @@
 """
-reflections/pm_audio_briefing/delivery.py — Voice-note + written-followup
+reflections/pm_briefings/delivery.py — Voice-note + written-followup
 delivery via direct Python imports (no subprocess).
 
 Synthesizes audio via tools.tts.synthesize() and queues the voice-note via
@@ -25,7 +25,7 @@ import tempfile
 import time
 from typing import Any
 
-logger = logging.getLogger("reflections.pm_audio_briefing.delivery")
+logger = logging.getLogger("reflections.pm_briefings.delivery")
 
 
 class BriefingTtsFailedError(RuntimeError):
@@ -140,7 +140,7 @@ def send(
         voice: Optional voice override (passed straight to tts.synthesize()).
             None means "let the synthesizer pick its default".
         dry_run: If True, skip TTS + enqueue; instead, write the transcript
-            and follow-up to logs/reflections/pm-audio-briefing-<slug>-<date>.txt
+            and follow-up to logs/reflections/pm-briefings-<slug>-<date>.txt
             for inspection. Used by DRY_RUN=1 testing.
 
     Returns:
@@ -249,10 +249,10 @@ def _dry_run_dump(transcript: str, written_followup: str, project: dict) -> dict
 
     log_dir = Path(__file__).parent.parent.parent / "logs" / "reflections"
     log_dir.mkdir(parents=True, exist_ok=True)
-    out_path = log_dir / f"pm-audio-briefing-{slug}-{today}.txt"
+    out_path = log_dir / f"pm-briefings-{slug}-{today}.txt"
 
     body = (
-        f"# pm-audio-briefing dry-run for {slug} on {today}\n\n"
+        f"# pm-briefings dry-run for {slug} on {today}\n\n"
         "## Audio transcript\n\n"
         f"{transcript}\n\n"
         "## Written follow-up\n\n"
