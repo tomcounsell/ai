@@ -28,7 +28,7 @@ GROUP_DESCRIPTIONS: dict[str, str] = {
     GROUP_AGENTS: "Liveness, throttling, circuit health, and recovery for agent sessions",
     GROUP_HOUSEKEEPING: "Redis cleanup, disk checks, analytics rollup, and branch pruning",
     GROUP_AUDITS: "Daily review of code, docs, hooks, skills, and Sentry issues",
-    GROUP_MEMORY: "Deduplication, decay pruning, quality audits, and knowledge reindexing",
+    GROUP_MEMORY: "Deduplication, decay pruning, and quality audits",
 }
 
 REFLECTION_GROUPS: dict[str, str] = {
@@ -40,13 +40,6 @@ REFLECTION_GROUPS: dict[str, str] = {
     "session-recovery-drip": GROUP_AGENTS,
     "session-intelligence": GROUP_AGENTS,
     "system-health-digest": GROUP_AGENTS,
-    "pm-audio-briefing": GROUP_AUDITS,  # consolidated PM briefings (issue #1276)
-    # ``pm-briefings`` is the prefix the dispatcher writes per-(project x slot)
-    # records under. Mapping it here ensures those records surface in the
-    # correct group via ``_classify_group``. After the deploy-coupled
-    # registry rename (issue #1292 deferred item #3), the legacy
-    # ``pm-audio-briefing`` key above can be removed; both stay during the
-    # cutover window.
     "pm-briefings": GROUP_AUDITS,
     "redis-index-cleanup": GROUP_HOUSEKEEPING,
     "redis-ttl-cleanup": GROUP_HOUSEKEEPING,
@@ -57,7 +50,6 @@ REFLECTION_GROUPS: dict[str, str] = {
     "behavioral-learning": GROUP_HOUSEKEEPING,
     "tech-debt-scan": GROUP_AUDITS,
     "redis-quality-audit": GROUP_AUDITS,
-    "daily-log-review": GROUP_AUDITS,
     "skills-audit": GROUP_AUDITS,
     "hooks-audit": GROUP_AUDITS,
     "docs-auditor": GROUP_AUDITS,
@@ -66,7 +58,6 @@ REFLECTION_GROUPS: dict[str, str] = {
     "task-backlog-check": GROUP_AUDITS,
     "principal-staleness": GROUP_AUDITS,
     "sentry-issue-triage": GROUP_AUDITS,
-    "daily-report-and-notify": GROUP_AUDITS,
     "memory-dedup": GROUP_MEMORY,
     "memory-decay-prune": GROUP_MEMORY,
     "memory-quality-audit": GROUP_MEMORY,
@@ -83,7 +74,7 @@ REFLECTION_GROUPS: dict[str, str] = {
 # ``pm-briefings-<slug>-<slot>`` after issue #1276. Both prefixes are listed so
 # any pre-rename ``pm-audio-briefing-<slug>`` records still in Redis continue
 # to surface on the dashboard.
-_PREFIX_EXPANDED_REFLECTIONS: tuple[str, ...] = ("pm-briefings", "pm-audio-briefing")
+_PREFIX_EXPANDED_REFLECTIONS: tuple[str, ...] = ("pm-briefings",)
 
 
 def _classify_group(name: str) -> str:
@@ -142,20 +133,7 @@ def _build_entry(name: str, config: dict, state, now: float) -> dict:
     }
 
 
-_PREFIX_FALLBACK_PARENTS: dict[str, str] = {
-    # Deploy-coupled shim — REMOVE when the vault yaml registry entry is
-    # renamed from "pm-audio-briefing" to "pm-briefings" (issue #1292
-    # deferred item #3, operator step on the bridge machine). After the
-    # rename, ``registry.get("pm-briefings")`` resolves directly and this
-    # fallback no longer matters.
-    #
-    # The pm-briefings consolidation (#1276) writes per-(project x slot)
-    # records under the "pm-briefings-" prefix, but the registry entry
-    # name remains "pm-audio-briefing" until the vault yaml is renamed.
-    # Map the new prefix to the legacy registry parent so the records
-    # surface on the dashboard during the cutover window.
-    "pm-briefings": "pm-audio-briefing",
-}
+_PREFIX_FALLBACK_PARENTS: dict[str, str] = {}
 
 
 def _expand_prefix_records(
