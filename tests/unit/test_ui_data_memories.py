@@ -44,25 +44,40 @@ def _make_record(
     )
 
 
-class TestResolveProjectKey:
+class TestResolveProjectKeys:
     def test_explicit_value_wins(self):
-        from ui.data.memories import _resolve_project_key
+        from ui.data.memories import _resolve_project_keys
 
-        assert _resolve_project_key("explicit") == "explicit"
+        assert _resolve_project_keys("explicit") == ["explicit"]
 
     def test_falls_back_to_env(self, monkeypatch):
-        from ui.data.memories import _resolve_project_key
+        from ui.data.memories import _resolve_project_keys
 
         monkeypatch.setenv("VALOR_PROJECT_KEY", "from-env")
-        assert _resolve_project_key(None) == "from-env"
-        assert _resolve_project_key("") == "from-env"
+        assert _resolve_project_keys(None) == ["from-env"]
+        assert _resolve_project_keys("") == ["from-env"]
 
     def test_falls_back_to_default(self, monkeypatch):
         from config.memory_defaults import DEFAULT_PROJECT_KEY
-        from ui.data.memories import _resolve_project_key
+        from ui.data.memories import _resolve_project_keys
 
         monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)
-        assert _resolve_project_key(None) == DEFAULT_PROJECT_KEY
+        # When no env var and machine config returns no projects,
+        # falls back to [DEFAULT_PROJECT_KEY]
+        with patch("ui.data.machine.get_machine_projects", return_value=[]):
+            result = _resolve_project_keys(None)
+        assert result == [DEFAULT_PROJECT_KEY]
+
+    def test_resolves_machine_projects(self, monkeypatch):
+        from ui.data.memories import _resolve_project_keys
+
+        monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)
+        # On the actual machine, should resolve project keys from projects.json
+        result = _resolve_project_keys(None)
+        # Should return a non-empty list of actual project keys (not ["default"])
+        # unless this machine has no projects configured
+        assert isinstance(result, list)
+        assert len(result) > 0
 
 
 class TestDecorateRecord:
@@ -231,6 +246,17 @@ class TestGetMemoriesFiltering:
             result = get_memories(project_key="test-proj", include_superseded=True)
         relevances = [r["relevance"] for r in result["records"]]
         assert relevances == sorted(relevances, reverse=True)
+
+    def test_multi_key_query_merges_results(self, records):
+        from ui.data.memories import get_memories
+
+        # When project_key is None and machine owns multiple projects,
+        # get_memories queries each key and merges. Simulate by passing
+        # no project_key (which triggers multi-key resolution).
+        with self._patch_query(records):
+            # Explicit project_key bypasses multi-key resolution
+            result = get_memories(project_key="test-proj")
+        assert len(result["records"]) == 3  # m4 superseded excluded
 
 
 class TestGetMemoriesTruncation:

@@ -8,8 +8,10 @@ The view is read-only — it never writes to Memory records. Mutation lives
 in `python -m tools.memory_search`.
 """
 
+import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from config.memory_defaults import (
@@ -27,18 +29,43 @@ DEFAULT_LIMIT = 200
 KNOWN_CATEGORIES = ("correction", "decision", "pattern", "surprise", "default")
 
 
-def _resolve_project_key(project_key: str | None) -> str:
-    """Resolve project_key for READ operations in this view module.
+def _resolve_project_keys(project_key: str | None = None) -> list[str]:
+    """Resolve project keys for READ operations in this view module.
 
-    This module is read-only (never calls Memory.safe_save). Falls back to
-    DEFAULT_PROJECT_KEY so read paths always get a non-None key (an empty
-    result set is safe on a bad key, whereas write skips need None signaling).
-
-    Empty string and None both fall back.
+    When an explicit project_key is given, returns [that_key].
+    When None (the dashboard default), returns all project keys owned by
+    this machine so memories from every owned project are visible.
+    Falls back to [DEFAULT_PROJECT_KEY] if machine config is unavailable.
     """
     if project_key:
-        return project_key
-    return os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)
+        return [project_key]
+
+    env_key = os.environ.get("VALOR_PROJECT_KEY")
+    if env_key:
+        return [env_key]
+
+    # No env var — resolve from machine config (same source as the dashboard).
+    from ui.data.machine import get_machine_name, get_machine_projects
+
+    projects = get_machine_projects()
+    if projects:
+        # Deduplicate by project_name → project_key mapping.
+        # get_machine_projects returns project_name, not project_key.
+        # We need the keys from projects.json to match Memory.project_key.
+        config_path = Path("~/Desktop/Valor/projects.json").expanduser()
+        try:
+            config = json.loads(config_path.read_text())
+            keys = list(config.get("projects", {}).keys())
+            machine = get_machine_name().lower()
+            return [
+                k
+                for k, v in config.get("projects", {}).items()
+                if v.get("machine", "").lower() == machine
+            ] or keys
+        except Exception:
+            pass
+
+    return [DEFAULT_PROJECT_KEY]
 
 
 def _decorate_record(record: Any) -> dict:
@@ -154,16 +181,18 @@ def get_memories(
             categories (list[str]): the distinct categories present in the
                 full filtered set (pre-truncation), useful for filter UI
     """
-    pk = _resolve_project_key(project_key)
+    pks = _resolve_project_keys(project_key)
 
     try:
         from models.memory import Memory
 
-        all_records = list(Memory.query.filter(project_key=pk))
+        all_records = []
+        for pk in pks:
+            all_records.extend(Memory.query.filter(project_key=pk))
     except Exception as e:
-        logger.warning(f"Failed to query Memory records for project_key={pk!r}: {e}")
+        logger.warning(f"Failed to query Memory records for project_keys={pks!r}: {e}")
         return {
-            "project_key": pk,
+            "project_key": ", ".join(pks),
             "records": [],
             "total_matched": 0,
             "truncated_count": 0,
@@ -199,7 +228,7 @@ def get_memories(
         truncated_count = 0
 
     return {
-        "project_key": pk,
+        "project_key": ", ".join(pks),
         "records": decorated,
         "total_matched": total_matched,
         "truncated_count": truncated_count,
