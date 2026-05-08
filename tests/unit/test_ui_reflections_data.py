@@ -165,6 +165,78 @@ class TestReflectionsDataLayer:
             assert "cost_usd_total" in entry
             assert "output_sink" in entry
 
+    def test_build_entry_exposes_unified_lifecycle_fields(self):
+        """#1342 Tier 3B: dashboard rows expose remaining unified-Reflection fields.
+
+        The Tier 3B item 4 field list is
+        ``output_sink, auto_delete_after_run, paused_until,
+          dead_letter_escalated, cost_usd_total, last_run_summary``.
+        ``output_sink``/``paused_until``/``cost_usd_total`` already shipped in
+        Tier 1+2; this asserts the remaining three are exposed by
+        ``_build_entry()`` regardless of whether the registry has any rows.
+        """
+        from ui.data.reflections import _build_entry
+
+        config = {
+            "interval": 300,
+            "priority": "normal",
+            "execution_type": "function",
+            "callable": "x.y",
+            "enabled": True,
+            "description": "test",
+        }
+        state = MagicMock()
+        state.name = "demo-reflection"
+        state.ran_at = 1_700_000_000.0
+        state.run_count = 2
+        state.last_status = "success"
+        state.last_error = None
+        state.last_duration = 1.5
+        state.failure_count_consecutive = 0
+        state.paused_until = 0.0
+        state.cost_usd_total = 0.42
+        state.output_sink = "telegram:Dev: Valor"
+        state.auto_delete_after_run = True
+        state.dead_letter_escalated = False
+        state.last_run_summary = {
+            "timestamp": 1_700_000_000.0,
+            "status": "success",
+            "duration": 1.5,
+            "error": None,
+            "output_summary": "did the thing",
+        }
+
+        entry = _build_entry("demo-reflection", config, state, now=1_700_000_500.0)
+
+        # Existing Tier 1+2 fields still present.
+        assert entry["output_sink"] == "telegram:Dev: Valor"
+        assert entry["paused_until"] == 0.0
+        assert entry["cost_usd_total"] == 0.42
+
+        # New Tier 3B fields.
+        assert entry["auto_delete_after_run"] is True
+        assert entry["dead_letter_escalated"] is False
+        assert isinstance(entry["last_run_summary"], dict)
+        assert entry["last_run_summary"]["output_summary"] == "did the thing"
+
+    def test_build_entry_handles_missing_state_gracefully(self):
+        """When state is None (no Redis row yet), defaults match documented shape."""
+        from ui.data.reflections import _build_entry
+
+        config = {
+            "interval": 60,
+            "priority": "low",
+            "execution_type": "function",
+            "callable": "x.y",
+            "enabled": True,
+            "description": "test",
+        }
+        entry = _build_entry("never-run", config, None, now=1_700_000_500.0)
+
+        assert entry["auto_delete_after_run"] is False
+        assert entry["dead_letter_escalated"] is False
+        assert entry["last_run_summary"] == {}
+
     def test_get_run_history_empty(self):
         from ui.data.reflections import get_run_history
 
