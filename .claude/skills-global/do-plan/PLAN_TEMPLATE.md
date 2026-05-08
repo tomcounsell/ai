@@ -247,11 +247,31 @@ and single-threaded").]
 
 ## No-Gos (Out of Scope)
 
-[Explicitly state what we're NOT doing. This is critical for scope control.]
+[Explicitly state what we're NOT doing. **Each entry must be tagged** with one
+of the four reasons below — plain "deferred" or "follow-up" without a tag is
+not allowed. Enforced by `.claude/hooks/validators/validate_no_gos_justification.py`.
 
-- [Feature deferred to later]
-- [Edge case we'll handle in v2]
-- [Related but separate concern]
+If the agent could finish the item in this plan, **do it instead of deferring**.
+The audit in issue #1325 found that most "operator step" / "follow-up issue"
+entries were laziness, not legitimate scope control.
+
+Tag legend:
+
+- `[EXTERNAL]` — needs a real human/world action (rotate a secret, click a
+  third-party UI, run on a machine the agent cannot reach)
+- `[ORDERED]` — sequenced deploy/merge that must wait for a human-gated event
+  in another system
+- `[DESTRUCTIVE]` — irreversible one-shot where review-before-execute is the
+  safety mechanism (data deletion, schema migration on hot tables)
+- `[SEPARATE-SLUG #NNN]` — already filed as issue NNN. The validator runs
+  `gh issue view NNN` to confirm; tracking-only promises with no issue fail.
+
+If nothing is genuinely out of scope, write: "Nothing deferred — every
+relevant item is in scope for this plan."]
+
+- [EXTERNAL] [Item that needs a real human/world action — explain why]
+- [ORDERED] [Item blocked by a human-gated event — name the event]
+- [SEPARATE-SLUG #NNN] [Item filed as separate issue — link the issue]
 
 ## Update System
 

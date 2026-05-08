@@ -61,6 +61,27 @@ State what we're NOT doing:
 - "Not handling offline mode in this iteration"
 - "Not supporting bulk operations yet"
 
+**Default to "do it now" over "defer to follow-up."** The agent writes plists,
+deletes schema fields, edits multi-machine configs (via `/update`), and runs
+migrations every day. If a "follow-up" item touches only files already in this
+change set, fold it into the plan — splitting it across PRs costs more
+coordination than the work itself.
+
+A No-Go is only legitimate when one of these is true:
+
+1. **External:** a human or external system must act (rotate a secret, click a
+   third-party UI, sign a contract).
+2. **Ordered:** the work must wait for a human-gated event in another system
+   (a separate deploy, a release window, a downstream merge).
+3. **Destructive:** irreversible one-shot where review-before-execute is the
+   safety mechanism (data deletion, schema migration on hot tables).
+4. **Separate slug:** the work is meaningfully a different feature with its
+   own issue, not just leftover scraps from this one. File the issue first.
+
+Plain "we'll do this later" is the laziness pattern this rule is designed to
+block (issue #1325). The plan validator enforces tagged justifications on every
+deferral.
+
 ## 8. Good is Relative
 
 Success is relative to appetite:
