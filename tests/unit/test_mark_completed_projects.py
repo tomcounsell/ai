@@ -1,4 +1,11 @@
-"""Tests for `Reflection.mark_completed(projects=...)` (#1187 step 3)."""
+"""Tests for `Reflection.mark_completed(projects=...)` (#1187 step 3).
+
+Post-#1273: the embedded ``run_history`` field was removed from Reflection.
+Per-run rows now live in ``ReflectionRun`` (``models/reflection_run.py``);
+the ``projects`` argument to ``mark_completed`` is preserved in the
+``last_run_summary`` dict (which the dashboard and per-project audits read).
+These tests exercise that path.
+"""
 
 from __future__ import annotations
 
@@ -40,9 +47,8 @@ def test_mark_completed_stores_projects_on_record(fresh_reflection):
     fresh_reflection.mark_completed(duration=1.0, projects=projects)
 
     ref = Reflection.query.filter(name="_test_mark_completed_projects")[0]
-    history = ref.run_history if isinstance(ref.run_history, list) else []
-    latest = history[-1]
-    assert latest["projects"] == projects
+    summary = ref.last_run_summary if isinstance(ref.last_run_summary, dict) else {}
+    assert summary.get("projects") == projects
 
 
 def test_mark_completed_default_projects_is_empty_list(fresh_reflection):
@@ -52,9 +58,8 @@ def test_mark_completed_default_projects_is_empty_list(fresh_reflection):
     fresh_reflection.mark_completed(duration=0.5)
 
     ref = Reflection.query.filter(name="_test_mark_completed_projects")[0]
-    history = ref.run_history if isinstance(ref.run_history, list) else []
-    latest = history[-1]
-    assert latest.get("projects") == []
+    summary = ref.last_run_summary if isinstance(ref.last_run_summary, dict) else {}
+    assert summary.get("projects") == []
 
 
 def test_mark_completed_with_none_projects_stores_empty_list(fresh_reflection):
@@ -64,9 +69,8 @@ def test_mark_completed_with_none_projects_stores_empty_list(fresh_reflection):
     fresh_reflection.mark_completed(duration=0.5, projects=None)
 
     ref = Reflection.query.filter(name="_test_mark_completed_projects")[0]
-    history = ref.run_history if isinstance(ref.run_history, list) else []
-    latest = history[-1]
-    assert latest.get("projects") == []
+    summary = ref.last_run_summary if isinstance(ref.last_run_summary, dict) else {}
+    assert summary.get("projects") == []
 
 
 def test_mark_completed_signature_accepts_projects_kwarg():
@@ -96,8 +100,7 @@ def test_mark_completed_with_error_and_projects(fresh_reflection):
     fresh_reflection.mark_completed(duration=0.3, error="aggregate error", projects=projects)
 
     ref = Reflection.query.filter(name="_test_mark_completed_projects")[0]
-    history = ref.run_history if isinstance(ref.run_history, list) else []
-    latest = history[-1]
-    assert latest["status"] == "error"
-    assert latest["error"] == "aggregate error"
-    assert latest["projects"] == projects
+    summary = ref.last_run_summary if isinstance(ref.last_run_summary, dict) else {}
+    assert summary.get("status") == "error"
+    assert summary.get("error") == "aggregate error"
+    assert summary.get("projects") == projects
