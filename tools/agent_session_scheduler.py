@@ -33,6 +33,7 @@ from pathlib import Path
 
 from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S
 from config.enums import SessionType
+from models.reflection import Reflection
 from models.session_lifecycle import NON_TERMINAL_STATUSES
 
 
@@ -189,6 +190,56 @@ def _check_persona_permission(action_type: str) -> dict | None:
             "action": action_type,
         }
     return None
+
+
+def _register_scheduled_reflection(
+    *,
+    session_id: str,
+    scheduled_at: float,
+    message_text: str,
+    priority: str,
+    project_key: str,
+):
+    """#1342 Tier 3B item 3 — back ``--after`` with a unified Reflection record.
+
+    The AgentSession path that powers ``cmd_schedule`` continues to drive
+    execution. This helper additionally writes a one-shot Reflection row
+    keyed off ``session_id`` so the scheduled work is visible on
+    ``dashboard.json`` (which reads from ``Reflection.get_all_states()``).
+
+    The Reflection uses the unified ``at:<ISO>`` schedule grammar with
+    ``execution_type="agent"`` and ``auto_delete_after_run=True`` so the
+    record self-cleans on a successful fire. Failures here are non-fatal:
+    the scheduler CLI must never block on dashboard surfacing.
+
+    Returns the Reflection on success (or the existing record on a re-run),
+    None on any error.
+    """
+    name = f"scheduled-{session_id}"
+    try:
+        existing = list(Reflection.query.filter(name=name))
+        if existing:
+            return existing[0]
+
+        iso = datetime.fromtimestamp(scheduled_at, tz=UTC).isoformat()
+        return Reflection.create(
+            name=name,
+            schedule=f"at:{iso}",
+            execution_type="agent",
+            auto_delete_after_run=True,
+            enabled=True,
+            command=message_text,
+            priority=priority,
+            project_key=project_key,
+            output_sink="dashboard_only",
+        )
+    except Exception as e:
+        logger.warning(
+            "[scheduler] failed to register scheduled Reflection for %s: %s",
+            session_id,
+            e,
+        )
+        return None
 
 
 def cmd_schedule(args: argparse.Namespace) -> int:
@@ -359,6 +410,19 @@ def cmd_schedule(args: argparse.Namespace) -> int:
                 logger.warning(
                     f"Failed to transition parent {parent_id} to waiting_for_children: {e}"
                 )
+
+        # #1342 Tier 3B item 3 — register a unified Reflection for --after dispatches
+        # so the scheduled work is visible on dashboard.json. The AgentSession path
+        # above still drives execution; this is purely the registry surface. Failures
+        # are non-fatal and do not block the schedule response.
+        if scheduled_at:
+            _register_scheduled_reflection(
+                session_id=session_id,
+                scheduled_at=scheduled_at,
+                message_text=message_text,
+                priority=priority,
+                project_key=project_key,
+            )
 
         # Count queue position
         pending = list(AgentSession.query.filter(project_key=project_key, status="pending"))

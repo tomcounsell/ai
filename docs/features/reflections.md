@@ -1,6 +1,10 @@
 # Reflections: Autonomous Maintenance System
 
-The reflections system is a unified framework for all recurring non-issue work. A single lightweight scheduler (`agent/reflection_scheduler.py`) reads from a declarative registry (`config/reflections.yaml`), tracks state in Redis, and executes reflections on schedule. This replaces the previously scattered scheduling mechanisms (launchd plists, asyncio loops, startup hooks).
+> **Single source of truth (post #1273 / #1342):** This document defines the unified Reflection schema, schedule grammar, output sinks, failure tracking, and migration path. Sibling docs (`agent-session-scheduling.md`, `reflections-dashboard.md`, `pm-briefings.md`, the `README.md` index) defer to this page for the canonical model and grammar.
+
+The reflections system is a unified framework for all recurring non-issue work. A single lightweight scheduler (`agent/reflection_scheduler.py`) reads from a declarative registry (`config/reflections.yaml`), tracks state in Redis (`Reflection` + `ReflectionRun` Popoto models), and executes reflections on schedule. This replaces the previously scattered scheduling mechanisms (launchd plists, asyncio loops, startup hooks, ad-hoc `--after`-style one-shots).
+
+`tools/agent_session_scheduler.py --after <ISO>` enqueues a `at:`-grammar Reflection alongside its primary AgentSession write so scheduled work is visible on the dashboard, and the helper-skill `/loop` and `/schedule` are documented as the harness-side fallback for one-off self-pacing within a single conversation. Both surfaces are first-class but reach the same backing data.
 
 ## Unified Reflection Scheduler
 
@@ -13,7 +17,7 @@ Worker startup (worker/__main__.py)
   -> ReflectionScheduler.start()
     -> Tick every 60 seconds
       -> For each reflection in registry:
-        -> Check if due (ran_at + interval < now)
+        -> Check if due (compute_next_due(schedule) <= now)
         -> Check skip-if-running guard
         -> Execute: function (direct callable) or agent (PM session)
         -> Update state in Redis (Reflection model)
@@ -25,25 +29,49 @@ Worker startup (worker/__main__.py)
 reflections:
   - name: session-liveness-check
     description: "Check running sessions for liveness and timeout, recover stuck ones"
-    interval: 300       # 5 minutes
+    every: 300s          # unified schedule grammar (issue #1273)
     priority: high
     execution_type: function
     callable: "agent.agent_session_queue._agent_session_health_check"
     enabled: true
+    output_sink: log_only
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Unique identifier (used as Redis key) |
-| `interval` | int | Seconds between runs |
+| `every` / `cron` / `at` | string | Unified schedule grammar — exactly one is required. See [Schedule Grammar](#schedule-grammar) below. |
 | `priority` | string | `urgent`, `high`, `normal`, or `low` |
 | `execution_type` | string | `function` (direct callable) or `agent` (PM session) |
 | `callable` | string | Dotted Python path (for function type) |
 | `command` | string | Natural-language prompt for PM session (for agent type) |
 | `enabled` | bool | Whether this reflection is active (default: true) |
+| `output_sink` | string | Where to deliver completion summaries: `log_only` (default), `dashboard_only`, `memory:<importance>`, or `telegram:<chat>`. See [Output Sinks](#output-sinks). |
+| `auto_delete_after_run` | bool | One-shot reflections (`at:` schedule) — record self-cleans on success. Default: `false`. |
+| `retry_policy` | dict | Optional override of `{max_retries, backoff_seconds, max_consecutive_failures_before_pause}`. See [Failure Tracking](#failure-tracking). |
 | `timeout` | int | Optional per-reflection timeout in seconds. Defaults: 1800 (30 min) for function, 3600 (60 min) for agent |
 
 **Convention:** Reflections are addressed by `name` (this YAML field) and dispatched by `callable` (dotted path). Numbered-step references (`step_X`) are historical and should not be reintroduced into source, comments, or docs.
+
+### Schedule Grammar
+
+The unified Reflection schema (issue #1273) collapses the prior `interval:` integer-seconds field into one of three string-typed schedule keys. Exactly one must be present per reflection.
+
+| Key | Shape | Example | Semantics |
+|-----|-------|---------|-----------|
+| `every` | duration string | `every: 300s`, `every: 5m`, `every: 1h`, `every: 24h` | Recurring on a fixed interval. Tracked by `ran_at + interval`. |
+| `cron` | five-field cron expression, optional `; tz=<zone>` suffix | `cron: 0 9 * * 1-5; tz=America/New_York` | Recurring on a calendar schedule. Timezone defaults to UTC; explicit zones must be valid IANA names. |
+| `at` | ISO-8601 instant | `at: 2026-05-15T09:00:00+00:00` | One-shot — fires exactly once at the given instant. Pair with `auto_delete_after_run: true` so the record self-cleans on success. |
+
+The runtime parser lives in `agent/reflection_schedule.py::compute_next_due()` and depends on `croniter` (declared in `pyproject.toml`).
+
+#### Migration from `interval:` (issue #1273)
+
+The legacy `interval: <int>` field has been replaced by `every: <int>s`. The migration is one-shot and idempotent:
+
+- `scripts/migrate_reflections_yaml.py` rewrites `interval: N` → `every: Ns` in place. Running it on an already-migrated YAML is a no-op.
+- The `/update` skill invokes the migration on every pull (`scripts/update/run.py` Step 3.65) so machines that haven't migrated yet pick up the change automatically. The wrapper lives in `scripts/update/reflections_yaml.py`.
+- The vault copy (`~/Desktop/Valor/reflections.yaml`) is the canonical target; the in-repo `config/reflections.yaml` symlinks to it on live machines.
 
 ### Registry Location (Vault-First)
 
@@ -173,37 +201,82 @@ by the time the slot runs at the next scheduler tick after 00:00 UTC.
 
 ### State Model (`models/reflection.py`)
 
-Each reflection gets a `Reflection` record in Redis tracking execution state:
+Each reflection gets a `Reflection` record in Redis tracking definition + last-run summary. Per-run history rows live separately in `ReflectionRun` (`models/reflection_run.py`) so the size of a Reflection record is bounded — the legacy 200-cap embedded `run_history` list is gone.
 
 | Field | Type | Purpose |
 |-------|------|---------|
+| `reflection_id` | AutoKeyField | Internal Popoto key |
 | `name` | KeyField | Unique identifier matching registry |
-| `ran_at` | Field(float) | Unix timestamp of last execution start |
-| `run_count` | IntField | Total number of executions |
-| `last_status` | Field | `pending`, `running`, `success`, `error`, `skipped` |
+| `schedule` | Field | Unified schedule string (`every:<dur>` / `cron:<expr>` / `at:<iso>`) |
+| `output_sink` | Field | Delivery target (`log_only` default) — see [Output Sinks](#output-sinks) |
+| `auto_delete_after_run` | Field(bool) | One-shot self-clean on success (default false) |
+| `enabled` | Field(bool) | Whether the scheduler dispatches this reflection (default true) |
+| `last_run_summary` | DictField | `{timestamp, status, duration, error}` — fast dashboard read |
+| `ran_at` | FloatField | Unix timestamp of last execution start (legacy compat) |
+| `run_count` | IntField | Total number of executions (legacy compat) |
+| `last_status` | Field | `pending`, `running`, `success`, `error`, `skipped`, `stale_running` |
 | `last_error` | Field | Error message from last failure |
-| `last_duration` | Field(float) | Duration of last run in seconds |
-| `run_history` | ListField | Append-only list of run dicts (capped at 200) |
+| `last_duration` | FloatField | Duration of last run in seconds |
+| `failure_count_consecutive` | IntField | Reset to 0 on success; incremented on error |
+| `retry_policy` | DictField | Optional override of `DEFAULT_RETRY_POLICY` (max_retries / backoff_seconds / max_consecutive_failures_before_pause) |
+| `paused_until` | FloatField | Auto-pause timestamp set by dead-letter escalation |
+| `dead_letter_escalated` | Field(bool) | True iff this reflection has hit the failure threshold and emitted a Memory record at importance 7.0 |
+| `cost_usd_total` | FloatField | Running total of Anthropic API spend (agent-type only) |
+| `tokens_input_total` | IntField | Running total of input tokens |
+| `tokens_output_total` | IntField | Running total of output tokens |
+| `created_by_session_id` | Field(null) | Session that created this reflection via MCP; `None` for registry-loaded entries |
 
-Note: `next_due` is computed as `ran_at + interval` in the dashboard data layer, not stored as a field.
+Note: `next_due` is computed by `agent.reflection_schedule.compute_next_due()` from the `schedule` string — not stored.
 
-#### Run Record Shape
+#### Per-Run History (`ReflectionRun`)
 
-Each entry appended to `run_history` by `Reflection.mark_completed()`:
+Each completed run writes a `ReflectionRun` row (`models/reflection_run.py`) carrying the full per-run record. The Reflection record retains only the latest `last_run_summary` for fast dashboard reads.
 
 | Key | Type | Notes |
 |-----|------|-------|
+| `run_id` | AutoKeyField | Internal Popoto key |
+| `name` | KeyField | Reflection name (matches `Reflection.name`) |
 | `timestamp` | float | Unix epoch when the run completed |
 | `status` | str | `ok`, `error`, `disabled` (aggregate result) |
-| `duration` | float | Total wall-clock seconds |
+| `duration_ms` | int | Total wall-clock milliseconds |
 | `error` | str \| None | Top-level error message (capped at 500 chars) |
 | `projects` | list[dict] | Per-project breakdown (empty `[]` for non-audit reflections) |
+| `cost_usd` | float | Anthropic API spend for this single run |
+| `tokens_input` / `tokens_output` | int | Token counts for this single run |
+| `output_summary` | str \| None | Optional output line shown on the dashboard / fed to memory or telegram sinks |
 
 Each entry in `projects` has shape `{slug, status, duration, findings_count, error}` where `status ∈ {"ok", "error", "skipped", "disabled"}`. See [Per-Project Audit Iteration](#per-project-audit-iteration) below.
 
+Per-run rows carry a tiered TTL keyed off the parent's frequency (7d for `every:` ≤ 1h, 30d for daily, 90d for weekly+ / cron / at) so the history retention scales with how chatty the reflection is.
+
+### Output Sinks
+
+`output_sink` controls where a reflection's per-run summary lands. The runtime delivery hook (`agent/reflection_output.py`) is shipped on a rolling basis — the field is honored by every sink kind that has shipped, and unshipped sinks degrade to `log_only` until their delivery path lands.
+
+| Sink | Behavior | Status |
+|------|----------|--------|
+| `log_only` (default) | Write to worker log + `last_run_summary`. No external delivery. | shipped |
+| `dashboard_only` | `last_run_summary` is surfaced on `dashboard.json`'s reflections section; no log/memory/telegram side effect. | shipped |
+| `memory:<importance>` | Write a Memory record at the given importance (0.0–10.0); the agent picks it up via subconscious recall. | deferred |
+| `telegram:<chat>` | Send the run summary to a Telegram chat (resolved through `projects.json`). On chat-resolution failure: `WARNING` log + `delivery_error` field on the `ReflectionRun` row, run still `success`. | deferred |
+
+**Telegram payload synthesis:** the dispatch path uses synthetic `session_id="reflection:<name>"` so outbox payloads are distinguishable from agent-session sends and don't collide with real session IDs.
+
+### Failure Tracking
+
+Every reflection carries a per-record retry policy (`DEFAULT_RETRY_POLICY` defaults: `max_retries=3`, `backoff_seconds=60`, `max_consecutive_failures_before_pause=5`). On error:
+
+1. `failure_count_consecutive` is incremented and `last_error` recorded.
+2. When the threshold (`max_consecutive_failures_before_pause`) is hit, `paused_until` is set 24h in the future and `dead_letter_escalated` flips to `True`.
+3. A Memory record at importance 7.0 is written **exactly once per escalation cluster** so the operator sees the failure in subconscious recall without flooding memory on every retry.
+
+Successful runs reset `failure_count_consecutive` to 0; `dead_letter_escalated` remains `True` until the operator clears it (it's an audit signal, not a runtime gate).
+
+The dashboard surfaces `failure_count_consecutive`, `paused_until`, and `dead_letter_escalated` directly on the reflections section of `dashboard.json` (see `ui/data/reflections.py::_build_entry`).
+
 ### Skip-if-Running Guard
 
-Before enqueuing a reflection, the scheduler checks if it's already running. If a reflection with the same name has `last_status == "running"`, it's skipped. If a reflection has been running for more than 2x its interval, it's considered stuck and reset to `error` status.
+Before enqueuing a reflection, the scheduler checks if it's already running. If a reflection with the same name has `last_status == "running"`, it's skipped. If a reflection has been running for more than 2x its computed interval (or its explicit `timeout`), it's considered stuck and transitioned to `stale_running` then reset to `error` status so the next tick retries.
 
 ### Observability
 

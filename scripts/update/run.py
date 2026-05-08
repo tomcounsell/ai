@@ -34,6 +34,7 @@ from scripts.update import (  # noqa: E402
     migrations,
     npm_tools,
     officecli,
+    reflections_yaml,
     rodney,
     sentry_cli,
     service,
@@ -126,6 +127,7 @@ class UpdateResult:
     reflections_sync_result: env_sync.ReflectionsSyncResult | None = None
     hook_audit: hooks.HookAuditResult | None = None
     migration_result: migrations.MigrationResult | None = None
+    reflections_yaml_result: reflections_yaml.ReflectionsYamlMigrationResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
@@ -634,6 +636,30 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             result.errors.append(f"Migration failed: {err}")
     if not mig.ran and not mig.failed:
         log("No pending migrations", v)
+
+    # Step 3.65: Migrate reflections.yaml (interval: -> every:) on every pull.
+    # Idempotent — issue #1273 unified Reflection grammar. Runs after Step 3
+    # `uv sync` so the migration's schema-validation phase can import croniter.
+    log("Migrating reflections.yaml schedule grammar...", v)
+    result.reflections_yaml_result = reflections_yaml.run_reflections_yaml_migration(project_dir)
+    ry = result.reflections_yaml_result
+    if ry.success:
+        if ry.action == "rewrote":
+            log(
+                f"  reflections.yaml: rewrote {ry.rewrites_count} interval line(s) -> every:",
+                v,
+                always=True,
+            )
+        elif ry.action == "noop":
+            log("  reflections.yaml: already migrated", v)
+        elif ry.action == "skipped":
+            log(
+                f"  reflections.yaml: skipped ({ry.error or 'target missing'})",
+                v,
+            )
+    else:
+        log(f"  WARN: reflections.yaml migration failed: {ry.error}", v, always=True)
+        result.warnings.append(f"reflections.yaml migration: {ry.error}")
 
     # Step 3.7: OfficeCLI binary install/update
     log("Checking OfficeCLI...", v)

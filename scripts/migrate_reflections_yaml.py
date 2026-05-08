@@ -266,17 +266,48 @@ def main(argv: list[str] | None = None) -> int:
             "Verification table command in the plan."
         ),
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Emit a machine-readable JSON status line. Used by "
+            "scripts/update/reflections_yaml.py (Step 3.65) to render "
+            "structured results."
+        ),
+    )
     args = parser.parse_args(argv)
 
     target = args.target or _resolve_default_target()
-    print(f"[migrate] target: {target}")
+    if not args.json:
+        print(f"[migrate] target: {target}")
 
     try:
         result = migrate_yaml(target, dry_run=args.dry_run)
     except MigrationError as e:
-        print(f"[migrate] ABORT: {e}", file=sys.stderr)
+        if args.json:
+            import json as _json
+
+            print(
+                _json.dumps({"rewrote": False, "rewrites_count": 0, "error": str(e)}),
+                file=sys.stderr,
+            )
+        else:
+            print(f"[migrate] ABORT: {e}", file=sys.stderr)
         return 1
-    print(f"[migrate] rewrote={result.rewrote} rewrites_count={result.rewrites_count}")
+    if args.json:
+        import json as _json
+
+        print(
+            _json.dumps(
+                {
+                    "rewrote": result.rewrote,
+                    "rewrites_count": result.rewrites_count,
+                    "target": str(result.target),
+                }
+            )
+        )
+    else:
+        print(f"[migrate] rewrote={result.rewrote} rewrites_count={result.rewrites_count}")
 
     if args.check_idempotent and not args.dry_run:
         second = migrate_yaml(target, dry_run=True)

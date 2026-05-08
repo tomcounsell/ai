@@ -131,6 +131,14 @@ def _build_entry(name: str, config: dict, state, now: float) -> dict:
         "paused_until": float(getattr(state, "paused_until", 0.0) or 0.0) if state else 0.0,
         "cost_usd_total": float(getattr(state, "cost_usd_total", 0.0) or 0.0) if state else 0.0,
         "output_sink": getattr(state, "output_sink", "log_only") if state else "log_only",
+        # #1342 Tier 3B item 4 — surface the remaining unified-Reflection fields.
+        "auto_delete_after_run": (
+            bool(getattr(state, "auto_delete_after_run", False)) if state else False
+        ),
+        "dead_letter_escalated": (
+            bool(getattr(state, "dead_letter_escalated", False)) if state else False
+        ),
+        "last_run_summary": (dict(getattr(state, "last_run_summary", {}) or {}) if state else {}),
     }
 
 
