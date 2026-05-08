@@ -257,3 +257,127 @@ async def test_classify_terminus_url_query_in_thread_not_treated_as_question():
         sender_is_bot=False,
     )
     assert result == "SILENT"
+
+
+# =============================================================================
+# Fast-Path 0: imperative verb tests (issue #1318)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_imperative_single_line_returns_respond():
+    """Single-line imperative directive → RESPOND via Fast-Path 0 (no LLM call)."""
+    result = await classify_conversation_terminus(
+        text="Continue to finish all stage of SDLC",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_imperative_multi_line_returns_respond():
+    """Multi-line imperative on line 2 → RESPOND via Fast-Path 0.
+
+    This is the May 7 motivating incident text verbatim. A regex anchored only
+    to message start (``^\\s*``) would miss this — the imperative is on line 2.
+    """
+    result = await classify_conversation_terminus(
+        text="I left a comment on PR 1316\n\nContinue to finish all stage of SDLC",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_imperative_go_ahead_multi_word_returns_respond():
+    """Multi-word imperative ``go ahead`` → RESPOND via Fast-Path 0."""
+    result = await classify_conversation_terminus(
+        text="Go ahead and merge it",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_imperative_proceed_returns_respond():
+    """``Proceed with the plan`` → RESPOND via Fast-Path 0."""
+    result = await classify_conversation_terminus(
+        text="Proceed with the plan",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_imperative_single_word_continue_returns_respond():
+    """Single-word ``continue`` → RESPOND via Fast-Path 0.
+
+    Fast-Path 0 must fire BEFORE Fast-Path 2's ≤1-word SILENT check so a
+    standalone imperative is never silently dropped.
+    """
+    result = await classify_conversation_terminus(
+        text="continue",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_ok_great_does_not_respond():
+    """Regression guard: ``ok great`` from a human must NOT classify as RESPOND.
+
+    "ok great" is a 2-word natural closer and not in `_ACKNOWLEDGMENT_TOKENS`
+    as a multi-word phrase, so it falls through Fast-Paths 0-3 and reaches the
+    LLM. Both REACT (emoji acknowledgment) and SILENT (no reply) are correct
+    outcomes — the harm Fast-Path 0 fights is RESPOND being missed for
+    imperatives, not REACT vs SILENT for closers. Pin the non-RESPOND behavior.
+    """
+    result = await classify_conversation_terminus(
+        text="ok great",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result in ("SILENT", "REACT")
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_thanks_still_silent_regression():
+    """Regression guard: ``thanks`` from a human → SILENT (acknowledgment token)."""
+    result = await classify_conversation_terminus(
+        text="thanks",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "SILENT"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_imperative_from_bot_still_silent():
+    """Bot sender with an imperative → SILENT via Fast-Path 1.
+
+    Fast-Path 0 is human-only — it must NEVER fire for bots, otherwise an AI
+    bot loop containing the word "continue" would re-trigger Valor.
+    """
+    result = await classify_conversation_terminus(
+        text="Continue with deployment",
+        thread_messages=[],
+        sender_is_bot=True,
+    )
+    assert result == "SILENT"
+
+
+def test_classify_terminus_mid_line_imperative_does_not_match_regex():
+    """Mid-sentence ``continue`` must NOT match Fast-Path 0.
+
+    The ``(?:^|\\n)\\s*`` anchor requires a preceding newline or message start,
+    so an imperative embedded mid-sentence falls through to the LLM. Verifies
+    against the compiled regex directly so the test is deterministic and does
+    not depend on LLM responses.
+    """
+    text = "I would just continue this automatically"
+    assert routing._IMPERATIVE_LINE_RE.search(text) is None

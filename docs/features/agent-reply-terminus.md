@@ -1,7 +1,7 @@
 # Agent Reply Terminus Detection
 
 **Status:** Shipped  
-**Issues:** [#911](https://github.com/tomcounsell/ai/issues/911) (initial), [#1090](https://github.com/tomcounsell/ai/issues/1090) (question-aware Fast-Path 2)
+**Issues:** [#911](https://github.com/tomcounsell/ai/issues/911) (initial), [#1090](https://github.com/tomcounsell/ai/issues/1090) (question-aware Fast-Path 2), [#1318](https://github.com/tomcounsell/ai/issues/1318) (imperative Fast-Path 0 + few-shot prompt)
 
 ## Problem
 
@@ -41,6 +41,9 @@ async def classify_conversation_terminus(
 
 Fast-paths are checked before any LLM call, in this exact order:
 
+0. **Human sender + leading imperative verb on any line** → `RESPOND`  
+   See [#1318](https://github.com/tomcounsell/ai/issues/1318). Human-only — the `not sender_is_bot` guard ensures bot loops containing the word "continue" never re-trigger Valor. Uses `_IMPERATIVE_LINE_RE` (multi-line aware) to match a small, deliberately-narrow set of high-precision continuation imperatives (`continue`, `proceed`, `resume`, `retry`, `redo`, `go ahead`, `ship it`, `do it`, `send it`, `try again`, `keep going`, `finish it`, `do this`, `handle it`, `move on`). Common verbs that frequently appear non-imperatively at message starts (`fix`, `run`, `merge`, `start`, `deploy`, `execute`, `push`) are EXCLUDED here and deferred to the few-shot LLM step.
+
 1. **Bot sender + no standalone `?`** → `SILENT`  
    The primary loop-break signal. If the sender is a bot and the message contains no question, it's a loop continuation — silence it immediately.
 
@@ -49,6 +52,53 @@ Fast-paths are checked before any LLM call, in this exact order:
 
 3. **Standalone `?` in text** → `RESPOND`  
    Fast exit before any LLM call. Uses regex `(?<![=&\w])\?|(?<![=&])\?(?!\w+=)` to exclude URL query-string parameters like `?q=1`.
+
+#### Fast-Path 0 Regex — Multi-Line Anchor
+
+`_IMPERATIVE_LINE_RE` is anchored with `(?:^|\n)\s*<verb>\b` so it matches an imperative at the start of the message OR at the start of any line. The motivating May 7, 2026 incident was a two-line human reply:
+
+```
+I left a comment on PR 1316
+
+Continue to finish all stage of SDLC
+```
+
+A regex anchored only to message start (`^\s*`) would have missed this. Mid-sentence usage (`"I would just continue this automatically"`) still does not match because there is no preceding newline-or-start before the verb — the sentence falls through to the LLM step, which has the few-shot examples to handle ambiguous cases.
+
+#### Few-Shot LLM Prompt
+
+The Ollama (`gemma4:e2b`) zero-shot prompt was too ambiguous to reliably distinguish continuation imperatives from conversation closers, leading to SILENT misclassifications of human action directives (May 6 and May 7, 2026 incidents). The prompt now includes labeled examples drawn from real misclassified messages plus canonical edge cases:
+
+```
+Examples:
+"Continue to finish all stage of SDLC" → RESPOND
+"Go ahead and merge" → RESPOND
+"Run it again" → RESPOND
+"Proceed with the plan" → RESPOND
+"I left a comment on PR 1316\n\nContinue to finish all stage of SDLC" → RESPOND
+"let's go with that" → RESPOND
+"please ship it when ready" → RESPOND
+"ok great" → REACT
+"sounds good" → REACT
+"nice work" → REACT
+"👍" → SILENT
+"thanks" → SILENT
+"got it" → SILENT
+```
+
+Examples cover all three labels so the model anchors on the full RESPOND/REACT/SILENT decision boundary, not just the imperative case. The prompt grows by operational feedback — when a new misclassification surfaces in `terminus:` DEBUG logs, append a labeled example here.
+
+#### DEBUG Log — Operational Feedback Loop
+
+Both Fast-Path 0 hits and LLM-classified results are logged at `DEBUG` level:
+
+```
+terminus: 'RESPOND' — 'Continue to finish all stage of SDLC' (Fast-Path 0)
+terminus: 'REACT' — 'ok great'
+terminus: 'SILENT' — 'thanks'
+```
+
+Tail with `tail -f logs/bridge.log | grep terminus:` (or grep historical files) to surface misclassifications. When a new SILENT decision should have been RESPOND, add the verb to `_IMPERATIVE_VERBS` (if it's a clean continuation imperative) and/or add a labeled few-shot example to the prompt. The 15-verb starting set is not final — it's a seed list that grows by feedback.
 
 ### LLM Classification
 
@@ -111,6 +161,18 @@ Unit tests in `tests/unit/test_routing.py` cover all required scenarios:
 - `test_classify_terminus_human_short_reply_no_question_still_silent` — human "Yes" + declarative thread → SILENT (regression guard)
 - `test_classify_terminus_bot_short_reply_to_valor_question_still_silent` — bot "Yes" + Valor question → SILENT via Fast-Path 1 (pins fast-path ordering)
 - `test_classify_terminus_url_query_in_thread_not_treated_as_question` — URL `?q=1` in thread_messages → SILENT (URL query strings stay excluded)
+
+**Fast-Path 0 imperative tests** (issue [#1318](https://github.com/tomcounsell/ai/issues/1318)):
+
+- `test_classify_terminus_imperative_single_line_returns_respond` — single-line "Continue ..." → RESPOND
+- `test_classify_terminus_imperative_multi_line_returns_respond` — May 7 incident verbatim (two-line message, imperative on line 2) → RESPOND
+- `test_classify_terminus_imperative_go_ahead_multi_word_returns_respond` — "Go ahead and merge it" → RESPOND
+- `test_classify_terminus_imperative_proceed_returns_respond` — "Proceed with the plan" → RESPOND
+- `test_classify_terminus_imperative_single_word_continue_returns_respond` — single-word "continue" → RESPOND (Fast-Path 0 fires before Fast-Path 2's ≤1-word SILENT check)
+- `test_classify_terminus_ok_great_does_not_respond` — "ok great" → REACT or SILENT, but never RESPOND
+- `test_classify_terminus_thanks_still_silent_regression` — "thanks" → SILENT (acknowledgment token unchanged)
+- `test_classify_terminus_imperative_from_bot_still_silent` — bot sender with imperative → SILENT via Fast-Path 1 (Fast-Path 0 is human-only)
+- `test_classify_terminus_mid_line_imperative_does_not_match_regex` — mid-sentence "continue" must NOT match `_IMPERATIVE_LINE_RE` (verifies regex anchor directly)
 
 ## Related
 
