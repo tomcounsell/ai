@@ -112,6 +112,7 @@ from bridge.media import (  # noqa: E402
     MEDIA_DIR,  # noqa: F401
     VISION_EXTENSIONS,  # noqa: F401
     VOICE_EXTENSIONS,  # noqa: F401
+    compute_media_timeout,
     describe_image,  # noqa: F401
     download_media,  # noqa: F401
     extract_document_text,  # noqa: F401
@@ -657,6 +658,88 @@ from bridge.update import (  # noqa: E402
 )
 
 
+async def _download_media_with_retry(
+    client,
+    message,
+    prefix: str = "media",
+) -> tuple[Path | None, str | None]:
+    """Download a Telegram media attachment with size-aware timeout + 1 retry.
+
+    Issue #1322 — the original code used a hard-coded 10s timeout; large files
+    on slow links failed silently. This wrapper:
+
+      1. Reads ``message.file.size`` (None-safe for thumbnails).
+      2. Computes a per-attempt timeout via ``compute_media_timeout`` (capped
+         at 120s).
+      3. Attempts the download. On ``TimeoutError``, retries once with a
+         **2x leash** (still capped at 120s).
+      4. Returns ``(local_path, error_string)``. On terminal timeout the error
+         string is ``"timeout after Xs (retried)"`` so downstream can tell
+         "too big" from "first attempt was just unlucky".
+
+    Telemetry: emits one ``logger.info`` line per attempt with
+    ``size_bytes``, ``computed_timeout_s``, ``duration_ms``, ``attempt``,
+    ``outcome``.
+    """
+    size_bytes: int | None = None
+    try:
+        size_bytes = getattr(getattr(message, "file", None), "size", None)
+    except Exception:
+        size_bytes = None
+
+    first_timeout = compute_media_timeout(size_bytes)
+    second_timeout = min(120.0, max(first_timeout, 2.0 * first_timeout))
+
+    msg_id = getattr(message, "id", None)
+
+    async def _attempt(timeout_s: float, attempt_n: int) -> tuple[Path | None, str | None]:
+        started = time.monotonic()
+        try:
+            path = await asyncio.wait_for(
+                download_media(client, message, prefix=prefix),
+                timeout=timeout_s,
+            )
+            duration_ms = int((time.monotonic() - started) * 1000)
+            outcome = "success" if path is not None else "no_path"
+            logger.info(
+                f"[media] download attempt={attempt_n} outcome={outcome} "
+                f"size_bytes={size_bytes} computed_timeout_s={timeout_s:.1f} "
+                f"duration_ms={duration_ms} msg_id={msg_id}"
+            )
+            return path, None
+        except TimeoutError:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            logger.info(
+                f"[media] download attempt={attempt_n} outcome=timeout "
+                f"size_bytes={size_bytes} computed_timeout_s={timeout_s:.1f} "
+                f"duration_ms={duration_ms} msg_id={msg_id}"
+            )
+            return None, "timeout"
+        except Exception as e:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            logger.info(
+                f"[media] download attempt={attempt_n} outcome=error "
+                f"size_bytes={size_bytes} computed_timeout_s={timeout_s:.1f} "
+                f"duration_ms={duration_ms} msg_id={msg_id} err={type(e).__name__}"
+            )
+            return None, f"{type(e).__name__}: {e}"
+
+    path, err = await _attempt(first_timeout, attempt_n=1)
+    if path is not None:
+        return path, None
+    if err != "timeout":
+        # Non-timeout error: do not retry — return the error as-is.
+        return None, err
+
+    # First attempt timed out — retry with 2x leash.
+    path, err = await _attempt(second_timeout, attempt_n=2)
+    if path is not None:
+        return path, None
+    if err == "timeout":
+        return None, f"timeout after {second_timeout:.0f}s (retried)"
+    return None, err
+
+
 def _build_completed_resume_text(
     completed_session,
     follow_up_text: str,
@@ -1142,30 +1225,29 @@ async def main():
             except Exception as e:
                 logger.warning(f"Memory save failed (non-fatal): {e}")
 
-        # === sdlc-1297: bridge-side media download ===
-        # The bridge owns Telethon RPC; the worker owns AI work. We download the
-        # media file synchronously here (with a 10s timeout) and persist the
-        # absolute path on the TelegramMessage record so the worker can run
+        # === sdlc-1297 + sdlc-1322: bridge-side media download ===
+        # The bridge owns Telethon RPC; the worker owns AI work. We download
+        # the media file synchronously here and persist the absolute path on
+        # the TelegramMessage record so the worker can run
         # vision/Whisper/extraction without ever touching Telethon.
+        #
+        # Issue #1322: timeout is now size-aware (5s + 1s/MB, capped at 120s)
+        # with one retry on TimeoutError using a 2x leash. Terminal failures
+        # set ``media_download_error`` to ``"timeout after Xs (retried)"`` so
+        # downstream can distinguish "first attempt was unlucky" from
+        # "we tried twice and the file is just too big".
         if message.media and stored_msg_id is not None:
             _media_type_for_download = get_media_type(message) or "media"
-            _local_path: Path | None = None
-            _download_error: str | None = None
-            try:
-                _local_path = await asyncio.wait_for(
-                    download_media(client, message, prefix=_media_type_for_download),
-                    timeout=10.0,
-                )
-            except TimeoutError:
-                _download_error = "timeout after 10s"
+            _local_path, _download_error = await _download_media_with_retry(
+                client,
+                message,
+                prefix=_media_type_for_download,
+            )
+            if _download_error:
                 logger.warning(
-                    f"[media] download timeout after 10s "
-                    f"(chat_id={event.chat_id}, msg_id={message.id})"
-                )
-            except Exception as e:
-                _download_error = f"{type(e).__name__}: {e}"
-                logger.warning(
-                    f"[media] download failed (chat_id={event.chat_id}, msg_id={message.id}): {e}"
+                    f"[media] download failed "
+                    f"(chat_id={event.chat_id}, msg_id={message.id}): "
+                    f"{_download_error}"
                 )
 
             try:
