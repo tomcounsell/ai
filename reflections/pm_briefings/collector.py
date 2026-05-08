@@ -1,5 +1,5 @@
 """
-reflections/pm_audio_briefing/collector.py — Raw-signal collector.
+reflections/pm_briefings/collector.py — Raw-signal collector.
 
 Pulls per-project signals (yesterday's merges, open bugs, upvote queue) using
 the project's working_directory and github.org/repo. v1 ships exactly 3
@@ -18,7 +18,7 @@ import logging
 import subprocess
 from typing import Any
 
-logger = logging.getLogger("reflections.pm_audio_briefing.collector")
+logger = logging.getLogger("reflections.pm_briefings.collector")
 
 
 def _run(cmd: list[str], cwd: str, timeout: int = 30) -> tuple[int, str, str]:

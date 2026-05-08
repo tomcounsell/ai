@@ -1,4 +1,4 @@
-"""Unit tests for reflections/pm_audio_briefing/builder.py.
+"""Unit tests for reflections/pm_briefings/builder.py.
 
 Covers:
 - Pass A prompt asserts forbidden phrases (forward-looking, no-numbers,
@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
-from reflections.pm_audio_briefing import builder
+from reflections.pm_briefings import builder
 
 pytestmark = [pytest.mark.unit]
 

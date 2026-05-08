@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from reflections import pm_audio_briefing as briefing
+from reflections import pm_briefings as briefing
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -24,10 +24,16 @@ def _project(slug, machine):
         "telegram": {"groups": {"PM: Test": {"chat_id": -1}}},
         "pm_briefing": {
             "enabled": True,
-            "schedule": "08:30",
             "timezone": "UTC",
             "target_groups": ["PM: Test"],
-            "angles": {},
+            "slots": [
+                {
+                    "name": "morning",
+                    "type": "morning",
+                    "schedule": "08:30",
+                    "angles": {},
+                }
+            ],
         },
     }
 

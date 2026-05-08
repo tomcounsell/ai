@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from reflections import pm_audio_briefing as briefing
+from reflections import pm_briefings as briefing
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 

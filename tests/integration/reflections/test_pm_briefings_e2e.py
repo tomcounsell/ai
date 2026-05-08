@@ -5,7 +5,7 @@ fixture project. Skipped in CI by default.
 
 The test runs in DRY_RUN=1 mode -- no audio is synthesized, no Telegram
 messages are queued. The expected output is a saved transcript at
-logs/reflections/pm-audio-briefing-<slug>-<date>.txt.
+logs/reflections/pm-briefings-<slug>-<date>.txt.
 
 Per the plan's N2-R2 angles-toggle integration step, the test also captures
 two transcripts (one with `angles.include = ["merges", "open-bugs"]` and one
@@ -70,7 +70,7 @@ def test_dry_run_writes_transcript(fixture_project, monkeypatch):
     are no signals (because skip_when_empty=False is the default for the
     test below). Here skip_when_empty=True returns ("", "") so no dump
     happens — we just confirm the run doesn't crash."""
-    from reflections import pm_audio_briefing as briefing
+    from reflections import pm_briefings as briefing
 
     monkeypatch.setenv("DRY_RUN", "1")
     with patch.object(briefing, "load_local_projects", return_value=[fixture_project]):
@@ -85,7 +85,7 @@ def test_angles_toggle_changes_transcript(fixture_project, monkeypatch, tmp_path
     Run once with both angles, then with just merges. The second transcript
     should be shorter (or at least lack any bug references).
     """
-    from reflections import pm_audio_briefing as briefing
+    from reflections import pm_briefings as briefing
 
     monkeypatch.setenv("DRY_RUN", "1")
     fixture_project["pm_briefing"]["skip_when_empty"] = False  # write something
@@ -105,7 +105,7 @@ def test_angles_toggle_changes_transcript(fixture_project, monkeypatch, tmp_path
     with patch.object(briefing, "load_local_projects", return_value=[fixture_project]):
         asyncio.run(briefing.run())
 
-    files_b = sorted(log_dir.glob("pm-audio-briefing-e2e-fixture-*.txt"))
+    files_b = sorted(log_dir.glob("pm-briefings-e2e-fixture-*.txt"))
     assert files_b, "expected at least one dry-run dump file"
 
     # The transcript file should contain no "open-bugs" references after toggle

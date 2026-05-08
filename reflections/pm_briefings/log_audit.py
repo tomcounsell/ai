@@ -1,5 +1,5 @@
 """
-reflections/pm_audio_briefing/log_audit.py — Log-audit slot.
+reflections/pm_briefings/log_audit.py — Log-audit slot.
 
 Per-project text-only summary of the previous day's logs (file sizes, error
 counts, regression markers, optional Sentry counts).
@@ -32,7 +32,7 @@ from typing import Any
 
 from reflections.utils import extract_structured_errors
 
-logger = logging.getLogger("reflections.pm_audio_briefing.log_audit")
+logger = logging.getLogger("reflections.pm_briefings.log_audit")
 
 
 SLOT_TYPE = "log_audit"
