@@ -32,6 +32,7 @@ dependencies = [
     "uvicorn[standard]>=0.34.0", # ASGI server for web UI
     "jinja2>=3.1.0", # Template engine for web UI
     "pillow>=10.0.0", # Screenshot downscaling to stay within Claude's 2000px image dimension limit
+    "croniter>=2.0.0", # Cron expression parser for unified Reflection schedule grammar (#1273)
 ]
 
 [project.optional-dependencies]

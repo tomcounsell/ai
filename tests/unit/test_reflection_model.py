@@ -1,7 +1,9 @@
 """Unit tests for the Reflection Popoto model (models/reflection.py).
 
-Covers mark_completed() with run_history append behavior added in
-the Unified Web UI PR (issue #477, PR #511).
+Post-#1273 (unified Reflection system): per-run history lives in
+``ReflectionRun`` rows; embedded ``run_history`` is gone. Tests for
+``mark_completed`` now assert the ``last_run_summary`` dict + a
+correctly-written ``ReflectionRun`` row.
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ import time
 
 
 class TestReflectionMarkCompleted:
-    """Tests for Reflection.mark_completed() including run_history append."""
+    """Tests for Reflection.mark_completed()."""
 
     def _create_reflection(self, name: str = "test-reflection"):
         from models.reflection import Reflection
@@ -22,7 +24,6 @@ class TestReflectionMarkCompleted:
             last_status="pending",
             last_error=None,
             last_duration=None,
-            run_history=[],
         )
 
     def test_mark_completed_success(self):
@@ -45,53 +46,49 @@ class TestReflectionMarkCompleted:
         assert reflection.last_error == "Something went wrong"
         assert reflection.run_count == 1
 
-    def test_mark_completed_appends_to_run_history(self):
-        """Each mark_completed() call appends a run record to run_history."""
-        reflection = self._create_reflection()
+    def test_mark_completed_writes_reflection_run_row(self):
+        """Each mark_completed() call writes a ReflectionRun row."""
+        from models.reflection_run import ReflectionRun
 
+        # Clean any pre-existing rows for the deterministic name.
+        for r in ReflectionRun.query.filter(name="test-reflection-runs"):
+            r.delete()
+
+        reflection = self._create_reflection(name="test-reflection-runs")
         reflection.mark_completed(duration=1.0)
-        assert len(reflection.run_history) == 1
-
         reflection.mark_completed(duration=2.0)
-        assert len(reflection.run_history) == 2
 
-    def test_run_history_record_structure(self):
-        """run_history entries have required fields: timestamp, status, duration, error."""
+        rows = list(ReflectionRun.query.filter(name="test-reflection-runs"))
+        assert len(rows) == 2
+
+        for r in rows:
+            r.delete()
+
+    def test_last_run_summary_record_structure(self):
+        """last_run_summary has timestamp, status, duration, error."""
         reflection = self._create_reflection()
         before = time.time()
         reflection.mark_completed(duration=2.5)
 
-        record = reflection.run_history[0]
-        assert "timestamp" in record
-        assert "status" in record
-        assert "duration" in record
-        assert "error" in record
+        summary = reflection.last_run_summary
+        assert "timestamp" in summary
+        assert "status" in summary
+        assert "duration" in summary
+        assert "error" in summary
 
-        assert record["status"] == "success"
-        assert record["duration"] == 2.5
-        assert record["error"] is None
-        assert record["timestamp"] >= before
+        assert summary["status"] == "success"
+        assert summary["duration"] == 2.5
+        assert summary["error"] is None
+        assert summary["timestamp"] >= before
 
-    def test_run_history_records_error(self):
-        """run_history entries capture error message when run fails."""
+    def test_last_run_summary_records_error(self):
+        """last_run_summary captures error message when run fails."""
         reflection = self._create_reflection()
         reflection.mark_completed(duration=0.1, error="Timeout after 10s")
 
-        record = reflection.run_history[0]
-        assert record["status"] == "error"
-        assert record["error"] == "Timeout after 10s"
-
-    def test_run_history_capped_at_200(self):
-        """run_history is capped at 200 entries — oldest are dropped."""
-        reflection = self._create_reflection()
-
-        # Add 205 runs
-        for i in range(205):
-            reflection.mark_completed(duration=float(i))
-
-        assert len(reflection.run_history) == 200
-        # Most recent 200 entries are kept (last one should have duration 204)
-        assert reflection.run_history[-1]["duration"] == 204.0
+        summary = reflection.last_run_summary
+        assert summary["status"] == "error"
+        assert summary["error"] == "Timeout after 10s"
 
     def test_mark_completed_increments_run_count(self):
         """run_count increments on every call."""
@@ -130,14 +127,13 @@ class TestReflectionMarkCompleted:
 
         assert len(reflection.last_error) == 1000
 
-    def test_error_truncated_in_run_history(self):
-        """Long error messages are truncated to 500 chars in run_history records."""
+    def test_error_truncated_in_last_run_summary(self):
+        """Long error messages are truncated to 500 chars in last_run_summary."""
         reflection = self._create_reflection()
         long_error = "x" * 1000
         reflection.mark_completed(duration=0.1, error=long_error)
 
-        record = reflection.run_history[0]
-        assert len(record["error"]) == 500
+        assert len(reflection.last_run_summary["error"]) == 500
 
 
 class TestReflectionGetOrCreate:
@@ -159,4 +155,3 @@ class TestReflectionGetOrCreate:
 
         r2 = Reflection.get_or_create("idempotent-check")
         assert r2.run_count == 1
-        assert r2.last_status == "success"
