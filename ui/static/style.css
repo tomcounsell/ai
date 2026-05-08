@@ -632,6 +632,21 @@ tr.session-row.stale {
     color: var(--text-primary);
 }
 
+/* Per-event-type timeline dot colors */
+.timeline-item.timeline-stage::before { background: var(--accent); }
+.timeline-item.timeline-lifecycle::before { background: var(--text-muted); }
+.timeline-item.timeline-user::before { background: var(--green); }
+.timeline-item.timeline-system::before { background: var(--border-light); }
+
+/* Per-event-type badge overrides */
+.badge-stage { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+.badge-lifecycle { background: color-mix(in srgb, var(--text-muted) 15%, transparent); color: var(--text-secondary); }
+.badge-user { background: color-mix(in srgb, var(--green) 20%, transparent); color: var(--green); }
+
+/* Stage events are lower visual weight — the text carries the signal */
+.timeline-item.timeline-stage .timeline-text { font-family: var(--font-mono); font-size: 13px; }
+.timeline-item.timeline-lifecycle .timeline-text { color: var(--text-secondary); font-size: 13px; }
+
 /* Links */
 a.link {
     color: var(--accent);
@@ -1016,8 +1031,13 @@ a:hover {
     font-size: 15px;
     font-weight: 600;
     color: var(--text-primary);
-    flex: 1;
+    flex: 1 1 0;
+    min-width: 0;
     margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 66%;
 }
 
 .modal-body {
@@ -1044,8 +1064,8 @@ a:hover {
 /* ── Stats Toggle Button ── */
 .stats-toggle {
     background: var(--bg-tertiary);
-    color: var(--text-muted);
-    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-light);
     border-radius: 12px;
     padding: 2px 10px;
     font-size: 11px;

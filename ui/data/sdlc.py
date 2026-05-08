@@ -228,6 +228,7 @@ class PipelineEvent(BaseModel):
     role: str  # e.g., 'stage', 'lifecycle', 'user', 'system'
     text: str
     timestamp: float | None = None
+    event_type: str | None = None  # raw event_type from history for template styling
 
 
 class PipelineProgress(BaseModel):
@@ -262,6 +263,7 @@ class PipelineProgress(BaseModel):
     session_type: str | None = None
     status: str | None = None
     slug: str | None = None
+    initiator: str | None = None  # "telegram", "email", "local", or short parent session id
     message_text: str | None = None
     project_key: str | None = None
     project_name: str | None = None
@@ -523,15 +525,69 @@ def _parse_stage_states(raw: str | dict | None) -> list[StageState]:
     return stages
 
 
+_STAGE_STATUS_EMOJI = {
+    "completed": "✓",
+    "skipped": "↷",
+    "failed": "✗",
+    "in_progress": "◉",
+    "ready": "○",
+    "pending": "·",
+}
+
+_STAGE_STATUS_ORDER = ["completed", "skipped", "failed", "in_progress", "ready", "pending"]
+
+
+def _stage_diff_text(prev: dict | None, curr: dict) -> str:
+    """Summarise what changed between two stage snapshots.
+
+    Returns a compact string like "PLAN completed · BUILD ready" listing only
+    the stages that changed, ordered by the SDLC stage order.  Internal keys
+    (prefixed with `_`) are ignored.  When there is no previous snapshot
+    (first stage event), returns a summary of all non-pending stages.
+    """
+    named_keys = [k for k in curr if not k.startswith("_")]
+
+    if prev is None:
+        changed = [(k, curr[k]) for k in named_keys if curr.get(k) not in ("pending", None)]
+    else:
+        changed = [
+            (k, curr[k])
+            for k in named_keys
+            if curr.get(k) != prev.get(k) and curr.get(k) not in (None,)
+        ]
+
+    if not changed:
+        return "stage snapshot (no changes)"
+
+    # Order by SDLC stage list when possible
+    def _sort_key(item):
+        name, status = item
+        try:
+            stage_idx = DISPLAY_STAGES.index(name)
+        except ValueError:
+            stage_idx = 999
+        return (stage_idx,)
+
+    changed.sort(key=_sort_key)
+
+    parts = []
+    for name, status in changed:
+        emoji = _STAGE_STATUS_EMOJI.get(status, "")
+        parts.append(f"{emoji} {name} {status}" if emoji else f"{name} {status}")
+    return " · ".join(parts)
+
+
 def _parse_history(history_list: list | None) -> list[PipelineEvent]:
     """Parse session history entries into typed PipelineEvent objects."""
     if not history_list or not isinstance(history_list, list):
         return []
 
     events = []
+    prev_stage_snapshot: dict | None = None
+
     for entry in history_list:
         if isinstance(entry, str):
-            # Format: "[role] text"
+            # Legacy format: "[role] text"
             if entry.startswith("[") and "]" in entry:
                 bracket_end = entry.index("]")
                 role = entry[1:bracket_end]
@@ -539,17 +595,61 @@ def _parse_history(history_list: list | None) -> list[PipelineEvent]:
             else:
                 role = "system"
                 text = entry
-            events.append(PipelineEvent(role=role, text=text))
+            events.append(PipelineEvent(role=role, text=text, event_type=role))
         elif isinstance(entry, dict):
+            event_type = entry.get("event_type") or entry.get("role") or "system"
+            raw_text = entry.get("text", "")
+
+            if event_type == "stage":
+                data = entry.get("data") or {}
+                stage_snapshot = data.get("stages") if isinstance(data, dict) else None
+                if stage_snapshot:
+                    # Compare only visible (non-internal) keys to skip duplicates
+                    # caused by internal fields like _verdicts changing timestamps.
+                    visible = {k: v for k, v in stage_snapshot.items() if not k.startswith("_")}
+                    prev_visible = (
+                        {k: v for k, v in prev_stage_snapshot.items() if not k.startswith("_")}
+                        if prev_stage_snapshot
+                        else None
+                    )
+                    if visible == prev_visible:
+                        continue
+                    text = _stage_diff_text(prev_stage_snapshot, stage_snapshot)
+                    prev_stage_snapshot = stage_snapshot
+                elif raw_text and raw_text != "bulk=update":
+                    text = raw_text
+                else:
+                    text = "stage update"
+            elif event_type == "user":
+                # Trim long PM prompts to the first meaningful line
+                first_line = (raw_text or "").splitlines()[0] if raw_text else ""
+                text = first_line[:120] + ("…" if len(first_line) > 120 else "")
+            else:
+                text = raw_text or str(entry)
+
             events.append(
                 PipelineEvent(
-                    role=entry.get("role", "system"),
-                    text=entry.get("text", str(entry)),
+                    role=event_type,
+                    text=text,
                     timestamp=entry.get("timestamp"),
+                    event_type=event_type,
                 )
             )
 
     return events
+
+
+def _resolve_initiator(session_id: str | None, parent_id: str | None) -> str | None:
+    """Derive a human-readable initiator label from session_id / parent."""
+    if parent_id:
+        return f"session/{parent_id[:8]}"
+    if not session_id:
+        return None
+    if session_id.startswith("tg_"):
+        return "telegram"
+    if "email" in session_id.lower():
+        return "email"
+    return "local"
 
 
 def _resolve_persona_display(session) -> str | None:
@@ -766,6 +866,10 @@ def _session_to_pipeline(session) -> PipelineProgress:
         completed_at=_safe_float(session.completed_at),
         updated_at=updated_at,
         parent_agent_session_id=_safe_str(getattr(session, "parent_agent_session_id", None)),
+        initiator=_resolve_initiator(
+            _safe_str(session.session_id),
+            _safe_str(getattr(session, "parent_agent_session_id", None)),
+        ),
         context_summary=_safe_str(getattr(session, "context_summary", None)),
         expectations=_safe_str(getattr(session, "expectations", None)),
         turn_count=turn_count,

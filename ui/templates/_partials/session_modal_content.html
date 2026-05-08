@@ -2,14 +2,21 @@
 <div class="modal-content">
     <div class="modal-header">
         <h2 class="modal-title">{{ pipeline.display_name }}</h2>
-        <div class="flex gap-2" style="align-items: center;">
+        <div class="flex gap-2" style="align-items: center; margin-left: auto;">
+            {% if pipeline.initiator %}
+            <span class="stats-toggle" style="cursor: default; margin-left: 0;">{{ pipeline.initiator }}</span>
+            {% endif %}
+            {% if pipeline.session_type %}
+            <span class="badge badge-{{ 'blue' if pipeline.session_type == 'Developer' else ('green' if pipeline.session_type == 'Teammate' else 'purple') }}">{{ 'PM' if pipeline.session_type == 'Project Manager' else ('dev' if pipeline.session_type == 'Developer' else pipeline.session_type) }}</span>
+            {% endif %}
             {% if pipeline.status %}
             <span class="badge badge-{{ pipeline.status }}{% if pipeline.is_stale %} stale{% endif %}">{{ pipeline.status }}</span>
             {% endif %}
             <button class="btn-copy"
                     data-session-id="{{ pipeline.agent_session_id }}"
                     data-thread="{{ pipeline.session_id or '-' }}"
-                    data-project="{{ pipeline.project_key or '-' }}"
+                    data-project="{{ (pipeline.project_name or pipeline.project_key) or '-' }}"
+                    data-slug="{{ pipeline.slug or '-' }}"
                     onclick="copySessionDetails(this)"
                     title="Copy identification details">&#128203;</button>
         </div>
@@ -20,44 +27,18 @@
             <div>
                 <h3>Details</h3>
                 <table class="data-table compact">
-                    <tr><td class="text-secondary">Session ID</td><td class="mono">{{ pipeline.agent_session_id }}</td></tr>
-                    {% if pipeline.session_id %}
-                    <tr><td class="text-secondary">Thread</td><td class="mono">{{ pipeline.session_id }}</td></tr>
-                    {% endif %}
-                    <tr><td class="text-secondary">Project</td><td class="mono">{{ pipeline.project_key or '-' }}</td></tr>
-                    {% if pipeline.branch_name %}
-                    <tr><td class="text-secondary">Branch</td><td class="mono">{{ pipeline.branch_name }}</td></tr>
-                    {% endif %}
-                    {% if pipeline.slug %}
-                    <tr><td class="text-secondary">Slug</td><td class="mono">{{ pipeline.slug }}</td></tr>
-                    {% endif %}
-                    {% if pipeline.claude_session_uuid %}
-                    <tr><td class="text-secondary">Resume</td><td>
-                        <span class="resume-chip mono" onclick="copyResumeCommand(this)" title="Click to copy" data-uuid="{{ pipeline.claude_session_uuid }}">/resume {{ pipeline.claude_session_uuid }}</span>
-                    </td></tr>
-                    {% endif %}
-                    {% if pipeline.session_type %}
-                    <tr><td class="text-secondary">Persona</td><td>
-                        <span class="badge badge-{{ 'blue' if pipeline.session_type == 'Developer' else ('green' if pipeline.session_type == 'Teammate' else 'purple') }}">{{ pipeline.session_type }}</span>
-                    </td></tr>
-                    {% endif %}
+                    <tr>
+                        <td class="text-secondary">Project</td>
+                        <td class="mono">
+                            {{ pipeline.project_name or pipeline.project_key or '-' }}{% if pipeline.branch_name or pipeline.slug %}<span class="text-muted">:
+                            {{ pipeline.branch_name or '' }}{% if pipeline.branch_name and pipeline.slug %} / {% endif %}{{ pipeline.slug or '' }}</span>{% endif %}
+                        </td>
+                    </tr>
                 </table>
-            </div>
-            <div>
-                <h3>Timing</h3>
-                <table class="data-table compact">
-                    <tr><td class="text-secondary">Created</td><td class="mono">{{ pipeline.created_at | format_timestamp if pipeline.created_at else '-' }}</td></tr>
-                    <tr><td class="text-secondary">Started</td><td class="mono">{{ pipeline.started_at | format_timestamp if pipeline.started_at else '-' }}</td></tr>
-                    {% if pipeline.completed_at %}
-                    <tr><td class="text-secondary">Completed</td><td class="mono">{{ pipeline.completed_at | format_timestamp }}</td></tr>
-                    {% endif %}
-                    {% if pipeline.duration is not none %}
-                    <tr><td class="text-secondary">Duration</td><td class="mono">{{ pipeline.duration | format_duration }}</td></tr>
-                    {% endif %}
-                    {% if pipeline.tool_call_count is not none %}
-                    <tr><td class="text-secondary">Tool calls</td><td class="mono">{{ pipeline.tool_call_count }}</td></tr>
-                    {% endif %}
-                </table>
+                <div class="modal-ids-row">
+                    <span class="modal-id-chip" title="{{ pipeline.agent_session_id }}">session {{ pipeline.agent_session_id[:8] }}…</span>
+                    {% if pipeline.session_id %}<span class="modal-id-chip" title="{{ pipeline.session_id }}">thread {{ pipeline.session_id }}</span>{% endif %}
+                </div>
 
                 {% if pipeline.issue_url or pipeline.plan_url or pipeline.pr_url %}
                 <h3 class="mt-4">Links</h3>
@@ -74,76 +55,76 @@
                 </table>
                 {% endif %}
 
+                <h3 class="mt-4">Waiting for{% if not pipeline.expectations %}: <span class="text-secondary" style="font-size: 13px; font-weight: normal;">None</span>{% endif %}</h3>
                 {% if pipeline.expectations %}
-                <h3 class="mt-4">Waiting for</h3>
-                <div class="text-secondary" style="font-size: 13px; font-style: italic;">{{ pipeline.expectations }}</div>
+                <div style="font-size: 15px; color: #e8924a;">{{ pipeline.expectations }}</div>
                 {% endif %}
+                {% if pipeline.claude_session_uuid %}
+                <span class="resume-chip mono mt-2" style="display: inline-block; margin-top: 8px;" onclick="copyResumeCommand(this)" title="Click to copy resume command" data-uuid="{{ pipeline.claude_session_uuid }}">/resume {{ pipeline.claude_session_uuid }}</span>
+                {% endif %}
+            </div>
+            <div>
+                {# Merged Timing + Liveness — one compact table so the modal
+                   doesn't split closely related signals across two sections. #}
+                <h3>Timing &amp; Liveness</h3>
+                <table class="data-table compact">
+                    {# Started + duration + completion on one line #}
+                    <tr>
+                        <td class="text-secondary">Started</td>
+                        <td class="mono">
+                            {% if pipeline.completed_at %}<span title="{{ pipeline.completed_at | format_timestamp }}">✔</span> {% endif %}{{ (pipeline.started_at or pipeline.created_at) | format_timestamp if (pipeline.started_at or pipeline.created_at) else '-' }}{% if pipeline.duration is not none %} · {{ pipeline.duration | format_duration }}{% endif %}
+                        </td>
+                    </tr>
+                    {% if pipeline.tool_call_count is not none %}
+                    <tr><td class="text-secondary">Tool calls</td><td class="mono">{{ pipeline.tool_call_count }}</td></tr>
+                    {% endif %}
+                    {# Liveness signals — only rendered when present #}
+                    {% if pipeline.harness_pid is not none %}
+                    <tr>
+                        <td class="text-secondary">PID</td>
+                        <td class="mono">
+                            {{ pipeline.harness_pid }}
+                            {% if pipeline.process_alive == True %}
+                            <span class="freshness-chip freshness-fresh" title="alive — PID may be recycled across worker restarts">alive</span>
+                            {% elif pipeline.process_alive == False %}
+                            <span class="ghost-badge" title="ghost — harness process dead">ghost</span>
+                            {% elif pipeline.process_alive is none %}
+                            <span class="freshness-chip freshness-warm" title="probe uncertain">unknown</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endif %}
+                    {% if pipeline.current_tool_name %}
+                    <tr><td class="text-secondary">Current tool</td><td class="mono">{{ pipeline.current_tool_name }}</td></tr>
+                    {% endif %}
+                    {# Last active = max(last_evidence_at, last_heartbeat_at) #}
+                    {% set _last_active = [pipeline.last_evidence_at, pipeline.last_heartbeat_at] | select | max %}
+                    {% if _last_active %}
+                    <tr><td class="text-secondary">Last active</td><td class="mono">{{ _last_active | format_timestamp }}</td></tr>
+                    {% endif %}
+                    {% if pipeline.last_tool_use_at %}
+                    <tr><td class="text-secondary">Last tool use</td><td class="mono">{{ pipeline.last_tool_use_at | format_timestamp }}</td></tr>
+                    {% endif %}
+                    {% if pipeline.last_turn_at %}
+                    <tr><td class="text-secondary">Last turn</td><td class="mono">{{ pipeline.last_turn_at | format_timestamp }}</td></tr>
+                    {% endif %}
+                    {% if pipeline.recovery_attempts %}
+                    <tr><td class="text-secondary">Recoveries</td><td class="mono">{{ pipeline.recovery_attempts }}</td></tr>
+                    {% endif %}
+                    {% if pipeline.reprieve_count %}
+                    <tr><td class="text-secondary">Reprieves</td><td class="mono">{{ pipeline.reprieve_count }}</td></tr>
+                    {% endif %}
+                    {% if pipeline.watchdog_unhealthy %}
+                    <tr><td class="text-secondary">Watchdog</td><td class="mono"><span class="badge badge-warning">{{ pipeline.watchdog_unhealthy }}</span></td></tr>
+                    {% endif %}
+                </table>
             </div>
         </div>
 
-        {# Liveness sub-table (#1269) — surfaces all heartbeat/evidence
-           timestamps + counters + PID probe so an operator can answer
-           "is this session actually progressing right now?" without
-           leaving the dashboard. Renders only when at least one signal
-           is available; old sessions with all-None fields skip the section. #}
-        {% set _has_liveness = pipeline.harness_pid is not none or pipeline.last_heartbeat_at or pipeline.last_sdk_heartbeat_at or pipeline.last_stdout_at or pipeline.last_evidence_at or pipeline.last_tool_use_at or pipeline.last_turn_at or pipeline.recovery_attempts or pipeline.reprieve_count or pipeline.current_tool_name or pipeline.watchdog_unhealthy %}
-        {% if _has_liveness %}
-        <h3>Liveness</h3>
-        <table class="data-table compact mb-4">
-            {% if pipeline.harness_pid is not none %}
-            <tr>
-                <td class="text-secondary">PID</td>
-                <td class="mono">
-                    {{ pipeline.harness_pid }}
-                    {% if pipeline.process_alive == True %}
-                    <span class="freshness-chip freshness-fresh" title="alive — process exists; PID may be recycled across worker restarts. Cross-check the freshness chip if the row looks stale.">alive</span>
-                    {% elif pipeline.process_alive == False %}
-                    <span class="ghost-badge" title="ghost — harness process dead; the dashboard reaper will sweep this shortly">ghost</span>
-                    {% elif pipeline.process_alive is none %}
-                    <span class="freshness-chip freshness-warm" title="probe uncertain — PID may have insufficient permissions or be unknown">unknown</span>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endif %}
-            {% if pipeline.current_tool_name %}
-            <tr><td class="text-secondary">Current tool</td><td class="mono">{{ pipeline.current_tool_name }}</td></tr>
-            {% endif %}
-            {% if pipeline.last_evidence_at %}
-            <tr><td class="text-secondary">Last evidence</td><td class="mono">{{ pipeline.last_evidence_at | format_timestamp }}</td></tr>
-            {% endif %}
-            {% if pipeline.last_heartbeat_at %}
-            <tr><td class="text-secondary">Last heartbeat</td><td class="mono">{{ pipeline.last_heartbeat_at | format_timestamp }}</td></tr>
-            {% endif %}
-            {% if pipeline.last_sdk_heartbeat_at %}
-            <tr><td class="text-secondary">Last SDK heartbeat</td><td class="mono">{{ pipeline.last_sdk_heartbeat_at | format_timestamp }}</td></tr>
-            {% endif %}
-            {% if pipeline.last_stdout_at %}
-            <tr><td class="text-secondary">Last stdout</td><td class="mono">{{ pipeline.last_stdout_at | format_timestamp }}</td></tr>
-            {% endif %}
-            {% if pipeline.last_tool_use_at %}
-            <tr><td class="text-secondary">Last tool use</td><td class="mono">{{ pipeline.last_tool_use_at | format_timestamp }}</td></tr>
-            {% endif %}
-            {% if pipeline.last_turn_at %}
-            <tr><td class="text-secondary">Last turn</td><td class="mono">{{ pipeline.last_turn_at | format_timestamp }}</td></tr>
-            {% endif %}
-            {% if pipeline.recovery_attempts %}
-            <tr><td class="text-secondary">Recovery attempts</td><td class="mono">{{ pipeline.recovery_attempts }}</td></tr>
-            {% endif %}
-            {% if pipeline.reprieve_count %}
-            <tr><td class="text-secondary">Reprieves</td><td class="mono">{{ pipeline.reprieve_count }}</td></tr>
-            {% endif %}
-            {% if pipeline.watchdog_unhealthy %}
-            <tr><td class="text-secondary">Watchdog</td><td class="mono"><span class="badge badge-warning">{{ pipeline.watchdog_unhealthy }}</span></td></tr>
-            {% endif %}
-        </table>
-        {% endif %}
-
         {% if pipeline.stages %}
-        <h3>SDLC</h3>
-        <div class="stage-indicator mt-2 mb-4" style="flex-wrap: wrap; gap: 6px;">
+        <div class="stage-indicator mb-4">
             {% for stage in pipeline.stages %}
-            {% if not loop.first %}<span class="stage-arrow">&#9654;</span>{% endif %}
-            <span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else '')) }}" style="font-size: 12px;">{{ stage.name }}</span>
+            <span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else ('ready' if stage.is_ready else ''))) }}" title="{{ stage.name }}">{{ stage.name[0] }}</span>
             {% endfor %}
         </div>
         {% endif %}
@@ -151,11 +132,11 @@
         {% if pipeline.message_text %}
         <h3>Original Message</h3>
         {% if pipeline.message_user_text %}
-        <div class="log-viewer mt-2" style="margin-bottom: 8px; white-space: pre-wrap;">{{ pipeline.message_user_text }}</div>
+        <div class="log-viewer mt-2" style="margin-bottom: 8px; white-space: pre-wrap; max-height: 126px; scrollbar-width: none;">{{ pipeline.message_user_text }}</div>
         {% elif pipeline.message_system_prompt %}
         <div class="log-viewer mt-2" style="margin-bottom: 8px; color: var(--text-muted, #888); font-style: italic; font-size: 13px;">(message truncated — system prompt only)</div>
         {% else %}
-        <div class="log-viewer mt-2" style="margin-bottom: 8px; white-space: pre-wrap;">{{ pipeline.message_text }}</div>
+        <div class="log-viewer mt-2" style="margin-bottom: 8px; white-space: pre-wrap; max-height: 126px; scrollbar-width: none;">{{ pipeline.message_text }}</div>
         {% endif %}
         {% if pipeline.message_system_prompt %}
         <div style="margin-bottom: 16px;">
@@ -174,17 +155,60 @@
         <h3>Timeline</h3>
         <div class="timeline mt-2">
             {% for event in pipeline.events %}
-            <div class="timeline-item {{ 'success' if 'completed' in event.text else ('error' if 'failed' in event.text or 'error' in event.text else ('active' if 'in_progress' in event.text else '')) }}">
+            {% set et = event.event_type or event.role %}
+            {% set has_completion = ('completed' in event.text or '✓' in event.text) %}
+            {% set has_failure = ('failed' in event.text or '✗' in event.text or 'error' in event.text) %}
+            {% set has_active = ('in_progress' in event.text or '◉' in event.text) %}
+            <div class="timeline-item timeline-{{ et }} {{ 'success' if has_completion else ('error' if has_failure else ('active' if has_active else '')) }}">
                 <div class="flex gap-2" style="align-items: center;">
-                    <span class="badge badge-{{ event.role }}">{{ event.role }}</span>
+                    <span class="badge badge-{{ et }}">{{ et }}</span>
                     {% if event.timestamp %}
-                    <span class="timeline-time">{{ event.timestamp | format_timestamp }}</span>
+                    <span class="timeline-time" data-ts="{{ event.timestamp }}" title="{{ event.timestamp | format_timestamp }}">{{ event.timestamp | format_timestamp }}</span>
                     {% endif %}
                 </div>
                 <div class="timeline-text">{{ event.text }}</div>
             </div>
             {% endfor %}
         </div>
+        <script>
+        (function() {
+            function reltime(ts) {
+                var d = Date.now() / 1000 - ts;
+                if (d < 60) return Math.round(d) + 's ago';
+                if (d < 3600) return Math.round(d/60) + 'm ago';
+                if (d < 86400) return Math.round(d/3600) + 'h ago';
+                return Math.round(d/86400) + 'd ago';
+            }
+            document.querySelectorAll('.timeline-time[data-ts]').forEach(function(el) {
+                el.textContent = reltime(parseFloat(el.dataset.ts));
+            });
+
+            // Auto-collapse middle lifecycle items when timeline has > 6 entries
+            var items = Array.from(document.querySelectorAll('#session-modal-body .timeline-item'));
+            if (items.length > 6) {
+                var hidden = [];
+                for (var i = 2; i < items.length - 2; i++) {
+                    if (items[i].classList.contains('timeline-lifecycle')) {
+                        items[i].style.display = 'none';
+                        hidden.push(items[i]);
+                    }
+                }
+                if (hidden.length > 0) {
+                    var toggle = document.createElement('div');
+                    toggle.className = 'timeline-collapse-toggle';
+                    toggle.textContent = '+ ' + hidden.length + ' lifecycle event' + (hidden.length > 1 ? 's' : '') + ' hidden';
+                    toggle.onclick = function() {
+                        var showing = hidden[0].style.display !== 'none';
+                        hidden.forEach(function(el) { el.style.display = showing ? 'none' : ''; });
+                        toggle.textContent = showing
+                            ? '+ ' + hidden.length + ' lifecycle event' + (hidden.length > 1 ? 's' : '') + ' hidden'
+                            : '− hide lifecycle events';
+                    };
+                    items[items.length - 2].parentNode.insertBefore(toggle, items[items.length - 2]);
+                }
+            }
+        })();
+        </script>
         {% endif %}
     </div>
 </div>
@@ -202,14 +226,20 @@
 }
 .resume-chip:hover { background: var(--bg-hover, #2a2a3e); }
 .resume-chip.copied { color: var(--success, #4caf50); border-color: var(--success, #4caf50); }
+.modal-ids-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.modal-id-chip { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; opacity: 0.55; cursor: default; }
+.timeline-collapse-toggle { font-size: 11px; color: var(--text-muted); cursor: pointer; padding: 2px 0 8px 0; margin-left: 4px; }
+.timeline-collapse-toggle:hover { color: var(--text-secondary); }
 </style>
 <script>
 function copySessionDetails(btn) {
-    var text = [
+    var lines = [
         'Session ID    ' + btn.dataset.sessionId,
         'Thread    ' + btn.dataset.thread,
         'Project    ' + btn.dataset.project
-    ].join('\n');
+    ];
+    if (btn.dataset.slug && btn.dataset.slug !== '-') lines.push('Slug    ' + btn.dataset.slug);
+    var text = lines.join('\n');
     navigator.clipboard.writeText(text).then(function() {
         var orig = btn.textContent;
         btn.textContent = '\u2713';
