@@ -31,6 +31,35 @@ class PersonaType(StrEnum):
     CUSTOMER_SERVICE = "customer-service"
 
 
+class AccessLevel(StrEnum):
+    """Prompt-rails layer applied on top of a persona.
+
+    Orthogonal to ``SessionType`` (which decides queueing, child-session shape,
+    output handler) and to ``PersonaType`` (which decides voice and identity).
+    AccessLevel decides which safety preamble + appendices wrap the persona
+    when ``compose_system_prompt`` assembles the final agent system prompt.
+
+    - ``WORKER``: full permissions; prepends ``WORKER_RULES`` (safety rails)
+      and appends principal context + completion criteria. Maps to
+      ``SessionType.DEV`` today.
+    - ``PM_READONLY``: read-only PM mode; omits ``WORKER_RULES``; appends
+      work-vault ``CLAUDE.md``. Maps to ``SessionType.PM`` today. Caller must
+      pass a ``working_directory``.
+    - ``TEAMMATE``: conversational, no rails. Maps to ``SessionType.TEAMMATE``
+      with the teammate persona today.
+    - ``CUSTOMER_SERVICE``: action-oriented, no code writes, no rails. Used by
+      the email-spawned customer-service persona override today.
+
+    AccessLevel is **prompt-only**; runtime tool restrictions are enforced
+    separately by ``agent/hooks/pre_tool_use.py`` keyed on ``SessionType``.
+    """
+
+    WORKER = "worker"
+    PM_READONLY = "pm-readonly"
+    TEAMMATE = "teammate"
+    CUSTOMER_SERVICE = "customer-service"
+
+
 class ClassificationType(StrEnum):
     """Intent classification results from the work request classifier.
 
