@@ -39,7 +39,7 @@ class TestReflectionsDataLayer:
             "description": "Daily PM voice briefing",
         }
 
-        # Build mock states: parent entry + two per-project records
+        # Build mock states (post-#1273: no run_history field).
         state_parent = MagicMock()
         state_parent.name = "pm-audio-briefing"
         state_parent.ran_at = 1_700_000_000.0
@@ -47,7 +47,10 @@ class TestReflectionsDataLayer:
         state_parent.last_status = "success"
         state_parent.last_error = None
         state_parent.last_duration = 5.0
-        state_parent.run_history = []
+        state_parent.failure_count_consecutive = 0
+        state_parent.paused_until = 0.0
+        state_parent.cost_usd_total = 0.0
+        state_parent.output_sink = "log_only"
 
         state_a = MagicMock()
         state_a.name = "pm-audio-briefing-psyoptimal"
@@ -56,7 +59,10 @@ class TestReflectionsDataLayer:
         state_a.last_status = "success"
         state_a.last_error = None
         state_a.last_duration = 6.0
-        state_a.run_history = []
+        state_a.failure_count_consecutive = 0
+        state_a.paused_until = 0.0
+        state_a.cost_usd_total = 0.0
+        state_a.output_sink = "log_only"
 
         state_b = MagicMock()
         state_b.name = "pm-audio-briefing-otherproj"
@@ -65,7 +71,10 @@ class TestReflectionsDataLayer:
         state_b.last_status = "success"
         state_b.last_error = None
         state_b.last_duration = 7.0
-        state_b.run_history = []
+        state_b.failure_count_consecutive = 0
+        state_b.paused_until = 0.0
+        state_b.cost_usd_total = 0.0
+        state_b.output_sink = "log_only"
 
         with (
             patch.object(
@@ -77,6 +86,7 @@ class TestReflectionsDataLayer:
                 "models.reflection.Reflection.get_all_states",
                 return_value=[state_parent, state_a, state_b],
             ),
+            patch.object(reflections_module, "_has_run_history", return_value=False),
         ):
             rows = reflections_module.get_all_reflections()
 
@@ -110,7 +120,10 @@ class TestReflectionsDataLayer:
         state_parent.last_status = "success"
         state_parent.last_error = None
         state_parent.last_duration = 5.0
-        state_parent.run_history = []
+        state_parent.failure_count_consecutive = 0
+        state_parent.paused_until = 0.0
+        state_parent.cost_usd_total = 0.0
+        state_parent.output_sink = "log_only"
 
         with (
             patch.object(
@@ -119,6 +132,7 @@ class TestReflectionsDataLayer:
                 return_value={"pm-audio-briefing": parent_entry},
             ),
             patch("models.reflection.Reflection.get_all_states", return_value=[state_parent]),
+            patch.object(reflections_module, "_has_run_history", return_value=False),
         ):
             rows = reflections_module.get_all_reflections()
 
@@ -139,6 +153,18 @@ class TestReflectionsDataLayer:
             assert "last_status" in entry
             assert "run_count" in entry
 
+    def test_reflection_entry_exposes_failure_tracking_fields(self):
+        """Cycle-3 ripple: dashboard rows expose new failure-tracking fields."""
+        from ui.data.reflections import get_all_reflections
+
+        result = get_all_reflections()
+        if result:
+            entry = result[0]
+            assert "failure_count_consecutive" in entry
+            assert "paused_until" in entry
+            assert "cost_usd_total" in entry
+            assert "output_sink" in entry
+
     def test_get_run_history_empty(self):
         from ui.data.reflections import get_run_history
 
@@ -152,6 +178,61 @@ class TestReflectionsDataLayer:
 
         result = get_run_detail("nonexistent-reflection", 0)
         assert result is None
+
+    def test_get_run_history_reads_reflection_run_rows(self):
+        """``get_run_history`` reads from the ReflectionRun model post-#1273."""
+        from models.reflection_run import ReflectionRun
+        from ui.data.reflections import get_run_history
+
+        # Clean any pre-existing rows
+        for r in ReflectionRun.query.filter(name="t-ui-runs"):
+            r.delete()
+
+        ReflectionRun.create(
+            name="t-ui-runs",
+            timestamp=1.0,
+            status="success",
+            duration_ms=1500.0,
+        )
+        ReflectionRun.create(
+            name="t-ui-runs",
+            timestamp=2.0,
+            status="error",
+            duration_ms=300.0,
+            error="boom",
+        )
+
+        result = get_run_history("t-ui-runs")
+        assert result["total_runs"] == 2
+        # Newest first
+        assert result["runs"][0]["timestamp"] == 2.0
+        assert result["runs"][0]["status"] == "error"
+        # Duration converted from ms to seconds
+        assert result["runs"][1]["duration"] == 1.5
+
+        for r in ReflectionRun.query.filter(name="t-ui-runs"):
+            r.delete()
+
+    def test_get_run_detail_reads_forward_index(self):
+        """``get_run_detail`` indexes in forward (oldest-first) order."""
+        from models.reflection_run import ReflectionRun
+        from ui.data.reflections import get_run_detail
+
+        for r in ReflectionRun.query.filter(name="t-ui-runs-detail"):
+            r.delete()
+
+        ReflectionRun.create(name="t-ui-runs-detail", timestamp=1.0, status="success")
+        ReflectionRun.create(name="t-ui-runs-detail", timestamp=2.0, status="error")
+
+        first = get_run_detail("t-ui-runs-detail", 0)
+        second = get_run_detail("t-ui-runs-detail", 1)
+        assert first is not None
+        assert second is not None
+        assert first["timestamp"] == 1.0
+        assert second["timestamp"] == 2.0
+
+        for r in ReflectionRun.query.filter(name="t-ui-runs-detail"):
+            r.delete()
 
 
 class TestReflectionFormatters:
@@ -186,90 +267,3 @@ class TestReflectionFormatters:
         assert _filter_format_relative(None) == "-"
         assert "in" in _filter_format_relative(300.0)
         assert "overdue" in _filter_format_relative(-300.0)
-
-
-class TestReflectionModelExtension:
-    """Tests for the run_history extension on the Reflection model."""
-
-    def test_mark_completed_appends_history(self):
-        """mark_completed() should append to run_history internally."""
-        from models.reflection import Reflection
-
-        ref = Reflection.get_or_create("_test_ui_history")
-        try:
-            initial_count = len(ref.run_history) if isinstance(ref.run_history, list) else 0
-
-            ref.mark_completed(duration=1.5)
-            ref = Reflection.query.filter(name="_test_ui_history")[0]
-
-            history = ref.run_history if isinstance(ref.run_history, list) else []
-            assert len(history) == initial_count + 1
-            latest = history[-1]
-            assert latest["status"] == "success"
-            assert latest["duration"] == 1.5
-            assert latest["error"] is None
-            # #1187: projects key always present, defaults to []
-            assert "projects" in latest
-            assert latest["projects"] == []
-        finally:
-            ref.delete()
-
-    def test_mark_completed_with_error_appends_history(self):
-        """mark_completed() with error should record error in history."""
-        from models.reflection import Reflection
-
-        ref = Reflection.get_or_create("_test_ui_error_history")
-        try:
-            ref.mark_completed(duration=2.0, error="test error")
-            ref = Reflection.query.filter(name="_test_ui_error_history")[0]
-
-            history = ref.run_history if isinstance(ref.run_history, list) else []
-            assert len(history) >= 1
-            latest = history[-1]
-            assert latest["status"] == "error"
-            assert latest["error"] == "test error"
-        finally:
-            ref.delete()
-
-    def test_mark_completed_signature_unchanged(self):
-        """Existing callers pass (duration) and (duration, error=msg).
-
-        Backward compat: positional ``mark_completed(1.0)`` keeps working
-        without ``projects=`` after #1187 added the new optional kwarg.
-        """
-        from models.reflection import Reflection
-
-        ref = Reflection.get_or_create("_test_ui_compat")
-        try:
-            # Positional arg only (like scheduler does)
-            ref.mark_completed(1.0)
-            # Keyword error arg (like scheduler does)
-            ref.mark_completed(2.0, error="some error")
-            assert ref.run_count >= 2
-            # #1187: every record gets projects=[] when omitted by caller
-            history = ref.run_history if isinstance(ref.run_history, list) else []
-            for record in history[-2:]:
-                assert record.get("projects") == []
-        finally:
-            ref.delete()
-
-    def test_run_history_cap(self):
-        """run_history should be capped at _RUN_HISTORY_CAP entries."""
-        from models.reflection import Reflection
-
-        ref = Reflection.get_or_create("_test_ui_cap")
-        try:
-            # Pre-populate with many entries
-            ref.run_history = [
-                {"timestamp": i, "status": "success", "duration": 1.0, "error": None}
-                for i in range(250)
-            ]
-            ref.save()
-
-            ref.mark_completed(duration=1.0)
-            ref = Reflection.query.filter(name="_test_ui_cap")[0]
-
-            history = ref.run_history if isinstance(ref.run_history, list) else []
-            assert len(history) <= 200
-        finally:
-            ref.delete()

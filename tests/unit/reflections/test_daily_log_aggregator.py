@@ -215,31 +215,46 @@ def test_collect_memories_filters_by_outcome_history_ts(yesterday_utc):
 
 
 def test_collect_reflection_runs_filters_by_run_history_ts(yesterday_utc):
-    """Reflection runs are matched on the run_history entry's timestamp."""
-    from models.reflection import Reflection
+    """ReflectionRun rows are matched on the row's ``timestamp`` field.
+
+    Post-#1273: per-run history moved off the embedded ``Reflection.run_history``
+    list onto unbounded ``ReflectionRun`` rows (30-day TTL). The collector reads
+    those rows directly, so test setup must create them directly.
+    """
+    from models.reflection_run import ReflectionRun
 
     target_str = yesterday_utc.strftime("%Y-%m-%d")
+    name = f"daily-report-test-{target_str}"
     yesterday_ts = datetime(
         yesterday_utc.year, yesterday_utc.month, yesterday_utc.day, 12, 0, 0, tzinfo=UTC
     ).timestamp()
     older_ts = yesterday_ts - 7 * 86400
 
-    refl = Reflection.get_or_create(name=f"daily-report-test-{target_str}")
-    refl.run_history = [
-        {"timestamp": yesterday_ts, "status": "success", "duration": 1.5, "error": None},
-        {"timestamp": older_ts, "status": "success", "duration": 2.0, "error": None},
-    ]
-    refl.save()
+    on_target = ReflectionRun.create(
+        name=name,
+        timestamp=yesterday_ts,
+        status="success",
+        duration_ms=1500.0,
+        error=None,
+    )
+    off_target = ReflectionRun.create(
+        name=name,
+        timestamp=older_ts,
+        status="success",
+        duration_ms=2000.0,
+        error=None,
+    )
 
     try:
         items, err = dr._collect_reflection_runs(yesterday_utc)
         assert err is None
-        matched = [it for it in items if it["name"] == refl.name]
+        matched = [it for it in items if it["name"] == name]
         assert len(matched) == 1, "only the in-window run should match"
         assert matched[0]["status"] == "success"
         assert matched[0]["duration"] == pytest.approx(1.5)
     finally:
-        refl.delete()
+        on_target.delete()
+        off_target.delete()
 
 
 # --- Crash collector ---------------------------------------------------------

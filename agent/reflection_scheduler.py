@@ -25,6 +25,11 @@ from typing import Any
 
 import yaml
 
+from agent.reflection_schedule import (
+    compute_next_due,
+    is_legacy_interval_format,
+    parse_every_duration,
+)
 from models.reflection import Reflection
 
 # Memory warning threshold in bytes (100MB)
@@ -76,25 +81,81 @@ REGISTRY_PATH = _resolve_registry_path()
 
 @dataclass
 class ReflectionEntry:
-    """A parsed reflection declaration from the registry."""
+    """A parsed reflection declaration from the registry.
+
+    Carries the unified ``schedule`` string (``every:`` / ``cron:`` / ``at:``).
+    For backward compatibility during the migration window, callers may still
+    construct an entry with ``interval=N`` (legacy seconds-only) and the
+    constructor will normalize it to ``schedule="every: Ns"`` so the rest of
+    the scheduler doesn't have to handle two shapes.
+    """
 
     name: str
     description: str
-    interval: int  # seconds between runs
     priority: str  # urgent | high | normal | low
     execution_type: str  # "function" or "agent"
+    schedule: str = ""  # unified grammar — every:/cron:/at:
+    interval: int = 0  # legacy seconds-only field; auto-normalized to schedule
     callable: str | None = None  # dotted Python path for function type
     command: str | None = None  # shell command for agent type
     enabled: bool = True
     timeout: int | None = None  # per-reflection timeout in seconds (None = use default)
 
+    def __post_init__(self) -> None:
+        """Normalize legacy ``interval=N`` to ``schedule='every: Ns'``."""
+        if not self.schedule and self.interval and self.interval > 0:
+            self.schedule = f"every: {self.interval}s"
+        # If schedule was provided in `every:` form, keep ``interval`` populated
+        # so the existing stale-detection logic (``state.ran_at + 2 * interval``)
+        # continues to work without a separate code path.
+        if self.schedule and not self.interval:
+            try:
+                self.interval = self._derive_interval_seconds(self.schedule)
+            except ValueError:
+                # Cron / at: schedules don't have an interval — leave 0 and let
+                # `interval_seconds()` synthesize a sensible default.
+                self.interval = 0
+
+    @staticmethod
+    def _derive_interval_seconds(schedule: str) -> int:
+        """Best-effort interval estimate from a unified-grammar schedule.
+
+        Returns the parsed seconds for ``every:``; raises for ``cron:``/``at:``.
+        """
+        prefix, _, body = schedule.partition(":")
+        if prefix.strip().lower() != "every":
+            raise ValueError("interval is only derivable from `every:` schedules")
+        return parse_every_duration(body.strip())
+
+    def interval_seconds(self) -> int:
+        """Return a numeric interval (seconds) for stale-detection thresholds.
+
+        For ``every:`` schedules this is exact. For ``cron:`` and ``at:``
+        schedules this returns the per-execution-type timeout as a sensible
+        upper bound — used only by the stale-running reaper.
+        """
+        if self.interval and self.interval > 0:
+            return self.interval
+        return self.effective_timeout()
+
     def validate(self) -> list[str]:
         """Validate this entry, returning a list of error messages."""
-        errors = []
+        errors: list[str] = []
         if not self.name:
             errors.append("name is required")
-        if not self.interval or self.interval <= 0:
-            errors.append(f"interval must be positive, got {self.interval}")
+        if not self.schedule:
+            errors.append("schedule is required (use every:/cron:/at:)")
+        else:
+            if is_legacy_interval_format(self.schedule):
+                errors.append(
+                    f"schedule {self.schedule!r} uses legacy `interval:` form; "
+                    "rewrite to `every: Ns`"
+                )
+            else:
+                try:
+                    compute_next_due(self.schedule, last_run=None)
+                except ValueError as e:
+                    errors.append(f"schedule grammar error: {e}")
         if self.priority not in ("urgent", "high", "normal", "low"):
             errors.append(f"invalid priority: {self.priority}")
         if self.execution_type not in ("function", "agent"):
@@ -156,9 +217,25 @@ def load_registry(path: Path | None = None) -> list[ReflectionEntry]:
 
         try:
             raw_timeout = raw.get("timeout")
+            # Unified-grammar fields: `every`, `cron`, or `at` map directly to
+            # the corresponding schedule prefix; the older `schedule:` field
+            # passes through verbatim. Legacy `interval: N` is normalized in
+            # ReflectionEntry.__post_init__ for the migration window.
+            schedule = raw.get("schedule", "") or ""
+            if not schedule:
+                if raw.get("every"):
+                    schedule = f"every: {raw['every']}"
+                elif raw.get("cron"):
+                    schedule = f"cron: {raw['cron']}"
+                    if raw.get("cron_tz"):
+                        schedule = f"{schedule}; tz={raw['cron_tz']}"
+                elif raw.get("at"):
+                    schedule = f"at: {raw['at']}"
+
             entry = ReflectionEntry(
                 name=raw.get("name", ""),
                 description=raw.get("description", ""),
+                schedule=schedule,
                 interval=int(raw.get("interval", 0)),
                 priority=raw.get("priority", "low"),
                 execution_type=raw.get("execution_type", "function"),
@@ -214,20 +291,36 @@ def _resolve_callable(dotted_path: str) -> Any:
 def is_reflection_due(entry: ReflectionEntry, state: Reflection, now: float) -> bool:
     """Check if a reflection is due to run.
 
-    A reflection is due if:
-    - It has never run (last_run is None), OR
-    - last_run + interval <= now
+    Delegates to the unified ``compute_next_due`` so the same parser handles
+    every schedule shape (``every:``, ``cron:``, ``at:``). Falls back to the
+    legacy ``state.ran_at + entry.interval`` check only when the entry has no
+    schedule string and a positive interval — the migration window.
 
     Args:
-        entry: The registry entry with the interval
-        state: The Redis state record with last_run
-        now: Current timestamp
+        entry: The registry entry (carries the unified schedule).
+        state: The Redis state record with last_run.
+        now: Current timestamp.
 
     Returns:
         True if the reflection should be enqueued.
     """
-    # Guard against Popoto returning the Field descriptor when value is None
+    # Guard against Popoto returning the Field descriptor when value is None.
     ran_at = state.ran_at if isinstance(state.ran_at, (int, float)) else None
+
+    if entry.schedule:
+        try:
+            next_due = compute_next_due(entry.schedule, last_run=ran_at, now=now)
+        except ValueError as e:
+            logger.warning(
+                "[reflection] %s has invalid schedule %r: %s",
+                entry.name,
+                entry.schedule,
+                e,
+            )
+            return False
+        return next_due <= now
+
+    # Legacy fallback (pre-migration entries with `interval:` only).
     if ran_at is None:
         return True
     return (ran_at + entry.interval) <= now
@@ -333,6 +426,17 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
             entry.name,
             duration,
         )
+
+        # Auto-delete one-shot ``at:`` reflections after a successful run
+        # (Q2 cycle-4 fix). Failed one-shots are preserved for diagnosis.
+        if state.auto_delete_after_run and (entry.schedule or "").strip().lower().startswith("at:"):
+            logger.info(
+                "[reflection] Auto-deleting one-shot reflection %s after success", entry.name
+            )
+            try:
+                state.delete()
+            except Exception as e:
+                logger.warning("[reflection] auto-delete failed for %s: %s", entry.name, e)
     except TimeoutError:
         duration = time.time() - start_time
         error_msg = f"TimeoutError: reflection '{entry.name}' exceeded {timeout}s timeout"
@@ -467,18 +571,27 @@ class ReflectionScheduler:
 
         for entry in self._entries:
             try:
-                state = Reflection.get_or_create(entry.name)
+                state = Reflection.get_or_create(entry.name, schedule=entry.schedule)
+
+                # Paused reflections are skipped BEFORE due-checking (Q6).
+                if state.is_paused(now=now):
+                    logger.debug(
+                        "[reflection] Skipping %s: paused until %s",
+                        entry.name,
+                        state.paused_until,
+                    )
+                    continue
 
                 # Skip if already running
                 if is_reflection_running(state):
-                    # Check for stuck reflections (running > 2x interval)
-                    if state.ran_at and (now - state.ran_at) > (entry.interval * 2):
+                    interval = entry.interval_seconds()
+                    if state.ran_at and (now - state.ran_at) > (interval * 2):
                         logger.warning(
                             "[reflection] %s appears stuck (running for %.0fs, interval=%ds). "
                             "Resetting status.",
                             entry.name,
                             now - state.ran_at,
-                            entry.interval,
+                            interval,
                         )
                         state.last_status = "error"
                         state.last_error = "Reset: appeared stuck (exceeded 2x interval)"
@@ -521,6 +634,58 @@ class ReflectionScheduler:
 
         return enqueued
 
+    def reap_stale_running(self) -> int:
+        """Force-mark Reflection records that have been ``last_status="running"`` past
+        a sane threshold (Q6 / Race 2 cycle-4 fix).
+
+        Called once at worker startup, after ``register_worker_pid`` and before the
+        first scheduler tick. A stale "running" record is one whose ``ran_at`` is
+        older than ``max(2 * entry.interval_seconds(), entry.effective_timeout())``.
+
+        Returns the number of records reaped.
+        """
+        now = time.time()
+        reaped = 0
+        for entry in self._entries:
+            try:
+                rows = list(Reflection.query.filter(name=entry.name))
+                if not rows:
+                    continue
+                state = rows[0]
+                if state.last_status != "running":
+                    continue
+                ran_at = state.ran_at if isinstance(state.ran_at, (int, float)) else None
+                if ran_at is None:
+                    continue
+                threshold = max(
+                    2 * entry.interval_seconds(),
+                    entry.effective_timeout(),
+                )
+                if (now - ran_at) <= threshold:
+                    continue
+                logger.warning(
+                    "[reflection] Reaping stale-running record %s "
+                    "(ran_at=%.0fs ago, threshold=%ds).",
+                    entry.name,
+                    now - ran_at,
+                    threshold,
+                )
+                state.last_status = "stale_running"
+                state.last_error = "stale running status cleared on worker restart"
+                state.failure_count_consecutive = (state.failure_count_consecutive or 0) + 1
+                state.save()
+                reaped += 1
+            except Exception as e:
+                logger.error(
+                    "[reflection] reap_stale_running failed for %s: %s",
+                    entry.name,
+                    e,
+                    exc_info=True,
+                )
+        if reaped:
+            logger.info("[reflection] reap_stale_running cleared %d stale record(s)", reaped)
+        return reaped
+
     async def start(self) -> None:
         """Start the scheduler loop. Runs forever, ticking every SCHEDULER_TICK_INTERVAL seconds."""
         if self._started:
@@ -529,6 +694,12 @@ class ReflectionScheduler:
 
         self._started = True
         self.load()
+        # Reap any reflections that were left in ``last_status="running"`` at
+        # the previous worker exit. Idempotent across restarts.
+        try:
+            self.reap_stale_running()
+        except Exception as e:
+            logger.error("[reflection] reap_stale_running on startup failed: %s", e)
         logger.info(
             "[reflection] Scheduler started with %d reflection(s), tick interval=%ds",
             len(self._entries),

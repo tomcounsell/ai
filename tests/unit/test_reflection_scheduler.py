@@ -202,6 +202,8 @@ class TestReflectionEntry:
         assert any("name" in e for e in errors)
 
     def test_invalid_negative_interval(self):
+        # Negative legacy interval cannot be normalized to a positive every:Ns
+        # schedule, so the entry now fails the unified ``schedule`` requirement.
         entry = ReflectionEntry(
             name="test",
             description="",
@@ -211,7 +213,7 @@ class TestReflectionEntry:
             callable="some.func",
         )
         errors = entry.validate()
-        assert any("interval" in e for e in errors)
+        assert any(("schedule" in e) or ("interval" in e) for e in errors)
 
     def test_invalid_priority(self):
         entry = ReflectionEntry(
