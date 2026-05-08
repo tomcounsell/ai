@@ -32,12 +32,35 @@ Shape of ``_verdicts[stage]``::
         "artifact_hash": "sha256:...",  # CRITIQUE only; None for REVIEW
         "blockers": 0,                    # REVIEW only
         "tech_debt": 0,                   # REVIEW only
+        # Optional REVIEW multi-judge side-fields (only present when caller
+        # passed judges= and consensus= kwargs to record_verdict). Both are
+        # written in the SAME single record_verdict call — single-writer
+        # invariant preserved.
+        "_judges": [
+            {"judge_id": "code-quality", "verdict": "APPROVED", "blockers": 0,
+             "tech_debt": 0, "confidence": 0.9, "reasoning_summary": "...",
+             "review_url": "..."},
+            ...
+        ],
+        "_consensus": {
+            "rule": "any-blocker-wins", "k": 2, "n": 2,
+            "mean_confidence": 0.85, "blocker_aggregation": "max",
+            "tied": False, "decided_at": "2026-04-18T12:34:56+00:00",
+        },
     }
 
+Multi-judge consensus: ``record_verdict`` accepts optional ``judges`` and
+``consensus`` kwargs at REVIEW. The Review skill computes consensus in the
+parent (via ``agent.sdlc_review_consensus.compute_consensus``) and makes ONE
+``record_verdict`` call. CRITIQUE rejects either kwarg — its internal critics
+aggregate before recording. See
+``docs/plans/multi-judge-consensus-gates.md``.
+
 Graceful failure: every function returns ``{}`` on error. Missing Redis, bad
-input, malformed sessions — none of these crash the caller. Skills rely on
-this: a verdict record failure must never block a critique/review from
-finishing.
+input, malformed sessions, malformed ``judges`` payload — none of these crash
+the caller, and a malformed payload never produces a partial write. Skills
+rely on this: a verdict record failure must never block a critique/review
+from finishing.
 
 Artifact hash semantics (CRITIQUE only):
   - Normalize line endings to ``\\n`` (cross-platform safety).
@@ -109,6 +132,34 @@ def _compute_artifact_hash(stage: str, issue_number: int | None) -> str | None:
     return compute_plan_hash(plan_path)
 
 
+# Required keys on each per-judge dict passed via the ``judges`` kwarg.
+_REQUIRED_JUDGE_KEYS = ("judge_id", "verdict", "blockers")
+
+
+def _validate_judges_payload(judges: list) -> bool:
+    """Validate every per-judge dict has the required keys + types.
+
+    Returns True if all dicts are well-formed; False otherwise. Mirrors the
+    graceful-failure contract: caller returns ``{}`` on a False without
+    writing a partial record.
+    """
+    if not isinstance(judges, list):
+        return False
+    for j in judges:
+        if not isinstance(j, dict):
+            return False
+        for key in _REQUIRED_JUDGE_KEYS:
+            if key not in j:
+                return False
+        if not isinstance(j["judge_id"], str) or not j["judge_id"].strip():
+            return False
+        if not isinstance(j["verdict"], str):
+            return False
+        if not isinstance(j["blockers"], int):
+            return False
+    return True
+
+
 def record_verdict(
     session,
     stage: str,
@@ -117,6 +168,8 @@ def record_verdict(
     tech_debt: int | None = None,
     issue_number: int | None = None,
     now: datetime | None = None,
+    judges: list | None = None,
+    consensus: dict | None = None,
 ) -> dict:
     """Record a verdict for a stage on a session's stage_states.
 
@@ -136,9 +189,28 @@ def record_verdict(
         issue_number: Optional issue number used to compute CRITIQUE's
             artifact_hash. Without it, ``artifact_hash`` is None.
         now: Optional timestamp for testability. Defaults to current UTC.
+        judges: Optional list of per-judge dicts (REVIEW multi-judge only).
+            Each dict must have ``judge_id`` (str), ``verdict`` (str),
+            ``blockers`` (int). Optional keys: ``tech_debt``, ``confidence``,
+            ``reasoning_summary``, ``review_url``. Persisted as
+            ``_verdicts[stage]._judges`` side-field.
+        consensus: Optional consensus metadata dict (REVIEW multi-judge only).
+            Persisted as ``_verdicts[stage]._consensus`` side-field. Caller
+            (typically ``do-pr-review`` SKILL) computes via
+            :func:`agent.sdlc_review_consensus.compute_consensus`.
 
     Returns:
         The written verdict record on success, or ``{}`` on any failure.
+
+    Multi-judge semantics:
+        - ``judges`` and ``consensus`` are only meaningful at stage ``REVIEW``.
+          CRITIQUE rejects either kwarg (its internal critics aggregate
+          before recording).
+        - When provided, both kwargs are persisted in the same single
+          ``update_stage_states`` call as the scalar — preserving the
+          single-writer invariant.
+        - Malformed ``judges`` payload (missing required key, wrong type) →
+          return ``{}`` with no partial write.
     """
     if stage not in _VERDICT_STAGES:
         logger.debug(f"sdlc_verdict: unknown stage {stage!r}")
@@ -147,6 +219,16 @@ def record_verdict(
         logger.debug("sdlc_verdict: empty or non-string verdict")
         return {}
     if session is None:
+        return {}
+
+    # Multi-judge side-fields are REVIEW-only. CRITIQUE has its own internal
+    # aggregation pattern (do-plan-critique) and must not gain _judges.
+    if stage != "REVIEW" and (judges is not None or consensus is not None):
+        logger.debug(f"sdlc_verdict: judges/consensus only valid at REVIEW, got stage={stage!r}")
+        return {}
+
+    if judges is not None and not _validate_judges_payload(judges):
+        logger.debug("sdlc_verdict: malformed judges payload — refusing partial write")
         return {}
 
     recorded_at = (now or datetime.now(UTC)).isoformat()
@@ -162,6 +244,13 @@ def record_verdict(
             record["blockers"] = int(blockers)
         if tech_debt is not None:
             record["tech_debt"] = int(tech_debt)
+        # Side-fields: only attached when caller passed them. Single-judge
+        # callers (e.g. /do-plan-critique single-judge legacy path) pass
+        # neither and the persisted shape is bit-identical to today.
+        if judges is not None:
+            record["_judges"] = list(judges)
+        if consensus is not None:
+            record["_consensus"] = dict(consensus)
 
     def _apply(states: dict) -> dict:
         verdicts = states.setdefault("_verdicts", {})
@@ -227,6 +316,20 @@ def _cli_record(args) -> dict:
     session = _find_session(session_id=args.session_id, issue_number=args.issue_number)
     if session is None:
         return {}
+    judges = None
+    consensus = None
+    if getattr(args, "judges_json", None):
+        try:
+            judges = json.loads(args.judges_json)
+        except Exception as e:
+            logger.debug(f"sdlc_verdict: --judges-json decode failed: {e}")
+            return {}
+    if getattr(args, "consensus_json", None):
+        try:
+            consensus = json.loads(args.consensus_json)
+        except Exception as e:
+            logger.debug(f"sdlc_verdict: --consensus-json decode failed: {e}")
+            return {}
     return record_verdict(
         session,
         stage=args.stage.upper(),
@@ -234,6 +337,8 @@ def _cli_record(args) -> dict:
         blockers=args.blockers,
         tech_debt=args.tech_debt,
         issue_number=args.issue_number,
+        judges=judges,
+        consensus=consensus,
     )
 
 
@@ -259,6 +364,25 @@ def main() -> None:
     rec.add_argument("--tech-debt", dest="tech_debt", type=int, default=None)
     rec.add_argument("--session-id", default=None)
     rec.add_argument("--issue-number", type=int, default=None)
+    rec.add_argument(
+        "--judges-json",
+        dest="judges_json",
+        default=None,
+        help=(
+            "JSON-encoded list of per-judge dicts (REVIEW multi-judge only). "
+            "Each dict must have judge_id (str), verdict (str), blockers (int)."
+        ),
+    )
+    rec.add_argument(
+        "--consensus-json",
+        dest="consensus_json",
+        default=None,
+        help=(
+            "JSON-encoded consensus metadata dict (REVIEW multi-judge only). "
+            "Typically the 'consensus' field returned by "
+            "agent.sdlc_review_consensus.compute_consensus."
+        ),
+    )
     rec.set_defaults(func=_cli_record)
 
     gt = subparsers.add_parser("get", help="Retrieve a verdict")
