@@ -33,6 +33,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
 | [Compaction Hardening](compaction-hardening.md) | JSONL backup before SDK context compaction, 5-min per-session cooldown, 30s post-compact nudge guard, SDK-tick backstop for missed PreCompact hooks | Shipped |
 | [Completion Tracking](completion-tracking.md) | Branch-based work tracking and completion token system | Archived |
+| [Composed Persona System](composed-persona-system.md) | Single `compose_system_prompt(persona, access_level, channel=None, ...)` composer + `_resolve_compose_args` resolver replacing the two-site picker ladder; new `AccessLevel` enum (WORKER / PM_READONLY / TEAMMATE / CUSTOMER_SERVICE); medium-aware drafter split (BASE + MEDIUM_RULES); per-machine byte-stability fixtures preserve #1227's prompt-cache invariant | Shipped |
 | [Computer Use](computer-use.md) | Native macOS desktop control via background-computer-use (bcu): drive Slack/Notes/Telegram-Desktop/etc. without moving the user's cursor. macOS-only OS gate (CLI exits 78 / EX_CONFIG); Electron selector-aware API for stale AX trees | Shipped |
 | [Config Architecture](config-architecture.md) | Unified config system: Pydantic Settings, path constants, zero hardcoded paths | Shipped |
 | [Config-Driven Chat Mode](config-driven-chat-mode.md) | Per-group persona field in projects.json controlling session type, classifier bypass, and passive listener behavior | Shipped |
