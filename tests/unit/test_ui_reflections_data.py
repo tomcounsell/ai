@@ -34,7 +34,7 @@ class TestReflectionsDataLayer:
         from ui.data import reflections as reflections_module
 
         parent_entry = {
-            "interval": 300,
+            "schedule": "every:300s",
             "timeout": 1500,
             "priority": "low",
             "execution_type": "function",
@@ -96,7 +96,7 @@ class TestReflectionsDataLayer:
         from ui.data import reflections as reflections_module
 
         parent_entry = {
-            "interval": 300,
+            "schedule": "every:300s",
             "priority": "low",
             "execution_type": "function",
             "callable": "reflections.pm_audio_briefing.run",

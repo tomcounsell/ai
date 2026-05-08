@@ -99,18 +99,33 @@ def _get_registry_map() -> dict[str, dict]:
 
 def _build_entry(name: str, config: dict, state, now: float) -> dict:
     """Build a single dashboard row from registry config + live Redis state."""
+    import math
+
+    from agent.reflection_scheduler import compute_interval_seconds, compute_next_due
     from models.reflection_run import ReflectionRun
 
-    interval = config.get("interval", 0)
+    schedule = config.get("schedule") or ""
+    # Legacy fallback: pre-migration entries kept an int `interval`. Post #1273
+    # the registry uses fazm-grammar `schedule:` strings; if both are absent we
+    # render with no cadence info rather than crashing.
+    try:
+        interval = compute_interval_seconds(schedule) if schedule else 0
+    except Exception:
+        interval = 0
 
-    # Compute next_due from ran_at + interval (not stored as a field)
     # Guard against Popoto returning the Field descriptor when value is None
     ran_at = state.ran_at if state else None
     if not isinstance(ran_at, (int, float)):
         ran_at = None
+
     next_due = None
-    if ran_at and interval:
-        next_due = ran_at + interval
+    if schedule:
+        try:
+            computed = compute_next_due(schedule, ran_at)
+            if isinstance(computed, (int, float)) and math.isfinite(computed):
+                next_due = computed
+        except Exception as e:
+            logger.debug("compute_next_due failed for %s (%r): %s", name, schedule, e)
 
     due_in_seconds = (next_due - now) if next_due else None
 

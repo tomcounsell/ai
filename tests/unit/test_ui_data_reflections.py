@@ -20,12 +20,53 @@ def test_build_entry_surfaces_new_fields():
     r.cost_usd_total = 0.42
     r.save()
 
-    cfg = {"interval": 60, "description": "x", "execution_type": "function"}
+    cfg = {"schedule": "every:60s", "description": "x", "execution_type": "function"}
     entry = _build_entry(name, cfg, r, time.time())
     assert entry["failure_count_consecutive"] == 3
     assert entry["paused_until"] > time.time()
     assert abs(entry["cost_usd_total"] - 0.42) < 1e-9
     assert entry["output_sink"] == "memory:7.0"
+
+
+def test_build_entry_computes_next_due_from_schedule():
+    """Regression for #1273 PR review blocker: dashboard must compute next_due
+    from the fazm-grammar `schedule` key, not the removed legacy `interval` int.
+
+    Without this, every reflection shows due_in_seconds=None and the dashboard
+    'due in N min' indicator silently breaks post-migration.
+    """
+    name = f"ui-sched-{int(time.time() * 1e6)}"
+    r = Reflection.create(name=name)
+    ran_at = time.time() - 10  # 10 seconds ago
+    r.ran_at = ran_at
+    r.save()
+
+    cfg = {"schedule": "every:60s", "description": "x", "execution_type": "function"}
+    entry = _build_entry(name, cfg, r, time.time())
+
+    # Cadence label still derives from the schedule.
+    assert entry["interval"] == 60
+    # next_due = ran_at + 60s; due_in_seconds ≈ 50 (60s cadence - 10s elapsed).
+    assert entry["next_due"] is not None
+    assert abs(entry["next_due"] - (ran_at + 60)) < 0.5
+    assert entry["due_in_seconds"] is not None
+    assert 45 <= entry["due_in_seconds"] <= 55
+    assert entry["overdue"] is False
+
+
+def test_build_entry_overdue_when_schedule_elapsed():
+    """When ran_at + schedule interval is in the past, overdue=True."""
+    name = f"ui-overdue-{int(time.time() * 1e6)}"
+    r = Reflection.create(name=name)
+    r.ran_at = time.time() - 3600  # one hour ago, schedule is 60s
+    r.save()
+
+    cfg = {"schedule": "every:60s", "description": "x", "execution_type": "function"}
+    entry = _build_entry(name, cfg, r, time.time())
+
+    assert entry["next_due"] is not None
+    assert entry["due_in_seconds"] < 0
+    assert entry["overdue"] is True
 
 
 def test_get_run_history_reads_from_reflection_run():
