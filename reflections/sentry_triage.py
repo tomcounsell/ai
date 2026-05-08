@@ -426,24 +426,16 @@ def run_sentry_triage() -> dict:
 
     logger.info(summary)
 
-    # Telegram summary (concise)
-    tg_lines = [f"Sentry triage: {len(issues)} issues"]
-    for cls_label, cls_key in [
-        ("Noise", "A"),
-        ("Transient", "B"),
-        ("Actionable", "C"),
-        ("Review", "D"),
-        ("Stale", "E"),
-    ]:
-        count = len(classified[cls_key])
-        if count:
-            tg_lines.append(f"  {cls_label} ({cls_key}): {count}")
-    if classified["C"]:
-        for issue, _, reason in classified["C"][:3]:
-            tg_lines.append(f"  -> {issue.get('shortId', '?')}: {issue.get('title', '')[:60]}")
-    if DRY_RUN and classified["C"]:
-        tg_lines.append("[dry run — no GitHub issues filed]")
-    _send_telegram_notification("\n".join(tg_lines))
+    # Telegram only when there's a genuine question for the human:
+    # Class D = "investigate" — issues that can't be auto-classified and need review.
+    # A (noise), B (transient), C (actionable, auto-filed as GH issues), E (stale, auto-resolvable)
+    # are all handled or logged silently to logs/reflections.log.
+    if classified["D"]:
+        tg_lines = [f"Sentry triage: {len(classified['D'])} issue(s) need your review"]
+        for issue, _, reason in classified["D"][:5]:
+            tg_lines.append(f"  {issue.get('shortId', '?')}: {issue.get('title', '')[:60]}")
+            tg_lines.append(f"    why: {reason}")
+        _send_telegram_notification("\n".join(tg_lines))
 
     return {
         "status": "ok",
