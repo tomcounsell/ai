@@ -528,6 +528,29 @@ After posting the review and verifying it was posted (Steps 6-6.5), emit a typed
 
 **Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output. Use `"partial"` — not `"success"` — whenever tech_debt or non-subjective nit findings exist. This ensures the pipeline routes to `/do-patch` before advancing to `/do-docs`. For `BLOCKED_ON_CONFLICT` and `PR_CLOSED`, `next_skill` is `null` — the pipeline should NOT auto-advance; the author must rebase or the PM must handle the closed-PR case manually.
 
+**Multi-judge OUTCOME variants:** when the multi-judge path runs (≥2 judges
+dispatched), include `judges_run` and `consensus_disagreement` inside
+`artifacts`. These mirror the side-fields recorded by `compute_consensus` and
+let operators grep session state for disagreement events without round-tripping
+through Redis. Single-judge / docs-only / lockfile-only / preflight short-circuit
+paths MUST NOT include these fields (they would mislead consumers into thinking
+multi-judge ran).
+
+**Multi-judge success (APPROVED via 2-of-2 consensus, all judges aligned):**
+```
+<!-- OUTCOME {"status":"success","stage":"REVIEW","verdict":"APPROVED","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":0,"nits":0,"judges_run":2,"consensus_disagreement":false},"notes":"Approved via 2-of-2 consensus (code-quality, risk).","next_skill":"/do-docs"} -->
+```
+
+**Multi-judge fail (CHANGES_REQUESTED — judges disagreed, any-blocker-wins triggered):**
+```
+<!-- OUTCOME {"status":"fail","stage":"REVIEW","verdict":"CHANGES_REQUESTED","artifacts":{"review_url":"{review_url}","blockers":1,"tech_debt":0,"nits":0,"judges_run":2,"consensus_disagreement":true},"notes":"Changes requested via 2-of-2 consensus: risk judge raised 1 blocker, code-quality approved.","failure_reason":"1 blocker must be fixed before merge","next_skill":"/do-patch"} -->
+```
+
+**Multi-judge partial (CHANGES_REQUESTED — judges aligned on tech_debt/nits, no blockers):**
+```
+<!-- OUTCOME {"status":"partial","stage":"REVIEW","verdict":"CHANGES_REQUESTED","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":2,"nits":1,"judges_run":2,"consensus_disagreement":false},"notes":"Changes requested via 2-of-2 consensus: 2 tech_debt and 1 nit findings. Routing to /do-patch.","next_skill":"/do-patch"} -->
+```
+
 ### Multi-judge consensus (optional, opt-in)
 
 When `SDLC_REVIEW_JUDGES` enables ≥2 judges, this skill orchestrates parallel
@@ -565,10 +588,26 @@ See `docs/features/multi-judge-consensus.md` and
    per-judge comment is confirmed posted. This is the comment
    `do-merge.md`'s regex picks up.
 
-**Cost containment:** docs-only / lockfile-only PRs reuse the existing
-`do-merge.md` shape classifier and force the legacy single-judge path.
-`SDLC_REVIEW_JUDGES=none` and `SDLC_REVIEW_K=1` are independent operator
-kill switches.
+**Cost containment:** before spawning judge forks, classify the PR's diff via
+the same module `/do-merge` uses:
+
+```bash
+SHAPE_JSON=$(python -m scripts.pr_shape_classify --pr "$PR_NUMBER" 2>/dev/null \
+  || echo '{"shape":"feature"}')
+SHAPE=$(echo "$SHAPE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('shape','feature'))")
+case "$SHAPE" in
+  docs-only|lockfile-only)
+    # Force legacy single-judge path — skip multi-judge orchestration.
+    SDLC_REVIEW_JUDGES=none
+    ;;
+esac
+```
+
+`scripts/pr_shape_classify.py` is the single source of truth — both
+`/do-merge` (`.claude/commands/do-merge.md`) and this skill invoke it via
+`python -m scripts.pr_shape_classify`. Do NOT inline shape logic or fork a
+parallel classifier. `SDLC_REVIEW_JUDGES=none` and `SDLC_REVIEW_K=1` remain
+independent operator kill switches.
 
 **Monitoring:** when multi-judge runs, the OUTCOME block records
 `judges_run` (count) and `consensus_disagreement` (bool, true when any pair
