@@ -30,10 +30,6 @@ The agent's description is set to `"Fallback for missing {name}.md"`.
 | `bridge/telegram_bridge.py` | Calls `validate_agent_files()` at startup |
 | `tests/unit/test_agent_definitions.py` | Unit tests covering normal load, missing files, and validation |
 
-## Prior Art
-
-The `_load_dev_session_prompt()` function in the same module already implemented this pattern with an `.exists()` check and hardcoded fallback prompt. This change extends the pattern to all agent definitions.
-
 ## Related
 
 - Plan: `docs/plans/sdk_graceful_agent_fallback.md`
