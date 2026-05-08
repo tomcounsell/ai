@@ -10,6 +10,8 @@ The AgentSession model uses a **session_type discriminator** (`SessionType` enum
 
 Session types, persona identifiers, and classification types are defined as `StrEnum` members in `config/enums.py`. See [Standardized Enums](standardized-enums.md) for the full enum reference.
 
+The system prompt for each session is assembled by `compose_system_prompt(persona, access_level, ...)` in [`agent/sdk_client.py`](../../agent/sdk_client.py) — the single composer for all session types. PM sessions resolve to `(PROJECT_MANAGER, PM_READONLY)`; Dev sessions to `(DEVELOPER, WORKER)`; Teammate sessions to `(TEAMMATE, TEAMMATE)`. See [Composed Persona System](composed-persona-system.md) for the full composer signature, the (persona × access-level) matrix, the byte-stability invariant, and the medium-aware drafter split that ships alongside it.
+
 This replaces the previous architecture where a single undifferentiated AgentSession handled both orchestration and execution. The PM session now orchestrates the pipeline stage-by-stage, spawning one Dev session per stage.
 
 ## Routing

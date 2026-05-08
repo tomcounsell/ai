@@ -1466,11 +1466,13 @@ async def _execute_agent_session(session: AgentSession) -> None:
             HarnessThinkingBlockCorruptionError,
             _get_prior_session_uuid,
             _load_persona_overlay_with_log,
+            _resolve_compose_args,
             _resolve_sentry_auth_token,
             build_harness_turn_input,
             get_response_via_harness,
             load_pm_system_prompt,
         )
+        from config.enums import AccessLevel, PersonaType
 
         project_key = project_config.get("_key", "valor") if project_config else "valor"
         _classification = (
@@ -1573,22 +1575,41 @@ async def _execute_agent_session(session: AgentSession) -> None:
         if isinstance(_email_cfg, dict) and _email_cfg.get("persona"):
             _email_persona_requested = str(_email_cfg["persona"])
 
+        # Determine persona via the single source of truth in sdk_client.
+        # _persona_source is local-only (for log line below); the actual
+        # persona/access-level mapping comes from _resolve_compose_args.
         if _session_type == SessionType.PM:
-            _resolved_persona = "project-manager"
             _persona_source = "session_type=pm"
         elif _transport == "email" or _email_persona_requested:
-            # Email-spawned sessions: trust project.email.persona, default to
-            # "teammate" when unset (mirrors bridge/email_bridge.py:709).
             if _email_persona_requested:
-                _resolved_persona = _email_persona_requested
                 _persona_source = "project.email.persona"
                 _email_persona_fallback = "teammate"
             else:
-                _resolved_persona = "teammate"
                 _persona_source = "email-default"
         elif _session_type == SessionType.TEAMMATE:
-            _resolved_persona = "teammate"
             _persona_source = "session_type=teammate"
+
+        _composed_persona, _composed_access_level, _ = _resolve_compose_args(
+            session_type=_session_type,
+            project=project_config,
+            transport=_transport,
+            chat_title=None,
+            is_dm=False,
+        )
+        # Email path with no project.email.persona but transport=="email"
+        # historically falls through to the teammate overlay. The resolver
+        # only triggers the email override when project.email.persona is set;
+        # the bare email-default case is handled by leaving the resolver's
+        # default (TEAMMATE) intact for SessionType.TEAMMATE.
+        if (
+            _session_type != SessionType.PM
+            and _transport == "email"
+            and not _email_persona_requested
+        ):
+            _composed_persona = PersonaType.TEAMMATE
+            _composed_access_level = AccessLevel.TEAMMATE
+
+        _resolved_persona = _composed_persona.value if _composed_persona else None
 
         # Canonical pre-load resolution log line. Emitted before any file I/O
         # so absence-vs-fallback is visible without triangulating against the
@@ -1599,7 +1620,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             f"{_resolved_persona or '<none>'} (source={_persona_source})"
         )
 
-        if _resolved_persona == "project-manager":
+        if _composed_access_level == AccessLevel.PM_READONLY:
             try:
                 _pm_system_prompt = load_pm_system_prompt(str(working_dir))
             except Exception as e:
