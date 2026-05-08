@@ -24,31 +24,31 @@ manual review runs, pass `valor-session create --needs-real-chrome
 
 ## Review Identity
 
-### Bot Account Model
+### Bot Account Model (opt-in per machine)
 
-Pipeline-driven reviews (invoked from the SDLC pipeline) MUST post under a
-dedicated service-account identity, not the operator's personal `gh` credential.
-This prevents agent `APPROVED` reviews from satisfying human-gated branch-protection
-rules and provides a clear forensic signal separating agent reviews from human ones.
+Pipeline-driven reviews MAY post under a dedicated service-account identity
+instead of the operator's `gh` credential. The bot identity is **opt-in per
+machine**: only the dedicated bot machine sets `SDLC_AGENT_GH_TOKEN`. Standard
+machines leave it blank, and pipeline reviews post under the operator's `gh`
+credential — reviewing our own commits is the accepted default.
 
 **Environment variables:**
 
 | Variable | Purpose | When set |
 |----------|---------|----------|
 | `CLAUDE_AGENT_REVIEW` | `1` when running in pipeline context | Set by `sdk_client.py` at session spawn |
-| `SDLC_AGENT_GH_TOKEN` | PAT for the bot account (e.g. `yudame-sdlc-bot`) | Set in `~/Desktop/Valor/.env` |
+| `SDLC_AGENT_GH_TOKEN` | PAT for the bot account (e.g. `yudame-sdlc-bot`) | Optional. Set only on the dedicated bot machine in `~/Desktop/Valor/.env` |
 
 **Rules:**
 - When `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is non-empty: inject
   `GH_TOKEN=$SDLC_AGENT_GH_TOKEN` for the single `gh pr review` / `gh pr comment`
-  subprocess that posts the review. All other `gh` calls (read-only queries) use
-  the operator's credential.
-- When `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is empty or unset: HARD
-  FAIL with a clear error message ("agent context but bot token missing — refusing
-  to post under operator identity") and emit `status:"fail"` OUTCOME. Never silently
-  fall back to the operator credential in pipeline context.
-- When `CLAUDE_AGENT_REVIEW` is unset or `0`: post under the operator's normal `gh`
-  credential. No `GH_TOKEN` override, no marker. Local developer behavior unchanged.
+  subprocess that posts the review. Emit the `<!-- SDLC-AGENT-REVIEW v1 -->`
+  marker. All other `gh` calls (read-only queries) use the operator's credential.
+- When `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is empty or unset:
+  post under the operator's `gh` credential without the marker. This is the
+  standard posture on every machine that is not the dedicated bot host.
+- When `CLAUDE_AGENT_REVIEW` is unset or `0`: post under the operator's `gh`
+  credential. Local developer behavior unchanged.
 
 **Important:** The `env GH_TOKEN=...` wrapper is ONLY applied when `SDLC_AGENT_GH_TOKEN`
 is non-empty. Passing an empty `GH_TOKEN` to `gh` would corrupt the stored credential.
@@ -561,8 +561,8 @@ The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator 
 2. **Tech debt and nits get patched.** `/do-patch` fixes all tech debt and non-subjective nits. Only purely subjective nits may be skipped — and that requires human approval.
 3. **Never approve and skip issues.** If you found tech debt or nits, they appear in the review body. The pipeline will patch them. Don't omit findings to make the review look clean.
 4. **Approval is reserved for zero-finding reviews ONLY.** If ANY tech_debt or nits exist, use `--request-changes`, never `--approve`. GitHub approval is a meaningful quality gate — it signals the PR is truly ready to merge with no outstanding work.
-5. **Pipeline-driven reviews MUST post under the bot identity.** When `CLAUDE_AGENT_REVIEW=1`, the review subprocess MUST use `GH_TOKEN=$SDLC_AGENT_GH_TOKEN`. If the token is missing, HARD FAIL — never post under the operator credential in pipeline context.
-6. **The `<!-- SDLC-AGENT-REVIEW v1 -->` marker MUST appear** in every review body when `CLAUDE_AGENT_REVIEW=1`. Reviews missing this marker in pipeline context are a bug.
+5. **Pipeline-driven reviews use bot identity when configured (opt-in per machine).** When `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is set, the review subprocess MUST use `GH_TOKEN=$SDLC_AGENT_GH_TOKEN`. When the token is unset or empty, post under the operator credential — this is the standard posture on machines that are not the dedicated bot host.
+6. **The `<!-- SDLC-AGENT-REVIEW v1 -->` marker MUST appear** in every review body when `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is set. The marker is omitted when posting under the operator credential.
 7. **`BLOCKED_ON_CONFLICT` and `PR_CLOSED` MUST NEVER call `gh pr review`.** These preflight short-circuit paths use `gh pr comment` exclusively. A formal review API call on a conflicted or closed PR encodes a false code-review verdict.
 
 ## Best Practices

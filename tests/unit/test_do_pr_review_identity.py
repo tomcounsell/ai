@@ -1,12 +1,11 @@
-"""Tests for /do-pr-review bot-identity contract (#1300).
+"""Tests for /do-pr-review bot-identity contract (#1300, opt-in per machine).
 
 Validates that:
 - When SDLC_AGENT_GH_TOKEN is set and non-empty, the review body contains
   the SDLC-AGENT-REVIEW marker and the skill doc specifies GH_TOKEN injection.
-- When SDLC_AGENT_GH_TOKEN is unset or empty (including empty string),
-  no override is applied — local developer behavior unchanged.
-- The identity setup block (§0) hard-fails when CLAUDE_AGENT_REVIEW=1 but the
-  token is absent (C-5 compliance).
+- When SDLC_AGENT_GH_TOKEN is unset or empty, no override is applied — the
+  review posts under the operator credential (standard posture on non-bot
+  machines).
 - The marker grammar documented in SKILL.md includes the sha= attribute.
 """
 
@@ -54,8 +53,9 @@ class TestSkillMdReviewIdentitySection:
         assert "CLAUDE_AGENT_REVIEW" in skill_text
 
     def test_hard_rule_bot_identity(self, skill_text: str) -> None:
-        """Hard Rules must include bot identity requirement."""
-        assert "Pipeline-driven reviews MUST post under the bot identity" in skill_text
+        """Hard Rules must document the opt-in bot-identity posture."""
+        assert "bot identity" in skill_text.lower()
+        assert "opt-in per machine" in skill_text.lower()
 
     def test_hard_rule_marker_presence(self, skill_text: str) -> None:
         """Hard Rules must require the marker when CLAUDE_AGENT_REVIEW=1."""
@@ -99,11 +99,18 @@ class TestPostReviewIdentitySetup:
         """§0 must define GH_TOKEN_FOR_REVIEW variable."""
         assert "GH_TOKEN_FOR_REVIEW" in post_review_text
 
-    def test_hard_fail_on_missing_token_in_agent_context(self, post_review_text: str) -> None:
-        """§0 must hard-fail when CLAUDE_AGENT_REVIEW=1 but SDLC_AGENT_GH_TOKEN is empty."""
+    def test_token_optional_in_agent_context(self, post_review_text: str) -> None:
+        """§0 must reference CLAUDE_AGENT_REVIEW and treat the token as opt-in.
+
+        When the token is unset, §0 falls through to the operator credential
+        rather than hard-failing — bot identity is opt-in per machine.
+        """
         assert "CLAUDE_AGENT_REVIEW" in post_review_text
-        # Hard-fail message
-        assert "refusing to post under operator identity" in post_review_text.lower()
+        assert "SDLC_AGENT_GH_TOKEN" in post_review_text
+        # Must not hard-fail when token is missing
+        assert "refusing to post under operator identity" not in post_review_text.lower()
+        # Must document the fall-through to operator credential
+        assert "operator credential" in post_review_text.lower()
 
     def test_empty_token_not_passed_to_gh(self, post_review_text: str) -> None:
         """C-5: empty GH_TOKEN must not be passed to gh (would corrupt credential store)."""

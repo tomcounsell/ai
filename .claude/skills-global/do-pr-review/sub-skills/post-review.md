@@ -21,22 +21,17 @@ any `gh pr review` or `gh pr comment` call.
 
 ```bash
 GH_TOKEN_FOR_REVIEW=""
+HEAD_SHA=""
 
-if [ "${CLAUDE_AGENT_REVIEW:-0}" = "1" ]; then
-  # Pipeline context — must use bot identity.
-  if [ -z "${SDLC_AGENT_GH_TOKEN:-}" ]; then
-    echo "ERROR: agent context (CLAUDE_AGENT_REVIEW=1) but SDLC_AGENT_GH_TOKEN is unset or empty." >&2
-    echo "Refusing to post review under operator identity in pipeline context." >&2
-    cat <<'OUTCOME'
-<!-- OUTCOME {"status":"fail","stage":"REVIEW","verdict":"IDENTITY_MISSING","artifacts":{},"notes":"SDLC_AGENT_GH_TOKEN not set in pipeline context","failure_reason":"agent context but bot token missing — refusing to post under operator identity","next_skill":null} -->
-OUTCOME
-    exit 1
-  fi
+if [ "${CLAUDE_AGENT_REVIEW:-0}" = "1" ] && [ -n "${SDLC_AGENT_GH_TOKEN:-}" ]; then
+  # Pipeline context AND a dedicated bot token is configured on this machine.
+  # Use bot identity and emit the forensic marker.
   GH_TOKEN_FOR_REVIEW="$SDLC_AGENT_GH_TOKEN"
-
-  # Resolve HEAD SHA for the marker
   HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
 fi
+# Otherwise (no token, or local dev run): fall through to operator credential.
+# SDLC_AGENT_GH_TOKEN is opt-in per machine — most machines review under the
+# operator identity. Only the dedicated bot machine sets the token.
 ```
 
 **Rules:**

@@ -3,11 +3,14 @@
 **Issues:** #1300 (bot identity), #1301 (conflict-state no-op)
 **PR:** sdlc-1300/1301
 
-Pipeline-driven PR reviews now post under a dedicated service-account identity
-instead of the operator's personal `gh` credential. Reviews are prefixed with
-a machine-readable marker. `BLOCKED_ON_CONFLICT` and `PR_CLOSED` paths use
-`gh pr comment` exclusively — never `gh pr review`. `UNKNOWN` mergeability
-after retry is treated conservatively as `CONFLICTING`.
+Pipeline-driven PR reviews can post under a dedicated service-account identity
+instead of the operator's personal `gh` credential. The bot identity is
+**opt-in per machine** via `SDLC_AGENT_GH_TOKEN`. Standard machines leave the
+token blank and post pipeline reviews under the operator credential; only the
+dedicated bot machine sets the token and emits the `<!-- SDLC-AGENT-REVIEW v1 -->`
+marker. `BLOCKED_ON_CONFLICT` and `PR_CLOSED` paths use `gh pr comment`
+exclusively — never `gh pr review`. `UNKNOWN` mergeability after retry is
+treated conservatively as `CONFLICTING`.
 
 ## Why This Exists
 
@@ -29,23 +32,26 @@ Three problems were observed on yudame/cuttlefish PR #354 (2026-05-06):
 
 ## How It Works
 
-### Bot Identity (`SDLC_AGENT_GH_TOKEN`)
+### Bot Identity (`SDLC_AGENT_GH_TOKEN`, opt-in per machine)
 
-When the skill runs in pipeline context (`CLAUDE_AGENT_REVIEW=1`), it injects
-`GH_TOKEN=$SDLC_AGENT_GH_TOKEN` for the single `gh pr review` or `gh pr comment`
-subprocess that posts the review. All other `gh` calls (read-only) use the
-operator's credential.
+When the skill runs in pipeline context (`CLAUDE_AGENT_REVIEW=1`) AND
+`SDLC_AGENT_GH_TOKEN` is set, it injects `GH_TOKEN=$SDLC_AGENT_GH_TOKEN` for
+the single `gh pr review` or `gh pr comment` subprocess that posts the review.
+All other `gh` calls (read-only) use the operator's credential.
+
+When the token is unset or empty, the skill posts under the operator's `gh`
+credential without the `<!-- SDLC-AGENT-REVIEW v1 -->` marker. This is the
+standard posture on every machine except the dedicated bot host.
 
 **Token resolution (in `post-review.md §0`):**
 ```bash
 GH_TOKEN_FOR_REVIEW=""
-if [ "${CLAUDE_AGENT_REVIEW:-0}" = "1" ]; then
-  if [ -z "${SDLC_AGENT_GH_TOKEN:-}" ]; then
-    echo "ERROR: agent context but bot token missing — refusing to post under operator identity"
-    exit 1
-  fi
+HEAD_SHA=""
+if [ "${CLAUDE_AGENT_REVIEW:-0}" = "1" ] && [ -n "${SDLC_AGENT_GH_TOKEN:-}" ]; then
   GH_TOKEN_FOR_REVIEW="$SDLC_AGENT_GH_TOKEN"
+  HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
 fi
+# Otherwise: fall through to operator credential.
 ```
 
 **Important safety:** The `env GH_TOKEN=...` wrapper is only applied when
@@ -159,15 +165,16 @@ after this change is deployed.
 
 ## Troubleshooting
 
-### "agent context but bot token missing"
+### Standard machine: pipeline review posts under operator identity
 
-```
-ERROR: agent context (CLAUDE_AGENT_REVIEW=1) but SDLC_AGENT_GH_TOKEN is unset or empty.
-Refusing to post review under operator identity in pipeline context.
-```
+This is the expected default. `SDLC_AGENT_GH_TOKEN` is opt-in per machine —
+only the dedicated bot host sets it. On every other machine, pipeline reviews
+post under the operator's `gh` credential and the `<!-- SDLC-AGENT-REVIEW v1 -->`
+marker is intentionally omitted.
 
-**Fix:** Add `SDLC_AGENT_GH_TOKEN=<token>` to `~/Desktop/Valor/.env` and restart
-the worker (`./scripts/valor-service.sh worker-restart`).
+If you intend a particular machine to post reviews as the bot:
+1. Add `SDLC_AGENT_GH_TOKEN=<token>` to `~/Desktop/Valor/.env`.
+2. Restart the worker (`./scripts/valor-service.sh worker-restart`).
 
 ### Marker Missing on Agent Review
 
