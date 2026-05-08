@@ -187,11 +187,15 @@ def check_system_tools() -> list[ToolCheck]:
         ("claude", "--version"),
         ("gh", "--version"),
         ("git", "--version"),
-        ("sentry-cli", "--version"),
         ("uv", "--version"),
     ]
     results = [check_command(name, flag) for name, flag in tools]
     results.append(check_python_alias())
+    # sentry-cli is optional — only required on machines that use Sentry
+    import shutil
+
+    if shutil.which("sentry-cli"):
+        results.append(check_command("sentry-cli", "--version"))
     return results
 
 

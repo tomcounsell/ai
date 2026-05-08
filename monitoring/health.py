@@ -153,16 +153,18 @@ class HealthChecker:
         Returns:
             Dictionary mapping API name to HealthCheckResult.
         """
-        api_keys = {
+        required_keys = {
             "anthropic": "ANTHROPIC_API_KEY",
             "openrouter": "OPENROUTER_API_KEY",
             "perplexity": "PERPLEXITY_API_KEY",
+        }
+        optional_keys = {
             "sentry": "SENTRY_API_KEY",
         }
 
         results: dict[str, HealthCheckResult] = {}
 
-        for name, env_var in api_keys.items():
+        for name, env_var in required_keys.items():
             value = os.environ.get(env_var)
             if value:
                 results[name] = HealthCheckResult(
@@ -178,6 +180,19 @@ class HealthChecker:
                     message=f"{name} API key not set",
                     details={"env_var": env_var},
                 )
+
+        for name, env_var in optional_keys.items():
+            value = os.environ.get(env_var)
+            results[name] = HealthCheckResult(
+                component=f"api_key_{name}",
+                status=HealthStatus.HEALTHY,
+                message=f"{name} API key configured"
+                if value
+                else f"{name} API key not set (optional)",
+                details={"env_var": env_var, "length": len(value)}
+                if value
+                else {"env_var": env_var},
+            )
 
         return results
 

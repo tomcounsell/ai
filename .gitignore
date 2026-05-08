@@ -466,3 +466,6 @@ tests/happy-paths/evidence/
 
 # Working-state scratchpad (gitignored per long-task-checkpointing feature)
 PROGRESS.md
+
+# Playwright CLI session snapshots
+.playwright-cli/

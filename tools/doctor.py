@@ -28,6 +28,14 @@ from pathlib import Path
 # Project root (ai/)
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
+# Load .env so health checks that read os.environ find the API keys.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(PROJECT_DIR / ".env")
+except Exception:
+    pass
+
 
 @dataclass
 class CheckResult:
