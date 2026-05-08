@@ -544,15 +544,16 @@ def _collect_crashes(target_date: datetime) -> tuple[list[dict], str | None]:
 
 
 def _collect_reflection_runs(target_date: datetime) -> tuple[list[dict], str | None]:
-    """Collect Reflection.run_history entries that ran on target_date.
+    """Collect ReflectionRun rows that ran on target_date.
 
-    Walks all Reflection records, scans `run_history`, and emits one item per
-    matching entry with the reflection name and per-project breakdown.
+    Reads from the ``ReflectionRun`` Popoto model (post-#1273; the embedded
+    ``Reflection.run_history`` list was removed in favor of unbounded per-run
+    rows with a 30-day TTL).
     """
     try:
-        from models.reflection import Reflection
+        from models.reflection_run import ReflectionRun
     except Exception as e:
-        return ([], f"Reflection import failed: {e}")
+        return ([], f"ReflectionRun import failed: {e}")
 
     start, end = _utc_day_bounds(target_date)
     start_ts = start.timestamp()
@@ -560,36 +561,28 @@ def _collect_reflection_runs(target_date: datetime) -> tuple[list[dict], str | N
     items: list[dict] = []
 
     try:
-        all_refl = Reflection.query.all()
+        all_runs = list(ReflectionRun.query.all())
     except Exception as e:
-        return ([], f"Reflection.query.all failed: {e}")
+        return ([], f"ReflectionRun.query.all failed: {e}")
 
-    for r in all_refl:
-        history = getattr(r, "run_history", None) or []
-        if not isinstance(history, list):
+    for run in all_runs:
+        try:
+            ts_f = float(getattr(run, "timestamp", 0.0) or 0.0)
+        except (TypeError, ValueError):
             continue
-        for entry in history:
-            if not isinstance(entry, dict):
-                continue
-            ts = entry.get("timestamp")
-            if ts is None:
-                continue
-            try:
-                ts_f = float(ts)
-            except (TypeError, ValueError):
-                continue
-            if not (start_ts <= ts_f <= end_ts):
-                continue
-            items.append(
-                {
-                    "name": r.name,
-                    "status": entry.get("status", "unknown"),
-                    "duration": float(entry.get("duration", 0.0) or 0.0),
-                    "error": entry.get("error"),
-                    "projects": entry.get("projects") or [],
-                    "ts": ts_f,
-                }
-            )
+        if not (start_ts <= ts_f <= end_ts):
+            continue
+        duration_ms = float(getattr(run, "duration_ms", 0.0) or 0.0)
+        items.append(
+            {
+                "name": getattr(run, "name", ""),
+                "status": getattr(run, "status", "unknown"),
+                "duration": duration_ms / 1000.0,
+                "error": getattr(run, "error", None),
+                "projects": [],  # per-project breakdown moved to last_run_summary on the parent
+                "ts": ts_f,
+            }
+        )
     return (items, None)
 
 

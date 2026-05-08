@@ -129,8 +129,25 @@ def _build_entry(name: str, config: dict, state, now: float) -> dict:
         "last_status": state.last_status if state else "pending",
         "last_error": state.last_error if state else None,
         "last_duration": state.last_duration if state else None,
-        "has_history": bool(state and isinstance(state.run_history, list) and state.run_history),
+        "has_history": _has_run_history(name) if state else False,
+        "failure_count_consecutive": (
+            getattr(state, "failure_count_consecutive", 0) if state else 0
+        ),
+        "paused_until": float(getattr(state, "paused_until", 0.0) or 0.0) if state else 0.0,
+        "cost_usd_total": float(getattr(state, "cost_usd_total", 0.0) or 0.0) if state else 0.0,
+        "output_sink": getattr(state, "output_sink", "log_only") if state else "log_only",
     }
+
+
+def _has_run_history(name: str) -> bool:
+    """Return True if there is at least one ReflectionRun row for ``name``.
+
+    Replaces the legacy embedded ``state.run_history`` truthiness check.
+    """
+    from models.reflection_run import ReflectionRun
+
+    rows = list(ReflectionRun.query.filter(name=name))
+    return bool(rows)
 
 
 _PREFIX_FALLBACK_PARENTS: dict[str, str] = {}
@@ -248,39 +265,67 @@ def get_reflection_detail(name: str) -> dict | None:
     return None
 
 
+def _run_row_to_dict(row, *, index: int | None = None) -> dict:
+    """Convert a ReflectionRun Popoto row into the dict shape the UI expected
+    from the legacy embedded ``run_history`` records.
+
+    Legacy keys: ``timestamp``, ``status``, ``duration``, ``error``, ``projects``.
+    """
+    duration_ms = float(getattr(row, "duration_ms", 0.0) or 0.0)
+    duration_seconds = duration_ms / 1000.0
+    out: dict = {
+        "timestamp": float(getattr(row, "timestamp", 0.0) or 0.0),
+        "status": getattr(row, "status", "success"),
+        "duration": duration_seconds,
+        "error": getattr(row, "error", None),
+        "projects": [],
+        "cost_usd": float(getattr(row, "cost_usd", 0.0) or 0.0),
+        "tokens_input": int(getattr(row, "tokens_input", 0) or 0),
+        "tokens_output": int(getattr(row, "tokens_output", 0) or 0),
+        "output_summary": getattr(row, "output_summary", None),
+        "delivery_error": getattr(row, "delivery_error", None),
+    }
+    if index is not None:
+        out["index"] = index
+    return out
+
+
 def get_run_history(name: str, page: int = 1) -> dict:
     """Get paginated run history for a specific reflection.
 
+    Reads from the ``ReflectionRun`` Popoto rows (issue #1273 — embedded
+    ``Reflection.run_history`` was removed).
+
     Args:
-        name: Reflection name
-        page: Page number (1-indexed)
+        name: Reflection name.
+        page: Page number (1-indexed).
 
     Returns:
         Dict with 'runs' (list of run dicts, newest first),
         'total_pages', and 'total_runs'.
     """
-    from models.reflection import Reflection
+    from models.reflection_run import ReflectionRun
 
-    states = Reflection.query.filter(name=name)
-    if not states:
+    rows = list(ReflectionRun.query.filter(name=name))
+    if not rows:
         return {"runs": [], "total_pages": 1, "total_runs": 0}
 
-    state = states[0]
-    history = state.run_history if isinstance(state.run_history, list) else []
+    # Sort newest-first by timestamp (Popoto query ordering varies; do it in Python).
+    rows.sort(key=lambda r: float(getattr(r, "timestamp", 0.0) or 0.0), reverse=True)
 
-    # Reverse to show newest first
-    history = list(reversed(history))
-    total_runs = len(history)
+    total_runs = len(rows)
     total_pages = max(1, math.ceil(total_runs / RUNS_PER_PAGE))
 
-    # Paginate
     start = (page - 1) * RUNS_PER_PAGE
     end = start + RUNS_PER_PAGE
-    page_runs = history[start:end]
+    page_rows = rows[start:end]
 
-    # Add index for detail links (original index in forward order)
-    for i, run in enumerate(page_runs):
-        run["index"] = total_runs - 1 - (start + i)
+    # ``index`` is the position in forward (oldest-first) order — used by the
+    # detail-link routing in get_run_detail.
+    page_runs = []
+    for i, row in enumerate(page_rows):
+        forward_index = total_runs - 1 - (start + i)
+        page_runs.append(_run_row_to_dict(row, index=forward_index))
 
     return {
         "runs": page_runs,
@@ -293,26 +338,23 @@ def get_run_detail(name: str, run_index: int) -> dict | None:
     """Get detail for a specific run by index.
 
     Args:
-        name: Reflection name
-        run_index: Zero-based index into run_history (forward order)
+        name: Reflection name.
+        run_index: Zero-based index in forward (oldest-first) order.
 
     Returns:
         Run dict with full details, or None if not found.
     """
-    from models.reflection import Reflection
+    from models.reflection_run import ReflectionRun
 
-    states = Reflection.query.filter(name=name)
-    if not states:
+    rows = list(ReflectionRun.query.filter(name=name))
+    if not rows:
         return None
 
-    state = states[0]
-    history = state.run_history if isinstance(state.run_history, list) else []
+    rows.sort(key=lambda r: float(getattr(r, "timestamp", 0.0) or 0.0))
 
-    if run_index < 0 or run_index >= len(history):
+    if run_index < 0 or run_index >= len(rows):
         return None
 
-    run = dict(history[run_index])
-    run["index"] = run_index
+    run = _run_row_to_dict(rows[run_index], index=run_index)
     run["name"] = name
-
     return run
