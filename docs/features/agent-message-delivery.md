@@ -20,26 +20,22 @@ gate. See `docs/features/pm-final-delivery.md` for the full protocol
 
 ### Stop Hook Review Gate (`agent/hooks/stop.py`)
 
-When a Telegram-triggered session tries to stop:
+When a user-triggered session tries to stop:
 
-1. **First stop** — the hook reads the agent's raw output from the transcript, runs it through the message drafter to produce a draft, then blocks the stop with a review prompt showing the draft and delivery choices
-2. **Agent decides** — the agent sees its draft and picks one of:
-   - `SEND` — deliver the draft as-is
-   - `EDIT: <text>` — replace the draft with revised text
-   - `REACT: <emoji>` — respond with only an emoji reaction
-   - `SILENT` — send nothing at all
-   - `CONTINUE` — resume working (false stop detected)
-3. **Second stop** — the hook parses the choice, writes delivery instructions to the AgentSession, and allows completion
-4. **Bridge executes** — `send_response_with_files()` reads the delivery instruction and acts accordingly
+1. **First stop** — the hook reads the agent's raw output from the transcript, runs it through the message drafter to produce a draft, then blocks the stop with a review prompt showing the draft and a prepopulated tool-call presentation (see [Delivery Execution](#delivery-execution-tool-call-path) below for the exact contract).
+2. **Agent acts** — the agent invokes a delivery tool (`tools/send_message.py`, `tools/react_with_emoji.py`), stops silently, or continues working. There is no string-menu protocol — the agent's choice is the tool call itself.
+3. **Second stop** — the hook inspects the transcript tail for `tool_use` blocks via `classify_delivery_outcome()`, classifies the outcome (send / react / silent / continue), and either allows completion or re-blocks with a "resume work" prompt for `continue`.
+
+The hook does **not** write a `delivery_action` or `delivery_text` field to the `AgentSession` — delivery is driven entirely by the tool call the agent makes during the second stop. Tool-call payloads route through `TelegramRelayOutputHandler.send` (or `EmailOutputHandler.send`) which always runs the drafter before the outbox write.
 
 ### Activation Rules
 
 The review gate only fires when:
-- Session was triggered by a Telegram message (`TELEGRAM_CHAT_ID` + `TELEGRAM_REPLY_TO` env vars set)
-- Agent hasn't already self-messaged via PM tools (`has_pm_messages()` is false)
-- Session has non-empty output
+- Session has a user-visible transport configured — `_is_user_triggered()` checks for any of `TELEGRAM_CHAT_ID`, `EMAIL_REPLY_TO`, or `VALOR_TRANSPORT` (`agent/hooks/stop.py:63-74`)
+- Session is not a child session (`parent_agent_session_id` unset; children deliver via the parent)
+- Session has non-empty transcript output
 
-Skipped for: subagent sessions, programmatic sessions, local Claude Code sessions, PM self-messaging sessions.
+Skipped for: subagent sessions, programmatic sessions, and any session without one of the transport env vars above.
 
 ### False Stop Detection
 
@@ -47,15 +43,14 @@ Simple heuristic: if the agent's output is short (<500 chars) and contains promi
 
 ## Delivery Execution (tool-call path)
 
-Post-#1072, the stop hook no longer writes delivery fields to the AgentSession. Instead, the agent acts on its delivery choice by calling a tool directly during the second stop:
+Post-#1072 the stop hook does not write delivery fields to the `AgentSession`. The agent's delivery choice is the tool call it makes (or doesn't) during the second stop. `classify_delivery_outcome()` (`agent/hooks/stop.py:217-245`) inspects the transcript tail and maps the observed `tool_use` blocks to one of four outcomes:
 
-| Agent choice | Action |
-|--------------|--------|
-| `SEND` | Call `tools/send_message.py` with the drafted text — payload flows through `TelegramRelayOutputHandler.send`, which always routes through `bridge.message_drafter.draft_message` before the outbox write |
-| `EDIT: <text>` | Same as `SEND` but with the agent's revised text |
-| `REACT: <emoji>` | Call `tools/react_with_emoji.py` with the chosen emoji — no text is sent |
-| `SILENT` | Do nothing — no tool calls, session completes without output |
-| `CONTINUE` | Resume working; the hook does not stop the agent |
+| Classified outcome | Agent action that produces it | Effect |
+|--------------------|-------------------------------|--------|
+| `send` | Invoked `python tools/send_message.py "<text>"` (the draft as-is, or a revised text — both classify the same) — also matches the legacy `tools/send_telegram.py` for the PM self-messaging path | Payload flows through `TelegramRelayOutputHandler.send` (or `EmailOutputHandler.send`), which always routes through `bridge.message_drafter.draft_message` before the outbox write |
+| `react` | Invoked `python tools/react_with_emoji.py "<feeling>"` | Telegram reaction is set on the original message; no text sent |
+| `silent` | Stopped without any tool invocation | Session completes with no output |
+| `continue` | Other `tool_use` activity present (still working) | Hook re-blocks with a "resume work" prompt; review state is reset so the next stop re-enters the gate |
 
 The canonical drafter entry point is `TelegramRelayOutputHandler.send` (for Telegram) and `EmailOutputHandler.send` (for email). Both run the drafter unconditionally, with a `try/except` fallback to raw text on drafter failure. See [message-drafter.md](message-drafter.md) for drafter details.
 
@@ -86,5 +81,5 @@ The Teammate persona prompt includes a DELIVERY REVIEW section explaining the ch
 - [Teammate Conversational Humility](qa-conversational-humility.md) — Teammate prompt design
 - [Config-Driven Chat Mode](config-driven-chat-mode.md) — Persona routing
 - [Chat-Dev Session Architecture](pm-dev-session-architecture.md) — Session types
-- [Agent-Controlled Delivery Protocol](agent-controlled-delivery.md) — Defense-in-depth filtering preventing delivery-choice text leaking to users
+- [PM Final Delivery](pm-final-delivery.md) — SDLC terminal-turn delivery protocol (bypasses the review gate)
 - Issue [#589](https://github.com/tomcounsell/ai/issues/589) — Tracking issue
