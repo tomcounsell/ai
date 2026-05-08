@@ -108,6 +108,24 @@ Test your analogy: Would a 16-year-old get it? If not, simplify.
 - Code: only when the actual syntax matters
 - Blockquotes: memorable takeaways
 
+## Client-Facing Decks: Why → How → What
+
+Educational decks explain a system to people who want to understand it. Client-facing decks — proposals, working sessions, decision briefs — serve a different function: they help a decision-maker act. The structure is different.
+
+**The failure mode for client-facing decks:** opening with the solution. Jumping to scope, architecture, or features before the client sees their own problem reflected back puts them in a passive receiver role instead of an active decision-maker. They disengage or start objecting to details before the framing is established.
+
+**The fix is structural, not cosmetic:**
+
+| Section | What it does | Typical slides |
+|---|---|---|
+| **Why** | Shows you understand the client's world before proposing anything | Who is the client, their operating reality, the specific problem they face, the goal in their own terms |
+| **How** | Explains the approach / governing principle at a level of abstraction above the solution | The mechanism, the philosophy, why this approach and not others |
+| **What** | The specific scope, features, decisions, or plan | Details, trade-offs, options, timelines |
+
+**Rule:** A client should never see a scope table, architecture diagram, or decision matrix before they have nodded at a slide that describes their own situation accurately. That nod is the moment they trust the presenter enough to engage with the solution.
+
+**For working sessions specifically** (where the audience must make decisions, not just learn): each decision item should be a discrete slide or pair of slides — context + the ask. State your recommended default and let them veto. Never open a decision item with an open question; always with a proposed path.
+
 ## Anti-Patterns (What NOT to Do)
 
 - **Wall of text**: If a slide has more than 6 lines of body text, split it

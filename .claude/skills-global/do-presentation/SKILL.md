@@ -56,8 +56,18 @@ Spawn an Explore agent to deeply research the topic:
 
 ### Step 3: Design the slide structure
 
-Read `CONTENT_GUIDE.md` for educational best practices. Structure slides following this proven flow:
+Read `CONTENT_GUIDE.md` for educational best practices.
 
+**First, determine the presentation type — it changes the opening structure:**
+
+| Type | Audience | Opening structure |
+|---|---|---|
+| **Educational / internal** | Technical teammates, general audience | What → How → Why it matters |
+| **Client-facing / working session** | Client decision-makers, executives | Why (their problem) → How (the approach) → What (the specifics) |
+
+For client-facing decks, the first 3–4 slides must establish: (1) who the client is and what their operating reality looks like, (2) the problem they are experiencing in their own terms, (3) the governing principle or goal — before any solution, scope, or technical content appears. Opening with a solution before the client sees their problem reflected back is the single most common failure mode.
+
+**Default slide structure (educational):**
 ```
 1. Title slide (hook + subtitle)
 2. The Problem (why this exists — relatable scenario)
@@ -69,6 +79,19 @@ Read `CONTENT_GUIDE.md` for educational best practices. Structure slides followi
 11. Trade-offs / Design Decisions
 12. Summary (3 bullet takeaway)
 13. Questions / Further Reading
+```
+
+**Client-facing / working session structure:**
+```
+1. Title + session framing (not a pitch — a working session)
+2. Why: Who is the client? (their context, their operating reality)
+3. Why: The problem they are experiencing (in their terms)
+4. How: The approach / governing principle
+5. How: The mechanism (what the system does, simply)
+6. What: The specific scope or decisions
+7+. Decision / agenda items (one per slide)
+N-1. Summary / next steps
+N.  Appendix
 ```
 
 Adjust count based on topic complexity. Aim for **one idea per slide**.
@@ -203,7 +226,61 @@ content...
 - Bold key terms on first use
 - Use analogies liberally — connect technical concepts to everyday things
 
-### Step 8: Export
+**Include these utility CSS classes in every theme** — they get used on almost every deck:
+
+```css
+/* Two-column grid */
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 10px; }
+.cols-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-top: 10px; }
+
+/* Callout — neutral/info (blue left accent) */
+.stat {
+  background: #eef2ff; border-left: 4px solid #2563a8;
+  padding: 12px 20px; margin: 10px 0;
+  font-size: 0.96em; font-weight: 600; color: #1a3a6b; line-height: 1.5;
+}
+
+/* Warning / risk callout (amber left accent) */
+.warn {
+  background: #fef3c7; border-left: 4px solid #f59e0b;
+  padding: 10px 18px; margin: 10px 0;
+  font-size: 0.88em; color: #92400e; line-height: 1.5;
+}
+
+/* Option/path cards — for A/B/C decision slides */
+.path-card {
+  border: 1px solid #e5e7eb; border-radius: 6px;
+  padding: 14px 16px; font-size: 0.86em;
+}
+.path-card strong { display: block; margin-bottom: 4px; }
+```
+
+Use `.cols` / `.cols-3` to break a slide that would otherwise be a dense list into scannable side-by-side sections. Use `.stat` for governing metrics and key facts. Use `.warn` for risks and blockers. Use `.path-card` inside `.cols-3` for A/B/C decision options.
+
+### Step 8: Self-review pass (before export)
+
+Before running Marp, spawn a subagent to critique the draft. This catches structural and density issues before the user sees a bad first version.
+
+**Spawn a `plan-reviewer` agent** with this prompt template:
+
+```
+Review this Marp presentation draft for two things only — structure and density.
+Do not evaluate content correctness.
+
+STRUCTURE: Does it open with Why (the audience's problem / context), then How (the approach),
+then What (the specifics)? For client-facing decks especially, flag if the first 3 slides do not
+establish who the audience is and what problem they are experiencing before any solution content appears.
+
+DENSITY: List every slide that exceeds 6 lines of body text, or has more than 2 dense paragraphs,
+or has a table with more than 5 rows and verbose cell text. For each, suggest: split into 2 slides,
+convert prose to a .cols layout, or trim to a single key sentence.
+
+Return a short list — flagged slides with one-line diagnosis each. No other feedback.
+```
+
+Act on every flag before exporting. A split slide costs 2 minutes. Sending a dense deck to a client costs a revision cycle.
+
+### Step 9: Export
 
 Run Marp CLI to generate outputs:
 
@@ -218,12 +295,13 @@ npx --yes @marp-team/marp-cli "<source>.md" --html --allow-local-files -o "<sour
 npx --yes @marp-team/marp-cli "<source>.md" --pptx --allow-local-files -o "<source>.pptx"
 ```
 
-### Step 9: Verify
+### Step 10: Verify
 
 After export, confirm:
 - [ ] PDF generated without errors
 - [ ] HTML generated without errors
 - [ ] Slide count matches plan
+- [ ] No slide flagged in the review pass was left unaddressed
 - [ ] Report file locations to user
 
 ## Output
@@ -234,5 +312,6 @@ Tell the user:
 3. How to edit (it's just markdown) and re-export
 
 ## Version history
+- v1.2.0 (2026-05-07): Added client-facing Why→How→What structure guidance (Step 3), self-review critique pass via subagent (Step 8), utility CSS classes in theme defaults (Step 7), "Client-Facing Decks" section in CONTENT_GUIDE.md. Driven by real session: first-pass deck opened with V0.5 scope before establishing client context; dense slides caught only after user review — both preventable with the review pass.
 - v1.1.0 (2026-04-13): Added Step 5 (brand logo collection via Simple Icons + Google Favicons), renumbered subsequent steps
 - v1.0.0 (2026-04-10): Initial — research, structure, theme detection, Marp export
