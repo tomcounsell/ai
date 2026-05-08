@@ -1002,14 +1002,19 @@ async def run_email_bridge() -> None:
 
 def main() -> None:
     """Entry point for ``python -m bridge.email_bridge``."""
+    import os
     import sys
     from pathlib import Path
 
     from dotenv import load_dotenv
 
-    # Mirror telegram_bridge.py env loading: repo .env first, vault .env second
-    load_dotenv(Path(__file__).parent.parent / ".env")
-    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+    # Mirror telegram_bridge.py env loading: repo .env first, vault .env second.
+    # Under launchd (VALOR_LAUNCHD=1), env vars are injected directly into the
+    # plist by install_email_bridge.sh — skip dotenv entirely to avoid macOS
+    # TCC hangs on the iCloud-synced ~/Desktop/Valor/.env that .env symlinks to.
+    if not os.environ.get("VALOR_LAUNCHD"):
+        load_dotenv(Path(__file__).parent.parent / ".env")
+        load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
     logging.basicConfig(
         level=logging.INFO,

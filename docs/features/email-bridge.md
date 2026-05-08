@@ -217,6 +217,29 @@ For Gmail, generate an App Password at <https://myaccount.google.com/apppassword
 ./scripts/valor-service.sh email-dead-letter replay --all
 ```
 
+### Boot-time auto-start
+
+Operators who want the email bridge to auto-start on boot can install a launchd plist:
+
+```bash
+./scripts/install_email_bridge.sh
+```
+
+The installer is **machine-gated**: it inspects `~/Desktop/Valor/projects.json` for any project owned by the current machine that has an `email:` block, and exits 0 with a "skip" message on machines without one. (Mirrors the `has_bridge_role` gate used by the Telegram bridge installer.)
+
+Key behaviors:
+
+- Idempotent (runs `launchctl bootout` before `bootstrap`).
+- Foreground-process pre-check: refuses to bootstrap if a non-launchd `python -m bridge.email_bridge` is already running (e.g. from `valor-service.sh email-start`). Stop the foreground bridge first.
+- Injects `.env` values into the plist's `EnvironmentVariables` block via `dotenv_values()`. macOS TCC blocks launchd agents from reading `~/Desktop` files, so the iCloud-synced `.env` would otherwise hang the bridge at startup.
+- Sets `VALOR_LAUNCHD=1` in the plist so `bridge/routing.py` and `bridge/email_bridge.py::main` skip their own iCloud `.env` reads.
+- Copies `~/Desktop/Valor/projects.json` to `config/projects.json` (and `reflections.yaml` if present) so the launchd-loaded bridge reads from local files rather than the iCloud-synced vault.
+- `KeepAlive=true` provides launchd-level restart on crash; no separate watchdog is installed (the email bridge does not have the Telethon session-lock failure mode that justifies `com.valor.bridge-watchdog`).
+
+**projects.json refresh contract.** After editing `~/Desktop/Valor/projects.json` (the iCloud-synced source of truth), operators **must** re-run `./scripts/install_email_bridge.sh` on every email-bridge machine to refresh the local `config/projects.json` copy. The launchd-loaded bridge reads the local copy under `VALOR_LAUNCHD=1`; without a refresh, an email-only machine continues to route based on the stale local copy.
+
+Operators who don't run the installer keep using `valor-service.sh email-start` exactly as before — boot-time auto-start is opt-in.
+
 ## Health Monitoring
 
 After each successful IMAP poll, the bridge writes the current timestamp to:

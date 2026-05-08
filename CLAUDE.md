@@ -142,6 +142,7 @@ valor-email threads
 | `./scripts/valor-service.sh email-status` | Check email bridge status, IMAP last-poll age, and SMTP relay heartbeat |
 | `./scripts/valor-service.sh email-dead-letter list` | List failed SMTP sends in dead-letter queue |
 | `./scripts/valor-service.sh email-dead-letter replay --all` | Replay all dead-lettered emails |
+| `./scripts/install_email_bridge.sh` | Install launchd plist for boot-time email bridge (machine-gated, idempotent; opt-in) |
 | `tail -f logs/bridge.log` | Stream bridge logs |
 | `pytest tests/` | Run all tests (parallel by default — `-n auto --dist=loadfile` from `pyproject.toml`) |
 | `pytest tests/unit/` | Run unit tests only (~40s parallel) |

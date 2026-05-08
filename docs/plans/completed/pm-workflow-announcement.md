@@ -520,3 +520,13 @@ The war-room verdict was recorded in PM session state with three CONCERN finding
 | CONCERN | `skip` override scope (one-time vs. session-wide) ambiguous | Data Flow + Bucket #3 overlay text | "Implementation Note (Concern: skip override scope — one-time vs. session-wide)" — defines one-time, no persistent flag, explicit re-fire semantics |
 
 No BLOCKERs were recorded. The build proceeds with all three CONCERNs acknowledged and Implementation Notes embedded. NITs (if any were recorded) are exempt from revision per `/do-plan-critique` v1.2.0 contract.
+
+
+<!--
+Audited 2026-05-08, see #1325 audit comment for status.
+
+Two punts, both filed as separate scoped issues:
+  - line 334 (overlay-drift audit): filed as #1336 (label: chore).
+  - line 361 (/update multi-machine overlay automation step): filed as #1337
+    (labels: chore,skills).
+-->

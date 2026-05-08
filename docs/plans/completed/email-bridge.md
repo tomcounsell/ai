@@ -426,3 +426,14 @@ Using: builder, test-engineer, validator, documentarian
 3. **SMTP/IMAP credentials**: **Single global account** via `.env` variables: `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_PORT`, `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_PORT`. Gmail with App Password.
 
 4. **Gmail API vs IMAP/SMTP**: **IMAP/SMTP.** The bridge is a long-running daemon — static App Password credentials are simpler than OAuth token refresh. Gmail MCP tools remain available to the agent during sessions for email search/context, but the bridge transport layer uses IMAP/SMTP.
+
+
+<!--
+Audited 2026-05-08, see #1325 audit comment for status.
+
+Punt at line 348 ("Deferred to follow-up: launchd plist + install script"):
+addressed in this audit PR (closes #1325). Adds com.valor.email-bridge.plist
+template, scripts/install_email_bridge.sh (machine-gated, env-injecting,
+idempotent), VALOR_LAUNCHD env-gate in bridge/email_bridge.py::main, and a
+regression test test_main_skips_dotenv_under_launchd.
+-->
