@@ -1,9 +1,11 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-05-08
+revised: 2026-05-08
+revision_applied: true
 tracking: https://github.com/tomcounsell/ai/issues/1318
 last_comment_id: none
 ---
@@ -113,24 +115,52 @@ No prerequisites — this work has no external dependencies.
 
 ### Flow
 
-Human action directive arrives → **Fast-Path 0 matches imperative verb** → `RESPOND` (no LLM call)
+Single-line directive ("Continue with deployment") → **Fast-Path 0 matches** → `RESPOND` (no LLM call)
 
-Ambiguous continuation ("proceed on the other one") → Fast-Paths 1-3 don't fire → **Few-shot LLM prompt** → `RESPOND`
+Multi-line directive (line 1 = "I left a comment on PR 1316", line 2 = "Continue to finish all stage of SDLC") → **Fast-Path 0 matches line 2 via `(?:^|\n)\s*` prefix** → `RESPOND` (no LLM call). **This is the May 7 incident.**
 
-Pure acknowledgment ("ok great") → Fast-Path 2 fires → `SILENT` (unchanged)
+Ambiguous continuation ("let's go with that") → Fast-Path 0 doesn't match → Fast-Paths 1-3 don't fire → **Few-shot LLM prompt** → `RESPOND`
+
+Mid-line imperative ("I would just continue this automatically") → Fast-Path 0 doesn't match (no preceding newline) → Falls through to LLM
+
+Pure acknowledgment ("ok great") → Fast-Path 0 doesn't match → Fast-Path 2 fires → `SILENT` (unchanged)
 
 ### Technical Approach
 
 **Fast-Path 0 placement**: Insert between the empty-text guard (line 581) and Fast-Path 1 (line 587). Fast-Path 0 must fire for human senders only — bot senders are handled entirely by Fast-Path 1. Add a `sender_is_bot` guard so the imperative check never interferes with bot loop suppression.
 
-**Imperative verbs to cover (initial set)**:
+**Imperative verbs to cover (initial set)** — deliberately narrow to high-precision continuation imperatives only. Common verbs that frequently appear non-imperatively at message starts (e.g. "fix" in "fix the bug at your leisure", "start" in "start of meeting", "run" in "run was successful") are deferred to the few-shot LLM step:
+
 ```
-continue, run, merge, proceed, retry, fix, start, deploy, execute,
-go ahead, do it, ship it, push, try again, finish, complete, resume,
-keep going, move on, send it, do this, handle it
+continue, proceed, resume, retry, redo,
+go ahead, ship it, do it, send it, try again,
+keep going, finish it, do this, handle it, move on
 ```
 
-Match strategy: `re.compile(r'^\s*(?:' + '|'.join(verbs) + r')\b', re.IGNORECASE)`. Leading-word match (anchored to start) avoids false positives in longer messages where an imperative appears mid-sentence in non-directive context.
+Single common words like `run`, `merge`, `fix`, `start`, `deploy`, `execute`, `push`, `complete` are EXCLUDED from Fast-Path 0. They appear too often in declarative speech to anchor a deterministic short-circuit. The few-shot LLM prompt covers them.
+
+**Match strategy — multi-line aware**: The motivating May 7 incident was a two-line message:
+```
+I left a comment on PR 1316
+
+Continue to finish all stage of SDLC
+```
+A regex anchored only to message start (`^\s*`) would miss this — the imperative is on line 2. Therefore Fast-Path 0 must scan **every line** for a leading imperative.
+
+```python
+# Module scope, near _STANDALONE_QUESTION_RE (line 553)
+_IMPERATIVE_VERBS = (
+    "continue", "proceed", "resume", "retry", "redo",
+    "go ahead", "ship it", "do it", "send it", "try again",
+    "keep going", "finish it", "do this", "handle it", "move on",
+)
+_IMPERATIVE_LINE_RE = re.compile(
+    r"(?:^|\n)\s*(?:" + "|".join(re.escape(v) for v in _IMPERATIVE_VERBS) + r")\b",
+    re.IGNORECASE,
+)
+```
+
+The `(?:^|\n)\s*` prefix matches either the start of the message OR any newline followed by optional whitespace, so any line that *leads with* an imperative verb fires Fast-Path 0. Mid-sentence usage ("I would just continue this automatically") still does not match because there is no preceding newline-or-start before the verb.
 
 **Few-shot examples** (add directly before the `Instructions:` block in the prompt):
 
@@ -184,13 +214,17 @@ logger.debug(f"terminus: {result!r} — {text[:80]!r}")
 
 ## Risks
 
-### Risk 1: Fast-Path 0 over-fires on human messages that mention imperatives passively
-**Impact:** A message like "I wish you would just continue this automatically" would incorrectly return `RESPOND`, spawning a session.
-**Mitigation:** Anchoring the regex to the start of the message (`^\s*`) means only messages that *lead* with an imperative match. The example above starts with "I wish", not an imperative — it won't match. Test confirms this.
+### Risk 1: Fast-Path 0 over-fires on messages where an imperative appears as a non-directive line opener
+**Impact:** A line beginning with "Continue reading the docs at..." (descriptive, not directive) would still trigger `RESPOND`. False positive spawns an unwanted session — but the failure mode is **conservative**: the agent processes a message it shouldn't have, rather than dropping a message it should have processed. Spawning is recoverable; silent drops are not.
+**Mitigation:** Verb list is deliberately narrow (15 imperative-only forms). Common verbs that appear non-imperatively (`fix`, `run`, `merge`, `start`, `deploy`, `execute`, `push`) are excluded. Two unit tests guard this: `"continue reading the docs"` should still RESPOND (we accept this as a conservative spawn), and `"I would just continue this automatically"` (mid-line) must return through to the LLM.
 
 ### Risk 2: Few-shot examples make the LLM prompt token count larger
 **Impact:** ~200 extra tokens per LLM call for messages that reach the LLM. Ollama local model; no cost, negligible latency.
 **Mitigation:** Accept. Issue explicitly permits ~200-token prompt growth.
+
+### Risk 3: Verb list drift — new imperatives discovered in the wild are not auto-captured
+**Impact:** Future SILENT misclassifications for imperatives outside the initial 15-verb set.
+**Mitigation:** The DEBUG log (`terminus: {result!r} — {text[:80]!r}`) is the operational feedback loop. When a new SILENT misclassification is reported, grep `logs/bridge.log` for the pattern, extend the verb list, add a few-shot example, and re-deploy. The 15-verb set is a starting point, not a final list.
 
 ## Race Conditions
 
@@ -221,15 +255,16 @@ No agent integration required — this is a bridge-internal change. `classify_co
 
 ## Success Criteria
 
-- [ ] `classify_conversation_terminus("Continue to finish all stage of SDLC", [], sender_is_bot=False)` returns `RESPOND` (unit test, Fast-Path 0)
-- [ ] `classify_conversation_terminus("Go ahead and merge", [], sender_is_bot=False)` returns `RESPOND` (unit test, Fast-Path 0)
-- [ ] `classify_conversation_terminus("Run it again", [], sender_is_bot=False)` returns `RESPOND` (unit test, Fast-Path 0)
+- [ ] `classify_conversation_terminus("Continue to finish all stage of SDLC", [], sender_is_bot=False)` returns `RESPOND` (unit test, Fast-Path 0, single-line)
+- [ ] `classify_conversation_terminus("I left a comment on PR 1316\n\nContinue to finish all stage of SDLC", [], sender_is_bot=False)` returns `RESPOND` (unit test, Fast-Path 0, **multi-line — the May 7 motivating incident**)
+- [ ] `classify_conversation_terminus("Go ahead and merge it", [], sender_is_bot=False)` returns `RESPOND` (unit test, Fast-Path 0, "go ahead" multi-word)
 - [ ] `classify_conversation_terminus("Proceed with the plan", [], sender_is_bot=False)` returns `RESPOND` (unit test, Fast-Path 0)
 - [ ] `classify_conversation_terminus("continue", [], sender_is_bot=False)` returns `RESPOND` (unit test, single-word imperative)
 - [ ] `classify_conversation_terminus("ok great", [], sender_is_bot=False)` returns `SILENT` (regression guard, acknowledgment token unchanged)
 - [ ] `classify_conversation_terminus("thanks", [], sender_is_bot=False)` returns `SILENT` (regression guard)
-- [ ] `classify_conversation_terminus("Continue with deployment", [], sender_is_bot=True)` returns `SILENT` (Fast-Path 1 still fires first for bots)
-- [ ] At least 5 real dropped-message examples from chat history included as labeled few-shot examples in the LLM prompt
+- [ ] `classify_conversation_terminus("Continue with deployment", [], sender_is_bot=True)` returns `SILENT` (Fast-Path 1 still fires first for bots — Fast-Path 0 is human-only)
+- [ ] `classify_conversation_terminus("I would just continue this automatically", ...)` does NOT trigger Fast-Path 0 (mid-line imperative falls through to LLM — verified via `_IMPERATIVE_LINE_RE.search(text) is None`)
+- [ ] At least 5 real dropped-message examples from `logs/bridge.log` included as labeled few-shot examples in the LLM prompt (mining task is part of build, not aspirational)
 - [ ] `docs/features/agent-reply-terminus.md` updated
 - [ ] Tests pass (`/do-test`)
 
@@ -267,20 +302,31 @@ See PLAN_TEMPLATE.md for full list.
 
 ## Step by Step Tasks
 
-### 1. Implement Fast-Path 0 and Few-Shot Prompt
-- **Task ID**: build-fast-path
+### 1. Mine SILENT misclassifications from bridge logs
+- **Task ID**: mine-examples
 - **Depends On**: none
-- **Validates**: `tests/unit/test_routing.py`
 - **Assigned To**: terminus-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `_IMPERATIVE_VERB_RE` module-level compiled regex at `bridge/routing.py` near line 553 (alongside `_STANDALONE_QUESTION_RE`)
-- Insert Fast-Path 0 check immediately after the empty-text guard (line 582), before Fast-Path 1 (line 587): `if not sender_is_bot and _IMPERATIVE_VERB_RE.search(text_stripped): return "RESPOND"`
-- Replace the zero-shot LLM prompt (lines 615-631) with a few-shot prompt including at least 5 labeled examples mined from bridge logs
+- `grep -E "terminus.*SILENT" logs/bridge.log* | tail -50` to surface recent SILENT decisions (note: this exact log line will only appear post-fix; for now, grep for prior log lines and cross-reference Telegram chat history near the May 6 and May 7 timestamps cited in the issue)
+- Cross-reference each SILENT decision against the actual message text via `valor-telegram read --chat-id <id> --since <timestamp>`
+- Identify at least 5 messages where SILENT was the wrong call. Capture them verbatim with their correct label (RESPOND or REACT)
+- Output: a list of `(text, correct_label)` pairs, written into the build commit as a comment block above the few-shot prompt in `bridge/routing.py` so future maintainers know where examples came from
+
+### 2. Implement Fast-Path 0 and Few-Shot Prompt
+- **Task ID**: build-fast-path
+- **Depends On**: mine-examples
+- **Validates**: `tests/unit/test_routing.py`
+- **Assigned To**: terminus-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Add `_IMPERATIVE_VERBS` tuple and `_IMPERATIVE_LINE_RE` module-level compiled regex at `bridge/routing.py` near line 553 (alongside `_STANDALONE_QUESTION_RE`). Pattern: `r"(?:^|\n)\s*(?:" + "|".join(re.escape(v) for v in _IMPERATIVE_VERBS) + r")\b"` with `re.IGNORECASE`. Multi-line aware — matches imperatives at the start of any line, not just the message
+- Insert Fast-Path 0 check immediately after the empty-text guard (line 582), before Fast-Path 1 (line 587): `if not sender_is_bot and _IMPERATIVE_LINE_RE.search(text): return "RESPOND"`
+- Replace the zero-shot LLM prompt (lines 615-631) with a few-shot prompt including the at-least-5 labeled examples from the mine-examples step plus the canonical examples enumerated in the Solution section
 - Add `logger.debug(f"terminus: {result!r} — {text[:80]!r}")` after result is determined (before the REACT-collapse block at line 674)
 - Run `python -m ruff format bridge/routing.py && python -m ruff check bridge/routing.py`
 
-### 2. Write Unit Tests
+### 3. Write Unit Tests
 - **Task ID**: build-tests
 - **Depends On**: build-fast-path
 - **Validates**: `tests/unit/test_routing.py`
@@ -288,10 +334,10 @@ See PLAN_TEMPLATE.md for full list.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Add test group `# Fast-Path 0: imperative verb tests` in `tests/unit/test_routing.py` after the existing Fast-Path tests
-- Write 8 tests covering all Success Criteria above (5 RESPOND imperatives, 2 SILENT regression guards, 1 bot-sender SILENT guard for imperatives)
+- Write 9 tests covering all Success Criteria above: single-line imperative RESPOND, **multi-line imperative RESPOND (May 7 incident)**, "go ahead" multi-word RESPOND, "Proceed" RESPOND, single-word "continue" RESPOND, "ok great" SILENT (regression), "thanks" SILENT (regression), bot-sender imperative SILENT (Fast-Path 1 wins), mid-line "I would just continue" does NOT match `_IMPERATIVE_LINE_RE`
 - Run `pytest tests/unit/test_routing.py -v` to confirm all pass
 
-### 3. Update Documentation
+### 4. Update Documentation
 - **Task ID**: document-terminus
 - **Depends On**: build-tests
 - **Assigned To**: terminus-documentarian
@@ -300,7 +346,7 @@ See PLAN_TEMPLATE.md for full list.
 - Update `docs/features/agent-reply-terminus.md`: add Fast-Path 0 to the "Fast-Path Priority Order" section (insert as new item 1, renumber existing 1-3 to 2-4); add subsection describing few-shot examples; document DEBUG log
 - Update the "Fast-Path Priority Order" table: add row `0. Imperative verb (human sender only) → RESPOND`
 
-### 4. Final Validation
+### 5. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-terminus
 - **Assigned To**: terminus-validator
@@ -325,12 +371,16 @@ See PLAN_TEMPLATE.md for full list.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| HIGH | Adversary | Original Fast-Path 0 regex was anchored to `^\s*` only — would have **missed the May 7 motivating incident** because the imperative was on line 2 of a multi-line message | Multi-line aware regex `(?:^|\n)\s*<verb>\b` | `_IMPERATIVE_LINE_RE` matches imperatives at start of any line; new test case covers exact incident text |
+| HIGH | Skeptic | Original verb list included `fix`, `run`, `merge`, `start`, `deploy`, `execute`, `push` — common words that frequently appear non-imperatively at message starts. False-positive rate would be high | Narrowed verb list to 15 high-precision continuation imperatives | Common verbs deferred to few-shot LLM step; documented in Solution and Risks |
+| MEDIUM | Operator | Log mining task ("mine 2-3 additional examples") was aspirational — no concrete operational steps, no acceptance evidence | New `mine-examples` task with explicit grep/cross-reference workflow | Output committed as comment block above few-shot prompt for traceability |
+| MEDIUM | Skeptic | Risk 1 mitigation claim ("starts with 'I wish' — won't match") was vacuously true because the multi-line incident wouldn't match either | Risk 1 rewritten honestly: false positives are conservative (spawn instead of drop), Risk 3 added for verb-list drift | DEBUG log is the operational feedback loop |
+| LOW | Simplifier | Original 8 tests didn't cover the multi-line case — the actual incident | Test count raised to 9 with multi-line incident as explicit case | See Test Impact and Step 3 |
 
 ---
 
 ## Open Questions
 
-None — this is a self-contained fix with clear scope, verified freshness, and no ambiguous design decisions.
+None — critique findings have been addressed in this revision. Plan is settled and ready for build.
