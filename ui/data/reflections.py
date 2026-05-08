@@ -99,6 +99,8 @@ def _get_registry_map() -> dict[str, dict]:
 
 def _build_entry(name: str, config: dict, state, now: float) -> dict:
     """Build a single dashboard row from registry config + live Redis state."""
+    from models.reflection_run import ReflectionRun
+
     interval = config.get("interval", 0)
 
     # Compute next_due from ran_at + interval (not stored as a field)
@@ -111,6 +113,27 @@ def _build_entry(name: str, config: dict, state, now: float) -> dict:
         next_due = ran_at + interval
 
     due_in_seconds = (next_due - now) if next_due else None
+
+    # Surface new Reflection fields (post-unification: failure tracking,
+    # pause window, rolling cost, output sink) so dashboard consumers can
+    # render them without re-querying the model.
+    failure_count_consecutive = 0
+    paused_until = 0.0
+    cost_usd_total = 0.0
+    output_sink = "log_only"
+    if state is not None:
+        fcc = getattr(state, "failure_count_consecutive", 0)
+        failure_count_consecutive = fcc if isinstance(fcc, int) else 0
+        pu = getattr(state, "paused_until", 0.0)
+        paused_until = float(pu) if isinstance(pu, (int, float)) else 0.0
+        cut = getattr(state, "cost_usd_total", 0.0)
+        cost_usd_total = float(cut) if isinstance(cut, (int, float)) else 0.0
+        os_val = getattr(state, "output_sink", "log_only")
+        output_sink = os_val if isinstance(os_val, str) and os_val else "log_only"
+
+    # has_history now derived from ReflectionRun rows (embedded run_history removed).
+    has_history = bool(ReflectionRun.query.filter(name=name)[:1])
+
     return {
         "name": name,
         "group": _classify_group(name),
@@ -129,7 +152,11 @@ def _build_entry(name: str, config: dict, state, now: float) -> dict:
         "last_status": state.last_status if state else "pending",
         "last_error": state.last_error if state else None,
         "last_duration": state.last_duration if state else None,
-        "has_history": bool(state and isinstance(state.run_history, list) and state.run_history),
+        "has_history": has_history,
+        "failure_count_consecutive": failure_count_consecutive,
+        "paused_until": paused_until,
+        "cost_usd_total": cost_usd_total,
+        "output_sink": output_sink,
     }
 
 
@@ -259,28 +286,37 @@ def get_run_history(name: str, page: int = 1) -> dict:
         Dict with 'runs' (list of run dicts, newest first),
         'total_pages', and 'total_runs'.
     """
-    from models.reflection import Reflection
+    from models.reflection_run import ReflectionRun
 
-    states = Reflection.query.filter(name=name)
-    if not states:
+    rows = list(ReflectionRun.query.filter(name=name))
+    if not rows:
         return {"runs": [], "total_pages": 1, "total_runs": 0}
 
-    state = states[0]
-    history = state.run_history if isinstance(state.run_history, list) else []
-
-    # Reverse to show newest first
-    history = list(reversed(history))
-    total_runs = len(history)
+    # Sort newest first for display
+    rows.sort(key=lambda r: r.timestamp or 0.0, reverse=True)
+    total_runs = len(rows)
     total_pages = max(1, math.ceil(total_runs / RUNS_PER_PAGE))
 
     # Paginate
     start = (page - 1) * RUNS_PER_PAGE
     end = start + RUNS_PER_PAGE
-    page_runs = history[start:end]
+    page_rows = rows[start:end]
 
-    # Add index for detail links (original index in forward order)
-    for i, run in enumerate(page_runs):
-        run["index"] = total_runs - 1 - (start + i)
+    # Map ReflectionRun rows to the legacy run-history dict shape so callers
+    # don't need updating. ``index`` is the original forward-order index.
+    page_runs = []
+    for i, row in enumerate(page_rows):
+        forward_index = total_runs - 1 - (start + i)
+        page_runs.append(
+            {
+                "timestamp": row.timestamp or 0.0,
+                "status": row.status or "success",
+                "duration": (row.duration_ms or 0) / 1000.0,
+                "error": row.error,
+                "projects": list(row.projects) if row.projects else [],
+                "index": forward_index,
+            }
+        )
 
     return {
         "runs": page_runs,
@@ -299,20 +335,30 @@ def get_run_detail(name: str, run_index: int) -> dict | None:
     Returns:
         Run dict with full details, or None if not found.
     """
-    from models.reflection import Reflection
+    from models.reflection_run import ReflectionRun
 
-    states = Reflection.query.filter(name=name)
-    if not states:
+    rows = list(ReflectionRun.query.filter(name=name))
+    if not rows:
         return None
 
-    state = states[0]
-    history = state.run_history if isinstance(state.run_history, list) else []
+    # Forward (oldest-first) order to match the prior run_history index semantics.
+    rows.sort(key=lambda r: r.timestamp or 0.0)
 
-    if run_index < 0 or run_index >= len(history):
+    if run_index < 0 or run_index >= len(rows):
         return None
 
-    run = dict(history[run_index])
-    run["index"] = run_index
-    run["name"] = name
-
-    return run
+    row = rows[run_index]
+    return {
+        "timestamp": row.timestamp or 0.0,
+        "status": row.status or "success",
+        "duration": (row.duration_ms or 0) / 1000.0,
+        "error": row.error,
+        "output_summary": row.output_summary,
+        "delivery_error": row.delivery_error,
+        "cost_usd": row.cost_usd or 0.0,
+        "tokens_input": row.tokens_input or 0,
+        "tokens_output": row.tokens_output or 0,
+        "projects": list(row.projects) if row.projects else [],
+        "index": run_index,
+        "name": name,
+    }

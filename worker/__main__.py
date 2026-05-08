@@ -199,6 +199,16 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"register_worker_pid (startup) failed: {e}")
 
+    # Reap any stale `last_status="running"` Reflection records left over from
+    # a prior crashed worker. Runs once at startup before the scheduler begins
+    # ticking so the recovered records do not get re-skipped as "still running".
+    try:
+        from agent.reflection_scheduler import reap_stale_running
+
+        reap_stale_running()
+    except Exception as e:
+        logger.warning(f"reap_stale_running (startup) failed: {e}")
+
     # Verify Redis is reachable by attempting to list sessions
     try:
         from models.agent_session import AgentSession

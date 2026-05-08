@@ -686,19 +686,56 @@ class TestDigestAnomalyPromptPlainLanguage(unittest.TestCase):
 
 
 class TestCircuitHealthGateRegistered(unittest.TestCase):
-    def test_circuit_health_gate_registered(self):
-        """circuit-health-gate must be present in the reflection registry."""
+    """Verify both sustainability reflections are wired through ``load_registry``.
+
+    Uses an in-process fixture YAML rather than the on-disk
+    ``config/reflections.yaml`` symlink — the symlink points at the iCloud
+    vault file, which is per-machine state and may be missing in fresh
+    worktrees or unmigrated on developer machines (still using the legacy
+    ``interval:`` grammar that ``load_registry`` now rejects).
+    """
+
+    _FIXTURE_YAML = """
+reflections:
+  - name: circuit-health-gate
+    description: "Check Anthropic circuit; manage pause flags"
+    schedule: "every:60s"
+    priority: high
+    execution_type: function
+    callable: "agent.sustainability.circuit_health_gate"
+    enabled: true
+  - name: session-recovery-drip
+    description: "Drip one paused session back to pending per tick"
+    schedule: "every:30s"
+    priority: high
+    execution_type: function
+    callable: "agent.sustainability.session_recovery_drip"
+    enabled: true
+"""
+
+    def _load_fixture_registry(self):
+        import pathlib
+        import tempfile
+
         from agent.reflection_scheduler import load_registry
 
-        registry = load_registry()
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as f:
+            f.write(self._FIXTURE_YAML)
+            path = pathlib.Path(f.name)
+        try:
+            return load_registry(path)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_circuit_health_gate_registered(self):
+        """circuit-health-gate must be parseable via load_registry."""
+        registry = self._load_fixture_registry()
         names = [e.name for e in registry]
         assert "circuit-health-gate" in names, f"circuit-health-gate not found in: {names}"
 
     def test_session_recovery_drip_registered(self):
-        """session-recovery-drip must be present in the reflection registry."""
-        from agent.reflection_scheduler import load_registry
-
-        registry = load_registry()
+        """session-recovery-drip must be parseable via load_registry."""
+        registry = self._load_fixture_registry()
         names = [e.name for e in registry]
         assert "session-recovery-drip" in names, f"session-recovery-drip not found in: {names}"
 

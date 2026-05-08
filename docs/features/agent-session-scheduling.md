@@ -78,15 +78,21 @@ The bridge injects routing context into the agent subprocess:
 
 The tool reads these to determine where to route self-scheduled session output.
 
-## Deferred Execution (`scheduled_at`)
+## Deferred Execution (`--after`)
 
-The `AgentSession` model has a `scheduled_at` field (UTC datetime). When set:
+The `--after <ISO8601>` flag defers execution until a future time. This path now writes a one-shot `at:<ISO>` Reflection record (via `_create_after_reflection` in `tools/agent_session_scheduler.py`) instead of a deferred AgentSession. The unified reflection scheduler drives execution at the scheduled time.
 
-- `_pop_agent_session()` skips sessions where `scheduled_at > now()`
-- Sessions with `scheduled_at` in the past are treated as immediate
-- Sessions with no `scheduled_at` are always eligible
+```bash
+python -m tools.agent_session_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"
+```
 
-Usage: `python -m tools.agent_session_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"`
+The command returns:
+
+```json
+{"status": "scheduled_reflection", "reflection_name": "...", "reflection_id": "..."}
+```
+
+For full details on the Reflection model, schedule grammar, one-shot semantics, and MCP surface see [Reflections](reflections.md).
 
 ## Priority Model
 

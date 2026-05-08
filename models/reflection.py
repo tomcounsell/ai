@@ -1,8 +1,9 @@
 """Reflection model - Redis-backed state for the unified reflection scheduler.
 
-Tracks per-reflection execution state: when it last ran, run count, and last
-status/error. Used by agent/reflection_scheduler.py to
-decide which reflections are due and to record outcomes.
+Tracks per-reflection execution state: schedule, last run summary, failure
+tracking, and rolling cost totals. Run history is stored separately as
+``ReflectionRun`` rows (see ``models/reflection_run.py``); this record only
+keeps a compact ``last_run_summary`` for fast dashboard reads.
 
 See docs/features/reflections.md for full documentation.
 """
@@ -14,7 +15,6 @@ from popoto import (
     Field,
     IntField,
     KeyField,
-    ListField,
     Model,
 )
 
@@ -25,39 +25,52 @@ class Reflection(Model):
     Each reflection declared in config/reflections.yaml gets one Reflection
     record in Redis, keyed by name. The scheduler reads/updates these records
     on every tick.
-
-    Fields:
-        name: Unique identifier matching the registry entry
-        ran_at: Unix timestamp of last successful execution start
-        run_count: Total number of times this reflection has executed
-        last_status: Result of last run: 'success', 'error', 'skipped', or 'running'
-        last_error: Error message from last failed run (None if last run succeeded)
-        last_duration: Duration of last run in seconds
-        run_history: Append-only list of recent run dicts (capped at 200).
-            Each dict: {timestamp, status, duration, error}
     """
 
     reflection_id = AutoKeyField()
     name = KeyField()
+
+    # Schedule (fazm-style triplet: cron:, every:, at:)
+    schedule = Field(default="")
+
+    # Execution type: "function" (in-process callable) or "agent" (spawn AgentSession).
+    # Registry-loaded reflections leave these blank and use the YAML ReflectionEntry;
+    # ad-hoc Reflections (e.g. `agent_session_scheduler --after`) carry the command
+    # inline so the scheduler can drive them without a YAML registration.
+    execution_type = Field(default="")
+    command = Field(default="", null=True)
+
+    # Output sink (log_only | dashboard_only | memory:<importance> | telegram:<chat>)
+    output_sink = Field(default="log_only")
+
+    # Last-run state
     ran_at = Field(type=float, null=True)
     run_count = IntField(default=0)
-    last_status = Field(default="pending")  # pending | running | success | error | skipped
+    last_status = Field(
+        default="pending"
+    )  # pending | running | success | error | skipped | stale_running
     last_error = Field(null=True)
     last_duration = Field(type=float, null=True)
-    run_history = ListField(default=[])  # List of run dicts, capped at 200
+    last_run_summary = Field(type=dict, default={})  # {ran_at, status, duration, error}
 
-    _RUN_HISTORY_CAP = 200
+    # Failure tracking
+    failure_count_consecutive = IntField(default=0)
+    retry_policy = Field(type=dict, default={})
+    paused_until = Field(type=float, default=0.0)
+    dead_letter_escalated = Field(type=bool, default=False)
 
-    def _normalize_run_history(self) -> None:
-        """Ensure run_history is a plain list before saving.
+    # Cost / token accounting (rolling totals)
+    cost_usd_total = Field(type=float, default=0.0)
+    tokens_input_total = IntField(default=0)
+    tokens_output_total = IntField(default=0)
 
-        Popoto's ListField can deserialize as a ListField descriptor object
-        instead of a plain list when loading from Redis. This normalization
-        prevents ModelException on save() due to 'ListField object is not
-        iterable' validation errors.
-        """
-        if not isinstance(self.run_history, list):
-            self.run_history = []
+    # Provenance / lifecycle
+    created_by_session_id = Field(null=True)
+    auto_delete_after_run = Field(type=bool, default=False)
+
+    # Threshold for the dead-letter Memory escalation (Q6 cycle-4 spec)
+    _DEAD_LETTER_THRESHOLD = 5
+    _DEAD_LETTER_PAUSE_SECONDS = 86400
 
     @classmethod
     def get_or_create(cls, name: str) -> "Reflection":
@@ -65,21 +78,12 @@ class Reflection(Model):
         existing = cls.query.filter(name=name)
         if existing:
             return existing[0]
-        return cls.create(
-            name=name,
-            ran_at=None,
-            run_count=0,
-            last_status="pending",
-            last_error=None,
-            last_duration=None,
-            run_history=[],
-        )
+        return cls.create(name=name)
 
     def mark_started(self) -> None:
         """Mark this reflection as currently running."""
         self.last_status = "running"
         self.ran_at = time.time()
-        self._normalize_run_history()
         self.save()
 
     def mark_completed(
@@ -87,44 +91,88 @@ class Reflection(Model):
         duration: float,
         error: str | None = None,
         projects: list[dict] | None = None,
+        cost_usd: float = 0.0,
+        tokens_input: int = 0,
+        tokens_output: int = 0,
+        output: str | None = None,
     ) -> None:
         """Mark this reflection as completed (success or error).
 
-        Internally appends a run record to run_history (capped at 200 entries).
-        Backward-compatible: callers omitting ``projects`` see ``projects=[]``
-        on the run record, identical to pre-#1187 behavior.
-
-        Args:
-            duration: How long the run took in seconds
-            error: Error message if the run failed, None for success
-            projects: optional per-project breakdown for per-project audits
-                (``[{slug, status, duration, findings_count, error}, ...]``).
-                When omitted (default), stored as ``[]``.
+        Creates a ``ReflectionRun`` row for history, updates the compact
+        ``last_run_summary`` on this record, increments rolling cost/token
+        totals, and applies failure-tracking + dead-letter Memory escalation
+        per Q6 cycle-4.
         """
+        # Lazy import to avoid circular imports during model registration.
+        from models.reflection_run import ReflectionRun
+
+        now = time.time()
+        status = "error" if error else "success"
+        truncated_error = error[:1000] if error else None
+
         self.last_duration = duration
         self.run_count = (self.run_count or 0) + 1
-        status = "error" if error else "success"
-        if error:
-            self.last_status = "error"
-            self.last_error = error[:1000] if error else None
-        else:
-            self.last_status = "success"
-            self.last_error = None
-
-        # Append to run_history (capped at RUN_HISTORY_CAP)
-        run_record = {
-            "timestamp": time.time(),
+        self.last_status = status
+        self.last_error = truncated_error
+        self.last_run_summary = {
+            "ran_at": now,
             "status": status,
             "duration": duration,
             "error": error[:500] if error else None,
-            "projects": projects or [],
         }
-        self._normalize_run_history()
-        history = self.run_history
-        history.append(run_record)
-        if len(history) > self._RUN_HISTORY_CAP:
-            history = history[-self._RUN_HISTORY_CAP :]
-        self.run_history = history
+
+        # Rolling totals
+        self.cost_usd_total = (self.cost_usd_total or 0.0) + (cost_usd or 0.0)
+        self.tokens_input_total = (self.tokens_input_total or 0) + (tokens_input or 0)
+        self.tokens_output_total = (self.tokens_output_total or 0) + (tokens_output or 0)
+
+        # Failure tracking + dead-letter Memory escalation (Q6 cycle-4)
+        if error:
+            self.failure_count_consecutive = (self.failure_count_consecutive or 0) + 1
+            if (
+                self.failure_count_consecutive >= self._DEAD_LETTER_THRESHOLD
+                and not self.dead_letter_escalated
+            ):
+                # Transition <5 -> >=5: write the Memory record once
+                try:
+                    from models.memory import Memory
+
+                    Memory.create(
+                        content=(
+                            f"Reflection {self.name} disabled: "
+                            f"{self.failure_count_consecutive} consecutive failures, "
+                            f"last error: {error}"
+                        ),
+                        importance=7.0,
+                        category="correction",
+                    )
+                except Exception:
+                    # Memory write must never crash the scheduler.
+                    pass
+                self.dead_letter_escalated = True
+            if self.failure_count_consecutive >= self._DEAD_LETTER_THRESHOLD:
+                # Threshold (or above) — extend pause window each failure.
+                self.paused_until = now + self._DEAD_LETTER_PAUSE_SECONDS
+        else:
+            # First success after escalation resets both fields.
+            self.failure_count_consecutive = 0
+            self.dead_letter_escalated = False
+
+        # Persist a ReflectionRun row for history.
+        try:
+            run = ReflectionRun.get_or_create_for(name=self.name, timestamp=now)
+            run.status = status
+            run.duration_ms = int(duration * 1000) if duration else 0
+            run.cost_usd = cost_usd or 0.0
+            run.tokens_input = tokens_input or 0
+            run.tokens_output = tokens_output or 0
+            run.error = truncated_error
+            run.output_summary = output[:1000] if output else None
+            run.projects = projects or []
+            run.save()
+        except Exception:
+            # History write must never crash the scheduler.
+            pass
 
         self.save()
 
@@ -132,7 +180,6 @@ class Reflection(Model):
         """Mark this reflection as skipped (e.g., already running)."""
         self.last_status = "skipped"
         self.last_error = reason
-        self._normalize_run_history()
         self.save()
 
     @classmethod

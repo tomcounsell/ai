@@ -31,6 +31,7 @@ from scripts.update import (  # noqa: E402
     kokoro,
     mcp_byob,
     mcp_memory,
+    mcp_reflections,
     migrations,
     npm_tools,
     officecli,
@@ -635,6 +636,41 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if not mig.ran and not mig.failed:
         log("No pending migrations", v)
 
+    # Step 3.65: Migrate reflections.yaml interval: → schedule: every:<N>s.
+    # Runs AFTER Step 3's uv sync (line 462) so croniter is installed before
+    # the migration imports it, and AFTER Step 1.66's YAML sync (line 403) so
+    # the vault file is already in place. Runs BEFORE Step 5's service restart
+    # so the worker boots onto the migrated registry. On failure, the update
+    # halts here; the YAML atomic-rename pattern means no partial file is left.
+    log("Migrating reflections.yaml (interval → schedule)...", v)
+    import subprocess as _subprocess
+
+    _migrate_env = {**os.environ, "REFLECTIONS_REGISTRY_SOURCE": "1"}
+    _migrate_result = _subprocess.run(
+        [sys.executable, str(project_dir / "scripts" / "migrate_reflections_yaml.py")],
+        capture_output=True,
+        text=True,
+        env=_migrate_env,
+    )
+    if _migrate_result.stdout:
+        for _line in _migrate_result.stdout.strip().splitlines():
+            log(f"  {_line}", v)
+    if _migrate_result.returncode != 0:
+        _stderr = _migrate_result.stderr.strip() if _migrate_result.stderr else ""
+        log(
+            f"FAIL: reflections.yaml migration failed (exit {_migrate_result.returncode})"
+            + (f": {_stderr}" if _stderr else ""),
+            v,
+            always=True,
+        )
+        result.errors.append(
+            f"reflections.yaml migration failed (exit {_migrate_result.returncode})"
+        )
+        # Halt the update: do not restart services onto a potentially inconsistent registry.
+        return result
+    else:
+        log("reflections.yaml migration OK", v)
+
     # Step 3.7: OfficeCLI binary install/update
     log("Checking OfficeCLI...", v)
     result.officecli_result = officecli.install_or_update()
@@ -837,6 +873,24 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             # process keeps running on the previously validated config.
             config = replace(config, do_service_restart=False)
 
+    # Belt-and-suspenders: verify croniter is importable (added as a dep in the
+    # unify-recurring-tasks PR). Step 3.65 uses it; if it's missing the migration
+    # will have already failed, but catching it here surfaces a clear diagnostic
+    # for machines that skipped Step 3 (e.g. --verify mode runs).
+    if config.do_service_restart:
+        try:
+            import croniter as _croniter  # noqa: F401
+
+            log("  croniter: OK", v)
+        except ImportError:
+            log(
+                "WARN: croniter not installed — reflection scheduler will reject cron: schedules. "
+                "Run 'uv sync' to install.",
+                v,
+                always=True,
+            )
+            result.warnings.append("croniter not installed; run uv sync")
+
     # Step 4.7: Validate sdlc-tool wrapper — green-light gate for service restart.
     # The wrapper resolves SDLC tool dispatch from any cwd; if it's missing or
     # broken, the bridge-spawned PM session can't record verdicts and the SDLC
@@ -884,6 +938,21 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if not _ollama_ok:
             # Title-gen falls back to category-only stubs — informational only.
             pass
+
+    # Step 4.85: Verify reflections MCP registration in ~/.claude.json (idempotent).
+    # Same lock + atomic-write pattern as Step 4.8 above. Mirrors the write-gating
+    # (full/cron only) so --verify is read-only. Failure is non-fatal — the
+    # reflections MCP is a convenience surface; the scheduler itself runs in the
+    # worker regardless of MCP registration state.
+    log("Verifying reflections MCP registration...", v)
+    _mcp_reflections_write = config.do_service_restart  # full/cron only
+    mcp_reflections_result = mcp_reflections.verify_reflections_mcp(write=_mcp_reflections_write)
+    log(f"  {mcp_reflections_result.message}", v)
+    if not mcp_reflections_result.ok:
+        if _mcp_reflections_write:
+            result.warnings.append(f"reflections MCP: {mcp_reflections_result.message}")
+        else:
+            result.warnings.append(f"reflections MCP drift: {mcp_reflections_result.message}")
 
     # Step 4.9: Verify BYOB MCP registration in ~/.claude.json (idempotent).
     # Same lock + atomic-write pattern as the memory MCP step above. The

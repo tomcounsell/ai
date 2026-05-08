@@ -230,14 +230,27 @@ class TestFailureLoopDetector:
 
 
 def test_reflections_config_has_agent_session_cleanup_enabled():
-    """The fix re-enables (keeps enabled) agent-session-cleanup."""
+    """The fix re-enables (keeps enabled) agent-session-cleanup.
+
+    ``config/reflections.yaml`` is a gitignored symlink to the iCloud vault
+    file; fresh worktrees and CI sandboxes won't have it. Skip rather than
+    fail in those environments — the invariant is still enforced on the
+    main checkout where the symlink is wired up.
+    """
     import pathlib
 
+    import pytest
     import yaml
 
     here = pathlib.Path(__file__).resolve()
     repo_root = here.parent.parent.parent
     cfg_path = repo_root / "config" / "reflections.yaml"
+    if not cfg_path.exists():
+        pytest.skip(
+            f"reflections registry symlink not present at {cfg_path} "
+            f"(expected on fresh worktrees/CI — invariant still enforced on main checkout)"
+        )
+
     data = yaml.safe_load(cfg_path.read_text())
 
     reflections = data.get("reflections", [])

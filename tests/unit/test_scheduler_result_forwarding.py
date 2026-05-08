@@ -46,7 +46,7 @@ async def test_execute_function_reflection_returns_sync_callable_result():
         description="fake",
         execution_type="function",
         callable="tests.unit.test_scheduler_result_forwarding._noop_target",
-        interval=86400,
+        schedule="every:86400s",
         priority="low",
     )
     with patch(
@@ -70,7 +70,7 @@ async def test_execute_function_reflection_returns_async_callable_result():
         description="fake",
         execution_type="function",
         callable="tests.unit.test_scheduler_result_forwarding._noop_target",
-        interval=86400,
+        schedule="every:86400s",
         priority="low",
     )
     with patch(
@@ -94,7 +94,7 @@ async def test_execute_function_reflection_returns_none_for_legacy_callable():
         description="fake",
         execution_type="function",
         callable="tests.unit.test_scheduler_result_forwarding._noop_target",
-        interval=86400,
+        schedule="every:86400s",
         priority="low",
     )
     with patch(
@@ -119,7 +119,7 @@ def _make_entry(execution_type: str = "function") -> ReflectionEntry:
             else None
         ),
         command="fake-agent" if execution_type == "agent" else None,
-        interval=86400,
+        schedule="every:86400s",
         priority="low",
     )
 

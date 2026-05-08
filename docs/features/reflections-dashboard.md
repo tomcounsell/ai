@@ -10,8 +10,12 @@ The reflections dashboard at `/reflections/` provides visibility into all regist
 
 ### Overview (`/reflections/`)
 - Grid of all registered reflections with live status from Redis
-- Each row shows: status dot (green/red/off), name + description, and a timing column with priority icon, last run timestamp, arrow to next due timestamp, and duration between them
+- Each row shows: status dot (green/red/off), name + description, timing column with priority icon, last run timestamp, arrow to next due timestamp, and duration between them
 - Failed runs display error messages inline
+- Rows with `failure_count_consecutive > 0` surface the consecutive failure count
+- Rows with `paused_until > now` are visually marked as paused
+- `output_sink` is exposed per row for at-a-glance delivery configuration
+- `cost_usd_total` is available for cost tracking on agent-type reflections
 - Auto-refreshes via HTMX every 10 seconds
 - Links to run history for reflections with historical data
 
@@ -26,7 +30,8 @@ The reflections dashboard at `/reflections/` provides visibility into all regist
 - Links to detail view for each run
 
 ### Run Detail (`/reflections/{name}/history/{index}/`)
-- Full detail for a single run including error text and log content
+- Full detail for a single run including error text, output summary, cost, token counts, and per-project breakdown
+- `delivery_error` is surfaced when an output sink delivery (e.g., Telegram send) failed
 - Log viewer with lazy-load via HTMX partial endpoint
 
 ### Ignore Patterns (`/reflections/ignores/`)
@@ -35,26 +40,52 @@ The reflections dashboard at `/reflections/` provides visibility into all regist
 
 ## Data Sources
 
-- **Registry**: `config/reflections.yaml` - names, descriptions, intervals, execution types
-- **State**: `Reflection` Popoto model in Redis - ran_at, status, run_count, error (next_due is computed from ran_at + interval, not stored)
-- **History**: `Reflection.run_history` ListField - capped at 200 entries per reflection
-- **Ignores**: `ReflectionIgnore` Popoto model in Redis - active patterns with TTL
+- **Registry**: `config/reflections.yaml` — names, descriptions, schedules, execution types
+- **State**: `Reflection` Popoto model in Redis — `ran_at`, `last_status`, `run_count`, `last_error`, `failure_count_consecutive`, `paused_until`, `cost_usd_total`, `output_sink`
+- **History**: `ReflectionRun` Popoto model in Redis (30-day TTL) — one row per completed run, queried via `ReflectionRun.query.filter(name=<name>)`
+- **Ignores**: `ReflectionIgnore` Popoto model in Redis — active patterns with TTL
 
-## Model Extension
+`next_due` is not stored; the data layer computes it via `compute_next_due(schedule, ran_at)` (or the legacy `ran_at + interval` path for registry entries that still carry an `interval` field).
 
-The `Reflection` model was extended with a `run_history` ListField that stores serialized run dicts:
+## Dashboard Row Fields
+
+Each dashboard entry (`_build_entry` in `ui/data/reflections.py`) exposes:
+
+| Field | Source | Notes |
+|-------|--------|-------|
+| `last_run` | `Reflection.ran_at` | Unix timestamp |
+| `next_due` | Computed | Not stored |
+| `run_count` | `Reflection.run_count` | |
+| `last_status` | `Reflection.last_status` | `pending`, `running`, `success`, `error`, `skipped`, `stale_running` |
+| `last_error` | `Reflection.last_error` | |
+| `last_duration` | `Reflection.last_duration` | Seconds |
+| `failure_count_consecutive` | `Reflection.failure_count_consecutive` | |
+| `paused_until` | `Reflection.paused_until` | Unix timestamp; 0.0 means not paused |
+| `cost_usd_total` | `Reflection.cost_usd_total` | Rolling total |
+| `output_sink` | `Reflection.output_sink` | `log_only`, `dashboard_only`, `memory:N`, `telegram:<chat>` |
+| `has_history` | `ReflectionRun.query.filter(name=...)[:1]` | Boolean; True if any run rows exist |
+
+## ReflectionRun Shape
+
+Run history is queried from `ReflectionRun` rows, not from an embedded list on the `Reflection` record. The data layer maps `ReflectionRun` fields to the display shape:
 
 ```python
 {
-    "timestamp": 1711000000.0,  # Unix timestamp
-    "status": "ok",              # ok | error | disabled (aggregate)
-    "duration": 1.5,             # seconds
-    "error": None,               # error message or None (capped at 500 chars)
-    "projects": [],              # per-project breakdown (empty for non-audit reflections)
+    "timestamp": float,       # Unix epoch of run completion
+    "status": str,            # "success" | "error" | "stale_running"
+    "duration": float,        # duration_ms / 1000.0
+    "error": str | None,
+    "output_summary": str | None,
+    "delivery_error": str | None,   # Non-None when output sink delivery failed
+    "cost_usd": float,
+    "tokens_input": int,
+    "tokens_output": int,
+    "projects": list[dict],   # Per-project breakdown for audit reflections
+    "index": int,
 }
 ```
 
-`mark_completed()` internally appends to `run_history` on each call. The list is capped at 200 entries (oldest trimmed). The method accepts an optional `projects: list[dict] | None = None` kwarg for per-project audits — existing callers omitting the kwarg get an empty `projects: []` on the run record with no behavior change. See [Per-Project Audit Iteration](reflections.md#per-project-audit-iteration) for the full breakdown.
+Per-project rows (when `projects` is non-empty) render an indented sub-table with status badge, `[slug]` tag, duration, and error cell.
 
 ## HTMX Endpoints
 
@@ -65,5 +96,5 @@ The `Reflection` model was extended with a `run_history` ListField that stores s
 
 ## Related
 
-- [Web UI Infrastructure](web-ui.md) - Shared infrastructure
-- [Reflections](reflections.md) - The reflection scheduler itself
+- [Web UI Infrastructure](web-ui.md) — Shared infrastructure
+- [Reflections](reflections.md) — The reflection scheduler, model fields, output sinks, failure tracking, and MCP surface

@@ -11,21 +11,25 @@ class TestReflectionsDataLayer:
     """Tests for ui.data.reflections query functions."""
 
     def test_get_all_reflections_returns_list(self):
+        """get_all_reflections returns a list (may be empty if registry path
+        is unresolved in this checkout — it's a symlink to the iCloud vault).
+
+        Content presence is exercised by the prefix-merge tests below using
+        an explicit registry mock; here we only assert the shape.
+        """
         from ui.data.reflections import get_all_reflections
 
         result = get_all_reflections()
         assert isinstance(result, list)
-        # Should have entries from config/reflections.yaml
-        assert len(result) > 0
 
     def test_prefix_expanded_reflections_tuple_is_wired(self):
-        """The pm-audio-briefing prefix is registered for per-project expansion."""
+        """The pm-briefings prefix is registered for per-project expansion."""
         from ui.data.reflections import _PREFIX_EXPANDED_REFLECTIONS
 
-        assert "pm-audio-briefing" in _PREFIX_EXPANDED_REFLECTIONS
+        assert "pm-briefings" in _PREFIX_EXPANDED_REFLECTIONS
 
     def test_prefix_merge_renders_per_project_rows(self):
-        """When Reflection records exist for `pm-audio-briefing-<key>`, the
+        """When Reflection records exist for `pm-briefings-<key>`, the
         helper appends per-project rows that reuse the parent's group."""
         from ui.data import reflections as reflections_module
 
@@ -41,37 +45,34 @@ class TestReflectionsDataLayer:
 
         # Build mock states: parent entry + two per-project records
         state_parent = MagicMock()
-        state_parent.name = "pm-audio-briefing"
+        state_parent.name = "pm-briefings"
         state_parent.ran_at = 1_700_000_000.0
         state_parent.run_count = 1
         state_parent.last_status = "success"
         state_parent.last_error = None
         state_parent.last_duration = 5.0
-        state_parent.run_history = []
 
         state_a = MagicMock()
-        state_a.name = "pm-audio-briefing-psyoptimal"
+        state_a.name = "pm-briefings-psyoptimal"
         state_a.ran_at = 1_700_000_100.0
         state_a.run_count = 1
         state_a.last_status = "success"
         state_a.last_error = None
         state_a.last_duration = 6.0
-        state_a.run_history = []
 
         state_b = MagicMock()
-        state_b.name = "pm-audio-briefing-otherproj"
+        state_b.name = "pm-briefings-otherproj"
         state_b.ran_at = 1_700_000_200.0
         state_b.run_count = 1
         state_b.last_status = "success"
         state_b.last_error = None
         state_b.last_duration = 7.0
-        state_b.run_history = []
 
         with (
             patch.object(
                 reflections_module,
                 "_get_registry_map",
-                return_value={"pm-audio-briefing": parent_entry},
+                return_value={"pm-briefings": parent_entry},
             ),
             patch(
                 "models.reflection.Reflection.get_all_states",
@@ -81,13 +82,13 @@ class TestReflectionsDataLayer:
             rows = reflections_module.get_all_reflections()
 
         names = [r["name"] for r in rows]
-        assert "pm-audio-briefing" in names  # parent registry entry
-        assert "pm-audio-briefing-psyoptimal" in names  # per-project row
-        assert "pm-audio-briefing-otherproj" in names  # per-project row
+        assert "pm-briefings" in names  # parent registry entry
+        assert "pm-briefings-psyoptimal" in names  # per-project row
+        assert "pm-briefings-otherproj" in names  # per-project row
 
         # Per-project rows reuse the parent's group classification
-        per_proj_row = next(r for r in rows if r["name"] == "pm-audio-briefing-psyoptimal")
-        parent_row = next(r for r in rows if r["name"] == "pm-audio-briefing")
+        per_proj_row = next(r for r in rows if r["name"] == "pm-briefings-psyoptimal")
+        parent_row = next(r for r in rows if r["name"] == "pm-briefings")
         assert per_proj_row["group"] == parent_row["group"]
 
     def test_prefix_merge_handles_zero_per_project_records(self):
@@ -104,28 +105,27 @@ class TestReflectionsDataLayer:
         }
 
         state_parent = MagicMock()
-        state_parent.name = "pm-audio-briefing"
+        state_parent.name = "pm-briefings"
         state_parent.ran_at = 1_700_000_000.0
         state_parent.run_count = 1
         state_parent.last_status = "success"
         state_parent.last_error = None
         state_parent.last_duration = 5.0
-        state_parent.run_history = []
 
         with (
             patch.object(
                 reflections_module,
                 "_get_registry_map",
-                return_value={"pm-audio-briefing": parent_entry},
+                return_value={"pm-briefings": parent_entry},
             ),
             patch("models.reflection.Reflection.get_all_states", return_value=[state_parent]),
         ):
             rows = reflections_module.get_all_reflections()
 
         names = [r["name"] for r in rows]
-        assert "pm-audio-briefing" in names
+        assert "pm-briefings" in names
         # No per-project rows because only the parent record exists
-        assert len([n for n in names if n.startswith("pm-audio-briefing-")]) == 0
+        assert len([n for n in names if n.startswith("pm-briefings-")]) == 0
 
     def test_reflection_entry_has_required_fields(self):
         from ui.data.reflections import get_all_reflections
@@ -188,88 +188,7 @@ class TestReflectionFormatters:
         assert "overdue" in _filter_format_relative(-300.0)
 
 
-class TestReflectionModelExtension:
-    """Tests for the run_history extension on the Reflection model."""
-
-    def test_mark_completed_appends_history(self):
-        """mark_completed() should append to run_history internally."""
-        from models.reflection import Reflection
-
-        ref = Reflection.get_or_create("_test_ui_history")
-        try:
-            initial_count = len(ref.run_history) if isinstance(ref.run_history, list) else 0
-
-            ref.mark_completed(duration=1.5)
-            ref = Reflection.query.filter(name="_test_ui_history")[0]
-
-            history = ref.run_history if isinstance(ref.run_history, list) else []
-            assert len(history) == initial_count + 1
-            latest = history[-1]
-            assert latest["status"] == "success"
-            assert latest["duration"] == 1.5
-            assert latest["error"] is None
-            # #1187: projects key always present, defaults to []
-            assert "projects" in latest
-            assert latest["projects"] == []
-        finally:
-            ref.delete()
-
-    def test_mark_completed_with_error_appends_history(self):
-        """mark_completed() with error should record error in history."""
-        from models.reflection import Reflection
-
-        ref = Reflection.get_or_create("_test_ui_error_history")
-        try:
-            ref.mark_completed(duration=2.0, error="test error")
-            ref = Reflection.query.filter(name="_test_ui_error_history")[0]
-
-            history = ref.run_history if isinstance(ref.run_history, list) else []
-            assert len(history) >= 1
-            latest = history[-1]
-            assert latest["status"] == "error"
-            assert latest["error"] == "test error"
-        finally:
-            ref.delete()
-
-    def test_mark_completed_signature_unchanged(self):
-        """Existing callers pass (duration) and (duration, error=msg).
-
-        Backward compat: positional ``mark_completed(1.0)`` keeps working
-        without ``projects=`` after #1187 added the new optional kwarg.
-        """
-        from models.reflection import Reflection
-
-        ref = Reflection.get_or_create("_test_ui_compat")
-        try:
-            # Positional arg only (like scheduler does)
-            ref.mark_completed(1.0)
-            # Keyword error arg (like scheduler does)
-            ref.mark_completed(2.0, error="some error")
-            assert ref.run_count >= 2
-            # #1187: every record gets projects=[] when omitted by caller
-            history = ref.run_history if isinstance(ref.run_history, list) else []
-            for record in history[-2:]:
-                assert record.get("projects") == []
-        finally:
-            ref.delete()
-
-    def test_run_history_cap(self):
-        """run_history should be capped at _RUN_HISTORY_CAP entries."""
-        from models.reflection import Reflection
-
-        ref = Reflection.get_or_create("_test_ui_cap")
-        try:
-            # Pre-populate with many entries
-            ref.run_history = [
-                {"timestamp": i, "status": "success", "duration": 1.0, "error": None}
-                for i in range(250)
-            ]
-            ref.save()
-
-            ref.mark_completed(duration=1.0)
-            ref = Reflection.query.filter(name="_test_ui_cap")[0]
-
-            history = ref.run_history if isinstance(ref.run_history, list) else []
-            assert len(history) <= 200
-        finally:
-            ref.delete()
+# NOTE: TestReflectionModelExtension was removed as part of the unify-recurring-tasks
+# migration. The legacy `Reflection.run_history` JSON field was replaced by the
+# `ReflectionRun` model (one row per execution). Equivalent coverage now lives in
+# tests/unit/test_reflection_model.py and tests/unit/test_reflection_run.py.

@@ -191,6 +191,84 @@ def _check_persona_permission(action_type: str) -> dict | None:
     return None
 
 
+def _slugify_command(text: str, max_len: int = 40) -> str:
+    """Reduce a command/message to a filename-safe slug for Reflection.name."""
+    import re
+
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", (text or "").strip().lower()).strip("-")
+    return (cleaned or "cmd")[:max_len].strip("-") or "cmd"
+
+
+def _create_after_reflection(
+    *,
+    iso: str,
+    scheduled_at: float,
+    command: str,
+    issue_number: int,
+    issue_title: str,
+    issue_url: str,
+    priority: str,
+    parent_id: str | None,
+) -> int:
+    """Write a one-shot `at:<ISO>` Reflection for the `--after` scheduling path.
+
+    Replaces the prior "delayed AgentSession" write. The unified Reflection
+    scheduler will pick this up at its scheduled time and spawn the agent run.
+    """
+    from agent.reflection_scheduler import compute_next_due
+    from models.reflection import Reflection
+
+    creator = os.environ.get("AGENT_SESSION_ID") or os.environ.get("VALOR_SESSION_ID")
+    name = f"oneshot-{_slugify_command(f'sdlc-{issue_number}-{issue_title}')}-{int(time.time())}"
+    schedule = f"at:{iso}"
+
+    try:
+        reflection = Reflection.create(
+            name=name,
+            schedule=schedule,
+            execution_type="agent",
+            command=command,
+            output_sink="log_only",
+            auto_delete_after_run=True,
+            created_by_session_id=creator,
+        )
+    except Exception as e:
+        _output({"status": "error", "message": f"Failed to create Reflection: {e}"})
+        return 1
+
+    try:
+        next_due = compute_next_due(schedule, None)
+        next_due_iso = (
+            datetime.fromtimestamp(next_due, tz=UTC).isoformat()
+            if next_due not in (None, float("inf"))
+            else None
+        )
+    except Exception:
+        next_due_iso = None
+
+    result = {
+        "status": "scheduled_reflection",
+        "reflection_name": reflection.name,
+        "reflection_id": getattr(reflection, "reflection_id", None),
+        "schedule": schedule,
+        "next_due": next_due_iso,
+        "scheduled_at": datetime.fromtimestamp(scheduled_at, tz=UTC).isoformat(),
+        "issue": issue_number,
+        "issue_title": issue_title,
+        "issue_url": issue_url,
+        "priority": priority,
+        "execution_type": "agent",
+        "output_sink": "log_only",
+        "auto_delete_after_run": True,
+        "created_by_session_id": creator,
+    }
+    if parent_id:
+        result["parent_agent_session_id"] = parent_id
+
+    _output(result)
+    return 0
+
+
 def cmd_schedule(args: argparse.Namespace) -> int:
     """Schedule an SDLC session for a GitHub issue."""
     # Persona gate
@@ -274,6 +352,23 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     issue_title = issue.get("title", f"Issue #{args.issue}")
     issue_url = issue.get("url", f"https://github.com/tomcounsell/ai/issues/{args.issue}")
     message_text = f"/sdlc {issue_url}\n\nIssue: {issue_title}"
+
+    # `--after` path: collapse the scheduling axis onto the unified Reflection
+    # scheduler (Q4 / Task 7 of issue #1273). Instead of writing a delayed
+    # AgentSession, write a one-shot `at:<ISO>` Reflection that the scheduler
+    # tick will dispatch. The SDLC orchestration concern (issue dispatch,
+    # project keying) stays in this CLI — only the scheduling axis collapses.
+    if args.after and scheduled_at is not None:
+        return _create_after_reflection(
+            iso=args.after,
+            scheduled_at=scheduled_at,
+            command=message_text,
+            issue_number=args.issue,
+            issue_title=issue_title,
+            issue_url=issue_url,
+            priority=args.priority or "normal",
+            parent_id=getattr(args, "parent_session", None),
+        )
 
     # Create session
     session_id = f"scheduled-{args.issue}-{uuid.uuid4().hex[:8]}"
