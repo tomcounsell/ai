@@ -63,7 +63,7 @@ Agent receives enriched text and can discuss the image directly.
 
 | Case | Behavior |
 |------|----------|
-| Bridge download timeout (10s) | `media_download_error="timeout after 10s"`; worker logs WARNING and proceeds with bare caption. |
+| Bridge download timeout (size-aware) | Per-attempt timeout = `max(10s, min(120s, 5s + size_bytes/MB))` with one 2x-leash retry (see [media-enrichment.md](media-enrichment.md#bridge-intake-telemetry)). On terminal failure: `media_download_error="timeout after Xs (retried)"`; worker logs WARNING and proceeds with bare caption. |
 | Bridge download exception | `media_download_error=<exc>`; same as above. |
 | Worker can't read the file | Logs `[enrichment] media file at {path} not readable` and proceeds with bare caption. |
 | Vision model error | Logged in worker; falls back to `[User sent an image - saved to {filename}]`. |

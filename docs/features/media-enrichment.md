@@ -1,7 +1,7 @@
 # Media Enrichment
 
 **Status**: Implemented
-**Last revised**: 2026-05-07 (sdlc-1297)
+**Last revised**: 2026-05-09 (sdlc-1344, follows sdlc-1322 / sdlc-1297)
 **Related**: [image-vision.md](image-vision.md), [bridge-worker-architecture.md](bridge-worker-architecture.md)
 
 ## Why this doc exists
@@ -18,11 +18,16 @@ Telegram
    v
 bridge.telegram_bridge.handler():
    1. Persist TelegramMessage(has_media=True, media_type=...)
-   2. await asyncio.wait_for(download_media(client, msg), timeout=10s)
+   2. await _download_media_with_retry(client, msg, prefix=media_type)
+        - Per-attempt timeout = compute_media_timeout(message.file.size)
+          (5s + size_bytes/MB, floored at 10s, capped at 120s)
+        - On TimeoutError: retry once with 2x leash (still capped at 120s)
         - On success: TelegramMessage.media_local_path = abs_path
-        - On timeout/error: TelegramMessage.media_download_error = "..."
+        - On terminal timeout: media_download_error = "timeout after Xs (retried)"
+        - On other error: media_download_error = "<ExceptionType>: <msg>"
    3. dispatch_telegram_session(...)  -> AgentSession enqueued in Redis
    4. Log: [bridge] intake_duration_ms=<ms> has_media=<bool> ...
+        Plus per-attempt: [media] download attempt=N outcome=... size_bytes=... computed_timeout_s=...
    |
    v  (Redis queue)
    |
@@ -46,7 +51,7 @@ The bridge and worker share the filesystem — `media_local_path` is an absolute
 | `has_media` | bool | Set true at intake when `message.media` is non-null. Pre-existing. |
 | `media_type` | str \| None | `"photo" \| "voice" \| "audio" \| "document"` etc. Pre-existing. |
 | `media_local_path` | str \| None | **(sdlc-1297)** Absolute filesystem path the bridge wrote at intake, or `None` if the download failed. |
-| `media_download_error` | str \| None | **(sdlc-1297)** Reason the bridge-side download failed (e.g. `"timeout after 10s"`). Inspected by the worker. |
+| `media_download_error` | str \| None | **(sdlc-1297, refined sdlc-1322)** Reason the bridge-side download failed. Distinct strings: `"timeout after Xs (retried)"` (both attempts timed out, where X is the second-attempt budget); `"<ExceptionType>: <msg>"` for non-timeout failures (no retry). Inspected by the worker. |
 
 All three new fields are nullable additive Popoto fields; existing records read `None` and the worker treats that as a normal "no path → skip AI" branch.
 
@@ -77,7 +82,9 @@ The handler emits
 
 at the end of every successful message intake (after enqueue). This is the observation point for the success criterion *p95 intake under 2s for media-bearing messages*.
 
-`download_media` is wrapped in `asyncio.wait_for(..., timeout=10.0)`. On `TimeoutError`, the bridge persists `media_download_error="timeout after 10s"` and proceeds to enqueue. The worker reads that on its side and falls through to the bare caption.
+`download_media` is invoked through `_download_media_with_retry` (in `bridge/telegram_bridge.py`), which uses a size-aware per-attempt timeout from `compute_media_timeout()` at `bridge/media.py:258`. The formula is `max(10.0, min(120.0, 5.0 + size_bytes/MB))` — so a 1MB photo gets the 10s baseline, a 10MB voice note gets ~15s, a 100MB document gets ~105s, and anything ≥ ~115MB is capped at 120s. `message.file.size` being absent (some thumbnails) falls back to the 10s baseline.
+
+On `TimeoutError`, the helper retries **once** with a 2x leash (still capped at 120s). If the retry also times out, the bridge persists `media_download_error="timeout after Xs (retried)"` (X = the second-attempt budget) and proceeds to enqueue. The `(retried)` suffix lets downstream logs distinguish "we tried twice and the file is just too big" from a first-attempt-unlucky failure. Non-timeout exceptions are not retried — the error string is stored as `"<ExceptionType>: <msg>"`. The worker reads `media_download_error` on its side and falls through to the bare caption with summary `media=skipped:download_failed`.
 
 ## Reply-chain note
 
@@ -85,8 +92,8 @@ The reply-chain branch in `bridge/enrichment.py` still requires a Telethon clien
 
 ## Implementation files
 
-- `bridge/telegram_bridge.py` — handler, intake timing, bridge-side download, persistence.
-- `bridge/media.py` — `download_media`, `process_incoming_media`, `process_downloaded_media`, `describe_image`, `transcribe_voice`, `extract_document_text`.
+- `bridge/telegram_bridge.py` — handler, intake timing, bridge-side download, persistence. Hosts `_download_media_with_retry` (size-aware timeout + 1-retry wrapper around `download_media`).
+- `bridge/media.py` — `download_media`, `compute_media_timeout` (size-aware timeout helper, line 258), `process_incoming_media`, `process_downloaded_media`, `describe_image`, `transcribe_voice`, `extract_document_text`.
 - `bridge/enrichment.py` — worker-side `enrich_message`.
 - `models/telegram.py` — `TelegramMessage` field definitions.
 - `agent/session_executor.py` — call site that passes the loaded `TelegramMessage` to `enrich_message`.
@@ -94,5 +101,6 @@ The reply-chain branch in `bridge/enrichment.py` still requires a Telethon clien
 ## Tests
 
 - `tests/unit/test_enrichment_media.py` — happy path + four failure-mode branches.
-- `tests/integration/test_media_enrichment_pipeline.py` — TelegramMessage round-trip through `enrich_message` (process_downloaded_media mocked).
+- `tests/unit/test_telegram_bridge_media_timeout.py` — `compute_media_timeout` table tests + `_download_media_with_retry` retry/success/no-retry paths (sdlc-1322).
+- `tests/integration/test_media_enrichment_pipeline.py` — TelegramMessage round-trip through `enrich_message` (process_downloaded_media mocked); also covers the size-aware retry path: `test_bridge_retries_slow_download_once` (first-attempt timeout, second succeeds) and `test_bridge_gives_up_after_retry` (both attempts time out, persisted error carries `(retried)` suffix).
 - `tests/unit/test_youtube_transcription.py` — verifies the YouTube branch is unaffected by the signature change.
