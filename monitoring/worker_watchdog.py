@@ -104,10 +104,12 @@ logger = _configure_logger()
 
 def _get_worker_pid() -> int | None:
     """Return PID of running worker process, or None."""
+    # Use case-insensitive flag (-i) to match both `python` and `Python`
+    # (macOS launchd spawns with the full path: .../Python.app/.../Python)
     for pattern in ("python -m worker", "python.*worker/__main__"):
         try:
             result = subprocess.run(
-                ["pgrep", "-f", pattern], capture_output=True, text=True, timeout=5
+                ["pgrep", "-if", pattern], capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0:
                 pids = [int(p) for p in result.stdout.split() if p.strip().isdigit()]

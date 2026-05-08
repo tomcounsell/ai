@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import ssl
 import sys
 from pathlib import Path
 from urllib.request import urlopen
@@ -52,7 +53,14 @@ def _download(url: str, dest: Path) -> None:
     print(f"  -> {url}")
     print(f"     {dest}")
 
-    with urlopen(url, timeout=120) as resp:  # noqa: S310 -- public mirror
+    try:
+        import certifi
+
+        _ssl_ctx: ssl.SSLContext | None = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        _ssl_ctx = None
+
+    with urlopen(url, timeout=120, context=_ssl_ctx) as resp:  # noqa: S310 -- public mirror
         total = int(resp.headers.get("Content-Length", "0") or 0)
         chunk_size = 1024 * 256
         downloaded = 0
