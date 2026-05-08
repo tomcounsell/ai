@@ -528,11 +528,58 @@ After posting the review and verifying it was posted (Steps 6-6.5), emit a typed
 
 **Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output. Use `"partial"` — not `"success"` — whenever tech_debt or non-subjective nit findings exist. This ensures the pipeline routes to `/do-patch` before advancing to `/do-docs`. For `BLOCKED_ON_CONFLICT` and `PR_CLOSED`, `next_skill` is `null` — the pipeline should NOT auto-advance; the author must rebase or the PM must handle the closed-PR case manually.
 
+### Multi-judge consensus (optional, opt-in)
+
+When `SDLC_REVIEW_JUDGES` enables ≥2 judges, this skill orchestrates parallel
+review judges and aggregates their findings before recording a single verdict.
+See `docs/features/multi-judge-consensus.md` and
+`docs/plans/multi-judge-consensus-gates.md` for the full design.
+
+**Env vars:**
+- `SDLC_REVIEW_JUDGES` — comma-separated judge IDs from the fixed roster
+  (`code-quality`, `risk`). Default: `code-quality,risk` (both enabled).
+  Set to `none` or empty to use the legacy single-judge path.
+- `SDLC_REVIEW_K` — K-of-N for consensus arithmetic. Default: 2.
+  Effective K is auto-clamped to `min(SDLC_REVIEW_K, len(enabled_judges))`.
+
+**Orchestration (when multi-judge active and PR is not docs-only / lockfile-only):**
+
+1. Spawn K agent forks via the same Task / `context: fork` pattern
+   `do-plan-critique` uses. Pass each fork a distinct `judge_id` and a
+   distinct system-prompt slice. **Each fork RETURNS its dict via stdout —
+   it does NOT write to Redis and does NOT post a PR comment.**
+2. Parent collects the K dicts.
+3. Parent posts each `## Review (Judge {id}):` per-judge comment
+   **sequentially** — the loop awaits each `gh pr comment` exit code
+   before posting the next. Per-judge headings use the distinct prefix
+   that does NOT match `do-merge.md`'s aggregate regex.
+4. Parent calls
+   `from agent.sdlc_review_consensus import compute_consensus` and runs
+   `compute_consensus(dicts, rule="any-blocker-wins")` to derive the scalar
+   verdict + consensus metadata.
+5. Parent makes ONE `record_verdict` call passing
+   `judges=dicts, consensus=meta` (or, via CLI, `--judges-json` and
+   `--consensus-json`). Single-writer invariant is preserved.
+6. Parent posts the aggregate `## Review: Approved` /
+   `## Review: Changes Requested` comment **last** — strictly after every
+   per-judge comment is confirmed posted. This is the comment
+   `do-merge.md`'s regex picks up.
+
+**Cost containment:** docs-only / lockfile-only PRs reuse the existing
+`do-merge.md` shape classifier and force the legacy single-judge path.
+`SDLC_REVIEW_JUDGES=none` and `SDLC_REVIEW_K=1` are independent operator
+kill switches.
+
+**Monitoring:** when multi-judge runs, the OUTCOME block records
+`judges_run` (count) and `consensus_disagreement` (bool, true when any pair
+of judges disagreed). Operators can grep these from session state.
+
 ### Record the verdict (mandatory)
 
 After emitting the OUTCOME block, record the review verdict on the PM session so the SDLC router's Legal Dispatch Guards (G3, G4) can consume it:
 
 ```bash
+# Single-judge (legacy / SDLC_REVIEW_JUDGES=none / docs-only / preflight):
 # For APPROVED reviews (OUTCOME status=success):
 sdlc-tool verdict record --stage REVIEW \
   --verdict "APPROVED" --blockers 0 --tech-debt 0 --issue-number $ISSUE_NUMBER
@@ -551,6 +598,14 @@ sdlc-tool verdict record --stage REVIEW \
 sdlc-tool verdict record --stage REVIEW \
   --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 \
   --issue-number $ISSUE_NUMBER
+
+# Multi-judge: pass --judges-json and --consensus-json after computing
+# consensus via agent.sdlc_review_consensus.compute_consensus. ONE record
+# call writes both the scalar AND the side-fields (single-writer invariant).
+sdlc-tool verdict record --stage REVIEW \
+  --verdict "$VERDICT" --blockers $BLOCKERS --tech-debt $TECH_DEBT \
+  --issue-number $ISSUE_NUMBER \
+  --judges-json "$JUDGES_JSON" --consensus-json "$CONSENSUS_JSON"
 ```
 
 The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state. If `$ISSUE_NUMBER` is unknown, omit the `--issue-number` flag and the recorder will resolve via `VALOR_SESSION_ID` / `AGENT_SESSION_ID`.
