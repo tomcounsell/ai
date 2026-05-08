@@ -7,7 +7,7 @@ created: 2026-05-04
 tracking: https://github.com/tomcounsell/ai/issues/1268
 last_comment_id:
 revision_applied: true
-revision_cycle: 3
+revision_cycle: 4
 ---
 
 # Composed Persona System: Single (persona × access-level × channel) Builder
@@ -19,12 +19,12 @@ The agent's system-prompt assembly conflates three independent axes — *who the
 **Current behavior:**
 
 - Two parallel pickers exist:
-  - [`agent/sdk_client.py`](../../agent/sdk_client.py) L3326–L3395 (`get_response_via_harness` path)
-  - [`agent/session_executor.py`](../../agent/session_executor.py) L1430–L1486 (the harness-route persona resolution)
+  - [`agent/sdk_client.py`](../../agent/sdk_client.py) L3364–L3434 (`get_response_via_harness` path) — split into a persona-resolution block at L3364–L3380 and a `custom_system_prompt` assembly block at L3396–L3433
+  - [`agent/session_executor.py`](../../agent/session_executor.py) L1576–L1628 (the harness-route persona resolution)
   Both branch on `SessionType` plus a `transport == "email"` override that swaps in `project.email.persona`. They are similar but not identical and have drifted independently (issue cited only `sdk_client.py`; freshness check found the second site).
 - Two prompt-builder functions exist with hard-baked behavior:
   - `load_system_prompt()` — bakes in the developer persona + `WORKER_RULES` + principal context + completion criteria.
-  - `load_pm_system_prompt(working_dir)` — bakes in the project-manager persona, *omits* `WORKER_RULES`, appends work-vault `CLAUDE.md`. Documented invariant in its docstring at sdk_client.py:1022–1026.
+  - `load_pm_system_prompt(working_dir)` — bakes in the project-manager persona, *omits* `WORKER_RULES`, appends work-vault `CLAUDE.md`. Documented invariants in its docstring at sdk_client.py:1027–1031.
   - For teammate / customer-service personas, `_load_persona_overlay_with_log()` is called directly with no rails layer at all.
 - Channel awareness leaks into the working-agent prompt: persona segments (`identity.md`, `tools.md`) and the developer overlay describe Telegram-specific behaviour, even though most of those concerns only matter at message-drafting time.
 - Voice rules (banned phrases, "no empty promises", good/bad reply examples) are scattered across persona overlays and `bridge/message_drafter.py:1295` `DRAFTER_SYSTEM_PROMPT` with no single source of truth. This plan **observes** the duplication but does not consolidate it (see Risk 4 / No-Gos — voice consolidation is deferred to a follow-up plan to keep the byte-stability mitigation clean).
@@ -38,24 +38,30 @@ A single `compose_system_prompt(persona, access_level, channel=None, **kwargs)` 
 
 **Baseline commit:** `5055b527c9fbe7710d7bb5dbe9a44132565e9fa6`
 **Issue filed at:** 2026-05-04T09:18:37Z (today)
-**Disposition:** Minor drift — the issue cites `sdk_client.py` L3326–L3395 as the only picker location, but a second equivalent picker exists in `agent/session_executor.py` L1430–L1486 (introduced for the harness route). The plan must collapse BOTH sites.
+**Disposition:** Minor drift — the issue cites `sdk_client.py` L3326–L3395 as the only picker location, but (a) the actual picker has shifted to L3364–L3434 since the issue was filed, and (b) a second equivalent picker exists in `agent/session_executor.py` L1576–L1628 (introduced for the harness route). The plan must collapse BOTH sites and uses the corrected line ranges throughout.
 
 **File:line references re-verified:**
 
 - `agent/sdk_client.py:892` (`load_persona_prompt`) — still holds
 - `agent/sdk_client.py:966` (`load_system_prompt`) — still holds
 - `agent/sdk_client.py:998` (`load_pm_system_prompt`) — still holds
-- `agent/sdk_client.py:3326–3395` (picker) — still holds
-- `agent/sdk_client.py:3331` (email override) — still holds
+- `agent/sdk_client.py:3364–3434` (picker — two blocks: persona resolution at 3364–3380 and `custom_system_prompt` assembly at 3396–3433) — **drifted from issue's cited 3326–3395; corrected here**
+- `agent/sdk_client.py:3370–3375` (email-persona override inside the persona-resolution block) — drifted from issue's cited 3331; corrected here
 - `bridge/message_drafter.py:1295` (`DRAFTER_SYSTEM_PROMPT`) — still holds
+- `bridge/message_drafter.py:1720` (`async def draft_message`) — still holds
+- `bridge/message_drafter.py:381` (`_validate_for_medium`) — still holds
+- `agent/sdk_client.py:920–947` (load_persona_prompt drift warnings — CRITIQUE / workflow-announcement / dev-session) — still holds; minor drift from cited 919–948
+- `agent/sdk_client.py:1800` (`_load_persona_overlay_with_log` definition; exception handler at 1840–1869) — drifted from cited 1837–1853 (the cite was the handler-only range; the function body starts at 1800)
+- `agent/sdk_client.py:1027–1031` (`load_pm_system_prompt` "Invariants" docstring section) — drifted from cited 1022–1026
+- `agent/sdk_client.py:1037` (work-vault CLAUDE.md read site inside `load_pm_system_prompt`) — still holds
 - `config/enums.py` `PersonaType` (4 members) and `SessionType` (3 members) — still holds
 - `config/personas/segments/manifest.json` (4 segments) — still holds
-- **NEW:** `agent/session_executor.py:1430–1486` — second picker site not cited in the issue but functionally equivalent and must be unified
+- **NEW:** `agent/session_executor.py:1576–1628` — second picker site not cited in the issue but functionally equivalent and must be unified (corrected from rev3's 1430–1486)
 
 **Cited sibling issues/PRs re-checked:**
 
 - #395 — CLOSED. Established persona/session-type split. Successful prior art.
-- #1148 — CLOSED. Added PM persona overlay with CRITIQUE/SDLC rules + the loader-warning pattern at sdk_client.py:919–948. Composer must preserve those warnings.
+- #1148 — CLOSED. Added PM persona overlay with CRITIQUE/SDLC rules + the loader-warning pattern at sdk_client.py:920–947. Composer must preserve those warnings.
 - #1189 — CLOSED. Added the workflow-announcement guard (loader warning at L931–939). Composer must preserve.
 - #1227 — CLOSED. Established the byte-stable PM prompt-prefix invariant for Anthropic prompt cache. Composer must preserve byte-for-byte for the PM cell.
 
@@ -71,7 +77,7 @@ A single `compose_system_prompt(persona, access_level, channel=None, **kwargs)` 
 ## Prior Art
 
 - **#395** (CLOSED) — Multi-persona system. Established PersonaType / SessionType split and the project-manager overlay. Successful; this plan builds on it.
-- **#1148** (CLOSED) — PM persona overlay with CRITIQUE/SDLC rules. Added inline loader warnings at `load_persona_prompt` (L919–948). Composer must keep those warnings.
+- **#1148** (CLOSED) — PM persona overlay with CRITIQUE/SDLC rules. Added inline loader warnings at `load_persona_prompt` (L920–947). Composer must keep those warnings.
 - **#1189** (CLOSED) — Workflow-announcement rule. Added the second loader warning. Composer must keep.
 - **#1227** (CLOSED) — PM prompt cache stability via `--exclude-dynamic-system-prompt-sections`. Established the byte-stable prefix property. Composer must preserve byte-for-byte.
 - **#599** (DRAFT plan) — Unifying persona vocabulary; not blocking but coordinated.
@@ -85,7 +91,7 @@ External research skipped — this is an internal refactor with no new dependenc
 - **New types**: `AccessLevel` enum in `config/enums.py` (or equivalent canonical declaration). Members: `WORKER` (full permissions + WORKER_RULES), `PM_READONLY` (PM mode, no WORKER_RULES, with work-vault CLAUDE.md), `TEAMMATE` (conversational, no rails), `CUSTOMER_SERVICE` (action-oriented, no code writes).
 - **New function**: `compose_system_prompt(persona, access_level, channel=None, *, project=None, working_directory=None) -> str` in `agent/sdk_client.py` (or a new `agent/persona_composer.py` if extraction is preferred — the plan defaults to keeping it adjacent to the existing loaders to keep the diff focused).
 - **Removed/redirected functions**: `load_system_prompt()` and `load_pm_system_prompt()` become thin wrappers that call `compose_system_prompt(...)` with the right tuple. `_load_persona_overlay_with_log()` stays as a logging adapter but now delegates the actual composition to `compose_system_prompt`.
-- **Picker collapse**: both `sdk_client.py:3326–3395` and `session_executor.py:1430–1486` collapse to a single helper `_resolve_compose_args(session_type, project, transport, ...) -> (persona, access_level, channel)` that lives in one place and is called from both sites.
+- **Picker collapse**: both `sdk_client.py:3364–3434` (two blocks: persona resolution at 3364–3380 and `custom_system_prompt` assembly at 3396–3433) and `session_executor.py:1576–1628` collapse to a single helper `_resolve_compose_args(session_type, project, transport, ...) -> (persona, access_level, channel)` that lives in one place and is called from both sites.
 - **Channel-aware drafter**: `bridge/message_drafter.py:draft_message(raw_response, session=None, *, medium="telegram", persona=None)` already accepts `medium` (today wired through to `_validate_for_medium` only — see `bridge/message_drafter.py:1720`–1747). This plan extends `medium` from validator-only into prompt selection: the drafter system prompt splits into a medium-agnostic base section plus a per-medium format section. **No new public parameter is introduced** — `medium` already exists, defaults to `"telegram"`, and is documented as the per-medium prompt/validator discriminator. The base section keeps the drafter's current voice content in place — no shared `voice.md` segment is introduced in this plan (see Risk 4 + No-Gos; consolidation is deferred to a follow-up).
 - **Coupling**: Slightly *decreased*. Today the picker knows about three concerns (session type, project mode, transport). After: the picker knows only about resolving three values; the composer knows only about composition; the drafter knows only about channel format.
 - **Reversibility**: High. The composer is purely additive; the new enum is small; both wrappers preserve their old signatures for safety. Rollback = revert the diff.
@@ -151,14 +157,14 @@ Worker emits agent output → `bridge/message_drafter.py:draft_message(raw_respo
 
   7. **Runtime preview / lint**: a one-off `pytest` test (`test_compose_system_prompt_invariants`) asserts at test time: (a) every cell composes without exception, (b) PM cell stays under 80K chars (cache budget), (c) no `{{identity.*}}` markers remain in the output, (d) `WORKER_RULES` precedes the persona overlay text in the `WORKER` cell. **No runtime cost** — this runs in CI, not on every compose. The validators in `_load_persona_overlay_with_log` and `load_persona_prompt` (the existing CRITIQUE/workflow-announcement substring checks) stay where they are; they catch overlay drift, not composer drift.
 
-- **Picker collapse**: extract `_resolve_compose_args` into a private helper at `agent/sdk_client.py` near `_resolve_persona`. Both call sites (sdk_client.py:3326 and session_executor.py:1430) call this helper. The helper encapsulates the email-persona override (`if transport == "email" and project.email.persona: persona = ...`).
+- **Picker collapse**: extract `_resolve_compose_args` into a private helper at `agent/sdk_client.py` near `_resolve_persona` (which today lives at L1873). Both call sites (sdk_client.py:3364 entry to the persona-resolution block and session_executor.py:1576) call this helper. The helper encapsulates the email-persona override (`if transport == "email" and project.email.persona: persona = ...`).
 - **Backward compatibility**: `load_system_prompt()` and `load_pm_system_prompt(work_dir)` remain as wrappers (one-line implementations that call the composer). All existing call sites continue to work without change. New code path: `compose_system_prompt(...)` direct.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
 
-- [ ] `_load_persona_overlay_with_log` already has structured exception handling for missing overlays (sdk_client.py:1837–1853). The composer must NOT swallow exceptions silently — it raises `FileNotFoundError` for missing required overlays, matching `load_persona_prompt`'s behavior at sdk_client.py:960–963. Tests assert that the composer raises (not returns empty string) for unknown personas with no fallback.
+- [ ] `_load_persona_overlay_with_log` already has structured exception handling for missing overlays (sdk_client.py:1840–1869, function defined at L1800). The composer must NOT swallow exceptions silently — it raises `FileNotFoundError` for missing required overlays, matching `load_persona_prompt`'s behavior at sdk_client.py:960–963. Tests assert that the composer raises (not returns empty string) for unknown personas with no fallback.
 - [ ] Add tests asserting that a missing required segment listed in `manifest.json` produces a clear error at startup (preserves today's behavior; the composer does not swallow segment-load failures).
 
 ### Empty/Invalid Input Handling
@@ -179,7 +185,7 @@ Worker emits agent output → `bridge/message_drafter.py:draft_message(raw_respo
 - [ ] `tests/unit/test_sdk_client_sdlc.py` — UPDATE: `WORKER_RULES` constant unchanged; the test that asserts WORKER_RULES is prepended (currently against `load_system_prompt()`) is rewritten to assert against `compose_system_prompt(persona=DEVELOPER, access_level=WORKER)`. Add a regression: `compose_system_prompt(persona=PROJECT_MANAGER, access_level=PM_READONLY, working_directory=...)` does NOT contain `WORKER_RULES` substring (preserves the load_pm_system_prompt invariant from sdk_client.py:1023).
 - [ ] `tests/unit/test_message_drafter.py` — UPDATE: drafter system prompt is now `BASE + MEDIUM_RULES["telegram"]`. Existing tests should pass unchanged because the default `medium="telegram"` produces the same text. Add a new test asserting `draft_message(raw_response, session=None, medium="email")` uses different format rules. The tested function is `draft_message` at `bridge/message_drafter.py:1720`; signature is `async def draft_message(raw_response: str, session=None, *, medium: str = "telegram", persona: str | None = None) -> MessageDraft`.
 - [ ] `tests/unit/test_drafter_validators.py` — UPDATE: any test that imports `DRAFTER_SYSTEM_PROMPT` directly is updated to import the composed result via the new `_compose_drafter_prompt(channel)` helper.
-- [ ] `tests/unit/test_pm_persona_guards.py` — no change. The PM overlay loader-warning tests at sdk_client.py:919–948 are preserved; they're inside `load_persona_prompt`, which stays as the segment-and-overlay assembler.
+- [ ] `tests/unit/test_pm_persona_guards.py` — no change. The PM overlay loader-warning tests at sdk_client.py:920–947 are preserved; they're inside `load_persona_prompt`, which stays as the segment-and-overlay assembler.
 - [ ] `tests/unit/test_message_drafter_chat_log.py`, `test_message_drafter_linkify.py` — UPDATE only if they import `DRAFTER_SYSTEM_PROMPT` directly; otherwise no change.
 - [ ] **NEW** `tests/unit/test_compose_system_prompt.py` — create. Covers: (1) byte-stability for `(DEVELOPER, WORKER)` and `(PROJECT_MANAGER, PM_READONLY)` cells against the wrappers' output captured from main; (2) one test per cell of the (persona × access-level) matrix; (3) startup-lint invariants (PM under 80K chars, no `{{identity.*}}` markers, WORKER_RULES precedes overlay).
 - [ ] **NEW** `tests/unit/test_resolve_compose_args.py` — create. Covers: each `(SessionType, project_mode, transport, project.email.persona)` input cell maps to the expected `(persona, access_level, channel)` output. Replaces inline branch-by-branch testing of the two pickers.
@@ -285,7 +291,7 @@ No external docs site for this repo — skip.
 
 - [ ] `compose_system_prompt(persona, access_level, channel=None, **kwargs)` exists and is the only path that produces a fully assembled agent system prompt; `load_system_prompt` and `load_pm_system_prompt` are thin wrappers.
 - [ ] `AccessLevel` enum is defined in `config/enums.py` with members `WORKER`, `PM_READONLY`, `TEAMMATE`, `CUSTOMER_SERVICE`.
-- [ ] `_resolve_compose_args(...)` helper exists and is the only branch ladder mapping `SessionType + project + transport → (persona, access_level, channel)`. Both `agent/sdk_client.py:3326` and `agent/session_executor.py:1430` call it.
+- [ ] `_resolve_compose_args(...)` helper exists and is the only branch ladder mapping `SessionType + project + transport → (persona, access_level, channel)`. Both `agent/sdk_client.py:3364` (entry to the persona-resolution block) and `agent/session_executor.py:1576` call it.
 - [ ] **Byte-stability (per-machine)**: `compose_system_prompt(DEVELOPER, WORKER)` is byte-identical to `load_system_prompt()` from main on the local machine; `compose_system_prompt(PROJECT_MANAGER, PM_READONLY, working_directory=W)` is byte-identical to `load_pm_system_prompt(W)` from main on the local machine. Asserted via fixture files at `tests/fixtures/{machine_name}/{dev,pm}_system_prompt_baseline.txt`. Test SKIPs on machines without a captured baseline (with a clear pointer to `scripts/capture_persona_baseline.py`).
 - [ ] Drafter `medium` parameter (already exists on `draft_message` at `bridge/message_drafter.py:1720`) now drives prompt selection; default `"telegram"` produces the same prompt bytes as today.
 - [ ] `email.persona` per-project override flows through the composer (not as inline branches in either picker site).
@@ -369,8 +375,8 @@ No external docs site for this repo — skip.
 - **Assigned To**: composer-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace the `if _session_type == SessionType.PM ... elif ... elif ...` block at `agent/sdk_client.py:3326–3395` with a single `_resolve_compose_args(...)` call followed by `compose_system_prompt(*args)`
-- Replace the equivalent block at `agent/session_executor.py:1430–1486` with the same call
+- Replace the `if _session_type == SessionType.PM ... elif ... elif ...` blocks at `agent/sdk_client.py:3364–3434` (both the persona-resolution ladder at 3364–3380 and the `custom_system_prompt` assembly ladder at 3396–3433) with a single `_resolve_compose_args(...)` call followed by `compose_system_prompt(*args)`
+- Replace the equivalent block at `agent/session_executor.py:1576–1628` with the same call
 - Confirm both sites produce the same `custom_system_prompt` value as before for every test cell
 
 ### 4. Channel-aware drafter
@@ -454,6 +460,7 @@ No external docs site for this repo — skip.
 | BLOCKER  | (cycle-1 critique) | voice.md scope contradiction — plan simultaneously claimed voice.md was a new segment in `manifest.json` (Solution Key Element 5; Question 2 + Question 5 resolutions) AND was NOT created in this plan because doing so breaks byte-stability (Risk 4 + No-Gos). | Solution Key Element on voice rules; Technical Approach Question 2 + Question 5; Risk 3; Risk 4; No-Gos; Update System; Step 2 + Step 4 + Step 6 task notes; Documentation; Success Criteria; Verification table. | Scrubbed all references to creating `config/personas/segments/voice.md` in this plan. Voice consolidation is now uniformly framed as **deferred to a follow-up plan**. The composition order in Question 5 no longer includes a `voice` segment (matches today's `manifest.json` exactly). The drafter's `BASE_DRAFTER_PROMPT` retains today's voice content verbatim — no extraction. A new Success Criterion + Verification check assert `manifest.json` is unchanged. Risk 4's framing is preserved as authoritative. |
 | BLOCKER  | (cycle-2 critique) | Byte-stability fixture not machine-stable — single fixture file would fail on bridge machines because composed prompt embeds `working_directory` paths, `{{identity.*}}` overrides from `~/Desktop/Valor/identity.json`, and per-machine work-vault `CLAUDE.md` content. | Risk 1 (full rewrite); Step 1 (capture baselines); Update System; Success Criteria byte-stability bullet; Verification table fixture-present check. | Adopted strategy (c): per-machine snapshots stored at `tests/fixtures/{machine_name}/{dev,pm}_system_prompt_baseline.txt`, with `machine_name` derived from `socket.gethostname()`. Test SKIPs (not FAILs) on machines without a baseline, pointing developers at `scripts/capture_persona_baseline.py`. Strategies (a) token normalization and (b) structural equality were considered and rejected with explicit rationale (both break the actual #1227 cache invariant, which depends on byte-identical runtime prompts). |
 | BLOCKER  | (cycle-2 critique) | `format_for_chat` doesn't exist — plan referenced a non-existent function on the drafter; actual API is `draft_message(raw_response, session=None, *, medium="telegram", persona=None)` at `bridge/message_drafter.py:1720`. | Solution → Flow → Drafter prompt assembly; Solution → Key Elements channel-aware drafter bullet; Technical Approach Question 3; Test Impact `tests/unit/test_message_drafter.py` row; Step 4 (drafter channel-split task). | Replaced every `format_for_chat` reference with `draft_message`. Replaced the parameter name `channel` with `medium` everywhere the drafter's *public surface* is described (Step 4, Test Impact, Flow, Question 3). The composer's internal parameter naming (`channel=None` in the working-agent composer) is unaffected because no working-agent cell uses it today (Question 4 / Open Question 1). The signature `async def draft_message(raw_response: str, session=None, *, medium: str = "telegram", persona: str | None = None) -> MessageDraft` already exists at `bridge/message_drafter.py:1720`–1747; the existing `medium` parameter is wired through to `_validate_for_medium` only today, and this plan extends it to also drive prompt selection (`BASE_DRAFTER_PROMPT + MEDIUM_RULES[medium]`). No new public parameter is introduced. |
+| BLOCKER  | (cycle-3 critique) | Stale file:line references — the picker location cited throughout the plan (`sdk_client.py:3326–3395`, `:3331`, `session_executor.py:1430–1486`) had drifted. Actual current locations on main: persona-resolution block at `sdk_client.py:3364–3380`, `custom_system_prompt` assembly block at `:3396–3433`, email-persona override at `:3370–3375`, second-site picker at `session_executor.py:1576–1628`. Several other cited ranges (`load_persona_prompt` warnings 919–948 → 920–947; `_load_persona_overlay_with_log` 1837–1853 → handler 1840–1869 with function defined at 1800; `load_pm_system_prompt` invariants 1022–1026 → 1027–1031) had also drifted by 1–5 lines. | Freshness Check `File:line references re-verified` block (full re-verification against current main); Problem section `Two parallel pickers exist` bullet; Prior Art #1148 entry; Architectural Impact `Picker collapse` bullet; Technical Approach `Picker collapse` bullet; Failure Path Test Strategy `_load_persona_overlay_with_log` bullet; Test Impact `test_pm_persona_guards.py` row; Success Criteria `_resolve_compose_args` bullet; Step 3 task body. | Re-grepped every cited symbol against current `agent/sdk_client.py`, `agent/session_executor.py`, and `bridge/message_drafter.py` HEAD. Updated all 11 stale references to current line numbers. Added `_resolve_persona` (L1873), `draft_message` (L1720), `_validate_for_medium` (L381) to the verified-references list for completeness. Disposition for the Freshness Check block changed to acknowledge the cycle-3 drift was caught and corrected. The freshness-check pattern itself is now durable: every revision cycle re-verifies cited references against current main. |
 
 ---
 
