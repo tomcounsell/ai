@@ -7,7 +7,7 @@ created: 2026-05-04
 tracking: https://github.com/tomcounsell/ai/issues/1273
 last_comment_id:
 revision_applied: true
-revision_cycle: 3
+revision_cycle: 4
 ---
 
 # Unify Loops, Schedules, Routines, and Reflections into One Persistent Reflection System
@@ -140,7 +140,7 @@ This is the load-bearing section. The issue surfaces eight uncommitted architect
 - Popoto's `KeyField` + filtered queries (`ReflectionRun.query.filter(name=X, timestamp__gte=Y)`) handle "all runs of reflection X in the last 30 days" efficiently — exactly the dashboard-usability complaint.
 - `Reflection.last_run_summary` (a small dict of {ran_at, status, duration, error}) stays embedded for fast dashboard reads — the dashboard never needs full history per-row.
 
-**Implementation guard:** `ReflectionRun` records get a TTL (`Meta.ttl = 86400 * 90`, 90 days) to bound Redis growth. Cleanup happens automatically via Redis expiration, not via `cleanup_expired()` scans.
+**Implementation guard:** `ReflectionRun` records get a TTL (`class Meta: ttl = 86400 * 30`, 30 days) to bound Redis growth — set on the model class so Popoto applies the Redis EXPIRE on every save (NOT a runtime-only EXPIRE call). Cleanup happens automatically via Redis expiration, not via `cleanup_expired()` scans. **Cycle-4 fix — TTL re-tuned from 90 days to 30 days** to match the dashboard's actual rollup horizon: `tools/analytics.py:101` shows `--days` defaults to 30, and `dashboard.json` consumes that rollup window. A 90-day TTL was overprovisioned (3× the consumer window) and stored data nothing reads.
 
 **Cycle-3 ripple — `ui/data/reflections.py` must be updated in the same PR:** the dashboard reader currently calls `state.run_history` in three places (verified at `ui/data/reflections.py:129` for `has_history`, `:257` for `get_run_history`, `:297` for `get_run_detail`). Removing the embedded `run_history` field without updating these reads would break the dashboard at the moment the PR lands. Disposition: **option (b) — update `ui/data/reflections.py` in the same PR** (chosen over option (a) "keep `run_history` and just deprecate writes" because deprecation leaves dead state on every Reflection record, contradicting the project's NO LEGACY CODE TOLERANCE principle, and over option (c) "compat shim" because a shim that "should never need to run" is a smell per the prevention-over-cleanup feedback). Specifically:
 - `_build_entry()` line 129: `has_history` becomes `bool(ReflectionRun.query.filter(name=name, limit=1))` — checks for the existence of any run row, not embedded list truthiness.
@@ -161,6 +161,8 @@ The dashboard task (Task 9) gains this responsibility; integration test `tests/i
 - `at:` accepts ISO-8601 with timezone: `at: "2026-05-05T09:00:00-07:00"`.
 - Exactly **one of** `cron:` / `every:` / `at:` must be set per Reflection — validated at registry-load time and at MCP-create time.
 
+**Cycle-4 fix — `at:` (one-shot) lifecycle.** Without explicit cleanup, an `at:` reflection's row stays in the registry forever after it fires. We add `auto_delete_after_run: bool = False` to `Reflection` (declared in Task 1). For `at:` schedules, both MCP `reflections_create` and the migration writer set `auto_delete_after_run=True` automatically (the schedule will never fire again). After a successful run, the scheduler checks `if reflection.schedule.startswith("at:") and reflection.auto_delete_after_run and run.status == "success": reflection.delete()`. Delete is gated on success so a failed one-shot is preserved on the dashboard for operator diagnosis (it can be removed manually via `reflections_remove`). Tests assert: (a) a successful `at:` reflection deletes itself, (b) a failed `at:` reflection persists with `failure_count_consecutive=1`, (c) a `cron:`/`every:` reflection with `auto_delete_after_run=True` is rejected at create-time as malformed.
+
 **Implementation guard:** Schedule parsing lives in one helper, `agent/reflection_scheduler.py::compute_next_due(schedule_str: str, last_run: float | None) -> float`, called from both the asyncio tick loop and the MCP `reflections_create` validator. Never duplicate the logic.
 
 ### Q3: Migration path for `reflections.yaml`
@@ -180,7 +182,21 @@ The dashboard task (Task 9) gains this responsibility; integration test `tests/i
 The migration is decomposed into three idempotent phases, each safe to run while reflections are mid-execution:
 
 1. **YAML rewrite (atomic).** Read `~/Desktop/Valor/reflections.yaml`, rewrite every `interval: N` → `every: Ns` in memory, write to a sibling temp file in the same directory, then `os.replace(temp, target)`. POSIX guarantees the rename is atomic; concurrent `load_registry()` reads see either the old or the new full file, never a torn read. **Crucially, the YAML and the model schema are independent surfaces** — a mid-flight reflection's `mark_completed()` writes to `Reflection` Popoto fields whose shape is unchanged by the YAML rewrite, so it cannot conflict with the rewrite.
-2. **`run_history` → `ReflectionRun` backfill (delta-loop).** Walk every `Reflection` record. For each entry in `run_history`, compute a stable key `(name, timestamp_unix)` and call `ReflectionRun.get_or_create(key=...)`. If the record already exists, skip. If `Reflection.last_status == "running"` at scan time, **do not clear `run_history` yet** — record the reflection's name in a sidecar set `reflections:migration:pending_clear` (Popoto-managed; never raw Redis per the project's no-raw-Redis-on-Popoto-keys invariant). After the loop, walk the sidecar set and for each name, re-fetch the `Reflection` record; if `last_status != "running"`, clear `run_history` atomically (Popoto `save()` is atomic per record) and remove the name from the sidecar set. Reflections that are still running at the end of the migration retain their `run_history` (no data loss); the next migration run (next `/update`) cleans them up. The migration is fully reentrant.
+2. **`run_history` → `ReflectionRun` backfill (delta-loop).** Walk every `Reflection` record. For each entry in `run_history`, compute a stable key `(name, timestamp_unix)` and call `ReflectionRun.get_or_create_for(name=name, timestamp=ts)` (see Task 1 cycle-4 fix). If the record already exists, skip. If `Reflection.last_status == "running"` at scan time, **do not clear `run_history` yet** — record the reflection's name in a sidecar `MigrationPendingClear` Popoto model (Popoto-managed; never raw Redis per the project's no-raw-Redis-on-Popoto-keys invariant). After the loop, walk the sidecar records and for each name, re-fetch the `Reflection` record; if `last_status != "running"`, clear `run_history` atomically (Popoto `save()` is atomic per record) and `delete()` the sidecar record. Reflections that are still running at the end of the migration retain their `run_history` (no data loss); the next migration run (next `/update`) cleans them up. The migration is fully reentrant.
+
+   **Cycle-4 fix — `MigrationPendingClear` model definition with explicit class-level TTL.** The cycle-3 prose said the sidecar has a 14-day TTL but did not show the model declaration. Popoto's `Meta.ttl` field is what tells the ORM to apply Redis EXPIRE on every save; a runtime-only `r.expire()` call would (a) be a raw-Redis-on-Popoto-keys violation and (b) miss the EXPIRE on idempotent re-saves. Author the sidecar as `models/migration_pending_clear.py`:
+   ```python
+   import popoto
+
+   class MigrationPendingClear(popoto.Model):
+       reflection_name = popoto.KeyField(unique=True)
+       recorded_at = popoto.Field(type=float, default=0.0)
+
+       class Meta:
+           ttl = 86400 * 14  # 14 days; auto-evicts stragglers if a machine
+                              # never re-runs /update for two weeks
+   ```
+   The 14-day window is well past any realistic `/update` cadence and bounds growth if a machine goes silent. Tests assert: (a) saving a record sets a Redis TTL ≤ 14 days, (b) the record auto-evicts after the TTL elapses (validated by Redis `OBJECT IDLETIME` or by mocking time), (c) `delete()` runs through the Popoto API, never `r.delete()` directly.
 3. **Schema validation pass.** After rewrite + backfill, re-load the registry via `load_registry()` and call `compute_next_due()` on every entry. Any parse error aborts the `/update` step (the rewrite phase is already durable; the bridge keeps serving on the new YAML, only schema validation fails loudly).
 
 This design **never blocks on `last_status="running"`** and never aborts on healthy long-running reflections.
@@ -218,6 +234,13 @@ This design **never blocks on `last_status="running"`** and never aborts on heal
 
 **Implementation guard:** Output sink resolution is in one helper, `agent/reflection_output.py::deliver(reflection: Reflection, run: ReflectionRun, output: str | dict) -> None`. Each sink kind is a small handler. Telegram delivery uses the existing Redis outbox (does NOT call Telegram directly from the scheduler).
 
+**Cycle-4 fix — `telegram:<chat>` resolver path.** The sink format alone is ambiguous about how `<chat>` resolves to a destination. Specify:
+
+- **Resolver:** `agent/reflection_output.py::_resolve_telegram_chat(chat: str) -> int | None` reads `~/Desktop/Valor/projects.json` (the canonical multi-project config, vault-synced) and resolves `<chat>` against, in order: (1) `projects.<key>.telegram.groups.<chat>` (group display-name lookup, the same surface `valor-telegram --chat` consumes), (2) `dms.whitelist[].name == chat` (DM contacts), (3) literal numeric chat ID if `<chat>` parses as int. The function reuses the existing project-config loader from `bridge/config_validation.py::load_projects_config` — no new file reader.
+- **On resolution failure:** the run is still recorded as `status="success"` (the work happened), but `_resolve_telegram_chat` returns `None`, the handler logs at `WARNING` with `reflection.name`, the literal `<chat>` value, and the resolved `projects.json` path (so an operator can fix the config), and the handler additionally appends a `delivery_error="telegram_resolve_failed: <chat>"` field on the `ReflectionRun` row for dashboard surfacing. **Fall-through is dashboard-only** — no fall back to Telegram default chat (would silently misroute), no swallow (would hide config drift).
+- **Originator session_id on the outbox message:** the resolver writes the Redis outbox payload with `session_id="reflection:" + reflection.name` (a synthetic prefixed identifier, never a real AgentSession ID), since the scheduler tick is not running in any specific session context. This matches the synthetic-taskId pattern fazm uses for routine output and lets the bridge route the message via the standard outbox path without confusing it for a session reply. The reflection's `created_by_session_id` is **not** used here (it's an authorship marker, not a routing target).
+- Tests assert: (a) a known group name resolves to the correct chat ID, (b) an unknown name produces a WARNING log + `delivery_error` on the run row + does NOT mark the run as failed, (c) a literal int string resolves directly, (d) the outbox payload's `session_id` field starts with `reflection:`.
+
 ### Q6: Failure tracking and dead letter
 
 **Decision:** **Extend `Reflection` with `failure_count_consecutive`, `retry_policy`, `paused_until`. Dead-letter sink is a Memory record at importance 7.0 (project-level learning).**
@@ -229,6 +252,14 @@ This design **never blocks on `last_status="running"`** and never aborts on heal
   1. Sets `paused_until = now + 86400` (24h auto-pause)
   2. Saves a Memory record with `importance=7.0`, `category="correction"`, content `"Reflection {name} disabled: {N} consecutive failures, last error: {err}"`
   3. Skips this reflection until `paused_until` passes or an operator clears it via MCP `reflections_resume`.
+
+**Cycle-4 fix — dead-letter Memory rate-limit.** Without a transition guard, the failure path could re-write the same Memory record on every subsequent failed run while still failing (same record every 24h after `paused_until` lapses, then re-trips). To prevent the drip, the dead-letter Memory write fires **only on the transition from `<5` to `>=5`** consecutive failures. We track this via the `dead_letter_escalated: bool = False` field on `Reflection` (declared in Task 1):
+1. On error, increment `failure_count_consecutive`.
+2. If `failure_count_consecutive >= 5 and not dead_letter_escalated`: write the Memory record AND set `dead_letter_escalated = True` AND set `paused_until = now + 86400`.
+3. If `failure_count_consecutive >= 5 and dead_letter_escalated`: still bump the counter, still extend `paused_until` to `now + 86400`, but do NOT re-write the Memory record.
+4. On the first success after escalation: reset `failure_count_consecutive = 0` AND `dead_letter_escalated = False` (so a future re-failure cluster will escalate again).
+- `reflections_resume` (MCP) also resets `dead_letter_escalated = False` along with the counter, so an operator's manual clear restores the escalation primitive.
+- Tests assert: (a) first crossing of the threshold writes the Memory record, (b) subsequent failures while `dead_letter_escalated=True` do NOT write Memory (`Memory.query.filter(content__contains=name).count()` stays at 1), (c) first success resets both fields, (d) a re-failure cluster after recovery escalates again.
 - We deliberately do NOT auto-create a GitHub issue or Redis stream — Memory is the canonical project-learning sink, and the dashboard already surfaces failures.
 
 **Implementation guard:** `paused_until` is a Unix float timestamp. Scheduler tick checks `paused_until > time.time()` BEFORE checking `next_due` — paused reflections are entirely skipped, not stuck in a "due but failing" loop. MCP `reflections_resume(name)` sets `paused_until = 0` and `failure_count_consecutive = 0`.
@@ -268,18 +299,39 @@ def _caller_id() -> str | None:
     Claude Code session)."""
     return os.environ.get("AGENT_SESSION_ID") or os.environ.get("VALOR_SESSION_ID")
 
-def _can_mutate(reflection: Reflection) -> bool:
+def _can_update(reflection: Reflection) -> bool:
+    """Caller is allowed to UPDATE (mutate fields, but not delete).
+    Permits None caller (scheduler tick, migration, direct CLI) so that
+    background tick-state updates (last_run_summary, paused_until,
+    failure counters) succeed."""
     caller = _caller_id()
     if caller is None:
-        # No session context — this is the migration script, scheduler reload,
-        # or a direct CLI invocation. Allowed to mutate registry-loaded reflections.
         return True
+    return caller == reflection.created_by_session_id
+
+def _can_remove(reflection: Reflection) -> bool:
+    """Caller is allowed to REMOVE the record entirely.
+    Stricter than update: a None caller is allowed ONLY when the call
+    originates from a registry-source context (migration script /
+    `reflections_yaml_reload`), signalled via the
+    REFLECTIONS_REGISTRY_SOURCE=1 env flag set by those entry points.
+    The scheduler tick MUST NOT call _can_remove (and never invokes the
+    `remove` MCP tool); attempts are blocked here defensively."""
+    caller = _caller_id()
+    if caller is None:
+        return os.environ.get("REFLECTIONS_REGISTRY_SOURCE") == "1"
     return caller == reflection.created_by_session_id
 ```
 
 This grounds the rule entirely in primitives that already exist in the codebase. There is **no `session.is_root_operator()` method** — that name was a stand-in in the previous draft and is removed. The "root operator" concept collapses to "called from a context where neither env var is set," which is exactly what migration scripts and direct CLI invocations look like. (`AGENT_SESSION_ID` is preferred when present because it is the canonical AgentSession FK; `VALOR_SESSION_ID` is the bridge-level fallback for sessions that pre-date the agent_session_id rollout.)
 
-**Implementation guard:** `Reflection.created_by_session_id` defaults to `None` for registry-loaded reflections (i.e., reflections from `reflections.yaml` have no creator session). The `_can_mutate` function rejects all agent-session callers for these (`caller != None`, and `None == created_by_session_id` only when caller is also `None`), so only the no-env-var path can mutate them — preserving the "registry-loaded reflections are sacred to YAML" invariant. Tests assert: (a) an agent session cannot remove a registry-loaded reflection, (b) an agent session can edit/remove a reflection it created, (c) a no-env-var caller can edit any reflection, (d) a different agent session (caller != created_by_session_id) is blocked.
+**Implementation guard:** `Reflection.created_by_session_id` defaults to `None` for registry-loaded reflections (i.e., reflections from `reflections.yaml` have no creator session). The `_can_update` / `_can_remove` functions both reject agent-session callers for these (`caller != None`, and `None == created_by_session_id` only when caller is also `None`), preserving the "registry-loaded reflections are sacred to YAML" invariant.
+
+**Cycle-4 fix — split `_can_update` vs `_can_remove`.** A single `_can_mutate` function would let the scheduler tick (which runs with no session env vars, so `caller is None`) DELETE records via the `remove` tool. Although the scheduler never calls `remove` today, the function shape would silently invite future bugs. We split:
+- `_can_update`: covers `reflections_update`, `reflections_pause`, `reflections_resume`, plus internal field writes the scheduler does on tick (last_run_summary, failure counters, paused_until). Permits `caller is None`.
+- `_can_remove`: covers `reflections_remove` only. Permits `caller is None` ONLY when `REFLECTIONS_REGISTRY_SOURCE=1` is set (a flag the migration script and the `reflections_yaml_reload` entry point export). The scheduler tick path does NOT set this flag and does not call `remove`.
+
+Tests assert: (a) an agent session cannot remove a registry-loaded reflection, (b) an agent session can edit/remove a reflection it created, (c) a no-env-var caller can update any reflection, (d) a no-env-var caller WITHOUT `REFLECTIONS_REGISTRY_SOURCE=1` cannot remove (simulates a stray cron/script), (e) a no-env-var caller WITH `REFLECTIONS_REGISTRY_SOURCE=1` can remove (simulates the migration script), (f) a different agent session (caller != created_by_session_id) is blocked from both update and remove.
 
 ### Q8: Cost accounting and analytics
 
@@ -331,7 +383,7 @@ No spikes needed. The architecture questions all resolve via prior art (fazm, th
 
 1. **`scripts/update/run.py` Step 3.65** runs `scripts/migrate_reflections_yaml.py` immediately after Step 3.6's existing data migrations (line 622) and before Step 3.7's binary installs (line 637). It runs **after Step 3's `uv sync`** (line 462) so the newly-added `croniter` dependency is installed before the migration imports it. The YAML was already synced at Step 1.66 (line 403), so the migration operates on the freshly-synced canonical file.
 2. **Phase 1 — atomic YAML rewrite.** Read `~/Desktop/Valor/reflections.yaml`, rewrite every `interval: N` → `every: Ns` in memory, write to a sibling temp file in the same directory, then `os.replace(temp, target)`. POSIX-atomic; concurrent readers see either the old or new full file.
-3. **Phase 2 — `run_history` → `ReflectionRun` delta-loop backfill.** Walk every `Reflection` record. For each `run_history` entry, compute key `(name, timestamp_unix)` and call `ReflectionRun.get_or_create(...)`. If `last_status == "running"` at scan time, record the name in `reflections:migration:pending_clear` (Popoto-managed sidecar set) and skip the clear step. After the scan, walk the sidecar; for each name, re-fetch the Reflection and clear `run_history` only if it has stopped running. Reflections still running at exit are handled on the next migration run (no data loss).
+3. **Phase 2 — `run_history` → `ReflectionRun` delta-loop backfill.** Walk every `Reflection` record. For each `run_history` entry, compute key `(name, timestamp_unix)` and call `ReflectionRun.get_or_create_for(name=name, timestamp=ts)`. If `last_status == "running"` at scan time, record the name in `reflections:migration:pending_clear` (Popoto-managed sidecar set) and skip the clear step. After the scan, walk the sidecar; for each name, re-fetch the Reflection and clear `run_history` only if it has stopped running. Reflections still running at exit are handled on the next migration run (no data loss).
 4. **Phase 3 — schema validation.** Re-load the registry via `load_registry()` and call `compute_next_due()` on every entry. Any parse error aborts and surfaces a loud failure to `/update`.
 5. **Scheduler restart** picks up new shape; `Reflection` records carry forward unchanged.
 
@@ -381,7 +433,7 @@ The migration **never blocks on `last_status="running"`** and is fully reentrant
 **Impact:** A reflection running at the moment of `/update`'s migration step has `last_status="running"` and a long-running execution in flight. The naive design (wait up to 60s for `last_status="running"` to clear, abort otherwise) would routinely starve under normal load — `analytics-rollup`, `docs-auditor`, and the per-project audit reflections regularly run for several minutes. A single long-running reflection would block every machine's `/update` run.
 **Mitigation:** The migration script does NOT wait for in-flight reflections to clear. The design coexists with running reflections in three idempotent phases (see Q3 for the full design):
 1. **Atomic YAML rewrite** via temp file + `os.replace()`. The YAML and the model schema are independent surfaces; mid-flight `mark_completed()` writes to Popoto fields whose shape is unchanged by the YAML rewrite.
-2. **Delta-loop `run_history` → `ReflectionRun` backfill.** Walk every Reflection; for each `run_history` entry, `ReflectionRun.get_or_create((name, timestamp))`. If `Reflection.last_status == "running"` at scan time, do not clear `run_history` — record the name in `reflections:migration:pending_clear` (a Popoto-managed sidecar set, never raw Redis). After the scan, walk the sidecar and clear `run_history` only on reflections that have since stopped running. Reflections still running at exit retain `run_history` and are handled on the next migration run.
+2. **Delta-loop `run_history` → `ReflectionRun` backfill.** Walk every Reflection; for each `run_history` entry, `ReflectionRun.get_or_create_for(name=name, timestamp=ts)`. If `Reflection.last_status == "running"` at scan time, do not clear `run_history` — record the name in `reflections:migration:pending_clear` (a Popoto-managed sidecar set, never raw Redis). After the scan, walk the sidecar and clear `run_history` only on reflections that have since stopped running. Reflections still running at exit retain `run_history` and are handled on the next migration run.
 3. **Schema validation** by re-loading the registry through `compute_next_due()`.
 The migration is fully reentrant — running it twice on the same machine is a no-op the second time. The model's `mark_completed` is unchanged-shape so even mid-flight runs complete safely. Documented in `scripts/migrate_reflections_yaml.py` docstring.
 
@@ -391,7 +443,7 @@ The migration is fully reentrant — running it twice on the same machine is a n
 
 ### Risk 3: `ReflectionRun` Redis growth is unbounded if TTL is misconfigured
 **Impact:** A high-frequency reflection (`circuit-health-gate` at 60s) generates 1,440 `ReflectionRun` records per day. Without TTL, Redis grows ~500KB/day per reflection. Across 33 reflections this is meaningful in a year.
-**Mitigation:** `ReflectionRun.Meta.ttl = 86400 * 90` (90 days). Tests assert TTL is set on every `ReflectionRun.create(...)`. A weekly reflection (`reflection-runs-cleanup-watchdog`) verifies orphan rows aren't accumulating (defense in depth).
+**Mitigation:** `class Meta: ttl = 86400 * 30` (30 days; cycle-4 re-tune from 90 → 30 to match `tools/analytics.py:101`'s `--days 30` rollup horizon). The TTL is declared on the model class so Popoto applies Redis EXPIRE on every save (NOT a runtime-only `r.expire()` call). Tests assert TTL is set on every `ReflectionRun.create(...)`. A weekly reflection (`reflection-runs-cleanup-watchdog`) verifies orphan rows aren't accumulating (defense in depth).
 
 ### Risk 4: MCP authorization model lets any session edit registry-loaded reflections
 **Impact:** An agent session calls `reflections_remove("daily-report-and-notify")` and the registry-loaded reflection is gone until the next scheduler restart re-creates it from YAML. Hidden state divergence from `reflections.yaml`.
@@ -415,7 +467,9 @@ The migration is fully reentrant — running it twice on the same machine is a n
 **Trigger:** Worker crashes mid-run; restart happens; reflection's `last_status="running"` is stale; new tick sees it as in-flight and skips, but `next_due` is in the past → repeat skip forever
 **Data prerequisite:** `last_status` accurately reflects current execution state
 **State prerequisite:** A stale "running" status is detected and cleared
-**Mitigation:** On scheduler startup, scan for `Reflection.last_status == "running"` records and check `ran_at` age. Anything older than the per-reflection `timeout` (default 30 min function, 1 hour agent) gets force-marked `error` with `last_error="stale running status cleared on worker restart"`. This logic exists in PR-#1187-era code; preserve it.
+**Mitigation:** On scheduler startup, scan for `Reflection.last_status == "running"` records and check `ran_at` age. Anything older than `2 * entry.interval_seconds()` (or the per-reflection `timeout`, default 30 min function / 1 hour agent, whichever is greater) gets force-marked `last_status="stale_running"` with `last_error="stale running status cleared on worker restart"`, and `failure_count_consecutive` is incremented (so a chronically-crashing reflection triggers the dead-letter path naturally).
+
+**Cycle-4 fix — reaper is not yet implemented; add it explicitly.** The cycle-3 prose said "this logic exists in PR-#1187-era code; preserve it." Verified by `grep -rn "last_status.*running\|stale.*running" agent/reflection_scheduler.py worker/`: only `is_reflection_running` (line 245) exists, which checks the flag but does NOT clear it. **The reaper does not exist today.** Add a concrete `agent/reflection_scheduler.py::reap_stale_running() -> int` that the worker calls in startup once, after `register_worker_pid` and before the first scheduler tick. It scans every Reflection, force-marks any with `last_status="running"` older than the threshold above to `last_status="stale_running"`, and returns the reaped count for logging. Tests assert: (a) a reflection with `last_status="running"` and `ran_at = now - 2*interval - 1` is reaped, (b) a reflection with `last_status="running"` and `ran_at = now - interval/2` is NOT reaped, (c) `failure_count_consecutive` increments on reap. Add the reaper invocation to the worker startup sequence in Task 4 (build-scheduler-failure-tracking) — see Step-by-Step Tasks.
 
 ### Race 3: Concurrent MCP `reflections_update` and scheduler tick fire same reflection
 **Location:** `mcp_servers/reflections_server.py::update_reflection` vs `agent/reflection_scheduler.py::_run_loop`
@@ -454,7 +508,16 @@ The `/update` skill prose itself (`.claude/skills/update/SKILL.md`) does not nee
 
 This work introduces a new MCP server. The agent reaches Reflections via:
 
-- **New MCP server**: `mcp_servers/reflections_server.py` exposes seven tools (Q7). **Cycle-3 fix:** the cycle-2 draft said this server is "registered in `.mcp.json` at the repo root," but `.mcp.json` does not exist in this repo (verified via `ls -la .mcp.json` → "No such file or directory"). The actual MCP registration mechanism is `~/.claude.json`'s `mcpServers` map, self-healed by `scripts/update/mcp_memory.py` at update Step 4.8 (`run.py:861`) under an `fcntl.flock` to coexist with Claude Code's own writes to that file. The plan adds **`scripts/update/mcp_reflections.py`** modeled on `mcp_memory.py` (same lock + atomic-rename pattern) that registers `reflections` under `mcpServers` with `command="python3"` and `module="mcp_servers.reflections_server"`. It is invoked from a new **Step 4.85** in `run.py` immediately after Step 4.8's memory MCP verification. The Dev session, the PM session, and the Teammate session all inherit the registration via `~/.claude.json` because the harness reads from there at session spawn.
+- **New MCP server**: `mcp_servers/reflections_server.py` exposes seven tools (Q7). **Cycle-3 fix:** the cycle-2 draft said this server is "registered in `.mcp.json` at the repo root," but `.mcp.json` does not exist in this repo (verified via `ls -la .mcp.json` → "No such file or directory"). The actual MCP registration mechanism is `~/.claude.json`'s `mcpServers` map, self-healed by `scripts/update/mcp_memory.py` at update Step 4.8 (`run.py:861`) under an `fcntl.flock` to coexist with Claude Code's own writes to that file. The plan adds **`scripts/update/mcp_reflections.py`** modeled on `mcp_memory.py` (same lock + atomic-rename pattern) that registers `reflections` under `mcpServers`. **Cycle-4 fix — full registration shape:** `mcp_memory.py:78-85`'s `_expected_entry()` returns four fields: `type="stdio"`, `command="python3"`, `args=["-m", "mcp_servers.memory_server"]`, and `env={"PYTHONPATH": repo_root}`; `_validate_mcp_entry` (`mcp_memory.py:88-104`) checks all four. The cycle-3 prose said only `command` and `args`, which means `mcp_reflections.py`'s drift-repair would fight on every `/update` because `type` and `env.PYTHONPATH` would be missing. The new helper MUST emit the same four-field shape:
+  ```python
+  {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["-m", "mcp_servers.reflections_server"],
+      "env": {"PYTHONPATH": repo_root},
+  }
+  ```
+  and ship a `_validate_mcp_entry`-shaped check that compares all four fields (type, command, args, env.PYTHONPATH). It is invoked from a new **Step 4.85** in `run.py` immediately after Step 4.8's memory MCP verification. The Dev session, the PM session, and the Teammate session all inherit the registration via `~/.claude.json` because the harness reads from there at session spawn.
 - **Bridge does NOT import reflection code directly.** Bridge stays I/O-only. All scheduling decisions happen in the worker.
 - **`tools/agent_session_scheduler.py` `--after <ISO>`** becomes a thin CLI that calls `Reflection.create(schedule="at:<ISO>", execution_type="agent", command=...)`. This keeps the existing CLI users (humans, scripts) working without flag changes; they just write to a new model under the hood.
 - **No new `pyproject.toml [project.scripts]` entry needed.** The MCP server is launched as `python3 -m mcp_servers.reflections_server` (the standard MCP module pattern, identical to `mcp_servers.memory_server`); the migration script is invoked by `scripts/update/run.py` as a direct `python` call. Both are launched as `python -m ...` commands, which the existing tooling handles.
@@ -483,11 +546,19 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 
 - [ ] All 8 architecture questions are answered in this plan with chosen path and rationale (DONE — see Architecture Decisions section)
 - [ ] `models/reflection.py` carries new fields: `schedule`, `output_sink`, `failure_count_consecutive`, `retry_policy`, `paused_until`, `cost_usd_total`, `tokens_input_total`, `tokens_output_total`
-- [ ] New `models/reflection_run.py` (`ReflectionRun` Popoto model) exists with TTL=90 days
+- [ ] New `models/reflection_run.py` (`ReflectionRun` Popoto model) exists with `class Meta: ttl = 86400 * 30` (30 days, matches `tools/analytics.py` `--days 30` rollup horizon)
 - [ ] `agent/reflection_scheduler.py::compute_next_due()` handles `cron:`, `every:`, `at:` grammar; pre-migration `interval:` field is rejected with a clear error
 - [ ] `~/Desktop/Valor/reflections.yaml` is migrated to the new grammar via `scripts/migrate_reflections_yaml.py`; idempotent
 - [ ] `dashboard.json` exposes `failure_count_consecutive`, `paused_until`, `cost_usd_total` per reflection
 - [ ] `mcp_servers/reflections_server.py` exposes 7 MCP tools and is registered in `~/.claude.json`'s `mcpServers` map via `scripts/update/mcp_reflections.py` (modeled on `scripts/update/mcp_memory.py`), invoked from `run.py` Step 4.85
+- [ ] `scripts/update/mcp_reflections.py` emits the full four-field shape (`type="stdio"`, `command="python3"`, `args=["-m", "mcp_servers.reflections_server"]`, `env={"PYTHONPATH": repo_root}`) AND ships a `_validate_mcp_entry`-shaped check that compares all four fields, matching `scripts/update/mcp_memory.py:78-104` exactly. Verified by a unit test that imports both modules and asserts shape parity.
+- [ ] `models/reflection_run.py::ReflectionRun.get_or_create_for(name, timestamp)` classmethod exists and is the only composite-key entry point used by the migration script and scheduler (no `Popoto.get_or_create((name, timestamp))` calls anywhere)
+- [ ] `models/migration_pending_clear.py::MigrationPendingClear` exists with `class Meta: ttl = 86400 * 14`, declared on the model class (not a runtime EXPIRE)
+- [ ] `Reflection.auto_delete_after_run` field exists; `at:` reflections set it to `True` on create; the scheduler deletes successful one-shots and preserves failed ones
+- [ ] `Reflection.dead_letter_escalated` field exists; the dead-letter Memory write fires only on the `<5 → >=5` transition; resets on first success and on `reflections_resume`
+- [ ] `agent/reflection_output.py::_resolve_telegram_chat` resolves through `projects.json` group/DM lookup; on failure, run is `success` but `delivery_error` is set on the `ReflectionRun` row + WARNING log
+- [ ] `mcp_servers/reflections_server.py` exposes `_can_update` AND `_can_remove` (split from the prior `_can_mutate`); `_can_remove` requires `REFLECTIONS_REGISTRY_SOURCE=1` for None-caller deletes
+- [ ] `agent/reflection_scheduler.py::reap_stale_running()` is called from worker startup; reaps `last_status="running"` records older than `2 * interval` and increments `failure_count_consecutive`
 - [ ] `tools/agent_session_scheduler.py --after <ISO>` writes a `Reflection`, not a delayed `AgentSession`
 - [ ] Failure-tracking semantics implemented: max 5 consecutive failures pauses for 24h and writes a Memory record at importance 7.0
 - [ ] `docs/features/reflections.md` is the single source of truth; sibling docs reconciled
@@ -593,8 +664,20 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 - **Assigned To**: model-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `schedule`, `output_sink`, `failure_count_consecutive`, `retry_policy` (dict), `paused_until`, `cost_usd_total`, `tokens_input_total`, `tokens_output_total`, `created_by_session_id` to `Reflection`
-- Create `models/reflection_run.py` with `ReflectionRun` model and `Meta.ttl = 86400 * 90`
+- Add `schedule`, `output_sink`, `failure_count_consecutive`, `retry_policy` (dict), `paused_until`, `cost_usd_total`, `tokens_input_total`, `tokens_output_total`, `created_by_session_id`, `auto_delete_after_run` (bool, default False), `dead_letter_escalated` (bool, default False) to `Reflection`
+- Create `models/reflection_run.py` with `ReflectionRun` model and `class Meta: ttl = 86400 * 30` (matches `tools/analytics export --days 30` rollup horizon — see Q8 cycle-4 fix; the prior 90-day choice was overprovisioned for a 30-day dashboard window)
+- **Cycle-4 fix — composite-key lookup classmethod on `ReflectionRun`:** Popoto does not provide a composite-key `get_or_create` (`grep -rn "get_or_create" models/` confirms only single-key custom classmethods exist on `Reflection`, `TeammateMetrics`, `DedupRecord`). Author a classmethod `ReflectionRun.get_or_create_for(name: str, timestamp: float) -> "ReflectionRun"` that does the explicit composite-key lookup using `Model.query.filter(...)` + fallback construct/save:
+  ```python
+  @classmethod
+  def get_or_create_for(cls, name: str, timestamp: float) -> "ReflectionRun":
+      existing = cls.query.filter(name=name, timestamp=timestamp).first()
+      if existing is not None:
+          return existing
+      run = cls(name=name, timestamp=timestamp)
+      run.save()
+      return run
+  ```
+  Cite this method by file/name (`models/reflection_run.py::ReflectionRun.get_or_create_for`) wherever the migration script and scheduler need composite-key idempotency. **No code in this plan calls `Popoto.get_or_create((name, timestamp))`** — that signature does not exist.
 - Remove embedded `run_history` from `Reflection`; add `last_run_summary` dict for fast dashboard reads
 - Preserve existing `mark_started`, `mark_completed`, `mark_skipped` API surface where shape allows; refactor where shape changes
 
@@ -605,7 +688,7 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 - **Agent Type**: validator
 - **Parallel**: false
 - Verify all new fields exist on the `Reflection` model
-- Verify `ReflectionRun` Meta.ttl is 90 days
+- Verify `ReflectionRun` `class Meta: ttl = 86400 * 30` (30 days, cycle-4 re-tune to match `tools/analytics.py` rollup horizon)
 - Verify Popoto save/load round-trips for both models without ListField descriptor issues
 - Verify `last_run_summary` is a dict, not a ListField
 
@@ -633,7 +716,7 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 - On error: increment `failure_count_consecutive`; on success: reset to 0
 - After `max_consecutive_failures_before_pause` (default 5): set `paused_until = now + 86400`, save Memory record at importance 7.0, category="correction"
 - Tick loop checks `paused_until > now` BEFORE `next_due` check
-- On worker restart: scan stale `last_status="running"` and force-clear (preserve PR-#1187-era logic)
+- **Cycle-4 fix — implement (not "preserve") the stale-running reaper.** Verified that no such reaper exists today; only the flag-check `is_reflection_running` (`agent/reflection_scheduler.py:245`) exists. Add `reap_stale_running() -> int`: scans every `Reflection` with `last_status == "running"` whose `ran_at` is older than `max(2 * entry.interval_seconds(), per_reflection_timeout)`, force-marks `last_status="stale_running"` with `last_error="stale running status cleared on worker restart"`, increments `failure_count_consecutive`, returns reaped count. Worker startup invokes it once (after `register_worker_pid`, before the first tick). Tests assert reap-yes / reap-no / failure-count increment per Race 2 cycle-4 spec.
 
 ### 5. Implement output-sink delivery
 - **Task ID**: build-output-sinks
@@ -659,10 +742,12 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 - Create `mcp_servers/reflections_server.py` exposing 7 tools: `reflections_create / list / get / update / remove / runs / pause / resume`
 - Auth via env primitives the SDK client already injects (`agent/sdk_client.py:1380-1385`):
   - `_caller_id()` returns `os.environ.get("AGENT_SESSION_ID") or os.environ.get("VALOR_SESSION_ID")`
-  - `_can_mutate(reflection)` returns `True` if `caller is None` (registry-source / migration / direct CLI) or `caller == reflection.created_by_session_id`
+  - **Cycle-4 fix — split mutation rule into `_can_update` and `_can_remove`** (replaces the prior single `_can_mutate`):
+    - `_can_update(reflection)` returns `True` if `caller is None` OR `caller == reflection.created_by_session_id`. Used for `reflections_update`, `reflections_pause`, `reflections_resume`, and scheduler-tick internal field writes.
+    - `_can_remove(reflection)` returns `True` if (`caller is None` AND `os.environ.get("REFLECTIONS_REGISTRY_SOURCE") == "1"`) OR `caller == reflection.created_by_session_id`. The migration script and `reflections_yaml_reload` set the env flag; the scheduler tick does NOT and never calls `remove`.
   - **No `is_root_operator()` helper is created** — the rule is grounded entirely in the existing env primitives
 - Registry-loaded reflections (`created_by_session_id=None`) are mutable only by no-env-var callers (migration script, scheduler reload, direct shell)
-- **Cycle-3 fix — register via `~/.claude.json`, not `.mcp.json`:** Create `scripts/update/mcp_reflections.py` modeled on `scripts/update/mcp_memory.py` (same `fcntl.flock(LOCK_EX | LOCK_NB)` + retry schedule + atomic-rename + `~/.claude.json.bak` backup pattern). The helper writes a `reflections` entry under `~/.claude.json`'s `mcpServers` map with `command="python3"` and `args=["-m", "mcp_servers.reflections_server"]`. Add a new **Step 4.85** to `scripts/update/run.py` immediately after Step 4.8's memory MCP verification (line 868), invoking the new helper with the same `_mcp_memory_write = config.do_service_restart` write-gating pattern. The repo-root `.mcp.json` referenced in the cycle-2 draft does not exist — verified via `ls -la .mcp.json` returning "No such file or directory."
+- **Cycle-3 fix — register via `~/.claude.json`, not `.mcp.json`:** Create `scripts/update/mcp_reflections.py` modeled on `scripts/update/mcp_memory.py` (same `fcntl.flock(LOCK_EX | LOCK_NB)` + retry schedule + atomic-rename + `~/.claude.json.bak` backup pattern). **Cycle-4 fix — full four-field shape:** the helper writes a `reflections` entry under `~/.claude.json`'s `mcpServers` map with `type="stdio"`, `command="python3"`, `args=["-m", "mcp_servers.reflections_server"]`, AND `env={"PYTHONPATH": repo_root}` — matching `mcp_memory.py:78-85`'s `_expected_entry()` exactly. It also ships a `_validate_mcp_entry`-shaped check (modeled on `mcp_memory.py:88-104`) that compares all four fields (type, command, args, env.PYTHONPATH). Without these, the registrar's drift-repair would re-write the entry on every `/update`. Add a new **Step 4.85** to `scripts/update/run.py` immediately after Step 4.8's memory MCP verification (line 868), invoking the new helper with the same `_mcp_memory_write = config.do_service_restart` write-gating pattern. The repo-root `.mcp.json` referenced in the cycle-2 draft does not exist — verified via `ls -la .mcp.json` returning "No such file or directory."
 - Validate schedule grammar at create-time using `compute_next_due()`
 - Tests use `monkeypatch.setenv("AGENT_SESSION_ID", ...)` and `monkeypatch.delenv(...)` to drive the auth states explicitly
 
@@ -689,7 +774,7 @@ This work introduces a new MCP server. The agent reaches Reflections via:
 - Create `scripts/migrate_reflections_yaml.py` that:
   - Reads `~/Desktop/Valor/reflections.yaml` (vault path)
   - **Phase 1 (atomic rewrite):** For each entry, rewrites `interval: N` → `every: Ns` in memory; writes a sibling temp file; `os.replace(temp, target)` for atomic POSIX rename. **Does NOT wait for `last_status="running"` to clear** — the YAML and the Popoto record schema are independent surfaces, so mid-flight reflections complete safely.
-  - **Phase 2 (delta-loop backfill):** Walk every existing `Reflection`. For each `run_history` entry, `ReflectionRun.get_or_create((name, timestamp))`. If `Reflection.last_status == "running"` at scan time, append the reflection's name to a Popoto-managed sidecar set `reflections:migration:pending_clear` and skip the `run_history` clear. After the scan, walk the sidecar; for each name, re-fetch the Reflection and clear `run_history` only if it has stopped running (atomic Popoto save). Names still in pending state at exit are handled on the next migration run.
+  - **Phase 2 (delta-loop backfill):** Walk every existing `Reflection`. For each `run_history` entry, `ReflectionRun.get_or_create_for(name=name, timestamp=ts)`. If `Reflection.last_status == "running"` at scan time, append the reflection's name to a Popoto-managed sidecar set `reflections:migration:pending_clear` and skip the `run_history` clear. After the scan, walk the sidecar; for each name, re-fetch the Reflection and clear `run_history` only if it has stopped running (atomic Popoto save). Names still in pending state at exit are handled on the next migration run.
   - **Phase 3 (schema validation):** Re-load the registry via `load_registry()`, call `compute_next_due()` on every entry, abort with a clear error message on parse failure.
   - **Idempotent:** detects post-migration shape (every entry already has `cron:`/`every:`/`at:`) and exits cleanly without rewriting; `ReflectionRun.get_or_create` ensures no double-write on re-runs.
   - **No raw Redis:** all sidecar set operations go through Popoto (`Model.query.filter()`, `instance.save()`, etc.), per the project's no-raw-Redis-on-Popoto-keys invariant.
@@ -807,7 +892,7 @@ Cycle 2: NEEDS REVISION — 3 NEW BLOCKERS surfaced (`.mcp.json` doesn't exist; 
 |----------|--------|---------|--------------|---------------------|
 | BLOCKER | (cycle-1) | Q7 references `session.is_root_operator()` which does not exist as a method anywhere in the codebase (`grep -rn 'is_root_operator' agent/ models/ mcp_servers/` returns no results). The auth model needs to use existing primitives or define the helper concretely. | Q7 (rewritten); Risk 4 (rewritten); Task 6 (rewritten); Task 11 (rewritten) | Auth check uses `os.environ.get("AGENT_SESSION_ID") or os.environ.get("VALOR_SESSION_ID")` — the primitives `agent/sdk_client.py:1380-1385` already injects when spawning a Claude Code subprocess. `_caller_id()` returns the env var (or `None` for migration scripts / direct CLI). `_can_mutate(reflection)` returns `True` iff `caller is None` (registry-source caller) or `caller == reflection.created_by_session_id`. No new helper method on a session class is needed. Tests use `monkeypatch.setenv`/`monkeypatch.delenv` to drive auth states. |
 | BLOCKER | (cycle-1) | The plan inserts the migration as "Step 4.7" in `scripts/update/run.py`, but Step 4.7 is already occupied (`run.py:839` validates the sdlc-tool wrapper as the green-light gate for service restart). The Update System, Data Flow, and Task 8 sections all repeat this collision. | Q3 (Implementation guard updated); Update System (corrected); Data Flow Migration path (corrected); Task 8 (corrected) | Insertion point is **Step 3.65**, immediately after `sync_reflections_yaml` at `run.py:403` and before Step 1.7's hook audit. Rationale: (a) the YAML has just been synced from the vault on the immediately preceding line, so the migration operates on the canonical file; (b) it precedes service-restart logic, so the worker restarts onto migrated state; (c) Step 4.7 stays with sdlc-tool validation. Atomic temp-file + rename means a failed migration leaves no partial file behind. |
-| BLOCKER | (cycle-1) | The original design waits up to 60s for `last_status="running"` to clear before writing YAML, then aborts. This will routinely starve under normal load — `analytics-rollup`, `docs-auditor`, and per-project audits regularly run for several minutes. A single long-running reflection blocks every machine's `/update`. | Q3 (rewritten with 3-phase design); Risk 1 (rewritten); Race 1 (already correct); Task 8 (rewritten); Task 12 (rewritten with new test cases) | Migration coexists with running reflections in 3 idempotent phases: (1) **Atomic YAML rewrite** — temp file + `os.replace()`; the YAML and the model-record schema are independent surfaces, so mid-flight `mark_completed()` cannot conflict. (2) **Delta-loop `run_history` → `ReflectionRun` backfill** — walk every Reflection; `ReflectionRun.get_or_create((name, timestamp))` for each entry; if `last_status="running"` at scan time, append the name to a Popoto-managed sidecar set `reflections:migration:pending_clear` and skip the `run_history` clear. After the scan, drain the sidecar — clear `run_history` only on reflections that have stopped running. (3) **Schema validation** — re-load registry, call `compute_next_due()` on every entry, abort loudly on parse error. The migration is fully reentrant; reflections still running at exit are handled on the next `/update`. |
+| BLOCKER | (cycle-1) | The original design waits up to 60s for `last_status="running"` to clear before writing YAML, then aborts. This will routinely starve under normal load — `analytics-rollup`, `docs-auditor`, and per-project audits regularly run for several minutes. A single long-running reflection blocks every machine's `/update`. | Q3 (rewritten with 3-phase design); Risk 1 (rewritten); Race 1 (already correct); Task 8 (rewritten); Task 12 (rewritten with new test cases) | Migration coexists with running reflections in 3 idempotent phases: (1) **Atomic YAML rewrite** — temp file + `os.replace()`; the YAML and the model-record schema are independent surfaces, so mid-flight `mark_completed()` cannot conflict. (2) **Delta-loop `run_history` → `ReflectionRun` backfill** — walk every Reflection; `ReflectionRun.get_or_create_for(name=name, timestamp=ts)` for each entry; if `last_status="running"` at scan time, append the name to a Popoto-managed sidecar set `reflections:migration:pending_clear` and skip the `run_history` clear. After the scan, drain the sidecar — clear `run_history` only on reflections that have stopped running. (3) **Schema validation** — re-load registry, call `compute_next_due()` on every entry, abort loudly on parse error. The migration is fully reentrant; reflections still running at exit are handled on the next `/update`. |
 | BLOCKER | (cycle-2) | The plan proposes registering the new MCP server in `.mcp.json` at the repo root, but no such file is checked into this repo. Verified via `ls -la .mcp.json` → "No such file or directory." The actual MCP registration surface is `~/.claude.json`'s `mcpServers` map, self-healed by `scripts/update/mcp_memory.py` at update Step 4.8. | Agent Integration (rewritten); Q7 / Task 6 (Register-step rewritten); Success Criteria (#481 rewritten); Verification table (new row); | Add `scripts/update/mcp_reflections.py` modeled on `scripts/update/mcp_memory.py` (same `fcntl.flock(LOCK_EX \| LOCK_NB)` + retry schedule + atomic-rename + `~/.claude.json.bak` backup pattern). The helper writes a `reflections` entry under `~/.claude.json`'s `mcpServers` map with `command="python3"` and `args=["-m", "mcp_servers.reflections_server"]`. New **Step 4.85** in `run.py` invokes it immediately after Step 4.8's memory MCP verification, gated by `config.do_service_restart`. All "register in `.mcp.json`" prose is replaced. |
 | BLOCKER | (cycle-2) | The plan adds `croniter` as a new dependency but places the migration step at Step 1.67 — BEFORE Step 3's `uv sync` at `run.py:462`. The migration script imports `croniter` (Phase 3 schema validation calls `compute_next_due`), so it would `ImportError` on a fresh machine. Worker import of the scheduler at Step 5 was fine, but the migration step itself was mis-ordered. | Q3 (Implementation guard rewritten); Update System (Step 3.65 rationale rewritten); Risk 2 (rewritten); Task 8 (rewritten); Data Flow Migration path (rewritten) | Move the migration invocation from Step 1.67 to **Step 3.65** — immediately after Step 3.6's existing data-migration phase (`run.py:622`) and before Step 3.7's binary installs (`run.py:637`). This is **after Step 3's `uv sync` at line 462**, so `croniter` is installed before the migration imports it. The YAML symlink was already established at Step 1.66 (line 403), so the canonical file is in place. Worker restart at Step 5 (line 887) remains well after `uv sync`. |
 | BLOCKER | (cycle-2) | The plan removes the embedded `run_history` field from the `Reflection` model but doesn't update `ui/data/reflections.py`, which reads `state.run_history` at lines 129, 257, 297. The dashboard would break the moment the PR lands. | Q1 implementation guard (cycle-3 ripple section added); Test Impact (two entries added); Task 9 (renamed + expanded); Verification table (new row); Documentation (no change needed — `reflections-dashboard.md` already in scope) | Disposition: **option (b)** — update `ui/data/reflections.py` in the same PR. Replace `state.run_history` reads with `ReflectionRun` Popoto queries: `_build_entry()` line 129 (has_history), `get_run_history()` lines 239-277, `get_run_detail()` lines 280-306. Caller signatures unchanged. New test `tests/unit/test_ui_data_reflections.py` asserts no remaining `state.run_history` references and that paginated reads come from `ReflectionRun.query`. Rejected option (a) "deprecate writes" — leaves dead state on every record (NO LEGACY CODE TOLERANCE). Rejected option (c) "compat shim" — a shim that should never run is a smell per prevention-over-cleanup feedback. |
@@ -817,3 +902,19 @@ Cycle 2: NEEDS REVISION — 3 NEW BLOCKERS surfaced (`.mcp.json` doesn't exist; 
 ## Open Questions
 
 (None — all 8 architecture questions resolved in the Architecture Decisions section. If the war-room critique surfaces blocking concerns, they will be added here for human input before build.)
+
+---
+
+## Revision Pass — Cycle 4
+
+Tactical fixes consolidated from cycle 2-4 critique passes. Architecture from rev3 is unchanged; these all sharpen contracts the build phase will rely on.
+
+1. **MCP server registration shape (Fix #1).** `scripts/update/mcp_reflections.py` now emits the full four-field shape (`type="stdio"`, `command`, `args`, `env={"PYTHONPATH": repo_root}`) and ships a `_validate_mcp_entry`-shaped check. Without these, drift-repair would re-write the entry on every `/update`. Reflected in Q7, Agent Integration, Task 6, and Success Criteria.
+2. **`ReflectionRun.get_or_create_for(name, timestamp)` classmethod (Fix #2).** Popoto provides no composite-key `get_or_create`; the plan now authors an explicit classmethod on `ReflectionRun` (`Model.query.filter(...).first()` + construct/save fallback) and cites it everywhere prior text said `Popoto.get_or_create((name, timestamp))`. Reflected in Task 1, Q3 Phase 2, Data Flow Migration, Risk 5, and Critique Results.
+3. **`at:` (one-shot) reflection lifecycle (Fix #3).** Added `auto_delete_after_run: bool = False` on `Reflection`; `at:` schedules set it `True` on create; scheduler deletes on success only (failed one-shots persist for diagnosis). Reflected in Q2, Task 1, and Success Criteria.
+4. **`telegram:<chat>` resolver path (Fix #4).** Documented the `_resolve_telegram_chat` helper in `agent/reflection_output.py` resolving via `projects.json` (groups → DMs → numeric ID); on failure, run is `success`, WARNING is logged, `delivery_error` field is set on the `ReflectionRun` row; outbox `session_id` is `reflection:<name>` (synthetic, never a real session). Reflected in Q5 and Success Criteria.
+5. **Dead-letter Memory rate-limiting (Fix #5).** Added `dead_letter_escalated: bool = False` on `Reflection`; Memory write fires only on the `<5 → >=5` transition; resets on first success and on `reflections_resume`. Reflected in Q6, Task 1, and Success Criteria.
+6. **Scheduler auth split — `_can_update` / `_can_remove` (Fix #6).** Split the prior single `_can_mutate` so the scheduler tick (None caller) can update fields but cannot delete records; `_can_remove` for None-caller requires `REFLECTIONS_REGISTRY_SOURCE=1` exported by the migration script and registry-reload entry point. Reflected in Q7, Task 6, and Success Criteria.
+7. **`ReflectionRun` TTL re-tune from 90d → 30d (Fix #7).** Aligned with `tools/analytics.py:101` (`--days` default = 30). The 90-day TTL was 3× the dashboard's actual rollup horizon and stored data nothing reads. Reflected in Q1 implementation guard, Risk 3, Task 1, and Success Criteria.
+8. **Stale-running reaper grounded (Fix #8).** Verified the prior-PR reaper does NOT exist (`grep` shows only `is_reflection_running` line 245, which checks but never clears the flag). Added concrete `reap_stale_running()` to be invoked once at worker startup, force-marking `last_status="stale_running"` and incrementing `failure_count_consecutive` for any record older than `max(2 * interval, timeout)`. Reflected in Race 2, Task 4, and Success Criteria.
+9. **`MigrationPendingClear` model with explicit class-level TTL (Fix #9).** Authored the sidecar as a Popoto model `models/migration_pending_clear.py` with `class Meta: ttl = 86400 * 14` declared on the model (NOT a runtime EXPIRE call, which would be a raw-Redis-on-Popoto-keys violation). Reflected in Q3 Phase 2 and Success Criteria.
