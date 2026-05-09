@@ -52,9 +52,7 @@ def worktree_busy_check(repo_root: Path, slug: str) -> tuple[str, str] | None:
         from models.agent_session import AgentSession
         from models.session_lifecycle import TERMINAL_STATUSES
     except Exception as e:  # pragma: no cover - import-time failure
-        logger.warning(
-            "worktree_busy_check: model imports failed (%s); fail-open", e
-        )
+        logger.warning("worktree_busy_check: model imports failed (%s); fail-open", e)
         return None
 
     worktree_dir = (repo_root / WORKTREES_DIR / slug).resolve()
@@ -64,9 +62,7 @@ def worktree_busy_check(repo_root: Path, slug: str) -> tuple[str, str] | None:
     try:
         sessions = AgentSession.query.all()
     except Exception as e:
-        logger.warning(
-            "worktree_busy_check: AgentSession query failed (%s); fail-open", e
-        )
+        logger.warning("worktree_busy_check: AgentSession query failed (%s); fail-open", e)
         return None
 
     for session in sessions:
@@ -102,9 +98,7 @@ def worktree_busy_check(repo_root: Path, slug: str) -> tuple[str, str] | None:
                 agent_session_id = getattr(session, "agent_session_id", "") or ""
                 return (session_id, agent_session_id)
         except Exception as e:
-            logger.debug(
-                "worktree_busy_check: skipping session row (%s)", e
-            )
+            logger.debug("worktree_busy_check: skipping session row (%s)", e)
             continue
 
     return None

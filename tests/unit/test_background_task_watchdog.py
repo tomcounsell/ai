@@ -27,6 +27,7 @@ async def test_working_dir_none_does_not_cancel(tmp_path):
     task = BackgroundTask(messenger=messenger, working_dir=None)
     # HEARTBEAT short for the test
     with patch.object(BackgroundTask, "HEARTBEAT_INTERVAL", 0.05):
+
         async def long_work() -> str:
             await asyncio.sleep(0.4)
             return "done"
@@ -52,6 +53,7 @@ async def test_working_dir_present_no_false_positive(tmp_path):
     messenger = _make_messenger()
     task = BackgroundTask(messenger=messenger, working_dir=str(tmp_path))
     with patch.object(BackgroundTask, "HEARTBEAT_INTERVAL", 0.05):
+
         async def short_work() -> str:
             await asyncio.sleep(0.3)
             return "done"
@@ -59,7 +61,7 @@ async def test_working_dir_present_no_false_positive(tmp_path):
         await task.run(short_work(), send_result=False)
         if task._task is not None:
             try:
-                result = await task._task
+                await task._task
             except asyncio.CancelledError:
                 pytest.fail("work task cancelled despite working_dir existing")
         # Watchdog cancels itself naturally when work completes
@@ -121,8 +123,7 @@ async def test_cwd_vanished_cancels_work(tmp_path, caplog):
 
     # Confirm the cwd_vanished warning was logged
     assert any(
-        "cwd_vanished" in rec.message and str(workdir) in rec.message
-        for rec in caplog.records
+        "cwd_vanished" in rec.message and str(workdir) in rec.message for rec in caplog.records
     ), f"cwd_vanished WARNING not logged. Records: {[r.message for r in caplog.records]}"
 
 
@@ -136,6 +137,7 @@ async def test_empty_string_working_dir_treated_as_none(tmp_path):
     assert task._working_dir is None
 
     with patch.object(BackgroundTask, "HEARTBEAT_INTERVAL", 0.05):
+
         async def short_work() -> str:
             await asyncio.sleep(0.2)
             return "done"
@@ -159,7 +161,7 @@ def test_increment_cwd_vanished_counter_swallows_redis_errors():
     task = BackgroundTask(messenger=messenger, working_dir="/tmp")
 
     # Patch the import inside _increment_cwd_vanished_counter to raise.
-    with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_R:
-        mock_R.incr.side_effect = RuntimeError("redis down")
+    with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+        mock_redis.incr.side_effect = RuntimeError("redis down")
         # Should NOT raise
         task._increment_cwd_vanished_counter()

@@ -105,8 +105,7 @@ async def test_cwd_vanished_cancels_within_seconds(caplog):
         # Verify the cwd_vanished WARNING was logged with session_id and path
         cwd_records = [r for r in caplog.records if "cwd_vanished" in r.message]
         assert cwd_records, (
-            f"cwd_vanished WARNING was not logged. Records: "
-            f"{[r.message for r in caplog.records]}"
+            f"cwd_vanished WARNING was not logged. Records: {[r.message for r in caplog.records]}"
         )
         assert any("cwd-vanished-test-session" in r.message for r in cwd_records)
     finally:

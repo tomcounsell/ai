@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -15,9 +14,7 @@ SCRIPT_PATH = REPO_ROOT / "scripts" / "post_merge_cleanup.py"
 
 def _load_script_module():
     """Import scripts/post_merge_cleanup.py as a module for direct main() calls."""
-    spec = importlib.util.spec_from_file_location(
-        "post_merge_cleanup_test_target", SCRIPT_PATH
-    )
+    spec = importlib.util.spec_from_file_location("post_merge_cleanup_test_target", SCRIPT_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

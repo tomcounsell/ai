@@ -199,6 +199,7 @@ class BackgroundTask:
         messenger: BossMessenger,
         acknowledgment_timeout: float = 180.0,  # 3 minutes
         working_dir: str | None = None,
+        project_key: str | None = None,
     ):
         """Construct a BackgroundTask.
 
@@ -213,6 +214,14 @@ class BackgroundTask:
                 has vanished (issue #1357, #1246). When ``None`` or empty,
                 the cwd-vanished check is skipped — preserves backward-compat
                 for callers that don't yet thread ``working_dir`` through.
+            project_key: Optional project key, used only as the prefix of the
+                ``{project_key}:session-health:cwd_vanished`` Redis counter.
+                Passed in from the caller (session_executor) so messenger.py
+                stays ORM-free — the architectural boundary enforced by
+                ``tests/unit/test_messenger_callbacks.py::
+                TestMessengerArchitecturalBoundary``. When ``None``, the
+                counter falls back to the bare ``session-health:cwd_vanished``
+                key (mirrors the orphan-reap fallback shape).
         """
         self.messenger = messenger
         self.acknowledgment_timeout = acknowledgment_timeout
@@ -220,6 +229,7 @@ class BackgroundTask:
         # detect a vanished worktree mid-run. Empty string is treated as None
         # so callers can pass ``str(maybe_path or "")`` safely.
         self._working_dir: str | None = working_dir if working_dir else None
+        self._project_key: str | None = project_key if project_key else None
 
         self._task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
@@ -450,10 +460,15 @@ class BackgroundTask:
     def _increment_cwd_vanished_counter(self) -> None:
         """Bump the ``cwd_vanished`` Redis counter (issue #1357).
 
-        Project-scoped counter: ``{project_key}:session-health:cwd_vanished``.
-        Falls back to bare ``session-health:cwd_vanished`` when the
-        project_key cannot be resolved (mirrors the orphan-reap counter
-        pattern in ``agent/session_health.py::_increment_orphan_process_counter``).
+        Project-scoped counter: ``{project_key}:session-health:cwd_vanished``
+        when the constructor was given a ``project_key``. Falls back to bare
+        ``session-health:cwd_vanished`` when ``project_key`` is None
+        (mirrors the orphan-reap counter pattern in
+        ``agent/session_health.py::_increment_orphan_process_counter``).
+
+        ``project_key`` is supplied by the caller (``session_executor``) at
+        construction time so messenger.py stays ORM-free — see the
+        architectural-boundary test in tests/unit/test_messenger_callbacks.py.
 
         All Redis errors are swallowed — the counter is observability, not
         correctness. Failing here must not crash the watchdog.
@@ -461,18 +476,8 @@ class BackgroundTask:
         try:
             from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
 
-            project_key: str | None = None
-            try:
-                from models.agent_session import AgentSession  # noqa: PLC0415
-
-                session = AgentSession.query.get(self.messenger.session_id)
-                if session is not None:
-                    project_key = getattr(session, "project_key", None)
-            except Exception:
-                project_key = None
-
-            if project_key:
-                _R.incr(f"{project_key}:session-health:cwd_vanished")
+            if self._project_key:
+                _R.incr(f"{self._project_key}:session-health:cwd_vanished")
             else:
                 _R.incr("session-health:cwd_vanished")
         except Exception as e:

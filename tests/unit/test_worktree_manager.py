@@ -570,8 +570,12 @@ class TestGetOrCreateWorktree:
         assert "develop" in cmd
 
 
-def _make_session(working_dir: str | None, status: str, session_id: str = "sess-1",
-                  agent_session_id: str = "agt-1") -> SimpleNamespace:
+def _make_session(
+    working_dir: str | None,
+    status: str,
+    session_id: str = "sess-1",
+    agent_session_id: str = "agt-1",
+) -> SimpleNamespace:
     """Build a duck-typed AgentSession stand-in for busy-check tests."""
     return SimpleNamespace(
         working_dir=working_dir,
@@ -586,13 +590,13 @@ class TestWorktreeBusyCheck:
     """Tests for worktree_busy_check (issue #1357)."""
 
     @patch("models.agent_session.AgentSession")
-    def test_no_sessions_returns_none(self, mock_AS):
-        mock_AS.query.all.return_value = []
+    def test_no_sessions_returns_none(self, mock_as):
+        mock_as.query.all.return_value = []
         assert worktree_busy_check(Path("/fake/repo"), "sdlc-1218") is None
 
     @patch("models.agent_session.AgentSession")
-    def test_terminal_session_does_not_block(self, mock_AS):
-        mock_AS.query.all.return_value = [
+    def test_terminal_session_does_not_block(self, mock_as):
+        mock_as.query.all.return_value = [
             _make_session("/fake/repo/.worktrees/sdlc-1218", "completed"),
             _make_session("/fake/repo/.worktrees/sdlc-1218", "killed"),
             _make_session("/fake/repo/.worktrees/sdlc-1218", "failed"),
@@ -602,8 +606,8 @@ class TestWorktreeBusyCheck:
         assert worktree_busy_check(Path("/fake/repo"), "sdlc-1218") is None
 
     @patch("models.agent_session.AgentSession")
-    def test_running_session_blocks(self, mock_AS):
-        mock_AS.query.all.return_value = [
+    def test_running_session_blocks(self, mock_as):
+        mock_as.query.all.return_value = [
             _make_session(
                 "/fake/repo/.worktrees/sdlc-1218",
                 "running",
@@ -615,9 +619,9 @@ class TestWorktreeBusyCheck:
         assert result == ("0_LIVE", "agt-LIVE")
 
     @patch("models.agent_session.AgentSession")
-    def test_subdir_match_blocks(self, mock_AS):
+    def test_subdir_match_blocks(self, mock_as):
         """working_dir below the worktree root still counts as busy."""
-        mock_AS.query.all.return_value = [
+        mock_as.query.all.return_value = [
             _make_session(
                 "/fake/repo/.worktrees/sdlc-1218/sub/dir",
                 "running",
@@ -629,9 +633,9 @@ class TestWorktreeBusyCheck:
         assert result[0] == "0_SUB"
 
     @patch("models.agent_session.AgentSession")
-    def test_substring_near_miss_does_not_block(self, mock_AS):
+    def test_substring_near_miss_does_not_block(self, mock_as):
         """sdlc-1218-other must NOT match sdlc-1218 (segment-aware)."""
-        mock_AS.query.all.return_value = [
+        mock_as.query.all.return_value = [
             _make_session(
                 "/fake/repo/.worktrees/sdlc-1218-other",
                 "running",
@@ -640,9 +644,9 @@ class TestWorktreeBusyCheck:
         assert worktree_busy_check(Path("/fake/repo"), "sdlc-1218") is None
 
     @patch("models.agent_session.AgentSession")
-    def test_relative_working_dir_match(self, mock_AS):
+    def test_relative_working_dir_match(self, mock_as):
         """working_dir stored as a relative path resolves against repo_root."""
-        mock_AS.query.all.return_value = [
+        mock_as.query.all.return_value = [
             _make_session(".worktrees/sdlc-1218", "running", session_id="0_REL"),
         ]
         # Use the actual cwd-resolvable repo root so resolve() works.
@@ -653,14 +657,14 @@ class TestWorktreeBusyCheck:
         assert result[0] == "0_REL"
 
     @patch("models.agent_session.AgentSession")
-    def test_query_raises_returns_none(self, mock_AS):
+    def test_query_raises_returns_none(self, mock_as):
         """Popoto query failure fails open (returns None) and logs WARNING."""
-        mock_AS.query.all.side_effect = RuntimeError("redis down")
+        mock_as.query.all.side_effect = RuntimeError("redis down")
         assert worktree_busy_check(Path("/fake/repo"), "sdlc-1218") is None
 
     @patch("models.agent_session.AgentSession")
-    def test_session_with_no_working_dir_skipped(self, mock_AS):
-        mock_AS.query.all.return_value = [
+    def test_session_with_no_working_dir_skipped(self, mock_as):
+        mock_as.query.all.return_value = [
             _make_session(None, "running"),
             _make_session("", "running"),
         ]
