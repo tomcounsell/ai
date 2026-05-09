@@ -389,11 +389,205 @@ class TestStdoutStaleRetired:
         assert _has_progress(entry) is True
 
     def test_fresh_heartbeats_no_stdout_young_started_at_returns_true(self):
-        """Fresh heartbeats + young session: warmup tolerance preserved."""
+        """Fresh heartbeats + young session: warmup tolerance preserved.
+
+        ``started_at=_ago(120)`` is intentionally inside the in-band region
+        (``STARTUP_GRACE_SECONDS`` < 120 < no-output budget = 1200s) so the
+        no-output budget gate added in #1356 does not fire.
+        """
         from agent.agent_session_queue import _has_progress
 
         entry = self._make_entry(last_stdout_at=None, started_at=_ago(120))
         assert _has_progress(entry) is True
+
+
+class TestSubCheckBNoOutputBudget:
+    """Tests for the no-output running-time budget gate in sub-check B (#1356).
+
+    Sub-check B (the legacy fresh-heartbeat fast-path) is now bounded by a
+    running-time budget computed from existing constants:
+    ``MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL`` (= 20 * 60 = 1200s,
+    20 min). A fresh ``last_heartbeat_at`` alone passes Tier 1 only while
+    ``running_seconds < STARTUP_GRACE_SECONDS`` (90s) OR
+    ``STARTUP_GRACE_SECONDS <= running_seconds <= no_output_budget``.
+
+    Beyond the budget, when ``sdk_ever_output`` is False, sub-check B falls
+    through to the own-progress fields. With no per-turn signals and no
+    own-progress fields set, ``_has_progress`` returns False and the
+    existing Tier-2 reprieve cap escalates the session to recovery.
+
+    The 11h-wedge pattern from PM session
+    ``90c4117dbf06431c86ee4807d7a18bcd`` (issue #1246) is reproduced here.
+    """
+
+    @staticmethod
+    def _make_entry(**overrides):
+        defaults = {
+            "turn_count": 0,
+            "log_path": "",
+            "claude_session_uuid": None,
+            "last_heartbeat_at": _ago(30),  # fresh queue heartbeat
+            "last_sdk_heartbeat_at": None,
+            "last_tool_use_at": None,
+            "last_turn_at": None,
+            "started_at": None,
+            "project_key": "test-no-output-budget",
+        }
+        defaults.update(overrides)
+        entry = SimpleNamespace(**defaults)
+        entry.get_children = lambda: []
+        return entry
+
+    def test_legacy_started_at_none_preserves_fast_path(self):
+        """started_at=None (legacy session) → fresh heartbeat alone passes Tier 1."""
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(started_at=None)
+        assert _has_progress(entry) is True
+
+    def test_running_30s_in_startup_grace_returns_true(self):
+        """running_seconds=30 (< STARTUP_GRACE_SECONDS=90) → True."""
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(started_at=_ago(30))
+        assert _has_progress(entry) is True
+
+    def test_running_89s_just_inside_grace_returns_true(self):
+        """running_seconds=89 (just inside STARTUP_GRACE_SECONDS=90) → True."""
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(started_at=_ago(89))
+        assert _has_progress(entry) is True
+
+    def test_running_300s_in_band_returns_true(self):
+        """running_seconds=300s (between grace and budget) → True (in-band, no kill)."""
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(started_at=_ago(300))
+        assert _has_progress(entry) is True
+
+    def test_running_just_over_budget_returns_false(self):
+        """running_seconds=1201s (1s over budget) + sdk_ever_output=False → False."""
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(started_at=_ago(1201))
+        assert _has_progress(entry) is False
+
+    def test_running_4h_no_output_returns_false(self):
+        """The 11h-wedge pattern: 4h running, no SDK output ever → False."""
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(started_at=_ago(4 * 3600))
+        assert _has_progress(entry) is False
+
+    def test_running_4h_with_output_falls_through_to_subcheck_a(self):
+        """4h running + stale per-turn signal (sdk_ever_output=True) → False from sub-check A.
+
+        Once sdk_ever_output is True, sub-check B is skipped entirely (the
+        ``if not sdk_ever_output`` guard at the top). The new budget gate
+        therefore does not apply — the existing sub-check A semantics drive
+        the verdict. With ``last_tool_use_at`` stale (older than 30 min),
+        sub-check A returns no-progress and ``_has_progress`` returns False.
+        """
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(
+            started_at=_ago(4 * 3600),
+            last_tool_use_at=_ago(2 * 3600),  # stale per-turn signal
+        )
+        assert _has_progress(entry) is False
+
+    def test_negative_running_seconds_clock_skew_preserves_fast_path(self):
+        """started_at in the future (clock skew) → treated as in startup grace, True."""
+        from agent.agent_session_queue import _has_progress
+
+        # _ago(-30) → started_at is 30s in the future. Negative running_seconds
+        # is < STARTUP_GRACE_SECONDS by construction, so the fast-path holds.
+        entry = self._make_entry(started_at=_ago(-30))
+        assert _has_progress(entry) is True
+
+    def test_naive_datetime_started_at_coerced_to_utc(self):
+        """started_at as naive datetime → coerced to UTC, gate evaluated normally."""
+        from datetime import UTC, datetime, timedelta
+
+        from agent.agent_session_queue import _has_progress
+
+        # Naive (no tzinfo) datetime 4h in the past. Mirrors the coercion
+        # pattern used for last_heartbeat_at on lines 690-691 of the source.
+        naive = (datetime.now(tz=UTC) - timedelta(hours=4)).replace(tzinfo=None)
+        entry = self._make_entry(started_at=naive)
+        assert _has_progress(entry) is False
+
+    def test_telemetry_counter_incremented_once_on_budget_exceeded(self, monkeypatch):
+        """Counter ``tier1_falloff:no_output_budget_exceeded`` is INCR'd exactly
+        once per fall-through tick.
+        """
+        calls: list[str] = []
+
+        class _FakeRedis:
+            @staticmethod
+            def incr(key: str) -> None:
+                calls.append(key)
+
+        # Patch the popoto Redis db accessor used at the call site.
+        from popoto import redis_db as _redis_db_mod
+
+        monkeypatch.setattr(_redis_db_mod, "POPOTO_REDIS_DB", _FakeRedis())
+
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(
+            started_at=_ago(2 * 3600),  # 2h running, well past the 20-min budget
+            project_key="proj-counter-test",
+        )
+        assert _has_progress(entry) is False
+        # Exactly one INCR on the new path. Other counters (tier1_flagged_total,
+        # tier2_reprieve_total) are emitted by the caller, not by _has_progress.
+        budget_calls = [k for k in calls if k.endswith("tier1_falloff:no_output_budget_exceeded")]
+        assert len(budget_calls) == 1, (
+            f"Expected 1 INCR on budget-exceeded path; got {len(budget_calls)}: {calls}"
+        )
+        assert budget_calls[0] == (
+            "proj-counter-test:session-health:tier1_falloff:no_output_budget_exceeded"
+        )
+
+    def test_telemetry_counter_failure_does_not_crash(self, monkeypatch):
+        """Metrics backend outage on the new path must not crash _has_progress."""
+
+        class _BoomRedis:
+            @staticmethod
+            def incr(key: str) -> None:
+                raise RuntimeError("redis exploded")
+
+        from popoto import redis_db as _redis_db_mod
+
+        monkeypatch.setattr(_redis_db_mod, "POPOTO_REDIS_DB", _BoomRedis())
+
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(started_at=_ago(2 * 3600))
+        # Must still return False (the gate fires) — telemetry crash is swallowed.
+        assert _has_progress(entry) is False
+
+    def test_tier2_handoff_after_max_reprieves(self):
+        """Integration: after MAX_NO_OUTPUT_REPRIEVES the Tier-2 escalation guard fires.
+
+        With the new gate, ``_has_progress`` returns False immediately on a 4h
+        no-output session. The caller increments ``reprieve_count`` per tick
+        until ``MAX_NO_OUTPUT_REPRIEVES`` (20) is reached, at which point
+        ``_tier2_reprieve_signal`` returns None (recovery proceeds).
+        """
+        from agent.agent_session_queue import _has_progress, _tier2_reprieve_signal
+        from agent.session_health import MAX_NO_OUTPUT_REPRIEVES
+
+        entry = self._make_entry(started_at=_ago(4 * 3600))
+        # Tier 1 declines.
+        assert _has_progress(entry) is False
+        # Below the cap — Tier 2 may still reprieve via psutil paths, but with
+        # handle=None the only signals available are entry-side. Confirm that
+        # at >= cap, regardless of any other gate, None is returned.
+        entry.reprieve_count = MAX_NO_OUTPUT_REPRIEVES
+        assert _tier2_reprieve_signal(handle=None, entry=entry) is None
 
 
 class TestTier2ReprieveGates:

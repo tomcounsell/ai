@@ -225,6 +225,26 @@ SDK_PROGRESS_FRESHNESS_WINDOW = int(os.environ.get("SDK_PROGRESS_FRESHNESS_WINDO
 # Sessions that have produced output (sdk_ever_output=True) are never subject to
 # this cap — their recovery depends solely on per-turn freshness in sub-check A.
 MAX_NO_OUTPUT_REPRIEVES = SDK_PROGRESS_FRESHNESS_WINDOW // HEARTBEAT_FRESHNESS_WINDOW  # 20
+# Running-time threshold (seconds) below which a fresh queue-layer
+# ``last_heartbeat_at`` alone is sufficient evidence of progress in
+# ``_has_progress`` sub-check B (issue #1356).
+#
+# Sessions in their startup window — before the SDK has emitted its first
+# tool or turn event — pass Tier 1 on the heartbeat alone. The default value
+# ``HEARTBEAT_FRESHNESS_WINDOW`` (90s) is the tightest grace that still
+# guarantees the very first health-check tick after ``started_at`` is set
+# does not false-kill the session.
+#
+# Beyond this grace, sub-check B applies a no-output running-time budget
+# computed inline as ``MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL``
+# (= 20 * 60 = 1200s = 20 min). Once that budget is exhausted and
+# ``sdk_ever_output`` is still False, sub-check B falls through and Tier 1
+# declines so the existing Tier-2 reprieve cap can escalate to recovery.
+#
+# Env-tunable via ``STARTUP_GRACE_SECONDS`` for parity with other tunables
+# in this file. Operators raising the budget must keep
+# ``STARTUP_GRACE_SECONDS < MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL``.
+STARTUP_GRACE_SECONDS = int(os.environ.get("STARTUP_GRACE_SECONDS", HEARTBEAT_FRESHNESS_WINDOW))
 
 # === Per-tool timeout sub-loop constants (issue #1270) ===
 # A session whose ``current_tool_name`` is non-null and whose
@@ -636,13 +656,37 @@ def _has_progress(entry: AgentSession) -> bool:
     subprocess existence — it is a watchdog-alive signal, NOT a progress signal.
     It is intentionally excluded from sub-check A (issue #1226).
 
-    **Sub-check B: Startup-window executor-alive fallback (#1036 narrowed).**
+    **Sub-check B: Startup-window executor-alive fallback (#1036, narrowed by #1226 / #1356).**
     When ``sdk_ever_output`` is False (neither per-turn field has ever been set),
     ``last_heartbeat_at`` (queue-layer, written by ``_heartbeat_loop``) fresher
-    than ``HEARTBEAT_FRESHNESS_WINDOW`` (90s) ⇒ progress. This preserves the
-    pre-#1226 behavior for sessions in their startup window before the first SDK
-    tool or turn event fires, and for sessions predating PR #1177 (whose hooks
-    did not write the per-turn fields).
+    than ``HEARTBEAT_FRESHNESS_WINDOW`` (90s) ⇒ progress, **subject to the
+    no-output running-time budget gate added by issue #1356**.
+
+    The gate reads ``entry.started_at`` and computes ``running_seconds``:
+
+    - ``started_at is None`` (legacy sessions predating the field) — the
+      fresh-heartbeat fast-path is preserved.
+    - ``running_seconds < STARTUP_GRACE_SECONDS`` (90s) — the fast-path is
+      preserved so the very first health-check tick after session start passes
+      Tier 1 on the heartbeat alone.
+    - ``STARTUP_GRACE_SECONDS <= running_seconds <= no_output_budget`` (where
+      ``no_output_budget = MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL``
+      = 1200s = 20 min) — fresh heartbeat still passes (preserves backward
+      compatibility for sessions in their normal startup-to-first-turn window).
+    - ``running_seconds > no_output_budget`` AND ``sdk_ever_output is False``
+      — sub-check B does NOT return True; it falls through to the own-progress
+      fields. The Redis counter
+      ``{project_key}:session-health:tier1_falloff:no_output_budget_exceeded``
+      is INCR'd once per fall-through tick. With the per-turn signals also
+      absent, ``_has_progress`` returns False and the Tier-2 reprieve cap
+      escalates the session to recovery within
+      ``MAX_NO_OUTPUT_REPRIEVES`` (20) ticks.
+
+    This preserves the pre-#1226 behavior for sessions in their normal
+    startup window and for sessions predating PR #1177 (whose hooks did not
+    write the per-turn fields), while bounding the previously-unbounded
+    fresh-heartbeat fast-path that allowed cwd-disappearance and similar
+    wedges to hold Tier 1 open indefinitely (issue #1246, parent of #1356).
 
     **Own-progress fields (#944 / #963, narrowed by #1226).**
     - ``turn_count > 0`` — at least one turn boundary observed.
@@ -680,17 +724,63 @@ def _has_progress(entry: AgentSession) -> bool:
             if (now_utc - ts_aware).total_seconds() < SDK_PROGRESS_FRESHNESS_WINDOW:
                 return True
 
-    # Sub-check B: startup-window executor-alive fallback (#1036 retained, narrowed).
+    # Sub-check B: startup-window executor-alive fallback (#1036 retained, narrowed
+    # by #1226 / #1356).
     # Use last_heartbeat_at as a Tier 1 signal ONLY before the SDK has produced any
     # tool or turn output. Once sdk_ever_output is True, sub-check A is authoritative.
     # Backward-compatible: sessions from before PR #1177 (no tool/turn fields) fall
     # here and behave identically to the pre-#1226 behavior.
+    #
+    # The fresh-heartbeat fast-path is gated by the no-output running-time budget
+    # added in issue #1356. See _has_progress docstring for the full rationale and
+    # the four legs of the gate (legacy/grace/in-band/budget-exceeded).
     if not sdk_ever_output:
         hb = getattr(entry, "last_heartbeat_at", None)
         if isinstance(hb, datetime):
             hb_aware = hb if hb.tzinfo else hb.replace(tzinfo=UTC)
             if (now_utc - hb_aware).total_seconds() < HEARTBEAT_FRESHNESS_WINDOW:
-                return True
+                # Compute running_seconds from started_at (if present) and apply
+                # the no-output budget gate. The budget is derived inline from
+                # MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL (= 1200s,
+                # 20 min) to keep the relationship to the existing constants
+                # visible at the call site.
+                started_at = getattr(entry, "started_at", None)
+                if not isinstance(started_at, datetime):
+                    # Legacy session: started_at not set → preserve fast-path.
+                    return True
+                started_aware = started_at if started_at.tzinfo else started_at.replace(tzinfo=UTC)
+                running_seconds = (now_utc - started_aware).total_seconds()
+                no_output_budget = MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL
+                if running_seconds < STARTUP_GRACE_SECONDS:
+                    # Inside the startup grace window (or clock-skew negative
+                    # running_seconds) → preserve fast-path. The very first
+                    # health-check tick after started_at is set must still pass.
+                    return True
+                if running_seconds <= no_output_budget:
+                    # In the band between startup grace and the no-output
+                    # budget → fresh heartbeat still passes. Preserves the
+                    # normal startup-to-first-turn window for slow auth /
+                    # large initial prompt digestion.
+                    return True
+                # Budget exceeded AND sdk_ever_output is False — DO NOT return
+                # True from sub-check B. INCR the telemetry counter exactly
+                # once on this fall-through path, then continue to the
+                # own-progress fields below. If those are also absent,
+                # _has_progress returns False and the existing Tier-2 reprieve
+                # cap (also gated on sdk_ever_output / MAX_NO_OUTPUT_REPRIEVES)
+                # escalates to recovery.
+                try:
+                    from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+                    _MR.incr(
+                        f"{entry.project_key}:session-health:"
+                        f"tier1_falloff:no_output_budget_exceeded"
+                    )
+                except Exception as _m_err:
+                    logger.warning(
+                        "[session-health] tier1_falloff counter increment failed (non-fatal): %s",
+                        _m_err,
+                    )
 
     # Own-progress fields (#944 / #963, narrowed by #1226).
     # Only evaluated when sdk_ever_output is False — once the SDK has produced
