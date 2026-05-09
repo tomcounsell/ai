@@ -276,13 +276,43 @@ Example minimal project entry:
 }
 ```
 
-Persona overlay files also live in `~/Desktop/Valor/personas/`. If missing, create them:
+### Persona overlays
+
+Persona overlay files live in `~/Desktop/Valor/personas/`. The loader (`agent.sdk_client.load_persona_prompt`) prefers the private overlay when present and falls back to the in-repo template (`config/personas/<persona>.md`) otherwise. Seeding the private overlays from the in-repo defaults at setup time gives the agent identical behavior on every fresh machine without waiting for iCloud propagation from another box.
+
+The PM and developer personas have in-repo templates that are version-controlled and PR-reviewable:
+- `config/personas/project-manager.md` — PM pipeline gate rules (CRITIQUE mandatory, REVIEW mandatory, multi-issue fan-out)
+- `config/personas/developer.md` — Developer SDLC-owner playbook (Mode 3 parallel orchestrator, `merge_authorized` bypass)
+
+Seed them into the vault if not already present (do NOT overwrite — existing overlays may carry per-machine customizations):
 
 ```bash
 mkdir -p ~/Desktop/Valor/personas
-# Create developer.md, project-manager.md, teammate.md with role-specific instructions
-# See config/personas/_base.md for the shared identity that gets prepended
+
+for persona in project-manager developer; do
+  src="config/personas/${persona}.md"
+  dst="$HOME/Desktop/Valor/personas/${persona}.md"
+  if [ ! -f "$dst" ]; then
+    cp "$src" "$dst"
+    echo "Seeded $dst from $src"
+  else
+    echo "$dst already exists — leaving in place (run \`diff\` to compare with $src)"
+  fi
+done
 ```
+
+The `teammate.md` overlay is still operator-customized (not seeded by setup); if missing, the in-repo `config/personas/teammate.md` would be the fallback but that file is intentionally gitignored, so a teammate-only machine must author its own overlay.
+
+If the machine is already running and you want to inspect drift between the in-repo template and the private overlay:
+
+```bash
+diff config/personas/project-manager.md ~/Desktop/Valor/personas/project-manager.md
+diff config/personas/developer.md ~/Desktop/Valor/personas/developer.md
+```
+
+The persona loader emits a WARNING log line if a known load-bearing substring is missing from the private overlay (e.g., `Mode 3` for the developer overlay, `CRITIQUE` for the PM overlay). Watch `logs/bridge.log` after the first session for these warnings — they signal that the private overlay has rolled back and should be re-synced.
+
+### Cross-machine reuse
 
 If the project is already defined on another machine's `~/Desktop/Valor/projects.json`, copy its entry rather than writing from scratch (iCloud syncs this file across machines).
 
