@@ -391,14 +391,38 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Permissive vs. strict reading of "runs unconditionally once."** The acceptance criterion says "runs unconditionally once instead of only when corruption/phantoms are detected." Two readings:
-   - **Strict (one-shot):** Add a persistent flag (e.g., a Redis key like `cleanup:initial_index_sweep_done`); the unconditional sweep runs only on the first tick after deploy, then reverts to gated. Pro: minimal behavior change long-term. Con: extra state to manage; doesn't catch any future drift sources.
-   - **Permissive (gate removed permanently):** `repair_indexes()` always runs. Pro: durable safety against any future drift; simpler code (no flag state). Con: small per-tick I/O cost (negligible per Risk 1 analysis).
+The three open questions raised in planning have been resolved as follows. These decisions are binding and replace the original `## Open Questions` section.
 
-   Plan currently specifies **permissive**. Confirm or override.
+### Q1 — Gate removal: Permissive (permanent), NOT one-shot
 
-2. **Metric name shape.** Issue acceptance criterion writes `agent_session.indexed_field.stale_members.{status}` (dotted-suffix per-status metric). Plan uses `agent_session.indexed_field.stale_members` with `dimensions={"status": <status>}` (per project convention; documented in recon "Revised" bucket). Confirm or override.
+**Decision:** Remove the `cleaned > 0 or phantoms_filtered > 0` gate at `agent/session_health.py:2027` permanently. `repair_indexes()` runs every tick.
 
-3. **Pre-scan all `IndexedField` indexes vs. only `status`.** Plan currently scans all `$IndexF:AgentSession:status:*` keys. Trivial to widen to all `$IndexF:AgentSession:*` (every indexed field). Worth widening, or stay laser-focused on the issue's acceptance criterion?
+**Rationale:**
+- Matches PR #1078's design philosophy. `AgentSession.repair_indexes()` (`models/agent_session.py:1905-1931`) is already idempotent — running on a clean DB is a no-op beyond Redis I/O.
+- One-shot would require novel persistent-flag state-management (Redis key like `cleanup:initial_index_sweep_done`) with no prior art in this codebase.
+- Permissive is strictly simpler and gives durable safety against any future drift source, not just the pre-`615eab9c` residue.
+- Per-tick cost is bounded (Risk 1 analysis): equivalent to what `repair_indexes()` already pays whenever any corrupt record is deleted, which happens routinely.
+
+### Q2 — Metric shape: `dimensions={"status": <status>}`, NOT dotted-suffix
+
+**Decision:** Emit `record_metric("agent_session.indexed_field.stale_members", count, {"status": status})`.
+
+**Rationale:**
+- Canonical signature: `analytics/collector.py:115-119` — `record_metric(name, value, dimensions)`.
+- All existing call sites use the dimensions form: `models/session_lifecycle.py:441-448`, `agent/pipeline_state.py:146`, `agent/memory_retrieval.py:329, 355`.
+- Zero dotted-suffix examples exist in the codebase. Following project convention is mandatory.
+
+### Q3 — Pre-scan scope: status-only pre-scan + free all-IndexedField repair
+
+**Decision:** Pre-scan `$IndexF:AgentSession:status:*` keys specifically. Let `repair_indexes()` handle ALL indexed fields naturally (no caller-side widening needed).
+
+**Rationale:**
+- The pre-scan emits `dimensions={"status": <status>}` — that metric shape only makes sense for the `status` index, where the index-key segment IS a status value.
+- For other indexed fields (`session_type`, `project_key`, etc.), the index-key segment is not a status, so a single status-keyed metric would be incoherent. Adding per-field metrics would explode scope.
+- `repair_indexes()` (`models/agent_session.py:1921-1928`) already scans every `IndexedField` on its own — that's free coverage for non-status fields. The unconditional invocation in step 5 of the Data Flow already gives durable safety for `session_type`, `project_key`, etc.
+- This resolves the previously-implicit inconsistency between the plan's "pre-scan ALL `IndexedField` indexes" stance (Solution → Technical Approach, Decision 3) and the `{"status": <s>}` metric shape (Solution → Technical Approach, Decision 2). The pre-scan is status-only; `repair_indexes()` covers the rest.
+
+**Plan section updates required (carried into implementation):**
+- `## Solution → Technical Approach`, Decision 3: Replace "pre-scan ALL `IndexedField` indexes, not just `status`" with "pre-scan status-only; `repair_indexes()` covers other IndexedFields generically." (Implementation reflects this directly; the plan body is left as-is for diff legibility but the implementer should follow the resolved decision.)
