@@ -406,24 +406,11 @@ class TestSessionIntelligenceCallable:
         assert_valid_result(result)
 
 
-# ============================================================
-# reflections.behavioral_learning
-# ============================================================
-
-
-class TestBehavioralLearningCallable:
-    """Smoke tests for reflections/behavioral_learning.py."""
-
-    def test_run_skips_when_cyclic_episode_missing(self):
-        """run() returns skipped result when models.cyclic_episode is unavailable."""
-        import sys
-
-        from reflections.behavioral_learning import run
-
-        with patch.dict(sys.modules, {"models.cyclic_episode": None}):
-            result = run_async(run())
-        assert_valid_result(result)
-        assert "skipped" in result["summary"]
+# reflections.behavioral_learning was deleted in issue #1362; the trajectory
+# feature is deferred pending the upstream Popoto TrajectoryMemory recipe
+# (tomcounsell/popoto#389) and the AgentSession instrumentation
+# (tool_sequence, friction_events) is intentionally not shipping until the
+# recipe lands.
 
 
 # reflections.daily_report was deleted in issue #1292; the daily-log slot
