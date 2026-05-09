@@ -149,7 +149,7 @@ officecli query slides.pptx 'shape[fill=FF0000]'
 Live HTML preview that auto-refreshes on every file change. Browsers can click / shift-click / box-drag to select shapes; the CLI can read the current browser selection and act on it.
 
 ```bash
-officecli watch <file> [--port N]      # Start preview server (default port 18080)
+officecli watch <file> [--port N]      # Start preview server (default port 26315)
 officecli unwatch <file>               # Stop
 officecli goto <file> <path>           # Scroll watching browser(s) to element (docx: p / table / tr / tc)
 ```
@@ -406,5 +406,6 @@ Example: a fundraising deck task → `officecli load_skill pitch-deck` → use t
 
 - Paths are **1-based** (XPath convention): `'/body/p[3]'` = third paragraph
 - `--index` is **0-based** (array convention): `--index 0` = first position
+- **Excel exception**: for `add --type row` and `add --type col`, `--index N` is **1-based** (matches OOXML RowIndex / column letter index). `--index 5` inserts at row 5 / column 5.
 - After modifications, verify with `validate` and/or `view issues`
 - **When unsure**, run `officecli help <format> <element>` instead of guessing
