@@ -26,12 +26,19 @@ def get_anthropic_api_key() -> str:
         _cached_anthropic_key = key
         return key
 
-    # os.environ may have empty string; read directly from .env files
-    for env_path in [
+    # os.environ may have empty string; read directly from .env files.
+    candidates = [
         Path(__file__).parent.parent / ".env",
         Path.home() / "src" / ".env",
-        Path.home() / "Desktop" / "Valor" / ".env",
-    ]:
+    ]
+    try:
+        from config.settings import vault
+
+        candidates.append(vault.env_path)
+    except Exception:
+        candidates.append(Path.home() / "Desktop" / "Valor" / ".env")
+
+    for env_path in candidates:
         if env_path.exists():
             for line in env_path.read_text().splitlines():
                 line = line.strip()

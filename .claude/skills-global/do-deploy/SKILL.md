@@ -85,7 +85,8 @@ Read the machine list from projects.json and report which machines will auto-upd
 ```bash
 python -c "
 import json, os
-config = json.load(open(os.path.expanduser('~/Desktop/Valor/projects.json')))
+vault = os.path.expanduser(os.environ.get('VALOR_VAULT_DIR', '~/Desktop/Valor'))
+config = json.load(open(os.path.join(vault, 'projects.json')))
 machines = set()
 for proj in config.get('projects', {}).values():
     m = proj.get('machine', '')

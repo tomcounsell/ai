@@ -95,8 +95,10 @@ def _load_env() -> None:
     try:
         from dotenv import load_dotenv
 
+        from config.settings import load_vault_env
+
         load_dotenv(_repo_root / ".env")
-        load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
+        load_vault_env()  # symlink target — no-op when repo .env is intact
     except Exception:
         pass
 

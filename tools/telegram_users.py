@@ -8,8 +8,15 @@ Reads from the dms.whitelist array in projects.json.
 import json
 from pathlib import Path
 
-# Canonical config location (iCloud-synced)
-PROJECTS_PATH = Path.home() / "Desktop" / "Valor" / "projects.json"
+
+def _projects_path() -> Path:
+    """Resolve projects.json via the vault, with a Desktop fallback."""
+    try:
+        from config.settings import vault
+
+        return vault.projects_path
+    except Exception:
+        return Path.home() / "Desktop" / "Valor" / "projects.json"
 
 
 def get_whitelisted_users() -> dict[str, int]:
@@ -24,7 +31,7 @@ def get_whitelisted_users() -> dict[str, int]:
         FileNotFoundError: If projects.json doesn't exist
         json.JSONDecodeError: If config file is invalid JSON
     """
-    with open(PROJECTS_PATH) as f:
+    with open(_projects_path()) as f:
         config = json.load(f)
 
     # Build name -> user_id mapping (case-insensitive)

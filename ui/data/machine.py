@@ -18,7 +18,12 @@ def get_machine_projects() -> list[dict]:
 
     Each row has: group_name, persona, project_name, github.
     """
-    config_path = Path("~/Desktop/Valor/projects.json").expanduser()
+    try:
+        from config.settings import vault
+
+        config_path = vault.projects_path
+    except Exception:
+        config_path = Path("~/Desktop/Valor/projects.json").expanduser()
     if not config_path.exists():
         return []
 

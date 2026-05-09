@@ -42,6 +42,16 @@ fi
 echo "Installing plist to $PLIST_DST..."
 sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g; s|__SERVICE_LABEL__|$LABEL|g" "$PLIST_SRC" > "$PLIST_DST"
 
+# Inject env vars into the plist. The helper auto-selects lean vs full
+# injection by the vault's TCC status — secrets only land in the plist
+# (and chmod 0600 applied) when the vault is on a TCC-restricted path.
+VAULT_DIR="${VALOR_VAULT_DIR:-$HOME/.valor}"
+[ -d "$VAULT_DIR" ] || VAULT_DIR="$HOME/Desktop/Valor"  # legacy compat
+"$PROJECT_DIR/.venv/bin/python" "$SCRIPT_DIR/install/inject_plist_env.py" \
+    --plist "$PLIST_DST" \
+    --env-file "$PROJECT_DIR/.env" \
+    --vault-dir "$VAULT_DIR"
+
 # Load new version
 echo "Loading $LABEL..."
 launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"

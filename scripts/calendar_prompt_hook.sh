@@ -5,7 +5,7 @@
 
 set +e  # Hooks must never fail noisily
 
-LOCKDIR="$HOME/Desktop/Valor"
+LOCKDIR="${VALOR_VAULT_DIR:-$HOME/Desktop/Valor}"
 STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
 SESSIONFILE="$LOCKDIR/.calendar_hook_session"
 SLUGFILE="$LOCKDIR/.calendar_hook_slug"
@@ -23,8 +23,8 @@ if echo "$PROMPT" | grep -qE '^\s*/[a-zA-Z0-9_-]+\s*$'; then
 fi
 
 # Only track projects that have a calendar mapping (allowlist via calendar_config.json)
-PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
-CALENDAR_JSON="$HOME/Desktop/Valor/calendar_config.json"
+PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$LOCKDIR/projects.json}"
+CALENDAR_JSON="$LOCKDIR/calendar_config.json"
 CURRENT_PROJECT=""
 if [ -f "$PROJECTS_JSON" ]; then
     CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" --arg home "$HOME" '
@@ -84,7 +84,7 @@ fi
 
 # Resolve project key from projects.json (matches working_directory to key)
 # Falls back to directory basename if no match found
-PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
+PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$LOCKDIR/projects.json}"
 PROJECT=$(basename "$PWD")
 if [ -f "$PROJECTS_JSON" ]; then
     MATCH=$(jq -r --arg cwd "$PWD" --arg home "$HOME" '

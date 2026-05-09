@@ -474,8 +474,10 @@ def main() -> int:
     """CLI entry point."""
     from dotenv import load_dotenv
 
+    from config.settings import load_vault_env
+
     load_dotenv()
-    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
+    load_vault_env()  # symlink target — no-op when repo .env is intact
 
     parser = argparse.ArgumentParser(
         prog="valor-email",

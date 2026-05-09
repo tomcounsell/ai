@@ -64,9 +64,9 @@ The pipeline graph is defined in [`agent/pipeline_graph.py`](agent/pipeline_grap
 # 1. Install dependencies
 pip install -e .
 
-# 2. Configure environment (symlink to vault)
-ln -sf ~/Desktop/Valor/.env ~/src/ai/.env
-# All secrets live in ~/Desktop/Valor/.env (iCloud-synced vault)
+# 2. Configure environment (symlink to vault — VALOR_VAULT_DIR or default ~/Desktop/Valor/)
+ln -sf "${VALOR_VAULT_DIR:-$HOME/Desktop/Valor}/.env" ~/src/ai/.env
+# All secrets live in <vault>/.env. Run `/setup` to pick a non-default vault location.
 
 # 3. Start the bridge and worker
 ./scripts/start_bridge.sh

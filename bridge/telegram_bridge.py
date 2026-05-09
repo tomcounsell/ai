@@ -42,11 +42,13 @@ from dotenv import load_dotenv  # noqa: E402
 # Load environment variables FIRST before any env checks.
 # Under launchd (VALOR_LAUNCHD=1), env vars are injected directly into the plist
 # by install_service() — skip dotenv entirely to avoid macOS TCC hangs on the
-# iCloud-synced ~/Desktop/Valor/.env that .env symlinks to.
+# iCloud-synced vault .env that the repo .env symlinks to.
 if not os.environ.get("VALOR_LAUNCHD"):
+    from config.settings import load_vault_env  # noqa: E402
+
     env_path = Path(__file__).parent.parent / ".env"
     load_dotenv(env_path)
-    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
+    load_vault_env()  # symlink target — no-op when repo .env is intact
 
 # Initialize Sentry error tracking (skip gracefully if DSN not configured)
 from bridge.hibernation import is_hibernating  # noqa: E402

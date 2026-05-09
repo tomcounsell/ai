@@ -52,7 +52,12 @@ def _resolve_project_keys(project_key: str | None = None) -> list[str]:
         # Deduplicate by project_name → project_key mapping.
         # get_machine_projects returns project_name, not project_key.
         # We need the keys from projects.json to match Memory.project_key.
-        config_path = Path("~/Desktop/Valor/projects.json").expanduser()
+        try:
+            from config.settings import vault
+
+            config_path = vault.projects_path
+        except Exception:
+            config_path = Path("~/Desktop/Valor/projects.json").expanduser()
         try:
             config = json.loads(config_path.read_text())
             keys = list(config.get("projects", {}).keys())

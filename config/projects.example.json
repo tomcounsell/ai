@@ -1,7 +1,7 @@
 {
   "$schema": "Project configuration for multi-instance Valor deployment",
   "_doc": {
-    "overview": "Shared config for all Valor machines (iCloud-synced via ~/Desktop/Valor/). Each machine reads this file and filters projects by the 'machine' field matched against its ComputerName (scutil --get ComputerName).",
+    "overview": "Shared config for all Valor machines. Lives in the configured vault directory (default ~/Desktop/Valor/; configurable via VALOR_VAULT_DIR). Each machine reads this file and filters projects by the 'machine' field matched against its ComputerName (scutil --get ComputerName).",
     "personas": "Define overlay file paths and permissions for each role. The bridge loads composable segments + persona overlay as the system prompt.",
     "projects.machine": "Must match the machine's ComputerName exactly (case-insensitive). This is how each machine knows which projects to handle.",
     "projects.telegram.groups": "Dict mapping group name to persona. Dev: prefix = developer, PM: prefix = project-manager, no prefix = teammate (mention-only).",

@@ -56,18 +56,19 @@ if ! "$VENV/bin/python" -c "import telethon; import httpx; import dotenv" 2>/dev
 fi
 
 # Check for required config files
+VAULT_DIR="${VALOR_VAULT_DIR:-$HOME/Desktop/Valor}"
 if [ ! -f ".env" ]; then
     echo "ERROR: .env file not found."
-    echo "  ln -sf ~/Desktop/Valor/.env ~/src/ai/.env"
-    echo "  # .env must be a symlink to the vault at ~/Desktop/Valor/.env"
+    echo "  ln -sf $VAULT_DIR/.env $(pwd)/.env"
+    echo "  # .env must be a symlink to the vault .env at $VAULT_DIR/.env"
     exit 1
 fi
 
-PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
+PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$VAULT_DIR/projects.json}"
 if [ ! -f "$PROJECTS_JSON" ]; then
     echo "ERROR: projects.json not found at $PROJECTS_JSON"
-    echo "  mkdir -p ~/Desktop/Valor"
-    echo "  cp config/projects.example.json ~/Desktop/Valor/projects.json"
+    echo "  mkdir -p $VAULT_DIR"
+    echo "  cp config/projects.example.json $VAULT_DIR/projects.json"
     echo "  # Then edit with your project settings"
     exit 1
 fi

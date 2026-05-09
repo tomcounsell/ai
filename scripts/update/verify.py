@@ -361,8 +361,9 @@ def check_sdk_auth(project_dir: Path) -> dict[str, bool]:
         pass
 
     # Check .env for API key and billing preference. The .env symlinks to
-    # ~/Desktop/Valor/.env (iCloud + TCC-protected); read can raise PermissionError
-    # (TCC revoked) or OSError (iCloud eviction). Neither should crash the orchestrator.
+    # <vault>/.env (default ~/Desktop/Valor; iCloud + TCC-protected); read can raise
+    # PermissionError (TCC revoked) or OSError (iCloud eviction). Neither should crash
+    # the orchestrator.
     env_file = project_dir / ".env"
     if env_file.exists():
         try:
@@ -376,10 +377,10 @@ def check_sdk_auth(project_dir: Path) -> dict[str, bool]:
 
 
 def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
-    """Sync Claude OAuth token from Desktop Valor dir to Claude Desktop config.
+    """Sync Claude OAuth token from the configured vault to Claude Desktop config.
 
     The source of truth for OAuth credentials is:
-        ~/Desktop/Valor/claude_oauth_config.json
+        <vault>/claude_oauth_config.json   (default vault: ~/Desktop/Valor/)
     The target (where Claude CLI reads auth) is:
         ~/Library/Application Support/Claude/config.json
 
@@ -390,7 +391,14 @@ def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
     """
     import json
 
-    source = Path.home() / "Desktop" / "Valor" / "claude_oauth_config.json"
+    try:
+        from config.settings import vault
+
+        vault_dir = vault.dir
+    except Exception:
+        vault_dir = Path.home() / "Desktop" / "Valor"
+
+    source = vault_dir / "claude_oauth_config.json"
     target = Path.home() / "Library" / "Application Support" / "Claude" / "config.json"
 
     result: dict[str, str | bool] = {
@@ -400,7 +408,7 @@ def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
     }
 
     if not source.exists():
-        result["reason"] = "No source credentials at ~/Desktop/Valor/claude_oauth_config.json"
+        result["reason"] = f"No source credentials at {source}"
         return result
 
     try:
@@ -974,7 +982,7 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
 
 
 def check_projects_json(project_dir: Path) -> ToolCheck:
-    """Validate ~/Desktop/Valor/projects.json before allowing a service restart.
+    """Validate ``<vault>/projects.json`` before allowing a service restart.
 
     Acts as the green-light gate for bridge startup: if the iCloud-synced
     config is malformed (e.g. one Telegram contact mapped to multiple
@@ -989,7 +997,12 @@ def check_projects_json(project_dir: Path) -> ToolCheck:
     import json
     import sys
 
-    config_path = Path.home() / "Desktop" / "Valor" / "projects.json"
+    try:
+        from config.settings import vault
+
+        config_path = vault.projects_path
+    except Exception:
+        config_path = Path.home() / "Desktop" / "Valor" / "projects.json"
     if not config_path.exists():
         return ToolCheck(
             name="projects.json",
@@ -1145,7 +1158,8 @@ def check_machine_identity(project_dir: Path) -> dict:
     """Verify this machine's identity against projects.json config.
 
     Reads ComputerName via scutil, matches against the 'machine' field
-    in ~/Desktop/Valor/projects.json, and returns the matched projects.
+    in ``<vault>/projects.json`` (default vault: ``~/Desktop/Valor/``),
+    and returns the matched projects.
     """
     import json
 
@@ -1155,8 +1169,13 @@ def check_machine_identity(project_dir: Path) -> dict:
     except Exception as e:
         return {"error": f"Could not read ComputerName: {e}"}
 
-    # Find projects.json
-    config_path = Path.home() / "Desktop" / "Valor" / "projects.json"
+    # Find projects.json via the vault cascade
+    try:
+        from config.settings import vault
+
+        config_path = vault.projects_path
+    except Exception:
+        config_path = Path.home() / "Desktop" / "Valor" / "projects.json"
     if not config_path.exists():
         config_path = project_dir / "config" / "projects.json"
     if not config_path.exists():

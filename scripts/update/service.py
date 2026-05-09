@@ -200,33 +200,19 @@ def get_worker_status(project_dir: Path) -> ServiceStatus:
 def _inject_env_into_plist(plist_path: Path, env_file: Path) -> int:
     """Merge .env vars into the plist's EnvironmentVariables dict.
 
-    Mirrors the inline shell+Python block in ``scripts/install_worker.sh``
-    (lines 95-131) so ``/update --full`` produces an equivalent worker plist.
-    Without this, only PATH/HOME/VALOR_LAUNCHD (the placeholders baked into
-    the template) end up in the plist and launchd-spawned worker processes
-    miss every ``.env`` var — including ``VALOR_PROJECT_KEY`` (issue #1171).
+    Delegates to ``scripts.install.inject_plist_env.inject`` so the
+    conditional lean (non-TCC) vs full (TCC) injection logic — and the
+    accompanying ``chmod 0600`` on TCC vaults — stays in one place.
 
-    Pre-existing keys in EnvironmentVariables are NOT overwritten (the
-    plist template's PATH/HOME/VALOR_LAUNCHD placeholders take precedence).
+    Pre-existing keys in EnvironmentVariables are NOT overwritten.
     Values of ``None`` are skipped so an empty ``KEY=`` line in ``.env``
     does not produce a bare empty value in the plist.
-
-    Args:
-        plist_path: Destination plist on disk.
-        env_file: Path to the project's ``.env`` file (typically a symlink
-            to ``~/Desktop/Valor/.env``).
 
     Returns:
         Count of env vars injected. ``0`` if injection was skipped due to
         a recoverable error (best-effort — never raises so the caller can
         still bootstrap a degraded plist).
     """
-    try:
-        from dotenv import dotenv_values
-    except Exception as e:  # pragma: no cover — dotenv is a hard dep, but be defensive
-        logger.warning("install_worker: cannot import dotenv (%s) — skipping env injection", e)
-        return 0
-
     if not plist_path.exists():
         logger.warning("install_worker: plist %s missing — skipping env injection", plist_path)
         return 0
@@ -236,43 +222,30 @@ def _inject_env_into_plist(plist_path: Path, env_file: Path) -> int:
         return 0
 
     try:
-        env_vars = dotenv_values(env_file)
-    except Exception as e:
-        logger.warning(
-            "install_worker: could not parse %s (%s) — skipping env injection", env_file, e
-        )
+        from scripts.install.inject_plist_env import inject
+    except Exception as e:  # pragma: no cover — local module, but be defensive
+        logger.warning("install_worker: cannot import inject_plist_env (%s)", e)
         return 0
 
     try:
-        with open(plist_path, "rb") as f:
-            plist = plistlib.load(f)
-    except Exception as e:
-        logger.warning(
-            "install_worker: could not load plist %s (%s) — skipping env injection", plist_path, e
-        )
-        return 0
-
-    existing = plist.setdefault("EnvironmentVariables", {})
-    injected = 0
-    for key, value in env_vars.items():
-        if key in existing or value is None:
-            continue
-        existing[key] = value
-        injected += 1
-
-    try:
-        with open(plist_path, "wb") as f:
-            plistlib.dump(plist, f)
-    except Exception as e:
-        logger.warning(
-            "install_worker: could not write plist %s (%s) — env injection rolled back",
+        injected, secrets_mode = inject(
             plist_path,
-            e,
+            env_file,
+            os_environ=dict(os.environ),
+        )
+    except Exception as e:
+        logger.warning(
+            "install_worker: env injection raised %s on plist %s — skipping", e, plist_path
         )
         return 0
 
+    mode_label = "full+chmod 0600 (TCC vault)" if secrets_mode else "lean (non-TCC vault)"
     logger.info(
-        "install_worker: injected %d env vars from %s into %s", injected, env_file, plist_path
+        "install_worker: injected %d env vars from %s into %s [%s]",
+        injected,
+        env_file,
+        plist_path,
+        mode_label,
     )
     return injected
 

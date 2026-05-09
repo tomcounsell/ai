@@ -24,8 +24,18 @@ from pathlib import Path
 from bridge.utc import utc_now
 from config.paths import DATA_DIR
 
-# Calendar config lives in ~/Desktop/Valor/, queue/cache in data/
-CALENDAR_CONFIG_PATH = Path.home() / "Desktop" / "Valor" / "calendar_config.json"
+
+# Calendar config lives in the configured vault, queue/cache in data/
+def _resolve_calendar_config_path() -> Path:
+    try:
+        from config.settings import vault
+
+        return vault.dir / "calendar_config.json"
+    except Exception:
+        return Path.home() / "Desktop" / "Valor" / "calendar_config.json"
+
+
+CALENDAR_CONFIG_PATH = _resolve_calendar_config_path()
 
 QUEUE_PATH = DATA_DIR / "calendar_queue.jsonl"
 EVENT_ID_CACHE_PATH = DATA_DIR / "calendar_event_ids.json"

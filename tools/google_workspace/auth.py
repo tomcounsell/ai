@@ -1,7 +1,9 @@
 """Google Workspace OAuth authentication module.
 
 Handles OAuth2 credential management for Google APIs.
-Credentials and tokens stored in ~/Desktop/Valor/ (env: GOOGLE_CREDENTIALS_DIR).
+Credentials and tokens are stored in the configured vault directory (default
+`~/Desktop/Valor/`; set `VALOR_VAULT_DIR` to change). The `GOOGLE_CREDENTIALS_DIR`
+env var still wins as an explicit per-call override.
 Tokens are per-machine to avoid iCloud sync race conditions on refresh.
 
 TOKEN_PATH is computed once at import time via _get_token_path() and remains
@@ -13,7 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import platform
 import subprocess
 from pathlib import Path
@@ -24,13 +25,24 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import Resource, build
 
-from config.settings import settings
-
 logger = logging.getLogger(__name__)
 
-# Resolve credentials directory: env var override or settings default (~/Desktop/Valor/)
-_env_dir = os.getenv("GOOGLE_CREDENTIALS_DIR")
-CONFIG_DIR = Path(_env_dir) if _env_dir else settings.google_auth.credentials_dir
+
+def _resolve_credentials_dir() -> Path:
+    """Resolve the Google credentials directory.
+
+    Cascade: GOOGLE_CREDENTIALS_DIR env var > vault.google_credentials_dir
+    > ~/Desktop/Valor/ as last-resort fallback when the vault is unresolved.
+    """
+    try:
+        from config.settings import vault
+
+        return vault.google_credentials_dir
+    except Exception:
+        return Path.home() / "Desktop" / "Valor"
+
+
+CONFIG_DIR = _resolve_credentials_dir()
 
 CREDENTIALS_PATH = CONFIG_DIR / "google_credentials.json"
 
