@@ -430,3 +430,129 @@ class TestKilledTransitionPathBackfill:
         assert session._saved_field_values["status"] == old_status
         assert session.status == "killed"
         session.save.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# waiting_for_children → terminal status: real-Popoto coverage (issue #1361)
+# ---------------------------------------------------------------------------
+#
+# Existing tests above operate on MagicMock sessions and validate the
+# _saved_field_values backfill mechanism. The acceptance criterion in #1361
+# requires real Popoto-backed coverage for the `waiting_for_children` index:
+# after exiting that status (via finalize_session OR transition_status), the
+# `$IndexF:AgentSession:status:waiting_for_children` set must NOT contain
+# the session's redis_key.
+#
+# These tests follow the real-Popoto pattern from
+# tests/unit/test_session_health_phantom_guard.py (TestCleanupCorruptedAgentSessions).
+# They construct real AgentSession instances, call .save(), then exercise the
+# lifecycle module against the live Redis indexes.
+
+
+class TestWaitingForChildrenExitTransition:
+    """Real-Popoto coverage for `waiting_for_children` index hygiene (#1361)."""
+
+    def test_finalize_session_clears_waiting_for_children_index(self):
+        """finalize_session(s, "killed") removes s from the waiting_for_children index."""
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import finalize_session, transition_status
+
+        s = AgentSession(
+            session_id="wfc-finalize-1361",
+            project_key="test-1361",
+            status="pending",
+        )
+        s.save()
+        transition_status(s, "waiting_for_children")
+        s_key = s._redis_key
+
+        # Sanity: after the transition, s IS a member of the
+        # waiting_for_children index.
+        members = POPOTO_REDIS_DB.smembers("$IndexF:AgentSession:status:waiting_for_children")
+        member_strs = {m.decode() if isinstance(m, bytes) else m for m in members}
+        assert s_key in member_strs, (
+            f"Pre-condition failed: {s_key} not in waiting_for_children index. "
+            f"Got members: {member_strs}"
+        )
+
+        # Exit via finalize_session.
+        finalize_session(
+            s,
+            "killed",
+            reason="test #1361",
+            skip_auto_tag=True,
+            skip_checkpoint=True,
+            skip_parent=True,
+        )
+
+        # Assertion: index is clean.
+        members = POPOTO_REDIS_DB.smembers("$IndexF:AgentSession:status:waiting_for_children")
+        member_strs = {m.decode() if isinstance(m, bytes) else m for m in members}
+        assert s_key not in member_strs, (
+            f"Stale member: {s_key} should NOT be in waiting_for_children index "
+            f"after finalize_session(s, 'killed'). Got: {member_strs}"
+        )
+
+    def test_transition_to_completed_clears_waiting_for_children_index(self):
+        """transition_status to a non-finalize path also clears the index member."""
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import transition_status
+
+        s = AgentSession(
+            session_id="wfc-transition-1361",
+            project_key="test-1361",
+            status="pending",
+        )
+        s.save()
+        transition_status(s, "waiting_for_children")
+        s_key = s._redis_key
+
+        # Move out of waiting_for_children to running (a non-terminal,
+        # non-finalize transition path).
+        transition_status(s, "running")
+
+        members = POPOTO_REDIS_DB.smembers("$IndexF:AgentSession:status:waiting_for_children")
+        member_strs = {m.decode() if isinstance(m, bytes) else m for m in members}
+        assert s_key not in member_strs, (
+            f"Stale member: {s_key} should NOT be in waiting_for_children index "
+            f"after transition_status(s, 'running'). Got: {member_strs}"
+        )
+
+    @pytest.mark.parametrize(
+        "terminal_status",
+        ["completed", "failed", "killed", "abandoned", "cancelled"],
+    )
+    def test_finalize_from_waiting_for_children_to_each_terminal(self, terminal_status):
+        """Every terminal exit from waiting_for_children clears the index."""
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import finalize_session, transition_status
+
+        s = AgentSession(
+            session_id=f"wfc-{terminal_status}-1361",
+            project_key="test-1361",
+            status="pending",
+        )
+        s.save()
+        transition_status(s, "waiting_for_children")
+        s_key = s._redis_key
+
+        finalize_session(
+            s,
+            terminal_status,
+            reason=f"test #1361 {terminal_status}",
+            skip_auto_tag=True,
+            skip_checkpoint=True,
+            skip_parent=True,
+        )
+
+        members = POPOTO_REDIS_DB.smembers("$IndexF:AgentSession:status:waiting_for_children")
+        member_strs = {m.decode() if isinstance(m, bytes) else m for m in members}
+        assert s_key not in member_strs, (
+            f"Stale waiting_for_children member after finalize to {terminal_status}: {member_strs}"
+        )
