@@ -94,7 +94,7 @@ future re-introduction of a local copy fails CI immediately.
 
 ## Architectural Impact
 
-- **New dependencies**: None at the package level. `bridge/context.py` already uses other helpers from `bridge/response.py` is currently false — context.py imports `bridge.response.set_reaction` is also false. After this change `bridge/context.py` will import `filter_tool_logs` from `bridge.response`. This creates a new module-level dependency `bridge.context → bridge.response` for one symbol.
+- **New dependencies**: None at the package level. `bridge/context.py` does not currently import from `bridge.response` (verified via grep). After this change, `bridge/context.py` will import `filter_tool_logs` from `bridge.response`, creating a new module-level dependency `bridge.context → bridge.response` for that one symbol.
 - **Interface changes**: None. The function name, signature, and module-public access on `bridge.context` (`bridge.context.filter_tool_logs`) all remain unchanged via the re-export. External callers that already import `from bridge.context import filter_tool_logs` (none in the current tree, verified) would continue to work.
 - **Coupling**: Increases coupling between `bridge.context` and `bridge.response` by one symbol. Both modules already coexist in the `bridge/` package and are co-imported by `bridge/telegram_bridge.py` (`bridge/telegram_bridge.py:95` and `:124`). The directional dependency is: response.py → (no bridge deps for filter logic) ← context.py reuses. No cycle risk.
 - **Data ownership**: Unchanged. `bridge.response` remains the owner of the tool-log filtering logic.
@@ -177,7 +177,7 @@ No prerequisites — this work has no external dependencies. All affected files 
 
 ### Risk 3: Future reintroduction of a local `filter_tool_logs` in `bridge/context.py`
 **Impact:** Restores the original bug.
-**Mitigation:** The identity-assertion unit test (`bridge.context.filter_tool_logs is bridge.response.filter_tool_logs`) fails the moment a local `def filter_tool_logs` shadows the import. Any duplicate triggers a CI failure on the very PR that introduces it.
+**Mitigation:** The identity-assertion unit test (`bridge.context.filter_tool_logs is bridge.response.filter_tool_logs`) fails the moment a direct local `def filter_tool_logs` shadows the import. Note this guard catches the exact pattern that produced this bug (local `def` redefinition) but does not catch all possible re-divergences — e.g. a third-module copy at `bridge/foo.py:filter_tool_logs` would not trigger it. Treated as "good-enough regression protection for the observed failure mode," not absolute coverage.
 
 ## Race Conditions
 
@@ -198,7 +198,7 @@ No agent integration required — this is a bridge-internal change. `filter_tool
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/bridge-response-improvements.md` — add a one-line cross-reference noting that `bridge/context.py` reuses `filter_tool_logs` from `bridge/response.py` for reply-chain hydration. Append near the existing `filter_tool_logs` reference at line 31 of that file.
+- [ ] Update `docs/features/bridge-response-improvements.md` line 31 — fix the stale `**Location**: bridge/telegram_bridge.py:filter_tool_logs()` reference (function actually lives in `bridge/response.py`) and add a one-line cross-reference noting that `bridge/context.py` reuses `filter_tool_logs` from `bridge/response.py` for reply-chain hydration.
 
 ### External Documentation Site
 - No external documentation site involved — this repo uses `docs/` markdown directly, no Sphinx/MkDocs build step in scope.
@@ -252,7 +252,7 @@ Single builder + validator pair. The work is small enough that one builder can c
   1. `test_filter_tool_logs_is_response_canonical`: imports `bridge.context` and `bridge.response`, asserts `bridge.context.filter_tool_logs is bridge.response.filter_tool_logs`.
   2. `test_format_reply_chain_drops_variation_selector_and_backtick_echo`: builds a chain whose Valor message contains `🛠️ exec: ls` (with U+FE0F variation selector), `📖 read: file.py`, and a backtick-shell-echo line; calls `format_reply_chain`; asserts none of those filter targets remain in the output.
   3. `test_format_reply_chain_omits_messages_below_length_floor`: builds a chain whose Valor message would filter to `< 5` chars; calls `format_reply_chain`; asserts the message is omitted from the output (the existing `if not content: continue` at lines 486-487 handles this once `filter_tool_logs` returns `""` per the canonical floor).
-- Update `docs/features/bridge-response-improvements.md` near the existing `filter_tool_logs` reference (around line 31) with a one-line cross-reference: `bridge/context.py` re-exports `filter_tool_logs` from `bridge/response.py` for reply-chain hydration; this is the single source of truth.
+- Update `docs/features/bridge-response-improvements.md` line 31 — the existing `**Location**: bridge/telegram_bridge.py:filter_tool_logs()` reference is stale (the function lives in `bridge/response.py`, not `telegram_bridge.py`). Replace it with two lines: (1) corrected canonical location `**Location**: bridge/response.py:filter_tool_logs()`, and (2) cross-reference: `bridge/context.py` re-exports `filter_tool_logs` from `bridge/response.py` for reply-chain hydration; this is the single source of truth.
 
 ### 2. Validate consolidation
 - **Task ID**: validate-consolidate-filter-tool-logs
@@ -290,10 +290,14 @@ Single builder + validator pair. The work is small enough that one builder can c
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique. Leave empty until critique is run. -->
+Verdict: READY TO BUILD (with concerns) — recorded `sha256:86f16bf9...`.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| Concern | Skeptic | Corrupted sentence in Architectural Impact line 97 (two clauses spliced, self-contradictory). | Plan revision | Replaced with a single declarative sentence about the new `bridge.context → bridge.response` dependency. |
+| Concern | Archaeologist | `docs/features/bridge-response-improvements.md` line 31 says the function lives in `bridge/telegram_bridge.py`; it actually lives in `bridge/response.py`. | Plan revision + builder | Step 1 now instructs the builder to fix the stale Location reference and append the cross-reference in the same edit. |
+| Concern | Operator | Original Open Question 1 left the test file undecided while validator/Verification commands hard-coded `tests/unit/test_context_module.py`. | Resolved Decisions section | Q1 resolved to extend `tests/unit/test_context_helpers.py`; all validator commands and Verification table updated to match. |
+| Concern | Adversary | Risk 3 framed `is`-check as "permanent regression protection" — overclaim. | Plan revision | Risk 3 now scopes the guard to "the exact pattern that produced this bug" and notes it doesn't catch all re-divergences. |
 
 ---
 
