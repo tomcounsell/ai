@@ -221,7 +221,7 @@ SDK_PROGRESS_FRESHNESS_WINDOW = int(os.environ.get("SDK_PROGRESS_FRESHNESS_WINDO
 # Max consecutive Tier 2 reprieves allowed for sessions that have NEVER produced
 # any SDK output (sdk_ever_output=False). After this many reprieves the "alive"
 # gate is suppressed and recovery proceeds. Derived from the SDK progress window
-# divided by the heartbeat write interval: 1800 // 90 = 20 ticks (~30 minutes).
+# divided by the heartbeat freshness window: 1800 // 90 = 20 ticks (~30 minutes).
 # Sessions that have produced output (sdk_ever_output=True) are never subject to
 # this cap — their recovery depends solely on per-turn freshness in sub-check A.
 MAX_NO_OUTPUT_REPRIEVES = SDK_PROGRESS_FRESHNESS_WINDOW // HEARTBEAT_FRESHNESS_WINDOW  # 20
@@ -229,22 +229,35 @@ MAX_NO_OUTPUT_REPRIEVES = SDK_PROGRESS_FRESHNESS_WINDOW // HEARTBEAT_FRESHNESS_W
 # ``last_heartbeat_at`` alone is sufficient evidence of progress in
 # ``_has_progress`` sub-check B (issue #1356).
 #
-# Sessions in their startup window — before the SDK has emitted its first
-# tool or turn event — pass Tier 1 on the heartbeat alone. The default value
-# ``HEARTBEAT_FRESHNESS_WINDOW`` (90s) is the tightest grace that still
-# guarantees the very first health-check tick after ``started_at`` is set
-# does not false-kill the session.
-#
-# Beyond this grace, sub-check B applies a no-output running-time budget
-# computed inline as ``MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL``
-# (= 20 * 60 = 1200s = 20 min). Once that budget is exhausted and
-# ``sdk_ever_output`` is still False, sub-check B falls through and Tier 1
-# declines so the existing Tier-2 reprieve cap can escalate to recovery.
+# Aliased to ``AGENT_SESSION_HEALTH_MIN_RUNNING`` (300s). The
+# ``_has_progress(entry)`` function is only called by the no_progress path
+# when ``running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING`` (see the
+# health-check loop's race-condition guard), so a tighter grace window
+# (e.g. 90s) would be unreachable. Choosing 300s makes the gate meaningful
+# from the very first tick where the gate could possibly fire.
 #
 # Env-tunable via ``STARTUP_GRACE_SECONDS`` for parity with other tunables
-# in this file. Operators raising the budget must keep
-# ``STARTUP_GRACE_SECONDS < MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL``.
-STARTUP_GRACE_SECONDS = int(os.environ.get("STARTUP_GRACE_SECONDS", HEARTBEAT_FRESHNESS_WINDOW))
+# in this file. Operators raising the grace must keep
+# ``STARTUP_GRACE_SECONDS < NO_OUTPUT_BUDGET_SECONDS`` so the in-band region
+# is non-empty.
+STARTUP_GRACE_SECONDS = int(
+    os.environ.get("STARTUP_GRACE_SECONDS", AGENT_SESSION_HEALTH_MIN_RUNNING)
+)
+# No-output running-time budget (seconds) for sub-check B (issue #1356).
+#
+# Defined as ``MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW``
+# (= 20 * 90 = 1800s = 30 min). Mirrors how ``MAX_NO_OUTPUT_REPRIEVES`` is
+# derived from ``SDK_PROGRESS_FRESHNESS_WINDOW // HEARTBEAT_FRESHNESS_WINDOW``,
+# keeping the relationship symmetric.
+#
+# When ``sdk_ever_output`` is False AND ``running_seconds > NO_OUTPUT_BUDGET_SECONDS``,
+# sub-check B's fresh-heartbeat fast-path is denied and the function falls
+# through to the own-progress fields. Combined with Tier-2's existing reprieve
+# cap (also gated on ``MAX_NO_OUTPUT_REPRIEVES``), this guarantees a session
+# that never emits a first turn is recovered within ~30 minutes.
+#
+# Not env-tunable directly because the underlying constants are.
+NO_OUTPUT_BUDGET_SECONDS = MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW  # 1800
 
 # === Per-tool timeout sub-loop constants (issue #1270) ===
 # A session whose ``current_tool_name`` is non-null and whose
@@ -662,25 +675,34 @@ def _has_progress(entry: AgentSession) -> bool:
     than ``HEARTBEAT_FRESHNESS_WINDOW`` (90s) ⇒ progress, **subject to the
     no-output running-time budget gate added by issue #1356**.
 
-    The gate reads ``entry.started_at`` and computes ``running_seconds``:
+    The gate reads ``started_ref = entry.started_at or entry.created_at`` and
+    computes ``running_seconds``:
 
-    - ``started_at is None`` (legacy sessions predating the field) — the
-      fresh-heartbeat fast-path is preserved.
-    - ``running_seconds < STARTUP_GRACE_SECONDS`` (90s) — the fast-path is
-      preserved so the very first health-check tick after session start passes
-      Tier 1 on the heartbeat alone.
-    - ``STARTUP_GRACE_SECONDS <= running_seconds <= no_output_budget`` (where
-      ``no_output_budget = MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL``
-      = 1200s = 20 min) — fresh heartbeat still passes (preserves backward
-      compatibility for sessions in their normal startup-to-first-turn window).
-    - ``running_seconds > no_output_budget`` AND ``sdk_ever_output is False``
-      — sub-check B does NOT return True; it falls through to the own-progress
-      fields. The Redis counter
+    - Both ``started_at`` and ``created_at`` are None (truly legacy / phantom
+      record predating the field) — the fresh-heartbeat fast-path is preserved.
+    - ``running_seconds < STARTUP_GRACE_SECONDS`` (300s, aliased to
+      ``AGENT_SESSION_HEALTH_MIN_RUNNING``) — the fast-path is preserved.
+      The caller's race-condition guard already filters sessions whose
+      running time is below this threshold; the explicit re-check defends
+      against clock skew and future reuse paths.
+    - ``STARTUP_GRACE_SECONDS <= running_seconds <= NO_OUTPUT_BUDGET_SECONDS``
+      (where ``NO_OUTPUT_BUDGET_SECONDS = MAX_NO_OUTPUT_REPRIEVES *
+      HEARTBEAT_FRESHNESS_WINDOW`` = 20 * 90 = 1800s = 30 min) — fresh
+      heartbeat still passes (preserves backward compatibility for sessions
+      in their normal startup-to-first-turn window).
+    - ``running_seconds > NO_OUTPUT_BUDGET_SECONDS`` AND
+      ``sdk_ever_output is False`` — sub-check B does NOT return True; it
+      falls through to the own-progress fields. The Redis counter
       ``{project_key}:session-health:tier1_falloff:no_output_budget_exceeded``
       is INCR'd once per fall-through tick. With the per-turn signals also
       absent, ``_has_progress`` returns False and the Tier-2 reprieve cap
       escalates the session to recovery within
       ``MAX_NO_OUTPUT_REPRIEVES`` (20) ticks.
+
+    The ``started_at or created_at`` fallback is load-bearing: the recovery
+    path nulls ``started_at`` when re-queuing a session, so without the
+    fallback a recovered session would silently re-enter the legacy fast-path
+    and re-open the wedge.
 
     This preserves the pre-#1226 behavior for sessions in their normal
     startup window and for sessions predating PR #1177 (whose hooks did not
@@ -739,28 +761,41 @@ def _has_progress(entry: AgentSession) -> bool:
         if isinstance(hb, datetime):
             hb_aware = hb if hb.tzinfo else hb.replace(tzinfo=UTC)
             if (now_utc - hb_aware).total_seconds() < HEARTBEAT_FRESHNESS_WINDOW:
-                # Compute running_seconds from started_at (if present) and apply
-                # the no-output budget gate. The budget is derived inline from
-                # MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL (= 1200s,
-                # 20 min) to keep the relationship to the existing constants
-                # visible at the call site.
+                # Compute running_seconds and apply the no-output budget gate
+                # (NO_OUTPUT_BUDGET_SECONDS = 1800s, 30 min).
+                #
+                # Use ``started_ref = entry.started_at or entry.created_at``.
+                # The recovery path nulls ``started_at`` when re-queuing a
+                # session to pending, so a recovered session would re-enter
+                # sub-check B with ``started_at=None`` and silently take the
+                # legacy fast-path — re-opening the wedge. The
+                # ``started_at or created_at`` fallback mirrors the
+                # established pattern at ``models/agent_session.py``.
                 started_at = getattr(entry, "started_at", None)
-                if not isinstance(started_at, datetime):
-                    # Legacy session: started_at not set → preserve fast-path.
+                created_at = getattr(entry, "created_at", None)
+                started_ref = started_at if isinstance(started_at, datetime) else created_at
+                if not isinstance(started_ref, datetime):
+                    # Truly legacy session (both fields None — pre-dates
+                    # ``created_at`` introduction or phantom record) →
+                    # preserve fast-path.
                     return True
-                started_aware = started_at if started_at.tzinfo else started_at.replace(tzinfo=UTC)
+                started_aware = (
+                    started_ref if started_ref.tzinfo else started_ref.replace(tzinfo=UTC)
+                )
                 running_seconds = (now_utc - started_aware).total_seconds()
-                no_output_budget = MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL
                 if running_seconds < STARTUP_GRACE_SECONDS:
                     # Inside the startup grace window (or clock-skew negative
-                    # running_seconds) → preserve fast-path. The very first
-                    # health-check tick after started_at is set must still pass.
+                    # running_seconds) → preserve fast-path. The
+                    # ``running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING``
+                    # caller-side guard already rules out genuinely fresh
+                    # sessions, but we keep the explicit check for defense in
+                    # depth and to handle clock skew.
                     return True
-                if running_seconds <= no_output_budget:
-                    # In the band between startup grace and the no-output
-                    # budget → fresh heartbeat still passes. Preserves the
-                    # normal startup-to-first-turn window for slow auth /
-                    # large initial prompt digestion.
+                if running_seconds <= NO_OUTPUT_BUDGET_SECONDS:
+                    # In the band between startup grace (300s) and the
+                    # no-output budget (1800s) → fresh heartbeat still passes.
+                    # Preserves the normal startup-to-first-turn window for
+                    # slow auth / large initial prompt digestion.
                     return True
                 # Budget exceeded AND sdk_ever_output is False — DO NOT return
                 # True from sub-check B. INCR the telemetry counter exactly

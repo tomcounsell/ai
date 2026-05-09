@@ -391,9 +391,9 @@ class TestStdoutStaleRetired:
     def test_fresh_heartbeats_no_stdout_young_started_at_returns_true(self):
         """Fresh heartbeats + young session: warmup tolerance preserved.
 
-        ``started_at=_ago(120)`` is intentionally inside the in-band region
-        (``STARTUP_GRACE_SECONDS`` < 120 < no-output budget = 1200s) so the
-        no-output budget gate added in #1356 does not fire.
+        ``started_at=_ago(120)`` is intentionally inside the
+        ``STARTUP_GRACE_SECONDS`` (300s) window so the no-output budget gate
+        added in #1356 does not fire — fresh heartbeat alone passes.
         """
         from agent.agent_session_queue import _has_progress
 
@@ -405,16 +405,20 @@ class TestSubCheckBNoOutputBudget:
     """Tests for the no-output running-time budget gate in sub-check B (#1356).
 
     Sub-check B (the legacy fresh-heartbeat fast-path) is now bounded by a
-    running-time budget computed from existing constants:
-    ``MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL`` (= 20 * 60 = 1200s,
-    20 min). A fresh ``last_heartbeat_at`` alone passes Tier 1 only while
-    ``running_seconds < STARTUP_GRACE_SECONDS`` (90s) OR
-    ``STARTUP_GRACE_SECONDS <= running_seconds <= no_output_budget``.
+    no-output budget defined as ``MAX_NO_OUTPUT_REPRIEVES *
+    HEARTBEAT_FRESHNESS_WINDOW`` (= 20 * 90 = 1800s = 30 min). A fresh
+    ``last_heartbeat_at`` alone passes Tier 1 only while
+    ``running_seconds < STARTUP_GRACE_SECONDS`` (300s) OR
+    ``STARTUP_GRACE_SECONDS <= running_seconds <= NO_OUTPUT_BUDGET_SECONDS``.
 
     Beyond the budget, when ``sdk_ever_output`` is False, sub-check B falls
     through to the own-progress fields. With no per-turn signals and no
     own-progress fields set, ``_has_progress`` returns False and the
     existing Tier-2 reprieve cap escalates the session to recovery.
+
+    The function uses ``started_ref = entry.started_at or entry.created_at``
+    so that recovered sessions (whose ``started_at`` is nulled by the
+    recovery path) cannot silently re-enter the legacy fast-path.
 
     The 11h-wedge pattern from PM session
     ``90c4117dbf06431c86ee4807d7a18bcd`` (issue #1246) is reproduced here.
@@ -431,6 +435,7 @@ class TestSubCheckBNoOutputBudget:
             "last_tool_use_at": None,
             "last_turn_at": None,
             "started_at": None,
+            "created_at": None,
             "project_key": "test-no-output-budget",
         }
         defaults.update(overrides)
@@ -438,39 +443,46 @@ class TestSubCheckBNoOutputBudget:
         entry.get_children = lambda: []
         return entry
 
-    def test_legacy_started_at_none_preserves_fast_path(self):
-        """started_at=None (legacy session) → fresh heartbeat alone passes Tier 1."""
+    def test_legacy_started_at_and_created_at_none_preserves_fast_path(self):
+        """Both started_at and created_at None (truly legacy) → fast-path."""
         from agent.agent_session_queue import _has_progress
 
-        entry = self._make_entry(started_at=None)
+        entry = self._make_entry(started_at=None, created_at=None)
         assert _has_progress(entry) is True
 
     def test_running_30s_in_startup_grace_returns_true(self):
-        """running_seconds=30 (< STARTUP_GRACE_SECONDS=90) → True."""
+        """running_seconds=30 (well inside STARTUP_GRACE_SECONDS=300) → True."""
         from agent.agent_session_queue import _has_progress
 
         entry = self._make_entry(started_at=_ago(30))
         assert _has_progress(entry) is True
 
-    def test_running_89s_just_inside_grace_returns_true(self):
-        """running_seconds=89 (just inside STARTUP_GRACE_SECONDS=90) → True."""
+    def test_running_299s_just_inside_grace_returns_true(self):
+        """running_seconds=299 (just inside STARTUP_GRACE_SECONDS=300) → True."""
         from agent.agent_session_queue import _has_progress
 
-        entry = self._make_entry(started_at=_ago(89))
+        entry = self._make_entry(started_at=_ago(299))
         assert _has_progress(entry) is True
 
-    def test_running_300s_in_band_returns_true(self):
-        """running_seconds=300s (between grace and budget) → True (in-band, no kill)."""
+    def test_running_600s_in_band_returns_true(self):
+        """running_seconds=600s (between grace and budget) → True (in-band)."""
         from agent.agent_session_queue import _has_progress
 
-        entry = self._make_entry(started_at=_ago(300))
+        entry = self._make_entry(started_at=_ago(600))
+        assert _has_progress(entry) is True
+
+    def test_running_1500s_late_in_band_returns_true(self):
+        """running_seconds=1500s (~10 min before budget cutoff) → True."""
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(started_at=_ago(1500))
         assert _has_progress(entry) is True
 
     def test_running_just_over_budget_returns_false(self):
-        """running_seconds=1201s (1s over budget) + sdk_ever_output=False → False."""
+        """running_seconds=1801s (1s over NO_OUTPUT_BUDGET_SECONDS=1800) → False."""
         from agent.agent_session_queue import _has_progress
 
-        entry = self._make_entry(started_at=_ago(1201))
+        entry = self._make_entry(started_at=_ago(1801))
         assert _has_progress(entry) is False
 
     def test_running_4h_no_output_returns_false(self):
@@ -480,7 +492,7 @@ class TestSubCheckBNoOutputBudget:
         entry = self._make_entry(started_at=_ago(4 * 3600))
         assert _has_progress(entry) is False
 
-    def test_running_4h_with_output_falls_through_to_subcheck_a(self):
+    def test_running_4h_with_stale_output_falls_through_to_subcheck_a(self):
         """4h running + stale per-turn signal (sdk_ever_output=True) → False from sub-check A.
 
         Once sdk_ever_output is True, sub-check B is skipped entirely (the
@@ -513,9 +525,21 @@ class TestSubCheckBNoOutputBudget:
         from agent.agent_session_queue import _has_progress
 
         # Naive (no tzinfo) datetime 4h in the past. Mirrors the coercion
-        # pattern used for last_heartbeat_at on lines 690-691 of the source.
+        # pattern used for last_heartbeat_at in the source.
         naive = (datetime.now(tz=UTC) - timedelta(hours=4)).replace(tzinfo=None)
         entry = self._make_entry(started_at=naive)
+        assert _has_progress(entry) is False
+
+    def test_started_at_none_uses_created_at_fallback(self):
+        """started_at=None + created_at=4h ago → False (started_ref fallback fires).
+
+        Recovered sessions have started_at nulled by the recovery path. The
+        ``started_ref = started_at or created_at`` fallback ensures sub-check B
+        does not silently re-enter the legacy fast-path on those records.
+        """
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(started_at=None, created_at=_ago(4 * 3600))
         assert _has_progress(entry) is False
 
     def test_telemetry_counter_incremented_once_on_budget_exceeded(self, monkeypatch):
@@ -537,7 +561,7 @@ class TestSubCheckBNoOutputBudget:
         from agent.agent_session_queue import _has_progress
 
         entry = self._make_entry(
-            started_at=_ago(2 * 3600),  # 2h running, well past the 20-min budget
+            started_at=_ago(2 * 3600),  # 2h running, well past the 30-min budget
             project_key="proj-counter-test",
         )
         assert _has_progress(entry) is False

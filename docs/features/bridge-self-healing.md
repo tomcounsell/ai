@@ -533,14 +533,17 @@ subprocess exists.
 
 When `sdk_ever_output` is False (neither per-turn field has ever been set),
 `last_heartbeat_at` fresh within `HEARTBEAT_FRESHNESS_WINDOW` (90s) counts
-as progress, **subject to the no-output running-time budget gate**:
+as progress, **subject to the no-output running-time budget gate**. The
+function uses `started_ref = entry.started_at or entry.created_at` so that
+recovered sessions (whose `started_at` is nulled by the recovery path)
+cannot silently re-enter the legacy fast-path:
 
-| `started_at` state | Verdict |
+| `started_ref` state | Verdict |
 |---|---|
-| `None` (legacy session) | fresh heartbeat passes |
-| `running_seconds < STARTUP_GRACE_SECONDS` (90s, env-tunable) | fresh heartbeat passes |
-| `STARTUP_GRACE_SECONDS <= running_seconds <= MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL` (= 1200s, 20 min) | fresh heartbeat passes (in-band) |
-| `running_seconds > 1200s` AND `sdk_ever_output is False` | **fall through** — INCRs `tier1_falloff:no_output_budget_exceeded`, sub-check B does NOT pass; combined with absent per-turn signals and own-progress fields, `_has_progress` returns False; Tier 2 reprieve cap then escalates to recovery within `MAX_NO_OUTPUT_REPRIEVES` ticks |
+| both `started_at` and `created_at` are None (truly legacy / phantom record) | fresh heartbeat passes |
+| `running_seconds < STARTUP_GRACE_SECONDS` (300s, aliased to `AGENT_SESSION_HEALTH_MIN_RUNNING`, env-tunable) | fresh heartbeat passes |
+| `STARTUP_GRACE_SECONDS <= running_seconds <= NO_OUTPUT_BUDGET_SECONDS` (= `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW` = 1800s, 30 min) | fresh heartbeat passes (in-band) |
+| `running_seconds > 1800s` AND `sdk_ever_output is False` | **fall through** — INCRs `tier1_falloff:no_output_budget_exceeded`, sub-check B does NOT pass; combined with absent per-turn signals and own-progress fields, `_has_progress` returns False; Tier 2 reprieve cap then escalates to recovery within `MAX_NO_OUTPUT_REPRIEVES` ticks |
 
 This bounds the previously-unbounded fresh-heartbeat fast-path that allowed
 cwd-disappearance and similar wedges (parent investigation #1246) to hold
@@ -572,8 +575,9 @@ session with any non-terminal child is not stuck).
 | Constant | Default | Env var | Purpose |
 |----------|---------|---------|---------|
 | `SDK_PROGRESS_FRESHNESS_WINDOW` | 1800s (30 min) | `SDK_PROGRESS_FRESHNESS_WINDOW_SECS` | Sub-check A freshness window for `last_tool_use_at` / `last_turn_at` (issue #1226) |
-| `MAX_NO_OUTPUT_REPRIEVES` | 20 | — (derived) | Tier-2 reprieve cap for `sdk_ever_output=False` sessions; also feeds the sub-check B no-output budget (`MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_WRITE_INTERVAL` = 1200s, issues #1226 / #1356) |
-| `STARTUP_GRACE_SECONDS` | 90s (= `HEARTBEAT_FRESHNESS_WINDOW`) | `STARTUP_GRACE_SECONDS` | Below this `running_seconds`, sub-check B's fresh-heartbeat fast-path is unconditional (issue #1356) |
+| `MAX_NO_OUTPUT_REPRIEVES` | 20 | — (derived) | Tier-2 reprieve cap for `sdk_ever_output=False` sessions; also feeds `NO_OUTPUT_BUDGET_SECONDS` (issues #1226 / #1356) |
+| `NO_OUTPUT_BUDGET_SECONDS` | 1800s (30 min) | — (derived) | `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW`. Sub-check B falls through when `running_seconds` exceeds this (issue #1356) |
+| `STARTUP_GRACE_SECONDS` | 300s (= `AGENT_SESSION_HEALTH_MIN_RUNNING`) | `STARTUP_GRACE_SECONDS` | Below this `running_seconds`, sub-check B's fresh-heartbeat fast-path is unconditional (issue #1356) |
 | `COMPACT_REPRIEVE_WINDOW_SEC` | 600s | `COMPACT_REPRIEVE_WINDOW_SECS` | Tier 2 `compacting` reprieve window — `last_compaction_ts` within this window reprieves the kill (issue #1099 Mode 3) |
 
 **Operator alert:** After 3 Tier 2 reprieves, the reprieve log message is
