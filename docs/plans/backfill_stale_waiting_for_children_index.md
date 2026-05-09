@@ -12,7 +12,7 @@ last_comment_id:
 
 ## Problem
 
-The `$IdxF:AgentSession:status:waiting_for_children` Popoto index can contain members whose underlying `AgentSession` hash exists but whose actual `status` field is something else (e.g., `killed`, `completed`). These are not phantoms — `repair_indexes()`'s phantom detector (`hgetall(member)` returns empty) does not see them.
+The `$IndexF:AgentSession:status:waiting_for_children` Popoto index can contain members whose underlying `AgentSession` hash exists but whose actual `status` field is something else (e.g., `killed`, `completed`). These are not phantoms — `repair_indexes()`'s phantom detector (`hgetall(member)` returns empty) does not see them.
 
 The hourly `agent-session-cleanup` reflection (`agent/session_health.py:1924`) only invokes `repair_indexes()` when **either** corrupt records were deleted **or** phantoms were observed (`agent/session_health.py:2027`). Genuine pre-`615eab9c` stale members never trip that gate, so they persist indefinitely.
 
@@ -118,7 +118,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/backfill_stale
 - **Per-status pre-scan helper** (`agent/session_health.py`): Iterates `$IndexF:AgentSession:status:*` keys, returns `dict[str, int]` of per-status stale counts (members whose hash's `status` field disagrees with the index key segment). Treats missing-hash members as "not counted here" (phantoms are `repair_indexes()`'s job).
 - **Gate removal** (`agent/session_health.py:2027`): Replace `if cleaned > 0 or phantoms_filtered > 0:` with unconditional invocation. Logging stays inside `try/except` so a `repair_indexes()` failure cannot abort the cleanup function.
 - **Metric emission** (`agent/session_health.py`): Wraps `record_metric()` in a fire-and-forget `try/except` consistent with existing analytics call sites.
-- **Test gap closure** (`tests/unit/test_agent_session_index_corruption.py`): New test class `TestWaitingForChildrenExitTransition` using a real Popoto-backed `AgentSession` (the file already imports the real Redis fixture). Asserts that after `transition_status(s, "waiting_for_children")` then `finalize_session(s, "killed")`, the `$IdxF:AgentSession:status:waiting_for_children` set does NOT contain `s.db_key.redis_key`.
+- **Test gap closure** (`tests/unit/test_agent_session_index_corruption.py`): New test class `TestWaitingForChildrenExitTransition` using a real Popoto-backed `AgentSession` (the file already imports the real Redis fixture). Asserts that after `transition_status(s, "waiting_for_children")` then `finalize_session(s, "killed")`, the `$IndexF:AgentSession:status:waiting_for_children` set does NOT contain `s.db_key.redis_key`.
 
 ### Flow
 
@@ -245,7 +245,7 @@ No agent integration required — this is a worker/reflection-internal change. T
 - [ ] Per-status stale-member counts logged at INFO when any drift is observed, DEBUG when zero.
 - [ ] Metric `agent_session.indexed_field.stale_members` emitted with `dimensions={"status": <status>}` for every stale member found.
 - [ ] New test `TestWaitingForChildrenExitTransition` in `tests/unit/test_agent_session_index_corruption.py` passes against real Popoto-backed `AgentSession`.
-- [ ] After `transition_status(s, "waiting_for_children")` followed by `finalize_session(s, "killed")`, `POPOTO_REDIS_DB.smembers("$IdxF:AgentSession:status:waiting_for_children")` does NOT contain `s.db_key.redis_key`.
+- [ ] After `transition_status(s, "waiting_for_children")` followed by `finalize_session(s, "killed")`, `POPOTO_REDIS_DB.smembers("$IndexF:AgentSession:status:waiting_for_children")` does NOT contain `s.db_key.redis_key`.
 - [ ] New file `tests/unit/test_session_health_unconditional_index_repair.py` exists with three tests (no-corruption, metric emission, metric failure resilience).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -311,7 +311,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Agent Type**: test-engineer
 - **Parallel**: true
 - Add a new test class `TestWaitingForChildrenExitTransition` to `tests/unit/test_agent_session_index_corruption.py`. Use a real Popoto-backed `AgentSession` (NOT `MagicMock` — the existing helpers `_make_lazy_session` / `_make_fully_loaded_session` are mock-based; the new tests must construct real sessions and use the real-Redis fixture pattern from another test file in this repo if needed).
-- Test 1 (`test_finalize_session_clears_waiting_for_children_index`): create a real session, call `transition_status(s, "waiting_for_children")`, call `finalize_session(s, "killed", skip_auto_tag=True, skip_checkpoint=True)`, assert `POPOTO_REDIS_DB.smembers("$IdxF:AgentSession:status:waiting_for_children")` does NOT contain `s.db_key.redis_key`.
+- Test 1 (`test_finalize_session_clears_waiting_for_children_index`): create a real session, call `transition_status(s, "waiting_for_children")`, call `finalize_session(s, "killed", skip_auto_tag=True, skip_checkpoint=True)`, assert `POPOTO_REDIS_DB.smembers("$IndexF:AgentSession:status:waiting_for_children")` does NOT contain `s.db_key.redis_key`.
 - Test 2 (`test_transition_to_completed_clears_waiting_for_children_index`): same as Test 1 but use `transition_status(s, "completed")` for the second step instead of `finalize_session(...)`.
 - Test 3: extend the parameterized terminal-status test at line 244 of the existing file (if present) to include `"waiting_for_children"` as a source status. If the test does not parameterize source status, add a new parameterized test that covers source = `"waiting_for_children"`, target ∈ `{"completed", "failed", "killed", "abandoned", "cancelled"}`.
 
@@ -324,7 +324,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Parallel**: true
 - Create `tests/unit/test_session_health_unconditional_index_repair.py`.
 - Test 1 (`test_repair_indexes_called_when_no_corruption`): empty Redis (no corrupt records, no phantoms); patch `AgentSession.repair_indexes` to a Mock; call `cleanup_corrupted_agent_sessions()`; assert the patched method was called exactly once.
-- Test 2 (`test_per_status_metric_emitted_for_stale_members`): pre-seed `POPOTO_REDIS_DB.sadd("$IdxF:AgentSession:status:waiting_for_children", <real-session-key-with-status="killed">)`. Patch `analytics.collector.record_metric` to a Mock. Call `cleanup_corrupted_agent_sessions()`. Assert `record_metric.call_args_list` contains a call with `("agent_session.indexed_field.stale_members", 1, {"status": "waiting_for_children"})`.
+- Test 2 (`test_per_status_metric_emitted_for_stale_members`): pre-seed `POPOTO_REDIS_DB.sadd("$IndexF:AgentSession:status:waiting_for_children", <real-session-key-with-status="killed">)`. Patch `analytics.collector.record_metric` to a Mock. Call `cleanup_corrupted_agent_sessions()`. Assert `record_metric.call_args_list` contains a call with `("agent_session.indexed_field.stale_members", 1, {"status": "waiting_for_children"})`.
 - Test 3 (`test_metric_emission_failure_does_not_abort_cleanup`): patch `record_metric` to raise `RuntimeError`; assert `cleanup_corrupted_agent_sessions()` still returns `{"corrupted": 0, "orphans": 0}` (or whatever the empty-DB shape is) without propagating the exception.
 - Test 4 (`test_pre_scan_failure_logged_but_not_fatal`): patch `POPOTO_REDIS_DB.keys` to raise on the pre-scan call; assert `cleanup_corrupted_agent_sessions()` proceeds, logs WARNING, and still calls `repair_indexes()`.
 
