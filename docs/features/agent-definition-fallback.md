@@ -12,7 +12,9 @@ This happens during deployment windows when code is updated but agent files have
 
 - **Missing file detection**: `_parse_agent_markdown()` checks `path.exists()` before reading. If the file is missing, it logs a warning and returns a fallback dict with a minimal prompt instead of raising.
 - **Session continues**: `get_agent_definitions()` returns a complete dict even when some or all agent files are missing. The agent operates with degraded prompts rather than crashing.
-- **Bridge startup validation**: `validate_agent_files()` is called during bridge initialization to surface missing files early via log warnings, giving operators a chance to fix the issue before users hit it.
+- **Startup validation**: `validate_agent_files()` is called during process initialization to surface missing files early via log warnings, giving operators a chance to fix the issue before users hit it. The check fires from two call sites:
+  - `bridge/telegram_bridge.py::main()` — covers Telegram bridge processes.
+  - `worker/__main__.py::main()` — covers the standalone worker, which is the actual session execution engine. A worker-only deployment (or one where the worker boots before the bridge) still gets the early-warning signal.
 
 ## Fallback Prompt
 
@@ -28,7 +30,9 @@ The agent's description is set to `"Fallback for missing {name}.md"`.
 |------|------|
 | `agent/agent_definitions.py` | Fallback logic in `_parse_agent_markdown()`, `validate_agent_files()` |
 | `bridge/telegram_bridge.py` | Calls `validate_agent_files()` at startup |
+| `worker/__main__.py` | Calls `validate_agent_files()` at startup (mirrors bridge — worker is the session execution engine) |
 | `tests/unit/test_agent_definitions.py` | Unit tests covering normal load, missing files, and validation |
+| `tests/unit/test_worker_startup_validation.py` | Static-import test asserting the worker module wires `validate_agent_files` into `main()` |
 
 ## Related
 

@@ -538,6 +538,17 @@ def main() -> None:
     # Set environment hint that we're running as standalone worker
     os.environ.setdefault("VALOR_WORKER_MODE", "standalone")
 
+    # Validate agent definition files exist on disk. Missing files are not
+    # fatal — the SDK falls back gracefully — but we surface warnings early
+    # so operators can fix them before users hit degraded prompts. The
+    # worker is the actual session execution engine (per CLAUDE.md), so this
+    # check must fire here in addition to the bridge startup hook.
+    from agent.agent_definitions import validate_agent_files
+
+    missing_agent_files = validate_agent_files()
+    for missing_path in missing_agent_files:
+        logger.warning("Missing agent definition file: %s", missing_path)
+
     projects = _load_projects(args.project)
 
     if not projects:
