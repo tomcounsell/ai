@@ -122,9 +122,10 @@ No prerequisites — this work has no external dependencies. All affected files 
 
 - **`bridge/response.py`**: Unchanged. Remains canonical owner of `filter_tool_logs`.
 - **`bridge/context.py`**: Loses its local `def filter_tool_logs` (lines 104-148) and the surrounding section header. Gains `from bridge.response import filter_tool_logs` near the existing top-of-file imports. Both internal call sites (`build_conversation_history` line 375, `format_reply_chain` line 485) keep their bare-name `filter_tool_logs(...)` call — the import resolves the same symbol they used before.
-- **New unit test** `tests/unit/test_context_module.py::test_filter_tool_logs_is_response_canonical`: asserts `bridge.context.filter_tool_logs is bridge.response.filter_tool_logs`. This is a single-line identity check that fails immediately if anyone re-introduces a local copy.
-- **New integration test** in `tests/integration/test_reply_delivery.py`: invokes `format_reply_chain` against a chain whose Valor message contains `🛠️ exec: ls` (with the U+FE0F variation selector) and a `📖 read:` line, asserts the formatted output contains neither emoji-prefixed line.
-- **New unit test** in `tests/unit/test_context_module.py` (or alongside the parity test): builds a chain whose Valor message would filter down to `< 5` chars after `filter_tool_logs`, asserts that message is omitted entirely from `format_reply_chain` output (because the canonical version returns `""` on the floor, and lines 486-487 already `continue` on empty content).
+- **New unit test class** `tests/unit/test_context_helpers.py::TestFilterToolLogsParity` containing three tests:
+  1. `test_filter_tool_logs_is_response_canonical`: asserts `bridge.context.filter_tool_logs is bridge.response.filter_tool_logs`. Single-line identity check that fails immediately if anyone re-introduces a local copy.
+  2. `test_format_reply_chain_drops_variation_selector_and_backtick_echo`: builds a chain whose Valor message contains `🛠️ exec: ls` (with the U+FE0F variation selector), `📖 read: file.py`, and a backtick-shell-echo line; asserts the formatted output contains none of those three filter targets.
+  3. `test_format_reply_chain_omits_messages_below_length_floor`: builds a chain whose Valor message filters down to `<5` chars after `filter_tool_logs`; asserts the message is omitted entirely from `format_reply_chain` output (because the canonical version returns `""` on the floor, and lines 486-487 already `continue` on empty content).
 
 ### Flow
 
@@ -153,9 +154,9 @@ No prerequisites — this work has no external dependencies. All affected files 
 
 ## Test Impact
 
-- [ ] `tests/integration/test_reply_delivery.py::TestFilterToolLogsFallback` — UPDATE: existing tests already import from `bridge.response` (verified at lines 196, 203, 210, 217, 223). They continue to pass unchanged. Add one new test in this class exercising `format_reply_chain` with a U+FE0F-prefixed tool trace, asserting the output has no `🛠️` or `📖` line.
-- [ ] `tests/unit/test_context_module.py` — REPLACE/CREATE: new file (file does not currently exist). Contains the identity assertion (`bridge.context.filter_tool_logs is bridge.response.filter_tool_logs`) and the length-floor-via-`format_reply_chain` test. If a reviewer prefers, the parity test alone could live in `tests/unit/test_context_helpers.py` (existing file at line 23 already tests context-module helpers); the length-floor test still wants a home alongside it. Builder picks one of: (a) new file `test_context_module.py`, (b) extend `test_context_helpers.py`. Document the choice in PR description.
-- [ ] `tests/e2e/test_message_pipeline.py:241` — UPDATE: this test currently calls `filter_tool_logs(raw)` imported from `bridge.response`. It exercises the canonical version. After consolidation it remains unchanged (still imports from `bridge.response`). No code edit needed; just verify it still passes.
+- [ ] `tests/integration/test_reply_delivery.py::TestFilterToolLogsFallback` — UNCHANGED: existing tests already import from `bridge.response` (verified at lines 196, 203, 210, 217, 223). They continue to pass unchanged. (Per resolved decisions, the variation-selector + backtick-echo test moves into `tests/unit/test_context_helpers.py::TestFilterToolLogsParity` rather than this class, because it asserts behavior through `format_reply_chain` — the live impact path — not through `filter_tool_logs` directly.)
+- [ ] `tests/unit/test_context_helpers.py` — UPDATE: extend with `TestFilterToolLogsParity` class containing three tests (identity assertion, variation-selector + backtick-echo through `format_reply_chain`, length-floor through `format_reply_chain`). The file is already scoped to `bridge/context.py` helpers per its module docstring at lines 1-7.
+- [ ] `tests/e2e/test_message_pipeline.py:241` — UNCHANGED: this test currently calls `filter_tool_logs(raw)` imported from `bridge.response`. It exercises the canonical version. After consolidation it remains unchanged. No code edit needed; just verify it still passes.
 
 ## Rabbit Holes
 
@@ -211,9 +212,8 @@ No agent integration required — this is a bridge-internal change. `filter_tool
 - [ ] `bridge/context.py` imports `filter_tool_logs` from `bridge.response` near the top of the file.
 - [ ] `bridge.context.filter_tool_logs is bridge.response.filter_tool_logs` evaluates `True` at runtime (asserted by unit test).
 - [ ] Both call sites at `bridge/context.py:375` (`build_conversation_history`) and `:485` (`format_reply_chain`) call the imported function unchanged in source — only the binding moves.
-- [ ] New integration test exercises `format_reply_chain` with a chain containing a Valor message with U+FE0F-prefixed tool traces; output contains no `🛠️` or `📖` lines.
-- [ ] New unit test asserts length-floor behavior: a Valor message that filters down to `< 5` chars is omitted entirely from the formatted reply chain.
-- [ ] `pytest tests/unit/test_context_helpers.py tests/unit/test_context_module.py tests/integration/test_reply_delivery.py tests/e2e/test_message_pipeline.py` passes.
+- [ ] `tests/unit/test_context_helpers.py::TestFilterToolLogsParity` contains three tests: identity assertion, variation-selector + backtick-echo through `format_reply_chain`, and length-floor through `format_reply_chain`.
+- [ ] `pytest tests/unit/test_context_helpers.py tests/integration/test_reply_delivery.py tests/e2e/test_message_pipeline.py` passes.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -240,18 +240,18 @@ Single builder + validator pair. The work is small enough that one builder can c
 ### 1. Consolidate filter_tool_logs and add tests
 - **Task ID**: build-consolidate-filter-tool-logs
 - **Depends On**: none
-- **Validates**: `tests/unit/test_context_module.py` (create), `tests/integration/test_reply_delivery.py` (extend), `tests/unit/test_context_helpers.py` (re-run unchanged), `tests/e2e/test_message_pipeline.py` (re-run unchanged)
-- **Informed By**: Issue #1359 file:line targets, Freshness Check (all references re-verified at commit 53a64e7c)
+- **Validates**: `tests/unit/test_context_helpers.py` (extend with `TestFilterToolLogsParity`), `tests/integration/test_reply_delivery.py` (re-run unchanged), `tests/e2e/test_message_pipeline.py` (re-run unchanged)
+- **Informed By**: Issue #1359 file:line targets, Freshness Check (all references re-verified at commit 53a64e7c), Resolved Decisions section
 - **Assigned To**: filter-tool-logs-consolidator
 - **Agent Type**: builder
 - **Parallel**: false
 - Delete the duplicate `def filter_tool_logs(response: str) -> str:` block at `bridge/context.py:104-148` and the surrounding section-header comment at lines 99-102.
 - Add `from bridge.response import filter_tool_logs` near the top of `bridge/context.py`. Place it adjacent to existing `from bridge.` imports if any exist; otherwise add a new top-level import line. Add a one-line comment above it explaining the single-source-of-truth intent.
 - Verify via `grep -rn "def filter_tool_logs" bridge/` that exactly one match remains (the canonical one in `response.py`).
-- Create `tests/unit/test_context_module.py` containing two tests:
+- Extend `tests/unit/test_context_helpers.py` with a new `TestFilterToolLogsParity` class containing three tests:
   1. `test_filter_tool_logs_is_response_canonical`: imports `bridge.context` and `bridge.response`, asserts `bridge.context.filter_tool_logs is bridge.response.filter_tool_logs`.
-  2. `test_format_reply_chain_omits_messages_below_length_floor`: builds a chain whose Valor message would filter to `< 5` chars, calls `format_reply_chain`, asserts the message is omitted from the output (the existing `if not content: continue` at lines 486-487 handles this once `filter_tool_logs` returns `""` per the canonical floor).
-- Add a new test in `tests/integration/test_reply_delivery.py::TestFilterToolLogsFallback` (or a new sibling class) that constructs a reply chain whose Valor message contains a U+FE0F-prefixed `🛠️ exec:` line and a `📖 read:` line, calls `format_reply_chain(chain)`, asserts the result contains neither `🛠️` nor `📖`.
+  2. `test_format_reply_chain_drops_variation_selector_and_backtick_echo`: builds a chain whose Valor message contains `🛠️ exec: ls` (with U+FE0F variation selector), `📖 read: file.py`, and a backtick-shell-echo line; calls `format_reply_chain`; asserts none of those filter targets remain in the output.
+  3. `test_format_reply_chain_omits_messages_below_length_floor`: builds a chain whose Valor message would filter to `< 5` chars; calls `format_reply_chain`; asserts the message is omitted from the output (the existing `if not content: continue` at lines 486-487 handles this once `filter_tool_logs` returns `""` per the canonical floor).
 - Update `docs/features/bridge-response-improvements.md` near the existing `filter_tool_logs` reference (around line 31) with a one-line cross-reference: `bridge/context.py` re-exports `filter_tool_logs` from `bridge/response.py` for reply-chain hydration; this is the single source of truth.
 
 ### 2. Validate consolidation
@@ -262,8 +262,8 @@ Single builder + validator pair. The work is small enough that one builder can c
 - **Parallel**: false
 - Run `grep -rn "def filter_tool_logs" bridge/` — assert output is exactly one line, in `bridge/response.py`.
 - Run `python -c "import bridge.context, bridge.response; assert bridge.context.filter_tool_logs is bridge.response.filter_tool_logs; print('PARITY OK')"` and confirm `PARITY OK` is printed.
-- Run `pytest tests/unit/test_context_module.py tests/unit/test_context_helpers.py tests/integration/test_reply_delivery.py tests/e2e/test_message_pipeline.py -x -q` — assert exit code 0.
-- Run `python -m ruff check bridge/context.py tests/unit/test_context_module.py` and `python -m ruff format --check bridge/context.py tests/unit/test_context_module.py` — assert exit code 0.
+- Run `pytest tests/unit/test_context_helpers.py tests/integration/test_reply_delivery.py tests/e2e/test_message_pipeline.py -x -q` — assert exit code 0.
+- Run `python -m ruff check bridge/context.py tests/unit/test_context_helpers.py` and `python -m ruff format --check bridge/context.py tests/unit/test_context_helpers.py` — assert exit code 0.
 - Confirm `docs/features/bridge-response-improvements.md` contains the new cross-reference line.
 - Report pass/fail with the exact commands run.
 
@@ -283,9 +283,9 @@ Single builder + validator pair. The work is small enough that one builder can c
 |-------|---------|----------|
 | Single definition | `grep -rn "def filter_tool_logs" bridge/` | exit code 0, exactly one match line in output |
 | Symbol identity | `python -c "import bridge.context, bridge.response; assert bridge.context.filter_tool_logs is bridge.response.filter_tool_logs"` | exit code 0 |
-| Targeted tests pass | `pytest tests/unit/test_context_module.py tests/unit/test_context_helpers.py tests/integration/test_reply_delivery.py tests/e2e/test_message_pipeline.py -x -q` | exit code 0 |
-| Lint clean | `python -m ruff check bridge/context.py tests/unit/test_context_module.py` | exit code 0 |
-| Format clean | `python -m ruff format --check bridge/context.py tests/unit/test_context_module.py` | exit code 0 |
+| Targeted tests pass | `pytest tests/unit/test_context_helpers.py tests/integration/test_reply_delivery.py tests/e2e/test_message_pipeline.py -x -q` | exit code 0 |
+| Lint clean | `python -m ruff check bridge/context.py tests/unit/test_context_helpers.py` | exit code 0 |
+| Format clean | `python -m ruff format --check bridge/context.py tests/unit/test_context_helpers.py` | exit code 0 |
 | Docs cross-ref present | `grep -n "context.py" docs/features/bridge-response-improvements.md` | exit code 0, output contains a line referencing the re-export |
 
 ## Critique Results
@@ -297,7 +297,16 @@ Single builder + validator pair. The work is small enough that one builder can c
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Test file placement**: Should the parity assertion live in a new file `tests/unit/test_context_module.py` or be appended to the existing `tests/unit/test_context_helpers.py`? Default in this plan: new file (cleanly separates module-level structural tests from per-helper behavioral tests). Override if you prefer the single-file pattern.
-2. **Length-floor test scope**: Is asserting the floor *through `format_reply_chain`* sufficient (current plan), or do you also want a direct `filter_tool_logs("🛠️ exec: ls\nok") == ""` assertion in `tests/unit/test_context_module.py`? The canonical floor is already exercised in `tests/integration/test_reply_delivery.py::TestFilterToolLogsFallback`, so the plan defaults to no — but a duplicate direct assertion in the new file would make this plan's contribution self-contained.
+1. **Test file placement — extend `tests/unit/test_context_helpers.py`.** Add a `TestFilterToolLogsParity` class to the existing file. Reasoning: `tests/unit/test_context_helpers.py:1-7` is explicitly scoped to `bridge/context.py` — its docstring says "Unit tests for bridge/context.py helper functions". It already groups multiple `bridge.context` concerns (`TestReplyThreadContextHeader`, `TestReferencesPriorContextDeictic`, `TestBuildCompletedResumeText`). Adding a new file for two tests would be an outlier in this codebase. All references to `tests/unit/test_context_module.py` in this plan are superseded by `tests/unit/test_context_helpers.py::TestFilterToolLogsParity`.
+
+2. **Length-floor test scope — through `format_reply_chain` only.** One assertion: build a chain where a Valor message's filtered remainder is `<5` chars; assert it's omitted from the formatted output. Do not add a duplicate direct `filter_tool_logs(...)` length-floor unit test — the existing tests at `tests/integration/test_reply_delivery.py:191-229` and `tests/e2e/test_message_pipeline.py:239-246` cover the function directly; a through-pipeline test adds new coverage. The `< 5` floor is currently UNCOVERED through the pipeline (verified via grep — no length-floor assertions in `tests/`), so this is a genuine gap-closer.
+
+### Net new coverage in this plan
+
+1. **Identity assertion** — `bridge.context.filter_tool_logs is bridge.response.filter_tool_logs` (permanent regression guard).
+2. **Length-floor through `format_reply_chain`** — chain with Valor message that filters to `<5` chars; assert message vanishes from output.
+3. **Variation-selector + backtick-echo through `format_reply_chain`** — chain with Valor message containing `🛠️ exec: ls` (with U+FE0F variation selector), `📖 read: file.py`, and a backtick-shell-echo line; assert all three filter targets are dropped from the formatted output.
+
+All three tests live in `tests/unit/test_context_helpers.py::TestFilterToolLogsParity`.
