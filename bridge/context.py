@@ -8,6 +8,9 @@ from pathlib import Path
 
 from telethon import TelegramClient
 
+# Reuse the canonical tool-log filter from bridge.response (single source of truth).
+# See docs/features/bridge-response-improvements.md and issue #1359.
+from bridge.response import filter_tool_logs
 from tools.link_analysis import (
     extract_urls,
     get_metadata,
@@ -94,58 +97,6 @@ DEICTIC_CONTEXT_PATTERNS = [
     re.compile(r"\bdid\s+we\s+", re.IGNORECASE),
     re.compile(r"\bwhat\s+about\s+(that|the)\b", re.IGNORECASE),
 ]
-
-
-# =============================================================================
-# Tool Log Filtering
-# =============================================================================
-
-
-def filter_tool_logs(response: str) -> str:
-    """
-    Remove tool execution traces from response.
-
-    Agent may include lines like "🛠️ exec: ls -la" in stdout.
-    These are internal logs, not meant for the user.
-
-    Returns:
-        Filtered response, or empty string if only logs remain.
-    """
-    if not response:
-        return ""
-
-    lines = response.split("\n")
-    filtered = []
-
-    # Generic pattern: emoji followed by word and colon (catches most tool logs)
-    generic_tool_pattern = re.compile(
-        r"^[\U0001F300-\U0001F9FF\u2600-\u26FF\u2700-\u27BF]\s*\w+:", re.UNICODE
-    )
-
-    for line in lines:
-        stripped = line.strip()
-
-        # Skip empty lines in sequence (but keep some structure)
-        if not stripped:
-            # Only add blank line if last line wasn't blank
-            if filtered and filtered[-1].strip():
-                filtered.append(line)
-            continue
-
-        # Skip lines that match the generic tool log pattern
-        if generic_tool_pattern.match(stripped):
-            continue
-
-        # If we got here, keep the line
-        filtered.append(line)
-
-    # Remove leading/trailing blank lines
-    while filtered and not filtered[0].strip():
-        filtered.pop(0)
-    while filtered and not filtered[-1].strip():
-        filtered.pop()
-
-    return "\n".join(filtered)
 
 
 # =============================================================================
