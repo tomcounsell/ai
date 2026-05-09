@@ -946,6 +946,28 @@ def load_persona_prompt(persona: str = "developer") -> str:
                 "Update ~/Desktop/Valor/personas/project-manager.md to remove the Agent tool "
                 "dispatch pattern."
             )
+        # Developer overlay drift guards: the dev persona was promoted in 2026-05-09
+        # to own full SDLC pipelines via parallel subagent fan-out. The "Mode 3"
+        # multi-issue orchestrator and the stale-baseline `merge_authorized` bypass
+        # are the load-bearing pieces — if either is missing, the overlay has
+        # rolled back to the pre-promotion 34-line single-stage executor and dev
+        # sessions will halt at the first multi-issue or merge-gate friction point.
+        # Substrings chosen for their stability: "Mode 3" anchors the parallel
+        # orchestrator playbook; "merge_authorized" anchors the bypass section.
+        if persona == "developer" and "Mode 3" not in overlay_content:
+            logger.warning(
+                f"Developer persona overlay '{overlay_path}' is missing the "
+                "Mode 3 parallel orchestrator playbook — dev sessions will not "
+                "fan out across multiple issues. Sync from "
+                "config/personas/developer.md."
+            )
+        if persona == "developer" and "merge_authorized" not in overlay_content:
+            logger.warning(
+                f"Developer persona overlay '{overlay_path}' is missing the "
+                "stale-baseline `merge_authorized` bypass section — dev "
+                "sessions will halt on Full Suite Gate false positives. "
+                "Sync from config/personas/developer.md."
+            )
         logger.info(f"Loaded persona '{persona}' from {overlay_path}")
         return f"{base_content}\n\n---\n\n{overlay_content}"
 
