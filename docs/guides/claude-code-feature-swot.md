@@ -88,8 +88,7 @@ Agent Types (by capability)
 │   ├── builder.md — General implementation
 │   ├── designer.md — UI/UX
 │   ├── data-architect.md — Schema/migration
-│   ├── agent-architect.md — Agent design
-│   └── dev-session.md — Full SDLC stage execution
+│   └── agent-architect.md — Agent design
 ├── Validators (read-only)
 │   ├── validator.md — Acceptance verification
 │   ├── code-reviewer.md — Code quality

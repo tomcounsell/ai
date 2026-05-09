@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Building
 type: chore
 appetite: Small
 owner: Tom Counsell
@@ -182,7 +182,7 @@ No other existing tests touch `get_definition` (it has zero callers including te
 
 ### Risk 3: Hardlink at `~/.claude/agents/dev-session.md` lingers on machines that don't run `/update` soon after
 **Impact:** Stale file remains in user-scope agents directory until the next update sync runs `_cleanup_stale_commands`. During that window, a stale PM persona dispatch could still resolve dev-session from the user-scope file.
-**Mitigation:** Acceptable. The window is short (next update cycle, typically same-day). Stale PM personas are themselves rare (warning logged at PM session startup per `sdk_client.py:940-948`). The combination of (a) needing a stale persona AND (b) being in the small window before the next update is a low-probability edge case. Document the cleanup mechanism in the PR body so reviewers understand the propagation path.
+**Mitigation:** Acceptable. The window is short (next update cycle, typically same-day). Stale PM personas are themselves rare (warning logged at PM session startup per `sdk_client.py:940-948`). The combination of (a) needing a stale persona AND (b) being in the small window before the next update is a low-probability edge case. **Per critique C2:** worktree checkouts have an independent inode from main; the verification "file does not exist" only confirms worktree state, and the user-scope hardlink at `~/.claude/agents/dev-session.md` will keep resolving via `setting_sources` until `/update` runs on each machine. The PR body MUST explicitly tell reviewers and the author: "After merge, run `/update` (or `python scripts/update/run.py`) on each machine so `_cleanup_stale_commands` reaps the user-scope copy."
 
 ### Risk 4: Inline comment rewrite at `agent_definitions.py:148-152` introduces a typo or removes useful context
 **Impact:** Future readers lose the Phase 5 archaeology that explained why `dev-session.md` was excluded.
@@ -272,7 +272,7 @@ Standard core tier: `builder`, `validator`. No specialists required.
 - **Assigned To**: cleanup-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Run `grep -rn "get_definition" /Users/tomcounsell/src/ai/ --include="*.py" 2>/dev/null | grep -v ".worktrees" | grep -v "/.venv/"`. Confirm only the definition itself appears.
+- Run `grep -rn "get_definition" "$(git rev-parse --show-toplevel)" --include="*.py" 2>/dev/null | grep -v "/\.venv/"`. Confirm only the definition itself appears. (Worktree-portable: uses `git rev-parse --show-toplevel` so the grep works whether run from main checkout or a worktree.)
 - Run `grep -rn "dev-session.md" /Users/tomcounsell/src/ai/ --include="*.py" --include="*.md" 2>/dev/null | grep -v ".worktrees" | grep -v "/.venv/" | grep -v "/.git/"`. Confirm the matches are exactly: `add-feature/SKILL.md:102`, `agent_definitions.py:150` (inline comment), `claude-code-feature-swot.md` (research and guides copies), and `agentsession-harness-abstraction.md:89` (historical plan, leave alone). Any new match means new drift to address before deletion.
 
 ### 2. Delete dead code
@@ -283,7 +283,7 @@ Standard core tier: `builder`, `validator`. No specialists required.
 - **Agent Type**: builder
 - **Parallel**: false
 - Delete `get_definition()` (lines 124-145 inclusive of docstring) from `agent/agent_definitions.py`.
-- Simplify the inline comment block at lines 148-152. Replace with: `# Agent files referenced by get_agent_definitions(). Used by validate_agent_files()` / `# to check that all expected files exist on disk at bridge startup.`
+- Simplify the inline comment block at lines 148-152. Replace with: `# Agent files referenced by get_agent_definitions(). Used by validate_agent_files()` / `# to check that all expected files exist on disk at process startup (worker and bridge).` (Updated per critique C1: PR #1353 wired the validator into both `worker/__main__.py:546-548` and `bridge/telegram_bridge.py:1051-1053`.)
 - Delete the file `.claude/agents/dev-session.md` (use `git rm`).
 
 ### 3. Update feature docs
@@ -292,9 +292,9 @@ Standard core tier: `builder`, `validator`. No specialists required.
 - **Validates**: Manual diff inspection; no `get_definition` references remain in `docs/features/`
 - **Assigned To**: cleanup-builder
 - **Agent Type**: builder
-- **Parallel**: false
-- Edit `docs/features/pm-dev-session-architecture.md` lines 406, 502, 509. Replace the `get_definition()` references with descriptions of `agent/sdk_client.py:940-948` (overlay grep at PM session startup; logs warning if PM persona still contains `subagent_type="dev-session"`).
-- Edit `docs/features/harness-abstraction.md:198` similarly.
+- **Parallel**: true
+- Edit `docs/features/pm-dev-session-architecture.md` lines 406, 502, 509. Replace the `get_definition()` references with descriptions of `agent/sdk_client.py:940-948` (overlay grep at PM session startup; logs warning if PM persona still contains `subagent_type="dev-session"`). Per critique N1, treat each line as a separate edit: line 406 is a Key Components table row → drop the row entirely (the function is gone; no replacement role exists in this module). Line 502 is prose → rewrite to describe the actual stale-persona detection at `sdk_client.py:940-948`. Line 509 is a Key Files table row whose Purpose column needs the `get_definition()` clause dropped — keep the row, simplify the description.
+- Edit `docs/features/harness-abstraction.md:198` similarly: rewrite to describe `sdk_client.py:940-948` instead of `get_definition()`.
 
 ### 4. Append plan footer cross-reference
 - **Task ID**: plan-footer
@@ -337,8 +337,8 @@ Standard core tier: `builder`, `validator`. No specialists required.
 
   ```python
   def test_dev_session_md_not_in_repo(self):
-      """Phase 5 cleanup #1360: dev-session.md must not be in the repo.
-      
+      """Phase 5 follow-up cleanup (#1360): dev-session.md must not be in the repo.
+
       The file was deleted because (a) get_agent_definitions() does not
       reference it, and (b) the SDK loads .claude/agents/*.md from disk
       via setting_sources, which would let a stale Agent(subagent_type=
@@ -346,7 +346,8 @@ Standard core tier: `builder`, `validator`. No specialists required.
       dispatches fail-fast with an SDK 'unknown subagent' error.
       """
       assert not (_AGENTS_DIR / "dev-session.md").exists(), (
-          ".claude/agents/dev-session.md must not exist (Phase 5 cleanup, #1360). "
+          ".claude/agents/dev-session.md must not exist "
+          "(Phase 5 follow-up cleanup, #1360). "
           "If a skill template or merge re-added it, delete it again."
       )
   ```
@@ -383,7 +384,29 @@ Standard core tier: `builder`, `validator`. No specialists required.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns) — 0 blockers, 4 concerns, 3 nits. Concerns C1-C4 addressed below; nits noted but not all applied.
+
+### C1 — `_EXPECTED_AGENT_FILES` comment must mention worker startup
+- **Resolution applied:** Inline-comment replacement text updated to `# Agent files referenced by get_agent_definitions(). Used by validate_agent_files()` / `# to check that all expected files exist on disk at process startup (worker and bridge).`
+- **Why:** PR #1353 (`5c2375b6`) wired `validate_agent_files()` into `worker/__main__.py:546-548` in addition to `bridge/telegram_bridge.py:1051-1053`. Saying "bridge startup" alone understates the worker's role.
+
+### C2 — Worktree inode is independent; PR body must instruct post-merge `/update`
+- **Resolution applied:** Risk 3 mitigation extended; PR body will explicitly tell reviewers/author to run `/update` (or `python scripts/update/run.py`) on each machine after merge so `_cleanup_stale_commands` reaps the user-scope hardlink at `~/.claude/agents/dev-session.md`. Without that step, `setting_sources` will keep resolving the stale file on the author's machine indefinitely.
+- **Why:** Worktree checkouts materialize fresh inodes; the `link count = 2` claim only holds in main checkout. The verification step "file does not exist" only confirms worktree state.
+
+### C3 — Pre-check grep must be worktree-portable
+- **Resolution applied:** Task 1 grep replaced with `grep -rn "get_definition" "$(git rev-parse --show-toplevel)" --include="*.py" 2>/dev/null | grep -v "/\.venv/"`. Drops the absolute path and the `.worktrees` filter that would have excluded the cleanup-builder's own checkout.
+- **Why:** Absolute path `/Users/tomcounsell/src/ai/` is non-portable across machines, and the `.worktrees` filter excludes the very worktree the builder is running in.
+
+### C4 — Task 3 marked `Parallel: true` for consistency with tasks 4 and 5
+- **Resolution applied:** All three doc-edit tasks (3, 4, 5) now mark `Parallel: true`. They edit disjoint files and depend only on `delete-dead-code`. No I/O contention.
+
+### Nits (advisory)
+- **N1** (line-509 is a Key Files table row, not prose): partially applied — Task 3 will treat each of lines 406, 502, 509 as separate edits with line-appropriate framing. Documented in this section; builder follows.
+- **N2** (lock-in test docstring conflates Phase 5 with #1360): applied — docstring will say "Phase 5 follow-up cleanup (#1360)".
+- **N3** (verification grep "possibly the new lock-in test's docstring" is permissive): not applied — the historical-plan reference and the new test's docstring/comment are both expected. Verification table holds; Task 7 wording is acceptable as advisory.
+
+---
 
 ---
 

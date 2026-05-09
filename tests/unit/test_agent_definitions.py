@@ -130,3 +130,18 @@ class TestAgentFilesCICheck:
             assert path.exists(), (
                 f"Agent definition file referenced in code but missing from repo: {path}"
             )
+
+    def test_dev_session_md_not_in_repo(self):
+        """Phase 5 follow-up cleanup (#1360): dev-session.md must not be in the repo.
+
+        The file was deleted because (a) get_agent_definitions() does not
+        reference it, and (b) the SDK loads .claude/agents/*.md from disk
+        via setting_sources, which would let a stale Agent(subagent_type=
+        "dev-session") dispatch resolve to it. Deletion makes stale
+        dispatches fail-fast with an SDK 'unknown subagent' error.
+        """
+        assert not (_AGENTS_DIR / "dev-session.md").exists(), (
+            ".claude/agents/dev-session.md must not exist "
+            "(Phase 5 follow-up cleanup, #1360). "
+            "If a skill template or merge re-added it, delete it again."
+        )

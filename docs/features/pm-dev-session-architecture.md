@@ -403,7 +403,7 @@ When a PM session invokes a Skill directly (e.g., `Skill(skill="do-build")`), th
 | `post_tool_use_hook()` | `agent/hooks/post_tool_use.py` | Completes pipeline stage for Skill path |
 | `PipelineStateMachine` | `agent/pipeline_state.py` | Manages stage_states on the parent AgentSession (moved from `bridge/` in Phase 3) |
 | `classify_outcome()` | `agent/pipeline_state.py` | Three-tier classification: OUTCOME contract, stop_reason, text patterns |
-| `get_definition()` | `agent/agent_definitions.py` | Returns actionable error for stale callers requesting `"dev-session"` Agent tool dispatch |
+| `_load_overlay_drift_guards` | `agent/sdk_client.py:940-948` | At PM session startup, greps the PM persona overlay for `subagent_type="dev-session"` and logs a warning if found; the actionable signal that flags stale PM personas pointing at the removed Agent tool dispatch path |
 | `user_prompt_submit.py` | `.claude/hooks/user_prompt_submit.py` | On first prompt, decides attach-vs-create: worker-spawned subprocesses attach the sidecar to the worker's existing AgentSession via `AGENT_SESSION_ID` / `VALOR_SESSION_ID` env vars (no new record, issue #1157); direct-CLI subprocesses fall through to `create_local()` gated by `SESSION_TYPE` / `VALOR_PARENT_SESSION_ID` |
 
 ### PM/Dev Session Environment Variables
@@ -499,14 +499,14 @@ Teammate message -> session_type="teammate" on AgentSession
 
 ## Agent Definitions
 
-The `dev-session` Agent tool entry has been removed from `agent/agent_definitions.py` (Phase 5 cleanup). Dev sessions are now created as `AgentSession` records via `python -m tools.valor_session create --role dev`, not via the Agent tool. `get_definition()` returns an actionable error if a stale PM persona still calls `Agent(subagent_type="dev-session")`.
+The `dev-session` Agent tool entry has been removed from `agent/agent_definitions.py` (Phase 5 cleanup, completed in #1360). Dev sessions are now created as `AgentSession` records via `python -m tools.valor_session create --role dev`, not via the Agent tool. The actionable signal for stale PM personas now lives at `agent/sdk_client.py:940-948`: at PM session startup, the PM persona overlay is grepped for `subagent_type="dev-session"` and a warning is logged if found, directing the operator to update `~/Desktop/Valor/personas/project-manager.md`. A stale dispatch (if it ever reaches the SDK) fails fast with the SDK's "unknown subagent" error.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `models/agent_session.py` | AgentSession model with session_type discriminator |
-| `agent/agent_definitions.py` | Agent registry; `get_definition()` provides actionable error for stale dev-session callers |
+| `agent/agent_definitions.py` | Agent registry (builder, validator, code-reviewer); `validate_agent_files()` verifies expected `.claude/agents/*.md` files exist at process startup |
 | `agent/agent_session_queue.py` | Queue dispatch surface — entry points (`enqueue_agent_session`, `register_callbacks`, worker loops); re-exports symbols from split modules |
 | `agent/session_completion.py` | Post-execution lifecycle: `_handle_dev_session_completion()`, `_create_continuation_pm()`, finalization |
 | `agent/session_executor.py` | Core execute loop: `_execute_agent_session()`, turn-boundary steering, nudge/re-enqueue |

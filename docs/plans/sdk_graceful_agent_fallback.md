@@ -222,3 +222,9 @@ No standalone feature doc needed -- this is a small defensive fix, not a user-fa
 ## Open Questions
 
 No open questions -- the issue is well-defined, the fix pattern already exists in the codebase (`_load_dev_session_prompt`), and the scope is narrow.
+
+---
+
+## See Also
+
+- **#1350** — Active follow-up: widen the fallback in `_parse_agent_markdown()` to cover malformed YAML and OS errors (this plan documents only the original `FileNotFoundError` case; shipped code uses `path.exists()`, functionally equivalent for the missing-file case).
