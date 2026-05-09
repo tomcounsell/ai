@@ -510,7 +510,7 @@ class TestPersonaOverlayLogging:
         m = re.search(r"prompt_chars=(\d+)", msg)
         assert m is not None and int(m.group(1)) > 0
 
-    def test_logs_missing_with_fallback_when_overlay_absent(self, caplog, monkeypatch):
+    def test_logs_missing_with_fallback_when_overlay_absent(self, caplog, monkeypatch, tmp_path):
         """When the requested overlay is missing but the fallback succeeds,
         emit a single WARNING with requested= and fell_back_to= fields."""
         import agent.sdk_client as sdk_mod
@@ -521,6 +521,18 @@ class TestPersonaOverlayLogging:
         empty_dir = sdk_mod.PERSONAS_OVERLAY_DIR
         # Remove customer-service overlay to simulate missing
         (empty_dir / "customer-service.md").unlink()
+
+        # Also redirect PERSONAS_BASE_DIR so the in-repo overlay fallback
+        # in _resolve_overlay_path() cannot resolve customer-service or the
+        # unknown-persona developer fallback (config/personas/developer.md
+        # exists in-repo as of #1355). Without this, load_persona_prompt
+        # would silently succeed via the developer fallback at sdk_client.py
+        # ~L974 and never raise FileNotFoundError, so the WARN under test
+        # would not fire. We keep PERSONAS_SEGMENTS_DIR pointing at the real
+        # segments dir so segment assembly still works for the fallback load.
+        empty_base = tmp_path / "no-base"
+        empty_base.mkdir()
+        monkeypatch.setattr(sdk_mod, "PERSONAS_BASE_DIR", empty_base)
 
         with caplog.at_level(logging.WARNING, logger="agent.sdk_client"):
             prompt = _load_persona_overlay_with_log(
