@@ -193,7 +193,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 When shipping a new feature, add a row to the table above. Format:
 
 ```markdown
-| [Feature Name](filename.md) | One-line description | Shipped |
 ```
 
 Keep entries sorted alphabetically by feature name.
