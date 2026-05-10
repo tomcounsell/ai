@@ -249,7 +249,7 @@ No tests to DELETE — all existing coverage is relevant. No REPLACE needed — 
 - **Don't normalize docstring style across all Popoto models.** Model behavior stays on models, but this plan is not a doc pass on `models/`. Scope creep.
 - **Don't replace HTMX with a client framework.** The `<details>`-outside-swap-target approach works with the existing stack. Don't add Idiomorph, Alpine.js, or Lit just to solve open-state preservation.
 - **Don't auto-derive groups from callable module paths in code.** The user asked for explicit `group:` fields in YAML — stick to that. Auto-derivation is implicit magic.
-- **Don't collapse `reflections/session_intelligence.py`, `behavioral_learning.py`, `daily_report.py` further.** These are already single-file and already match the one-file-per-reflection principle; they just move into the appropriate group directory (`agents/`, `housekeeping/`, `audits/` respectively per dashboard taxonomy).
+- **Don't collapse `reflections/session_intelligence.py`, `daily_report.py` further.** These are already single-file and already match the one-file-per-reflection principle; they just move into the appropriate group directory (`agents/`, `audits/` respectively per dashboard taxonomy). (`behavioral_learning.py` was deleted in #1362; no longer applies.)
 - **Don't introduce a new group taxonomy.** Per Tom: use the existing 4 dashboard groups (`agents`, `housekeeping`, `audits`, `memory`) verbatim. Do not propose `core/`, `self_healing/`, `tasks/`, `pipelines/`, or any other directory name.
 - **Don't redesign the reflection details modal or run history pane.** The current drill-in view works; only the top-level grid changes.
 
@@ -310,7 +310,7 @@ No agent integration required — reflections are scheduled background jobs exec
 
 - [ ] `reflections/{group}/{name}.py` exists for every reflection in `config/reflections.yaml` (33 currently), each with a single `run()` public entry and a module docstring matching the standard shape. Agent-type reflections get placeholder files whose docstring points at YAML `command:` as executable source-of-truth.
 - [ ] `reflections/utilities.py` exists with `load_local_projects` + `run_llm_reflection`; `reflections/utils.py` deleted
-- [ ] All single-file bundles deleted: `reflections/maintenance.py`, `reflections/auditing.py`, `reflections/memory_management.py`, `reflections/task_management.py`, `reflections/session_intelligence.py`, `reflections/behavioral_learning.py`, `reflections/daily_report.py`
+- [ ] All single-file bundles deleted: `reflections/maintenance.py`, `reflections/auditing.py`, `reflections/memory_management.py`, `reflections/task_management.py`, `reflections/session_intelligence.py`, `reflections/daily_report.py` (`reflections/behavioral_learning.py` already deleted in #1362)
 - [ ] `agent/sustainability.py` **fully deleted** (per Tom). Any non-reflection helpers with surviving callers (`send_hibernation_notification`, `sustainability_digest`) relocated to `agent/notifications.py` first.
 - [ ] `scripts/popoto_index_cleanup.py` and `scripts/memory_consolidation.py` retained as thin import-and-delegate shims (per Tom: existing CLI invocations may exist; safer to leave shims).
 - [ ] `config/reflections.yaml`: every entry has a `group:` field with value in `{agents, housekeeping, audits, memory}`, every `callable:` points at a resolvable path, stale `ReflectionRunner` comment at line 58 removed
@@ -412,7 +412,6 @@ Single-dev refactor; team structure stays lean.
 - Wrap (thin shim, source stays put): `agent.agent_session_queue.cleanup_stale_branches_all_projects` → `reflections/housekeeping/stale_branch_cleanup.py`
 - Move logic, keep CLI shim: `scripts/popoto_index_cleanup.py:run_cleanup` → `reflections/housekeeping/redis_index_cleanup.py`. Per Tom: leave the shim at `scripts/popoto_index_cleanup.py` (may be invoked manually as CLI). The shim becomes a thin import-and-delegate wrapper.
 - Split `reflections/maintenance.py` into per-file units in `reflections/housekeeping/`: `tech_debt_scan.py`, `redis_ttl_cleanup.py`, `redis_quality_audit.py`, `merged_branch_cleanup.py`, `disk_space_check.py`, `analytics_rollup.py` — **note** `tech_debt_scan` and `redis_quality_audit` will move to `audits/` per group-membership rules; only the cleanup/check/rollup ones land in `housekeeping/`
-- Move: `reflections/behavioral_learning.py` → `reflections/housekeeping/behavioral_learning.py`. Preserve `to_unix_ts` import (per commit `9e3a64f5`)
 - Move: `do-docs-branch-sweeper` callable (locate via `config/reflections.yaml` → its current source module) into `reflections/housekeeping/do_docs_branch_sweeper.py`
 - Inline single-use helpers (`extract_structured_errors`, regex constants) into their owning files
 
@@ -452,7 +451,7 @@ Single-dev refactor; team structure stays lean.
 - Update every `callable:` in `config/reflections.yaml` to the new path (e.g. `reflections.agents.circuit_health_gate.run`)
 - Add `group:` field to every entry, value one of `agents | housekeeping | audits | memory`. Group assignment per the heuristic in Technical Approach (existing `REFLECTION_GROUPS` mapping as starting point; new entries by intuitive fit)
 - Delete stale `ReflectionRunner` comment at line 58
-- Delete bundles: `reflections/maintenance.py`, `reflections/auditing.py`, `reflections/memory_management.py`, `reflections/task_management.py`, `reflections/utils.py`, `reflections/session_intelligence.py`, `reflections/behavioral_learning.py`, `reflections/daily_report.py`
+- Delete bundles: `reflections/maintenance.py`, `reflections/auditing.py`, `reflections/memory_management.py`, `reflections/task_management.py`, `reflections/utils.py`, `reflections/session_intelligence.py`, `reflections/daily_report.py` (`reflections/behavioral_learning.py` already deleted in #1362)
 - **Fully delete `agent/sustainability.py`** (per Tom). If `send_hibernation_notification` or `sustainability_digest` exports have surviving non-test callers (re-grep before deletion), relocate them to `agent/notifications.py` first; otherwise delete the file outright. Do not leave a stub.
 - Run `python -m ruff check .` and `python -m ruff format .` to clean import reshuffling
 
@@ -523,7 +522,7 @@ Single-dev refactor; team structure stays lean.
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | All callables resolve | `pytest tests/unit/test_reflection_scheduler.py::test_all_callables_resolve -q` | exit code 0 |
 | Every YAML entry has group | `pytest tests/unit/test_reflection_scheduler.py::test_every_yaml_entry_has_group -q` | exit code 0 |
-| No bundle modules left | `test ! -f reflections/maintenance.py && test ! -f reflections/auditing.py && test ! -f reflections/memory_management.py && test ! -f reflections/task_management.py && test ! -f reflections/utils.py && test ! -f reflections/session_intelligence.py && test ! -f reflections/behavioral_learning.py && test ! -f reflections/daily_report.py` | exit code 0 |
+| No bundle modules left | `test ! -f reflections/maintenance.py && test ! -f reflections/auditing.py && test ! -f reflections/memory_management.py && test ! -f reflections/task_management.py && test ! -f reflections/utils.py && test ! -f reflections/session_intelligence.py && test ! -f reflections/daily_report.py` (`behavioral_learning.py` already deleted in #1362) | exit code 0 |
 | `agent/sustainability.py` deleted | `test ! -f agent/sustainability.py` | exit code 0 |
 | All reflection files exist | `find reflections -mindepth 2 -maxdepth 2 -name '*.py' ! -name '__init__.py' \| wc -l` | output ≥ 33 |
 | Stale comment removed | `grep -n 'ReflectionRunner' config/reflections.yaml` | exit code 1 |
