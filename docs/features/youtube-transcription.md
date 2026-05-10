@@ -2,7 +2,7 @@
 
 **Status**: Implemented
 **Implemented**: 2026-01-20
-**Updated**: 2026-04-06
+**Updated**: 2026-05-10
 
 ## Overview
 
@@ -85,6 +85,64 @@ Passes enriched message to agent:
 Claude can discuss video content intelligently
 ```
 
+## CLI Surface (`valor-youtube-transcribe`)
+
+The same transcription pipeline is exposed as a CLI for use outside the bridge enrichment path (local Claude Code sessions, ad-hoc dev work, agent Bash invocations). Prefer this CLI over `WebFetch` for any YouTube URL — YouTube serves anti-bot HTML to non-browser fetchers, so `WebFetch` will fail.
+
+### Synopsis
+
+```
+valor-youtube-transcribe [--json | --summary-only] URL
+```
+
+### Flags
+
+| Flag | Behavior |
+|------|----------|
+| (none) | Human-readable: `Title:`, `Video ID:`, then summary if present, otherwise the full transcript |
+| `--json` | Emit the raw `process_youtube_url()` dict as indented JSON. Same dict the bridge enrichment path consumes. |
+| `--summary-only` | Emit only the summary. If no summary exists (transcript < 2000 chars), emit the full transcript prefixed with the pinned note `# No summary available; full transcript below`. |
+
+`--json` and `--summary-only` are mutually exclusive.
+
+### Examples
+
+```bash
+# Default: print transcript or summary
+valor-youtube-transcribe https://www.youtube.com/watch?v=jNQXAC9IVRw
+
+# Programmatic use: parse the raw dict
+valor-youtube-transcribe --json https://youtu.be/jNQXAC9IVRw | jq .summary
+
+# Compact summary for long videos
+valor-youtube-transcribe --summary-only https://youtu.be/abc123
+```
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success — transcript or summary printed to stdout |
+| 1 | Failure — error message on stderr (invalid URL, live stream, video too long, transcription failed, unexpected exception) |
+| 2 | argparse error (e.g. `--json` and `--summary-only` together) |
+
+### Distinction from `valor-ingest`
+
+`valor-ingest` and `valor-youtube-transcribe` are deliberately separate paths:
+
+- `valor-youtube-transcribe` → stdout (transcript/summary/JSON) for in-conversation reasoning. No file artifacts.
+- `valor-ingest` → writes a `.md` sidecar that the knowledge indexer picks up. Different contract, different consumer.
+
+Do not unify them — the contracts differ on purpose.
+
+### Implementation
+
+- Entry point: `tools/link_analysis/cli.py:main`
+- Console script registered in `pyproject.toml [project.scripts]` as `valor-youtube-transcribe = "tools.link_analysis.cli:main"`
+- Wraps the existing `process_youtube_url()` async function via `asyncio.run`
+- Module constant `NO_SUMMARY_NOTE` pins the `--summary-only` fallback string for testability
+- Tests: `tests/unit/test_link_analysis_cli.py` (mocked argparse + output formatting + exit codes)
+
 ## Enrichment Behavior
 
 `bridge/enrichment.py` always applies the YouTube-enriched text to the agent context, regardless of whether transcription succeeded or failed. This ensures the agent receives either a transcript or an actionable failure explanation — never just the original URL with no context.
@@ -116,6 +174,8 @@ Claude can discuss video content intelligently
   - `summarize_transcript()` - Summarize long transcripts with GPT-4o-mini
   - `process_youtube_url()` - Full processing pipeline (caption-first)
   - `process_youtube_urls_in_text()` - Process all YouTube URLs in message
+
+- `tools/link_analysis/cli.py`: `valor-youtube-transcribe` CLI wrapper around `process_youtube_url`
 
 - `bridge/enrichment.py`: Deferred message enrichment
   - Calls `process_youtube_urls_in_text()` for transcription

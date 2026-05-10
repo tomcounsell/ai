@@ -186,7 +186,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |
 | [xfail Hygiene](xfail-hygiene.md) | Three-layer xfail hygiene system preventing stale test markers after bug fixes land | Shipped |
 | [YouTube Search](youtube-search.md) | Search YouTube by query using yt-dlp, returning structured results (title, URL, duration, views) via `valor-youtube-search` CLI | Shipped |
-| [YouTube Transcription](youtube-transcription.md) | Auto-transcribe YouTube videos shared in messages for Claude context | Shipped |
+| [YouTube Transcription](youtube-transcription.md) | Auto-transcribe YouTube videos shared in messages for Claude context; also exposed as `valor-youtube-transcribe` CLI | Shipped |
 
 ## Adding New Entries
 
