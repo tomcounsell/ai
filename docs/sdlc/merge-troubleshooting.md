@@ -202,6 +202,49 @@ for TEST pending).
 
 ---
 
+## Worktree Cleanup Blocked (issue #1357)
+
+**Symptom.** `python scripts/post_merge_cleanup.py {slug}` exits **2** and
+prints `worktree busy: in use by session_id=<id>` to stderr. The local
+`session/{slug}` branch is still present because `gh pr merge --delete-branch`
+cannot delete a branch referenced by an active worktree.
+
+**Diagnose.** The exit code is the signal — exit 2 means the busy guard
+fired (distinct from exit 1 generic errors). Inspect the offending session:
+
+```bash
+python -m tools.valor_session status --id <session_id>
+```
+
+**Remediate.**
+
+1. If the session is genuinely live and still doing useful work, wait for it to
+   finish, then re-run `post_merge_cleanup.py {slug}`.
+2. If the session is wedged or dead but its row hasn't flipped yet:
+
+   ```bash
+   python -m tools.valor_session kill --id <session_id>
+   python scripts/post_merge_cleanup.py {slug}
+   ```
+
+3. If the cleanup must proceed despite a live session, override programmatically
+   by passing `force=True` to `remove_worktree()` (no CLI flag — this is
+   deliberate friction). The WARNING log
+   `force-removing worktree .worktrees/{slug} despite live session_id=...` is
+   grep-able for audit. **Do not make `--force` your reflex.**
+
+**Verify.**
+
+```bash
+python scripts/post_merge_cleanup.py {slug}
+echo "Exit: $?"  # 0 == clean; 2 == still blocked
+```
+
+See [`docs/sdlc/do-merge.md#busy-guard-issue-1357`](do-merge.md#busy-guard-issue-1357) for the full operator workflow and
+[`docs/features/session-isolation.md#worktree-busy-guard-issue-1357`](../features/session-isolation.md#worktree-busy-guard-issue-1357) for the runtime invariant.
+
+---
+
 ## Quick Reference
 
 | Blocker category | Remediation | Command |
@@ -212,6 +255,7 @@ for TEST pending).
 | LOCKFILE | `uv lock && git add uv.lock && commit && push` | See Lockfile Drift |
 | FULL_SUITE | Investigate new blocking regression | `pytest tests/{node_id}` |
 | MERGE_CONFLICT | Rebase onto `origin/main` | See Merge Conflict |
+| BUSY_GUARD (`post_merge_cleanup` exit 2) | Kill wedged session, re-run cleanup | See Worktree Cleanup Blocked |
 
 After any remediation, re-dispatch `/do-merge {pr}`. If the same blocker
 category recurs 3 times, escalate to the human per the G4 convergence

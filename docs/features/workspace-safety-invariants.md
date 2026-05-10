@@ -61,6 +61,7 @@ Callers determine `is_worktree` by checking whether `.worktrees` appears in the 
 There is an inherent time-of-check-to-time-of-use gap: the directory could be removed between validation and subprocess launch. This is acknowledged and acceptable because:
 
 - PR #304 already handles CWD death reactively (guards in `remove_worktree()` and `post_merge_cleanup.py`)
+- The two-layer guard from #1357 closes the same race from both ends: `worktree_busy_check()` blocks `remove_worktree()` from deleting a worktree referenced by a non-terminal `AgentSession`, and `BackgroundTask._watchdog` (in `agent/messenger.py`) cancels the work task within one heartbeat tick if the worktree disappears mid-run via some other path (manual `rm -rf`, OS cleanup, recovery script). See the [Worktree Busy Guard](session-isolation.md#worktree-busy-guard-issue-1357) section.
 - The validation here is proactive/preventive, not a sole line of defense
 - The race window is milliseconds in practice
 
@@ -74,4 +75,4 @@ There is an inherent time-of-check-to-time-of-use gap: the directory could be re
 - **Tests**: `tests/unit/test_workspace_safety.py` (23 tests across 4 test classes)
 - **Plan**: `docs/plans/workspace-safety-invariants.md`
 - **Issue**: [#306](https://github.com/tomcounsell/ai/issues/306)
-- **Prior art**: PR #304 (reactive CWD death guard), PR #882 / issue #880 (delete-time path guard)
+- **Prior art**: PR #304 (reactive CWD death guard), PR #882 / issue #880 (delete-time path guard), PR #1367 / issue #1357 (busy guard + cwd-vanished watchdog)
