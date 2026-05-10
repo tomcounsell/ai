@@ -207,6 +207,9 @@ valor-email threads
 | `python -m tools.doctor --install-hook` | Install git pre-push hook running doctor --quick |
 | `valor-youtube-search "query"` | Search YouTube for videos by query |
 | `valor-youtube-search --limit N "query"` | Search YouTube with limited results |
+| `valor-youtube-transcribe <url>` | Transcribe a YouTube video (captions-first, Whisper fallback). Prefer this over `WebFetch` for YouTube URLs — YouTube serves anti-bot HTML to non-browser fetchers. |
+| `valor-youtube-transcribe --json <url>` | Same as above, emit raw `process_youtube_url` dict as JSON |
+| `valor-youtube-transcribe --summary-only <url>` | Emit only the GPT-4o-mini summary (or full transcript with a note if none) |
 | `valor-tts --text "Hello." --output /tmp/out.ogg` | Synthesize text to OGG/Opus (Kokoro local primary, OpenAI tts-1 fallback). See `docs/features/tts.md`. |
 | `valor-tts --text "Hello." --output /tmp/out.ogg --voice af_bella` | Synthesize with a specific voice (catalog in `tools/tts/README.md`) |
 | `valor-tts --text "Hello." --output /tmp/out.ogg --force-cloud` | Force the cloud (OpenAI tts-1) backend even if Kokoro is available |
