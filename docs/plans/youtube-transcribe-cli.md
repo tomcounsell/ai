@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-05-10
 tracking: https://github.com/tomcounsell/ai/issues/1371
 last_comment_id:
+revision_applied: true
 ---
 
 # YouTube Transcribe CLI + Agent Guidance
@@ -137,6 +138,7 @@ For `--json`: agent runs `valor-youtube-transcribe --json URL` → parses dict �
 - [ ] No existing CLI tests in `tools/link_analysis/` — this is greenfield CLI surface, additive only.
 - [ ] `pyproject.toml [project.scripts]` is not directly tested; the integration test below covers entry-point registration.
 - [ ] `tests/integration/test_cli_entry_points.py` (if it exists) — UPDATE: add a row for `valor-youtube-transcribe --help` exit-code-0 smoke test to confirm console_scripts registration works after `pip install -e .`. If not present, add a small integration test invoking the CLI as a subprocess.
+- [ ] **Live async-chain integration test (C2):** Add a `@pytest.mark.integration` test in `tests/integration/test_link_analysis_cli.py` (create if absent) that runs `subprocess.run(["valor-youtube-transcribe", "<short-captioned-vid-url>"], capture_output=True, timeout=60)` and asserts `proc.returncode == 0` and `len(proc.stdout) > 0`. Do NOT mock `process_youtube_url` here — the whole point is to catch the `asyncio.run` × `asyncio.get_event_loop()` interaction at `tools/link_analysis/__init__.py:447` (deprecated in 3.12+). Also add a deprecation-warning smoke check: invoke under `python -W error::DeprecationWarning -m tools.link_analysis.cli <url>` once during validate-cli; a non-zero exit signals the deprecation has become an error and the wrapper needs adjustment.
 
 If neither test file pre-exists, create them. The build phase will resolve which.
 
@@ -292,6 +294,7 @@ Tier 1 defaults (builder, validator, documentarian) are sufficient. No specialis
 - Create `tests/unit/test_link_analysis_cli.py`.
 - Mock `process_youtube_url` to return canned dicts (success, error, live-stream, too-long, summary-present, summary-absent).
 - Assert CLI exit codes, stdout contents, stderr contents, JSON validity.
+- **Pin the no-summary note string (C3):** In `tools/link_analysis/cli.py`, define `NO_SUMMARY_NOTE = "# No summary available; full transcript below"` as a module constant. Add a unit-test case that mocks `process_youtube_url` to return `{"success": True, "transcript": "short", "summary": None}`, runs the CLI with `--summary-only`, and asserts `stdout.startswith(NO_SUMMARY_NOTE)`. Without pinning, future edits will silently drift the contract.
 
 ### 5. Bridge log investigation
 - **Task ID**: investigate-bridge-log
@@ -300,8 +303,9 @@ Tier 1 defaults (builder, validator, documentarian) are sufficient. No specialis
 - **Assigned To**: bridge-log-investigator
 - **Agent Type**: builder
 - **Parallel**: true
-- Grep `logs/bridge.log` for `process_youtube_url` invocations near session `tg__179144806_9742`.
+- Grep `logs/bridge.log` AND all rotated siblings (`logs/bridge.log.[0-9]*`) for `process_youtube_url` invocations near session `tg__179144806_9742`. Use: `grep -E "process_youtube_url|tg__179144806_9742" logs/bridge.log logs/bridge.log.[0-9]*` (shell-glob expansion).
 - Determine: did enrichment run? Did a guard suppress it?
+- **Log-rotation fallback (C1):** If zero matches across all rotations, "logs rotated out of retention" is a valid finding. Post a comment to #1371 stating: "Bridge logs for session tg__179144806_9742 have rotated out of retention; cannot verify enrichment behavior for the original triggering message" — this satisfies the "investigation result captured" success criterion without a synthetic conclusion. Do NOT block the build on missing log evidence.
 - Post findings as a comment on issue #1371. If a defect is found, file a new bug issue and reference it from the comment.
 
 ### 6. Validate CLI end-to-end
@@ -347,7 +351,7 @@ Tier 1 defaults (builder, validator, documentarian) are sufficient. No specialis
 | CLI rejects invalid URL | `valor-youtube-transcribe https://example.com` | exit code 1 |
 | CLAUDE.md updated | `grep -F 'valor-youtube-transcribe' CLAUDE.md` | exit code 0 |
 | Anti-WebFetch steering | `grep -i 'WebFetch.*YouTube\|YouTube.*WebFetch\|never WebFetch' CLAUDE.md` | exit code 0 |
-| valor-ingest untouched | `git diff main -- tools/valor_ingest.py \| wc -l` | output > -1 (i.e., zero or unchanged) |
+| valor-ingest untouched | `git diff --quiet main -- tools/valor_ingest.py` | exit code 0 (zero diff) |
 | Unit tests pass | `pytest tests/unit/test_link_analysis_cli.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check tools/link_analysis/cli.py tests/unit/test_link_analysis_cli.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/link_analysis/cli.py tests/unit/test_link_analysis_cli.py` | exit code 0 |
@@ -355,7 +359,46 @@ Tier 1 defaults (builder, validator, documentarian) are sufficient. No specialis
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns)
+**Findings:** 4 (0 blockers, 3 concerns, 1 nit)
+
+### Concerns
+
+**C1: Bridge log for session `tg__179144806_9742` may be rotated out**
+- Location: Step 5 (investigate-bridge-log), Verification table row "Investigation comment"
+- Finding: `logs/bridge.log` currently has 12k lines and 5 rotated siblings (`bridge.log.1`..`.5`); a `grep tg__179144806` across the active log returns zero matches. The triggering message likely lives in a rotated file or is gone entirely.
+- Suggestion: Have the investigation task `grep` across `logs/bridge.log*` (all rotations), and document a clean exit path: "logs rotated, evidence unavailable" is a valid finding and should still close the task with a comment on #1371.
+- Implementation Note: Use `grep -E "process_youtube_url|tg__179144806_9742" logs/bridge.log logs/bridge.log.[0-9]*` (glob expanded by shell). If zero matches across all rotations, post a comment stating "Bridge logs for session tg__179144806_9742 have rotated out of retention; cannot verify enrichment behavior for the original triggering message" — this satisfies success-criterion "investigation result captured" without forcing a synthetic conclusion.
+
+**C2: `asyncio.run` inside `process_youtube_url` uses `asyncio.get_event_loop()`**
+- Location: Solution / Technical Approach, Risk 1
+- Finding: At `tools/link_analysis/__init__.py:447`, `process_youtube_url` calls `loop = asyncio.get_event_loop()`. Inside an `asyncio.run()` context this works (returns the running loop), but `asyncio.get_event_loop()` is deprecated for use outside a running loop in Python 3.12+ and may emit DeprecationWarning. The CLI's `asyncio.run(process_youtube_url(...))` is the correct shape (creates a fresh loop), so this is not a runtime breakage — but the test plan must actually exercise the live function once, not only the mocked path.
+- Suggestion: Add an integration smoke test that runs the CLI against a real short captioned video to prove the async chain works end-to-end. Risk 1's mitigation already says this; the Test Impact section should explicitly require it (currently only the validator step does).
+- Implementation Note: In `tests/integration/test_cli_entry_points.py` (or new `tests/integration/test_link_analysis_cli.py`), use `subprocess.run(["valor-youtube-transcribe", "https://youtu.be/<short-captioned-vid>"], capture_output=True, timeout=60)` and assert `proc.returncode == 0` and `len(proc.stdout) > 0`. Mark with `@pytest.mark.integration` so it can be skipped offline. Do NOT mock `process_youtube_url` here — the whole point is to catch the asyncio.run × get_event_loop interaction.
+
+**C3: `--summary-only` fallback behavior is documented in Resolved Decisions but not in the success criteria**
+- Location: Success Criteria (line 205), Resolved Decisions #3
+- Finding: Resolved Decision #3 says `--summary-only` falls back to "full transcript prefixed with a one-line note" when no summary exists. Success Criteria line 205 says "returns just the summary (or full transcript with note if no summary)". The success criterion is fine, but the test plan in Step 4 should assert the specific note format ("# No summary available; full transcript below") so the contract is testable.
+- Suggestion: In `tests/unit/test_link_analysis_cli.py`, add a case that mocks `process_youtube_url` to return `{"success": True, "transcript": "short", "summary": None}` and asserts stdout starts with the agreed note prefix.
+- Implementation Note: Pin the exact note string in the test and in the CLI module — e.g., `NO_SUMMARY_NOTE = "# No summary available; full transcript below"`. Without pinning, future edits will silently drift the contract.
+
+### Nits
+
+**N1: Verification row for "valor-ingest untouched" uses brittle git diff comparison**
+- Location: Verification table, line 350
+- Finding: `git diff main -- tools/valor_ingest.py | wc -l` evaluated as `output > -1` is always true; this check passes vacuously.
+- Suggestion: Change expected to `output == 0` and the command to `git diff main -- tools/valor_ingest.py` then assert empty output, or use `git diff --quiet main -- tools/valor_ingest.py` and check exit code 0.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
+| Task numbering | PASS | 1-8 sequential |
+| Dependencies valid | PASS | All `Depends On` references resolve |
+| File paths exist | PASS | All cited source paths verified; new files (cli.py, tests) intentionally absent |
+| Prerequisites met | PARTIAL | `process_youtube_url` importable; `pyproject.toml` writable; `logs/bridge.log` exists but session `tg__179144806_9742` already rotated out — see C1 |
+| Cross-references | PASS | Success criteria map to tasks; no-gos / rabbit holes do not appear in the task list |
 
 ---
 
