@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Small
 owner: Valor Engels
@@ -359,8 +359,10 @@ Tier 1 defaults (builder, validator, documentarian) are sufficient. No specialis
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Investigation timing**: Should the bridge-log investigation block the CLI build, or run in parallel? (Plan currently says parallel — the two are independent.)
-2. **Test video**: Is there a preferred known-short caption-bearing YouTube URL for validator tests, or should the validator pick one and document it?
-3. **`--summary-only` fallback**: When a video has no summary (transcript < 2000 chars), should `--summary-only` print the full transcript with a note, or print nothing and exit 0? (Plan currently says "fall back with note" — intuitive but worth confirming.)
+The following questions were resolved during finalization:
+
+1. **Investigation timing**: Run in parallel with CLI build — the two are independent.
+2. **Test video**: Validator picks any short caption-bearing public video and documents the URL inline in the test file. No preferred URL is mandated; reproducibility comes from the documented choice.
+3. **`--summary-only` fallback**: When no summary exists (transcript < 2000 chars), print the full transcript prefixed with a one-line note (e.g., `# No summary available; full transcript below`) and exit 0. Empty output would be confusing.
