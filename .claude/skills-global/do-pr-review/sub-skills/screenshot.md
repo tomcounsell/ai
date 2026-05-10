@@ -45,7 +45,7 @@ mkdir -p generated_images/pr-${PR_NUMBER}
 
 ### 3. Start the Application
 
-Use `/prepare_app` or start the dev server directly:
+Start the dev server using the repo's `## Running` README section:
 ```bash
 # Example for Django projects:
 python manage.py runserver --noreload &

@@ -34,8 +34,8 @@ User request
           |
           v
 /do-pr-review (fork context)
-  |---> /prepare-app           start services
-  \---> mcp__byob__browser_*   take screenshots (real Chrome)
+  |---> repo README '## Running'  start dev server
+  \---> mcp__byob__browser_*      take screenshots (real Chrome)
 ```
 
 ## Skill-to-Skill References
@@ -51,7 +51,7 @@ do-build ------> do-test
 
 do-patch -------> (direct pytest + lint, no longer invokes do-test)
 
-do-pr-review ---> prepare-app
+do-pr-review ---> repo README '## Running' (start server per-repo docs)
               \-> mcp__byob__browser_* (BYOB MCP)
 
 new-valor-skill -> new-skill  (reads SKILL.md + SKILL_TEMPLATE.md)

@@ -313,7 +313,7 @@ gh pr diff $PR_NUMBER --name-only
 mkdir -p generated_images/pr-$PR_NUMBER
 
 # PR branch was already checked out in Step 1.
-# Use /prepare_app to ensure app is running, then capture via BYOB MCP:
+# Start the app using the repo's '## Running' README section, then capture via BYOB MCP:
 # (replace bash with mcp__byob__browser_* tool calls)
 #   mcp__byob__browser_navigate(url="http://localhost:8000", waitUntil="networkidle")
 #   mcp__byob__browser_read(url="http://localhost:8000", reuseTab=true, screens=1)
@@ -479,7 +479,7 @@ Save this URL as `{review_url}` for the output summary.
 
 **Works with:**
 - `/do-build` - Reviews PRs created by the build workflow
-- `/prepare_app` - Ensures app is running before screenshots
+- Repo `## Running` README section — start server per the project's own docs
 - BYOB MCP (`mcp__byob__browser_*`) - Handles browser automation and screenshot capture
 - `gh` CLI - Fetches PR data and posts reviews
 

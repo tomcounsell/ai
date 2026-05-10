@@ -537,7 +537,7 @@ Validate implementation against spec with screenshots.
 Steps:
 1. Detect branch and workflow ID
 2. Find matching spec in `specs/*.md`
-3. Start app with `/prepare_app`
+3. Start the app (see the repo's `## Running` README section)
 4. Capture screenshots via BYOB MCP (`mcp__byob__browser_*`) — see `.claude/skills/do-pr-review/SKILL.md`
 5. Compare implementation vs spec
 6. Classify issues (blocker/tech_debt/skippable)

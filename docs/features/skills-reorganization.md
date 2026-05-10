@@ -18,7 +18,7 @@ Every skill now has proper frontmatter fields:
 
 ### Commands Consolidated
 - **Thin wrapper commands deleted**: `do-build.md`, `do-plan.md`, `do-test.md`, `do-docs.md`, `do-pr-review.md`, `update.md` — skills handle `replace with concrete examples like `/do-plan`, `/do-build`, etc. or clarify as a pattern placeholder` invocation directly
-- **Substantial commands converted to skills**: `setup.md`, `prepare_app.md`, `prime.md`, `add-feature.md`, `pthread.md`, `audit-next-tool.md`, `sdlc.md` — each now has a proper `this is a template pattern; either keep with explicit note that `{name}` is a placeholder or replace with concrete example like `.claude/skills/do-plan/SKILL.md` with frontmatter
+- **Substantial commands converted to skills**: `setup.md`, `prime.md`, `add-feature.md`, `pthread.md`, `audit-next-tool.md`, `sdlc.md` — each now has a proper `this is a template pattern; either keep with explicit note that `{name}` is a placeholder or replace with concrete example like `.claude/skills/do-plan/SKILL.md` with frontmatter
 - **`.claude/commands/` is now empty** — all functionality migrated to skills
 
 ### Generic New-Skill Extracted

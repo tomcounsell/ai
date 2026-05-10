@@ -19,7 +19,7 @@ The `/do-pr-review` command validates implementations against specifications and
 **Status:** ✅ Implemented (BYOB-only since #1256)
 **Implementation files:**
 - `.claude/commands/do-pr-review.md` - Review workflow command
-- `.claude/commands/prepare_app.md` - App preparation command
+- Repo `## Running` README section — server startup instructions per-project
 - `CLAUDE.md` - Documentation and integration
 
 ## Source Inspiration
@@ -66,7 +66,7 @@ Create a `/do-pr-review` command that:
 ```
 .claude/commands/
   do-pr-review.md           # Review workflow command
-  prepare_app.md      # App setup for review (start servers, etc.)
+  # Server startup: see each repo's '## Running' README section
 
 agents/
   {workflow_id}/
@@ -147,7 +147,7 @@ Examples:
 ## Implementation Steps
 
 1. Create `.claude/commands/do-pr-review.md` with review logic
-2. Create `.claude/commands/prepare_app.md` for app setup
+2. Consult the repo's `## Running` README section to start the dev server
 3. Add screenshot storage to `agents/{id}/review/review_img/`
 4. Integrate with BYOB MCP (`mcp__byob__browser_*`) for captures
 5. Add review report schema

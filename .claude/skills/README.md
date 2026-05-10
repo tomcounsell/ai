@@ -17,7 +17,6 @@ Human-readable index of all Claude Code skills in this project. Not loaded by Cl
 | google-workspace | 249 | Model only | - | Gmail, Calendar, Docs, Sheets, Drive, Chat |
 | new-skill | 102 | Infra | - | Generic skill creator (repo-agnostic) |
 | new-valor-skill | 184 | User + Model | - | Valor-specific skill creator with repo patterns |
-| prepare-app | 306 | User + Model | - | Start services and prepare app for review |
 | prime | 102 | Infra | - | Codebase onboarding and architecture guide |
 | pthread | 138 | User + Model | fork | Spawn parallel agents for independent tasks |
 | reading-sms-messages | 38 | Model only | - | Read SMS/iMessage from macOS Messages app |

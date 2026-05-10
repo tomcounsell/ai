@@ -34,6 +34,7 @@ from scripts.update import (  # noqa: E402
     migrations,
     npm_tools,
     officecli,
+    readme_check,
     reflections_yaml,
     rodney,
     sentry_cli,
@@ -133,6 +134,7 @@ class UpdateResult:
     npm_tools_result: npm_tools.NpmToolsResult | None = None
     sentry_cli_result: sentry_cli.InstallResult | None = None
     kokoro_result: kokoro.DownloadResult | None = None
+    readme_check_result: readme_check.ReadmeCheckResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -931,6 +933,19 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         else:
             # --verify mode: report drift but do not warn aggressively
             result.warnings.append(f"BYOB MCP drift: {mcp_byob_result.message}")
+
+    # Step 4.95: Check that each active project repo has a '## Running' README section.
+    # Warn only — never blocks the update. Guides devs to document startup commands
+    # in their repo's README rather than relying on a generic skill to guess.
+    log("Checking project READMEs for '## Running' section...", v)
+    result.readme_check_result = readme_check.check_project_readmes(project_dir)
+    rc = result.readme_check_result
+    if rc.ok:
+        log(f"  README check OK ({rc.checked} project(s))", v)
+    else:
+        for warn in rc.warnings:
+            log(f"WARN: {warn}", v, always=True)
+            result.warnings.extend(rc.warnings)
 
     # Step 5: Service management
     if config.do_service_restart:
