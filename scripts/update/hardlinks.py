@@ -34,6 +34,13 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "daily-integration-audit"),
     # Retired skills — superseded by byob MCP + bowser subagent
     ("skills", "bowser"),
+    # Moved from skills-global to project-only .claude/skills/
+    ("skills", "linkedin"),
+    ("skills", "linkedin-messaging"),
+    ("skills", "officecli"),
+    ("skills", "x-com"),
+    # Moved from global commands to project-only .claude/commands/
+    ("commands", "kill.md"),
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,
