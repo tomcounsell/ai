@@ -136,6 +136,11 @@ This calls `cleanup_after_merge()` from `agent/worktree_manager.py`, which:
 
 Without this step, `gh pr merge --delete-branch` fails to delete the local branch because git refuses to delete a branch referenced by an active worktree.
 
+**Exit codes** (issue #1357):
+- `0` — clean (worktree and branch removed)
+- `1` — generic error (git failure, unexpected exception)
+- `2` — **busy guard fired**: a non-terminal `AgentSession` still references the worktree as `working_dir`. The offending session id is printed to stderr. See [`docs/sdlc/merge-troubleshooting.md`](../../../docs/sdlc/merge-troubleshooting.md#worktree-cleanup-blocked-issue-1357) for the recovery workflow.
+
 ## Step 7.6: Documentation Cascade
 
 After the PR is created, run the `/do-docs` cascade to find and surgically update any existing documentation affected by the code changes in this build. Pass the PR number so the cascade can inspect the full diff:

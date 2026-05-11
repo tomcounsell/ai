@@ -67,6 +67,20 @@ def main() -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
+    # Issue #1357: distinct exit code (2) when the worktree is in use by a
+    # live AgentSession. Operators should investigate the named session and
+    # kill it (if dead) before retrying — not blindly add --force.
+    if result.get("blocked_by_session"):
+        session_id = result["blocked_by_session"]
+        print(
+            f"Error: worktree .worktrees/{args.slug} is in use by "
+            f"session_id={session_id}. Investigate the session "
+            f"(valor-session status --id {session_id}); kill it if dead "
+            f"(valor-session kill --id {session_id}) and re-run.",
+            file=sys.stderr,
+        )
+        return 2
+
     if result["already_clean"]:
         print(f"Nothing to clean up for '{args.slug}' -- already clean.")
         return 0

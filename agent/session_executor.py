@@ -1690,7 +1690,19 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 return result
             return raw
 
-        task = BackgroundTask(messenger=messenger)
+        # Pass working_dir so BackgroundTask._watchdog can detect a vanished
+        # worktree mid-run (issue #1357). Pre-existing local `working_dir` is
+        # the same path used to spawn the SDK subprocess earlier in this
+        # function, so the watchdog observes the exact directory the SDK is
+        # holding open as cwd. project_key is supplied here (not resolved
+        # inside messenger.py) to preserve the messenger's ORM-free invariant
+        # — see tests/unit/test_messenger_callbacks.py::
+        # TestMessengerArchitecturalBoundary.
+        task = BackgroundTask(
+            messenger=messenger,
+            working_dir=str(working_dir),
+            project_key=getattr(session, "project_key", None),
+        )
         await task.run(do_work(), send_result=True)
 
         # === Two-tier no-progress detector: populate cancellable task ref (#1036) ===

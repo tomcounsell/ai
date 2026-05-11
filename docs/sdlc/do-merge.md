@@ -28,7 +28,39 @@ After a successful merge, remove the worktree:
 git worktree remove .worktrees/{slug}
 ```
 
+Or use the dedicated script (preferred, since it also deletes the local branch and prunes stale worktree refs):
+```bash
+python scripts/post_merge_cleanup.py {slug}
+```
+
 The branch `session/{slug}` is deleted automatically by GitHub on merge if "delete branch on merge" is enabled.
+
+### Busy Guard (issue #1357)
+
+`post_merge_cleanup.py` refuses to delete a worktree while a non-terminal `AgentSession` still references it as `working_dir`. This protects against the macOS cwd-vanished wedge (investigation #1246): deleting a directory out from under a live SDK subprocess does not signal that subprocess; `getcwd(3)` returns ENOENT, the harness hangs forever in `proc.communicate()`, and the session row sits at `status=running` for hours.
+
+The script's exit codes:
+
+| Exit | Meaning |
+|------|---------|
+| 0 | Cleanup succeeded (or already clean) |
+| 1 | Generic error — git/branch removal failed |
+| 2 | **Blocked** — a live session is using the worktree |
+
+When you see exit 2, the stderr line points to the offending session:
+
+```text
+Error: worktree .worktrees/{slug} is in use by session_id=0_LIVE.
+Investigate the session (valor-session status --id 0_LIVE);
+kill it if dead (valor-session kill --id 0_LIVE) and re-run.
+```
+
+Operator response, in order:
+1. Run `valor-session status --id <session_id>` to verify whether the session is genuinely live or wedged.
+2. If wedged or dead: `valor-session kill --id <session_id>` then re-run `post_merge_cleanup.py`.
+3. If genuinely live and the cleanup must proceed anyway, override programmatically with `cleanup_after_merge(repo_root, slug)` after passing `force=True` to `remove_worktree`. **Do not make `--force` your reflex** — copy-paste `--force` defeats the protection. The WARNING log on `force=True` (`force-removing worktree ... despite live session_id=...`) is grep-able for audit.
+
+The complementary defense at runtime is the `BackgroundTask._watchdog` cwd-vanished check: if a worktree disappears underneath a session by some other path (manual `rm -rf`, OS-level cleanup, recovery script), the watchdog cancels the work task within one heartbeat tick (~60s in production), logs `cwd_vanished session_id=...`, and increments `{project_key}:session-health:cwd_vanished`.
 
 ## Bridge/Worker Restart After Merge
 

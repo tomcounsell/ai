@@ -193,6 +193,24 @@ python scripts/post_merge_cleanup.py {slug}
 
 The function returns a status dict with `worktree_removed`, `branch_deleted`, `already_clean`, and `errors` fields. It is safe to call in any state -- if everything is already cleaned up, it is a no-op.
 
+### Worktree Busy Guard (Issue #1357)
+
+`remove_worktree()` enforces a runtime invariant: **a worktree at `.worktrees/{slug}/` is removable only if no non-terminal `AgentSession` references it as `working_dir`**. The guard is implemented by `worktree_busy_check(repo_root, slug)`, which scans `AgentSession.query.all()` for live sessions and matches their `working_dir` against the target worktree path using segment-aware containment (so `.worktrees/sdlc-1218` matches `.worktrees/sdlc-1218/subdir` but not `.worktrees/sdlc-1218-other`).
+
+When the guard fires:
+
+- `remove_worktree(repo_root, slug)` returns `("blocked", session_id)` instead of `True`/`False`.
+- `cleanup_after_merge(repo_root, slug)` surfaces the block as `result["blocked_by_session"]` and adds `f"blocked: worktree in use by session_id=..."` to `result["errors"]`.
+- `python scripts/post_merge_cleanup.py {slug}` prints the offending session id to stderr and exits **2** (distinct from exit 1 for generic errors). See [`docs/sdlc/do-merge.md`](../sdlc/do-merge.md#busy-guard-issue-1357) for the operator workflow.
+
+**Why this guard exists.** Investigation #1246 documented a 10.9-hour PM-session wedge: a sibling `/do-merge` ran `post_merge_cleanup.py` while the PM session's SDK subprocess was still running with cwd inside the same worktree. macOS does not signal subprocesses about deleted cwd directories — `getcwd(3)` returns ENOENT, the harness hangs in `await proc.communicate()` forever, and the AgentSession row stays at `status=running` until a manual kill. The busy guard prevents that delete from happening.
+
+**Override.** `remove_worktree(repo_root, slug, force=True)` removes the worktree despite a live session, with a WARNING log (`force-removing worktree .worktrees/{slug} despite live session_id=...`). Use only when the session has already been verified dead but its row hasn't flipped yet. The WARNING is grep-able for audit.
+
+**Complementary watchdog.** `BackgroundTask._watchdog` (`agent/messenger.py`) checks `os.path.isdir(working_dir)` on each heartbeat tick. If the directory has vanished — by manual `rm -rf`, OS cleanup, or any path that bypassed the busy guard — the watchdog cancels the work task within one tick, logs `cwd_vanished session_id=...`, and increments the `{project_key}:session-health:cwd_vanished` Redis counter (falls back to bare `session-health:cwd_vanished` when the project_key is unknown). The existing `CancelledError` handler in `_run_work` then sends "I was interrupted and will resume automatically" to the user.
+
+**Layering.** The guard prevents the bad delete (source); the watchdog catches it if it happens anyway via a different path (sink). The two layers are independent and reverting either does not break the other.
+
 ## Key Experiment Findings
 
 Experiments validated the approach before implementation:

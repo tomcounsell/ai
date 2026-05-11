@@ -12,6 +12,7 @@ Usage:
 
 import asyncio
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -197,9 +198,38 @@ class BackgroundTask:
         self,
         messenger: BossMessenger,
         acknowledgment_timeout: float = 180.0,  # 3 minutes
+        working_dir: str | None = None,
+        project_key: str | None = None,
     ):
+        """Construct a BackgroundTask.
+
+        Args:
+            messenger: BossMessenger used to deliver final results and
+                liveness callbacks.
+            acknowledgment_timeout: Reserved for future ack-timeout behavior;
+                currently informational. Defaults to 180s.
+            working_dir: Optional path the SDK subprocess was spawned with as
+                its CWD. When provided, ``_watchdog`` checks each tick that
+                the directory still exists and cancels the work task if it
+                has vanished (issue #1357, #1246). When ``None`` or empty,
+                the cwd-vanished check is skipped — preserves backward-compat
+                for callers that don't yet thread ``working_dir`` through.
+            project_key: Optional project key, used only as the prefix of the
+                ``{project_key}:session-health:cwd_vanished`` Redis counter.
+                Passed in from the caller (session_executor) so messenger.py
+                stays ORM-free — the architectural boundary enforced by
+                ``tests/unit/test_messenger_callbacks.py::
+                TestMessengerArchitecturalBoundary``. When ``None``, the
+                counter falls back to the bare ``session-health:cwd_vanished``
+                key (mirrors the orphan-reap fallback shape).
+        """
         self.messenger = messenger
         self.acknowledgment_timeout = acknowledgment_timeout
+        # Issue #1357: track the SDK subprocess's CWD so the watchdog can
+        # detect a vanished worktree mid-run. Empty string is treated as None
+        # so callers can pass ``str(maybe_path or "")`` safely.
+        self._working_dir: str | None = working_dir if working_dir else None
+        self._project_key: str | None = project_key if project_key else None
 
         self._task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
@@ -353,26 +383,65 @@ class BackgroundTask:
             if self._watchdog_task and not self._watchdog_task.done():
                 self._watchdog_task.cancel()
 
+    # Tunable for tests (issue #1357). Production stays at 60s; the
+    # integration test monkeypatches this to 1s to exercise the
+    # cwd-vanished branch without waiting two minutes in CI.
+    HEARTBEAT_INTERVAL = 60  # seconds
+
     async def _watchdog(self) -> None:
         """
         Internal health check watchdog with periodic heartbeat.
 
-        Emits a heartbeat log every 60s while the SDK subprocess is running.
-        This provides continuous liveness visibility instead of a single
-        check at acknowledgment_timeout. Does not send any message to chat.
+        Emits a heartbeat log every ``HEARTBEAT_INTERVAL`` seconds while the
+        SDK subprocess is running. This provides continuous liveness
+        visibility instead of a single check at acknowledgment_timeout.
+        Does not send any message to chat.
 
         After each heartbeat log, invokes `messenger.notify_heartbeat_tick()`
         so the queue layer can update `last_sdk_heartbeat_at` for the
         two-tier no-progress detector (issue #1036). Callback exceptions are
         caught inside `notify_heartbeat_tick` and do not crash the watchdog.
+
+        CWD-vanished detection (issue #1357, ties to investigation #1246):
+            When ``self._working_dir`` is set, each tick first checks that
+            the directory still exists on disk. If it has been removed out
+            from under the SDK subprocess (e.g. a sibling ``/do-merge`` ran
+            ``post_merge_cleanup.py`` for the same slug, or someone did
+            ``rm -rf`` manually), we log ``cwd_vanished``, increment
+            ``{project_key}:session-health:cwd_vanished``, cancel the work
+            task, and break the loop. The existing ``CancelledError`` handler
+            in ``_run_work`` then sends "I was interrupted..." to the user.
         """
-        heartbeat_interval = 60  # seconds
+        heartbeat_interval = self.HEARTBEAT_INTERVAL
         elapsed = 0
         try:
             while self._task and not self._task.done():
                 await asyncio.sleep(heartbeat_interval)
                 elapsed += heartbeat_interval
                 if self._task and not self._task.done():
+                    # Issue #1357: detect vanished cwd before logging the
+                    # heartbeat. If we don't, the heartbeat keeps writing
+                    # "running Ns" while the SDK is silently wedged on a
+                    # dead vnode (the macOS kernel does not signal the
+                    # subprocess about its deleted cwd).
+                    if self._working_dir and not os.path.isdir(self._working_dir):
+                        logger.warning(
+                            "[%s] cwd_vanished session_id=%s working_dir=%s",
+                            self.messenger.session_id,
+                            self.messenger.session_id,
+                            self._working_dir,
+                        )
+                        self._increment_cwd_vanished_counter()
+                        try:
+                            self._task.cancel()
+                        except Exception as cancel_err:
+                            logger.debug(
+                                "[%s] cwd_vanished cancel raised: %s",
+                                self.messenger.session_id,
+                                cancel_err,
+                            )
+                        break
+
                     communicated = self.messenger.has_communicated()
                     logger.info(
                         "[%s] SDK heartbeat: running %ds, communicated=%s",
@@ -387,6 +456,36 @@ class BackgroundTask:
             pass
         except Exception as e:
             logger.error(f"[{self.messenger.session_id}] Watchdog error: {e}")
+
+    def _increment_cwd_vanished_counter(self) -> None:
+        """Bump the ``cwd_vanished`` Redis counter (issue #1357).
+
+        Project-scoped counter: ``{project_key}:session-health:cwd_vanished``
+        when the constructor was given a ``project_key``. Falls back to bare
+        ``session-health:cwd_vanished`` when ``project_key`` is None
+        (mirrors the orphan-reap counter pattern in
+        ``agent/session_health.py::_increment_orphan_process_counter``).
+
+        ``project_key`` is supplied by the caller (``session_executor``) at
+        construction time so messenger.py stays ORM-free — see the
+        architectural-boundary test in tests/unit/test_messenger_callbacks.py.
+
+        All Redis errors are swallowed — the counter is observability, not
+        correctness. Failing here must not crash the watchdog.
+        """
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+            if self._project_key:
+                _R.incr(f"{self._project_key}:session-health:cwd_vanished")
+            else:
+                _R.incr("session-health:cwd_vanished")
+        except Exception as e:
+            logger.debug(
+                "[%s] cwd_vanished counter increment failed (non-fatal): %s",
+                self.messenger.session_id,
+                e,
+            )
 
     @property
     def is_running(self) -> bool:

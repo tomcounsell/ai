@@ -10,11 +10,98 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
 WORKTREES_DIR = ".worktrees"
 VALID_SLUG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+
+def worktree_busy_check(repo_root: Path, slug: str) -> tuple[str, str] | None:
+    """Check whether any non-terminal AgentSession references this worktree.
+
+    Walks the AgentSession table looking for rows whose ``working_dir`` lives
+    inside ``.worktrees/{slug}/`` (or is exactly that directory) and whose
+    ``status`` is not in ``TERMINAL_STATUSES``. The first match wins.
+
+    Imports of ``models.agent_session`` and ``models.session_lifecycle`` are
+    deferred to function body to keep ``worktree_manager.py``'s import-time
+    graph unchanged (worktree_manager is loaded by tooling that should not
+    pay the Popoto bootstrap cost just to validate slugs).
+
+    Path comparison normalizes both sides via ``os.path.normpath`` (no symlink
+    resolution) then matches the worktree's path components segment-by-segment
+    against the session's. ``.worktrees/sdlc-1218`` matches ``.worktrees/
+    sdlc-1218/subdir`` but not ``.worktrees/sdlc-1218-other`` (Risk 5).
+
+    Failure mode: if the Popoto query raises (Redis unavailable, malformed
+    row, anything), the helper logs a WARNING and returns ``None`` (fail-open).
+    Refusing every worktree removal because Redis hiccupped would cause more
+    operational pain than the busy guard prevents.
+
+    Args:
+        repo_root: Path to the main repository.
+        slug: Work item slug whose worktree we want to remove.
+
+    Returns:
+        ``(session_id, agent_session_id)`` of the first live session
+        referencing the worktree, or ``None`` if clear.
+    """
+    try:
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import TERMINAL_STATUSES
+    except Exception as e:  # pragma: no cover - import-time failure
+        logger.warning("worktree_busy_check: model imports failed (%s); fail-open", e)
+        return None
+
+    worktree_dir = (repo_root / WORKTREES_DIR / slug).resolve()
+    worktree_norm = os.path.normpath(str(worktree_dir))
+    worktree_parts = Path(worktree_norm).parts
+
+    try:
+        sessions = AgentSession.query.all()
+    except Exception as e:
+        logger.warning("worktree_busy_check: AgentSession query failed (%s); fail-open", e)
+        return None
+
+    for session in sessions:
+        try:
+            wd = getattr(session, "working_dir", None)
+            if not wd:
+                continue
+            status = getattr(session, "status", None)
+            if not status or status in TERMINAL_STATUSES:
+                continue
+
+            # Normalize without resolving symlinks (Risk 5: realpath could
+            # amplify the match into unrelated directories).
+            try:
+                # Try resolving an absolute path; fall back to normpath for
+                # relative working_dir values like ".worktrees/sdlc-1218".
+                if os.path.isabs(wd):
+                    session_norm = os.path.normpath(wd)
+                else:
+                    session_norm = os.path.normpath(str((repo_root / wd).resolve()))
+            except Exception:
+                session_norm = os.path.normpath(str(wd))
+
+            session_parts = Path(session_norm).parts
+            # Segment-aware containment: the worktree's parts must be a prefix
+            # of the session's parts. This rejects ".worktrees/sdlc-1218-other"
+            # while accepting ".worktrees/sdlc-1218/subdir".
+            if (
+                len(session_parts) >= len(worktree_parts)
+                and session_parts[: len(worktree_parts)] == worktree_parts
+            ):
+                session_id = getattr(session, "session_id", "") or ""
+                agent_session_id = getattr(session, "agent_session_id", "") or ""
+                return (session_id, agent_session_id)
+        except Exception as e:
+            logger.debug("worktree_busy_check: skipping session row (%s)", e)
+            continue
+
+    return None
 
 
 def validate_workspace(
@@ -490,8 +577,21 @@ def get_or_create_worktree(repo_root: Path, slug: str, base_branch: str = "main"
     return create_worktree(repo_root, slug, base_branch)
 
 
-def remove_worktree(repo_root: Path, slug: str, delete_branch: bool = True) -> bool:
+def remove_worktree(
+    repo_root: Path,
+    slug: str,
+    delete_branch: bool = True,
+    force: bool = False,
+) -> bool | tuple[Literal["blocked"], str]:
     """Remove a git worktree and optionally its branch.
+
+    Refuses removal if a non-terminal ``AgentSession`` still references the
+    worktree as ``working_dir`` (issue #1357). This prevents the macOS
+    cwd-vanished wedge documented in investigation #1246: deleting a
+    directory out from under a running SDK subprocess does not signal that
+    subprocess; ``getcwd(3)`` starts returning ENOENT, the harness hangs
+    forever in ``proc.communicate()``, and the AgentSession row sits at
+    ``status=running`` until a manual kill.
 
     If the current process CWD is inside the worktree being removed,
     this function changes CWD to repo_root first to prevent the shell
@@ -501,9 +601,15 @@ def remove_worktree(repo_root: Path, slug: str, delete_branch: bool = True) -> b
         repo_root: Path to the main repository
         slug: Work item slug
         delete_branch: Whether to also delete the session branch
+        force: If True, removes the worktree even when a live session
+            references it. A WARNING is logged in that case. Use only
+            when the session has already been verified dead but its row
+            has not yet flipped to a terminal status.
 
     Returns:
-        True if successfully removed, False otherwise
+        True if successfully removed, False if the worktree was missing or
+        the git remove command failed, or ``("blocked", session_id)`` when
+        a live session is using the worktree and ``force=False``.
 
     Raises:
         ValueError: If slug contains path traversal or invalid characters
@@ -511,6 +617,29 @@ def remove_worktree(repo_root: Path, slug: str, delete_branch: bool = True) -> b
     _validate_slug(slug)
     worktree_dir = repo_root / WORKTREES_DIR / slug
     branch_name = f"session/{slug}"
+
+    # Refuse-busy guard (issue #1357): ask the AgentSession table whether
+    # any non-terminal session still references this worktree.
+    busy = worktree_busy_check(repo_root, slug)
+    if busy is not None:
+        session_id, agent_session_id = busy
+        if force:
+            logger.warning(
+                "force-removing worktree .worktrees/%s despite live "
+                "session_id=%s agent_session_id=%s",
+                slug,
+                session_id,
+                agent_session_id,
+            )
+        else:
+            logger.warning(
+                "Refusing to remove worktree .worktrees/%s: in use by "
+                "session_id=%s agent_session_id=%s. Pass force=True to override.",
+                slug,
+                session_id,
+                agent_session_id,
+            )
+            return ("blocked", session_id)
 
     if not worktree_dir.exists():
         logger.info(f"Worktree not found: {worktree_dir}")
@@ -865,13 +994,25 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
     # Step 1: Remove worktree if it exists
     if had_worktree:
         removed = remove_worktree(repo_root, slug, delete_branch=False)
-        result["worktree_removed"] = removed
-        if removed:
-            logger.info(f"Post-merge: removed worktree for {slug}")
-        else:
-            msg = f"Failed to remove worktree .worktrees/{slug}"
+        # Issue #1357: remove_worktree returns ("blocked", session_id) when a
+        # live AgentSession references the worktree. Surface that into the
+        # result dict so post_merge_cleanup.py can exit 2 and the operator
+        # knows which session to investigate.
+        if isinstance(removed, tuple) and removed and removed[0] == "blocked":
+            session_id = removed[1]
+            result["worktree_removed"] = False
+            result["blocked_by_session"] = session_id
+            msg = f"blocked: worktree in use by session_id={session_id}"
             result["errors"].append(msg)
             logger.warning(f"Post-merge: {msg}")
+        else:
+            result["worktree_removed"] = bool(removed)
+            if removed:
+                logger.info(f"Post-merge: removed worktree for {slug}")
+            else:
+                msg = f"Failed to remove worktree .worktrees/{slug}"
+                result["errors"].append(msg)
+                logger.warning(f"Post-merge: {msg}")
 
     # Step 2: Prune stale worktree references (handles cases where the
     # directory was manually deleted but git still tracks the worktree)
