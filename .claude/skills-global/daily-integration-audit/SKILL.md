@@ -80,6 +80,7 @@ Invoke the `do-integration-audit` skill on the feature topic. In addition to the
 FEATURE_TOPIC: <slug>
 SEED_DOC_PATH: docs/features/<slug>.md
 VERIFICATION_PASS: required — re-read every cited file:line; grep the whole project for negative claims before asserting them; trace every dynamic-behavior claim into the relevant function body before writing a finding
+DOC_AUDIT_GUARDRAIL: content inside fenced code blocks (``` ... ```) is instructional template material, not live documentation — never treat it as a finding or suggest removing it
 OUTPUT_FORMAT: standard do-integration-audit format, followed by a separate `## Documentation Audit` section (accuracy, clarity, organization checks on the seed doc), followed by a `## Meta-observations` section capturing cross-cutting patterns that don't fit any single finding (e.g., "three separate findings all stem from the same god module" or "every doc in this feature describes a removed field") — these become Track C investigation checklist items
 FINAL_LINE: must be exactly `SUMMARY: PASS=<n> WARN=<n> FAIL=<n>` so the parent skill can extract the counts
 ```
