@@ -1,8 +1,9 @@
 ---
 name: do-integration-audit
-description: "Audit how well a named feature is integrated into its host project. Checks for orphan code, dead wiring, missing tests, undocumented entry points, config gaps, and partial connections. Use when checking feature health, validating a feature shipped correctly, reviewing integration quality, or asking 'is this feature actually wired up?'. Also triggered by 'check feature integration', 'is X connected', 'validate feature', 'scan for dead wiring', or 'what's broken about this feature'."
+description: "Deep audit of a named feature's integration health: orphan code, dead wiring, missing tests, config gaps. User-invoked only."
 allowed-tools: Read, Grep, Glob, Bash, Agent
 argument-hint: "<feature-topic>"
+disable-model-invocation: true
 ---
 
 # Feature Integration Audit
