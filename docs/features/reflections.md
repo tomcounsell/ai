@@ -136,7 +136,6 @@ each update run. This ensures the scheduler always reads the vault version.
 | Name | Callable | Description |
 |------|----------|-------------|
 | `session-intelligence` | `reflections.session_intelligence.run` | Session Analysis → LLM Reflection → Bug Issue Filing **(disabled — calls gh CLI and spawns agent)** |
-| `behavioral-learning` | `reflections.behavioral_learning.run` | Episode Cycle-Close → Pattern Crystallization |
 | `pm-briefings` | `reflections.pm_briefings.run` | Slot-driven PM briefings dispatcher. Each project declares slots (`morning`, `daily_log`, `log_audit`) in `projects.json`. See [pm-briefings.md](pm-briefings.md). |
 
 **Memory management:**
@@ -332,7 +331,6 @@ The package modules:
 | `reflections.auditing` | 5 auditing callables (docs audit, skills audit, hooks audit, PR review audit, branch sweeper) |
 | `reflections.task_management` | 2 task management callables (task check, principal staleness) |
 | `reflections.session_intelligence` | Pipeline: session analysis → LLM reflection → bug issue filing |
-| `reflections.behavioral_learning` | Pipeline: episode cycle-close → pattern crystallization |
 | `reflections.pm_briefings` | Slot-driven dispatcher (`pm-briefings` registry entry): `morning`, `daily_log`, `log_audit` per (project × slot) — see [pm-briefings.md](pm-briefings.md) |
 | `reflections.memory_management` | 3 memory management callables (decay prune, quality audit, knowledge reindex) |
 
@@ -657,7 +655,6 @@ The reflection scheduler starts automatically as part of the standalone worker p
 | `reflections/auditing.py` | 5 auditing callables + PR review audit helpers (`run_log_review` retired in #1292) |
 | `reflections/task_management.py` | 2 task management callables |
 | `reflections/session_intelligence.py` | Session analysis → LLM reflection → bug issue pipeline |
-| `reflections/behavioral_learning.py` | Episode cycle-close → pattern crystallization pipeline |
 | `reflections/pm_briefings/` | Slot-driven `pm-briefings` dispatcher: `morning`, `daily_log`, `log_audit` slot modules + builder + delivery |
 | `reflections/memory_management.py` | 3 memory management callables |
 | `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
