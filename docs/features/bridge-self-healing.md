@@ -509,20 +509,53 @@ long-running session is making progress. To minimize **false-negatives**
 (killing a working session) while still reaping genuinely wedged sessions, the
 detector uses two independent tiers. (Issues #1036 and #1046.)
 
-### Tier 1 — dual heartbeat + stdout-stale kill signal
+### Tier 1 — per-turn signals (sub-check A) + bounded startup-window heartbeat (sub-check B)
 
-Two independent 60-second writers update separate AgentSession fields:
+`_has_progress()` evaluates two sub-checks. Either passing → progress.
+
+**Sub-check A — per-turn SDK progress (issue #1226).**
+
+| Field | Writer | When |
+|-------|--------|------|
+| `last_tool_use_at` | `agent/hooks/liveness_writers.py::record_tool_boundary` (PreToolUse / PostToolUse) | Per tool call boundary |
+| `last_turn_at` | `agent/sdk_client.py` on `result` event | End of each turn |
+
+Either field fresher than `SDK_PROGRESS_FRESHNESS_WINDOW` (1800s, 30 min)
+counts as progress. `last_sdk_heartbeat_at` (the BackgroundTask watchdog
+tick) is intentionally NOT a progress signal — it proves only that the
+subprocess exists.
+
+**Sub-check B — startup-window executor-alive fallback (issue #1036, narrowed by #1356).**
 
 | Field | Writer | When |
 |-------|--------|------|
 | `last_heartbeat_at` | Queue-layer `_heartbeat_loop` inside `_execute_agent_session` | Every `HEARTBEAT_WRITE_INTERVAL` (60s) |
-| `last_sdk_heartbeat_at` | Messenger-layer `BackgroundTask._watchdog` via `on_heartbeat_tick` callback | Every 60s while SDK subprocess runs |
 
-`_has_progress()` returns `True` if **either** heartbeat is within
-`HEARTBEAT_FRESHNESS_WINDOW` (90s), or any own-progress field
-(`turn_count`, `log_path`, `claude_session_uuid`) is set, or the session
-has at least one non-terminal child. Tier 1 flags a session as potentially
-stuck when ALL of those signals are absent.
+When `sdk_ever_output` is False (neither per-turn field has ever been set),
+`last_heartbeat_at` fresh within `HEARTBEAT_FRESHNESS_WINDOW` (90s) counts
+as progress, **subject to the no-output running-time budget gate**. The
+function uses `started_ref = entry.started_at or entry.created_at` so that
+recovered sessions (whose `started_at` is nulled by the recovery path)
+cannot silently re-enter the legacy fast-path:
+
+| `started_ref` state | Verdict |
+|---|---|
+| both `started_at` and `created_at` are None (truly legacy / phantom record) | fresh heartbeat passes |
+| `running_seconds < STARTUP_GRACE_SECONDS` (300s, aliased to `AGENT_SESSION_HEALTH_MIN_RUNNING`, env-tunable) | fresh heartbeat passes |
+| `STARTUP_GRACE_SECONDS <= running_seconds <= NO_OUTPUT_BUDGET_SECONDS` (= `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW` = 1800s, 30 min) | fresh heartbeat passes (in-band) |
+| `running_seconds > 1800s` AND `sdk_ever_output is False` | **fall through** — INCRs `tier1_falloff:no_output_budget_exceeded`, sub-check B does NOT pass; combined with absent per-turn signals and own-progress fields, `_has_progress` returns False; Tier 2 reprieve cap then escalates to recovery within `MAX_NO_OUTPUT_REPRIEVES` ticks |
+
+This bounds the previously-unbounded fresh-heartbeat fast-path that allowed
+cwd-disappearance and similar wedges (parent investigation #1246) to hold
+Tier 1 open indefinitely. Sessions that have produced any SDK output
+(`sdk_ever_output=True`) are not subject to sub-check B at all — sub-check A
+is authoritative for them.
+
+**Own-progress fields and child-activity check** are evaluated as a final
+fall-through: `turn_count > 0`, non-empty `log_path`, non-empty
+`claude_session_uuid` (sticky once set, evaluated only when
+`sdk_ever_output` is False), and the #963 child-activity check (a PM
+session with any non-terminal child is not stuck).
 
 > **Retired by issue #1172:** the stdout-stale Tier 1 extension from #1046
 > (`STDOUT_FRESHNESS_WINDOW`, `FIRST_STDOUT_DEADLINE`) has been removed
@@ -531,11 +564,20 @@ stuck when ALL of those signals are absent.
 > — long-thinking turns and large tool outputs produce legitimate stdout
 > silence. See [PM Session Liveness](pm-session-liveness.md) for the
 > evidence-only philosophy and cost-monitoring backstop.
+>
+> **Retired by issue #1226:** the symmetric "dual heartbeat" Tier 1
+> (either `last_heartbeat_at` or `last_sdk_heartbeat_at` fresh = progress)
+> was replaced by sub-check A above. `last_sdk_heartbeat_at` is now
+> watchdog-only.
 
 **Constants:**
 
 | Constant | Default | Env var | Purpose |
 |----------|---------|---------|---------|
+| `SDK_PROGRESS_FRESHNESS_WINDOW` | 1800s (30 min) | `SDK_PROGRESS_FRESHNESS_WINDOW_SECS` | Sub-check A freshness window for `last_tool_use_at` / `last_turn_at` (issue #1226) |
+| `MAX_NO_OUTPUT_REPRIEVES` | 20 | — (derived) | Tier-2 reprieve cap for `sdk_ever_output=False` sessions; also feeds `NO_OUTPUT_BUDGET_SECONDS` (issues #1226 / #1356) |
+| `NO_OUTPUT_BUDGET_SECONDS` | 1800s (30 min) | — (derived) | `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW`. Sub-check B falls through when `running_seconds` exceeds this (issue #1356) |
+| `STARTUP_GRACE_SECONDS` | 300s (= `AGENT_SESSION_HEALTH_MIN_RUNNING`) | `STARTUP_GRACE_SECONDS` | Below this `running_seconds`, sub-check B's fresh-heartbeat fast-path is unconditional (issue #1356) |
 | `COMPACT_REPRIEVE_WINDOW_SEC` | 600s | `COMPACT_REPRIEVE_WINDOW_SECS` | Tier 2 `compacting` reprieve window — `last_compaction_ts` within this window reprieves the kill (issue #1099 Mode 3) |
 
 **Operator alert:** After 3 Tier 2 reprieves, the reprieve log message is
