@@ -1,6 +1,6 @@
 ---
 name: new-skill
-description: Use when creating a new Claude Code skill directory and SKILL.md. Also use when the user says 'create a skill', 'new skill', or 'add a skill'. Handles both shared (~/.claude/skills/) and project-specific (.claude/skills/) skills.
+description: Use when creating a new Claude Code skill, subagent, or Valor Python tool. Also use when the user says 'create a skill', 'new skill', 'add a skill', 'create an agent', 'new agent', 'create a tool', 'new tool', or 'add a tool'. Handles shared (~/.claude/skills/), project-specific (.claude/skills/), subagents (.claude/agents/), and Valor tools/ directory.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 argument-hint: "<skill-name>"
 disable-model-invocation: true
@@ -10,11 +10,13 @@ disable-model-invocation: true
 
 ## What this skill does
 
-Creates a new Claude Code skill from scratch, following the canonical template structure. It guides the agent through choosing a skill name, writing trigger-oriented descriptions, structuring the SKILL.md with progressive disclosure, and placing the skill in the correct scope (shared personal vs. project-specific). The result is a complete, spec-compliant skill directory ready for use.
+Creates Claude Code skills, subagents, and Valor Python tools from scratch, following canonical patterns. Guides through naming, scoping, structuring with progressive disclosure, and registering the artifact. The result is a complete, spec-compliant artifact ready for use.
 
 ## When to load sub-files
 
-- Creating any new skill → read [SKILL_TEMPLATE.md](SKILL_TEMPLATE.md) and use it as the starting skeleton
+- Creating a Claude Code skill → read [SKILL_TEMPLATE.md](SKILL_TEMPLATE.md) for the skeleton
+- Creating a subagent (`.claude/agents/`) → read [AGENT.md](AGENT.md)
+- Creating a Valor Python tool (`tools/`) → read [VALOR_TOOL.md](VALOR_TOOL.md)
 - Need current Anthropic field specs or substitution variable docs → read `~/.claude/skills/do-skills-audit/references/anthropic-skills-docs.txt`
 - Need a real-world example of a canonical skill structure → read `~/.claude/skills/do-skills-audit/references/anthropic-skill-creator.md`
 
@@ -106,4 +108,5 @@ If a skill is not being discovered or loaded:
 
 ## Version history
 
+- v2.0.0 (2026-05-11): Absorbed new-valor-skill (VALOR_TOOL.md) and add-feature (AGENT.md); unified entry point for skills, agents, and tools
 - v1.0.0 (2026-02-22): Initial — extracted from new-valor-skill as a generic, repo-agnostic skill creator

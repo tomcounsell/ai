@@ -27,6 +27,9 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("commands", "do-pr-review.md"),
     ("commands", "update.md"),
     ("commands", "sdlc.md"),
+    # Retired skills — consolidated into new-skill
+    ("skills", "add-feature"),
+    ("skills", "new-valor-skill"),
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,
