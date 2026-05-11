@@ -30,6 +30,8 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     # Retired skills — consolidated into new-skill
     ("skills", "add-feature"),
     ("skills", "new-valor-skill"),
+    # Retired skills — moved to reflections
+    ("skills", "daily-integration-audit"),
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,
