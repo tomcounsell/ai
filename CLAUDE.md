@@ -441,8 +441,8 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 
 ### Configuration Files
 
-- `.env` - Symlink → `~/Desktop/Valor/.env` (do not write secrets here directly)
-- `~/Desktop/Valor/projects.json` - Multi-project configuration (iCloud-synced, private)
+- `.env` - Symlink → `<vault>/.env` (do not write secrets here directly). Vault location is configurable via `VALOR_VAULT_DIR`; default `~/Desktop/Valor/`.
+- `<vault>/projects.json` - Multi-project configuration (private; lives in the configured vault directory)
 - `.claude/settings.local.json` - Claude Code settings
 
 ### Single-Machine Ownership (Strict)
@@ -460,11 +460,25 @@ Enforced by `bridge/config_validation.py::validate_projects_config` and gated by
 
 ## Secrets
 
-All secrets go in **`~/Desktop/Valor/.env`**. Never write secrets to `repo/.env`.
+All secrets go in **`<vault>/.env`** — the vault is configurable per machine via `VALOR_VAULT_DIR`; the established default is `~/Desktop/Valor/`. Never write secrets to `repo/.env`.
 
-The repo `.env` is a symlink — writing to it writes to the vault, but the canonical workflow is to edit `~/Desktop/Valor/.env` directly. The symlink is created automatically by `scripts/remote-update.sh` and `scripts/update/env_sync.py` on each machine after iCloud syncs.
+The repo `.env` is a symlink — writing to it writes to the vault, but the canonical workflow is to edit `<vault>/.env` directly. The symlink is created automatically by `scripts/remote-update.sh` and `scripts/update/env_sync.py` on each machine.
 
-**Adding a new secret:** add it to `~/Desktop/Valor/.env`, add a placeholder to `.env.example` (with a comment line above the `KEY=` — required by the completeness check), add a field to `config/settings.py`. That's it — no sync step needed.
+**Adding a new secret:** add it to `<vault>/.env`, add a placeholder to `.env.example` (with a comment line above the `KEY=` — required by the completeness check), add a field to `config/settings.py`. That's it — no sync step needed.
+
+### Picking a vault location
+
+Each machine can pick its own vault directory. Run `/setup` for the interactive picker, or pre-set `VALOR_VAULT_DIR` in your shell rc / install command:
+
+| Option | Sync? | Tradeoffs |
+|---|---|---|
+| `~/Desktop/Valor/` | iCloud (Desktop) | Established default. Subject to the iCloud rename bug if the path is recreated; TCC-blocks open() under launchd (but that's already worked around — install scripts copy projects.json/reflections.yaml into `config/` for launchd processes). |
+| `~/.valor/` | None | Hidden home dir, single-machine, no cloud backup. Fastest, no TCC issues. |
+| `~/Documents/Valor/` | iCloud (Documents) | Often iCloud-synced; sync conflicts possible. |
+| `~/iCloud Drive/Valor/` | iCloud explicit | Synced, but file-on-demand evictions may surprise launchd processes. |
+| Custom path | Whatever you set up | Free-form; bring your own sync (Dropbox, Resilio, none). |
+
+To move an existing install to a different vault, copy the directory, point `VALOR_VAULT_DIR` at the new location (and persist that in your shell rc / `<new>/.env`), repoint the repo `.env` symlink (`ln -sfn "<new>/.env" .env`), then re-run the install scripts (`./scripts/install_worker.sh` etc.) so the launchd plists pick up the new value.
 
 ## Plan Requirements (This Repo Only)
 

@@ -25,8 +25,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 from telethon import TelegramClient
 
+from config.settings import load_vault_env
+
 load_dotenv(Path(__file__).parent.parent / ".env")
-load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+load_vault_env()
 
 try:
     API_ID = int(os.getenv("TELEGRAM_API_ID") or "0")

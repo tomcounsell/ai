@@ -582,8 +582,10 @@ def main():
     try:
         from dotenv import load_dotenv
 
+        from config.settings import load_vault_env
+
         load_dotenv()
-        load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+        load_vault_env()
     except ImportError:
         pass  # dotenv optional; env vars may be set directly
 

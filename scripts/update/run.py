@@ -386,7 +386,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     result.env_sync_result = env_sync.sync_env_from_vault(project_dir)
     env_r = result.env_sync_result
     if env_r.created:
-        log(".env symlink created → ~/Desktop/Valor/.env", v, always=True)
+        log(f".env symlink created → {env_sync.VAULT_ENV_PATH}", v, always=True)
     if env_r.error:
         log(f"WARN: Env symlink: {env_r.error}", v)
         result.warnings.append(f"Env symlink: {env_r.error}")
@@ -409,7 +409,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     refl_r = result.reflections_sync_result
     if refl_r.created:
         log(
-            "config/reflections.yaml symlink created → ~/Desktop/Valor/reflections.yaml",
+            f"config/reflections.yaml symlink created → {env_sync.VAULT_REFLECTIONS_PATH}",
             v,
             always=True,
         )
@@ -824,7 +824,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         )
         result.warnings.append(
             f"No projects in config for machine '{machine_check.get('hostname')}'. "
-            "Check 'machine' field in ~/Desktop/Valor/projects.json"
+            f"Check 'machine' field in {env_sync.VAULT_PROJECTS_PATH}"
         )
 
     # Step 4.5: Telegram auth check (warn only — bridge is optional, worker runs without it)

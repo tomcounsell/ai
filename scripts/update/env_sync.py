@@ -1,11 +1,12 @@
 """Verify that the project .env is a symlink and config/projects.json is a real file copy.
 
-The vault at ~/Desktop/Valor/ (iCloud-synced) is the single source of truth for
-secrets and project configuration.
+The vault directory (configurable via ``VALOR_VAULT_DIR``; default
+``~/Desktop/Valor/``) is the single source of truth for secrets and project
+configuration.
 
 - .env: kept as a symlink (loaded only from terminal, never under launchd)
 - config/projects.json: kept as a real file copy (launchd TCC blocks open() on iCloud-synced
-  ~/Desktop files, so the launchd worker cannot follow a symlink here)
+  vault files, so the launchd worker cannot follow a symlink here)
 
 On a fresh machine or after accidental deletion, this module restores both automatically.
 """
@@ -16,8 +17,19 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-VAULT_ENV_PATH = Path.home() / "Desktop" / "Valor" / ".env"
-VAULT_PROJECTS_PATH = Path.home() / "Desktop" / "Valor" / "projects.json"
+
+def _vault_dir() -> Path:
+    """Resolve the vault directory via the cascade, with a desktop fallback."""
+    try:
+        from config.settings import vault
+
+        return vault.dir
+    except Exception:
+        return Path.home() / "Desktop" / "Valor"
+
+
+VAULT_ENV_PATH = _vault_dir() / ".env"
+VAULT_PROJECTS_PATH = _vault_dir() / "projects.json"
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +142,7 @@ def sync_projects_json(project_dir: Path) -> ProjectsSyncResult:
     return result
 
 
-VAULT_REFLECTIONS_PATH = Path.home() / "Desktop" / "Valor" / "reflections.yaml"
+VAULT_REFLECTIONS_PATH = _vault_dir() / "reflections.yaml"
 
 
 @dataclass

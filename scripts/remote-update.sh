@@ -11,11 +11,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LOCK_DIR="$PROJECT_DIR/data/update.lock"
 
-# ── Ensure .env → ~/Desktop/Valor/.env symlink ──────────────────────
+# ── Ensure .env → <vault>/.env symlink ──────────────────────────────
 # The vault file is the single source of truth for secrets. On a fresh machine
 # or after accidental deletion, create the symlink before sourcing .env so the
-# rest of this script always reads from the vault.
-VAULT_ENV="$HOME/Desktop/Valor/.env"
+# rest of this script always reads from the vault. VALOR_VAULT_DIR (when set
+# in the user's shell rc) overrides the established default ~/Desktop/Valor.
+VAULT_ENV="${VALOR_VAULT_DIR:-$HOME/Desktop/Valor}/.env"
 REPO_ENV="$PROJECT_DIR/.env"
 if [ -n "$VAULT_ENV" ] && [ -f "$VAULT_ENV" ] && [ ! -L "$REPO_ENV" ]; then
     echo "[update] Creating .env symlink → $VAULT_ENV"
@@ -123,7 +124,7 @@ if [ -f "$REFLECTIONS_DST" ]; then
 fi
 
 # ── Sync config/reflections.yaml symlink ─────────────────────────────
-# Vault file at ~/Desktop/Valor/reflections.yaml takes precedence over in-repo.
+# Vault file at <vault>/reflections.yaml takes precedence over in-repo.
 # Idempotent: skips gracefully if vault file doesn't exist (fresh machine).
 "$PYTHON" -c "
 from scripts.update.env_sync import sync_reflections_yaml
@@ -132,7 +133,7 @@ result = sync_reflections_yaml(Path('$PROJECT_DIR'))
 if result.skipped:
     print('reflections.yaml: vault not found, using in-repo fallback')
 elif result.created:
-    print('reflections.yaml: symlink created → ~/Desktop/Valor/reflections.yaml')
+    print('reflections.yaml: symlink created → <vault>/reflections.yaml')
 elif result.symlink_ok:
     print('reflections.yaml: symlink OK')
 elif result.error:

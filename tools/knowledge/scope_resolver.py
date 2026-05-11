@@ -30,7 +30,12 @@ def _load_project_mappings() -> list[tuple[str, str]]:
     if _project_mappings is not None:
         return _project_mappings
 
-    projects_path = Path.home() / "Desktop" / "Valor" / "projects.json"
+    try:
+        from config.settings import vault
+
+        projects_path = vault.projects_path
+    except Exception:
+        projects_path = Path.home() / "Desktop" / "Valor" / "projects.json"
     if not projects_path.exists():
         logger.warning(f"projects.json not found at {projects_path}")
         _project_mappings = []

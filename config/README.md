@@ -2,34 +2,37 @@
 
 This directory contains configuration files for the Valor AI system.
 
+The vault directory (where private configuration like `projects.json`, persona overlays, and `.env` live) is configurable per machine via the `VALOR_VAULT_DIR` environment variable. The established default is `~/Desktop/Valor/`. Run `/setup` for the interactive picker, or set `VALOR_VAULT_DIR` in your shell rc to pick a non-default location.
+
 ## Files
 
 ### `projects.example.json` (Template)
-Canonical template with complete field documentation. Copy this to create your private projects.json:
+Canonical template with complete field documentation. Copy this to your vault to create your private projects.json:
 
 ```bash
-mkdir -p ~/Desktop/Valor
-cp config/projects.example.json ~/Desktop/Valor/projects.json
-# Edit ~/Desktop/Valor/projects.json with your settings
+VAULT="${VALOR_VAULT_DIR:-$HOME/Desktop/Valor}"
+mkdir -p "$VAULT"
+cp config/projects.example.json "$VAULT/projects.json"
+# Edit $VAULT/projects.json with your settings
 ```
 
 ### `personas/segments/` (Composable identity)
 Prompt segments assembled per `manifest.json` by `load_persona_prompt()`. Contains `identity.md` (shared identity and values), `work-patterns.md` (communication style), and `tools.md` (tool guidance). These stay in the repo because they are not private.
 
-Persona overlay files (developer.md, project-manager.md, teammate.md) live in `~/Desktop/Valor/personas/` (iCloud-synced, private).
+Persona overlay files (developer.md, project-manager.md, teammate.md) live in `<vault>/personas/` (private; default vault `~/Desktop/Valor/`).
 
 ### `secrets/` (Git-ignored)
 Directory for sensitive credentials (Google OAuth tokens, etc.). Created automatically by the settings system.
 
 ### `identity.json`
-Structured identity data (name, email, timezone, org). Per-instance overrides via `~/Desktop/Valor/identity.json`.
+Structured identity data (name, email, timezone, org). Per-instance overrides via `<vault>/identity.json`.
 
 ### `personas/segments/`
 Composable prompt segments: `identity.md`, `work-patterns.md`, `tools.md`. Assembled by `load_persona_prompt()` per `manifest.json`.
 
-## Private Configuration (~/Desktop/Valor/)
+## Private Configuration (in your vault)
 
-The following files live outside the repo in `~/Desktop/Valor/` (iCloud-synced):
+The following files live outside the repo in `<vault>/` (default `~/Desktop/Valor/`):
 
 | File | Purpose |
 |------|---------|
@@ -37,8 +40,12 @@ The following files live outside the repo in `~/Desktop/Valor/` (iCloud-synced):
 | `personas/developer.md` | Developer persona overlay |
 | `personas/project-manager.md` | PM persona overlay |
 | `personas/teammate.md` | Teammate persona overlay |
+| `.env` | Secrets (API keys, tokens) — symlinked from repo `.env` |
+| `identity.json` (optional) | Per-instance identity override |
+| `google_credentials.json` | Google OAuth client credentials |
+| `google_token.<machine>.json` | Per-machine OAuth tokens |
 
-Override the projects.json path with the `PROJECTS_CONFIG_PATH` env var.
+Override the projects.json path with the `PROJECTS_CONFIG_PATH` env var. Override the vault location entirely with `VALOR_VAULT_DIR`.
 
 ## Required Fields
 
@@ -51,10 +58,11 @@ Every project configuration MUST include:
 
 ## Setup Steps
 
-1. **Copy the example file**:
+1. **Copy the example file** into your vault:
    ```bash
-   mkdir -p ~/Desktop/Valor
-   cp config/projects.example.json ~/Desktop/Valor/projects.json
+   VAULT="${VALOR_VAULT_DIR:-$HOME/Desktop/Valor}"
+   mkdir -p "$VAULT"
+   cp config/projects.example.json "$VAULT/projects.json"
    ```
 
 2. **Edit working directories**:
@@ -83,9 +91,9 @@ Every project configuration MUST include:
    }
    ```
 
-4. **Create persona overlays**:
+4. **Create persona overlays** in your vault:
    ```bash
-   mkdir -p ~/Desktop/Valor/personas
+   mkdir -p "${VALOR_VAULT_DIR:-$HOME/Desktop/Valor}/personas"
    # Create developer.md, project-manager.md, teammate.md
    ```
 
@@ -112,7 +120,7 @@ tail -f logs/bridge.log
 
 **Cause**: A project is missing the `working_directory` field.
 
-**Fix**: Add `working_directory` to the project or set a default in `~/Desktop/Valor/projects.json`.
+**Fix**: Add `working_directory` to the project or set a default in `<vault>/projects.json` (default vault `~/Desktop/Valor/`; configurable via `VALOR_VAULT_DIR`).
 
 ### Configuration not taking effect
 

@@ -175,7 +175,12 @@ def ensure_global_hook(project_dir: Path) -> CalendarHookResult:
 
 def generate_calendar_config(project_dir: Path) -> CalendarConfigResult:
     """Generate Google Calendar config by matching projects to calendars."""
-    base_dir = Path.home() / "Desktop" / "Valor"
+    try:
+        from config.settings import vault
+
+        base_dir = vault.dir
+    except Exception:
+        base_dir = Path.home() / "Desktop" / "Valor"
     config_path = base_dir / "calendar_config.json"
 
     # Check OAuth token (per-machine or shared)
@@ -261,8 +266,10 @@ def generate_calendar_config(project_dir: Path) -> CalendarConfigResult:
     # Get active projects from env
     from dotenv import load_dotenv
 
+    from config.settings import load_vault_env
+
     load_dotenv(project_dir / ".env")
-    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+    load_vault_env()
     active_projects = [p.strip() for p in os.getenv("ACTIVE_PROJECTS", "").split(",") if p.strip()]
 
     # Match each project to a calendar

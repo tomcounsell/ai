@@ -1008,13 +1008,25 @@ def main() -> None:
 
     from dotenv import load_dotenv
 
+    from config.settings import load_vault_env
+
     # Mirror telegram_bridge.py env loading: repo .env first, vault .env second.
-    # Under launchd (VALOR_LAUNCHD=1), env vars are injected directly into the
-    # plist by install_email_bridge.sh — skip dotenv entirely to avoid macOS
-    # TCC hangs on the iCloud-synced ~/Desktop/Valor/.env that .env symlinks to.
+    # Under launchd (VALOR_LAUNCHD=1), skip dotenv entirely IF the vault sits
+    # on a TCC-restricted path — pydantic-settings/dotenv open() on iCloud-
+    # synced ~/Desktop/.env hangs indefinitely. For non-TCC vaults (~/.valor),
+    # load_dotenv works fine at runtime even under launchd.
     if not os.environ.get("VALOR_LAUNCHD"):
         load_dotenv(Path(__file__).parent.parent / ".env")
-        load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+        load_vault_env()
+    else:
+        try:
+            from config.settings import vault
+
+            if not vault.is_tcc_restricted:
+                load_dotenv(Path(__file__).parent.parent / ".env")
+                load_vault_env()
+        except Exception:
+            pass  # vault unresolvable under launchd — env injected via plist
 
     logging.basicConfig(
         level=logging.INFO,

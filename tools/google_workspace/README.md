@@ -26,7 +26,7 @@ except GoogleAuthError as e:
 
 ## Configuration
 
-Credentials are stored in the directory specified by `GOOGLE_CREDENTIALS_DIR` environment variable (defaults to `~/Desktop/Valor/`).
+Credentials are stored in the directory specified by `GOOGLE_CREDENTIALS_DIR` environment variable. When unset, the location follows the configured vault — `${VALOR_VAULT_DIR}/` — with the established default `~/Desktop/Valor/`.
 
 Required files:
 - `google_credentials.json` -- OAuth client configuration

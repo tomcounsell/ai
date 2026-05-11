@@ -49,6 +49,18 @@ fi
 # Copy plist (substitute target if needed)
 sed "s|__TARGET__|$TARGET|g; s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__SERVICE_LABEL__|$PLIST_NAME|g" "$PLIST_SRC" > "$PLIST_DEST"
 
+# Inject env vars into the plist. The helper auto-selects lean vs full
+# injection by the vault's TCC status — secrets only land in the plist
+# (and chmod 0600 applied) when the vault is on a TCC-restricted path.
+PYTHON_BIN="${PYTHON_BIN:-$PROJECT_DIR/.venv/bin/python}"
+[ -x "$PYTHON_BIN" ] || PYTHON_BIN="python3"
+VAULT_DIR="${VALOR_VAULT_DIR:-$HOME/.valor}"
+[ -d "$VAULT_DIR" ] || VAULT_DIR="$HOME/Desktop/Valor"  # legacy compat
+"$PYTHON_BIN" "$SCRIPT_DIR/install/inject_plist_env.py" \
+    --plist "$PLIST_DEST" \
+    --env-file "$PROJECT_DIR/.env" \
+    --vault-dir "$VAULT_DIR"
+
 # Load
 launchctl load "$PLIST_DEST"
 

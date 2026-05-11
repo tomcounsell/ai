@@ -14,10 +14,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 from telethon import TelegramClient
 
+from config.settings import load_vault_env
+
 # Load environment
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
-load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+load_vault_env()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

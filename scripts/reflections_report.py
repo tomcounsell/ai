@@ -98,7 +98,7 @@ def issue_exists_for_date(date: str, cwd: str | None = None) -> bool:
 def ensure_reflections_label(cwd: str | None = None) -> bool:
     """Ensure the 'reflections' label exists in the target repo.
 
-    Reflections runs across multiple project repos (see ~/Desktop/Valor/projects.json).
+    Reflections runs across multiple project repos (see `vault.projects_path`).
     The label only exists where someone created it, so issue creation fails with
     "could not add label: 'reflections' not found" in fresh repos. Creating the
     label with --force is idempotent: no-op if it exists, creates it if not.

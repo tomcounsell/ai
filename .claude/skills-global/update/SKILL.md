@@ -27,7 +27,7 @@ The orchestrator will:
 - Pull latest changes (with automatic stash/unstash)
 - Sync `.claude` hardlinks and audit skill hooks
 - Check for pending critical dependency upgrades
-- **Verify machine identity** — reads `scutil --get ComputerName`, matches against `machine` field in `~/Desktop/Valor/projects.json`, reports which projects this machine handles
+- **Verify machine identity** — reads `scutil --get ComputerName`, matches against `machine` field in `${VALOR_VAULT_DIR}/projects.json` (default vault `~/Desktop/Valor/`), reports which projects this machine handles
 - Sync dependencies if pyproject.toml changed
 - Verify critical dependency versions
 - Check/pull Ollama summarizer model
@@ -114,16 +114,16 @@ uv sync --all-extras --reinstall
 ```
 
 ### Calendar integration not working
-1. Check OAuth token: `ls ~/Desktop/Valor/google_token.json`
+1. Check OAuth token: `ls "${VALOR_VAULT_DIR:-$HOME/Desktop/Valor}/google_token.json"`
 2. Re-run OAuth: `valor-calendar test`
 3. Check deps: `.venv/bin/python -c "import google_auth_oauthlib; print('OK')"`
 
 ### Wrong projects active (machine identity mismatch)
 
-The bridge derives active projects from `scutil --get ComputerName` matched against the `machine` field in `~/Desktop/Valor/projects.json`. If the wrong projects are active:
+The bridge derives active projects from `scutil --get ComputerName` matched against the `machine` field in `${VALOR_VAULT_DIR}/projects.json` (default vault `~/Desktop/Valor/`). If the wrong projects are active:
 
 1. Check the machine name: `scutil --get ComputerName`
-2. Check the config: `python -c "import json; [print(f'{k}: {v.get(\"machine\")}') for k,v in json.load(open('$HOME/Desktop/Valor/projects.json')).get('projects',{}).items()]"`
+2. Check the config: `python -c "import json, os; vault=os.environ.get('VALOR_VAULT_DIR', os.path.expanduser('~/Desktop/Valor')); [print(f'{k}: {v.get(\"machine\")}') for k,v in json.load(open(f'{vault}/projects.json')).get('projects',{}).items()]"`
 3. Fix: ensure the `machine` value in projects.json matches the ComputerName exactly (case-insensitive)
 
 ### Bridge won't start

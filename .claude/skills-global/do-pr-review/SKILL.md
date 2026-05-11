@@ -37,7 +37,7 @@ credential — reviewing our own commits is the accepted default.
 | Variable | Purpose | When set |
 |----------|---------|----------|
 | `CLAUDE_AGENT_REVIEW` | `1` when running in pipeline context | Set by `sdk_client.py` at session spawn |
-| `SDLC_AGENT_GH_TOKEN` | PAT for the bot account (e.g. `yudame-sdlc-bot`) | Optional. Set only on the dedicated bot machine in `~/Desktop/Valor/.env` |
+| `SDLC_AGENT_GH_TOKEN` | PAT for the bot account (e.g. `yudame-sdlc-bot`) | Optional. Set only on the dedicated bot machine in `${VALOR_VAULT_DIR}/.env` (default vault `~/Desktop/Valor/`) |
 
 **Rules:**
 - When `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is non-empty: inject

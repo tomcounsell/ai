@@ -22,10 +22,12 @@ sys.path.insert(0, str(project_root))
 
 from dotenv import load_dotenv  # noqa: E402
 
+from config.settings import load_vault_env  # noqa: E402
+
 # Load env
 env_path = project_root / ".env"
 load_dotenv(env_path)
-load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+load_vault_env()
 
 # Configure detailed logging
 logging.basicConfig(
