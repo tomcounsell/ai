@@ -28,7 +28,10 @@ Filters out tool execution traces from agent responses before sending to Telegra
 
 If filtering removes everything, no message is sent (reaction emoji suffices).
 
-**Location**: `bridge/telegram_bridge.py:filter_tool_logs()`
+**Location**: `bridge/response.py:filter_tool_logs()` (single source of truth).
+`bridge/context.py` re-exports this canonical implementation for reply-chain
+hydration (`build_conversation_history` and `format_reply_chain`); see
+issue #1359 for the consolidation history.
 
 ### 2. Reply-Based Session Continuity ✅
 

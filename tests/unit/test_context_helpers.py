@@ -211,3 +211,96 @@ class TestBuildCompletedResumeText:
             self._fake_session("ctx"), "msg", reply_chain_context=chain_block
         )
         assert result.count(REPLY_THREAD_CONTEXT_HEADER) == 1
+
+
+class TestFilterToolLogsParity:
+    """`bridge.context.filter_tool_logs` must be the canonical version
+    in `bridge.response`.
+
+    History: a stale local `def filter_tool_logs` lived in
+    `bridge/context.py` and silently diverged from the canonical
+    `bridge/response.py` implementation (variation-selector handling,
+    backtick-shell echoes, `<5` char length floor — all weaker in the
+    stale copy). PR #1077 consolidated `bridge/response.py` but its
+    audit only grepped for *imports* of the canonical path, missing
+    the orphan `def`. Issue #1359 closes the duplicate and these tests
+    are the permanent guard against the same audit miss recurring.
+    """
+
+    def test_filter_tool_logs_is_response_canonical(self):
+        """Identity assertion: any future re-introduction of a local
+        `def filter_tool_logs` in `bridge/context.py` will shadow the
+        import and fail this test, breaking CI on the offending PR."""
+        import bridge.context
+        import bridge.response
+
+        assert bridge.context.filter_tool_logs is bridge.response.filter_tool_logs
+
+    def test_format_reply_chain_drops_variation_selector_and_backtick_echo(self):
+        """Through-pipeline assertion: `format_reply_chain` must drop
+        U+FE0F-prefixed tool traces (`🛠️ exec:`, `📖 read:`) and
+        backtick-wrapped shell echoes from Valor messages.
+
+        Asserts the canonical filter (which handles variation selectors
+        and the `_SHELL_COMMAND_HINTS` echo filter) reaches the live
+        impact path that feeds `_build_completed_resume_text` at
+        `bridge/telegram_bridge.py:1740` and `:2259`.
+        """
+        from bridge.context import format_reply_chain
+
+        # U+FE0F variation selector after wrench emoji, plus a book emoji,
+        # plus a backtick-wrapped shell command echo.
+        valor_message = (
+            "Here is the analysis you asked for.\n"
+            "\U0001f6e0️ exec: ls -la\n"
+            "\U0001f4d6 read: bridge/context.py\n"
+            "`cd bridge && ls -la`\n"
+            "The duplicate definition is at line 104."
+        )
+        chain = [
+            {"sender": "Tom", "content": "what's in bridge/?", "message_id": 1, "date": None},
+            {"sender": "Valor", "content": valor_message, "message_id": 2, "date": None},
+        ]
+
+        formatted = format_reply_chain(chain)
+
+        # All three filter targets must be absent from the output.
+        assert "\U0001f6e0" not in formatted, "wrench emoji tool trace leaked"
+        assert "\U0001f4d6" not in formatted, "book emoji tool trace leaked"
+        assert "`cd bridge && ls -la`" not in formatted, "backtick shell echo leaked"
+        # The meaningful prose must still be present.
+        assert "Here is the analysis you asked for." in formatted
+        assert "The duplicate definition is at line 104." in formatted
+
+    def test_format_reply_chain_omits_messages_below_length_floor(self):
+        """Through-pipeline assertion: when `filter_tool_logs` returns `""`
+        because the post-filter remainder is below the `<5` char floor,
+        `format_reply_chain` must omit the Valor message entirely
+        (the existing `if not content: continue` at `bridge/context.py:486-487`
+        handles this once the canonical floor returns `""`).
+
+        This floor is currently UNCOVERED through `format_reply_chain` — the
+        existing direct-function tests at
+        `tests/integration/test_reply_delivery.py:191-229` and
+        `tests/e2e/test_message_pipeline.py:239-246` only exercise
+        `filter_tool_logs` in isolation.
+        """
+        from bridge.context import format_reply_chain
+
+        # After filter_tool_logs runs, only "ok" remains (2 chars, below
+        # the `<5` floor) so the canonical version returns "".
+        valor_short = "\U0001f6e0️ exec: ls\nok"
+        chain = [
+            {"sender": "Tom", "content": "run ls", "message_id": 1, "date": None},
+            {"sender": "Valor", "content": valor_short, "message_id": 2, "date": None},
+            {"sender": "Tom", "content": "thanks", "message_id": 3, "date": None},
+        ]
+
+        formatted = format_reply_chain(chain)
+
+        # The Valor message must be omitted entirely.
+        assert "ok" not in formatted, "below-floor remainder should not reach the output"
+        assert "Valor:" not in formatted, "Valor message should be omitted, not just emptied"
+        # The surrounding messages must still be present.
+        assert "Tom: run ls" in formatted
+        assert "Tom: thanks" in formatted
