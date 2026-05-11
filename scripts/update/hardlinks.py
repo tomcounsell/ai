@@ -32,6 +32,8 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "new-valor-skill"),
     # Retired skills — moved to reflections
     ("skills", "daily-integration-audit"),
+    # Retired skills — superseded by byob MCP + bowser subagent
+    ("skills", "bowser"),
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,
