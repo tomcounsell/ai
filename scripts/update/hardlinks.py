@@ -41,6 +41,8 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "x-com"),
     # Moved from global commands to project-only .claude/commands/
     ("commands", "kill.md"),
+    # Moved from skills-global to project-only .claude/skills/
+    ("skills", "update"),
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,

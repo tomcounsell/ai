@@ -4,6 +4,7 @@ description: "Render Mermaid .mmd diagrams as hand-drawn style PNG exports via E
 argument-hint: "<file.mmd|file.excalidraw> [file2 ...] [--out <dir>]"
 allowed-tools: Bash, mcp__byob__browser_navigate, mcp__byob__browser_read, mcp__byob__browser_click, mcp__byob__browser_type, mcp__byob__browser_press_key, mcp__byob__browser_eval, mcp__byob__browser_screenshot, mcp__byob__browser_close_tab
 user-invocable: true
+disable-model-invocation: true
 ---
 
 # mermaid-render
