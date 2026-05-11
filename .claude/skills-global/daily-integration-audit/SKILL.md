@@ -112,7 +112,11 @@ Proposed fix: <one sentence>
 
 Context: <paste the exact finding text from the audit report>
 
-Please: implement the fix, run relevant tests, open a PR referencing this audit run."
+Please: implement the fix, run relevant tests, then do ONE of the following:
+- If the fix is non-trivial: open a PR referencing this audit run, trigger /do-pr-review, and return to main.
+- If the fix is trivial (doc typo, single-line change): commit directly to main and push.
+- If you cannot confidently fix it: abandon the branch, return to main, and leave a note.
+Never leave the machine on a feature branch without a PR or an explicit abandon."
 ```
 
 If `--dry-run`, print the command instead of executing.
