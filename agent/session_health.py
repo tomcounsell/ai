@@ -23,9 +23,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from agent.session_state import SessionHandle, _active_events, _active_sessions, _active_workers
+from analytics.collector import record_metric
 from models.agent_session import AgentSession, SessionType
+from models.session_lifecycle import ALL_STATUSES, get_authoritative_session
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
-from models.session_lifecycle import get_authoritative_session
+
+# Re-exported for tests/monkeypatching: keeps the symbol resolvable as
+# `agent.session_health.record_metric` even after ruff/F401 lint cycles.
+__all__ = ["record_metric"]
 
 logger = logging.getLogger(__name__)
 
@@ -1921,6 +1926,95 @@ def _delete_with_stale_key_lookup(session) -> bool:
         return False
 
 
+# === Per-status index drift pre-scan (issue #1361) ===
+#
+# `repair_indexes()` (models/agent_session.py) only counts a member as
+# `stale_count` when `hgetall(member)` returns empty (i.e., the underlying
+# hash is gone — a "phantom"). It does NOT count members whose hash exists
+# but whose `status` field disagrees with the index segment ("drift").
+#
+# This pre-scan walks `$IndexF:AgentSession:status:*` keys and counts drift
+# members per status. Phantoms are skipped here (still owned by repair_indexes).
+# Counts feed the `agent_session.indexed_field.stale_members` metric.
+#
+# IMPORTANT: scope is intentionally `status` only. Other indexed fields
+# (e.g. `claude_pid`, `claude_session_uuid`) have non-status segments;
+# putting them into a `dimensions={"status": ...}` metric would produce an
+# inverted cardinality bomb. `repair_indexes()` (called unconditionally
+# below) handles drift on those fields generically — no per-field metric.
+_STATUS_INDEX_PREFIX = "$IndexF:AgentSession:status:"
+
+
+def _count_per_status_stale_index_members() -> dict[str, int]:
+    """Walk status-index keys and count drift members per status segment.
+
+    A "drift" member has a populated hash whose `status` field differs from
+    the index-key segment. Phantoms (empty `hgetall`) are NOT counted —
+    they are `repair_indexes()`'s responsibility (see #1361).
+
+    Unknown status segments (not in `ALL_STATUSES`) are coalesced under
+    the `"unknown"` key and a WARNING is logged with the actual segment
+    value, so a future bug producing garbage segments cannot explode the
+    metric's dimension cardinality.
+
+    Returns:
+        Mapping of status (or "unknown") -> count of drift members.
+        Empty dict on a clean DB.
+    """
+    from popoto.redis_db import POPOTO_REDIS_DB
+
+    drift: dict[str, int] = {}
+    keys = POPOTO_REDIS_DB.keys(f"{_STATUS_INDEX_PREFIX}*")
+    for raw_key in keys:
+        index_key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+        # Parse the segment after the literal prefix.
+        if not index_key.startswith(_STATUS_INDEX_PREFIX):
+            continue
+        segment = index_key[len(_STATUS_INDEX_PREFIX) :]
+        if segment in ALL_STATUSES:
+            dim_status = segment
+        else:
+            dim_status = "unknown"
+            logger.warning(
+                "[agent-session-cleanup] Unknown status segment in index key %s "
+                "(coalesced into dimension status='unknown')",
+                index_key,
+            )
+
+        for raw_member in POPOTO_REDIS_DB.smembers(index_key):
+            hash_data = POPOTO_REDIS_DB.hgetall(raw_member)
+            if not hash_data:
+                # Phantom — owned by repair_indexes(); skip here.
+                continue
+            # Status field is msgpack-encoded; decoding is best-effort.
+            # If we can't tell the field's value, treat it as drift (safer
+            # to count than to silently miss a real drift case).
+            actual_status = _extract_status_field(hash_data)
+            if actual_status != segment:
+                drift[dim_status] = drift.get(dim_status, 0) + 1
+    return drift
+
+
+def _extract_status_field(hash_data: dict) -> str | None:
+    """Decode the `status` field from a raw `HGETALL` payload.
+
+    Popoto serializes field values via msgpack. Returns the decoded string
+    on success, or None if the field is missing or undecodable.
+    """
+    import msgpack
+
+    # Hash keys/values come back as bytes from redis-py by default.
+    for k, v in hash_data.items():
+        kstr = k.decode() if isinstance(k, bytes) else k
+        if kstr != "status":
+            continue
+        try:
+            return msgpack.unpackb(v) if isinstance(v, (bytes, bytearray)) else v
+        except Exception:
+            return None
+    return None
+
+
 def cleanup_corrupted_agent_sessions() -> dict[str, int]:
     """Delete AgentSession records with corrupted data that prevent .save().
 
@@ -1939,12 +2033,23 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
     mis-flags it as "corrupt", and ``.delete()`` damages real records whose
     indexed-field values happen to match.
 
-    After the mutation pass, ``AgentSession.repair_indexes()`` (NOT the older
-    ``rebuild_indexes()``) is invoked when either real corrupt records were
-    deleted OR phantoms were observed. ``repair_indexes()`` explicitly clears
-    ``$IndexF:AgentSession:*`` members that point to deleted hashes before
-    rebuilding every index from surviving hashes — closing the orphan loop
-    at the source so subsequent ``query.*`` calls stop yielding phantoms.
+    After the mutation pass, two independent index-hygiene steps run on
+    EVERY tick (issue #1361 — gate removed):
+
+    1. **Per-status drift pre-scan.** Walks ``$IndexF:AgentSession:status:*``
+       and counts members whose hash exists but whose ``status`` field
+       disagrees with the index segment ("drift"). Counts are emitted as
+       ``agent_session.indexed_field.stale_members`` metrics with
+       ``dimensions={"status": <status>}``. This is observability-only —
+       the actual cleanup is done by step 2.
+    2. **Unconditional ``AgentSession.repair_indexes()``.** Clears every
+       ``$IndexF:AgentSession:*`` key and rebuilds from surviving hashes.
+       Idempotent on a clean DB; per-tick cost is negligible.
+
+    The pre-scan and ``repair_indexes()`` count DIFFERENT failure modes.
+    ``repair_indexes()``'s ``phantoms_cleared`` is members whose hash is
+    GONE; the pre-scan's drift counts are members whose hash is PRESENT
+    but mis-classified. The two counters are independent and additive.
 
     Called by the reflection scheduler as the 'agent-session-cleanup' reflection.
     Also safe to call from startup recovery or the update script.
@@ -2022,24 +2127,71 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
                     del_err,
                 )
 
-    # Clean orphan $IndexF members at the source whenever we either deleted
-    # real corrupt records OR observed phantoms (orphans in the index sets).
-    if cleaned > 0 or phantoms_filtered > 0:
+    # === Per-status drift pre-scan (issue #1361) ===
+    # `repair_indexes()` only counts phantoms (members whose hash is gone).
+    # Drift members — hash present, but `status` field disagrees with the
+    # index segment — slip past it. Pre-scan counts those per status so the
+    # `agent_session.indexed_field.stale_members` metric is observable.
+    # Pre-scan failure is logged as WARNING and is non-fatal: the cleanup
+    # function MUST continue to repair_indexes() regardless.
+    per_status_drift: dict[str, int] = {}
+    try:
+        per_status_drift = _count_per_status_stale_index_members()
+    except Exception as scan_err:
+        logger.warning(
+            "[agent-session-cleanup] Per-status stale index pre-scan failed (non-fatal): %s",
+            scan_err,
+            exc_info=True,
+        )
+        per_status_drift = {}
+
+    # Emit per-status drift metrics. record_metric is best-effort internally
+    # (analytics/collector.py wraps every backend write in try/except), but
+    # we wrap again to defend against any future contract change.
+    for status, count in per_status_drift.items():
+        if count <= 0:
+            continue
         try:
-            stale, rebuilt = AgentSession.repair_indexes()
+            record_metric(
+                "agent_session.indexed_field.stale_members",
+                count,
+                {"status": status},
+            )
+        except Exception as metric_err:
+            logger.warning(
+                "[agent-session-cleanup] record_metric failed for status=%s "
+                "count=%d (non-fatal): %s",
+                status,
+                count,
+                metric_err,
+            )
+
+    # === Unconditional repair_indexes() (issue #1361) ===
+    # PR #1078 introduced a `cleaned > 0 or phantoms_filtered > 0` gate here.
+    # The gate prevented `repair_indexes()` from ever flushing genuine drift
+    # members for which the underlying hash was fine. Issue #1361 removes
+    # the gate permanently — `repair_indexes()` is idempotent on a clean DB,
+    # the per-tick cost is negligible, and the durable safety covers any
+    # future drift source (not just pre-`615eab9c` residue).
+    try:
+        phantoms_cleared, sessions_rebuilt = AgentSession.repair_indexes()
+        if phantoms_cleared or sessions_rebuilt or cleaned or phantoms_filtered or per_status_drift:
             logger.info(
-                "[agent-session-cleanup] repair_indexes: cleared %d stale index "
-                "pointer(s), rebuilt %d record(s) (cleaned=%d corrupt, "
-                "phantoms_filtered=%d)",
-                stale,
-                rebuilt,
+                "[agent-session-cleanup] repair_indexes: phantoms_cleared=%d "
+                "(hash missing), sessions_rebuilt=%d, drift_per_status=%s "
+                "(hash present, status mismatched), cleaned=%d corrupt, "
+                "phantoms_filtered=%d. phantoms_cleared and drift_per_status "
+                "are independent counters.",
+                phantoms_cleared,
+                sessions_rebuilt,
+                per_status_drift or {},
                 cleaned,
                 phantoms_filtered,
             )
-        except Exception as idx_err:
-            logger.warning("[agent-session-cleanup] Index repair failed: %s", idx_err)
-    else:
-        logger.debug("[agent-session-cleanup] No corrupted sessions found")
+        else:
+            logger.debug("[agent-session-cleanup] repair_indexes: no drift, no phantoms")
+    except Exception as idx_err:
+        logger.warning("[agent-session-cleanup] Index repair failed: %s", idx_err)
 
     # === Cross-process orphan reap pass (#1271) ===
     # Wrapped in try/except — reaper failure must never abort corrupted-record

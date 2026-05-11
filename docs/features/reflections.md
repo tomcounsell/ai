@@ -92,7 +92,7 @@ each update run. This ensures the scheduler always reads the vault version.
 | Name | Interval | Priority | Type | Description |
 |------|----------|----------|------|-------------|
 | `session-liveness-check` | 5 min | high | function | Check running sessions for liveness and timeout, recover stuck ones |
-| `agent-session-cleanup` | 1 hour | normal | function | Delete corrupted AgentSession records, repair orphan `$IndexF` members, AND reap cross-process orphan `claude`/MCP processes (phantom-filter guarded — see [bridge self-healing](bridge-self-healing.md#7-agent-session-cleanup-agentsession_healthpy) and [Cross-Process Orphan Reap (#1271)](bridge-self-healing.md#cross-process-orphan-reap-1271)) |
+| `agent-session-cleanup` | 1 hour | normal | function | Delete corrupted AgentSession records, run `AgentSession.repair_indexes()` unconditionally on every tick (issue #1361 — gate removed), emit per-status `agent_session.indexed_field.stale_members` drift metrics, AND reap cross-process orphan `claude`/MCP processes (phantom-filter guarded — see [bridge self-healing](bridge-self-healing.md#7-agent-session-cleanup-agentsession_healthpy) and [Cross-Process Orphan Reap (#1271)](bridge-self-healing.md#cross-process-orphan-reap-1271)) |
 | `stale-branch-cleanup` | daily | low | function | Clean up session branches older than 72 hours (disabled) |
 | `redis-index-cleanup` | daily | low | function | Rebuild Redis model indexes to remove orphaned entries |
 | `circuit-health-gate` | 1 min | high | function | Check Anthropic circuit state; manage `queue_paused` and `worker:hibernating` flags atomically |

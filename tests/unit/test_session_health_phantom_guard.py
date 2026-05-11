@@ -208,19 +208,34 @@ class TestCleanupCorruptedAgentSessions:
             f"Orphan member still present in index set: {member_strs}"
         )
 
-    def test_zero_sessions_does_not_call_repair_indexes(self, caplog):
-        """Preserves existing behavior: empty Redis -> cleanup is a cheap no-op."""
-        from agent.session_health import cleanup_corrupted_agent_sessions
+    def test_repair_indexes_runs_unconditionally_on_empty_pass(self, monkeypatch):
+        """Issue #1361: gate removed; `repair_indexes()` runs on every tick.
 
-        with caplog.at_level(logging.INFO, logger="agent.session_health"):
-            result = cleanup_corrupted_agent_sessions()
+        Previous behavior asserted that empty Redis was a cheap no-op (no
+        `repair_indexes()` call). PR #1078's gate (`cleaned > 0 or
+        phantoms_filtered > 0`) prevented genuine drift members from ever
+        being flushed because their underlying hash was fine and they
+        weren't phantoms. #1361 removes the gate permanently.
+        """
+        from agent.session_health import cleanup_corrupted_agent_sessions
+        from models.agent_session import AgentSession
+
+        invoked = {"count": 0}
+        original = AgentSession.repair_indexes
+
+        def _spy():
+            invoked["count"] += 1
+            return original()
+
+        monkeypatch.setattr(AgentSession, "repair_indexes", _spy)
+
+        result = cleanup_corrupted_agent_sessions()
 
         assert isinstance(result, dict)
         assert result["corrupted"] == 0
-        # No repair_indexes log line should appear.
-        repair_logs = [rec for rec in caplog.records if "repair_indexes" in rec.message]
-        messages = [rec.message for rec in repair_logs]
-        assert not repair_logs, f"repair_indexes should not run on empty pass; got: {messages}"
+        assert invoked["count"] == 1, (
+            "After #1361, repair_indexes() must run unconditionally on every tick"
+        )
 
     def test_phantoms_only_triggers_repair_indexes(self, caplog, monkeypatch):
         """Load-bearing: phantoms present but zero real corrupt -> repair DOES run.
