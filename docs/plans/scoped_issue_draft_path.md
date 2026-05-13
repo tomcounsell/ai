@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
@@ -81,10 +81,12 @@ Trace the issue-creation path the fix touches end-to-end:
 
 1. **Entry point:** Operator (or another skill) invokes `/do-issue` (or `/do-investigation-issue`). The skill's SKILL.md runs as a sequence of bash blocks in the agent's shell.
 2. **Body draft (today, broken):** A `cat > /tmp/issue_body.md << 'BODY' … BODY` heredoc writes the issue body to a fixed path. Concurrent agent B can `cat > /tmp/issue_body.md` between this write and step 4's read, and there is no detector.
-3. **Body draft (after fix):** The skill computes `DRAFT=$(mktemp -t issue_body.XXXXXX.md)` once at the top of the body-write block and writes to `"$DRAFT"`. The first line is `<!-- draft-owner: pid=$$ ts=<epoch> -->`. The PID and ts are captured into shell variables at draft time (`OWNER_PID=$$`, `OWNER_TS=<epoch>`) so the verification step can match against those exact values, not against `$$` at read time (a subshell would have a different `$$`).
-4. **Verification (after fix):** Immediately before `gh issue create`, the skill runs `head -1 "$DRAFT" | grep -q "draft-owner: pid=$OWNER_PID ts=$OWNER_TS"` (using the captured values). On mismatch, the skill prints a clear error to stderr (including both expected and actual anchor) and exits non-zero so the SDLC pipeline registers the failure.
+3. **Body draft (after fix):** The skill computes `DRAFT=$(mktemp "${TMPDIR:-/tmp}/issue_body.XXXXXX")` once at the top of the body-write block and writes to `"$DRAFT"`. The first line is the captured anchor literal `<!-- draft-owner: pid=<PID> ts=<epoch> -->`. The PID and ts are captured into shell variables at draft time (`OWNER_PID=$$`, `OWNER_TS=$(date +%s)`, `ANCHOR="draft-owner: pid=${OWNER_PID} ts=${OWNER_TS}"`) so the verification step matches against the captured literal `$ANCHOR`, never re-deriving `$$` at verify time.
+4. **Verification (after fix):** Immediately before `gh issue create`, the skill runs `head -1 "$DRAFT" | grep -qF "<!-- ${ANCHOR} -->"` (using the captured anchor literal). On mismatch, the skill prints a clear error to stderr (including both expected and actual anchor) and exits non-zero so the SDLC pipeline registers the failure.
 5. **Publish:** `gh issue create … --body "$(cat "$DRAFT")"` runs against the verified draft. Output (issue URL) flows back to the agent.
-6. **Cleanup (best-effort):** `rm -f "$DRAFT"` after publish. Failure to remove is non-fatal; `mktemp` paths are in `/tmp` and will get reaped by the OS.
+6. **Cleanup (best-effort):** `rm -f "$DRAFT"` after publish. Failure to remove is non-fatal; `mktemp` paths are in `$TMPDIR`/`/tmp` and will get reaped by the OS.
+
+**Single-shell invariant (load-bearing):** Steps 3 through 6 MUST execute inside a single bash tool invocation. Each Bash tool call in this codebase spawns a fresh shell with a new `$$`; if `mktemp` runs in one tool call and verification runs in another, `OWNER_PID`/`OWNER_TS`/`ANCHOR`/`DRAFT` shell variables vanish between calls and verification cannot reconstruct the captured anchor. The skill must wrap the entire mktemp → write → verify → publish → cleanup pipeline in one bash block. This is prescribed explicitly in each SKILL.md step rather than left as the agent's inference.
 
 The fix lives entirely in steps 3–4. Steps 1, 2 (today's behavior), 5, and 6 either disappear or remain unchanged.
 
@@ -122,9 +124,11 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/scoped_issue_d
 
 ### Key Elements
 
-- **Per-invocation `mktemp` draft path** — Each `/do-issue` and `/do-investigation-issue` invocation gets a unique scratch file like `/tmp/issue_body.AbC123.md`. Two concurrent invocations are guaranteed-disjoint by `mktemp` semantics.
-- **Owner anchor header** — Each draft's first line is `<!-- draft-owner: pid=<PID> ts=<EPOCH> -->`. The PID and timestamp are captured into shell variables at draft time so the verification step compares against the values that were written, not against `$$` at verify time.
-- **Pre-publish verification** — Immediately before `gh issue create`, the skill `head -1`s the draft and `grep`s for the captured anchor. Mismatch aborts with a clear stderr message naming both expected and actual anchor; success proceeds to publish.
+- **Per-invocation `mktemp` draft path** — Each `/do-issue` and `/do-investigation-issue` invocation gets a unique scratch file like `/tmp/issue_body.AbC123`. Two concurrent invocations are guaranteed-disjoint by `mktemp` semantics. The template uses the positional form `mktemp "${TMPDIR:-/tmp}/issue_body.XXXXXX"` which works identically on macOS (BSD) and Linux (GNU). The `-t TEMPLATE` form is BSD/GNU-incompatible: BSD `mktemp -t prefix` treats the argument as a literal prefix and appends its own random suffix, so `mktemp -t issue_body.XXXXXX.md` on macOS yields a file literally named `issue_body.XXXXXX.md.<rand>` — defeating the unguessable-name property. The `.md` suffix is dropped from the filename (the draft is a transient artifact `cat`-piped into `gh`; no consumer reads it by extension).
+- **Owner anchor header** — Each draft's first line is `<!-- draft-owner: pid=<PID> ts=<EPOCH> -->`. The PID and timestamp are captured into shell variables (`OWNER_PID=$$`, `OWNER_TS=$(date +%s)`, `ANCHOR="draft-owner: pid=${OWNER_PID} ts=${OWNER_TS}"`) at draft time so the verification step compares against the captured `$ANCHOR` literal, never re-deriving `$$` at verify time.
+- **Single-shell invariant** — The whole mktemp → write → verify → publish → cleanup pipeline executes inside one bash tool invocation. Splitting it across tool calls breaks `$$` capture (each call is a fresh shell) and loses the `$DRAFT`/`$ANCHOR` variables. Each SKILL.md prescribes this explicitly as a single bash block.
+- **Pre-publish verification** — Immediately before `gh issue create`, the skill `head -1`s the draft and `grep -qF`s for the captured anchor literal. Mismatch aborts with a clear stderr message naming both expected and actual anchor; success proceeds to publish.
+- **Write-site contract closure** — Both SKILL.md files prescribe both the *write* and the *read* paths via the same `$DRAFT` shell variable in one bash block. The current `do-issue/SKILL.md` only mentions the read path (line 120's `cat /tmp/issue_body.md`), leaving the write site to the agent's improvisation. The fix replaces that implicit contract with an explicit Step that allocates `$DRAFT`, writes the body to it, verifies the anchor, and publishes — all in one bash invocation. This is decided, not deferred (see Open Question #2 in the original draft; closed here).
 - **Best-effort cleanup** — `rm -f "$DRAFT"` after publish. Non-fatal on failure.
 
 ### Flow
@@ -137,15 +141,18 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/scoped_issue_d
 
 For `do-investigation-issue/SKILL.md`, the contract is already explicit: line 48 has the literal `cat > /tmp/investigation_body.md` heredoc. The fix replaces the literal path with `$DRAFT` at both write (line 48) and read (line 81) sites.
 
-For both `do-issue/SKILL.md` and `do-investigation-issue/SKILL.md`:
+For both `do-issue/SKILL.md` and `do-investigation-issue/SKILL.md`, the SKILL.md must prescribe a **single bash tool invocation** that runs the whole pipeline (mktemp → write → verify → publish → cleanup). Each Bash tool call in this codebase is a fresh shell with its own `$$`; splitting these steps across calls breaks anchor capture and the `$DRAFT` variable. The instruction text in each SKILL.md states this explicitly so the agent doesn't accidentally split it.
 
-1. **At the top of the body-creation bash block**, allocate the draft path and capture owner identity:
+Inside that single bash block:
+
+1. **At the top**, allocate the draft path and capture owner identity (cross-platform `mktemp` template form):
    ```bash
-   DRAFT=$(mktemp -t issue_body.XXXXXX.md) || { echo "ERROR: mktemp failed" >&2; exit 1; }
+   DRAFT=$(mktemp "${TMPDIR:-/tmp}/issue_body.XXXXXX") || { echo "ERROR: mktemp failed" >&2; exit 1; }
    OWNER_PID=$$
    OWNER_TS=$(date +%s)
    ANCHOR="draft-owner: pid=${OWNER_PID} ts=${OWNER_TS}"
    ```
+   Note: positional template form (no `-t`) — works on macOS BSD and Linux GNU identically. BSD's `-t prefix` mode treats the argument as a literal prefix (it appends its own random suffix), so `-t issue_body.XXXXXX.md` produces a file literally named `issue_body.XXXXXX.md.<rand>` on macOS. The positional template is the only portable shape. `${TMPDIR:-/tmp}` honors macOS's per-user `/var/folders/...` `$TMPDIR` and falls back to `/tmp` on Linux.
 2. **In the heredoc that writes the body**, prepend the anchor as the first line:
    ```bash
    cat > "$DRAFT" << BODY
@@ -215,7 +222,10 @@ No existing tests affected — the change is markdown-only inside two SKILL.md f
 **Impact:** If a future edit accidentally re-derives `DRAFT` mid-block or the heredoc body itself contains the anchor literal somewhere other than the first line, `head -1 | grep` could pass (or fail) for the wrong reason. **Mitigation:** Anchor is checked with `head -1 | grep -qF` (fixed-string, exact-match against the literal anchor line `<!-- draft-owner: pid=… ts=… -->`). The body content of an issue does not naturally contain `<!-- draft-owner:` — it would have to be deliberately included. The risk surface is "operator pastes a literal `draft-owner: pid=...` line into the body," which is contrived enough to ignore. Documented as known limitation.
 
 ### Risk 3: Hardlinks not propagated on a stale machine
-**Impact:** A machine that has not run `/update` since this PR merges keeps the old inode at `~/.claude/skills/<skill>/SKILL.md`. That machine's `/do-issue` invocations would still write to `/tmp/issue_body.md`. **Mitigation:** This is the standard "skills change requires `/update`" risk class, not unique to this fix. Already documented in `scripts/update/hardlinks.py` design. Operators are expected to run `/update` after pulling skill changes; the existing `/update` machinery includes a hooks-merge step that runs on every invocation. **Verification step:** the smoke test in Verification re-runs `stat -f "%i"` post-merge to confirm both file paths share an inode on the test machine.
+**Impact:** A machine that has not run `/update` since this PR merges keeps the old inode at `~/.claude/skills/<skill>/SKILL.md`. That machine's `/do-issue` invocations would still write to `/tmp/issue_body.md`. **Mitigation:** This is the standard "skills change requires `/update`" risk class, not unique to this fix. Already documented in `scripts/update/hardlinks.py` design. Operators are expected to run `/update` after pulling skill changes; the existing `/update` machinery includes a hooks-merge step that runs on every invocation. **Verification step:** the post-merge verification (see Verification table) re-runs `stat -f "%i"` on the main checkout after `/update` to confirm both file paths share an inode on the test machine.
+
+### Risk 4: Inode check is meaningless inside a git worktree
+**Impact:** This work happens in `.worktrees/scoped_issue_draft_path/`. Worktree checkouts share the `.git` dir with main but each working tree has its own independent files on disk — they are NOT hardlinks to anything under `~/.claude/skills/`. `scripts/update/hardlinks.py::_sync_skills` only runs on `/update` against the *main* checkout's `.claude/skills-global/`, so during build the worktree-side `.claude/skills-global/<skill>/SKILL.md` has its own inode unrelated to `~/.claude/skills/<skill>/SKILL.md`. Running `stat -f "%i"` between the worktree file and `~/.claude/skills/` during build will (correctly) show two different inodes — that is *not* a regression. **Mitigation:** Build-stage validation does NOT check inode equality. Inode equality is verified ONLY after merge to main and after `/update` has re-run hardlink propagation. The plan's Step-1/Step-2 validation criteria are updated to drop the in-worktree `stat` check; it moves to a post-merge step in the Verification table.
 
 ## Race Conditions
 
@@ -266,7 +276,7 @@ If `docs/features/` contains nothing about `/do-issue`'s scratch mechanism, this
 - [ ] `/do-issue` no longer references `/tmp/issue_body.md` literally; the draft path is `mktemp`-generated per invocation.
 - [ ] `/do-investigation-issue` no longer references `/tmp/investigation_body.md` literally; same scoping applied.
 - [ ] Both skills prepend a `<!-- draft-owner: pid=<PID> ts=<EPOCH> -->` anchor to the draft and verify it via `head -1 | grep -qF` before `gh issue create`. Anchor mismatch causes `exit 1` with both expected and actual anchor on stderr.
-- [ ] Both file paths (`~/.claude/skills/<skill>/SKILL.md` and `.claude/skills-global/<skill>/SKILL.md`) share an inode after the edit (`stat -f "%i"` confirms hardlink intact). The "two mirror locations updated identically" acceptance criterion is satisfied automatically by the hardlink machinery; the edit is to one inode.
+- [ ] Both file paths (`~/.claude/skills/<skill>/SKILL.md` and `.claude/skills-global/<skill>/SKILL.md`) share an inode **after merge to main and `/update` re-run** (`stat -f "%i"` confirms hardlink intact). The "two mirror locations updated identically" acceptance criterion is satisfied automatically by the hardlink machinery on main; the edit in the worktree is to one inode that becomes the shared inode after `/update`. **Build-stage inode check in the worktree is intentionally skipped** — worktree files are independent inodes by git's design (see Risk 4).
 - [ ] Manual concurrency smoke test (documented in Verification) confirms two concurrent draft+publish runs from two shells produce two distinct issues with correct, non-cross-contaminated bodies.
 - [ ] No new dependencies added. `bash` builtins (`mktemp`, `printf`, `grep`, `head`, `cat`, `rm`, `$$`, `date +%s`) and existing `gh` only.
 - [ ] Tests pass (`/do-test`) — the existing pytest suite is not affected; this verifies no collateral breakage.
@@ -299,43 +309,42 @@ Single component, single skill mechanism — minimal team.
 ### 1. Edit `do-issue/SKILL.md`
 - **Task ID**: build-do-issue-edit
 - **Depends On**: none
-- **Validates**: stat-inode equality between `.claude/skills-global/do-issue/SKILL.md` and `~/.claude/skills/do-issue/SKILL.md` post-edit
+- **Validates**: grep confirms `mktemp`, `draft-owner`, and `$DRAFT` references all present in `.claude/skills-global/do-issue/SKILL.md`; no literal `/tmp/issue_body.md` remains. (Inode equality with `~/.claude/skills/` is NOT checked here — worktree files are independent inodes; see Risk 4. That check moves to post-merge Verification.)
 - **Informed By**: Hardlink Discovery section + Technical Approach steps 1–5
 - **Assigned To**: skill-draft-scoper
 - **Agent Type**: builder
 - **Parallel**: false (sequential to ease reviewer comprehension)
 - Edit `.claude/skills-global/do-issue/SKILL.md` block at line 114–121 (`### Step 6: Create the Issue`)
 - Replace the `gh issue create … --body "$(cat /tmp/issue_body.md)"` block with the full mktemp + anchor + verify + publish + cleanup sequence (see Technical Approach)
-- **Add an explicit body-write step BEFORE Step 6.** The current SKILL.md only prescribes the read path; the agent improvises the write at runtime. The fix must add `DRAFT=$(mktemp -t issue_body.XXXXXX.md)` and `OWNER_PID=$$; OWNER_TS=$(date +%s); ANCHOR="draft-owner: pid=${OWNER_PID} ts=${OWNER_TS}"` near the top of Step 6 (or as a dedicated Step 5.5), then explicitly instruct the agent to write the body via `printf '<!-- %s -->\n' "${ANCHOR}" > "$DRAFT"; cat >> "$DRAFT" << 'BODY' …agent-substituted body… BODY`. This closes the implicit contract — `$DRAFT` flows from write to verify to publish in one shell scope, not via the agent's deduced convention
-- Run `stat -f "%i" .claude/skills-global/do-issue/SKILL.md ~/.claude/skills/do-issue/SKILL.md` post-edit; confirm both inodes match
-- Commit on the build branch
+- **Add an explicit body-write step BEFORE Step 6** and prescribe the single-shell invariant. The current SKILL.md only mentions the read path; the agent improvises the write at runtime. The fix must add `DRAFT=$(mktemp "${TMPDIR:-/tmp}/issue_body.XXXXXX")` and `OWNER_PID=$$; OWNER_TS=$(date +%s); ANCHOR="draft-owner: pid=${OWNER_PID} ts=${OWNER_TS}"` near the top of Step 6 (or as a dedicated Step 5.5), inside the SAME bash block that later runs `gh issue create` and `rm -f "$DRAFT"`. The SKILL.md instruction text must explicitly state: "Run mktemp, write, verify, publish, and cleanup in one bash tool invocation. Splitting across calls breaks `$$` capture." Body write uses `printf '<!-- %s -->\n' "${ANCHOR}" > "$DRAFT"; cat >> "$DRAFT" << 'BODY' …agent-substituted body… BODY`. This closes the implicit contract — `$DRAFT` flows from write to verify to publish in one shell scope.
 
 ### 2. Edit `do-investigation-issue/SKILL.md`
 - **Task ID**: build-do-investigation-edit
 - **Depends On**: build-do-issue-edit
-- **Validates**: stat-inode equality between `.claude/skills-global/do-investigation-issue/SKILL.md` and `~/.claude/skills/do-investigation-issue/SKILL.md` post-edit
+- **Validates**: grep confirms `mktemp`, `draft-owner`, and `$DRAFT` references present; no literal `/tmp/investigation_body.md` remains. (Inode equality is NOT checked in the worktree — see Risk 4. Post-merge only.)
 - **Informed By**: Risk 1 (heredoc quoting), Technical Approach step 2 (two-step `printf` + quoted heredoc pattern)
 - **Assigned To**: skill-draft-scoper
 - **Agent Type**: builder
 - **Parallel**: false
-- Edit `.claude/skills-global/do-investigation-issue/SKILL.md` Step 2 (line 47–74, the body heredoc) and Step 3 (line 78–83, the publish)
+- Edit `.claude/skills-global/do-investigation-issue/SKILL.md` Step 2 (line 47–74, the body heredoc) and Step 3 (line 78–83, the publish). Consolidate both steps into a single bash block (or prescribe in the surrounding instruction text that the agent must run them in one bash invocation) so `$DRAFT`/`$ANCHOR`/`$OWNER_PID` persist between write and publish.
+- Use `mktemp "${TMPDIR:-/tmp}/investigation_body.XXXXXX"` (positional template form — see Risk 5 / Solution Key Elements).
 - Apply the two-step `printf '<!-- %s -->\n' "${ANCHOR}" > "$DRAFT"` then `cat >> "$DRAFT" << 'BODY' … BODY` pattern to preserve the literal-placeholder heredoc semantics
 - Add the anchor verification block before `gh issue create`
 - Replace `--body "$(cat /tmp/investigation_body.md)"` with `--body "$(cat "$DRAFT")"` and add `rm -f "$DRAFT"` cleanup after success
-- Run `stat -f "%i" .claude/skills-global/do-investigation-issue/SKILL.md ~/.claude/skills/do-investigation-issue/SKILL.md` post-edit; confirm both inodes match
 - Commit on the build branch
 
-### 3. Validate concurrency smoke test
+### 3. Validate concurrency smoke test (no real GitHub issues created)
 - **Task ID**: validate-concurrency-smoke
 - **Depends On**: build-do-issue-edit, build-do-investigation-edit
 - **Assigned To**: concurrency-smoke-tester
 - **Agent Type**: validator
 - **Parallel**: false
-- Open two shells. In shell A, run the body-draft + verify + publish sequence with a body containing the marker `SMOKE-A`. In shell B, run the same sequence simultaneously with body marker `SMOKE-B`. Use a real `gh issue create --label test` against this repo (close the resulting test issues afterward).
-- Confirm: two distinct issues created, one body contains `SMOKE-A` and not `SMOKE-B`, the other contains `SMOKE-B` and not `SMOKE-A`. Cross-contamination = test failure.
-- Clean up: `gh issue close <N>` on both test issues with comment "smoke test cleanup"
-- Run a deliberate-collision test: in shell C, write `<!-- draft-owner: pid=99999 ts=0 --> hostile body` to the `mktemp` path of an in-progress shell D draft. Confirm shell D's verification block prints "ERROR: draft anchor mismatch" to stderr and exits 1, no issue published.
-- Report pass/fail
+- **No `gh issue create` against the real GitHub API in this smoke.** The structural property under test is "concurrent invocations produce non-colliding, anchor-verified drafts." That is fully observable from the draft files themselves; involving the real GitHub API risks orphan test issues if cleanup fails mid-run, which the critique flagged. Substitute `gh issue create … --body "$(cat "$DRAFT")"` with `cp "$DRAFT" "/tmp/smoke-$MARKER.captured"` so the published body is captured locally instead of posted.
+- Extract the body-draft + verify pipeline from each SKILL.md into a standalone bash script (`/tmp/smoke_do_issue.sh`) for the smoke. Two background invocations of that script (`bash /tmp/smoke_do_issue.sh SMOKE-A & bash /tmp/smoke_do_issue.sh SMOKE-B & wait`) simulate concurrent agents.
+- Assert: `/tmp/smoke-SMOKE-A.captured` contains marker `SMOKE-A` and not `SMOKE-B`; `/tmp/smoke-SMOKE-B.captured` contains `SMOKE-B` and not `SMOKE-A`. Each captured file's first line matches its own captured anchor (different PIDs, different `$ANCHOR` strings). Cross-contamination = test failure.
+- Deliberate-collision test: spawn one invocation, pause it after mktemp+write but before verify (insert `read -t 5` in a test copy of the script). From a second shell, write `<!-- draft-owner: pid=99999 ts=0 --> hostile body` to the known `$DRAFT` path. Resume the paused invocation; confirm verification prints `ERROR: draft anchor mismatch` to stderr and exits 1, no captured file is produced.
+- Cleanup: `rm -f /tmp/smoke-*.captured /tmp/smoke_do_issue.sh` and any `$TMPDIR/issue_body.*` left from interrupted runs. This cleanup runs unconditionally via `trap` in the smoke driver script.
+- Report pass/fail. **No GitHub API calls made; no issues to close.**
 
 ### 4. Documentation pass
 - **Task ID**: document-feature
@@ -354,7 +363,8 @@ Single component, single skill mechanism — minimal team.
 - **Agent Type**: validator
 - **Parallel**: false
 - Re-grep `.claude/skills-global/` for `/tmp/issue_body.md` and `/tmp/investigation_body.md` — must return zero matches
-- Re-stat both file pairs — both inodes still match
+- Re-grep `.claude/skills-global/{do-issue,do-investigation-issue}/SKILL.md` for `mktemp` and `draft-owner` — must return matches in both
+- Skip inode equality check in the worktree (worktree files have independent inodes — see Risk 4). Inode check is in the post-merge Verification table.
 - Run `python -m ruff check .` and `python -m ruff format --check .` (no Python touched, but proves no collateral)
 - Run `pytest tests/unit/` (parallel) — must pass; this fix does not change any Python so the suite is a regression-only check
 - Final pass/fail report
@@ -369,22 +379,33 @@ Single component, single skill mechanism — minimal team.
 | `do-issue` SKILL.md has anchor check | `grep -n "draft-owner" .claude/skills-global/do-issue/SKILL.md` | output contains `draft-owner` |
 | `do-investigation-issue` SKILL.md uses `mktemp` | `grep -n "mktemp" .claude/skills-global/do-investigation-issue/SKILL.md` | output contains `mktemp` |
 | `do-investigation-issue` SKILL.md has anchor check | `grep -n "draft-owner" .claude/skills-global/do-investigation-issue/SKILL.md` | output contains `draft-owner` |
-| `do-issue` hardlink intact | `stat -f "%i" .claude/skills-global/do-issue/SKILL.md ~/.claude/skills/do-issue/SKILL.md \| sort -u \| wc -l` | output `1` (single unique inode) |
-| `do-investigation-issue` hardlink intact | `stat -f "%i" .claude/skills-global/do-investigation-issue/SKILL.md ~/.claude/skills/do-investigation-issue/SKILL.md \| sort -u \| wc -l` | output `1` |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Unit tests pass | `pytest tests/unit/ -x -q` | exit code 0 |
 
-The two-shell concurrency smoke (Step 3 of tasks) is **manual**, documented in this plan, and produces a written pass/fail in the validator's report. It is the load-bearing acceptance test for this fix.
+### Post-merge verification (runs on main checkout after `/update`, NOT in the worktree)
+
+These checks require the hardlink propagation that `scripts/update/hardlinks.py::_sync_skills` performs on `/update` against the main checkout. They are meaningless inside a git worktree (see Risk 4) and are deliberately deferred to after PR merge + `/update`.
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| `do-issue` hardlink intact (post-merge, main) | `stat -f "%i" ~/src/ai/.claude/skills-global/do-issue/SKILL.md ~/.claude/skills/do-issue/SKILL.md \| awk '{print $1}' \| sort -u \| wc -l \| tr -d ' '` | output `1` |
+| `do-investigation-issue` hardlink intact (post-merge, main) | `stat -f "%i" ~/src/ai/.claude/skills-global/do-investigation-issue/SKILL.md ~/.claude/skills/do-investigation-issue/SKILL.md \| awk '{print $1}' \| sort -u \| wc -l \| tr -d ' '` | output `1` |
+
+The two-shell concurrency smoke (Step 3 of tasks) is **automated by a smoke driver script**, runs without touching the real GitHub API (publish replaced with local `cp` capture), and produces a written pass/fail in the validator's report. It is the load-bearing acceptance test for this fix.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Revision round 1 addressed 2 blockers + 3 concerns + 1 nit:
 
----
+- **B1 (mktemp template)** — RESOLVED. Switched from `mktemp -t issue_body.XXXXXX.md` (BSD-incompatible — macOS treats argument as a literal prefix and appends its own random suffix) to the positional template form `mktemp "${TMPDIR:-/tmp}/issue_body.XXXXXX"` which is identical-behavior on BSD and GNU. Verified in-shell that the new form generates `/var/folders/.../issue_body.<6 random>` on macOS. Solution Key Elements + Technical Approach step 1 document the rationale so a future reviewer can't "simplify" the form back to `-t`.
+- **B2 (cross-tool-call `$$` fragility)** — RESOLVED. Added an explicit **single-shell invariant**: the entire mktemp → write → verify → publish → cleanup pipeline runs inside one bash tool invocation. Each Bash tool call spawns a fresh shell with a new `$$`; splitting the pipeline across calls loses `OWNER_PID`/`OWNER_TS`/`ANCHOR`/`DRAFT` and breaks verification. The SKILL.md instruction text must state this requirement so the agent doesn't accidentally split it. Documented in Data Flow, Solution Key Elements, Technical Approach, and Step-by-Step Tasks.
+- **C1 (worktree hardlink check broken)** — RESOLVED. Added Risk 4 explaining that worktree files have independent inodes by git's design — `scripts/update/hardlinks.py` only runs on `/update` against main. Removed inode-equality checks from build-stage Steps 1/2/5. Moved the `stat -f "%i"` check to a new **Post-merge verification** subsection of the Verification table; it runs on main after `/update`. Success Criteria updated accordingly.
+- **C2 (real test issues without cleanup)** — RESOLVED. Smoke test no longer creates real GitHub issues. The `gh issue create` call is replaced with `cp "$DRAFT" "/tmp/smoke-$MARKER.captured"` so the captured body is observable locally. Concurrency is exercised by two background bash invocations of an extracted smoke driver script. A `trap` in the driver guarantees `rm -f /tmp/smoke-*.captured` runs unconditionally. **No GitHub API calls; no orphan-issue risk.** Step 3 of tasks rewritten.
+- **C3 (unresolved write-site contract)** — RESOLVED. Original Open Question #2 (whether to close the implicit write-site contract in `do-issue/SKILL.md`) is decided: yes, the SKILL.md MUST prescribe both write and read paths via a single `$DRAFT` variable inside one bash block. Moved from Open Questions into Solution Key Elements as a committed decision. Step-1 task text now states this requirement explicitly.
+- **N1 (nit)** — Open Questions list trimmed: #2 is now a committed decision (moved into Solution); #1 and #3 remain as legitimate confirmation-asks.
 
-## Open Questions
+### Remaining open questions (non-blocking)
 
 1. **Should the anchor format encode anything beyond `pid=<PID> ts=<EPOCH>`?** The plan's stance is no — PID+epoch is sufficient for the local-machine, sub-second collision window. Adding a session id would be nicer but `${CLAUDE_SESSION_ID}` is not reliably exported across all invocation surfaces. Confirm this is acceptable.
-2. **The `do-issue` SKILL.md only specifies the *read* path, not the write path.** A `grep -rn "issue_body\|/tmp/issue" .claude/skills-global/do-issue/` returns exactly one match: line 120's `cat /tmp/issue_body.md`. The body must be created somewhere by the agent improvising at runtime — but `ISSUE_TEMPLATE.md`, `RECON.md`, and `CHECKLIST.md` contain no write instruction either. The current contract is "the consumer reads from this hardcoded path; you figure out how to get the body there." The fix needs to **close that contract** by making the SKILL.md prescribe both write and read paths through a single `DRAFT=$(mktemp …)` variable that flows top-to-bottom. This is the surgical fix the issue asks for; not a scope expansion. **Confirm the planner agrees with this framing** (vs. trying to thread `mktemp` only at the read site, which would leave the write-site path still hardcoded by convention).
-3. **Should I also add inline comments to `~/.claude/skills/<skill>/SKILL.md` reading "DO NOT EDIT THIS FILE — hardlinked from .claude/skills-global/<skill>/SKILL.md, edit there"?** Currently no such warning exists, and the hardlink discovery during freshness check showed how easy it would be for a future agent to "fix" the wrong inode believing it is independent. This is one extra inline comment per file. Out of strict scope but high signal-to-noise.
+2. **Should I also add inline comments to `~/.claude/skills/<skill>/SKILL.md` reading "DO NOT EDIT THIS FILE — hardlinked from .claude/skills-global/<skill>/SKILL.md, edit there"?** Currently no such warning exists, and the hardlink discovery during freshness check showed how easy it would be for a future agent to "fix" the wrong inode believing it is independent. This is one extra inline comment per file. Out of strict scope but high signal-to-noise.
