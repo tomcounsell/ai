@@ -149,7 +149,7 @@ This work is staged in follow-up tasks (9 and 11 in the plan).
 
 The agent delivers user-visible messages and reactions via two CLI tools invoked through the `Bash` tool, not through a dedicated MCP server:
 
-- `tools/send_message.py '<text>'` — primary delivery tool. Writes the payload to the same Redis outbox consumed by `bridge/telegram_relay.py`. Handles `--reply-to <msg_id>` and `--file <path>` flags for threaded replies and attachments.
+- `tools/send_message.py '<text>'` — primary delivery tool. Reconstitutes the `AgentSession` from `VALOR_SESSION_ID` and delegates to `agent.output_handler.TelegramRelayOutputHandler.send` for both telegram and email transports, so the drafter / redundancy filter / read-the-room gate run identically on the tool-call path and the silent-worker path. Handles `--reply-to <msg_id>` and `--file <path>` flags for threaded replies and attachments. Fail-closed on missing session; `ALLOW_LEGACY_RPUSH_FALLBACK=1` opts into a diagnostic-only legacy raw rpush.
 - `tools/react_with_emoji.py '<emoji>'` — posts a reaction emoji on the triggering message. Used for lightweight acknowledgements ("thumbs up, done") when a full text response would be noise.
 
 The stop hook classifies each turn's outcome by scanning `tool_use` blocks for these exact script paths (`agent/hooks/stop.py::classify_delivery_outcome`). Matches produce one of the five outcomes (send, edit+send, react, silent, continue).
