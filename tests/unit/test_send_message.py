@@ -101,9 +101,7 @@ class TestSendViaEmail:
         monkeypatch.setattr(sm, "_lookup_session", lambda sid: fake_session)
 
         mock_send = AsyncMock(return_value=None)
-        with patch(
-            "agent.output_handler.TelegramRelayOutputHandler.send", new=mock_send
-        ):
+        with patch("agent.output_handler.TelegramRelayOutputHandler.send", new=mock_send):
             sm._send_via_email("Body text here")
 
         mock_send.assert_awaited_once()
