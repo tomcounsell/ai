@@ -338,12 +338,13 @@ async def _send_queued_message(
                         )
                         # Fall through to standard send path below.
 
-                # Single file or album (default path)
+                # Single file or album (default path).
+                # Send file without caption, then text as a separate message so
+                # Telegram's narrow caption column doesn't constrain the text layout.
                 file_arg = available[0] if len(available) == 1 else available
                 sent = await telegram_client.send_file(
                     int(chat_id),
                     file_arg,
-                    caption=text or None,
                     reply_to=reply_to_id,
                 )
                 # Telethon returns a list for albums, single Message for one file
@@ -354,12 +355,18 @@ async def _send_queued_message(
                 file_names = [os.path.basename(fp) for fp in available]
                 logger.info(
                     f"Relay: sent PM file(s) to chat {chat_id} "
-                    f"(files={file_names}, "
-                    f"caption={len(text)} chars, msg_id={msg_id})"
+                    f"(files={file_names}, msg_id={msg_id})"
                 )
                 if message.get("cleanup_file"):
                     for fp in available:
                         _safe_unlink(fp)
+                if text:
+                    await telegram_client.send_message(
+                        int(chat_id),
+                        text,
+                        reply_to=reply_to_id,
+                    )
+                    logger.info(f"Relay: sent follow-up text to chat {chat_id} ({len(text)} chars)")
                 return msg_id
             else:
                 # All files missing -- fall back to text-only
