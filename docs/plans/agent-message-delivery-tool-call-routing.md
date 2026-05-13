@@ -5,6 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-05-13
 revised: 2026-05-14
+revision_applied: true
 tracking: https://github.com/tomcounsell/ai/issues/1369
 last_comment_id: none
 ---
