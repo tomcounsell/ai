@@ -265,11 +265,7 @@ The smoke test in Verification asserts post-edit that both file paths still shar
 
 ## Documentation
 
-- [ ] Update `docs/features/sdlc-pipeline.md` IF it documents `/do-issue`'s draft mechanism. (If it does not, no doc update for this feature; the SKILL.md is the authoritative source for skill behavior.)
-- [ ] No new `docs/features/` entry — this is a bug fix to existing skills, not a new feature.
-- [ ] Inline rationale comment in each SKILL.md block explaining why `mktemp` and the anchor check exist (one short comment so a future reader does not "simplify" the safety check away).
-
-If `docs/features/` contains nothing about `/do-issue`'s scratch mechanism, this section reduces to the SKILL.md inline comments only.
+No documentation changes needed beyond inline SKILL.md comments. Confirmed during build: `docs/features/sdlc-pipeline.md` does not document `/do-issue`'s scratch-draft mechanism (`grep -n "issue_body\|/tmp/issue" docs/features/sdlc-pipeline.md` returns empty), so the conditional update from the original plan does not apply. The SKILL.md files are the authoritative source for skill behavior, and inline rationale comments explaining the `mktemp` + anchor check have been added to both edited blocks so a future reader does not "simplify" the safety check away.
 
 ## Success Criteria
 
