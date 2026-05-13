@@ -38,6 +38,23 @@ ln -sf "$(command -v python3)" /opt/homebrew/bin/python
 
 The update orchestrator (`scripts/update/run.py`) verifies this via `check_python_alias()` and fails loudly if missing.
 
+### Bootstrap cross-machine shell env loader
+
+Cross-machine secrets and shell config live in `~/Desktop/Valor/` (iCloud-synced). `~/.zshenv` itself does NOT sync (it's in `$HOME`), so each new machine needs a one-line bootstrap that sources the vault loader. The update script self-heals this on every run via `scripts/update/zshenv_sync.py`, but on a fresh machine the easiest path is to run that module directly before the first `/update`:
+
+```bash
+cd ~/src/ai
+.venv/bin/python -c "from scripts.update.zshenv_sync import sync_zshenv; r = sync_zshenv(); print(r)"
+```
+
+That:
+- Seeds `~/Desktop/Valor/zshenv.sh` with a default loader if missing (only the very first machine ever does this — subsequent machines inherit the file via iCloud).
+- Appends a `[ -f ~/Desktop/Valor/zshenv.sh ] && source ...` guard to `~/.zshenv` if missing.
+
+After it runs, open a fresh shell and confirm a shared secret is loaded (e.g., `echo "${SENTRY_PERSONAL_TOKEN:+set}"` — should print `set` if the vault `.env` defines it). If the vault hasn't synced yet, the guard line is still safe (it's `[ -f ]`-gated) and will activate as soon as iCloud lands the file.
+
+If you need to add new cross-machine shell config later (PATH tweaks shared across all Valor machines, shell functions, etc.), edit `~/Desktop/Valor/zshenv.sh` directly — it syncs everywhere automatically. Keep host-specific config in the local `~/.zshenv` or `~/.zshrc`.
+
 ## Step 1: Install uv Package Manager
 
 We use `uv` for fast, reliable Python package management (much faster than pip).

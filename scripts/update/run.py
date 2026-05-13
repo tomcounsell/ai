@@ -40,6 +40,7 @@ from scripts.update import (  # noqa: E402
     sentry_cli,
     service,
     verify,
+    zshenv_sync,
 )
 
 
@@ -126,6 +127,7 @@ class UpdateResult:
     hardlink_result: hardlinks.HardlinkSyncResult | None = None
     env_sync_result: env_sync.EnvSyncResult | None = None
     reflections_sync_result: env_sync.ReflectionsSyncResult | None = None
+    zshenv_sync_result: zshenv_sync.ZshenvSyncResult | None = None
     hook_audit: hooks.HookAuditResult | None = None
     migration_result: migrations.MigrationResult | None = None
     reflections_yaml_result: reflections_yaml.ReflectionsYamlMigrationResult | None = None
@@ -418,6 +420,21 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if refl_r.error:
         log(f"WARN: reflections.yaml: {refl_r.error}", v, always=True)
         result.warnings.append(f"reflections.yaml symlink: {refl_r.error}")
+
+    # Step 1.67: Bootstrap cross-machine zshenv loader.
+    # Seeds ~/Desktop/Valor/zshenv.sh (vault) if missing and ensures ~/.zshenv
+    # sources it. Idempotent — most runs are no-ops. Critical on fresh machines
+    # so shared secrets (GITHUB_PAT_*, etc.) land in every shell.
+    log("Verifying ~/.zshenv → vault loader...", v)
+    result.zshenv_sync_result = zshenv_sync.sync_zshenv()
+    zr = result.zshenv_sync_result
+    if zr.vault_seeded:
+        log("Seeded ~/Desktop/Valor/zshenv.sh (vault loader)", v, always=True)
+    if zr.guard_added:
+        log("Added Valor source guard to ~/.zshenv", v, always=True)
+    if zr.error:
+        log(f"WARN: zshenv sync: {zr.error}", v, always=True)
+        result.warnings.append(f"zshenv sync: {zr.error}")
 
     # Step 1.7: Audit skill hooks for dangerous patterns
     log("Auditing skill hooks...", v)

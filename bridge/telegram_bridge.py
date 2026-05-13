@@ -2836,6 +2836,17 @@ async def main():
                 lookback_override=lookback,
             )
             logger.info(f"Catchup scan complete: {caught_up} message(s) queued")
+            # Force Telethon to sync channel update state via getChannelDifference
+            # for all monitored channels. Without this, Telegram withholds realtime
+            # UpdateNewChannelMessage events for low-activity or newly-added channels,
+            # requiring explicit polling to establish the update stream.
+            try:
+                await client.catch_up()
+                logger.info(
+                    "[catchup] Telethon catch_up() complete — channel update streams active"
+                )
+            except Exception as _cu_err:
+                logger.warning(f"[catchup] catch_up() failed (non-fatal): {_cu_err}")
         except Exception as e:
             logger.error(f"Catchup scan failed: {e}", exc_info=True)
 
