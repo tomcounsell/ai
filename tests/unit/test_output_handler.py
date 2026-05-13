@@ -1127,8 +1127,11 @@ class TestTransportAwareRouting:
 
         payload = json.loads(handler._redis.rpush.call_args[0][1])
         # Match the unified email payload schema from bridge/email_relay.py.
+        # The handler emits ``to`` as a list to carry the reply-all recipient
+        # set (primary + To/CC minus self). With no extra recipients stamped
+        # on the session, the list collapses to just the primary recipient.
         assert payload["session_id"] == "email-sess"
-        assert payload["to"] == "customer@example.com"
+        assert payload["to"] == ["customer@example.com"]
         # Subject prefixed with "Re:" (worker-reply semantics).
         assert payload["subject"] == "Re: My setup question"
         assert payload["body"] == "Here is the answer."
@@ -1222,13 +1225,11 @@ class TestTransportAwareRouting:
             else:
                 _os.environ["READ_THE_ROOM_ENABLED"] = old_rtr
 
-        # Exactly one rpush — the email message itself. No reaction.
-        assert handler._redis.rpush.call_count == 1
-        key = handler._redis.rpush.call_args[0][0]
-        assert key.startswith("email:outbox:"), f"Expected email outbox write, got {key}"
-        payload = json.loads(handler._redis.rpush.call_args[0][1])
-        assert payload.get("type") != "reaction"
-        assert "body" in payload  # email-shaped, not reaction-shaped
+        # Per the unified-handler contract: when RTR suppresses on an email
+        # session, the payload is dropped entirely. Email has no reaction
+        # concept and the canonical pipeline now runs RTR for both transports,
+        # so an email suppression is fully silent (zero rpush, zero reaction).
+        assert handler._redis.rpush.call_count == 0
 
     def test_send_with_empty_text_for_email_is_noop(self):
         """Empty text on an email session must NOT queue an empty email."""
