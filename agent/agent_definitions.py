@@ -121,35 +121,8 @@ def get_agent_definitions() -> dict[str, AgentDefinition]:
     return definitions
 
 
-def get_definition(subagent_type: str) -> AgentDefinition | None:
-    """Look up an agent definition by subagent_type.
-
-    Returns the AgentDefinition for the given type, or None if not found.
-
-    For the "dev-session" type: if the PM persona is stale and still calls
-    Agent(subagent_type="dev-session"), this returns an error definition
-    directing the PM to use `python -m tools.valor_session create --role dev`
-    instead. This provides an actionable error rather than an opaque crash.
-    """
-    definitions = get_agent_definitions()
-    if subagent_type in definitions:
-        return definitions[subagent_type]
-
-    logger.warning(
-        f"Unknown subagent_type requested: '{subagent_type}'. "
-        "If this is 'dev-session', the PM persona may be stale. "
-        "Dev sessions are now created via "
-        '`python -m tools.valor_session create --role dev --parent "$AGENT_SESSION_ID" '
-        '--message "..."`.'
-    )
-    return None
-
-
 # Agent files referenced by get_agent_definitions(). Used by validate_agent_files()
-# to check that all expected files exist on disk at bridge startup.
-# Note: dev-session.md is intentionally excluded (Phase 5 cleanup: dev sessions
-# are now created via `python -m tools.valor_session create --role dev`, not via
-# Agent tool dispatch).
+# to check that all expected files exist on disk at process startup (worker and bridge).
 _EXPECTED_AGENT_FILES = [
     "builder.md",
     "validator.md",

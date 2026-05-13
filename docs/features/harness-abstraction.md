@@ -195,7 +195,7 @@ instead of `Agent(subagent_type="dev-session", ...)`. The Agent tool dispatch pa
 
 `sdk_client.py` contains a startup validation in `load_persona_prompt()` that warns if the PM persona still contains Agent tool dispatch (backward-compat guard).
 
-`get_definition()` in `agent_definitions.py` returns an actionable error for stale callers that still request `"dev-session"` from the Agent tool.
+The actionable signal for stale PM personas lives at `agent/sdk_client.py:940-948` (`_load_overlay_drift_guards`): the PM persona overlay is grepped for `subagent_type="dev-session"` at PM session startup, and a warning is logged if found, directing the operator to update `~/Desktop/Valor/personas/project-manager.md`. A stale dispatch that does reach the SDK fails fast with an "unknown subagent" error.
 
 ## Hook Cleanup (Phase 5)
 
