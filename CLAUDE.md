@@ -545,6 +545,7 @@ No existing tests affected — this is a greenfield feature with no prior test c
 | `docs/features/README.md` | Feature index — look up how things work |
 | `docs/sdlc/` | Per-stage repo-specific addenda — read by SDLC skills at runtime |
 | `tests/README.md` | Test suite index — feature markers, blind spots, contribution guide |
+| `docs/conventions/knowledge-base-section.md` | KB-section convention every project's `CLAUDE.md`/`README.md` should follow |
 
 ## GitHub Issue Labels
 
@@ -562,6 +563,24 @@ Use these labels consistently when creating or editing issues:
 
 Do NOT use a `feature` label — it adds no signal.
 
-## Business Context
+## Knowledge Base (KB)
 
-For business context, project notes, and assets see the work vault: `~/src/work-vault/AI Valor Engels System/`
+This project's knowledge has two sources. Pull from both before answering substantive questions.
+
+**1. Vault (curated docs, iCloud-synced)**
+- Location: `~/work-vault/AI Valor Engels System/`
+- Index: see that directory's `README.md` for the file index
+- Source of truth for business context, project notes, decisions, and assets
+- Ingest binaries into the indexer with `valor-ingest <path>` (creates `.md` sidecars; `--scan` for backfill)
+
+**2. Memory system (Redis, agent-learned observations)**
+- Project key: `valor` (partitions memories for this project — see `config/projects.json`)
+- Search: `python -m tools.memory_search search "<query>" --project valor`
+- Save: `python -m tools.memory_search save "<content>" --project valor`
+- Status: `python -m tools.memory_search status --project valor`
+- MCP recall: `mcp__memory__memory_search`, `mcp__memory__memory_get`
+- See `docs/features/subconscious-memory.md` for ingestion, scoring, and consolidation
+
+Curated vault = what humans wrote. Memory = what the agent learned (corrections, decisions, patterns, surprises). Both partition by project — don't leak cross-project context.
+
+This is a convention every project should follow — see [`docs/conventions/knowledge-base-section.md`](docs/conventions/knowledge-base-section.md).
