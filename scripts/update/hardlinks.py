@@ -43,6 +43,21 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("commands", "kill.md"),
     # Moved from skills-global to project-only .claude/skills/
     ("skills", "update"),
+    # Old command files superseded by same-named skills (removed to prevent duplicates)
+    ("commands", "add-feature.md"),
+    ("commands", "audit-models.md"),
+    ("commands", "audit-next-tool.md"),
+    ("commands", "do-merge.md"),
+    ("commands", "prepare_app.md"),
+    ("commands", "prime.md"),
+    ("commands", "pthread.md"),
+    ("commands", "queue-status.md"),
+    ("commands", "setup.md"),
+    # Project-only skills removed from user-level (only work in this repo's context)
+    ("skills", "checking-system-logs"),
+    ("skills", "google-workspace"),
+    ("skills", "reading-sms-messages"),
+    ("skills", "telegram"),
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,
