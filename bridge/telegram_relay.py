@@ -257,9 +257,16 @@ async def _send_queued_message(
     # Local session IDs (e.g. "local-<uuid>") are not Telegram chat IDs.
     # Drop them silently — their output was already written by FileOutputHandler.
     try:
-        int(chat_id)
+        chat_id_int = int(chat_id)
     except (ValueError, TypeError):
         logger.debug(f"Relay: dropping non-Telegram chat_id '{chat_id}' (local session)")
+        return None
+
+    # chat_id=0 is not a valid Telegram peer (causes PeerIdInvalidError).
+    if chat_id_int == 0:
+        logger.warning(
+            f"Relay: dropping message with zero chat_id (invalid Telegram peer): {message}"
+        )
         return None
 
     # Must have either text or files
