@@ -146,19 +146,19 @@ This is a deletion + lock-in flow, not a user flow. Sequence:
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] No new `except Exception: pass` blocks introduced. Existing handlers in `_parse_agent_markdown` (covered by `tests/unit/test_agent_definitions.py::TestParseAgentMarkdown::test_missing_file_logs_warning`) are unchanged.
+- [x] No new `except Exception: pass` blocks introduced. Existing handlers in `_parse_agent_markdown` (covered by `tests/unit/test_agent_definitions.py::TestParseAgentMarkdown::test_missing_file_logs_warning`) are unchanged.
 
 ### Empty/Invalid Input Handling
-- [ ] No new functions added; no new input-handling logic. The lock-in test asserts a static repo invariant (file does not exist) — no input variation applies.
+- [x] No new functions added; no new input-handling logic. The lock-in test asserts a static repo invariant (file does not exist) — no input variation applies.
 
 ### Error State Rendering
-- [ ] No user-visible output changes. The user-visible behavior change for stale dev-session dispatches (SDK "unknown subagent" error) is delegated to the SDK and is not under this plan's control. We rely on the SDK's existing error rendering.
+- [x] No user-visible output changes. The user-visible behavior change for stale dev-session dispatches (SDK "unknown subagent" error) is delegated to the SDK and is not under this plan's control. We rely on the SDK's existing error rendering.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_agent_definitions.py` — UPDATE: add `test_dev_session_md_not_in_repo` asserting `(_AGENTS_DIR / "dev-session.md").exists() is False`. No changes to existing tests; the existing assertions (`"dev-session" not in defs`, `len(missing) == 3`, etc.) remain accurate post-cleanup.
-- [ ] `tests/unit/test_agent_definitions.py::TestGetAgentDefinitions::test_returns_all_agents_when_files_exist` — comment at line 54-55 references "Phase 5 note: dev-session was removed from get_agent_definitions()". Comment stays accurate post-cleanup; no edit needed.
-- [ ] `tests/unit/test_agent_definitions.py::TestValidateAgentFiles::test_detects_missing_files` — comment at line 102 references "Phase 5: dev-session.md removed from `_EXPECTED_AGENT_FILES`." Still accurate; no edit needed.
+- [x] `tests/unit/test_agent_definitions.py` — UPDATE: add `test_dev_session_md_not_in_repo` asserting `(_AGENTS_DIR / "dev-session.md").exists() is False`. No changes to existing tests; the existing assertions (`"dev-session" not in defs`, `len(missing) == 3`, etc.) remain accurate post-cleanup.
+- [x] `tests/unit/test_agent_definitions.py::TestGetAgentDefinitions::test_returns_all_agents_when_files_exist` — comment at line 54-55 references "Phase 5 note: dev-session was removed from get_agent_definitions()". Comment stays accurate post-cleanup; no edit needed.
+- [x] `tests/unit/test_agent_definitions.py::TestValidateAgentFiles::test_detects_missing_files` — comment at line 102 references "Phase 5: dev-session.md removed from `_EXPECTED_AGENT_FILES`." Still accurate; no edit needed.
 
 No other existing tests touch `get_definition` (it has zero callers including tests) or `dev-session.md`. The lock-in test is the only test surface change.
 
@@ -209,37 +209,37 @@ No agent integration required — this is a bridge-internal change (deletion of 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/pm-dev-session-architecture.md` — replace `get_definition()` references at lines 406, 502, 509 with descriptions of the actual stale-persona detection at `agent/sdk_client.py:940-948` (overlay grep at PM session startup; logs `WARNING: PM persona overlay still contains Agent tool dispatch instructions`).
-- [ ] Update `docs/features/harness-abstraction.md:198` — same replacement pattern.
+- [x] Update `docs/features/pm-dev-session-architecture.md` — replace `get_definition()` references at lines 406, 502, 509 with descriptions of the actual stale-persona detection at `agent/sdk_client.py:940-948` (overlay grep at PM session startup; logs `WARNING: PM persona overlay still contains Agent tool dispatch instructions`).
+- [x] Update `docs/features/harness-abstraction.md:198` — same replacement pattern.
 
 ### Plan Cross-Reference
-- [ ] Append a single-line footer to `docs/plans/sdk_graceful_agent_fallback.md` referencing #1350 (active follow-up widening the fallback to malformed YAML / OS errors).
+- [x] Append a single-line footer to `docs/plans/sdk_graceful_agent_fallback.md` referencing #1350 (active follow-up widening the fallback to malformed YAML / OS errors).
 
 ### Skill / Research Doc Updates
-- [ ] Update `.claude/skills-global/add-feature/SKILL.md:102` — remove `dev-session.md` from the example list. Replace with `code-reviewer.md` (the third remaining agent in `_EXPECTED_AGENT_FILES`) so the skill still has three concrete examples.
-- [ ] Update `docs/research/claude-code-feature-swot.md:92` — remove `dev-session.md` from the Builders subtree (Phase 5 already removed the runtime; the doc just hadn't caught up).
-- [ ] Update `docs/guides/claude-code-feature-swot.md:92` — same removal (this file appears to be a sibling of the research doc; verify both during edit).
+- [x] Update `.claude/skills-global/add-feature/SKILL.md:102` — remove `dev-session.md` from the example list. Replace with `code-reviewer.md` (the third remaining agent in `_EXPECTED_AGENT_FILES`) so the skill still has three concrete examples.
+- [x] Update `docs/research/claude-code-feature-swot.md:92` — remove `dev-session.md` from the Builders subtree (Phase 5 already removed the runtime; the doc just hadn't caught up).
+- [x] Update `docs/guides/claude-code-feature-swot.md:92` — same removal (this file appears to be a sibling of the research doc; verify both during edit).
 
 ### Inline Documentation
-- [ ] Simplify the inline comment at `agent/agent_definitions.py:148-152` — drop the "Phase 5 cleanup" archaeology, keep a concise statement of what `_EXPECTED_AGENT_FILES` is for.
+- [x] Simplify the inline comment at `agent/agent_definitions.py:148-152` — drop the "Phase 5 cleanup" archaeology, keep a concise statement of what `_EXPECTED_AGENT_FILES` is for.
 
 [No `docs/features/README.md` index update needed — these are existing docs being corrected, not new feature docs being introduced.]
 
 ## Success Criteria
 
-- [ ] `agent/agent_definitions.py::get_definition` deleted (~22 lines including docstring).
-- [ ] `.claude/agents/dev-session.md` deleted from the repo.
-- [ ] Inline comment at `agent/agent_definitions.py:148-152` simplified to drop dev-session archaeology.
-- [ ] `docs/features/pm-dev-session-architecture.md` lines 406, 502, 509 updated to describe `agent/sdk_client.py:940-948`.
-- [ ] `docs/features/harness-abstraction.md:198` updated similarly.
-- [ ] `docs/plans/sdk_graceful_agent_fallback.md` gains a footer cross-link to #1350.
-- [ ] `.claude/skills-global/add-feature/SKILL.md:102` no longer references `dev-session.md`.
-- [ ] `docs/research/claude-code-feature-swot.md:92` and `docs/guides/claude-code-feature-swot.md:92` no longer reference `dev-session.md`.
-- [ ] `tests/unit/test_agent_definitions.py` adds `test_dev_session_md_not_in_repo` asserting `(_AGENTS_DIR / "dev-session.md").exists() is False`.
-- [ ] `python -c "from agent.agent_definitions import get_agent_definitions; d = get_agent_definitions(); assert 'dev-session' not in d"` passes.
-- [ ] Tests pass (`pytest tests/unit/test_agent_definitions.py -v`).
-- [ ] Lint and format clean (`python -m ruff check .`, `python -m ruff format --check .`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] `agent/agent_definitions.py::get_definition` deleted (~22 lines including docstring).
+- [x] `.claude/agents/dev-session.md` deleted from the repo.
+- [x] Inline comment at `agent/agent_definitions.py:148-152` simplified to drop dev-session archaeology.
+- [x] `docs/features/pm-dev-session-architecture.md` lines 406, 502, 509 updated to describe `agent/sdk_client.py:940-948`.
+- [x] `docs/features/harness-abstraction.md:198` updated similarly.
+- [x] `docs/plans/sdk_graceful_agent_fallback.md` gains a footer cross-link to #1350.
+- [x] `.claude/skills-global/add-feature/SKILL.md:102` no longer references `dev-session.md`.
+- [x] `docs/research/claude-code-feature-swot.md:92` and `docs/guides/claude-code-feature-swot.md:92` no longer reference `dev-session.md`.
+- [x] `tests/unit/test_agent_definitions.py` adds `test_dev_session_md_not_in_repo` asserting `(_AGENTS_DIR / "dev-session.md").exists() is False`.
+- [x] `python -c "from agent.agent_definitions import get_agent_definitions; d = get_agent_definitions(); assert 'dev-session' not in d"` passes.
+- [x] Tests pass (`pytest tests/unit/test_agent_definitions.py -v`).
+- [x] Lint and format clean (`python -m ruff check .`, `python -m ruff format --check .`).
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
