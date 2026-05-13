@@ -250,9 +250,7 @@ class TelegramRelayOutputHandler:
         reply_all = [chat_id] + [
             a
             for a in (list(original_to) + list(original_cc))
-            if isinstance(a, str)
-            and a.lower() != own_addr
-            and a.lower() != primary_lower
+            if isinstance(a, str) and a.lower() != own_addr and a.lower() != primary_lower
         ]
         # Deduplicate while preserving order in case the bridge stamped the
         # same address twice across To and CC.
@@ -642,9 +640,7 @@ class TelegramRelayOutputHandler:
         # the same overflow path the drafter just produced).
         merged_paths: list[str] = []
         _seen_paths: set[str] = set()
-        for fp in (file_paths or []) + (
-            [drafter_overflow_file] if drafter_overflow_file else []
-        ):
+        for fp in (file_paths or []) + ([drafter_overflow_file] if drafter_overflow_file else []):
             if not fp or fp in _seen_paths:
                 continue
             _seen_paths.add(fp)

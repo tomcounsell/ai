@@ -64,42 +64,110 @@ class TestResolveTransport:
 
 
 class TestSendViaEmail:
-    def test_unified_payload_shape(self, r, monkeypatch, capsys):
-        from tools.send_message import _send_via_email
+    """Issue #1369: ``_send_via_email`` no longer writes to the email outbox
+    directly — it reconstitutes the AgentSession and delegates to
+    ``TelegramRelayOutputHandler.send``, which owns the email outbox write.
+
+    The unified email payload SHAPE is now asserted at the handler layer in
+    ``tests/unit/test_output_handler.py`` (``TestTransportAwareRouting`` /
+    ``TestDrafterHoistedAboveTransport``). The tests below assert the
+    CLI-side contract: env validation, session lookup, fail-closed default
+    on missing session, and the env-gated legacy fallback.
+    """
+
+    def test_invokes_canonical_handler_with_email_session(self, monkeypatch):
+        """Happy path: when the session exists, the tool delegates to
+        ``TelegramRelayOutputHandler.send`` with the recipient address as
+        chat_id and ``reply_to_msg_id=0``."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import tools.send_message as sm
 
         monkeypatch.setenv("VALOR_SESSION_ID", "sess-1")
         monkeypatch.setenv("EMAIL_REPLY_TO", "alice@example.com")
         monkeypatch.setenv("EMAIL_SUBJECT", "Re: hi")
         monkeypatch.setenv("EMAIL_IN_REPLY_TO", "<orig@x>")
+        monkeypatch.delenv("ALLOW_LEGACY_RPUSH_FALLBACK", raising=False)
+
+        fake_session = MagicMock()
+        fake_session.session_id = "sess-1"
+        fake_session.extra_context = {
+            "transport": "email",
+            "email_subject": "Re: hi",
+            "email_message_id": "<orig@x>",
+            "email_to_addrs": [],
+            "email_cc_addrs": [],
+        }
+        monkeypatch.setattr(sm, "_lookup_session", lambda sid: fake_session)
+
+        mock_send = AsyncMock(return_value=None)
+        with patch(
+            "agent.output_handler.TelegramRelayOutputHandler.send", new=mock_send
+        ):
+            sm._send_via_email("Body text here")
+
+        mock_send.assert_awaited_once()
+        positional = list(mock_send.call_args.args)
+        assert "alice@example.com" in positional
+        assert "Body text here" in positional
+        assert 0 in positional  # reply_to_msg_id sentinel for email
+        assert mock_send.call_args.kwargs["session"] is fake_session
+
+    def test_missing_session_fails_closed(self, monkeypatch):
+        """Default behavior when the AgentSession lookup returns ``None``:
+        non-zero exit (the tool refuses to silently bypass the handler)."""
+        import tools.send_message as sm
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "sess-missing")
+        monkeypatch.setenv("EMAIL_REPLY_TO", "alice@example.com")
+        monkeypatch.delenv("ALLOW_LEGACY_RPUSH_FALLBACK", raising=False)
+        monkeypatch.setattr(sm, "_lookup_session", lambda sid: None)
+
+        with pytest.raises(SystemExit) as ei:
+            sm._send_via_email("hi")
+        assert ei.value.code == 1
+
+    def test_legacy_fallback_writes_unified_payload(self, r, monkeypatch):
+        """When ``ALLOW_LEGACY_RPUSH_FALLBACK=1`` AND the session is missing,
+        the tool writes the unified payload shape directly to
+        ``email:outbox:{session_id}``. This is the diagnostic opt-in path
+        — the tests below assert the legacy payload contract still holds."""
+        from tools.send_message import _send_via_email
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "sess-legacy")
+        monkeypatch.setenv("EMAIL_REPLY_TO", "alice@example.com")
+        monkeypatch.setenv("EMAIL_SUBJECT", "Re: hi")
+        monkeypatch.setenv("EMAIL_IN_REPLY_TO", "<orig@x>")
+        monkeypatch.setenv("ALLOW_LEGACY_RPUSH_FALLBACK", "1")
+        # Force the lookup to fail so the legacy path engages.
+        monkeypatch.setattr("tools.send_message._lookup_session", lambda sid: None)
 
         _send_via_email("Body text here")
 
-        key = "email:outbox:sess-1"
-        raw = r.lpop(key)
+        raw = r.lpop("email:outbox:sess-legacy")
         assert raw is not None
         payload = json.loads(raw)
-
-        assert payload["session_id"] == "sess-1"
+        assert payload["session_id"] == "sess-legacy"
         assert payload["to"] == "alice@example.com"
         assert payload["subject"] == "Re: hi"
-        # Body field is the unified shape; legacy `text` is not emitted anymore
         assert payload["body"] == "Body text here"
-        assert "text" not in payload
         assert payload["attachments"] == []
         assert payload["in_reply_to"] == "<orig@x>"
         assert payload["references"] == "<orig@x>"
         assert payload["from_addr"] == "valor@test.local"
-        assert isinstance(payload["timestamp"], float)
 
-    def test_ttl_set_on_queue(self, r, monkeypatch):
+    def test_legacy_fallback_ttl_set_on_queue(self, r, monkeypatch):
+        """The legacy fallback still applies the 3600s TTL to the outbox key."""
         from tools.send_message import _send_via_email
 
-        monkeypatch.setenv("VALOR_SESSION_ID", "sess-2")
+        monkeypatch.setenv("VALOR_SESSION_ID", "sess-legacy-ttl")
         monkeypatch.setenv("EMAIL_REPLY_TO", "alice@example.com")
+        monkeypatch.setenv("ALLOW_LEGACY_RPUSH_FALLBACK", "1")
+        monkeypatch.setattr("tools.send_message._lookup_session", lambda sid: None)
 
         _send_via_email("hi")
 
-        ttl = r.ttl("email:outbox:sess-2")
+        ttl = r.ttl("email:outbox:sess-legacy-ttl")
         assert 0 < ttl <= 3600
 
     def test_missing_session_id_exits(self, monkeypatch):
@@ -122,16 +190,21 @@ class TestSendViaEmail:
             _send_via_email("hi")
         assert ei.value.code == 1
 
-    def test_missing_subject_defaults(self, r, monkeypatch):
+    def test_legacy_fallback_missing_subject_defaults(self, r, monkeypatch):
+        """Legacy fallback applies ``(no subject)`` when EMAIL_SUBJECT is
+        unset. The canonical path lets the handler's ``_send_via_email_outbox``
+        derive the subject from ``extra_context.email_subject`` instead."""
         from tools.send_message import _send_via_email
 
-        monkeypatch.setenv("VALOR_SESSION_ID", "sess-3")
+        monkeypatch.setenv("VALOR_SESSION_ID", "sess-legacy-nosubject")
         monkeypatch.setenv("EMAIL_REPLY_TO", "alice@example.com")
+        monkeypatch.setenv("ALLOW_LEGACY_RPUSH_FALLBACK", "1")
         monkeypatch.delenv("EMAIL_SUBJECT", raising=False)
         monkeypatch.delenv("EMAIL_IN_REPLY_TO", raising=False)
+        monkeypatch.setattr("tools.send_message._lookup_session", lambda sid: None)
 
         _send_via_email("hi")
-        payload = json.loads(r.lpop("email:outbox:sess-3"))
+        payload = json.loads(r.lpop("email:outbox:sess-legacy-nosubject"))
         assert payload["subject"] == "(no subject)"
         assert payload["in_reply_to"] is None
         assert payload["references"] is None

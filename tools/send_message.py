@@ -123,9 +123,8 @@ def _legacy_telegram_rpush(
     except Exception as e:
         print(f"Error: Redis write failed: {e}", file=sys.stderr)
         sys.exit(1)
-    print(
-        f"Queued ({len(text)} chars{', ' + str(len(file_paths)) + ' files' if file_paths else ''}) [legacy]"
-    )
+    _files_suffix = f", {len(file_paths)} files" if file_paths else ""
+    print(f"Queued ({len(text)} chars{_files_suffix}) [legacy]")
 
 
 def _legacy_email_rpush(text: str, *, recipient: str, session_id: str) -> None:
@@ -284,9 +283,8 @@ def _send_via_email(text: str, file_paths: list[str] | None = None) -> None:
     Despite the type name, this method is the single canonical queue-side
     entrypoint for both transports. The handler's internal email branch
     builds the email-shaped outbox payload (reply-all ``to`` list, subject,
-    threading headers) so the CLI never imports ``EmailOutputHandler``. Doing
-    so would couple the tool to synchronous SMTP, which is the wrong layer
-    for a queue-only writer.
+    threading headers). The CLI deliberately does NOT import the synchronous
+    SMTP handler — that is the wrong layer for a queue-only writer.
     """
     session_id = os.environ.get("VALOR_SESSION_ID")
     reply_to_addr = os.environ.get("EMAIL_REPLY_TO")
