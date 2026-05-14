@@ -143,6 +143,17 @@ Telegram media (photos, voice, audio, documents) requires both Telethon RPC (dow
 
 Full contract and field-level reference live in [media-enrichment.md](media-enrichment.md). The sibling reply-chain branch in `bridge/enrichment.py` still requires a Telethon client and is silently skipped in the worker until a follow-up issue lands; that is **not** considered fixed by sdlc-1297.
 
+### Media Intake Resilience (issue #1330)
+
+The sdlc-1297 contract assumes (a) `TelegramMessage.query.get(stored_msg_id)` always returns the record the bridge just created, and (b) `_download_media_with_retry` returns either a path or a populated error string. Both assumptions can fail transiently — a Popoto stale-index condition can return `None` from `query.get`, and the size-aware retry wrapper can return `(None, None)` ("no_path" outcome) when `client.download_media` reports success but the file is missing post-download. Either case left the file orphaned on disk and the agent seeing only the `[media]` placeholder.
+
+Defense in depth lives in two layers:
+
+- **Bridge persist (loud failure)**: After `query.get(stored_msg_id)`, a single bounded re-query covers transient stale-index reads; if both calls return `None`, the bridge logs a `WARNING` with `stored_msg_id`, `chat_id`, `message_id`, `local_path`, and `download_error` and proceeds. Separately, if the download wrapper returned `(_local_path=None, _download_error=None)` while `message.media` is truthy, a second `WARNING` records the no-path-no-error condition. Neither path is silent anymore. The bridge deliberately does **not** call `query.keys(clean=True)` here — index-mutating calls on the hot intake path are too expensive; the worker-side fallback below is the durable safety net.
+- **Worker self-heal**: In `bridge/enrichment.py`, when `has_media=True` AND `media_local_path` is unset AND `media_download_error` is also unset, the worker globs `bridge.media.MEDIA_DIR` for `*_{message_id}.*` (the filename pattern is fully determined by `bridge/media.py::download_media`). On exactly one match it adopts the file with an `INFO` log (`self-heal: recovered orphan media file ...`) and runs AI enrichment as if `media_local_path` had been persisted. Zero matches or multiple matches fall through to the existing "legacy record?" `WARNING` so ambiguity surfaces rather than silently misroutes.
+
+**Explicit non-goal**: this work does not fix the upstream Popoto stale-index root cause. That is tracked under #617 / #860 — orphan-index hygiene is its own ongoing reflection. sdlc-1330 makes intake resilient to that condition; the root cause is unaffected.
+
 ### Execution Harness Routing
 
 All session types (dev, pm, teammate) execute via the CLI harness (`claude -p`). There is no SDK execution branch — the `DEV_SESSION_HARNESS` feature flag was eliminated in issue #912.
