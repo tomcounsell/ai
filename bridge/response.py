@@ -235,8 +235,13 @@ def extract_files_from_response(
 
 
 def clean_message(text: str, project: dict | None) -> str:
-    """Strip @-mention triggers from inbound user text."""
-    # Import here to avoid circular dependencies
+    """Strip @-mention triggers from inbound user text.
+
+    @-prefixed triggers (e.g. ``@valor``) are unambiguous — strip wherever they
+    appear, anchored to a word boundary. Bare-word triggers (e.g. ``valor``,
+    ``hey valor``) are only stripped when they begin the message (addressing
+    the bot), so that names used as nouns mid-prose are preserved.
+    """
     from bridge.routing import DEFAULT_MENTIONS
 
     mentions = DEFAULT_MENTIONS
@@ -246,7 +251,14 @@ def clean_message(text: str, project: dict | None) -> str:
 
     result = text
     for mention in mentions:
-        result = re.sub(re.escape(mention), "", result, flags=re.IGNORECASE)
+        if mention.startswith("@"):
+            pattern = re.escape(mention) + r"\b"
+            result = re.sub(pattern, "", result, flags=re.IGNORECASE)
+        else:
+            # Bare-word trigger: only at the start of the message, addressing
+            # the bot. Consumes any trailing comma/colon and whitespace.
+            pattern = r"^\s*" + re.escape(mention) + r"\b[\s,:]*"
+            result = re.sub(pattern, "", result, count=1, flags=re.IGNORECASE)
     return result.strip()
 
 

@@ -81,7 +81,12 @@ def should_respond(
 
 
 def clean_message(text: str, project: dict | None, default_mentions: list[str]) -> str:
-    """Remove mention triggers from message for cleaner processing."""
+    """Remove mention triggers from message for cleaner processing.
+
+    Mirrors bridge.response.clean_message: @-prefixed triggers strip anywhere
+    on a word boundary; bare-word triggers only strip when addressing the bot
+    at the start of the message.
+    """
     mentions = default_mentions
     if project:
         telegram_config = project.get("telegram", {})
@@ -89,7 +94,12 @@ def clean_message(text: str, project: dict | None, default_mentions: list[str]) 
 
     result = text
     for mention in mentions:
-        result = re.sub(re.escape(mention), "", result, flags=re.IGNORECASE)
+        if mention.startswith("@"):
+            pattern = re.escape(mention) + r"\b"
+            result = re.sub(pattern, "", result, flags=re.IGNORECASE)
+        else:
+            pattern = r"^\s*" + re.escape(mention) + r"\b[\s,:]*"
+            result = re.sub(pattern, "", result, count=1, flags=re.IGNORECASE)
     return result.strip()
 
 

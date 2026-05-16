@@ -76,7 +76,12 @@ def should_respond(
 
 
 def clean_message(text: str, project: dict | None, default_mentions: list[str]) -> str:
-    """Remove mention triggers from message for cleaner processing."""
+    """Remove mention triggers from message for cleaner processing.
+
+    Mirrors bridge.response.clean_message: @-prefixed triggers strip anywhere
+    on a word boundary; bare-word triggers only strip when addressing the bot
+    at the start of the message.
+    """
     mentions = default_mentions
     if project:
         telegram_config = project.get("telegram", {})
@@ -84,7 +89,12 @@ def clean_message(text: str, project: dict | None, default_mentions: list[str]) 
 
     result = text
     for mention in mentions:
-        result = re.sub(re.escape(mention), "", result, flags=re.IGNORECASE)
+        if mention.startswith("@"):
+            pattern = re.escape(mention) + r"\b"
+            result = re.sub(pattern, "", result, flags=re.IGNORECASE)
+        else:
+            pattern = r"^\s*" + re.escape(mention) + r"\b[\s,:]*"
+            result = re.sub(pattern, "", result, count=1, flags=re.IGNORECASE)
     return result.strip()
 
 
@@ -338,29 +348,49 @@ class TestCleanMessage:
         assert result == "please help me"
 
     def test_removes_hey_mention(self, valor_project):
-        """Should remove 'hey valor' mention."""
+        """Should remove leading 'hey valor' address."""
         result = clean_message("hey valor can you help?", valor_project, self.DEFAULT_MENTIONS)
-        # "valor" gets removed first, leaving "hey  can you help?"
-        # This is expected - the important thing is "valor" is gone
         assert "valor" not in result.lower()
+        assert result == "can you help?"
 
     def test_removes_plain_mention(self, valor_project):
-        """Should remove plain 'valor' mention."""
+        """Should remove leading 'valor,' address."""
         result = clean_message("valor, what is this?", valor_project, self.DEFAULT_MENTIONS)
-        assert result == ", what is this?"
+        assert result == "what is this?"
 
     def test_case_insensitive_removal(self, valor_project):
         """Mention removal should be case-insensitive."""
         result = clean_message("HEY VALOR can you help?", valor_project, self.DEFAULT_MENTIONS)
-        # "VALOR" gets removed (case-insensitive), the important thing is it's gone
         assert "valor" not in result.lower()
+        assert result == "can you help?"
 
-    def test_removes_multiple_mentions(self, valor_project):
-        """Should remove multiple mentions in one message."""
+    def test_removes_multiple_at_mentions(self, valor_project):
+        """@-mentions are unambiguous and strip anywhere."""
         result = clean_message(
-            "@valor hey valor please valor help", valor_project, self.DEFAULT_MENTIONS
+            "@valor please ping @valor again", valor_project, self.DEFAULT_MENTIONS
         )
-        assert "valor" not in result.lower()
+        assert "@valor" not in result.lower()
+        assert "please ping" in result and "again" in result
+
+    def test_preserves_bare_name_mid_prose(self, valor_project):
+        """Bare 'Valor' used as a noun mid-message must NOT be stripped.
+
+        Regression for the production bug where ``"Valor"`` (the bot's name
+        in quotes) was deleted from inbound text, leaving ``""`` in its place.
+        """
+        result = clean_message(
+            'It stripped the name from inside the ""\nIt\'s your name!',
+            valor_project,
+            self.DEFAULT_MENTIONS,
+        )
+        assert result == 'It stripped the name from inside the ""\nIt\'s your name!'
+
+        result2 = clean_message(
+            'The agent is called "Valor" and reports to Tom.',
+            valor_project,
+            self.DEFAULT_MENTIONS,
+        )
+        assert "Valor" in result2
 
     def test_preserves_non_mention_text(self, valor_project):
         """Should preserve text that isn't a mention."""
