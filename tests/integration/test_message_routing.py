@@ -10,7 +10,6 @@ These tests verify the logic by calling the functions with test data directly,
 similar to the unit tests but focusing on end-to-end scenarios.
 """
 
-import re
 
 # Re-implement bridge functions for testable integration tests
 # This matches the actual bridge logic but allows parameter injection
@@ -78,19 +77,6 @@ def should_respond(
         return any(mention.lower() in text_lower for mention in mentions)
 
     return False
-
-
-def clean_message(text: str, project: dict | None, default_mentions: list[str]) -> str:
-    """Remove mention triggers from message for cleaner processing."""
-    mentions = default_mentions
-    if project:
-        telegram_config = project.get("telegram", {})
-        mentions = telegram_config.get("mention_triggers", default_mentions)
-
-    result = text
-    for mention in mentions:
-        result = re.sub(re.escape(mention), "", result, flags=re.IGNORECASE)
-    return result.strip()
 
 
 def build_context_prefix(project: dict | None, session_type: str | None = None) -> str:
@@ -241,36 +227,6 @@ class TestResponseDecisionIntegration:
         )
 
 
-class TestMessageCleaningIntegration:
-    """Integration tests for message cleaning."""
-
-    DEFAULT_MENTIONS = ["@valor", "valor", "hey valor"]
-
-    def test_cleans_mentions_before_processing(self, sample_config):
-        """Mentions should be cleaned from message before sending to agent."""
-        active = ["valor"]
-        group_map = build_group_to_project_map(sample_config, active)
-        project = find_project_for_chat("Dev: Valor", group_map)
-
-        original = "@valor please review this code"
-        cleaned = clean_message(original, project, self.DEFAULT_MENTIONS)
-
-        assert "@valor" not in cleaned
-        assert "please review this code" in cleaned
-
-    def test_preserves_message_content(self, sample_config):
-        """Important message content should be preserved after cleaning."""
-        active = ["valor"]
-        group_map = build_group_to_project_map(sample_config, active)
-        project = find_project_for_chat("Dev: Valor", group_map)
-
-        original = "hey valor the API endpoint /api/users is returning 500 errors"
-        cleaned = clean_message(original, project, self.DEFAULT_MENTIONS)
-
-        assert "/api/users" in cleaned
-        assert "500 errors" in cleaned
-
-
 class TestEdgeCases:
     """Tests for edge cases and error handling."""
 
@@ -289,12 +245,6 @@ class TestEdgeCases:
         assert "dev: valor" in group_map
         assert len(group_map) == 1
 
-    def test_empty_message_text(self):
-        """Empty message text should not crash."""
-        result = clean_message("", None, self.DEFAULT_MENTIONS)
-
-        assert result == ""
-
     def test_none_chat_title_handling(self, sample_config):
         """None chat title (DMs) should be handled gracefully."""
         group_map = build_group_to_project_map(sample_config, ["valor"])
@@ -302,25 +252,6 @@ class TestEdgeCases:
         # Should return None, not crash
         result = find_project_for_chat(None, group_map)
         assert result is None
-
-    def test_special_characters_in_mention(self):
-        """Special regex characters in mentions should be handled."""
-        # Test with @ which could be special in regex
-        result = clean_message("@valor help", None, self.DEFAULT_MENTIONS)
-
-        assert result == "help"
-
-    def test_unicode_in_message(self, sample_config):
-        """Unicode characters in messages should be handled."""
-        active = ["valor"]
-        group_map = build_group_to_project_map(sample_config, active)
-        project = find_project_for_chat("Dev: Valor", group_map)
-
-        # Message with emoji and unicode
-        original = "@valor can you help with this? Thanks!"
-        cleaned = clean_message(original, project, self.DEFAULT_MENTIONS)
-
-        assert "Thanks!" in cleaned
 
 
 class TestMultiMachineScenarios:

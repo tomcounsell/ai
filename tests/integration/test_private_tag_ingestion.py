@@ -3,7 +3,7 @@
 These tests exercise the same transformations the Telegram bridge performs:
 - Compute safe_text = strip_private(text) once.
 - Pass safe_text to the persistence sites (Memory.safe_save, TelegramMessage,
-  AgentSession.message_text via clean_message).
+  AgentSession.message_text).
 - Pre-strip reply_chain_context in BOTH the completed-resume path
   (bridge/telegram_bridge.py:1416) and the fresh-message prehydration path
   (bridge/telegram_bridge.py:1922).
@@ -23,7 +23,6 @@ import re
 from pathlib import Path
 
 from agent.private_tag import strip_private
-from bridge.response import clean_message
 from bridge.telegram_bridge import _build_completed_resume_text
 
 SECRET = "sk-int-test-secret-redacted"
@@ -36,11 +35,14 @@ USER_TEXT = f"Refactor the auth handler. The current key is {PRIVATE_WRAPPED}. S
 def _bridge_compute_safe_pair(text: str, project: dict | None = None) -> tuple[str, str, str, str]:
     """Mirror the bridge handler's text computation:
     text → safe_text, clean_text (live), safe_clean_text (persisted).
+
+    `clean_text` and `safe_clean_text` are now identity passes over `text` and
+    `safe_text` respectively — the bridge no longer strips name triggers from
+    message bodies. The `project` arg is retained for callers but unused.
     """
+    _ = project
     safe_text = strip_private(text)
-    clean_text = clean_message(text, project) or text
-    safe_clean_text = clean_message(safe_text, project) or safe_text
-    return text, safe_text, clean_text, safe_clean_text
+    return text, safe_text, text, safe_text
 
 
 class TestInboundPersistence:
@@ -108,7 +110,7 @@ class TestLiveAgentVisibility:
     def test_clean_text_retains_wrapped_for_live_path(self):
         text, _safe_text, clean_text, _safe_clean_text = _bridge_compute_safe_pair(USER_TEXT)
         assert PRIVATE_WRAPPED in text
-        # clean_message is built from raw text (live SDK prompt input).
+        # clean_text passes raw text through verbatim (live SDK prompt input).
         # It MUST retain the wrapped region so the agent sees the tags this turn.
         assert SECRET in clean_text
         assert "<private>" in clean_text

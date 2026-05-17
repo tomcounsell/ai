@@ -14,7 +14,7 @@ every persistent-write boundary that handles raw user input:
         - store_message(content=...)               (TelegramMessage.content)
         - Memory.safe_save(content=...)            (subconscious memory)
         - logger.info(... text[:50] ...)           (bridge.log)
-        - AgentSession.message_text                (via clean_message + reply chain)
+        - AgentSession.message_text                (via safe_text + reply chain)
 
     .claude/hooks/hook_utils/memory_bridge.py
         - ingest()    : Memory.safe_save() of user prompts

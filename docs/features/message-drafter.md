@@ -176,7 +176,7 @@ Both layers queue a 👀 reaction on suppress (with an anchor) and emit `session
 - `agent/output_handler.py::TelegramRelayOutputHandler` — canonical delivery entry point. Drafter runs here; payload is written to the Redis outbox. Used by both the worker `send_cb` and (since the #1074 follow-up) the bridge's handler-event send callback.
 - `bridge/email_bridge.py::EmailOutputHandler` — drafter-in-handler wiring for email.
 - `bridge/telegram_relay.py::_send_queued_message` — belt-and-suspenders length guard.
-- `bridge/response.py` — slim reactions + helpers module. Contains `set_reaction`, `VALIDATED_REACTIONS`, `filter_tool_logs`, `extract_files_from_response`, `clean_message`. The pre-#1074 `send_response_with_files` delivery function was removed in the follow-up (see `docs/plans/message-drafter-followup.md` Part C).
+- `bridge/response.py` — slim reactions + helpers module. Contains `set_reaction`, `VALIDATED_REACTIONS`, `filter_tool_logs`, `extract_files_from_response`. The pre-#1074 `send_response_with_files` delivery function was removed in the follow-up (see `docs/plans/message-drafter-followup.md` Part C). The `clean_message` mention-stripper was removed entirely once routing was the sole trigger source — name triggers in message bodies now pass through verbatim so mid-prose context survives.
 - `agent/hooks/stop.py` — stop-hook review gate that drafts the final reply and classifies delivery outcomes by matching `tool_use` blocks for the CLI delivery tools.
 - `tools/send_message.py`, `tools/react_with_emoji.py` — the agent-facing CLI delivery surface (see "Delivery Tool Surface" above).
 

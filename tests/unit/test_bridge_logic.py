@@ -4,7 +4,6 @@ Unit tests for Telegram bridge logic.
 Tests the core decision-making functions without requiring Telegram connectivity.
 """
 
-import re
 
 # Import the functions we're testing (we'll test them in isolation)
 # These are re-implemented here to test the logic without importing the module
@@ -73,19 +72,6 @@ def should_respond(
         return any(mention.lower() in text_lower for mention in mentions)
 
     return False
-
-
-def clean_message(text: str, project: dict | None, default_mentions: list[str]) -> str:
-    """Remove mention triggers from message for cleaner processing."""
-    mentions = default_mentions
-    if project:
-        telegram_config = project.get("telegram", {})
-        mentions = telegram_config.get("mention_triggers", default_mentions)
-
-    result = text
-    for mention in mentions:
-        result = re.sub(re.escape(mention), "", result, flags=re.IGNORECASE)
-    return result.strip()
 
 
 def build_context_prefix(project: dict | None, session_type: str | None = None) -> str:
@@ -320,59 +306,6 @@ class TestShouldRespond:
             default_mentions=self.DEFAULT_MENTIONS,
         )
         assert result is True
-
-
-# ============================================================================
-# Tests for clean_message
-# ============================================================================
-
-
-class TestCleanMessage:
-    """Tests for message cleaning (mention removal)."""
-
-    DEFAULT_MENTIONS = ["@valor", "valor", "hey valor"]
-
-    def test_removes_at_mention(self, valor_project):
-        """Should remove @valor mention."""
-        result = clean_message("@valor please help me", valor_project, self.DEFAULT_MENTIONS)
-        assert result == "please help me"
-
-    def test_removes_hey_mention(self, valor_project):
-        """Should remove 'hey valor' mention."""
-        result = clean_message("hey valor can you help?", valor_project, self.DEFAULT_MENTIONS)
-        # "valor" gets removed first, leaving "hey  can you help?"
-        # This is expected - the important thing is "valor" is gone
-        assert "valor" not in result.lower()
-
-    def test_removes_plain_mention(self, valor_project):
-        """Should remove plain 'valor' mention."""
-        result = clean_message("valor, what is this?", valor_project, self.DEFAULT_MENTIONS)
-        assert result == ", what is this?"
-
-    def test_case_insensitive_removal(self, valor_project):
-        """Mention removal should be case-insensitive."""
-        result = clean_message("HEY VALOR can you help?", valor_project, self.DEFAULT_MENTIONS)
-        # "VALOR" gets removed (case-insensitive), the important thing is it's gone
-        assert "valor" not in result.lower()
-
-    def test_removes_multiple_mentions(self, valor_project):
-        """Should remove multiple mentions in one message."""
-        result = clean_message(
-            "@valor hey valor please valor help", valor_project, self.DEFAULT_MENTIONS
-        )
-        assert "valor" not in result.lower()
-
-    def test_preserves_non_mention_text(self, valor_project):
-        """Should preserve text that isn't a mention."""
-        result = clean_message(
-            "@valor fix the evaluation code", valor_project, self.DEFAULT_MENTIONS
-        )
-        assert "fix the evaluation code" in result
-
-    def test_no_project_uses_defaults(self):
-        """Without project, should use default mentions."""
-        result = clean_message("@valor help me", None, self.DEFAULT_MENTIONS)
-        assert result == "help me"
 
 
 # ============================================================================

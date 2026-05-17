@@ -14,7 +14,11 @@ What remains here:
   bridge's send callback before enqueuing agent output.
 - `extract_files_from_response`: parses `<<FILE:/path>>` markers. Used by the
   bridge's direct send path to pull out file attachments.
-- `clean_message`: strips @-mention triggers from inbound user text.
+
+Inbound user text is no longer cleaned of @-mention triggers — routing already
+decides whether a message is addressed to the agent, and stripping the agent's
+name from message bodies destroys mid-prose context (issue: agent confused by
+sentences with their own name elided).
 """
 
 from __future__ import annotations
@@ -227,27 +231,6 @@ def extract_files_from_response(
     cleaned = "\n".join(cleaned_lines).strip()
 
     return cleaned, files_to_send
-
-
-# =============================================================================
-# Mention Stripping
-# =============================================================================
-
-
-def clean_message(text: str, project: dict | None) -> str:
-    """Strip @-mention triggers from inbound user text."""
-    # Import here to avoid circular dependencies
-    from bridge.routing import DEFAULT_MENTIONS
-
-    mentions = DEFAULT_MENTIONS
-    if project:
-        telegram_config = project.get("telegram", {})
-        mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
-
-    result = text
-    for mention in mentions:
-        result = re.sub(re.escape(mention), "", result, flags=re.IGNORECASE)
-    return result.strip()
 
 
 # =============================================================================

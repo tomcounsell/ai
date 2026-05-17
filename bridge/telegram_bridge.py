@@ -125,7 +125,6 @@ from bridge.response import (  # noqa: E402
     REACTION_ABORT,
     REACTION_COMPLETE,
     REACTION_RECEIVED,
-    clean_message,
     extract_files_from_response,
     filter_tool_logs,
     set_reaction,
@@ -1336,18 +1335,16 @@ async def main():
             has_media=bool(message.media),
         )
 
-        # Clean the message text (no media/YouTube/link enrichment here).
-        # sdlc-1179: derive both variants. `clean_text` (built from raw `text`)
+        # Message text passes through verbatim — routing already decided this
+        # message is addressed to the agent, so stripping name triggers from the
+        # body would only destroy mid-prose context. `clean_text` (raw `text`)
         # feeds the live-agent SDK prompt -- the agent must see <private> tags
         # this turn to reason about wrapped content. `safe_clean_text`
         # (built from `safe_text`) flows into AgentSession.message_text and
         # any other persisted derivative.
-        clean_text = clean_message(text, project)
-        if not clean_text:
-            clean_text = "--file attachment only--" if message.media else "--empty message--"
-        safe_clean_text = clean_message(safe_text, project)
-        if not safe_clean_text:
-            safe_clean_text = "--file attachment only--" if message.media else "--empty message--"
+        empty_fallback = "--file attachment only--" if message.media else "--empty message--"
+        clean_text = text if text and text.strip() else empty_fallback
+        safe_clean_text = safe_text if safe_text and safe_text.strip() else empty_fallback
 
         # Extract YouTube URLs (lightweight -- no transcription yet)
         youtube_urls = extract_youtube_urls(text)

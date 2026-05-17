@@ -10,7 +10,7 @@ import pytest
 from bridge.context import build_context_prefix, is_status_question
 from bridge.dedup import is_duplicate_message, record_message_processed
 from bridge.markdown import escape_markdown
-from bridge.response import clean_message, extract_files_from_response, filter_tool_logs
+from bridge.response import extract_files_from_response, filter_tool_logs
 from bridge.routing import (
     build_group_to_project_map,
     classify_needs_response,
@@ -251,17 +251,6 @@ class TestResponseCleaning:
         assert "<<FILE:" not in cleaned
         # File won't exist in test env so files list is empty
         assert isinstance(files, list)
-
-    def test_clean_message_strips_mentions(self, valor_project):
-        import bridge.routing as routing_mod
-
-        old_mentions = routing_mod.DEFAULT_MENTIONS
-        try:
-            routing_mod.DEFAULT_MENTIONS = ["@valor", "valor"]
-            result = clean_message("@valor what is Python?", valor_project)
-            assert "what is Python?" in result
-        finally:
-            routing_mod.DEFAULT_MENTIONS = old_mentions
 
 
 @pytest.mark.e2e
