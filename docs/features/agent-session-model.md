@@ -1,6 +1,6 @@
 # AgentSession Model
 
-Unified Redis model tracking agent work from enqueue through completion. Replaces both `AgentSession` (queue) and `SessionLog` (transcript) with a single `AgentSession` model in `models/agent_session.py`.
+Unified Redis model tracking agent work from enqueue through completion. Replaces both `AgentSession` (queue) and `AgentSession` (transcript) with a single `AgentSession` model in `models/agent_session.py`.
 
 ## Status Lifecycle
 
@@ -319,7 +319,7 @@ cleaned up by the TTL when they next touch Redis).
 - `_normalize_kwargs()` maps old field names to their new consolidated equivalents: `message_text`, `sender_name`, `sender_id`, `telegram_message_id`, `chat_title` -> `initial_telegram_message`; `revival_context`, `classification_type`, `classification_confidence` -> `extra_context`; `work_item_slug` -> `slug`; `last_activity` -> `updated_at`; `scheduled_after` -> `scheduled_at`; `history` -> `session_events`
 - `__setattr__` auto-converts float timestamps to `datetime` for DatetimeField fields
 - Property accessors provide read access to old field names (`sender_name`, `message_text`, etc.) for backward compatibility
-- `models/session_log.py` exports `SessionLog = AgentSession` (shim)
+- `models/agent_session.py` exports `AgentSession = AgentSession` (shim)
 - No Redis data migration needed for new sessions; existing sessions can be migrated with `scripts/migrate_datetime_fields.py`
 
 ## Migration
