@@ -113,11 +113,15 @@ Load `CHECKLIST.md` and verify every item before creating the issue.
 
 ```bash
 TYPE="feature"  # or "bug" or "chore"
+ISSUE_BODY_FILE=$(mktemp /tmp/issue_body_XXXXXX.md)
 
+# Write the issue body to the temp file, then create the issue
 gh issue create \
   --title "Brief, specific title" \
   --label "$TYPE" \
-  --body "$(cat /tmp/issue_body.md)"
+  --body "$(cat "$ISSUE_BODY_FILE")"
+
+rm -f "$ISSUE_BODY_FILE"
 ```
 
 ### Step 7: Report
