@@ -1,6 +1,6 @@
 """GitHub CLI authentication module.
 
-Configures `gh` to use GITHUB_PAT_YUDAME as the primary GitHub access token.
+Configures `gh` to use GITHUB_PAT as the primary GitHub access token.
 Called during every update run so all machines stay consistently authenticated.
 
 The step is idempotent: if `gh auth status` already shows the correct token
@@ -28,9 +28,9 @@ class GhAuthResult:
 
 
 def configure_gh_auth(project_dir: Path | None = None) -> GhAuthResult:
-    """Configure gh CLI with GITHUB_PAT_YUDAME from the environment.
+    """Configure gh CLI with GITHUB_PAT from the environment.
 
-    Reads GITHUB_PAT_YUDAME from the process environment (which remote-update.sh
+    Reads GITHUB_PAT from the process environment (which remote-update.sh
     sources from .env before invoking run.py). If the variable is set and
     non-empty, runs ``echo "$PAT" | gh auth login --with-token`` to configure
     github.com authentication. Idempotent: safe to call on every update run.
@@ -50,12 +50,12 @@ def configure_gh_auth(project_dir: Path | None = None) -> GhAuthResult:
             detail="gh CLI not found on PATH — install via `brew install gh`",
         )
 
-    pat = os.environ.get("GITHUB_PAT_YUDAME", "").strip()
+    pat = os.environ.get("GITHUB_PAT", "").strip()
     if not pat:
         return GhAuthResult(
             success=False,
             action="skipped",
-            detail="GITHUB_PAT_YUDAME not set in environment — skipping gh auth",
+            detail="GITHUB_PAT not set in environment — skipping gh auth",
         )
 
     # gh refuses `auth login` when GITHUB_TOKEN is set in the environment
