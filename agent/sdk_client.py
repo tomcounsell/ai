@@ -2967,6 +2967,9 @@ async def build_harness_turn_input(
     is_cross_repo: bool = False,
     *,
     skip_prefix: bool = False,
+    persona: str | None = None,
+    email_from: str | None = None,
+    email_sender_name: str | None = None,
 ) -> str:
     """Build context-enriched message for CLI harness execution.
 
@@ -2991,6 +2994,10 @@ async def build_harness_turn_input(
         classification: Classification type from bridge (e.g., "sdlc", "question").
         is_cross_repo: Whether this is a cross-repo project (project_key != "valor").
         skip_prefix: If True, return raw message without context headers.
+        persona: Resolved persona name. Passed to build_context_prefix so that
+            customer-service sessions are not given the teammate read-only restriction.
+        email_from: Email address of the contact being served (email bridge only).
+        email_sender_name: Display name paired with email_from.
 
     Returns:
         Enriched message string with context headers prepended, or raw message
@@ -3000,7 +3007,14 @@ async def build_harness_turn_input(
         return message
     from bridge.context import build_context_prefix
 
-    enriched = build_context_prefix(project, session_type, sender_id)
+    enriched = build_context_prefix(
+        project,
+        session_type,
+        sender_id,
+        persona=persona,
+        email_from=email_from,
+        sender_name=email_sender_name,
+    )
 
     if sender_name:
         enriched += f"\n\nFROM: {sender_name}"
@@ -3177,10 +3191,32 @@ async def get_agent_response_sdk(
         except Exception:
             pass
 
+    # Resolve persona early so build_context_prefix can suppress the teammate
+    # read-only restriction for customer-service sessions.
+    _early_persona, _, _ = _resolve_compose_args(
+        session_type=_session_type,
+        project=project,
+        transport=_session_extra_context.get("transport"),
+        chat_title=chat_title,
+        is_dm=(chat_title is None),
+        project_mode=project_mode,
+    )
+
+    # Extract email contact info so the agent knows who it's serving.
+    _email_from: str | None = _session_extra_context.get("email_from")
+    _email_sender_name: str | None = _session_extra_context.get("sender_name")
+
     # Build context-enriched message (includes user permission restrictions)
     from bridge.context import build_context_prefix
 
-    context = build_context_prefix(project, _session_type, sender_id)
+    context = build_context_prefix(
+        project,
+        _session_type,
+        sender_id,
+        persona=_early_persona,
+        email_from=_email_from,
+        sender_name=_email_sender_name,
+    )
     enriched_message = context
     enriched_message += f"\n\nFROM: {sender_name}"
     if chat_title:
