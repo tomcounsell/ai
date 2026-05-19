@@ -970,7 +970,6 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     log("Checking PM persona overlay drift...", v)
     try:
         import difflib
-        from pathlib import Path
 
         repo_template = Path("config/personas/segments/project-manager.md")
         private_overlay = Path.home() / "Desktop" / "Valor" / "personas" / "project-manager.md"
