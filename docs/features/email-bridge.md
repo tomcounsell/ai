@@ -58,6 +58,21 @@ The IMAP poller never fetches messages from unknown senders. Before each poll cy
 
 Within a machine, messages that match are marked `SEEN` immediately on fetch (before parsing) to prevent duplicate processing on concurrent polls on the same machine.
 
+### Dynamic Customer Resolver (Optional)
+
+Projects can declare a `customer_resolver` hook in `projects.json` to replace
+static allow-list routing with dynamic customer identity resolution. When
+configured, the bridge calls the resolver for every inbound email; the resolver
+returns a `customer_id` string (known customer) or `None` (drop). Sessions for
+known customers use the `customer-service` persona and carry `customer_id` in
+`extra_context` and as a `CUSTOMER_ID` subprocess environment variable.
+
+On resolver failure the message stays `\Seen`, a `valor-retry` Gmail label is
+applied for future retry, and `resolver:failures:{project_key}` is incremented.
+
+See [Customer Resolver](customer-resolver.md) for the full config schema,
+resolver interface contract, caching semantics, and monitoring guide.
+
 ### Transport-Keyed Callbacks
 
 `AgentSession` callbacks are keyed by `(project_key, transport)`. The worker resolves the correct `OutputHandler` by looking up `(project_key, "email")` instead of the Telegram default. This keeps email and Telegram sessions fully isolated with no cross-contamination of delivery channels.
