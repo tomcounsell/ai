@@ -25,6 +25,7 @@ from scripts.update import (  # noqa: E402
     cal_integration,
     deps,
     env_sync,
+    gh_auth,
     git,
     hardlinks,
     hooks,
@@ -435,6 +436,19 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if zr.error:
         log(f"WARN: zshenv sync: {zr.error}", v, always=True)
         result.warnings.append(f"zshenv sync: {zr.error}")
+
+    # Step 1.68: Configure gh CLI with GITHUB_PAT_YUDAME.
+    # Ensures all machines use the correct primary GitHub token consistently.
+    # Idempotent — safe to run on every update tick.
+    log("Configuring gh CLI auth...", v)
+    gh_auth_result = gh_auth.configure_gh_auth(project_dir)
+    if gh_auth_result.action == "configured":
+        log("gh auth: configured with GITHUB_PAT_YUDAME", v, always=True)
+    elif gh_auth_result.action == "skipped":
+        log(f"gh auth: skipped — {gh_auth_result.detail}", v)
+    elif not gh_auth_result.success:
+        log(f"WARN: gh auth: {gh_auth_result.error}", v, always=True)
+        result.warnings.append(f"gh auth: {gh_auth_result.error}")
 
     # Step 1.7: Audit skill hooks for dangerous patterns
     log("Auditing skill hooks...", v)
