@@ -965,6 +965,52 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             # --verify mode: report drift but do not warn aggressively
             result.warnings.append(f"BYOB MCP drift: {mcp_byob_result.message}")
 
+    # Step 4.10: Check PM persona overlay drift between in-repo template and private vault.
+    # Surface only — never auto-merges. Fails gracefully if vault file absent (fresh machine).
+    log("Checking PM persona overlay drift...", v)
+    try:
+        import difflib
+        from pathlib import Path
+
+        repo_template = Path("config/personas/segments/project-manager.md")
+        private_overlay = Path.home() / "Desktop" / "Valor" / "personas" / "project-manager.md"
+
+        if not repo_template.exists():
+            log("  PM persona template not found — skipping drift check", v)
+        elif not private_overlay.exists():
+            log("  No private overlay found — skipping (fresh machine)", v)
+        else:
+            template_lines = repo_template.read_text().splitlines(keepends=True)
+            overlay_lines = private_overlay.read_text().splitlines(keepends=True)
+            diff = list(
+                difflib.unified_diff(
+                    template_lines,
+                    overlay_lines,
+                    fromfile="config/personas/segments/project-manager.md",
+                    tofile="~/Desktop/Valor/personas/project-manager.md",
+                )
+            )
+            if diff:
+                diff_lines = len(
+                    [
+                        line
+                        for line in diff
+                        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+                    ]
+                )
+                result.warnings.append(
+                    f"PM persona overlay drift: {diff_lines} lines differ. "
+                    f"Run 'diff config/personas/segments/project-manager.md "
+                    f"~/Desktop/Valor/personas/project-manager.md' to review."
+                )
+                log(f"  PM persona overlay drift: {diff_lines} changed lines", v)
+            else:
+                log("  PM persona overlay: in sync", v)
+    except Exception as _persona_exc:
+        _persona_warn = f"PM persona overlay drift check failed (WARNING): {_persona_exc}"
+        log(f"  {_persona_warn}", v)
+        result.warnings.append(_persona_warn)
+
     # Step 4.95: Check that each active project repo has a '## Running' README section.
     # Warn only — never blocks the update. Guides devs to document startup commands
     # in their repo's README rather than relying on a generic skill to guess.
