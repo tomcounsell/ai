@@ -303,10 +303,33 @@ gh pr diff $PR_NUMBER --name-only
 ### 3. Screenshot Capture (if UI changes detected)
 
 **Determine if screenshots needed:**
-- Check diff for UI-related files: `*.html`, `*.jsx`, `*.tsx`, `*.vue`, `*.css`, `*.scss`, `*.py` (templates)
-- If no UI files changed, skip this step
 
-**If screenshots needed:**
+Check the changed file list for UI-related extensions and patterns:
+- `*.html`, `*.htm` — HTML templates
+- `*.jsx`, `*.tsx` — React components
+- `*.vue` — Vue single-file components
+- `*.css`, `*.scss`, `*.sass`, `*.less` — Stylesheets
+- `*.js`, `*.ts` — JavaScript/TypeScript (when the file is under a `ui/`, `frontend/`, `static/`, `assets/`, `templates/`, or `components/` directory)
+- Django/Jinja template files (`.html` under `templates/`)
+- Any file whose path contains `ui/`, `frontend/`, `static/`, `web/`, `assets/`, or `templates/`
+
+**Set the UI gate flag early:**
+
+```bash
+UI_FILES=$(gh pr diff $PR_NUMBER --name-only | grep -E '\.(html|htm|jsx|tsx|vue|css|scss|sass|less)$|/(ui|frontend|static|web|assets|templates)/' || true)
+UI_CHANGES_DETECTED=false
+SCREENSHOTS_CAPTURED=0
+
+if [ -n "$UI_FILES" ]; then
+  UI_CHANGES_DETECTED=true
+  echo "UI files changed — visual proof required before approval:"
+  echo "$UI_FILES"
+fi
+```
+
+**If no UI files changed:** skip this step entirely. The screenshot gate is a no-op — `SCREENSHOTS_CAPTURED=0` is fine and approval is not blocked.
+
+**If UI files changed (`UI_CHANGES_DETECTED=true`):**
 
 ```bash
 # Prepare screenshot directory
@@ -318,12 +341,32 @@ mkdir -p generated_images/pr-$PR_NUMBER
 #   mcp__byob__browser_navigate(url="http://localhost:8000", waitUntil="networkidle")
 #   mcp__byob__browser_read(url="http://localhost:8000", reuseTab=true, screens=1)
 #   mcp__byob__browser_screenshot(tabId=<tab>, savePath="generated_images/pr-$PR_NUMBER/01_main_view.png")
+
+# After each successful screenshot, increment the counter:
+# SCREENSHOTS_CAPTURED=$((SCREENSHOTS_CAPTURED + 1))
 ```
 
 **Screenshot naming convention:**
 - `01_main_view.png` - Primary affected view
 - `02_feature_demo.png` - New feature in action
 - `03_edge_case.png` - Edge case or error state
+
+**Visual proof gate (evaluated after this step, before posting any approval):**
+
+If `UI_CHANGES_DETECTED=true` AND `SCREENSHOTS_CAPTURED=0`, the review MUST NOT approve.
+Set a gate failure flag:
+
+```bash
+VISUAL_PROOF_GATE_FAILED=false
+if [ "$UI_CHANGES_DETECTED" = "true" ] && [ "$SCREENSHOTS_CAPTURED" -eq 0 ]; then
+  VISUAL_PROOF_GATE_FAILED=true
+  echo "VISUAL PROOF GATE FAILED: UI files were changed but no screenshots were captured."
+  echo "This PR cannot be approved without visual proof of the UI changes."
+  echo "Posting 'Request Changes' verdict with a note to capture screenshots."
+fi
+```
+
+This flag is consumed in Step 6: if `VISUAL_PROOF_GATE_FAILED=true`, override any otherwise-clean verdict to `CHANGES_REQUESTED` and add a **blocker** finding documenting the missing visual proof. The blocker text should name the specific UI files that changed and explain that at least one screenshot is required before this PR can be approved.
 
 ### 4. Plan Validation (if plan exists)
 
@@ -418,6 +461,26 @@ Include any findings as a "Legacy Cruft" subsection in the review output.
 Cruft findings are advisory, not blockers. See `.claude/agents/cruft-auditor.md`.
 
 ### 6. Post Review
+
+**Visual proof gate check (before posting):**
+
+If `VISUAL_PROOF_GATE_FAILED=true` (set in Step 3), inject a blocker finding
+regardless of the code-review verdict:
+
+```
+**File:** `(PR diff — UI files without visual proof)`
+**Code:** `(see UI_FILES list from Step 3)`
+**Issue:** UI changes detected but no BYOB screenshots were captured. Visual
+proof is required before this PR can be approved. At least one screenshot of
+the affected UI must be included in the review.
+**Severity:** blocker
+**Fix:** Start the app, navigate to the affected page(s) via BYOB MCP, capture
+at least one screenshot with mcp__byob__browser_screenshot, and re-run the
+review.
+```
+
+This blocker is real and counts toward the verdict: the review MUST post as
+`CHANGES_REQUESTED`, not `APPROVED`, regardless of other findings.
 
 All review-posting logic lives in `sub-skills/post-review.md §3`. That
 sub-skill is the **single source of truth** for the review-post decision tree.
@@ -658,6 +721,7 @@ The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator 
 5. **Pipeline-driven reviews use bot identity when configured (opt-in per machine).** When `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is set, the review subprocess MUST use `GH_TOKEN=$SDLC_AGENT_GH_TOKEN`. When the token is unset or empty, post under the operator credential — this is the standard posture on machines that are not the dedicated bot host.
 6. **The `<!-- SDLC-AGENT-REVIEW v1 -->` marker MUST appear** in every review body when `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is set. The marker is omitted when posting under the operator credential.
 7. **`BLOCKED_ON_CONFLICT` and `PR_CLOSED` MUST NEVER call `gh pr review`.** These preflight short-circuit paths use `gh pr comment` exclusively. A formal review API call on a conflicted or closed PR encodes a false code-review verdict.
+8. **Visual proof is a hard gate for PRs with UI changes.** If any HTML, CSS, JS/TS, JSX/TSX, Vue, or template files are in the diff, the review MUST capture at least one BYOB screenshot before posting an approval. If screenshots were not captured (BYOB unavailable, app failed to start, or step was skipped), the review MUST post as `CHANGES_REQUESTED` with a blocker citing the missing visual proof. This rule exists because visual bugs in frontend changes are invisible to static analysis — see issue #1380.
 
 ## Best Practices
 
