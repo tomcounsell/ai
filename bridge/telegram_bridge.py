@@ -1253,7 +1253,34 @@ async def main():
             try:
                 from models.telegram import TelegramMessage
 
+                # Two silent failure modes are addressed here (see sdlc-1330):
+                #   1. `query.get(stored_msg_id)` can transiently return `None`
+                #      during a Popoto stale-index condition. The previous
+                #      code silently no-op'd the persist block; we now log a
+                #      WARNING and do ONE bounded re-query. We deliberately
+                #      do NOT call `keys(clean=True)` here — it's a heavy,
+                #      index-mutating call and the worker-side self-heal in
+                #      `bridge/enrichment.py` is the durable safety net.
+                #   2. `_download_media_with_retry` can return `(None, None)`
+                #      ("no_path" outcome) when `client.download_media`
+                #      reports success but the file is missing post-download.
+                #      The persist block sees no error, no path, and was
+                #      previously silent. We now log a WARNING so the
+                #      condition is observable in logs.
                 _record = TelegramMessage.query.get(stored_msg_id)
+                if _record is None:
+                    # Single bounded re-query before giving up.
+                    _record = TelegramMessage.query.get(stored_msg_id)
+                    if _record is None:
+                        logger.warning(
+                            f"[media] TelegramMessage.query.get returned None "
+                            f"(stored_msg_id={stored_msg_id} "
+                            f"chat_id={event.chat_id} "
+                            f"message_id={message.id} "
+                            f"local_path={_local_path} "
+                            f"download_error={_download_error}); "
+                            f"persist skipped, worker self-heal will attempt recovery"
+                        )
                 if _record is not None:
                     if _local_path is not None:
                         # Persist as absolute path so the worker can read it
@@ -1262,6 +1289,22 @@ async def main():
                     if _download_error is not None:
                         _record.media_download_error = _download_error
                     _record.save()
+
+                # Second silent path: download wrapper returned (None, None)
+                # with no error string. message.media truthy means there WAS
+                # media to download.
+                if (
+                    _local_path is None
+                    and _download_error is None
+                    and getattr(message, "media", None)
+                ):
+                    logger.warning(
+                        f"[media] download returned no path with no error "
+                        f"(stored_msg_id={stored_msg_id} "
+                        f"chat_id={event.chat_id} "
+                        f"message_id={message.id}); "
+                        f"file may be missing post-download, worker self-heal will attempt recovery"
+                    )
             except Exception as e:
                 logger.warning(f"[media] failed to persist media_local_path: {e}")
 
