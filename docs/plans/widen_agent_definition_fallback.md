@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-05-13
 tracking: https://github.com/tomcounsell/ai/issues/1350
 last_comment_id:
+revision_applied: true
 ---
 
 # Widen Agent-Definition Fallback to Cover Malformed YAML and OS Errors
@@ -100,10 +101,10 @@ No prerequisites — this work has no external dependencies. The change touches 
 
 ### Key Elements
 
-- **Shared fallback constructor**: Extract the dict at `agent_definitions.py:51-57` into `_fallback_definition(path: Path, reason: str) -> dict` so the same shape is returned from every failure branch.
-- **Unified try/except in `_parse_agent_markdown`**: Wrap the read+parse in a single `try`/`except (FileNotFoundError, OSError, ValueError, UnicodeDecodeError)` (keeping `path.exists()` as a fast-path check too) and route every failure to `_fallback_definition` with a reason string that names the exception class.
-- **Warning log on every fallback path**: Log via `logger.warning("Agent definition %s unusable (%s: %s) — using fallback prompt", path, exc.__class__.__name__, exc)`. Never swallow silently.
-- **Trial-parse in `validate_agent_files()`**: After confirming the file exists, attempt `_parse_agent_markdown` and treat any returned-fallback as a startup warning. Either (a) bubble malformed files into the returned list of "problematic paths" or (b) add a sibling helper. We pick (a) to keep one return type and one log channel.
+- **Shared fallback constructor**: Extract the dict at `agent_definitions.py:51-57` into `_fallback_definition(path: Path, reason: str) -> dict` so the same shape is returned from every failure branch. The dict carries an explicit `"_is_fallback": True` marker so callers (notably `validate_agent_files`) can detect fallback dicts via key lookup rather than parsing the free-text `description`.
+- **Unified try/except in `_parse_agent_markdown`**: Wrap the read+parse in a single `try`/`except (OSError, ValueError)` (keeping `path.exists()` as a fast-path check too) and route every failure to `_fallback_definition` with a reason string that names the exception class. `OSError` covers `FileNotFoundError`, `PermissionError`, and other I/O subclasses; `ValueError` covers the missing-frontmatter raise and `UnicodeDecodeError` (a `ValueError` subclass). An explicit comment in the source enumerates the covered subclasses for future readers.
+- **Warning log on every fallback path**: Log via `logger.warning("Agent definition %s unusable (%s: %s) — using fallback prompt", path, exc.__class__.__name__, exc)`. Never swallow silently. `logger.warning` (not `logger.exception`) is intentional: these failures are *expected and handled*, and the path + exception class + str(exc) suffice for diagnosis. Operators needing a traceback can re-run with the log level temporarily raised.
+- **Trial-parse in `validate_agent_files()`**: Only after confirming the file exists, attempt `_parse_agent_markdown` and check the returned dict for `"_is_fallback": True`. If set, push the path into the returned "problematic" list. Missing files take the existing existence-only branch (with their existing warning) and never reach the trial-parse call, so no warning is double-logged. We retain the existing return type of `list[str]` — reasons go to the log only.
 
 ### Flow
 
@@ -114,9 +115,10 @@ Session creation → `get_agent_definitions()` → `_parse_agent_markdown(path)`
 ### Technical Approach
 
 - Keep the function signature and the existing `path.exists()` fast-path. Wrap `path.read_text()` + frontmatter regex match in one try/except.
-- Catch `FileNotFoundError, PermissionError, OSError, ValueError, UnicodeDecodeError` — explicit list, not bare `Exception` (per repo convention).
-- `_fallback_definition` accepts `path` and `reason` (short string suitable for the agent's `description` field, e.g. `"Fallback for unreadable {path.name}: {reason}"`).
-- `validate_agent_files()` calls `_parse_agent_markdown` and inspects whether the returned dict is a fallback (cheap: the description starts with `"Fallback"`). Any fallback returned at validation time pushes the path into the "problematic" list. We retain the existing return type of `list[str]`.
+- Catch `(OSError, ValueError)` — covers `FileNotFoundError`, `PermissionError`, `UnicodeDecodeError` (all subclasses) plus the explicit `ValueError` raised for missing frontmatter. An inline comment in the source enumerates the covered subclasses so future readers see the surface without running `python -c "issubclass(...)"`.
+- `_fallback_definition` accepts `path` and `reason` (short string suitable for the agent's `description` field, e.g. `"Fallback for unreadable {path.name}: {reason}"`) and stamps `"_is_fallback": True` on the returned dict.
+- `validate_agent_files()` keeps its existing missing-file branch (`if not path.exists(): missing.append(...); continue`) intact so PR #1353's `test_partial_missing` log format and assertions remain valid. Only when the file exists does it call `_parse_agent_markdown` and inspect `result.get("_is_fallback")`; any True hit appends the path to the "problematic" list. We retain the existing return type of `list[str]`.
+- The `_is_fallback` key is read by `validate_agent_files` only. Downstream consumers (`get_agent_definitions` and `AgentDefinition` construction) read `frontmatter` and `body`; they ignore extra keys, so no stripping step is needed.
 - Update `docs/features/agent-definition-fallback.md` "Behavior" section to enumerate the three failure modes, the warning log format, and the startup trial-parse.
 
 ## Failure Path Test Strategy
@@ -153,7 +155,7 @@ Session creation → `get_agent_definitions()` → `_parse_agent_markdown(path)`
 
 ### Risk 1: Catching `Exception` too broadly hides real bugs
 **Impact:** If we widened the except to `Exception`, a programmer error inside the parser (e.g., a typo in a regex) would silently produce fallback dicts, and we'd lose the agent's intended prompt without anyone noticing — until quality regressed.
-**Mitigation:** Catch an explicit tuple `(FileNotFoundError, PermissionError, OSError, ValueError, UnicodeDecodeError)`. Anything else propagates as before. A unit test asserts that an unrelated exception (e.g., `KeyError` raised from inside the patched parser) does NOT fall back.
+**Mitigation:** Catch `(OSError, ValueError)` — covers the full surface (`FileNotFoundError`, `PermissionError`, `UnicodeDecodeError` are subclasses). Anything outside that tree (e.g., `KeyError`, `AttributeError`, `TypeError`) propagates as before. A unit test asserts that an unrelated exception raised from inside the patched parser does NOT fall back. **Note:** the negative test must raise a class that is neither an `OSError` nor a `ValueError` subclass — `KeyError` qualifies; `UnicodeDecodeError` does not (it inherits from `ValueError` and would correctly hit the fallback path).
 
 ### Risk 2: A subtle parse change later expands the failure surface
 **Impact:** A future contributor adds a new step to `_parse_agent_markdown` (e.g., YAML safe-load via PyYAML) whose exception type isn't in the tuple → silent crash returns.
@@ -226,9 +228,9 @@ No agent integration required — this is a bridge/worker-internal change to sta
 - **Assigned To**: agent-def-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Extract the fallback dict construction in `agent/agent_definitions.py:51-57` into a helper `_fallback_definition(path: Path, reason: str) -> dict`.
-- Refactor `_parse_agent_markdown` to wrap `read_text` + regex match in a single `try/except (FileNotFoundError, PermissionError, OSError, ValueError, UnicodeDecodeError)`. Each branch logs `logger.warning(... exception class name ... path ...)` and returns `_fallback_definition(path, reason)`.
-- Extend `validate_agent_files()` to trial-parse each existing file via `_parse_agent_markdown` and add any path that returned a fallback to the returned list (alongside the missing-file paths it already returns).
+- Extract the fallback dict construction in `agent/agent_definitions.py:51-57` into a helper `_fallback_definition(path: Path, reason: str) -> dict`. The helper stamps `"_is_fallback": True` on the returned dict so callers can detect fallbacks via key lookup instead of parsing the free-text `description`.
+- Refactor `_parse_agent_markdown` to wrap `read_text` + regex match in a single `try/except (OSError, ValueError)` (covers `FileNotFoundError`, `PermissionError`, `UnicodeDecodeError`, plus the explicit `ValueError` for missing frontmatter). Each branch logs `logger.warning(... exception class name ... path ...)` (intentionally `warning`, not `exception` — these failures are expected and handled) and returns `_fallback_definition(path, reason)`. Add an inline comment above the except clause enumerating the covered subclasses.
+- Extend `validate_agent_files()` to keep its existing existence-only branch intact (`if not path.exists(): missing.append(...); continue`), and only trial-parse files that exist. For each existing file, call `_parse_agent_markdown(path)` and check `result.get("_is_fallback")`; if True, append the path to the returned list. This preserves PR #1353's `test_partial_missing` log format (one warning per missing file) and avoids double-logging.
 - Add tests in `tests/unit/test_agent_definitions.py`:
   - `test_malformed_yaml_returns_fallback` (file with body but no frontmatter delimiters)
   - `test_malformed_yaml_logs_warning` (asserts exception class name appears in log)
@@ -274,7 +276,14 @@ No agent integration required — this is a bridge/worker-internal change to sta
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns) — 0 blockers, 3 concerns, 1 nit. All addressed by this revision pass.
+
+| # | Severity | Critics | Finding | Resolution |
+|---|----------|---------|---------|------------|
+| 1 | Concern | Skeptic, Adversary | Fallback-dict detection via `description.startswith("Fallback")` is a fragile contract. | Switched to explicit `"_is_fallback": True` marker stamped by `_fallback_definition` and read by `validate_agent_files` via `result.get("_is_fallback")`. Documented in Solution → Key Elements and Technical Approach. |
+| 2 | Concern | Operator, Simplifier | `validate_agent_files()` would double-log warnings for missing files if it trial-parsed them. | Trial-parse is now guarded behind `path.exists()`; missing files take the existing existence-only branch and never reach `_parse_agent_markdown`. Preserves PR #1353's `test_partial_missing` log format. |
+| 3 | Concern | Archaeologist, Simplifier | Exception tuple `(FileNotFoundError, PermissionError, OSError, ValueError, UnicodeDecodeError)` is redundant — `OSError` and `ValueError` already cover the subclasses. | Collapsed to `(OSError, ValueError)` with an inline comment enumerating covered subclasses. Risk 1 mitigation language updated. The negative test explicitly uses `KeyError` (neither subclass). |
+| 4 | Nit | User | Plan didn't justify `logger.warning` over `logger.exception`. | Added explicit note in Solution → Key Elements: `warning` is intentional because these failures are expected/handled; path + exception class + str(exc) suffice for diagnosis. |
 
 ---
 
