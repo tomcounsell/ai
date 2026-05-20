@@ -1,8 +1,8 @@
-"""Unit tests for PM persona overlay drift check in scripts/update/run.py.
+"""Unit tests for PM persona overlay drift check.
 
-The drift check (Step 4.10) compares the in-repo PM persona template
-(config/personas/segments/project-manager.md) against the private vault
-overlay (~Desktop/Valor/personas/project-manager.md).
+Exercises the real implementation in ``scripts.update.persona_drift`` so the
+production code (Step 4.10 in ``scripts/update/run.py``) is covered by these
+tests, not a parallel re-implementation.
 
 Verifies:
   - Identical files → no warning
@@ -11,91 +11,59 @@ Verifies:
   - Template absent → no warning, no error
   - Both absent → no warning, no error
   - IOError reading file → warning appended, no crash
+  - Default repo template path resolves to the real PM persona file
 """
 
 from __future__ import annotations
 
-import difflib
 from pathlib import Path
 from unittest.mock import patch
 
-# ---------------------------------------------------------------------------
-# Helper — replicate the drift-check logic as a callable for unit testing.
-# We test the logic directly rather than importing from run.py because run.py
-# has many heavy side effects at import time (env reads, dataclass creation).
-# The implementation in run.py follows this exact logic.
-# ---------------------------------------------------------------------------
+from scripts.update.persona_drift import (
+    DEFAULT_TEMPLATE_REL,
+    check_pm_persona_drift,
+)
 
 
-def _run_persona_drift_check(
-    repo_template: Path,
-    private_overlay: Path,
-) -> list[str]:
-    """Return list of warnings produced by the Step 4.10 drift check.
-
-    Mirrors the try/except block added to scripts/update/run.py exactly,
-    with the file paths parameterised for test isolation.
+def _setup(
+    tmp_path: Path,
+    template_text: str | None,
+    overlay_text: str | None,
+) -> tuple[Path, Path]:
+    """Create a fake project_dir with the template at the real relative path
+    and an overlay file alongside. Returns (project_dir, overlay_path).
     """
-    warnings: list[str] = []
-    try:
-        if not repo_template.exists():
-            return warnings
-        if not private_overlay.exists():
-            return warnings
-
-        template_lines = repo_template.read_text().splitlines(keepends=True)
-        overlay_lines = private_overlay.read_text().splitlines(keepends=True)
-        diff = list(
-            difflib.unified_diff(
-                template_lines,
-                overlay_lines,
-                fromfile=str(repo_template),
-                tofile=str(private_overlay),
-            )
-        )
-        if diff:
-            diff_lines = len(
-                [
-                    line
-                    for line in diff
-                    if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
-                ]
-            )
-            warnings.append(
-                f"PM persona overlay drift: {diff_lines} lines differ. "
-                f"Run 'diff {repo_template} {private_overlay}' to review."
-            )
-    except Exception as exc:
-        warnings.append(f"PM persona overlay drift check failed (WARNING): {exc}")
-    return warnings
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    template_path = project_dir / DEFAULT_TEMPLATE_REL
+    if template_text is not None:
+        template_path.parent.mkdir(parents=True, exist_ok=True)
+        template_path.write_text(template_text)
+    overlay_path = tmp_path / "overlay-project-manager.md"
+    if overlay_text is not None:
+        overlay_path.write_text(overlay_text)
+    return project_dir, overlay_path
 
 
 def test_identical_files_no_warning(tmp_path):
     """Identical template and overlay should produce no warning."""
     content = "# PM Persona\n\nYou are a PM.\n"
-    template = tmp_path / "project-manager.md"
-    overlay = tmp_path / "overlay-project-manager.md"
-    template.write_text(content)
-    overlay.write_text(content)
+    project_dir, overlay = _setup(tmp_path, content, content)
 
-    warnings = _run_persona_drift_check(template, overlay)
+    warnings = check_pm_persona_drift(project_dir, overlay_path=overlay)
 
     assert warnings == []
 
 
 def test_one_line_difference_produces_warning(tmp_path):
     """A single line difference should append a warning with a line count."""
-    template = tmp_path / "project-manager.md"
-    overlay = tmp_path / "overlay-project-manager.md"
-    template.write_text("# PM Persona\n\nYou are a PM.\n")
-    overlay.write_text("# PM Persona\n\nYou are a senior PM.\n")
+    project_dir, overlay = _setup(
+        tmp_path,
+        "# PM Persona\n\nYou are a PM.\n",
+        "# PM Persona\n\nYou are a senior PM.\n",
+    )
 
-    warnings = _run_persona_drift_check(template, overlay)
+    warnings = check_pm_persona_drift(project_dir, overlay_path=overlay)
 
     assert len(warnings) == 1
     assert "PM persona overlay drift" in warnings[0]
@@ -105,12 +73,13 @@ def test_one_line_difference_produces_warning(tmp_path):
 
 def test_line_count_reflects_actual_diff(tmp_path):
     """Diff line count should match the number of +/- lines in the unified diff."""
-    template = tmp_path / "project-manager.md"
-    overlay = tmp_path / "overlay-project-manager.md"
-    template.write_text("line1\nline2\nline3\n")
-    overlay.write_text("line1\nchanged2\nchanged3\n")
+    project_dir, overlay = _setup(
+        tmp_path,
+        "line1\nline2\nline3\n",
+        "line1\nchanged2\nchanged3\n",
+    )
 
-    warnings = _run_persona_drift_check(template, overlay)
+    warnings = check_pm_persona_drift(project_dir, overlay_path=overlay)
 
     assert len(warnings) == 1
     # 2 removed + 2 added = 4 diff lines
@@ -119,42 +88,35 @@ def test_line_count_reflects_actual_diff(tmp_path):
 
 def test_private_overlay_absent_no_warning(tmp_path):
     """When the private overlay does not exist, no warning is emitted (fresh machine)."""
-    template = tmp_path / "project-manager.md"
-    template.write_text("# PM Persona\n")
-    # overlay intentionally not created
+    project_dir, _ = _setup(tmp_path, "# PM Persona\n", None)
 
-    warnings = _run_persona_drift_check(template, tmp_path / "nonexistent.md")
+    warnings = check_pm_persona_drift(project_dir, overlay_path=tmp_path / "nonexistent.md")
 
     assert warnings == []
 
 
 def test_template_absent_no_warning(tmp_path):
     """When the repo template does not exist, no warning is emitted."""
-    overlay = tmp_path / "overlay-project-manager.md"
-    overlay.write_text("# PM Persona\n")
-    # template intentionally not created
+    project_dir, overlay = _setup(tmp_path, None, "# PM Persona\n")
 
-    warnings = _run_persona_drift_check(tmp_path / "nonexistent.md", overlay)
+    warnings = check_pm_persona_drift(project_dir, overlay_path=overlay)
 
     assert warnings == []
 
 
 def test_both_absent_no_warning(tmp_path):
     """When neither file exists, no warning is emitted."""
-    warnings = _run_persona_drift_check(
-        tmp_path / "nonexistent-template.md",
-        tmp_path / "nonexistent-overlay.md",
-    )
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+
+    warnings = check_pm_persona_drift(project_dir, overlay_path=tmp_path / "nonexistent-overlay.md")
 
     assert warnings == []
 
 
 def test_ioerror_reading_file_appends_warning_no_crash(tmp_path):
     """An IOError while reading files should append a warning but not crash."""
-    template = tmp_path / "project-manager.md"
-    overlay = tmp_path / "overlay-project-manager.md"
-    template.write_text("# PM Persona\n")
-    overlay.write_text("# PM Persona\n")
+    project_dir, overlay = _setup(tmp_path, "# PM Persona\n", "# PM Persona\n")
 
     original_read_text = Path.read_text
 
@@ -164,7 +126,7 @@ def test_ioerror_reading_file_appends_warning_no_crash(tmp_path):
         return original_read_text(self, *args, **kwargs)
 
     with patch.object(Path, "read_text", failing_read_text):
-        warnings = _run_persona_drift_check(template, overlay)
+        warnings = check_pm_persona_drift(project_dir, overlay_path=overlay)
 
     assert len(warnings) == 1
     assert "WARNING" in warnings[0] or "drift check failed" in warnings[0]
@@ -172,12 +134,22 @@ def test_ioerror_reading_file_appends_warning_no_crash(tmp_path):
 
 def test_warning_contains_diff_command(tmp_path):
     """Warning message should include a diff command operators can run."""
-    template = tmp_path / "project-manager.md"
-    overlay = tmp_path / "overlay-project-manager.md"
-    template.write_text("original content\n")
-    overlay.write_text("changed content\n")
+    project_dir, overlay = _setup(tmp_path, "original content\n", "changed content\n")
 
-    warnings = _run_persona_drift_check(template, overlay)
+    warnings = check_pm_persona_drift(project_dir, overlay_path=overlay)
 
     assert len(warnings) == 1
     assert "diff" in warnings[0]
+
+
+def test_default_template_path_points_at_real_file():
+    """Regression test for the path bug in the original PR: the default repo
+    template path must resolve to an existing file at the repo root, not a
+    nonexistent `segments/project-manager.md`.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    template_path = repo_root / DEFAULT_TEMPLATE_REL
+    assert template_path.exists(), (
+        f"DEFAULT_TEMPLATE_REL ({DEFAULT_TEMPLATE_REL}) does not resolve to a real file "
+        f"at {template_path}. The drift check would silently no-op on every machine."
+    )

@@ -35,6 +35,7 @@ from scripts.update import (  # noqa: E402
     migrations,
     npm_tools,
     officecli,
+    persona_drift,
     readme_check,
     reflections_yaml,
     rodney,
@@ -967,48 +968,15 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
 
     # Step 4.10: Check PM persona overlay drift between in-repo template and private vault.
     # Surface only — never auto-merges. Fails gracefully if vault file absent (fresh machine).
+    # All logic lives in scripts/update/persona_drift.py so unit tests exercise the real code.
     log("Checking PM persona overlay drift...", v)
-    try:
-        import difflib
-
-        repo_template = Path("config/personas/segments/project-manager.md")
-        private_overlay = Path.home() / "Desktop" / "Valor" / "personas" / "project-manager.md"
-
-        if not repo_template.exists():
-            log("  PM persona template not found — skipping drift check", v)
-        elif not private_overlay.exists():
-            log("  No private overlay found — skipping (fresh machine)", v)
-        else:
-            template_lines = repo_template.read_text().splitlines(keepends=True)
-            overlay_lines = private_overlay.read_text().splitlines(keepends=True)
-            diff = list(
-                difflib.unified_diff(
-                    template_lines,
-                    overlay_lines,
-                    fromfile="config/personas/segments/project-manager.md",
-                    tofile="~/Desktop/Valor/personas/project-manager.md",
-                )
-            )
-            if diff:
-                diff_lines = len(
-                    [
-                        line
-                        for line in diff
-                        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
-                    ]
-                )
-                result.warnings.append(
-                    f"PM persona overlay drift: {diff_lines} lines differ. "
-                    f"Run 'diff config/personas/segments/project-manager.md "
-                    f"~/Desktop/Valor/personas/project-manager.md' to review."
-                )
-                log(f"  PM persona overlay drift: {diff_lines} changed lines", v)
-            else:
-                log("  PM persona overlay: in sync", v)
-    except Exception as _persona_exc:
-        _persona_warn = f"PM persona overlay drift check failed (WARNING): {_persona_exc}"
-        log(f"  {_persona_warn}", v)
-        result.warnings.append(_persona_warn)
+    _persona_warnings = persona_drift.check_pm_persona_drift(project_dir)
+    if _persona_warnings:
+        for _w in _persona_warnings:
+            log(f"  {_w}", v)
+            result.warnings.append(_w)
+    else:
+        log("  PM persona overlay: in sync (or files absent)", v)
 
     # Step 4.95: Check that each active project repo has a '## Running' README section.
     # Warn only — never blocks the update. Guides devs to document startup commands
