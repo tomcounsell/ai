@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor
 created: 2026-04-17
 tracking: https://github.com/tomcounsell/ai/issues/1028
-last_comment_id:
+last_comment_id: 4377084180
 revision_applied: true
 ---
 
@@ -240,8 +240,14 @@ Group labels come from a constant mapping in `ui/data/reflections.py` (keeps dis
 - [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE: 47 tests. Any that mock/assert specific callable paths need path updates. Most are generic scheduler tests; minimal impact.
 - [ ] `tests/unit/test_ui_reflections_data.py` — UPDATE + EXTEND: 12 existing tests stay; add new tests for `get_grouped_reflections()` covering empty groups, all-disabled groups, mixed-status groups, error aggregation.
 - [ ] `tests/integration/test_reflections_redis.py` — UPDATE: 13 tests. Imports change; Redis persistence tests unaffected.
+- [ ] `tests/unit/test_utc.py` — VERIFY: comment `4277729942` (2026-04-20 UTC hotfix, commit `9e3a64f5`) rewired three relocated callables (`session_recovery_drip`, `session_count_throttle`, `failure_loop_detector`, plus `memory_decay_prune`, `memory_quality_audit`, `behavioral_learning` if still extant) to import `to_unix_ts` from `bridge.utc`. After the file split, confirm test_utc.py still exercises these callables via their new import paths, or that the test references nothing path-specific. UPDATE imports only if needed.
+- [ ] `ui/templates/index.html` and the session-list partial (per PR #1282 / issue #1269) — VERIFY UNTOUCHED: the template restructure scope is `ui/templates/reflections/_partials/status_grid.html` only. Session row liveness chips, ghost badge, and lifecycle glyphs added by #1282 must not regress. No code changes expected; add a smoke test or visual check during BUILD that loads `localhost:8500` and confirms session rows still render their Liveness chips alongside the new collapsible reflection groups.
 
 No tests to DELETE — all existing coverage is relevant. No REPLACE needed — behavior is preserved, only import paths change.
+
+**Upstream-change notices incorporated:**
+- Comment `4277729942` (2026-04-20): UTC hotfix `9e3a64f5` rewired `.timestamp()` calls in three sustainability callables, two memory_management callables, and `behavioral_learning` to use `bridge.utc.to_unix_ts()`. **Action for BUILD:** when relocating these files to `reflections/agents/`, `reflections/memory/`, and `reflections/pipelines/`, preserve the `from bridge.utc import to_unix_ts` imports and naive-as-UTC normalization. Do NOT regress to bare `.timestamp()`. The "behavior parity" mandate in Rabbit Holes already covers this; this is the explicit reminder.
+- Comment `4377084180` (2026-05-05): PR #1282 / issue #1269 expanded the dashboard session detail modal (Liveness section, freshness chips, ghost badge, new glyphs). **Action for BUILD:** the collapsible `<details>` grouping pattern this plan establishes for reflections must NOT bleed into the session list. Scope of template restructure is reflections-only — touch only `ui/templates/reflections/_partials/status_grid.html` and `ui/data/reflections.py`. Different files than session-list, but they share the dashboard refresh path and HTMX cadence, so verify visually during BUILD.
 
 ## Rabbit Holes
 
