@@ -347,7 +347,7 @@ Sends write the **unified outbox payload** to `email:outbox:{session_id}` with a
 }
 ```
 
-The `session_id` format (`cli-{secs}-{pid}-{token_hex(4)}`) gives 32 bits of per-call randomness so concurrent invocations in the same second collide effectively never. `tools/send_message.py::_send_via_email` emits the same shape so the relay has a single contract to drain. The `"to"` field is canonically `list[str]`; the relay's `_normalize_payload()` also accepts a single comma-separated string and splits it into `list[str]`.
+The `session_id` format (`cli-{secs}-{pid}-{token_hex(4)}`) gives 32 bits of per-call randomness so concurrent invocations in the same second collide effectively never. `tools/send_message.py::_send_via_email` reconstitutes the `AgentSession` from `VALOR_SESSION_ID` and delegates to `agent.output_handler.TelegramRelayOutputHandler.send`, which then writes through `_send_via_email_outbox` — so the outbox payload shape is emitted from the handler, not the tool. The relay has a single contract to drain. The `"to"` field is canonically `list[str]`; the relay's `_normalize_payload()` also accepts a single comma-separated string and splits it into `list[str]`.
 
 The relay (`bridge/email_relay.py`) polls `email:outbox:*` every 100 ms. For each key it performs atomic `LPOP`, builds the MIME message via `_build_reply_mime()` (switching to `MIMEMultipart` when attachments are present), and dispatches over SMTP in `asyncio.to_thread`. On failure it increments `_relay_attempts`, `RPUSH`es back, and DLQs via `bridge.email_dead_letter.write_dead_letter()` after `MAX_EMAIL_RELAY_RETRIES` (default 3) attempts. The relay writes `email:relay:last_poll_ts` once per cycle (5-minute TTL) for operator liveness probes.
 

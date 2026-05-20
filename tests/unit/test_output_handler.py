@@ -1127,8 +1127,11 @@ class TestTransportAwareRouting:
 
         payload = json.loads(handler._redis.rpush.call_args[0][1])
         # Match the unified email payload schema from bridge/email_relay.py.
+        # The handler emits ``to`` as a list to carry the reply-all recipient
+        # set (primary + To/CC minus self). With no extra recipients stamped
+        # on the session, the list collapses to just the primary recipient.
         assert payload["session_id"] == "email-sess"
-        assert payload["to"] == "customer@example.com"
+        assert payload["to"] == ["customer@example.com"]
         # Subject prefixed with "Re:" (worker-reply semantics).
         assert payload["subject"] == "Re: My setup question"
         assert payload["body"] == "Here is the answer."
@@ -1222,13 +1225,11 @@ class TestTransportAwareRouting:
             else:
                 _os.environ["READ_THE_ROOM_ENABLED"] = old_rtr
 
-        # Exactly one rpush — the email message itself. No reaction.
-        assert handler._redis.rpush.call_count == 1
-        key = handler._redis.rpush.call_args[0][0]
-        assert key.startswith("email:outbox:"), f"Expected email outbox write, got {key}"
-        payload = json.loads(handler._redis.rpush.call_args[0][1])
-        assert payload.get("type") != "reaction"
-        assert "body" in payload  # email-shaped, not reaction-shaped
+        # Per the unified-handler contract: when RTR suppresses on an email
+        # session, the payload is dropped entirely. Email has no reaction
+        # concept and the canonical pipeline now runs RTR for both transports,
+        # so an email suppression is fully silent (zero rpush, zero reaction).
+        assert handler._redis.rpush.call_count == 0
 
     def test_send_with_empty_text_for_email_is_noop(self):
         """Empty text on an email session must NOT queue an empty email."""
@@ -1658,3 +1659,216 @@ class TestRedundancyFilterWiring:
         assert ev["matched_prior_preview"] == "previous status message here", (
             "matched_prior_preview must be the text of the matched prior draft"
         )
+
+
+class TestDrafterHoistedAboveTransport:
+    """Issue #1369: the drafter must run ONCE for both telegram and email
+    transports, before the transport branch. These tests confirm the hoist
+    and the email-side propagation (reply-all ``to`` list, attachments,
+    suppression-drops-payload contract)."""
+
+    def _make_handler(self):
+        h = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        h._redis = MagicMock()
+        return h
+
+    def _telegram_session(self, session_id="hoist-tg"):
+        s = MagicMock()
+        s.session_id = session_id
+        s.extra_context = {"transport": "telegram"}
+        s.is_sdlc = False
+        s.recent_sent_drafts = []
+        return s
+
+    def _email_session(
+        self,
+        session_id="hoist-email",
+        to_addrs=None,
+        cc_addrs=None,
+        subject="The thread",
+        message_id="<orig@example.com>",
+    ):
+        s = MagicMock()
+        s.session_id = session_id
+        s.extra_context = {
+            "transport": "email",
+            "email_subject": subject,
+            "email_message_id": message_id,
+            "email_to_addrs": to_addrs or [],
+            "email_cc_addrs": cc_addrs or [],
+        }
+        s.is_sdlc = False
+        s.recent_sent_drafts = []
+        return s
+
+    def test_drafter_called_once_for_telegram(self):
+        """A telegram send must invoke ``draft_message`` exactly once."""
+        handler = self._make_handler()
+        session = self._telegram_session()
+        draft_stub = MagicMock(
+            text="drafted telegram text",
+            full_output_file=None,
+            was_drafted=True,
+            artifacts={},
+            needs_self_draft=False,
+            expectations=None,
+            context_summary=None,
+        )
+
+        with patch(
+            "bridge.message_drafter.draft_message",
+            AsyncMock(return_value=draft_stub),
+        ) as mock_draft:
+            asyncio.run(handler.send("123", "raw text", 0, session=session))
+
+        assert mock_draft.await_count == 1
+        # Drafted text reached the outbox, not raw.
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        assert payload["text"] == "drafted telegram text"
+
+    def test_drafter_called_once_for_email(self):
+        """An email send must invoke ``draft_message`` exactly once. This is
+        the regression that closes #1369: previously the email branch never
+        ran the drafter."""
+        handler = self._make_handler()
+        session = self._email_session()
+        draft_stub = MagicMock(
+            text="drafted email body",
+            full_output_file=None,
+            was_drafted=True,
+            artifacts={},
+            needs_self_draft=False,
+            expectations=None,
+            context_summary=None,
+        )
+
+        with patch(
+            "bridge.message_drafter.draft_message",
+            AsyncMock(return_value=draft_stub),
+        ) as mock_draft:
+            asyncio.run(handler.send("customer@example.com", "raw", 0, session=session))
+
+        assert mock_draft.await_count == 1
+        # The drafter ran with ``medium="email"`` so the per-medium format
+        # rules apply (no markdown on the wire for email).
+        assert mock_draft.await_args.kwargs["medium"] == "email"
+        # Drafted body landed in the email payload.
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        assert payload["body"] == "drafted email body"
+
+    def test_email_payload_carries_reply_all_recipients(self):
+        """The email outbox payload's ``to`` field is a list combining the
+        primary recipient with ``extra_context.email_to_addrs`` and
+        ``email_cc_addrs``, minus the SMTP user (own address)."""
+        handler = self._make_handler()
+        session = self._email_session(
+            to_addrs=["primary@example.com", "team@example.com"],
+            cc_addrs=["watcher@example.com"],
+        )
+
+        import os as _os
+
+        old_smtp = _os.environ.get("SMTP_USER")
+        _os.environ["SMTP_USER"] = "bot@ourdomain.com"
+        try:
+            with patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=RuntimeError("skip drafter")),
+            ):
+                asyncio.run(
+                    handler.send(
+                        "primary@example.com",
+                        "reply body",
+                        0,
+                        session=session,
+                    )
+                )
+        finally:
+            if old_smtp is None:
+                _os.environ.pop("SMTP_USER", None)
+            else:
+                _os.environ["SMTP_USER"] = old_smtp
+
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        # Primary first, then To/CC entries (dedup the primary; drop SMTP user).
+        assert payload["to"] == [
+            "primary@example.com",
+            "team@example.com",
+            "watcher@example.com",
+        ]
+
+    def test_email_payload_drops_own_smtp_user_from_reply_all(self):
+        """When the SMTP user appears in the original To/CC, it is filtered
+        out of the reply-all list (we don't reply to ourselves)."""
+        handler = self._make_handler()
+        session = self._email_session(
+            to_addrs=["bot@ourdomain.com", "team@example.com"],
+            cc_addrs=["bot@ourdomain.com"],
+        )
+
+        import os as _os
+
+        old_smtp = _os.environ.get("SMTP_USER")
+        _os.environ["SMTP_USER"] = "bot@ourdomain.com"
+        try:
+            with patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=RuntimeError("skip drafter")),
+            ):
+                asyncio.run(handler.send("customer@example.com", "body", 0, session=session))
+        finally:
+            if old_smtp is None:
+                _os.environ.pop("SMTP_USER", None)
+            else:
+                _os.environ["SMTP_USER"] = old_smtp
+
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        # bot@ourdomain.com must NOT appear anywhere in the to list.
+        addrs_lower = [a.lower() for a in payload["to"]]
+        assert "bot@ourdomain.com" not in addrs_lower
+
+    def test_cli_file_paths_propagate_to_telegram_outbox(self):
+        """CLI-supplied ``file_paths`` are forwarded into the telegram outbox
+        payload (and merged with any drafter overflow file)."""
+        handler = self._make_handler()
+        session = self._telegram_session()
+
+        with patch(
+            "bridge.message_drafter.draft_message",
+            AsyncMock(side_effect=RuntimeError("skip drafter")),
+        ):
+            asyncio.run(
+                handler.send(
+                    "12345",
+                    "body",
+                    0,
+                    session=session,
+                    file_paths=["/tmp/a.png", "/tmp/b.txt"],
+                )
+            )
+
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        assert payload["file_paths"] == ["/tmp/a.png", "/tmp/b.txt"]
+
+    def test_cli_file_paths_propagate_to_email_outbox(self):
+        """CLI-supplied ``file_paths`` are forwarded into the email outbox
+        payload as ``attachments`` (the relay's expected key)."""
+        handler = self._make_handler()
+        session = self._email_session()
+
+        with patch(
+            "bridge.message_drafter.draft_message",
+            AsyncMock(side_effect=RuntimeError("skip drafter")),
+        ):
+            asyncio.run(
+                handler.send(
+                    "customer@example.com",
+                    "see attached",
+                    0,
+                    session=session,
+                    file_paths=["/tmp/report.pdf"],
+                )
+            )
+
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        assert payload["attachments"] == ["/tmp/report.pdf"]
