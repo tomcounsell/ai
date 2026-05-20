@@ -185,6 +185,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Worker Hibernation](worker-hibernation.md) | Mid-execution session pause and drip resume on Anthropic API failures: `paused` status, `worker:hibernating` Redis flag, `circuit-health-gate` and `session-recovery-drip` reflections | Shipped |
 | [Worker Service](worker-service.md) | Standalone worker process for AgentSession processing, OutputHandler protocol, TelegramRelayOutputHandler (Redis outbox), FileOutputHandler fallback, launchd service | Shipped |
 | [Workspace Safety Invariants](workspace-safety-invariants.md) | Pre-launch validation of agent working directories with CWD existence, path containment, and slug sanitization | Shipped |
+| [Worktree Manager](worktree-manager.md) | Branch verification on worktree reuse — `verify_worktree_branch` auto-checks-out clean worktrees and raises `WorktreeBranchMismatchError` on dirty ones, preventing silent MERGE-stage hangs from slug reuse (#1377) | Shipped |
 | [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |
 | [xfail Hygiene](xfail-hygiene.md) | Three-layer xfail hygiene system preventing stale test markers after bug fixes land | Shipped |
 | [YouTube Search](youtube-search.md) | Search YouTube by query using yt-dlp, returning structured results (title, URL, duration, views) via `valor-youtube-search` CLI | Shipped |

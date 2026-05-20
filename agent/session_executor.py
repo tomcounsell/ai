@@ -878,6 +878,29 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 f"main checkout contamination (issue #887)."
             )
 
+        # Branch-mismatch guard (issue #1377): a reused worktree handed off
+        # between SDLC stages may still be checked out to the previous stage's
+        # branch. If we proceed without verifying, the Claude Code subprocess
+        # launches on the wrong branch, produces no output, and is killed by
+        # startup-recovery 6+ minutes later. verify_worktree_branch
+        # auto-recovers clean worktrees and raises on dirty ones — the latter
+        # surfaces as a session failure with last_error populated instead of
+        # a silent hang.
+        if _stype == "dev" and slug and WORKTREES_DIR in str(working_dir):
+            from agent.worktree_manager import (  # noqa: PLC0415
+                WorktreeBranchMismatchError,
+                verify_worktree_branch,
+            )
+
+            try:
+                verify_worktree_branch(working_dir, branch_name)
+            except WorktreeBranchMismatchError as e:
+                logger.error(
+                    f"[worktree-branch-guard] Session {session.session_id} "
+                    f"slug={slug}: {e} — refusing to launch harness (issue #1377)"
+                )
+                raise
+
         # Compute task list ID for sub-agent task isolation
         # Tier 2: planned work uses the slug directly
         # Tier 1: ad-hoc sessions use thread-{chat_id}-{root_msg_id}
