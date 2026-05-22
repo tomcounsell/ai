@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -329,9 +328,7 @@ class TestTeammateHookBlocks:
 
         assert result.get("decision") == "block"
 
-    def test_teammate_sensitive_file_still_blocked(
-        self, fake_project, mock_context, monkeypatch
-    ):
+    def test_teammate_sensitive_file_still_blocked(self, fake_project, mock_context, monkeypatch):
         """Sensitive file (.env) is blocked by the sensitive-path check,
         with the sensitive-path block message — not the teammate redirect."""
         monkeypatch.setenv("SESSION_TYPE", "teammate")

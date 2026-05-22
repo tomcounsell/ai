@@ -199,9 +199,7 @@ TEAMMATE_ALLOWED_TOPLEVEL_EXTENSIONS: tuple[str, ...] = (".md",)
 # Absolute path prefixes always allowed (knowledge base). These are matched
 # BEFORE rebasing to the project root, so writes to the vault from any cwd
 # work as expected.
-TEAMMATE_ALLOWED_ABSOLUTE_PREFIXES: tuple[str, ...] = (
-    os.path.expanduser("~/work-vault/"),
-)
+TEAMMATE_ALLOWED_ABSOLUTE_PREFIXES: tuple[str, ...] = (os.path.expanduser("~/work-vault/"),)
 
 
 def _is_teammate_session() -> bool:
@@ -635,7 +633,8 @@ async def pre_tool_use_hook(
                     f"Blocked: teammate sessions cannot write to '{file_path}'. "
                     "This path looks like source code, which requires a Dev session. "
                     "To proceed:\n\n"
-                    "  valor-session create --role dev --slug <slug> --message \"<task description>\"\n\n"
+                    "  valor-session create --role dev --slug <slug> "
+                    '--message "<task description>"\n\n'
                     "Suggest this to the human first and wait for explicit "
                     "confirmation before spawning the Dev session. Teammates "
                     "may write to: docs/, .claude/, .github/, wiki/, skills/, "

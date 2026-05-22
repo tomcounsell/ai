@@ -64,7 +64,7 @@ def build_teammate_instructions() -> str:
         "writes to source code (anything outside `docs/`, `.claude/`, `.github/`, `wiki/`, "
         "`skills/`, top-level meta files, and `~/work-vault/`) are blocked.\n"
         "- If you hit a block, suggest spawning a Dev session to the human via: "
-        "`valor-session create --role dev --slug <slug> --message \"<task>\"`. "
+        '`valor-session create --role dev --slug <slug> --message "<task>"`. '
         "Don't spawn it unilaterally — get human confirmation first.\n"
         "- Bash is open. Every Bash command is audit-logged with the `[teammate-audit]` "
         "tag — assume your shell activity is visible after the fact.\n"

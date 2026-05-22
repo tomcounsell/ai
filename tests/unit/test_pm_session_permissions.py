@@ -148,9 +148,7 @@ class TestPMWriteRestriction:
         input_data = self._make_write_input(
             "/Users/test/src/ai/docs/features/new-feature.md", tool_name="MultiEdit"
         )
-        result = asyncio.run(
-            pre_tool_use_hook(input_data, "tu-multiedit-pm-docs", mock_context)
-        )
+        result = asyncio.run(pre_tool_use_hook(input_data, "tu-multiedit-pm-docs", mock_context))
 
         assert result.get("decision") != "block"
 
