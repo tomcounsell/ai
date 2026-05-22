@@ -515,7 +515,7 @@ The `dev-session` Agent tool entry has been removed from `agent/agent_definition
 | `agent/session_state.py` | Shared globals: `_active_sessions`, `_global_session_semaphore`, `SessionHandle` |
 | `agent/output_handler.py` | `OutputHandler` protocol for routing agent output; `TelegramRelayOutputHandler` (Redis outbox for Telegram delivery) and `FileOutputHandler` (logs to `logs/worker/`) implementations |
 | `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` (re-exported from `bridge/response.py`) |
-| `agent/agent_sessions.py` | Canonical location for `save_session_snapshot()` (re-exported from `bridge/agent_sessions.py`) |
+| `agent/session_logs.py` | Canonical location for `save_session_snapshot()` (re-exported from `bridge/session_logs.py`) |
 | `agent/sdk_client.py` | SDK client; uses `project_key` identity checks for cross-repo detection |
 | `worker/__main__.py` | Standalone worker entry point (`python -m worker`); processes sessions without Telegram bridge |
 
