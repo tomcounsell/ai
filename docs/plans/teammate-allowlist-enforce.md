@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-05-22
 tracking: https://github.com/tomcounsell/ai/issues/1410
 last_comment_id:
+revision_applied: true
 ---
 
 # Teammate session: code-write hard lock + capable prompt
@@ -100,18 +101,94 @@ User asks teammate to do something operational:
 
 ### Technical Approach
 
-**Universal allowlist** (in `pre_tool_use.py` as module-level constants):
+**Universal allowlist** — see the algorithm block below for the canonical constants. Conceptually:
+
+- **Anchored top-level dirs** (anywhere under project root, but only as `parts[0]`): `docs`, `.claude`, `.github`, `wiki`, `skills`
+- **Top-level filenames** (exactly at project root, depth=1): README.md, CHANGELOG.md, CLAUDE.md, AGENTS.md, GEMINI.md, OPENCLAW.md, SWARM.md, PLAN.md, TODO.md, ROADMAP.md, CONTRIBUTING.md, SECURITY.md, MAINTENANCE.md, DEPLOYMENT.md, INSTRUCTIONS.md, LICENSE, NOTICE, CNAME, .gitignore, .gitattributes, .editorconfig
+- **Top-level extensions** (depth=1 only): `.md` (catches PHASE_*, MODERNIZATION_*, etc.)
+- **Absolute prefixes**: `~/work-vault/` (knowledge base)
+
+**`_teammate_is_allowed_write(file_path)` algorithm:**
+
+The algorithm has TWO passes — a normalization pass (catches path-traversal via `..`) and a realpath pass (catches symlink escape). Both passes must agree the path is allowed.
 
 ```python
-# Recursive prefixes — match anywhere in the path
-TEAMMATE_ALLOWED_WRITE_DIR_PREFIXES: tuple[str, ...] = (
-    "/docs/",
-    "/.claude/",
-    "/.github/",
-    "/wiki/",
-    "/skills/",
-)
-# Top-level filenames — match basename at any depth-1 location under project root
+def _teammate_is_allowed_write(file_path: str) -> bool:
+    if not file_path:
+        return False
+
+    # Resolve project root from cwd (matches the cwd contract the worker
+    # establishes when spawning the session — same contract PM relies on).
+    project_root = os.path.realpath(os.getcwd())
+
+    # PASS 1 — normalize input to defeat `..` traversal.
+    normalized = os.path.normpath(file_path)
+    if not _path_on_allowlist(normalized, project_root):
+        return False
+
+    # PASS 2 — realpath to defeat symlink escape.
+    # Use realpath on the parent directory + basename so we don't follow a
+    # symlink that doesn't yet exist (Write creates files), but DO follow any
+    # symlink in the parent chain (which is the actual escape vector).
+    try:
+        parent = os.path.realpath(os.path.dirname(os.path.abspath(normalized)))
+        resolved = os.path.join(parent, os.path.basename(normalized))
+    except OSError:
+        return False  # Can't resolve → default-deny
+    if not _path_on_allowlist(resolved, project_root):
+        return False
+
+    return True
+
+
+def _path_on_allowlist(path: str, project_root: str) -> bool:
+    """Check whether `path` is on the teammate write allowlist.
+
+    `path` may be relative or absolute. `project_root` is the project's
+    real (symlink-resolved) working directory.
+    """
+    # Absolute prefixes (vault) — match BEFORE rebasing to project root.
+    abs_path = os.path.abspath(path)
+    for prefix in TEAMMATE_ALLOWED_ABSOLUTE_PREFIXES:
+        if abs_path.startswith(prefix):
+            return True
+
+    # Rebase to project-root-relative for the directory/top-level checks.
+    # If the path is outside project_root, fall through to deny (vault was
+    # handled above; everything else outside the project is off-limits).
+    try:
+        rel = os.path.relpath(abs_path, project_root)
+    except ValueError:
+        return False  # Different drives (Windows); shouldn't happen on macOS.
+    if rel.startswith(".."):
+        return False  # Outside project root.
+
+    rel_posix = rel.replace("\\", "/")
+    parts = rel_posix.split("/")
+    first = parts[0] if parts else ""
+
+    # Directory prefix check — ANCHORED to parts[0], not substring.
+    # parts[0] must equal one of the allowed top-level dir names.
+    if first in TEAMMATE_ALLOWED_DIR_NAMES_AT_ROOT:
+        return True
+
+    # Top-level file check — exactly ONE part means top-level file.
+    if len(parts) == 1:
+        if first in TEAMMATE_ALLOWED_TOPLEVEL_NAMES:
+            return True
+        # Top-level *.md (covers CHANGELOG, PHASE_*, MODERNIZATION_*, etc.)
+        if any(first.endswith(ext) for ext in TEAMMATE_ALLOWED_TOPLEVEL_EXTENSIONS):
+            return True
+
+    return False
+```
+
+Constants change accordingly (replacing the earlier "directory prefix substrings" with anchored dir names):
+
+```python
+TEAMMATE_ALLOWED_DIR_NAMES_AT_ROOT: frozenset[str] = frozenset({
+    "docs", ".claude", ".github", "wiki", "skills",
+})
 TEAMMATE_ALLOWED_TOPLEVEL_NAMES: frozenset[str] = frozenset({
     "README.md", "CHANGELOG.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md",
     "OPENCLAW.md", "SWARM.md", "PLAN.md", "TODO.md", "ROADMAP.md",
@@ -119,22 +196,17 @@ TEAMMATE_ALLOWED_TOPLEVEL_NAMES: frozenset[str] = frozenset({
     "INSTRUCTIONS.md", "LICENSE", "NOTICE", "CNAME",
     ".gitignore", ".gitattributes", ".editorconfig",
 })
-# Top-level extensions — any .md file at the project root is meta-doc
 TEAMMATE_ALLOWED_TOPLEVEL_EXTENSIONS: tuple[str, ...] = (".md",)
-# Absolute paths — the knowledge base, anywhere
 TEAMMATE_ALLOWED_ABSOLUTE_PREFIXES: tuple[str, ...] = (
     os.path.expanduser("~/work-vault/"),
 )
 ```
 
-**`_teammate_is_allowed_write(file_path)` algorithm:**
+**Why two passes:**
+- Pass 1 (normpath): catches `docs/../agent/foo.py` — the syntactic escape.
+- Pass 2 (realpath): catches `ln -s ../agent docs/escape && write docs/escape/sdk_client.py` — the symlink escape. The substring-match would see `/docs/` in the input and allow; the OS write would follow the symlink and land in `agent/sdk_client.py`. Realpath resolution after normpath fixes this.
 
-1. If `file_path` is empty → return False (defensive).
-2. If `file_path` starts with any `TEAMMATE_ALLOWED_ABSOLUTE_PREFIXES` → True.
-3. Normalize path: replace `\` with `/`. Prepend `/` if relative (so `docs/foo.md` matches `/docs/`).
-4. If any `TEAMMATE_ALLOWED_WRITE_DIR_PREFIXES` substring is in the normalized path → True.
-5. Determine if the path is "top-level" by checking depth: `PurePosixPath(file_path).parts` has length ≤ 2 (allowing for leading `/`), OR the relative form has no directory component. If top-level AND (basename in `TEAMMATE_ALLOWED_TOPLEVEL_NAMES` OR extension in `TEAMMATE_ALLOWED_TOPLEVEL_EXTENSIONS`) → True.
-6. Otherwise → False.
+**Anchoring to `parts[0]` instead of substring** also fixes positional promiscuity: `agent/docs_handler/foo.py` no longer matches the `docs/` rule by accident.
 
 **Block message** when a teammate hits a disallowed path:
 
@@ -157,11 +229,14 @@ wiki/, skills/, top-level *.md and meta files, and ~/work-vault/.
   if _is_teammate_session() and not _teammate_is_allowed_write(file_path):
       return {"decision": "block", "reason": <block_message>}
   ```
-- Bash branch: after the sensitive-file check and PM check, add audit logging (NOT a block):
+- Bash branch: after the sensitive-file check and PM check, add audit logging (NOT a block). **The audit call MUST be wrapped in try/except** — failure to log must never block the user's command (matches the liveness-writer pattern at lines 402-408):
   ```python
   if _is_teammate_session():
-      truncated = (command or "")[:500]
-      logger.info(f"[teammate-audit] bash command={truncated!r}")
+      try:
+          truncated = (command or "")[:500]
+          logger.info(f"[teammate-audit] bash command={truncated!r}")
+      except Exception as _audit_err:
+          logger.debug("[pre_tool_use] teammate audit log failed (non-fatal): %s", _audit_err)
   ```
 
 **Audit log destination — decision: `logger.info` in `pre_tool_use.py`.**
@@ -189,6 +264,7 @@ Drop:
 Add (replacing the dropped block):
 - "TOOL POSTURE: You have full read/write/Bash access. The pre_tool_use hook enforces ONE rule: writes to source code (anything outside `docs/`, `.claude/`, `.github/`, `wiki/`, `skills/`, top-level meta files, and `~/work-vault/`) are blocked. If you hit a block, suggest spawning a Dev session to the human via: `valor-session create --role dev --slug <slug> --message <task>`. Don't spawn it unilaterally — get human confirmation first."
 - "OPERATIONAL WORK ENCOURAGED: running scripts, restarting services, querying state, updating docs, resetting credentials via documented tools — all in scope. Be useful."
+- "WHEN BLOCKED: Do NOT apologize or treat the block as a permanent stop. The block is a routing decision, not a refusal. Your job on a block is to (1) restate what the human asked for in concrete terms, (2) propose the exact `valor-session create --role dev --slug <slug> --message <task>` command you'd run, (3) wait for the human's go-ahead. The block message itself contains the command template — surface it to the human, don't swallow it."
 
 ## Failure Path Test Strategy
 
@@ -209,13 +285,23 @@ Add (replacing the dropped block):
 
 - [ ] `tests/unit/test_pm_session_permissions.py` — UPDATE: keep all existing PM assertions intact. Add a sibling test class `TestTeammateWriteRestriction` with cases mirroring `TestPMBashRestriction`'s structure (allow/deny matrix for representative paths).
 - [ ] `tests/unit/test_qa_handler.py` — UPDATE: the existing tests assert specific substrings from the old prose (`"Do NOT write files"`, `"Do NOT use the Agent tool"`). After rewriting `build_teammate_instructions()`, these assertions will fail. Replace with assertions on the NEW prose markers (`"valor-session create --role dev"`, `"OPERATIONAL WORK ENCOURAGED"`, and the preserved DELIVERY REVIEW substrings).
-- [ ] New file: `tests/unit/test_teammate_write_restriction.py` — REPLACE/CREATE: dedicated test module for `_teammate_is_allowed_write()` covering the full allow/deny matrix (docs paths, .claude paths, .github paths, vault absolute paths, top-level meta files, code paths, path-traversal attempts, empty input).
+- [ ] New file: `tests/unit/test_teammate_write_restriction.py` — REPLACE/CREATE: dedicated test module for `_teammate_is_allowed_write()` covering the full allow/deny matrix:
+  - **Allow:** `docs/foo.md`, `docs/features/x.md`, `.claude/skills/y.md`, `.github/workflows/z.yml`, `wiki/Home.md`, `skills/custom.md`, `README.md`, `CHANGELOG.md`, `LICENSE`, `.gitignore`, `~/work-vault/notes/n.md`, `~/work-vault/AI Valor Engels System/foo.md`
+  - **Deny — code paths:** `agent/sdk_client.py`, `bridge/telegram_bridge.py`, `worker/__main__.py`, `tools/foo.py`, `tests/unit/x.py`, `apps/web/page.tsx`, `packages/core/index.ts`
+  - **Deny — positional promiscuity:** `agent/docs_handler/foo.py` (must NOT match `/docs/` rule), `tools/wiki_scraper.py` (must NOT match `/wiki/` rule), `agent/skills_router.py` (must NOT match `/skills/` rule)
+  - **Deny — path traversal:** `docs/../agent/foo.py`, `.claude/../bridge/x.py`, `docs/sub/../../agent/y.py`
+  - **Deny — symlink escape:** Set up a tmp dir with `ln -s ../agent docs/escape`, attempt write to `docs/escape/sdk_client.py`, assert denied via realpath check. Use `tmp_path` fixture and `monkeypatch` cwd.
+  - **Deny — top-level non-allowlist file:** `pyproject.toml`, `package.json`, `Makefile`, `Dockerfile`, `manage.py`
+  - **Deny — nested non-allowlist:** `apps/api/README.md` (top-level *.md rule does NOT extend to nested READMEs)
+  - **Deny — outside project root:** `/tmp/foo.md`, `/etc/passwd`
+  - **Deny — empty/invalid:** `""`, `None` (via type guard)
+  - **MultiEdit case:** same allow/deny matrix exercised through the `MultiEdit` tool_name branch of `pre_tool_use_hook`.
 - [ ] `tests/unit/test_qa_nudge_cap.py` — no change expected (tests `TEAMMATE_MAX_NUDGE_COUNT` only).
 - [ ] `tests/unit/test_steering_mechanism.py` — no change expected (imports `TEAMMATE_MAX_NUDGE_COUNT` only).
 
 ## Rabbit Holes
 
-- **Don't try to parse Bash for code-path writes.** `sed -i agent/foo.py` will slip through the Write/Edit guard. We accept this — Bash audit log catches it after the fact. Trying to lint arbitrary Bash for path-mutation intent is brittle (cp, mv, tee, sed, awk, redirection, heredocs, `git apply`...) and we will lose the arms race.
+- **Don't try to parse Bash for code-path writes.** `sed -i agent/foo.py` will slip through the Write/Edit guard. We accept this — Bash audit log catches it after the fact. Trying to lint arbitrary Bash for path-mutation intent is brittle (cp, mv, tee, sed, awk, redirection, heredocs, `git apply`...) and we will lose the arms race. **Note:** the symlink-escape via `ln -s` followed by Write is closed because pass 2 of the allowlist check uses `os.path.realpath` — but `ln -s ../agent docs/escape && sed -i 's/x/y/' docs/escape/sdk_client.py` is still a Bash-route escape we're accepting via audit-only.
 - **Don't add per-project allowlist extensions** (e.g., `projects.<key>.teammate.writable_paths`). The user explicitly chose general-over-tailored. Edge cases (Hugo content sites, Django templates) take the dev-session redirect.
 - **Don't introduce a new `session_type="ops"` or `"sysadmin"`.** Teammate already exists; we're just making it honest. A new session type adds routing complexity for no enforcement benefit.
 - **Don't resolve symlinks.** Tempting because "what if the LLM writes through a symlink into a code path?" — but the LLM passes the path it sees, the SDK writes through whatever Python's `open()` does, and TOCTOU makes resolution unreliable anyway. Trust the input string + the `SENSITIVE_PATHS` net.
@@ -229,7 +315,11 @@ Add (replacing the dropped block):
 
 ### Risk 2: Path-traversal escape (`docs/../agent/foo.py`)
 **Impact:** Substring-match for `/docs/` would allow this write, leaking through the allowlist.
-**Mitigation:** Run `os.path.normpath` on the input before the prefix check. Test case in `test_teammate_write_restriction.py` covers this explicitly.
+**Mitigation:** `os.path.normpath` is applied as pass 1 of the allowlist check, BEFORE matching. Test case in `test_teammate_write_restriction.py` covers this explicitly with multiple traversal variants.
+
+### Risk 2b: Symlink escape (`ln -s ../agent docs/escape`)
+**Impact:** Surfaced during plan critique. A teammate can create a symlink via Bash (`ln -s ../agent docs/escape`) then issue `Write("docs/escape/sdk_client.py", ...)`. The substring check sees `/docs/` and would allow it; the OS write follows the symlink and lands in `agent/sdk_client.py`.
+**Mitigation:** Pass 2 of the allowlist check uses `os.path.realpath` on the parent directory (which resolves any symlinks in the chain), then re-checks the resolved path against the allowlist. Both passes must agree the path is allowed. Test case in `test_teammate_write_restriction.py` exercises this with a real symlink in a `tmp_path` fixture. **Note:** this closes the Write/Edit/MultiEdit route; the Bash route (`sed -i docs/escape/sdk_client.py`) remains audit-only, as documented in Rabbit Holes.
 
 ### Risk 3: Teammate session running in a non-project working directory
 **Impact:** If a teammate session runs with cwd outside any project (e.g., user's home), relative paths like `docs/foo.md` could resolve to unexpected places. The allowlist doesn't validate that the path is actually inside a project root.
@@ -239,9 +329,10 @@ Add (replacing the dropped block):
 **Impact:** Teammate sessions doing a lot of Bash work could flood worker.log with `[teammate-audit]` lines.
 **Mitigation:** Truncate command to 500 chars. Log rotation is already in place. If volume is a problem in practice, migrate to a Redis stream — but YAGNI until we see it bite.
 
-### Risk 5: customer-service persona regression
-**Impact:** Customer-service today inherits teammate-style prompt constraints via prompt prose. If we drop those constraints from `build_teammate_instructions()`, customer-service might also become permissive — depending on how `_load_persona_overlay_with_log("customer-service", fallback="teammate", ...)` composes.
-**Mitigation:** Check `agent/sdk_client.py:3665-3677` (customer-service branch) — confirm it uses `config/personas/customer-service.md` directly, NOT `build_teammate_instructions()`. If correct (likely), customer-service is unaffected. If wrong, add an explicit "do not modify code" prose block to `customer-service.md` and verify the test in `test_persona_loading.py` still passes. **Spike-style check during build, not blocking the plan.**
+### Risk 5: customer-service persona regression — VERIFIED MOOT
+**Status:** Investigated during plan critique. Not a real risk.
+**Finding:** `build_teammate_instructions()` is only called from `agent/sdk_client.py:3405` (the teammate-mode injection path). The customer-service branch at `agent/sdk_client.py:3672` loads `config/personas/customer-service.md` directly via `_load_persona_overlay_with_log("customer-service", fallback="teammate", ...)` — the `fallback="teammate"` arg refers to falling back to the *persona overlay file*, not to `build_teammate_instructions()`. Customer-service prose constraints live in `config/personas/customer-service.md` (verified: contains its own "you do not write or modify code in this mode" line), entirely independent of this plan's surface.
+**No mitigation needed** — leaving entry in plan as evidence the question was asked and resolved.
 
 ## Race Conditions
 
@@ -292,7 +383,8 @@ No new MCP server or bridge changes required.
 - [ ] `pre_tool_use_hook` blocks Write/Edit/MultiEdit to disallowed paths when `SESSION_TYPE=teammate`, with the redirect message containing the literal string `valor-session create --role dev`.
 - [ ] `pre_tool_use_hook` does NOT block Bash for teammate sessions but logs every Bash command with `[teammate-audit]` tag.
 - [ ] `build_teammate_instructions()` no longer contains the prose strings `"Do NOT write files"` or `"Do NOT use the Agent tool"`; DOES contain `"valor-session create --role dev"` and the preserved DELIVERY REVIEW block verbatim.
-- [ ] `tests/unit/test_teammate_write_restriction.py` covers: docs paths allowed, .claude paths allowed, .github paths allowed, wiki paths allowed, skills paths allowed, vault absolute path allowed, top-level *.md allowed, top-level LICENSE allowed, agent/*.py blocked, bridge/*.py blocked, worker/*.py blocked, tests/*.py blocked, empty input blocked, path-traversal (`docs/../agent/foo.py`) blocked, MultiEdit blocked same as Write.
+- [ ] `tests/unit/test_teammate_write_restriction.py` covers the full matrix from Test Impact — allow cases, deny cases, positional-promiscuity cases (`agent/docs_handler/x.py` denied), path-traversal cases (`docs/../agent/x.py` denied), **symlink-escape case** (`ln -s ../agent docs/escape`; write to `docs/escape/sdk_client.py` denied via realpath), top-level-only restrictions (nested README.md denied), out-of-project-root cases, MultiEdit parity with Write/Edit.
+- [ ] `build_teammate_instructions()` output contains the literal string `"WHEN BLOCKED"` and the redirect command `"valor-session create --role dev"` — tested in updated `test_qa_handler.py`.
 - [ ] `tests/unit/test_qa_handler.py` updated to assert new prose markers; passes.
 - [ ] `tests/unit/test_pm_session_permissions.py` still passes (no regression in PM enforcement).
 - [ ] PM session MultiEdit regression test added — confirms PM allowlist now also gates MultiEdit.
