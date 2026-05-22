@@ -141,6 +141,46 @@ async def test_retry_succeeds_on_second_attempt():
     assert call_count["n"] == 2
 
 
+# ---------------------------------------------------------------------------
+# sdlc-1330: silent persist branches now log WARNING
+# ---------------------------------------------------------------------------
+
+
+def test_persist_warns_when_record_none_string_in_source():
+    """sdlc-1330: the bridge persist block must emit a WARNING when
+    TelegramMessage.query.get returns None twice. We assert the exact log
+    string is present in the source so the wiring can't silently regress.
+
+    The persist block is inline in a deep event handler; a full mock-based
+    test would require patching the entire Telethon stack. The Verification
+    table in docs/plans/sdlc-1330.md greps for the same string."""
+    src = Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py"
+    text = src.read_text()
+    assert "TelegramMessage.query.get returned None" in text, (
+        "Expected the sdlc-1330 WARNING string in bridge/telegram_bridge.py"
+    )
+    # Verify single bounded re-query is wired (two get() calls in a row inside
+    # the persist try-block).
+    assert text.count("TelegramMessage.query.get(stored_msg_id)") >= 2, (
+        "Expected at least 2 calls to query.get(stored_msg_id) for the single-retry pattern"
+    )
+
+
+def test_persist_warns_when_download_returns_no_path_with_no_error_string_in_source():
+    """sdlc-1330: the second silent branch (`_local_path is None AND
+    _download_error is None AND message.media`) must log a WARNING. Assert
+    the log string and the conjunction is wired in source."""
+    src = Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py"
+    text = src.read_text()
+    assert "download returned no path with no error" in text, (
+        "Expected the sdlc-1330 no-path WARNING string in bridge/telegram_bridge.py"
+    )
+    # The conjunction guards against false positives when there's no media at
+    # all (skipping persist entirely is the normal case).
+    assert "_local_path is None" in text
+    assert "_download_error is None" in text
+
+
 @pytest.mark.asyncio
 async def test_first_attempt_success_no_retry():
     """First attempt succeeds -> single call, no retry telemetry."""

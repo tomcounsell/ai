@@ -16,6 +16,14 @@ INPUT=$(cat)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
+# Only track planned Dev sessions (tier-2 work with a real AgentSession.slug).
+# Direct CLI sessions have no CLAUDE_CODE_TASK_LIST_ID; thread-scoped sessions
+# have a 'thread-' prefix. Both should produce no calendar events.
+TASK_LIST_ID="${CLAUDE_CODE_TASK_LIST_ID:-}"
+if [ -z "$TASK_LIST_ID" ] || echo "$TASK_LIST_ID" | grep -qE '^thread-'; then
+    exit 0
+fi
+
 # Skip bare slash commands (no extra prompt = no real work)
 # e.g. "/update" skips, but "/do-build implement auth" tracks
 if echo "$PROMPT" | grep -qE '^\s*/[a-zA-Z0-9_-]+\s*$'; then

@@ -126,6 +126,82 @@ async def test_media_enrichment_failure_path(caplog):
 
 
 # =============================================================================
+# sdlc-1330: worker-side self-heal of orphan media files
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_voice_message_persists_path_when_query_get_returns_none(
+    tmp_path, caplog, monkeypatch
+):
+    """sdlc-1330 end-to-end: simulate the incident where the bridge downloaded
+    a voice message to disk but ``TelegramMessage.query.get`` returned None due
+    to a transient Popoto stale-index condition, so ``media_local_path`` was
+    never persisted on the record.
+
+    The worker-side self-heal must find the orphan file in MEDIA_DIR by
+    ``message_id`` and run AI enrichment so the agent receives the
+    transcription rather than the bare ``--file attachment only--`` sentinel.
+    """
+    import bridge.media as media_mod
+
+    # Redirect MEDIA_DIR to the test tmp_path so we don't pollute the real
+    # bridge/data/media/ directory.
+    monkeypatch.setattr(media_mod, "MEDIA_DIR", tmp_path)
+
+    msg_id = 99730  # avoid collision with other tests
+    orphan = tmp_path / f"voice_20260508_111815_{msg_id}.ogg"
+    orphan.write_bytes(b"OggS\x00fake-voice-payload")
+
+    from models.telegram import TelegramMessage
+
+    # The record reflects what the bridge would persist when the Popoto
+    # stale-index condition silently no-op'd the persist block:
+    # has_media=True but media_local_path=None and no download error.
+    tm = TelegramMessage.create(
+        chat_id="test-1330-self-heal",
+        message_id=msg_id,
+        direction="in",
+        sender="tester",
+        content="--file attachment only--",
+        timestamp=0.0,
+        message_type="voice",
+        project_key="test-media-1330",
+        has_media=True,
+        media_type="voice",
+        media_local_path=None,
+        media_download_error=None,
+    )
+    try:
+        from bridge.enrichment import enrich_message
+
+        fake_transcription = "[Voice transcription] Hello from the orphan voice note."
+        with patch(
+            "bridge.media.process_downloaded_media",
+            new_callable=AsyncMock,
+            return_value=(fake_transcription, [orphan]),
+        ) as proc:
+            with caplog.at_level("INFO"):
+                enriched = await enrich_message(
+                    message_text="--file attachment only--",
+                    telegram_message=tm,
+                )
+
+        # Self-heal recovered the orphan file and ran AI enrichment.
+        assert "[Voice transcription]" in enriched
+        assert "Hello from the orphan voice note." in enriched
+        proc.assert_called_once()
+        # Self-heal log line is present at INFO level.
+        assert any("self-heal: recovered orphan media file" in r.message for r in caplog.records)
+        # Existing "legacy record?" warning must NOT fire — self-heal succeeded.
+        assert not any(
+            "has_media=True but media_local_path is unset" in r.message for r in caplog.records
+        )
+    finally:
+        tm.delete()
+
+
+# =============================================================================
 # Size-aware retry path (sdlc-1322 follow-up, issue #1344)
 # =============================================================================
 

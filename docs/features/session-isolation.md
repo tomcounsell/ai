@@ -105,6 +105,10 @@ The three #887 layers above all live on the worker / agent code path. Nothing pr
 
 **Relationship to #887 and #1272:** sibling enforcement on a different surface. #887 covers the worker-side AgentSession executor; #1272 closes the slugless residual hole; #1288 covers the git-side path (`git commit` from the wrong CWD on a session branch). Together they make the invariant — "`session/{slug}` lives only in `.worktrees/{slug}/`" — a closed system across worker, CLI, and git surfaces.
 
+### Branch verification on worktree reuse (#1377)
+
+A worktree handed between SDLC stages may still be checked out to the previous stage's branch (e.g. BUILD leaves `.worktrees/{slug}/` on `session/{slug}`; a follow-up MERGE dev session expects `main`). The executor calls `verify_worktree_branch` after the #887 main-checkout guard and before launching the Claude Code subprocess. Clean worktrees are auto-checked-out to the expected branch with an INFO `[worktree-branch-recovery]` log; dirty worktrees raise `WorktreeBranchMismatchError` so the session fails loudly with `last_error` populated instead of hanging silently. See `docs/features/worktree-manager.md` for the full behavior table and rationale.
+
 ### Early Worktree Provisioning via `--slug`
 
 The `valor-session create` CLI command accepts a `--slug` flag that provisions a worktree at session creation time, before the session is enqueued:

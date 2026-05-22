@@ -1,6 +1,7 @@
 """Message routing, config loading, response decisions, and mention detection."""
 
 import asyncio
+import importlib
 import json
 import logging
 import re
@@ -1227,3 +1228,291 @@ async def should_respond_async(
         logger.info(f"Classified as ignore: {text[:50]}...")
         return False, False
     return True, False
+
+
+# =============================================================================
+# Customer Resolver
+# =============================================================================
+
+# Conservative email validation: rejects anything that could poison cache keys
+# or argv. On mismatch: return None, log WARN, do NOT increment resolver:failures
+# (malformed input != resolver failure).
+_SENDER_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,62}@[A-Za-z0-9][A-Za-z0-9.-]{0,252}\.[A-Za-z]{2,}$"
+)
+
+# Conservative customer_id pattern: rejects multi-line, HTML, and other garbage.
+# Must be a single-line token of safe characters.
+_CUSTOMER_ID_PATTERN = re.compile(r"[A-Za-z0-9_\-:.]{1,128}")
+
+# Default resolver cache TTL (seconds)
+_DEFAULT_RESOLVER_CACHE_TTL = 300
+
+# Default subprocess timeout (seconds)
+_DEFAULT_RESOLVER_TIMEOUT = 5.0
+
+
+def _get_redis():
+    """Return a Redis connection (lazy import to avoid circular dependency)."""
+    import os
+
+    import redis
+
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+    return redis.Redis.from_url(redis_url, decode_responses=False)
+
+
+def _resolve_resolver_callable(dotted_path: str):
+    """Resolve a dotted Python path to a callable.
+
+    Args:
+        dotted_path: e.g. "myapp.resolvers.resolve_customer"
+
+    Returns:
+        The callable object.
+
+    Raises:
+        ImportError: If the module cannot be imported.
+        AttributeError: If the function doesn't exist in the module.
+    """
+    parts = dotted_path.rsplit(".", 1)
+    if len(parts) != 2:
+        raise ImportError(f"Invalid callable path: {dotted_path!r}")
+    module_path, func_name = parts
+    module = importlib.import_module(module_path)
+    return getattr(module, func_name)
+
+
+async def resolve_customer(
+    sender: str,
+    project_config: dict,
+    imap_conn=None,
+    imap_uid=None,
+) -> str | None:
+    """Resolve an email sender to a customer_id using the project's customer_resolver.
+
+    Dispatch order:
+    1. Return None immediately if project has no customer_resolver configured.
+    2. Reject malformed sender (conservative regex) — return None, no counter.
+    3. Check Redis cache (cache hit returns cached value; cached "" means None).
+    4. Dispatch subprocess (argv form) or importlib callable.
+    5. Cache result. On error: increment resolver:failures:{project_key},
+       attempt valor-retry IMAP label (best-effort), return None (fail-closed).
+
+    Args:
+        sender: The sender's email address.
+        project_config: The project config dict from projects.json.
+        imap_conn: Optional open imaplib connection (for valor-retry label on failure).
+        imap_uid: Optional IMAP UID bytes (for valor-retry label on failure).
+
+    Returns:
+        customer_id string on success, None if not a customer or on any error.
+    """
+    resolver_config = project_config.get("customer_resolver")
+    if not resolver_config:
+        return None
+
+    project_key = project_config.get("_key") or project_config.get("name", "unknown")
+
+    # Validate sender before any Redis/subprocess interaction
+    if not sender or not _SENDER_PATTERN.match(sender):
+        logger.warning(f"[resolver] Malformed sender rejected: {sender!r}")
+        return None
+
+    cache_ttl = int(resolver_config.get("cache_ttl_seconds", _DEFAULT_RESOLVER_CACHE_TTL))
+    cache_key = f"customer_resolver:{project_key}:{sender}"
+
+    # Check cache
+    try:
+        r = _get_redis()
+        cached = r.get(cache_key)
+        if cached is not None:
+            # decode bytes if needed (decode_responses=False)
+            if isinstance(cached, bytes):
+                cached = cached.decode("utf-8", errors="replace")
+            if cached == "":
+                logger.debug(f"[resolver] Cache hit (None) for {sender!r}")
+                return None
+            logger.debug(f"[resolver] Cache hit: {sender!r} -> {cached!r}")
+            return cached
+    except Exception as e:
+        logger.warning(f"[resolver] Redis cache read failed: {e}")
+        r = None
+
+    # Dispatch
+    customer_id: str | None = None
+    dispatch_error: Exception | None = None
+
+    resolver_type = resolver_config.get("type", "subprocess")
+
+    if resolver_type == "subprocess":
+        command = resolver_config.get("command", [])
+        timeout = float(resolver_config.get("timeout_seconds", _DEFAULT_RESOLVER_TIMEOUT))
+        try:
+            customer_id = await _dispatch_subprocess_resolver(command, sender, timeout)
+        except Exception as e:
+            dispatch_error = e
+
+    elif resolver_type == "callable":
+        dotted_path = resolver_config.get("callable", "")
+        try:
+            func = _resolve_resolver_callable(dotted_path)
+            raw = func(sender)
+            customer_id = _sanitize_customer_id(str(raw) if raw is not None else "")
+        except Exception as e:
+            dispatch_error = e
+
+    else:
+        logger.warning(f"[resolver] Unknown resolver type: {resolver_type!r}")
+        dispatch_error = ValueError(f"Unknown resolver type: {resolver_type!r}")
+
+    if dispatch_error is not None:
+        logger.error(f"[resolver] Dispatch failed for {sender!r}: {dispatch_error}")
+        _on_resolver_failure(project_key, imap_conn, imap_uid, r)
+        return None
+
+    # Cache result (empty string for None)
+    cache_value = customer_id if customer_id is not None else ""
+    try:
+        if r is not None:
+            r.setex(cache_key, cache_ttl, cache_value.encode("utf-8"))
+    except Exception as e:
+        logger.warning(f"[resolver] Redis cache write failed: {e}")
+
+    if customer_id is not None:
+        # Success: clear failure counter
+        try:
+            if r is not None:
+                r.delete(f"resolver:failures:{project_key}")
+        except Exception:
+            pass
+        logger.info(f"[resolver] Resolved {sender!r} -> {customer_id!r}")
+    else:
+        logger.debug(f"[resolver] {sender!r} is not a known customer")
+
+    return customer_id
+
+
+async def _dispatch_subprocess_resolver(
+    command: list[str],
+    sender: str,
+    timeout: float,
+) -> str | None:
+    """Dispatch a subprocess resolver and return a sanitized customer_id or None.
+
+    Uses asyncio.create_subprocess_exec (argv form only — never shell).
+    Applies a hard timeout. stdout is sanitized before returning.
+
+    Raises:
+        asyncio.TimeoutError: If the subprocess exceeds the timeout.
+        Exception: On subprocess creation failure or non-zero exit.
+    """
+    if not command:
+        raise ValueError("Subprocess resolver has empty command")
+
+    proc = await asyncio.create_subprocess_exec(
+        *command,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise TimeoutError(f"Resolver subprocess timed out after {timeout}s: {command}")
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Resolver subprocess exited {proc.returncode}: {command} "
+            f"(stderr: {stderr_bytes[:200].decode('utf-8', errors='replace')!r})"
+        )
+
+    return _sanitize_customer_id(stdout_bytes.decode("utf-8", errors="replace"))
+
+
+class _ResolverMalformedOutputError(ValueError):
+    """Raised when resolver output fails sanitization (multi-line, garbage, etc.).
+
+    Distinct from empty output (not-a-customer) so the caller can increment
+    the failure counter for malformed output but not for clean None responses.
+    """
+
+
+def _sanitize_customer_id(raw: str) -> str | None:
+    """Sanitize raw resolver output to a safe customer_id or None.
+
+    Validation sequence (from critique):
+    1. Strip surrounding whitespace.
+    2. Return None for empty output (resolver says "not a customer" — not a failure).
+    3. Raise _ResolverMalformedOutputError if multi-line — fail-closed on prefixed output.
+    4. Raise _ResolverMalformedOutputError if output fails the conservative pattern.
+
+    Raises:
+        _ResolverMalformedOutputError: For multi-line or non-ASCII/garbage output.
+            Callers should increment the failure counter on this exception.
+    """
+    cleaned = raw.strip()
+    if not cleaned:
+        return None
+    if "\n" in cleaned or "\r" in cleaned:
+        msg = (
+            f"[resolver] Multi-line resolver output rejected "
+            f"(first line: {cleaned.split()[0][:40]!r})"
+        )
+        logger.warning(msg)
+        raise _ResolverMalformedOutputError(msg)
+    if not re.fullmatch(r"[A-Za-z0-9_\-:.]{1,128}", cleaned):
+        msg = f"[resolver] Resolver output failed sanitization: {cleaned[:40]!r}"
+        logger.warning(msg)
+        raise _ResolverMalformedOutputError(msg)
+    return cleaned
+
+
+def _on_resolver_failure(
+    project_key: str,
+    imap_conn,
+    imap_uid,
+    r,
+) -> None:
+    """Handle resolver failure: increment counter + attempt valor-retry IMAP label.
+
+    Increments resolver:failures:{project_key} for future watchdog consumption.
+    Applies X-GM-LABELS valor-retry to the IMAP message so a future retry
+    mechanism can find it. Both operations are best-effort — failures are logged.
+    """
+    # Increment failure counter
+    try:
+        if r is not None:
+            r.incr(f"resolver:failures:{project_key}")
+    except Exception as e:
+        logger.warning(f"[resolver] Failed to increment failure counter: {e}")
+
+    # Apply valor-retry Gmail label (best-effort)
+    if imap_conn is not None and imap_uid is not None:
+        try:
+            imap_conn.uid("store", imap_uid, "+X-GM-LABELS", '("valor-retry")')
+            logger.info(f"[resolver] Applied valor-retry label for project={project_key}")
+        except Exception as e:
+            logger.warning(f"[resolver] Failed to apply valor-retry label: {e}")
+
+
+def invalidate_customer_cache(project_key: str, sender_id: str) -> None:
+    """Delete the cached resolver result for a sender.
+
+    Call this when the CRM changes (e.g., a customer is added or removed)
+    to force a fresh resolver dispatch on the next message.
+
+    Args:
+        project_key: The project key from projects.json.
+        sender_id: The sender's email address.
+    """
+    cache_key = f"customer_resolver:{project_key}:{sender_id}"
+    try:
+        r = _get_redis()
+        r.delete(cache_key)
+        logger.info(f"[resolver] Invalidated cache for {sender_id!r} in project={project_key!r}")
+    except Exception as e:
+        logger.warning(f"[resolver] Failed to invalidate cache: {e}")
