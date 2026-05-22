@@ -119,6 +119,41 @@ class TestPMWriteRestriction:
         assert result.get("decision") == "block"
         assert "sensitive" in result.get("reason", "").lower()
 
+    def test_pm_blocked_from_multiedit_source_code(self, mock_context, monkeypatch):
+        """PM session cannot MultiEdit source code files.
+
+        Regression test: MultiEdit was previously un-handled by the
+        Write/Edit branch, so PM could bypass the docs/ allowlist via
+        MultiEdit. The teammate-allowlist-enforce plan added MultiEdit
+        to the tool_name check; this test locks that fix in.
+        """
+        monkeypatch.setenv("SESSION_TYPE", "pm")
+
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        input_data = self._make_write_input(
+            "/Users/test/src/ai/agent/sdk_client.py", tool_name="MultiEdit"
+        )
+        result = asyncio.run(pre_tool_use_hook(input_data, "tu-multiedit-pm", mock_context))
+
+        assert result.get("decision") == "block"
+        assert "docs/" in result.get("reason", "")
+
+    def test_pm_allowed_to_multiedit_docs(self, mock_context, monkeypatch):
+        """PM session is still allowed to MultiEdit docs/ files."""
+        monkeypatch.setenv("SESSION_TYPE", "pm")
+
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        input_data = self._make_write_input(
+            "/Users/test/src/ai/docs/features/new-feature.md", tool_name="MultiEdit"
+        )
+        result = asyncio.run(
+            pre_tool_use_hook(input_data, "tu-multiedit-pm-docs", mock_context)
+        )
+
+        assert result.get("decision") != "block"
+
 
 # --- PreToolUse hook: PM Bash allowlist tests ---
 

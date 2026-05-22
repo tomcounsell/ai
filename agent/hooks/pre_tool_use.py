@@ -11,6 +11,25 @@ contains shell metacharacters that could smuggle mutations -- is blocked with a
 The authoritative list of allowed/blocked commands lives in
 ``tests/unit/test_pm_session_permissions.py::TestPMBashRestriction``.
 
+Teammate write enforcement
+--------------------------
+For teammate sessions (``SESSION_TYPE=teammate``), the Write/Edit/MultiEdit
+branch enforces ONE hard rule: writes to source-code paths are blocked.
+``_teammate_is_allowed_write`` defines the universal allowlist (docs/,
+.claude/, .github/, wiki/, skills/, top-level meta files, and the
+~/work-vault/ knowledge base root). The check uses a two-pass algorithm:
+``os.path.normpath`` defeats ``..`` path-traversal, then ``os.path.realpath``
+on the parent directory defeats symlink-escape (e.g. ``ln -s ../agent
+docs/escape && Write("docs/escape/sdk_client.py", ...)``).
+
+Bash is NOT blocked for teammate sessions but every command is audit-logged
+with the ``[teammate-audit]`` tag at INFO level. The audit call is wrapped
+in try/except so an audit failure can never block the user's command.
+
+The block message includes the exact ``valor-session create --role dev``
+command the teammate should propose to the human, so the redirect is
+self-contained and actionable.
+
 Skill tool stage tracking
 -------------------------
 When a PM session calls the Skill tool (e.g., ``Skill(skill="do-build")``),
@@ -112,6 +131,168 @@ def _is_pm_allowed_write(file_path: str) -> bool:
         if prefix in normalized:
             return True
     return False
+
+
+# --- Teammate session write allowlist ------------------------------------------
+#
+# Teammate sessions (``SESSION_TYPE=teammate``) can do real operational work:
+# update docs, edit .claude/ skills, run scripts, restart services, manage
+# the knowledge base. The ONE hard rule enforced in code is that writes to
+# source code paths require spawning a Dev session.
+#
+# This is a positive allowlist — anything NOT explicitly listed here is
+# treated as a code path and blocked for Write/Edit/MultiEdit. Bash is
+# audit-logged but not blocked (see Rabbit Holes in
+# docs/plans/teammate-allowlist-enforce.md for the rationale).
+#
+# Assumes the teammate session's cwd is the project root (the worker
+# establishes this contract when spawning the session, matching what PM
+# enforcement already relies on). If the cwd contract breaks, PM enforcement
+# would also break.
+
+# Anchored directory names: parts[0] of the project-root-relative path must
+# equal one of these to be allowed. NOT a substring match — a path like
+# ``agent/docs_handler/foo.py`` does NOT match the docs/ rule.
+TEAMMATE_ALLOWED_DIR_NAMES_AT_ROOT: frozenset[str] = frozenset(
+    {
+        "docs",
+        ".claude",
+        ".github",
+        "wiki",
+        "skills",
+    }
+)
+
+# Exact top-level filenames at the project root (depth == 1).
+TEAMMATE_ALLOWED_TOPLEVEL_NAMES: frozenset[str] = frozenset(
+    {
+        "README.md",
+        "CHANGELOG.md",
+        "CLAUDE.md",
+        "AGENTS.md",
+        "GEMINI.md",
+        "OPENCLAW.md",
+        "SWARM.md",
+        "PLAN.md",
+        "TODO.md",
+        "ROADMAP.md",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+        "MAINTENANCE.md",
+        "DEPLOYMENT.md",
+        "INSTRUCTIONS.md",
+        "LICENSE",
+        "NOTICE",
+        "CNAME",
+        ".gitignore",
+        ".gitattributes",
+        ".editorconfig",
+    }
+)
+
+# Top-level extensions allowed at depth == 1 only. Catches PHASE_*.md,
+# MODERNIZATION_*.md, etc. without listing each by name. Nested *.md
+# (e.g. apps/api/README.md) is NOT allowed by this rule — only the
+# anchored top-level dir names (docs/, etc.) cover nested markdown.
+TEAMMATE_ALLOWED_TOPLEVEL_EXTENSIONS: tuple[str, ...] = (".md",)
+
+# Absolute path prefixes always allowed (knowledge base). These are matched
+# BEFORE rebasing to the project root, so writes to the vault from any cwd
+# work as expected.
+TEAMMATE_ALLOWED_ABSOLUTE_PREFIXES: tuple[str, ...] = (
+    os.path.expanduser("~/work-vault/"),
+)
+
+
+def _is_teammate_session() -> bool:
+    """Check whether the current session is a teammate session."""
+    return os.environ.get("SESSION_TYPE") == SessionType.TEAMMATE
+
+
+def _path_on_teammate_allowlist(path: str, project_root: str) -> bool:
+    """Return True iff *path* is on the teammate write allowlist.
+
+    ``path`` may be relative or absolute. ``project_root`` is the project's
+    real (symlink-resolved) working directory. Used by
+    ``_teammate_is_allowed_write`` for both the normalization pass and the
+    realpath pass.
+    """
+    # Absolute prefixes (vault) — match BEFORE rebasing to project root so
+    # writes to ~/work-vault/ work from any cwd.
+    abs_path = os.path.abspath(path)
+    for prefix in TEAMMATE_ALLOWED_ABSOLUTE_PREFIXES:
+        if abs_path.startswith(prefix):
+            return True
+
+    # Rebase to project-root-relative for the directory/top-level checks.
+    try:
+        rel = os.path.relpath(abs_path, project_root)
+    except ValueError:
+        return False  # Different drives (Windows); shouldn't happen on macOS.
+    if rel.startswith(".."):
+        return False  # Outside project root.
+
+    rel_posix = rel.replace("\\", "/")
+    parts = rel_posix.split("/")
+    first = parts[0] if parts else ""
+
+    # Directory prefix check — ANCHORED to parts[0]. Require len(parts) > 1
+    # so a bare file literally named ``docs`` (no extension) at project root
+    # does NOT match the directory rule. Bare top-level files go through the
+    # explicit filename / extension allowlist below.
+    if len(parts) > 1 and first in TEAMMATE_ALLOWED_DIR_NAMES_AT_ROOT:
+        return True
+
+    # Top-level file check — exactly ONE part means top-level file.
+    if len(parts) == 1:
+        if first in TEAMMATE_ALLOWED_TOPLEVEL_NAMES:
+            return True
+        if any(first.endswith(ext) for ext in TEAMMATE_ALLOWED_TOPLEVEL_EXTENSIONS):
+            return True
+
+    return False
+
+
+def _teammate_is_allowed_write(file_path: str) -> bool:
+    """Check whether a teammate session is allowed to write to *file_path*.
+
+    Two-pass algorithm:
+
+    - Pass 1 (``os.path.normpath``) defeats syntactic path-traversal via
+      ``..`` (e.g. ``docs/../agent/foo.py`` would otherwise sneak past a
+      naive substring check because ``/docs/`` appears in the input).
+    - Pass 2 (``os.path.realpath`` on the parent directory) defeats
+      symlink-escape (e.g. ``ln -s ../agent docs/escape`` followed by
+      Write to ``docs/escape/sdk_client.py``). We realpath the parent
+      directory + raw basename so we don't follow a symlink that doesn't
+      yet exist (Write creates files), but DO follow any symlink in the
+      parent chain — the actual escape vector.
+
+    Both passes must agree the path is on the allowlist. Default-deny on
+    any error.
+    """
+    if not file_path:
+        return False
+
+    # Resolve project root from cwd (matches the cwd contract the worker
+    # establishes when spawning the session — same contract PM relies on).
+    project_root = os.path.realpath(os.getcwd())
+
+    # PASS 1 — normalize input to defeat `..` traversal.
+    normalized = os.path.normpath(file_path)
+    if not _path_on_teammate_allowlist(normalized, project_root):
+        return False
+
+    # PASS 2 — realpath to defeat symlink escape.
+    try:
+        parent = os.path.realpath(os.path.dirname(os.path.abspath(normalized)))
+        resolved = os.path.join(parent, os.path.basename(normalized))
+    except OSError:
+        return False  # Can't resolve → default-deny
+    if not _path_on_teammate_allowlist(resolved, project_root):
+        return False
+
+    return True
 
 
 def _is_sensitive_path(file_path: str) -> bool:
@@ -417,11 +598,11 @@ async def pre_tool_use_hook(
         return {}
 
     # Only inspect write-capable tools
-    if tool_name not in ("Write", "Edit", "Bash"):
+    if tool_name not in ("Write", "Edit", "MultiEdit", "Bash"):
         return {}
 
-    # For Write/Edit, check the file_path parameter
-    if tool_name in ("Write", "Edit"):
+    # For Write/Edit/MultiEdit, check the file_path parameter
+    if tool_name in ("Write", "Edit", "MultiEdit"):
         file_path = tool_input.get("file_path", "")
         if _is_sensitive_path(file_path):
             logger.warning(f"[pre_tool_use] Blocked {tool_name} to sensitive path: {file_path}")
@@ -441,6 +622,24 @@ async def pre_tool_use_hook(
                     f"Blocked: PM session cannot write to '{file_path}'. "
                     "PM can only write to docs/ directories. "
                     "Spawn a dev-session subagent for code changes."
+                ),
+            }
+        # Teammate sessions: writes restricted to docs/, .claude/, .github/,
+        # wiki/, skills/, top-level meta files, and ~/work-vault/. Source
+        # code paths require spawning a Dev session.
+        if _is_teammate_session() and not _teammate_is_allowed_write(file_path):
+            logger.warning(f"[pre_tool_use] Teammate blocked from writing to: {file_path}")
+            return {
+                "decision": "block",
+                "reason": (
+                    f"Blocked: teammate sessions cannot write to '{file_path}'. "
+                    "This path looks like source code, which requires a Dev session. "
+                    "To proceed:\n\n"
+                    "  valor-session create --role dev --slug <slug> --message \"<task description>\"\n\n"
+                    "Suggest this to the human first and wait for explicit "
+                    "confirmation before spawning the Dev session. Teammates "
+                    "may write to: docs/, .claude/, .github/, wiki/, skills/, "
+                    "top-level *.md and meta files, and ~/work-vault/."
                 ),
             }
 
@@ -490,5 +689,18 @@ async def pre_tool_use_hook(
                     "Any mutation must be dispatched to a dev-session subagent."
                 ),
             }
+
+        # Teammate sessions: Bash is NOT blocked, but every command is
+        # audit-logged so misuse is visible after the fact. Fire-and-forget
+        # — an audit failure must never block the user's command.
+        if _is_teammate_session():
+            try:
+                truncated = (command or "")[:500]
+                logger.info(f"[teammate-audit] bash command={truncated!r}")
+            except Exception as _audit_err:
+                logger.debug(
+                    "[pre_tool_use] teammate audit log failed (non-fatal): %s",
+                    _audit_err,
+                )
 
     return {}
