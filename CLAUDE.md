@@ -155,6 +155,7 @@ valor-email threads
 | `tail -f logs/worker.log` | Stream worker logs (includes reflection scheduler) |
 | `sdlc-tool stage-query --issue-number {N}` | Query SDLC pipeline state for an issue (cwd-independent — see `docs/features/sdlc-tool-resolver.md`) |
 | `sdlc-tool verdict get --stage CRITIQUE --issue-number {N}` | Read the recorded critique verdict for an issue (also: `--stage REVIEW`) |
+| `sdlc-decompose docs/plans/{slug}.md` | Decompose a plan into independent dev work units for multi-dev fan-out (see `docs/features/sdlc-parallel-execution.md`). Caps at `MAX_PARALLEL_DEVS` (default 3); exits non-zero on over-cap. |
 | `python scripts/sdlc_reflection.py` | Run SDLC reflection manually |
 | `python scripts/sdlc_reflection.py --dry-run` | Preview SDLC reflection without writing |
 | `python scripts/sdlc_reflection.py --days 14` | Run with larger lookback window |

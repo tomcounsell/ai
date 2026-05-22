@@ -175,29 +175,67 @@ sdlc-tool dispatch get --issue-number {issue_number}
 
 The CLI wraps `agent.sdlc_router.record_dispatch()` and `tools.stage_states_helpers.update_stage_states()` — it is the correct runtime entry point. Never call `record_dispatch()` directly from a shell or skill script; always use `sdlc-tool dispatch record`.
 
-## Step 4: Dispatch ONE Sub-Skill
+## Step 4: Dispatch ONE Sub-Skill (or a Parallel-Safe Pair)
 
-**Do not pattern-match against a hand-edited table.** Instead, call the routing tool and dispatch whatever skill it returns. The tool evaluates all guards (G1–G6) and dispatch rules (14 rows) against live state.
+**Do not pattern-match against a hand-edited table.** Instead, call the routing tool and dispatch whatever skill it returns. The tool evaluates all guards (G1–G7) and dispatch rules (14 rows) against live state.
 
 ```bash
 # Get the next dispatch decision
 sdlc-tool next-skill --issue-number {issue_number}
 ```
 
-The tool outputs JSON:
+The tool outputs JSON in one of three shapes:
+
+Single dispatch:
 ```json
 {"skill": "/do-build", "reason": "...", "row_id": "4a", "dispatched": true}
 ```
 
-Or when blocked:
+Multi-dispatch (parallel-safe pair, e.g. DOCS + PATCH after REVIEW):
+```json
+{"multi": true, "dispatched": true,
+ "skills": ["/do-docs", "/do-patch"],
+ "dispatches": [
+   {"skill": "/do-docs", "reason": "...", "row_id": "9"},
+   {"skill": "/do-patch", "reason": "...", "row_id": "8"}
+ ],
+ "reason": "parallel-safe pair: /do-docs (9) + /do-patch (8)"}
+```
+
+Blocked:
 ```json
 {"blocked": true, "reason": "G4: stage oscillation ...", "guard_id": "G4"}
 ```
 
 **How to use the output:**
-1. If `dispatched` is `true`: record the dispatch via `sdlc-tool dispatch record` (see Step 3.5), then invoke the returned `skill`.
-2. If `blocked` is `true`: surface the `reason` to the human and wait. Do NOT loop or guess an alternative skill.
-3. If neither key is present (error): log the `error` field and escalate to the human.
+1. If `multi` is `true`: invoke the `pthread` skill to run all listed `skills` as parallel sub-agents. Record dispatch for the *first* skill in the list (the multi-dispatch is gated by guards as one decision -- a guard fire on the first dispatch replaces the whole pair). After both sub-agents complete, re-invoke `/sdlc` to re-dispatch based on the new pipeline state.
+2. If `dispatched` is `true` (single): record the dispatch via `sdlc-tool dispatch record` (see Step 3.5), then invoke the returned `skill`.
+3. If `blocked` is `true`: surface the `reason` to the human and wait. Do NOT loop or guess an alternative skill.
+4. If neither key is present (error): log the `error` field and escalate to the human.
+
+### Multi-dev fan-out (BUILD stage, Phase 1)
+
+When BUILD is the dispatched stage and the plan decomposes cleanly into independent work units, the PM may fan out one Dev sub-session per unit instead of running a single Dev session through the plan serially. The pattern:
+
+1. Decompose the plan:
+   ```bash
+   sdlc-decompose docs/plans/{slug}.md
+   ```
+   Emits a JSON array of units (`unit_id`, `description`, `tasks`). Cap is `MAX_PARALLEL_DEVS` (default 3) -- over-cap decompositions exit non-zero and the PM falls back to single-dev BUILD.
+2. If the array has only one unit: dispatch `/do-build` normally (single-dev path).
+3. If the array has 2+ units: for each unit `u_i`, **sequentially** call
+   ```bash
+   valor-session create --role dev --parent $AGENT_SESSION_ID \
+     --slug {slug}-u{i} --message "Implement unit {u_i}: {description}. Tasks: ..."
+   ```
+   Sub-slug worker_keys are distinct, so the worker runs the children concurrently. (Sequential creation only -- timestamp-based ID collision risk for parallel creation.)
+4. Call `valor-session wait-for-children --session-id $AGENT_SESSION_ID`. This transitions the PM to `waiting_for_children`; `_finalize_parent_sync` auto-resumes the PM when every child reaches a terminal status.
+5. On resume:
+   - If any child has non-`completed` terminal status: use `valor-session steer --id <child-id> --message "fix: ..."` to re-drive that child rather than spawning a replacement. Re-wait via `wait-for-children`.
+   - If all children completed: dispatch one merge-integration Dev session with slug `{slug}-merge`. Its message instructs it to `git checkout session/{slug}` then `git merge session/{slug}-u1 session/{slug}-u2 ...` in unit_id order. On conflict, the merge session writes the conflict file list to `last_error` and exits non-zero -- escalate to human (no automated conflict resolution).
+6. After the merge session completes, steer to TEST stage on the parent slug; the single-dev path resumes.
+
+Fan-out is BUILD-only in Phase 1. TEST, REVIEW, DOCS, MERGE remain serial.
 
 **Before recording and dispatching**, also supply `--proposed-skill` when you already know what skill you intend to invoke (enables G3 PR-lock detection):
 ```bash
