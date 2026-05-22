@@ -506,7 +506,7 @@ The `dev-session` Agent tool entry has been removed from `agent/agent_definition
 | File | Purpose |
 |------|---------|
 | `models/agent_session.py` | AgentSession model with session_type discriminator |
-| `agent/agent_definitions.py` | Agent registry (builder, validator, code-reviewer); `validate_agent_files()` verifies expected `.claude/agents/*.md` files exist at process startup |
+| `agent/agent_definitions.py` | Agent registry (builder, validator, code-reviewer); `validate_agent_files()` verifies expected `.claude/agents/*.md` files are present AND parse cleanly at process startup (trial-parse covers missing, malformed, and unreadable files) |
 | `agent/agent_session_queue.py` | Queue dispatch surface — entry points (`enqueue_agent_session`, `register_callbacks`, worker loops); re-exports symbols from split modules |
 | `agent/session_completion.py` | Post-execution lifecycle: `_handle_dev_session_completion()`, `_create_continuation_pm()`, finalization |
 | `agent/session_executor.py` | Core execute loop: `_execute_agent_session()`, turn-boundary steering, nudge/re-enqueue |

@@ -7,7 +7,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | Feature | Description | Status |
 |---------|-------------|--------|
 | [Adding Reflection Tasks](adding-reflection-tasks.md) | Developer guide with copy-paste template for adding new reflection steps | Shipped |
-| [Agent Definition Fallback](agent-definition-fallback.md) | Graceful degradation when agent definition markdown files are missing — logs warning and continues with fallback prompt instead of crashing | Shipped |
+| [Agent Definition Fallback](agent-definition-fallback.md) | Graceful degradation when agent definition markdown files are missing, malformed, or unreadable — logs warning and continues with fallback prompt instead of crashing | Shipped |
 | [Agent Reply Terminus](agent-reply-terminus.md) | Conversation terminus detection (RESPOND/REACT/SILENT) in reply-to-Valor path to break infinite bot reply loops | Shipped |
 | [Agent Session Health Monitor](agent-session-health-monitor.md) | Detects and recovers stuck running sessions in the queue; runs three complementary orphan reapers (corrupted records, in-process subprocess reap, and cross-process OS-table reap with worker self-suicide guard via `worker:registered_pid:*`); per-tool timeout sub-loop with per-tier counters (internal/mcp/default) for sessions wedged on a single tool call (#1270) | Shipped |
 | [Agent Session Hierarchy](agent-session-scheduling.md#parent-child-session-hierarchy) | Parent-child session decomposition with completion propagation, progress tracking, and orphan/stuck parent self-healing | Shipped |
