@@ -141,9 +141,9 @@ PM fix in.
 ## Prompt Rewrite
 
 `build_teammate_instructions()` in `agent/teammate_handler.py` was
-rewritten to drop the restrictive "Do NOT write files / Do NOT use the
-Agent tool / Do NOT spawn a Dev session" prose in favor of three new
-blocks:
+rewritten to drop the prior restrictive prose (the no-write / no-Agent /
+no-Dev-spawn prohibitions) in favor of three new blocks that explain
+the code-level enforcement and encourage operational work:
 
 - **TOOL POSTURE** — describes the one-rule enforcement and the audit log.
   Tells the model to suggest spawning a Dev session when it hits a block,
