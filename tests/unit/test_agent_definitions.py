@@ -100,9 +100,7 @@ class TestParseAgentMarkdown:
         """PermissionError (OSError subclass) from read_text falls back."""
         path = tmp_path / "denied.md"
         path.write_text("---\ndescription: ok\n---\nBody")
-        with patch.object(
-            Path, "read_text", side_effect=PermissionError("permission denied")
-        ):
+        with patch.object(Path, "read_text", side_effect=PermissionError("permission denied")):
             result = _parse_agent_markdown(path)
         assert result.get("_is_fallback") is True
         assert "PermissionError" in result["frontmatter"]["description"]
