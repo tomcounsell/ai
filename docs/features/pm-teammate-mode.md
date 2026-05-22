@@ -87,7 +87,7 @@ In `_execute_agent_request()`, after determining the session type is "pm" or "te
 3. If `is_teammate` is true, injects teammate instructions via `build_teammate_instructions()` instead of PM dispatch instructions
 4. If `is_work` or classifier fails, preserves current behavior exactly
 
-### `bridge/message_drafter.py` (née `bridge/summarizer.py`)
+### `bridge/message_drafter.py`
 
 Teammate sessions bypass structured formatting entirely:
 

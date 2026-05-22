@@ -26,6 +26,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import smtplib
 import time
 from email import encoders
@@ -672,24 +673,162 @@ class EmailOutputHandler:
 
 
 # =============================================================================
+# Subject-line coalescing helpers
+# =============================================================================
+
+# Max age for subject-line coalescing: sessions older than this are ignored.
+# Prevents accidentally merging unrelated threads from months ago.
+COALESCE_MAX_AGE_SECONDS = 48 * 3600
+
+# Regex for stripping leading reply/forward prefixes (case-insensitive, repeated).
+_SUBJECT_PREFIX_RE = re.compile(
+    r"^(?:Re|Fwd|Fw|Aw|AW|Antw|RE|FW|FWD)(?:\[\d+\])?\s*:\s*",
+    re.IGNORECASE,
+)
+
+# Regex for stripping leading bracket ticket tags like [ticket-123]
+_SUBJECT_TICKET_RE = re.compile(r"^\[[^\]]*\]\s*")
+
+
+def normalize_subject(s: str) -> str:
+    """Normalize an email subject for coalescing comparison.
+
+    Strips leading Re/Fwd/AW/Antw prefixes (repeated), bracket ticket tags,
+    collapses whitespace, and lowercases.
+
+    Args:
+        s: Raw subject string.
+
+    Returns:
+        Normalized subject string (lowercase, no reply prefix, no ticket tag).
+    """
+    s = s.strip()
+    # Strip reply/forward prefixes repeatedly
+    while True:
+        stripped = _SUBJECT_PREFIX_RE.sub("", s)
+        if stripped == s:
+            break
+        s = stripped
+    # Strip bracket ticket tags
+    s = _SUBJECT_TICKET_RE.sub("", s)
+    # Collapse whitespace
+    s = " ".join(s.split())
+    return s.lower()
+
+
+def _query_non_terminal_sessions(project_key: str) -> list:
+    """Query AgentSession for non-terminal sessions in a project.
+
+    Bounded to sessions created within the last COALESCE_MAX_AGE_SECONDS
+    (48 hours) to prevent unbounded scans.
+
+    Args:
+        project_key: The project key to filter by.
+
+    Returns:
+        List of AgentSession objects.
+    """
+    from models.agent_session import AgentSession
+    from models.session_lifecycle import NON_TERMINAL_STATUSES
+
+    min_created_at = time.time() - COALESCE_MAX_AGE_SECONDS
+    sessions = []
+    for status in NON_TERMINAL_STATUSES:
+        try:
+            batch = list(AgentSession.query.filter(project_key=project_key, status=status))
+            sessions.extend(batch)
+        except Exception:
+            pass
+    # Filter by age (Python-side, since Popoto may not support gte on float fields)
+    sessions = [s for s in sessions if (getattr(s, "created_at", 0) or 0) >= min_created_at]
+    return sessions
+
+
+def find_coalescing_session_id(
+    project_key: str,
+    customer_id: str,
+    normalized_subject: str,
+) -> str | None:
+    """Find an existing session to coalesce into by subject-line match.
+
+    Scoped to (project_key, customer_id) to limit false-positive blast radius
+    to a single customer's own recent correspondence.
+
+    Applies a 48-hour age bound to prevent stale sessions from resurrecting.
+    Empty normalized_subject never coalesces.
+
+    Args:
+        project_key: The project key.
+        customer_id: The customer ID (from resolver).
+        normalized_subject: The normalized inbound subject line.
+
+    Returns:
+        session_id of the most recently created matching session, or None.
+    """
+    if not normalized_subject or not normalized_subject.strip():
+        return None
+
+    try:
+        sessions = _query_non_terminal_sessions(project_key)
+    except Exception as e:
+        logger.warning(f"[email] find_coalescing_session_id query failed: {e}")
+        return None
+
+    min_created_at = time.time() - COALESCE_MAX_AGE_SECONDS
+    matching = []
+    for s in sessions:
+        extra = getattr(s, "extra_context", None) or {}
+        if extra.get("customer_id") != customer_id:
+            continue
+        stored_subject = normalize_subject(extra.get("email_subject", ""))
+        if stored_subject != normalized_subject:
+            continue
+        created = getattr(s, "created_at", 0) or 0
+        if created < min_created_at:
+            continue
+        matching.append(s)
+
+    if not matching:
+        return None
+
+    # Pick most recently created
+    best = max(matching, key=lambda s: getattr(s, "created_at", 0) or 0)
+    age_hrs = (time.time() - (getattr(best, "created_at", 0) or 0)) / 3600
+    logger.info(
+        f"[email] coalescing matched session={best.session_id} age={age_hrs:.1f}h limit=48h"
+    )
+    return best.session_id
+
+
+# =============================================================================
 # IMAP polling loop
 # =============================================================================
 
 
-async def _process_inbound_email(parsed: dict, config: dict) -> None:
+async def _process_inbound_email(
+    parsed: dict,
+    config: dict,
+    imap_conn=None,
+    imap_uid=None,
+) -> None:
     """Process a single parsed inbound email.
 
-    Resolves the sender to a project, checks for thread continuation via
-    In-Reply-To header, and enqueues an AgentSession.
+    Resolves the sender to a project, optionally runs the customer_resolver to
+    identify the sender, checks for thread continuation (In-Reply-To first, then
+    subject-line coalescing), and enqueues an AgentSession.
 
     Args:
         parsed: Dict from parse_email_message() with keys:
                 from_addr, subject, body, message_id, in_reply_to
         config: The loaded projects.json config dict.
+        imap_conn: Optional open imaplib connection passed through from
+                   _poll_imap so the resolver failure path can apply the
+                   valor-retry Gmail label.
+        imap_uid: Optional IMAP UID bytes for the message (for valor-retry label).
     """
     from agent.agent_session_queue import enqueue_agent_session
     from agent.byob_skill_triggers import infer_requires_real_chrome
-    from bridge.routing import ACTIVE_PROJECTS, find_project_for_email
+    from bridge.routing import ACTIVE_PROJECTS, find_project_for_email, resolve_customer
     from config.enums import SessionType
 
     from_addr = parsed["from_addr"]
@@ -709,9 +848,33 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
         logger.info(f"[email] Project '{project_key}' not in ACTIVE_PROJECTS, discarding")
         return
 
+    # --- Dynamic customer resolver (optional) ---
+    # If the project declares a customer_resolver, use it to identify the sender.
+    # Projects without a resolver keep the existing static-allow-list flow unchanged.
+    customer_id: str | None = None
+    email_persona: str = project.get("email", {}).get("persona", "teammate")
+
+    if project.get("customer_resolver"):
+        customer_id = await resolve_customer(
+            from_addr, project, imap_conn=imap_conn, imap_uid=imap_uid
+        )
+        if customer_id is None:
+            # Resolver says "not a customer" (or failed) — drop cleanly.
+            # Message is already \Seen; valor-retry label applied by resolve_customer on failure.
+            logger.info(
+                f"[email] Resolver returned None for {from_addr!r}, discarding "
+                f"(project={project_key})"
+            )
+            return
+        # Customer resolved — force customer-service persona for this session
+        email_persona = "customer-service"
+        logger.info(
+            f"[email] Resolver identified customer_id={customer_id!r} "
+            f"for {from_addr!r} (project={project_key})"
+        )
+
     # Derive session type from email.persona (default: teammate for human-facing email)
     # customer-service maps to TEAMMATE so it never orchestrates dev sessions
-    email_persona = project.get("email", {}).get("persona", "teammate")
     _non_pm_personas = ("teammate", "customer-service")
     session_type = SessionType.TEAMMATE if email_persona in _non_pm_personas else SessionType.PM
 
@@ -719,14 +882,27 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
         "working_directory", "~/src"
     )
 
-    # Check for thread continuation via In-Reply-To
+    # --- Session coalescing (precedence: In-Reply-To > subject-line > new) ---
     existing_session_id = None
+
+    # (1) In-Reply-To: check Redis msgid map
     if in_reply_to:
         try:
             r = _get_redis()
             existing_session_id = r.get(f"email:msgid:{in_reply_to}")
         except Exception as e:
             logger.warning(f"[email] Redis lookup for In-Reply-To failed: {e}")
+
+    # (2) Subject-line coalescing (only for customer-resolver sessions)
+    if not existing_session_id and customer_id:
+        normalized = normalize_subject(subject or "")
+        if normalized:
+            existing_session_id = find_coalescing_session_id(project_key, customer_id, normalized)
+            if existing_session_id:
+                logger.info(
+                    f"[email] Subject-line coalescing: session={existing_session_id} "
+                    f"subject={normalized!r}"
+                )
 
     # Construct session_id
     timestamp = int(time.time())
@@ -758,6 +934,18 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
     if _byob_real_chrome:
         logger.info(f"[email] byob_inference_set_real_chrome session_id={session_id}")
 
+    # Build extra_context — include customer_id when resolved
+    extra_context: dict = {
+        "transport": "email",
+        "email_message_id": message_id,
+        "email_from": from_addr,
+        "email_to_addrs": parsed.get("to_addrs", []),
+        "email_cc_addrs": parsed.get("cc_addrs", []),
+        "email_subject": subject,
+    }
+    if customer_id is not None:
+        extra_context["customer_id"] = customer_id
+
     # Enqueue the session with email transport metadata
     try:
         await enqueue_agent_session(
@@ -772,14 +960,7 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
             project_config=project,
             session_type=session_type,
             requires_real_chrome=_byob_real_chrome,
-            extra_context_overrides={
-                "transport": "email",
-                "email_message_id": message_id,
-                "email_from": from_addr,
-                "email_to_addrs": parsed.get("to_addrs", []),
-                "email_cc_addrs": parsed.get("cc_addrs", []),
-                "email_subject": subject,
-            },
+            extra_context_overrides=extra_context,
         )
         logger.info(f"[email] Enqueued session {session_id} for {from_addr}")
     except Exception as e:

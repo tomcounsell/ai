@@ -26,7 +26,7 @@ When a user-triggered session tries to stop:
 2. **Agent acts** — the agent invokes a delivery tool (`tools/send_message.py`, `tools/react_with_emoji.py`), stops silently, or continues working. There is no string-menu protocol — the agent's choice is the tool call itself.
 3. **Second stop** — the hook inspects the transcript tail for `tool_use` blocks via `classify_delivery_outcome()`, classifies the outcome (send / react / silent / continue), and either allows completion or re-blocks with a "resume work" prompt for `continue`.
 
-The hook does **not** write a `delivery_action` or `delivery_text` field to the `AgentSession` — delivery is driven entirely by the tool call the agent makes during the second stop. Tool-call payloads route through `TelegramRelayOutputHandler.send` (or `EmailOutputHandler.send`) which always runs the drafter before the outbox write.
+The hook does **not** write a `delivery_action` or `delivery_text` field to the `AgentSession` — delivery is driven entirely by the tool call the agent makes during the second stop. Tool-call payloads route through `TelegramRelayOutputHandler.send` — the single canonical queue-side handler for both telegram and email transports. The handler runs the drafter once before the transport branch, so both outbox writes inherit the same drafter / redundancy filter / read-the-room / narration-fallback pipeline. See [Filters layered on every send](#filters-layered-on-every-send).
 
 ### Activation Rules
 
@@ -36,6 +36,8 @@ The review gate only fires when:
 - Session has non-empty transcript output
 
 Skipped for: subagent sessions, programmatic sessions, and any session without one of the transport env vars above.
+
+**`VALOR_TRANSPORT` accepted values:** `telegram` or `email` (case-insensitive). When set, it overrides the inferred transport (which otherwise picks `email` if `EMAIL_REPLY_TO` is set, else `telegram` when `TELEGRAM_CHAT_ID` is set). Any other value is rejected by the tool with a non-zero exit.
 
 ### False Stop Detection
 
@@ -47,12 +49,30 @@ Post-#1072 the stop hook does not write delivery fields to the `AgentSession`. T
 
 | Classified outcome | Agent action that produces it | Effect |
 |--------------------|-------------------------------|--------|
-| `send` | Invoked `python tools/send_message.py "<text>"` (the draft as-is, or a revised text — both classify the same) — also matches the legacy `tools/send_telegram.py` for the PM self-messaging path | Payload flows through `TelegramRelayOutputHandler.send` (or `EmailOutputHandler.send`), which always routes through `bridge.message_drafter.draft_message` before the outbox write |
+| `send` | Invoked `python tools/send_message.py "<text>"` (the draft as-is, or a revised text — both classify the same) — also matches the legacy `tools/send_telegram.py` for the PM self-messaging path | Payload flows through `TelegramRelayOutputHandler.send` (single canonical handler for both telegram and email), which routes through `bridge.message_drafter.draft_message` exactly once before the outbox write |
 | `react` | Invoked `python tools/react_with_emoji.py "<feeling>"` | Telegram reaction is set on the original message; no text sent |
 | `silent` | Stopped without any tool invocation | Session completes with no output |
 | `continue` | Other `tool_use` activity present (still working) | Hook re-blocks with a "resume work" prompt; review state is reset so the next stop re-enters the gate |
 
-The canonical drafter entry point is `TelegramRelayOutputHandler.send` (for Telegram) and `EmailOutputHandler.send` (for email). Both run the drafter unconditionally, with a `try/except` fallback to raw text on drafter failure. See [message-drafter.md](message-drafter.md) for drafter details.
+The canonical drafter entry point is `TelegramRelayOutputHandler.send`. Despite the type name, it is the single canonical queue-side entrypoint for both telegram and email transports — the handler hoists the drafter to a single call site above the transport branch, so the email outbox write inherits identically-drafted text without a second drafter call. Drafter failures fall through to raw text via a `try/except`; the relay length guard catches oversize payloads as a last line of defense. See [message-drafter.md](message-drafter.md) for drafter details.
+
+The synchronous SMTP path in `bridge/email_bridge.py::EmailOutputHandler.send` continues to exist for the silent worker registration on email-routing projects (`worker/__main__.py`). The CLI tool (`tools/send_message.py`) never imports `EmailOutputHandler`; the SMTP layer is the wrong abstraction for a queue-only writer.
+
+### Filters layered on every send
+
+Both the silent worker path and the CLI tool-call path (`tools/send_message.py`) reach `TelegramRelayOutputHandler.send`, which runs these filters in order on every invocation:
+
+1. **Drafter** (`bridge.message_drafter.draft_message`) — per-medium length / format compliance. Runs once, before the transport branch, with `medium="telegram"` or `medium="email"` based on `extra_context.transport`.
+2. **Redundancy filter** ([`bridge/redundancy_filter.py`](../../bridge/redundancy_filter.py)) — deterministic bigram-Jaccard guard for SDLC sessions, compares the drafted text against `session.recent_sent_drafts`. On `suppress` the payload is dropped; for telegram the handler queues a 👀 reaction on the anchor message.
+3. **Read-the-Room** ([`bridge/read_the_room.py`](../../bridge/read_the_room.py)) — Haiku-judged appropriateness gate (`READ_THE_ROOM_ENABLED`). Returns `send` | `trim` | `suppress`; on `suppress` for telegram the handler queues a 👀 reaction and skips the outbox.
+4. **Narration fallback** — when the drafter fails AND self-draft steering is unavailable, the handler substitutes a fixed message rather than emitting pure process narration.
+5. **Outbox rpush** — `telegram:outbox:{session_id}` or `email:outbox:{session_id}` (the latter carries a reply-all `to` list).
+
+For email sessions, suppression (RTR or redundancy) drops the payload entirely with no reaction — email has no equivalent reaction mechanism. The CLI tool's promise gate runs **before** the handler call (gate → linkify → handler-drafter → handler-filters → outbox) so a session with an outstanding promise short-circuits without paying the Haiku / Popoto / Redis cost.
+
+### Diagnostic fallback: `ALLOW_LEGACY_RPUSH_FALLBACK`
+
+When the CLI tool cannot reconstitute its `AgentSession` from Popoto (race, dev environment, or misconfiguration), the **default behavior is fail-closed** — the tool exits non-zero so the harness sees the failure. Setting `ALLOW_LEGACY_RPUSH_FALLBACK=1` opts into a legacy raw-rpush path that bypasses the canonical handler (no drafter, no RTR, no redundancy filter) and logs a warning. This is intended for short-lived diagnostic use only; never set in production worker env.
 
 ## Classification Context (`agent/sdk_client.py`)
 
@@ -71,10 +91,10 @@ The Teammate persona prompt includes a DELIVERY REVIEW section explaining the ch
 ## Test Coverage
 
 - `tests/unit/test_stop_hook_review.py` — Review gate activation, transcript reading, false stop detection, choice parsing, state management, integration tests
-- `tests/unit/test_tool_call_delivery.py` — `classify_delivery_outcome`'s send/react/continue/silent outcomes (plus the legacy `send_telegram` alias) and the second-stop tool-call review-gate flow
+- `tests/unit/test_tool_call_delivery.py` — `classify_delivery_outcome`'s send/react/continue/silent outcomes (plus the legacy `send_telegram` alias), the second-stop tool-call review-gate flow, and the tool → canonical-handler routing assertions for both transports
 - `tests/unit/test_duplicate_delivery.py` — Duplicate-delivery prevention: catchup Redis dedup checks and auto-continue skips for completed sessions
 - `tests/unit/test_qa_handler.py` — Teammate prompt humility markers, review gate awareness
-- `tests/e2e/test_message_pipeline.py` — Bool classifier assertions
+- `tests/unit/test_output_handler.py` — `TestDrafterHoistedAboveTransport`: the drafter is invoked exactly once for both telegram and email sessions; email payload carries the reply-all `to` list; CLI-supplied file paths propagate to both outboxes
 
 ## Related
 

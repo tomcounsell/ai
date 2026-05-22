@@ -73,6 +73,17 @@ if not result.projects_json_check.available:
 
 Bridge code does *not* validate on its own startup — that would crash the live process when a bad config lands on disk via iCloud sync. The gate is exclusively in the update path. See [Single-Machine Ownership](single-machine-ownership.md) for the full validator scope.
 
+### PM persona overlay drift check
+
+Step 4.10 of `scripts/update/run.py` compares the in-repo PM persona template (`config/personas/project-manager.md`) against the private per-machine vault overlay (`~/Desktop/Valor/personas/project-manager.md`). Logic lives in `scripts/update/persona_drift.py::check_pm_persona_drift` so tests exercise the real helper.
+
+The check is **surface only**: it never auto-merges, never mutates files, and never raises (any unexpected error becomes a warning). Behavior:
+
+- **In sync or either file absent (fresh machine):** silent, no warning. Logs `PM persona overlay: in sync (or files absent)` in verbose mode.
+- **Drift detected:** appends a warning of the form `PM persona overlay drift: N lines differ. Run 'diff <repo_template> <overlay>' to review.` to `result.warnings`. The operator resolves drift manually — typically by reconciling the vault overlay into the repo template or vice versa.
+
+The check matches the same pattern as the Steps 4.8/4.9 memory and BYOB MCP drift checks. Implements Phase 2 of [issue #1396](https://github.com/tomcounsell/ai/issues/1396); Phase 1 (dynamic MCP loading) is deferred.
+
 ### Technical Approach
 
 #### 1. `scripts/remote-update.sh`

@@ -149,12 +149,12 @@ This work is staged in follow-up tasks (9 and 11 in the plan).
 
 The agent delivers user-visible messages and reactions via two CLI tools invoked through the `Bash` tool, not through a dedicated MCP server:
 
-- `tools/send_message.py '<text>'` — primary delivery tool. Writes the payload to the same Redis outbox consumed by `bridge/telegram_relay.py`. Handles `--reply-to <msg_id>` and `--file <path>` flags for threaded replies and attachments.
+- `tools/send_message.py '<text>'` — primary delivery tool. Reconstitutes the `AgentSession` from `VALOR_SESSION_ID` and delegates to `agent.output_handler.TelegramRelayOutputHandler.send` for both telegram and email transports, so the drafter / redundancy filter / read-the-room gate run identically on the tool-call path and the silent-worker path. Handles `--reply-to <msg_id>` and `--file <path>` flags for threaded replies and attachments. Fail-closed on missing session; `ALLOW_LEGACY_RPUSH_FALLBACK=1` opts into a diagnostic-only legacy raw rpush.
 - `tools/react_with_emoji.py '<emoji>'` — posts a reaction emoji on the triggering message. Used for lightweight acknowledgements ("thumbs up, done") when a full text response would be noise.
 
 The stop hook classifies each turn's outcome by scanning `tool_use` blocks for these exact script paths (`agent/hooks/stop.py::classify_delivery_outcome`). Matches produce one of the five outcomes (send, edit+send, react, silent, continue).
 
-**Why CLI tools over a bespoke MCP server:** shipping a `mcp_servers/message_delivery_server.py` would require a root `.mcp.json` registration and add 300–500 lines of infrastructure for a surface that already works. The CLI tools route through the same outbox + relay as every other delivery path, the stop hook already recognizes them, and they are transparent to `gh pr comment` or any other bridge path that bypasses the drafter. Transcript readability (tool calls appearing as `Bash` invocations rather than semantic `send_message` tool_use blocks) is the only real trade-off, and the stop hook compensates by attaching semantic classification after the fact.
+**Why CLI tools over a bespoke MCP server:** a dedicated MCP server would require a root `.mcp.json` registration and add 300–500 lines of infrastructure for a surface that already works. The CLI tools route through the same outbox + relay as every other delivery path, the stop hook already recognizes them, and they are transparent to `gh pr comment` or any other bridge path that bypasses the drafter. Transcript readability (tool calls appearing as `Bash` invocations rather than semantic `send_message` tool_use blocks) is the only real trade-off, and the stop hook compensates by attaching semantic classification after the fact.
 
 **Reversibility:** the CLI-tool surface can be wrapped in an MCP server in a future chore if transcript readability becomes a pain point. The stop-hook classification logic would gain a pattern match on the new tool name and keep the existing Bash-pattern match as a fallback for legacy turns.
 
@@ -171,7 +171,7 @@ Both layers queue a 👀 reaction on suppress (with an anchor) and emit `session
 
 ## Files
 
-- `bridge/message_drafter.py` — the drafter module (replaces `bridge/summarizer.py`). Includes `_truncate_at_sentence_boundary` since the #1074 follow-up.
+- `bridge/message_drafter.py` — the drafter module. Includes `_truncate_at_sentence_boundary` since the #1074 follow-up.
 - `bridge/redundancy_filter.py` — deterministic redundancy filter for SDLC sessions (issue #1205).
 - `agent/output_handler.py::TelegramRelayOutputHandler` — canonical delivery entry point. Drafter runs here; payload is written to the Redis outbox. Used by both the worker `send_cb` and (since the #1074 follow-up) the bridge's handler-event send callback.
 - `bridge/email_bridge.py::EmailOutputHandler` — drafter-in-handler wiring for email.

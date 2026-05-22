@@ -65,7 +65,7 @@ The worker's `enrich_message` emits a single summary log line per call; `media=`
 | `media=yes` | AI enrichment succeeded; description prepended to text. |
 | `media=skipped:no_record` | No `TelegramMessage` record was loaded (manual session, ad-hoc invocation). Normal path. |
 | `media=skipped:download_failed` | `media_local_path is None and media_download_error is not None`. |
-| `media=skipped:no_path` | `media_local_path is None` and no error recorded — usually a pre-migration record. |
+| `media=skipped:no_path` | `media_local_path is None` and no error recorded — after the **(sdlc-1330)** orphan self-heal runs first. If exactly one file matches `*_{message_id}.*` under `MEDIA_DIR`, the worker adopts it, logs an `INFO` self-heal line, and proceeds to AI enrichment (i.e. summary becomes `media=yes`). Zero or multiple matches fall through to this summary — usually a pre-migration record or genuinely missing intake. |
 | `media=skipped:file_unreadable` | The file at `media_local_path` is missing or not readable. |
 | `media=skipped:no_description` | AI ran but produced empty output. |
 | `media=failed` | AI processing raised; logged with traceback. |
@@ -94,7 +94,7 @@ The reply-chain branch in `bridge/enrichment.py` still requires a Telethon clien
 
 - `bridge/telegram_bridge.py` — handler, intake timing, bridge-side download, persistence. Hosts `_download_media_with_retry` (size-aware timeout + 1-retry wrapper around `download_media`).
 - `bridge/media.py` — `download_media`, `compute_media_timeout` (size-aware timeout helper, line 258), `process_incoming_media`, `process_downloaded_media`, `describe_image`, `transcribe_voice`, `extract_document_text`.
-- `bridge/enrichment.py` — worker-side `enrich_message`.
+- `bridge/enrichment.py` — worker-side `enrich_message`; hosts the **(sdlc-1330)** orphan-file self-heal that globs `MEDIA_DIR` for `*_{message_id}.*` when `has_media=True` but neither `media_local_path` nor `media_download_error` is set.
 - `models/telegram.py` — `TelegramMessage` field definitions.
 - `agent/session_executor.py` — call site that passes the loaded `TelegramMessage` to `enrich_message`.
 
