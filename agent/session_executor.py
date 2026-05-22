@@ -814,6 +814,27 @@ async def _execute_agent_session(session: AgentSession) -> None:
             if is_synthetic_slug:
                 resolved_branch = f"session/{slug}"
                 needs_wt = True
+            # Stageless dev sessions with a pre-provisioned worktree
+            # (typical for /do-todos batch dispatch: PM session creates
+            # dev sessions with working_dir already pointing at
+            # ``.worktrees/{slug}/`` but no ``current_stage`` set yet).
+            # ``resolve_branch_for_stage`` returns ``("main", False)`` in
+            # that case, which trips the branch-mismatch guard below
+            # because the worktree is on ``session/{slug}`` and
+            # ``git checkout main`` cannot succeed when main is owned by
+            # the primary checkout. Trust the worktree's branch.
+            _stype_early = getattr(session, "session_type", None)
+            if (
+                _stype_early == "dev"
+                and slug
+                and stage is None
+                and resolved_branch == "main"
+                and not needs_wt
+                and WORKTREES_DIR in str(working_dir)
+                and working_dir.exists()
+            ):
+                resolved_branch = f"session/{slug}"
+                needs_wt = True
             branch_name = resolved_branch
             # If branch resolution says we need a worktree and working_dir isn't one,
             # OR the path looks like a worktree but the directory is missing on disk
