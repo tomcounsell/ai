@@ -835,3 +835,63 @@ class TestVerifyWorktreeBranch:
     def test_none_path_raises_type_error(self):
         with pytest.raises(TypeError):
             verify_worktree_branch(None, "main")
+
+    def test_mismatch_clean_target_branch_locked_elsewhere_raises(self, tmp_path):
+        """Issue #1412: refuse early when expected_branch is held by another worktree."""
+        import subprocess as _sp
+
+        # Main repo on `main`.
+        main_repo = _init_git_worktree(tmp_path, "main")
+        # Create a session branch in the main repo, then add a sibling worktree
+        # for it. After the worktree is added, the main repo stays on `main`
+        # and the sibling holds `session/x`.
+        _sp.run(
+            ["git", "-C", str(main_repo), "branch", "session/x"],
+            check=True,
+            capture_output=True,
+        )
+        sibling = tmp_path / "sibling"
+        _sp.run(
+            ["git", "-C", str(main_repo), "worktree", "add", str(sibling), "session/x"],
+            check=True,
+            capture_output=True,
+        )
+
+        # Now `main` is locked by main_repo. verify_worktree_branch on the
+        # sibling asking for "main" must raise with the structured cause.
+        with pytest.raises(WorktreeBranchMismatchError) as ei:
+            verify_worktree_branch(sibling, "main")
+        assert ei.value.expected_branch == "main"
+        assert ei.value.actual_branch == "session/x"
+        cause = str(ei.value)
+        assert "already used by worktree at" in cause
+        assert str(main_repo.resolve()) in cause or str(main_repo) in cause
+
+    def test_mismatch_clean_target_branch_not_locked_proceeds(self, tmp_path):
+        """Issue #1412: when target branch is unlocked, existing recovery path still runs."""
+        import subprocess as _sp
+
+        # Main repo on `main`, create a `main2` branch (no worktree holds it),
+        # then move the main repo onto `session/x`. Now `main2` is unlocked.
+        main_repo = _init_git_worktree(tmp_path, "main")
+        _sp.run(
+            ["git", "-C", str(main_repo), "branch", "main2"],
+            check=True,
+            capture_output=True,
+        )
+        _sp.run(
+            ["git", "-C", str(main_repo), "checkout", "-q", "-b", "session/x"],
+            check=True,
+            capture_output=True,
+        )
+
+        # Asking the main_repo (currently on session/x) to verify "main2"
+        # should auto-checkout since `main2` is not held by any worktree.
+        verify_worktree_branch(main_repo, "main2")
+        head = _sp.run(
+            ["git", "-C", str(main_repo), "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head == "main2"

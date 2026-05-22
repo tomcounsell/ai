@@ -156,6 +156,42 @@ def verify_worktree_branch(worktree_path: Path, expected_branch: str) -> None:
             dirty_files=dirty,
         )
 
+    # Pre-check: refuse early if expected_branch is locked by another worktree
+    # (issue #1412). Without this guard, `git checkout` below fails with a raw
+    # "'<branch>' is already used by worktree at '<path>'" stderr leak.
+    try:
+        common_dir = subprocess.run(
+            ["git", "-C", str(worktree_path), "rev-parse", "--git-common-dir"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            actual_branch,
+            cause=f"git rev-parse --git-common-dir failed: {e.stderr.strip() if e.stderr else e}",
+        ) from e
+
+    # --git-common-dir returns the .git directory of the main repo (may be a
+    # path relative to the worktree, e.g. just ".git" for a standalone repo);
+    # resolve it against the worktree before taking the parent.
+    common_dir_raw = Path(common_dir.stdout.strip())
+    if not common_dir_raw.is_absolute():
+        common_dir_raw = worktree_path / common_dir_raw
+    main_repo_root = common_dir_raw.resolve().parent
+    holding_path = _find_worktree_for_branch(main_repo_root, expected_branch)
+    if holding_path is not None and Path(holding_path).resolve() != worktree_path.resolve():
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            actual_branch,
+            cause=(
+                f"cannot checkout '{expected_branch}': already used by worktree at '{holding_path}'"
+            ),
+        )
+
     # Clean — auto-recover by checking out the expected branch.
     try:
         subprocess.run(
