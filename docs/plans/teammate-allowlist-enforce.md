@@ -169,7 +169,11 @@ def _path_on_allowlist(path: str, project_root: str) -> bool:
 
     # Directory prefix check — ANCHORED to parts[0], not substring.
     # parts[0] must equal one of the allowed top-level dir names.
-    if first in TEAMMATE_ALLOWED_DIR_NAMES_AT_ROOT:
+    # NOTE: require len(parts) > 1 so a bare file literally named `docs`
+    # (or `.claude`, `wiki`, etc.) at project root does NOT match the
+    # directory rule. Bare top-level files go through the explicit
+    # filename/extension allowlist below.
+    if len(parts) > 1 and first in TEAMMATE_ALLOWED_DIR_NAMES_AT_ROOT:
         return True
 
     # Top-level file check — exactly ONE part means top-level file.
@@ -292,6 +296,7 @@ Add (replacing the dropped block):
   - **Deny — path traversal:** `docs/../agent/foo.py`, `.claude/../bridge/x.py`, `docs/sub/../../agent/y.py`
   - **Deny — symlink escape:** Set up a tmp dir with `ln -s ../agent docs/escape`, attempt write to `docs/escape/sdk_client.py`, assert denied via realpath check. Use `tmp_path` fixture and `monkeypatch` cwd.
   - **Deny — top-level non-allowlist file:** `pyproject.toml`, `package.json`, `Makefile`, `Dockerfile`, `manage.py`
+  - **Deny — bare top-level dir-name file:** `docs` (no extension, at project root) must be DENIED even though `parts[0]="docs"`. Covered by the `len(parts) > 1` guard. Likewise `.claude`, `wiki`, `skills` as bare files.
   - **Deny — nested non-allowlist:** `apps/api/README.md` (top-level *.md rule does NOT extend to nested READMEs)
   - **Deny — outside project root:** `/tmp/foo.md`, `/etc/passwd`
   - **Deny — empty/invalid:** `""`, `None` (via type guard)
