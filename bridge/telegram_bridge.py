@@ -1045,14 +1045,21 @@ async def main():
         logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set")
         sys.exit(1)
 
-    # Validate agent definition files exist on disk. Missing files are not
-    # fatal — the SDK falls back gracefully — but we surface warnings early
-    # so operators can fix them before users hit degraded prompts.
+    # Validate agent definition files are usable on disk. Missing, malformed,
+    # or unreadable files are not fatal — the SDK falls back gracefully — but
+    # we surface warnings early so operators can fix them before users hit
+    # degraded prompts. `_parse_agent_markdown` already logs a precise warning
+    # (with exception class and path) for each fallback path, so we emit a
+    # concise startup-level summary here instead of a misleading per-path line.
     from agent.agent_definitions import validate_agent_files
 
-    missing_agent_files = validate_agent_files()
-    for missing_path in missing_agent_files:
-        logger.warning("Missing agent definition file: %s", missing_path)
+    problematic_agent_files = validate_agent_files()
+    if problematic_agent_files:
+        logger.warning(
+            "Unusable agent definition files detected at startup (%d): %s",
+            len(problematic_agent_files),
+            problematic_agent_files,
+        )
 
     logger.info("Starting Valor bridge")
     logger.info("Agent backend: Claude Agent SDK")

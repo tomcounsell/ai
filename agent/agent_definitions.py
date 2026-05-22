@@ -173,8 +173,9 @@ def validate_agent_files() -> list[str]:
     For each expected agent file, this checks:
 
     1. **Existence**: if the file is missing, append its path to the returned
-       list and log a warning (existing behavior, preserved for log-format
-       compatibility with ``test_partial_missing``).
+       list. Per-path warnings are emitted by ``_parse_agent_markdown`` for
+       parse failures; the missing-file case is surfaced via the returned list
+       (callers log a summary).
     2. **Trial-parse**: if the file exists, attempt to parse it via
        ``_parse_agent_markdown``. Because that helper now returns a fallback
        dict (with ``"_is_fallback": True``) for malformed YAML, OS read
