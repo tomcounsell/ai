@@ -707,7 +707,16 @@ start_worker() {
 
     if [ -f "$WORKER_PLIST_PATH" ]; then
         if ! is_worker_launchd_loaded; then
-            launchctl load "$WORKER_PLIST_PATH"
+            # Use bootstrap (modern API) instead of `launchctl load`, which is
+            # deprecated since macOS 12 and registers the service in a legacy
+            # domain invisible to `gui/<uid>/` queries. The legacy registration
+            # breaks `KeepAlive` respawn and makes the watchdog's recovery
+            # chain unable to find the service (rc=113). Defensive bootout
+            # first so bootstrap doesn't fail with "service already
+            # bootstrapped" if a partial registration exists. See issue #1407
+            # and `scripts/install_worker.sh` for the canonical pattern.
+            launchctl bootout "gui/$(id -u)/$WORKER_PLIST_NAME" 2>/dev/null || true
+            launchctl bootstrap "gui/$(id -u)" "$WORKER_PLIST_PATH"
         else
             launchctl kickstart "gui/$(id -u)/$WORKER_PLIST_NAME"
         fi

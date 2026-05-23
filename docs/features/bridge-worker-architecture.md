@@ -616,6 +616,7 @@ launchd's `ThrottleInterval` (configured at 10 seconds in `com.valor.worker.plis
 - After `asyncio.run(_run_worker(...))` returns, `main()` checks the flag and calls `sys.exit(1)` if it is set.
 - SIGINT (developer Ctrl-C) leaves the flag unset and exits 0 — a voluntary stop during development should not be penalized with a forced restart.
 - `stop_worker()` in `scripts/valor-service.sh` uses `launchctl bootout` (the modern macOS API) to remove the worker from the launchd domain, consistent with `scripts/install_worker.sh`.
+- `start_worker()` in `scripts/valor-service.sh` uses `launchctl bootout` (defensive, to clear any partial registration) followed by `launchctl bootstrap gui/<uid> <plist>` (issue #1407). The previous `launchctl load` path is deprecated since macOS 12 and registers the service in a legacy domain invisible to `gui/<uid>/` queries — this broke `KeepAlive` respawn and made the watchdog's recovery chain return rc=113. Bootstrap-based registration is the only path that keeps `KeepAlive` and `launchctl kickstart` working together.
 
 **Result:** Worker killed via SIGTERM restarts within 15 seconds (10s `ThrottleInterval` + margin) rather than the ~10-minute default.
 
