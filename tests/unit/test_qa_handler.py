@@ -9,10 +9,13 @@ class TestBuildTeammateInstructions:
         assert isinstance(result, str)
         assert len(result) > 50
 
-    def test_no_agent_tool_instruction(self):
+    def test_dev_session_redirect_present(self):
+        """Teammate prompt must surface the Dev-session redirect command
+        and the WHEN BLOCKED guidance verbatim, since the hook block
+        message also includes the redirect."""
         result = build_teammate_instructions()
-        assert "Do NOT spawn a Dev session" in result
-        assert "Do NOT use the Agent tool" in result
+        assert "valor-session create --role dev" in result
+        assert "WHEN BLOCKED" in result
 
     def test_read_only_tools_mentioned(self):
         result = build_teammate_instructions()
@@ -20,9 +23,22 @@ class TestBuildTeammateInstructions:
         assert "Glob" in result
         assert "Grep" in result
 
-    def test_no_write_instruction(self):
+    def test_operational_work_encouraged(self):
+        """The rewrite drops 'Do NOT' prose in favor of explicit
+        encouragement to do operational work."""
         result = build_teammate_instructions()
-        assert "Do NOT write files" in result
+        assert "OPERATIONAL WORK ENCOURAGED" in result
+        # Old restrictive prose must be gone (it's enforced in code now).
+        assert "Do NOT write files" not in result
+        assert "Do NOT use the Agent tool" not in result
+        assert "Do NOT spawn a Dev session" not in result
+
+    def test_tool_posture_block_present(self):
+        """The TOOL POSTURE block must describe the one-rule enforcement
+        and the audit log."""
+        result = build_teammate_instructions()
+        assert "TOOL POSTURE" in result
+        assert "teammate-audit" in result
 
     def test_no_send_telegram_instruction(self):
         """Teammate should not reference send_telegram.py -- single delivery path via summarizer."""

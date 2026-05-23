@@ -166,6 +166,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [System Overview](system-overview.md) | High-level architecture and design principles | Archived |
 | [Task List Isolation Experiment](task-list-isolation.md) | Experiment results validating CLAUDE_CODE_TASK_LIST_ID behavior | Archived |
 | [Teammate Conversational Humility](qa-conversational-humility.md) | Direct, honest Teammate responses: brevity, hedged language for uncertain claims, stop-hook review gate for delivery control | Shipped |
+| [Teammate Session Permissions](teammate-session-permissions.md) | Code-level enforcement of the one teammate hard rule (writes to source-code paths require a Dev session); two-pass allowlist (normpath + realpath) closes path-traversal and symlink-escape; `[teammate-audit]` Bash log; capable prompt with TOOL POSTURE / OPERATIONAL WORK ENCOURAGED / WHEN BLOCKED blocks. Also fixes a latent PM MultiEdit gap. | Shipped |
 | [Telegram History & Links](telegram-history.md) | Searchable message history and link compilation from Telegram | Shipped |
 | [Telegram Message Edit Handling](telegram-message-edit-handling.md) | Handles Telegram MessageEdited events — steers running sessions with edited text or spawns a fresh session for completed ones | Shipped |
 | [Telegram Messaging](telegram-messaging.md) | Unified interface for reading and sending Telegram messages via `valor-telegram` CLI | Shipped |
