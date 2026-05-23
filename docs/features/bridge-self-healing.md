@@ -425,11 +425,11 @@ A Redis counter (`worker:watchdog:down_ticks:{hostname}`) tracks consecutive mis
 |-------|---------|--------|
 | L1 | First down tick (count == 1) | Log `Worker missing — giving launchd one tick to restart` and exit. Give launchd a chance. |
 | L2 | Second consecutive down tick (count >= 2) | `launchctl kickstart -k gui/<uid>/com.valor.worker`, then poll `pgrep` for up to 10s. On success, clear counter. |
-| L2.5 | L2 returned rc=113 / `Could not find service` AND `~/Library/LaunchAgents/com.valor.worker.plist` exists (issue #1407) | `launchctl bootstrap gui/<uid> <plist>` to re-register the service in the gui domain, then retry kickstart and verify. On success, clear counter. Heals the regression where `start_worker()` registered the service via the legacy `launchctl load` path, leaving it invisible to `gui/<uid>/` queries. Plist-existence gate ensures uninstalled hosts fall through cleanly. |
+| L2.5 | L2 returned rc=113 / `Could not find service` AND `~/Library/LaunchAgents/com.valor.worker.plist` exists (issue #1407) | `launchctl bootstrap gui/<uid> <plist>` to re-register the service in the gui domain, then retry kickstart and verify. On success, clear counter. Heals the case where `start_worker()` registered the service via `launchctl load`, leaving it invisible to `gui/<uid>/` queries. Plist-existence gate ensures uninstalled hosts fall through cleanly. |
 | L3 | L2/L2.5 verify failed | `launchctl enable gui/<uid>/com.valor.worker` (clears sticky-disable from `worker-disable`) + kickstart + verify. On success, clear counter. |
 | L4 | L3 verify failed AND count >= 3 | Log CRITICAL with hostname + tick count. Reason string includes `bootstrap+kickstart+enable all failed` when L2.5 was attempted, otherwise `kickstart+enable both failed`. Write `worker:watchdog:critical:{hostname}` Redis key (TTL 1h, JSON payload `{hostname, tick_count, last_attempt_at, reason}`). Counter persists; subsequent ticks repeat L4 idempotently. |
 
-**Why L2.5 was needed (issue #1407)**: prior to the fix, `scripts/valor-service.sh::start_worker()` used `launchctl load` (deprecated since macOS 12) which registered the worker in a legacy domain. After any `worker-stop && worker-start` cycle, `KeepAlive` no longer fired and the watchdog's `kickstart gui/<uid>/...` returned rc=113. `start_worker()` was also modernized to use `bootout + bootstrap gui/<uid> <plist>` so the registration always lands in the modern domain on day one. L2.5 is the defense-in-depth — if any future code path regresses to the legacy registration, the watchdog now self-heals.
+**Why L2.5 was needed (issue #1407)**: prior to the fix, `scripts/valor-service.sh::start_worker()` used `launchctl load` which registered the worker in a domain outside `gui/<uid>/`. After any `worker-stop && worker-start` cycle, `KeepAlive` no longer fired and the watchdog's `kickstart gui/<uid>/...` returned rc=113. `start_worker()` was also modernized to use `bootout + bootstrap gui/<uid> <plist>` so the registration always lands in the gui domain on day one. L2.5 is the defense-in-depth — if any future code path regresses, the watchdog now self-heals.
 
 **Operator-disable short-circuit**: the watchdog detects sticky-disable via `launchctl print-disabled gui/<uid>` at the very top of `main()`. If `"com.valor.worker" => disabled` appears in the output, it logs `Worker disabled by operator (launchctl print-disabled) — skipping check`, clears the down-tick counter (so a future re-enable starts fresh), and returns without touching launchctl. This is the only authoritative source — `worker-disable` in `valor-service.sh` calls `launchctl disable` directly; no sidecar flag file exists. Operator check precedes the down-counter increment so a disabled worker never accumulates ticks.
 
@@ -539,11 +539,11 @@ When `sdk_ever_output` is False (neither per-turn field has ever been set),
 as progress, **subject to the no-output running-time budget gate**. The
 function uses `started_ref = entry.started_at or entry.created_at` so that
 recovered sessions (whose `started_at` is nulled by the recovery path)
-cannot silently re-enter the legacy fast-path:
+cannot silently re-enter the original fast-path:
 
 | `started_ref` state | Verdict |
 |---|---|
-| both `started_at` and `created_at` are None (truly legacy / phantom record) | fresh heartbeat passes |
+| both `started_at` and `created_at` are None (phantom record from older format) | fresh heartbeat passes |
 | `running_seconds < STARTUP_GRACE_SECONDS` (300s, aliased to `AGENT_SESSION_HEALTH_MIN_RUNNING`, env-tunable) | fresh heartbeat passes |
 | `STARTUP_GRACE_SECONDS <= running_seconds <= NO_OUTPUT_BUDGET_SECONDS` (= `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW` = 1800s, 30 min) | fresh heartbeat passes (in-band) |
 | `running_seconds > 1800s` AND `sdk_ever_output is False` | **fall through** — INCRs `tier1_falloff:no_output_budget_exceeded`, sub-check B does NOT pass; combined with absent per-turn signals and own-progress fields, `_has_progress` returns False; Tier 2 reprieve cap then escalates to recovery within `MAX_NO_OUTPUT_REPRIEVES` ticks |
@@ -570,7 +570,7 @@ session with any non-terminal child is not stuck).
 >
 > **Retired by issue #1226:** the symmetric "dual heartbeat" Tier 1
 > (either `last_heartbeat_at` or `last_sdk_heartbeat_at` fresh = progress)
-> was replaced by sub-check A above. `last_sdk_heartbeat_at` is now
+> was rewritten as sub-check A above. `last_sdk_heartbeat_at` is now
 > watchdog-only.
 
 **Constants:**
