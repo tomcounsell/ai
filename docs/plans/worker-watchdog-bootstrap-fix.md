@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor
 created: 2026-05-22
 tracking: https://github.com/tomcounsell/ai/issues/1407
 last_comment_id:
+revision_applied: true
 ---
 
 # Worker Watchdog launchd Bootstrap Fix
@@ -214,16 +215,16 @@ No agent integration required — this is an infrastructure fix to the worker la
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/bridge-worker-architecture.md` if it documents the launchd registration — add a sentence noting the bootstrap-based registration model.
-- [ ] Update `docs/features/bridge-self-healing.md` (or its worker counterpart, if present) to mention the watchdog's new L2.5 bootstrap-recovery step.
+- [x] Update `docs/features/bridge-worker-architecture.md` if it documents the launchd registration — add a sentence noting the bootstrap-based registration model.
+- [x] Update `docs/features/bridge-self-healing.md` (or its worker counterpart, if present) to mention the watchdog's new L2.5 bootstrap-recovery step.
 
 ### External Documentation Site
 - No external docs site for this repo.
 
 ### Inline Documentation
-- [ ] Code comment in `start_worker()` explaining why `bootout + bootstrap` is preferred over `load` (cite macOS 12+ deprecation).
-- [ ] Code comment in `_handle_missing_worker()` for the L2.5 branch explaining the rc=113 detection and self-healing intent.
-- [ ] Module-level docstring update in `monitoring/worker_watchdog.py` to extend the L1→L4 description with the new L2.5 step.
+- [x] Code comment in `start_worker()` explaining why `bootout + bootstrap` is preferred over `load` (cite macOS 12+ deprecation).
+- [x] Code comment in `_handle_missing_worker()` for the L2.5 branch explaining the rc=113 detection and self-healing intent.
+- [x] Module-level docstring update in `monitoring/worker_watchdog.py` to extend the L1→L4 description with the new L2.5 step.
 
 ## Success Criteria
 
