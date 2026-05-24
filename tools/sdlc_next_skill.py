@@ -123,7 +123,12 @@ def decide(
         On error: ``{"error": "...", "dispatched": False}``
     """
     try:
-        from agent.sdlc_router import Blocked, Dispatch, decide_next_dispatch
+        from agent.sdlc_router import (
+            Blocked,
+            Dispatch,
+            MultiDispatch,
+            decide_next_dispatch,
+        )
 
         enriched = _resolve_enriched(issue_number, session_id)
         stage_states = enriched.get("stages") or {}
@@ -132,7 +137,22 @@ def decide(
 
         result = decide_next_dispatch(stage_states, meta, context)
 
-        if isinstance(result, Dispatch):
+        if isinstance(result, MultiDispatch):
+            return {
+                "multi": True,
+                "dispatched": True,
+                "skills": [d.skill for d in result.dispatches],
+                "dispatches": [
+                    {
+                        "skill": d.skill,
+                        "reason": d.reason,
+                        "row_id": d.row_id,
+                    }
+                    for d in result.dispatches
+                ],
+                "reason": result.reason,
+            }
+        elif isinstance(result, Dispatch):
             return {
                 "skill": result.skill,
                 "reason": result.reason,
