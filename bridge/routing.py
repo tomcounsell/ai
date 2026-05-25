@@ -357,8 +357,15 @@ def resolve_persona(
     Returns:
         PersonaType member or None (unconfigured).
     """
-    # DMs are always Teammate
+    # DMs: use per-project dm_persona if configured, else default to TEAMMATE
     if is_dm:
+        if project:
+            dm_persona_str = project.get("telegram", {}).get("dm_persona")
+            if dm_persona_str:
+                try:
+                    return PersonaType(dm_persona_str)
+                except ValueError:
+                    pass
         return PersonaType.TEAMMATE
 
     # Look up persona from group config in projects.json
