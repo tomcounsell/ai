@@ -646,6 +646,13 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
             logger.debug(f"Relay: discarding dead letter for non-Telegram chat_id '{chat_id}'")
             return
 
+        # chat_id=0 is not a valid Telegram peer — don't persist, it loops forever.
+        if chat_id_int <= 0:
+            logger.warning(
+                f"Relay: discarding dead letter for invalid chat_id={chat_id!r} (not a valid peer)"
+            )
+            return
+
         try:
             from bridge.dead_letters import persist_failed_delivery
 

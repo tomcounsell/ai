@@ -48,6 +48,19 @@ async def replay_dead_letters(client) -> int:
             await letter.async_delete()
             continue
 
+        # Guard against invalid chat_id=0 (not a valid Telegram peer).
+        # Clean up any stuck dead letters from previous relay bugs.
+        try:
+            chat_id_int = int(chat_id)
+        except (ValueError, TypeError):
+            chat_id_int = 0
+        if chat_id_int <= 0:
+            logger.warning(
+                f"Dead letter replay: discarding invalid chat_id={chat_id!r}, deleting record"
+            )
+            await letter.async_delete()
+            continue
+
         try:
             if len(text) > 4096:
                 text = text[:4093] + "..."
