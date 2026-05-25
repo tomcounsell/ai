@@ -5,7 +5,7 @@ Seven standalone reflection functions, each registered in config/reflections.yam
 - session_recovery_drip: drip paused_circuit and paused sessions back to pending one at a time
 - session_count_throttle: throttle sessions per hour to prevent runaway execution
 - failure_loop_detector: deduplicate GitHub issues for repeated error patterns
-- sustainability_digest: daily Telegram health summary
+- sustainability_digest: daily health summary, logged only (no Telegram delivery)
 - send_hibernation_notification: enqueue a Telegram notification for hibernation entry or wake
 
 All functions are synchronous (run in executor by the reflection scheduler).
@@ -493,11 +493,12 @@ def _file_github_issue(fingerprint: str, sessions: list, session_ids: list) -> N
 
 
 def sustainability_digest() -> None:
-    """Send a daily health summary to Telegram.
+    """Log a daily health summary.
 
-    Checks all health signals locally. If everything is nominal, sends a
-    one-line "all clear" directly via valor-telegram (no agent session needed).
-    Only spins up a full agent session when there are anomalies worth reporting.
+    Checks all health signals locally and emits the result to the worker log
+    (no Telegram, no agent session). Operators read it via `tail logs/worker.log`
+    or the dashboard; we deliberately do not push it to chat to avoid 4x/day
+    cross-machine noise.
 
     This reflection is registered with interval 86400s (daily).
     """
@@ -561,11 +562,11 @@ def sustainability_digest() -> None:
         )
 
         if is_nominal:
-            # Send a one-liner directly — no agent session needed
-            _send_telegram("🩺 Daily health check — all clear, no surprises.")
-            logger.info("[system-health-digest] All nominal — sent one-liner")
+            logger.info(
+                "[system-health-digest] All nominal — circuits OK, throttle=none, "
+                "queue active, 0 failure clusters, 0 failed sessions (24h)"
+            )
         else:
-            # Something noteworthy — spin up an agent to investigate and report
             anomalies = []
             if not circuits_ok:
                 anomalies.append("one or more service circuits are not healthy")
@@ -580,55 +581,6 @@ def sustainability_digest() -> None:
             elif failed_24h < 0:
                 anomalies.append("could not count failed sessions")
 
-            command = (
-                "You are generating the daily sustainability digest for the Valor AI system. "
-                "There are anomalies that need reporting:\n"
-                + "\n".join(f"- {a}" for a in anomalies)
-                + "\n\n"
-                "Investigate each anomaly. Collect details:\n"
-                "1. Circuit state per dependency (anthropic, telegram, redis)\n"
-                "2. Current throttle level and queue paused status from Redis\n"
-                "3. Session counts and failure details from last 24 hours\n"
-                "4. Active failure cluster count\n\n"
-                "When reporting circuit states, translate as follows"
-                " — never output the raw state string:\n"
-                "- 'closed' or 'CLOSED' → OK\n"
-                "- 'open' or 'OPEN' → DOWN\n"
-                "- 'half_open' or 'HALF_OPEN' → RECOVERING\n\n"
-                "Format as a concise Telegram message highlighting what's wrong. "
-                "Send via valor-telegram to the 'Dev: Valor' chat. "
-                "Subject line: ⚠️ Daily Health Digest — anomalies detected."
-            )
-
-            AgentSession.create_and_enqueue(
-                project_key=project_key,
-                message_text=command,
-                session_type="dev",
-                priority="low",
-                extra_context={"digest_type": "sustainability_digest"},
-            )
-            logger.info(
-                "[system-health-digest] Anomalies detected (%s) — enqueued agent session",
-                ", ".join(anomalies),
-            )
+            logger.warning("[system-health-digest] Anomalies detected: %s", "; ".join(anomalies))
     except Exception:
         logger.exception("[system-health-digest] Unhandled exception — skipping tick")
-
-
-def _send_telegram(message: str) -> None:
-    """Send a message to the 'Dev: Valor' chat via valor-telegram CLI."""
-    try:
-        result = subprocess.run(
-            ["valor-telegram", "send", "--chat", "Dev: Valor", message],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            logger.error(
-                "[system-health-digest] valor-telegram send failed (rc=%d): %s",
-                result.returncode,
-                result.stderr.strip(),
-            )
-    except Exception as e:
-        logger.error("[system-health-digest] Failed to send Telegram message: %s", e)
