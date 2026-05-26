@@ -190,16 +190,16 @@ Inside that single bash block:
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] No Python `except Exception: pass` blocks in the touched files — the touched files are SKILL.md (markdown). The bash error path is explicit `exit 1` with stderr output, not an exception swallow. Documented in this plan.
+- [x] No Python `except Exception: pass` blocks in the touched files — the touched files are SKILL.md (markdown). The bash error path is explicit `exit 1` with stderr output, not an exception swallow. Documented in this plan.
 
 ### Empty/Invalid Input Handling
-- [ ] Document what happens if `mktemp` fails: skill exits 1 with `ERROR: mktemp failed` (line in Technical Approach step 1). The pipeline's outer SDLC machinery treats non-zero exit as stage failure.
-- [ ] Document what happens if `head -1 "$DRAFT"` returns empty (file truncated to 0 bytes by another agent): the `grep -qF` fails, the verification block prints "ERROR: draft anchor mismatch" with empty actual line, exit 1. **No silent loop.**
-- [ ] Document what happens if the entire draft is replaced with foreign content (the original incident scenario): `head -1` returns the foreign first line, `grep -qF` against the captured anchor fails, abort with both expected + actual lines on stderr.
+- [x] Document what happens if `mktemp` fails: skill exits 1 with `ERROR: mktemp failed` (line in Technical Approach step 1). The pipeline's outer SDLC machinery treats non-zero exit as stage failure.
+- [x] Document what happens if `head -1 "$DRAFT"` returns empty (file truncated to 0 bytes by another agent): the `grep -qF` fails, the verification block prints "ERROR: draft anchor mismatch" with empty actual line, exit 1. **No silent loop.**
+- [x] Document what happens if the entire draft is replaced with foreign content (the original incident scenario): `head -1` returns the foreign first line, `grep -qF` against the captured anchor fails, abort with both expected + actual lines on stderr.
 
 ### Error State Rendering
-- [ ] The skill's user-visible failure path is the stderr block (`ERROR: draft anchor mismatch …`). Manual smoke (see Verification) confirms it renders to the operator and is not swallowed by `gh issue create`'s output channel.
-- [ ] On success, output is unchanged (`Issue created: #{number} — {title}` line).
+- [x] The skill's user-visible failure path is the stderr block (`ERROR: draft anchor mismatch …`). Manual smoke (see Verification) confirms it renders to the operator and is not swallowed by `gh issue create`'s output channel.
+- [x] On success, output is unchanged (`Issue created: #{number} — {title}` line).
 
 ## Test Impact
 
@@ -269,14 +269,14 @@ No documentation changes needed beyond inline SKILL.md comments. Confirmed durin
 
 ## Success Criteria
 
-- [ ] `/do-issue` no longer references `/tmp/issue_body.md` literally; the draft path is `mktemp`-generated per invocation.
-- [ ] `/do-investigation-issue` no longer references `/tmp/investigation_body.md` literally; same scoping applied.
-- [ ] Both skills prepend a `<!-- draft-owner: pid=<PID> ts=<EPOCH> -->` anchor to the draft and verify it via `head -1 | grep -qF` before `gh issue create`. Anchor mismatch causes `exit 1` with both expected and actual anchor on stderr.
-- [ ] Both file paths (`~/.claude/skills/<skill>/SKILL.md` and `.claude/skills-global/<skill>/SKILL.md`) share an inode **after merge to main and `/update` re-run** (`stat -f "%i"` confirms hardlink intact). The "two mirror locations updated identically" acceptance criterion is satisfied automatically by the hardlink machinery on main; the edit in the worktree is to one inode that becomes the shared inode after `/update`. **Build-stage inode check in the worktree is intentionally skipped** — worktree files are independent inodes by git's design (see Risk 4).
-- [ ] Manual concurrency smoke test (documented in Verification) confirms two concurrent draft+publish runs from two shells produce two distinct issues with correct, non-cross-contaminated bodies.
-- [ ] No new dependencies added. `bash` builtins (`mktemp`, `printf`, `grep`, `head`, `cat`, `rm`, `$$`, `date +%s`) and existing `gh` only.
-- [ ] Tests pass (`/do-test`) — the existing pytest suite is not affected; this verifies no collateral breakage.
-- [ ] Documentation updated (`/do-docs`) per the Documentation section.
+- [x] `/do-issue` no longer references `/tmp/issue_body.md` literally; the draft path is `mktemp`-generated per invocation.
+- [x] `/do-investigation-issue` no longer references `/tmp/investigation_body.md` literally; same scoping applied.
+- [x] Both skills prepend a `<!-- draft-owner: pid=<PID> ts=<EPOCH> -->` anchor to the draft and verify it via `head -1 | grep -qF` before `gh issue create`. Anchor mismatch causes `exit 1` with both expected and actual anchor on stderr.
+- [x] Both file paths (`~/.claude/skills/<skill>/SKILL.md` and `.claude/skills-global/<skill>/SKILL.md`) share an inode **after merge to main and `/update` re-run** (`stat -f "%i"` confirms hardlink intact). The "two mirror locations updated identically" acceptance criterion is satisfied automatically by the hardlink machinery on main; the edit in the worktree is to one inode that becomes the shared inode after `/update`. **Build-stage inode check in the worktree is intentionally skipped** — worktree files are independent inodes by git's design (see Risk 4).
+- [x] Manual concurrency smoke test (documented in Verification) confirms two concurrent draft+publish runs from two shells produce two distinct issues with correct, non-cross-contaminated bodies.
+- [x] No new dependencies added. `bash` builtins (`mktemp`, `printf`, `grep`, `head`, `cat`, `rm`, `$$`, `date +%s`) and existing `gh` only.
+- [x] Tests pass (`/do-test`) — the existing pytest suite is not affected; this verifies no collateral breakage.
+- [x] Documentation updated (`/do-docs`) per the Documentation section.
 
 ## Team Orchestration
 
