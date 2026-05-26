@@ -305,6 +305,26 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Corrupted session cleanup failed (non-fatal): {e}")
 
+    # Step 2b: Clean class-set orphans for AgentSession and Memory (#1459)
+    # repair_indexes() in step 2 only covers $IndexF (field/status indexes).
+    # TTL expiry removes hashes without removing class-set members, which causes
+    # continuous Sentry noise. clean_indexes() uses SSCAN (production-safe).
+    try:
+        from models.agent_session import AgentSession
+        from models.memory import Memory
+
+        for model_cls, label in ((AgentSession, "AgentSession"), (Memory, "Memory")):
+            try:
+                removed = model_cls.clean_indexes()
+                if removed:
+                    logger.info(
+                        f"clean_indexes {label}: removed {removed} orphan class-set entries"
+                    )
+            except Exception as ci_err:
+                logger.warning(f"clean_indexes {label} failed (non-fatal): {ci_err}")
+    except Exception as e:
+        logger.warning(f"Class-set orphan cleanup failed (non-fatal): {e}")
+
     # Step 3: Recover any sessions that were running when the previous process died
     try:
         recovered = _recover_interrupted_agent_sessions_startup()

@@ -25,6 +25,7 @@ from pathlib import Path
 from agent.session_state import SessionHandle, _active_events, _active_sessions, _active_workers
 from analytics.collector import record_metric
 from models.agent_session import AgentSession, SessionType
+from models.memory import Memory
 from models.session_lifecycle import ALL_STATUSES, get_authoritative_session
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
@@ -2317,6 +2318,27 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
             logger.debug("[agent-session-cleanup] repair_indexes: no drift, no phantoms")
     except Exception as idx_err:
         logger.warning("[agent-session-cleanup] Index repair failed: %s", idx_err)
+
+    # === Class-set orphan cleanup (#1459) ===
+    # repair_indexes() covers $IndexF (field/status indexes) but never touches
+    # the class set ($Idx:AgentSession). TTL expiry removes the hash but not
+    # its class-set member, causing continuous Sentry noise. clean_indexes()
+    # uses SSCAN (production-safe) to remove stale class-set entries.
+    for model_cls, model_label in ((AgentSession, "AgentSession"), (Memory, "Memory")):
+        try:
+            orphans_removed = model_cls.clean_indexes()
+            if orphans_removed:
+                logger.info(
+                    "[agent-session-cleanup] clean_indexes %s: removed %d orphan class-set entries",
+                    model_label,
+                    orphans_removed,
+                )
+        except Exception as ci_err:
+            logger.warning(
+                "[agent-session-cleanup] clean_indexes %s failed (non-fatal): %s",
+                model_label,
+                ci_err,
+            )
 
     # === Cross-process orphan reap pass (#1271) ===
     # Wrapped in try/except — reaper failure must never abort corrupted-record
