@@ -143,6 +143,7 @@ fi
 
 TYPE="feature"  # or "bug" or "chore"
 
+# Write the issue body to the temp file, then create the issue
 gh issue create \
   --title "Brief, specific title" \
   --label "$TYPE" \

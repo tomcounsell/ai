@@ -8,7 +8,7 @@ Controls that make QA responses in teammate group chats conversational rather th
 
 ### Layer 1: Teammate Prompt Overhaul (`agent/teammate_handler.py`)
 
-`build_teammate_instructions()` uses a "direct, knowledgeable colleague" framing with honest AI self-identity. Key rules:
+`build_teammate_instructions()` uses a "direct, knowledgeable colleague" framing with honest AI self-identity. Write/Edit/MultiEdit to source code paths are blocked at the hook level — see [Teammate Session Permissions](teammate-session-permissions.md). Key conversational rules:
 
 - Keep responses brief: 1-3 sentences usually, matching the energy of the chat
 - Not every message needs a question -- only ask when genuinely needed for clarification

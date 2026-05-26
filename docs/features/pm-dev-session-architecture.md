@@ -5,7 +5,7 @@
 The AgentSession model uses a **session_type discriminator** (`SessionType` enum from `config/enums.py`) to distinguish between three session roles:
 
 - **PM Session** (`session_type=SessionType.PM`): Read-only CLI harness session with PM persona. Owns the Telegram conversation, orchestrates work, and spawns Dev sessions. For multi-issue requests, a parent PM session can also spawn child PM sessions (see [PM Session Child Fan-out](pm-session-child-fanout.md)).
-- **Teammate Session** (`session_type=SessionType.TEAMMATE`): Conversational CLI harness session with Teammate persona. Handles informational queries directly without spawning Dev sessions.
+- **Teammate Session** (`session_type=SessionType.TEAMMATE`): Conversational CLI harness session with Teammate persona. Handles informational queries directly and may perform operational work (running scripts, restarting services, editing docs and `.claude/` skills, managing the knowledge base). Writes to source-code paths are blocked in code with a redirect that proposes spawning a Dev session — see [Teammate Session Permissions](teammate-session-permissions.md).
 - **Dev session** (`session_type=SessionType.DEV`): Full-permission CLI harness session with Dev persona. Executes a single assigned SDLC stage and reports the result back to the PM.
 
 Session types, persona identifiers, and classification types are defined as `StrEnum` members in `config/enums.py`. See [Standardized Enums](standardized-enums.md) for the full enum reference.
@@ -65,6 +65,35 @@ PM session attempts a mutating operation. Three layers of enforcement apply:
 
 Any mutation (building, testing, committing, installing, recovering) must be
 dispatched to a Dev session via `python -m tools.valor_session create --role dev --parent "$AGENT_SESSION_ID" --message "..."`. The worker creates and routes the Dev session with full tool access. The PM's hook allowlist only blocks PM sessions (`SESSION_TYPE=pm`), so Dev sessions retain full tool access.
+
+## Enforcement — Teammate Session Write Restrictions
+
+Teammate sessions (`SESSION_TYPE=teammate`) get a different shape from PM:
+**Bash is open** (so teammates can run scripts, restart services, query state)
+but **writes to source-code paths are blocked in code** with a redirect that
+proposes spawning a Dev session. The same `pre_tool_use` hook handles this
+enforcement via `_teammate_is_allowed_write()`. The universal allowlist
+covers `docs/`, `.claude/`, `.github/`, `wiki/`, `skills/`, top-level meta
+files (README, CHANGELOG, CLAUDE.md, LICENSE, etc.) and any top-level `*.md`,
+plus the absolute prefix `~/work-vault/`.
+
+The allowlist algorithm runs two passes — `os.path.normpath` defeats
+path-traversal via `..`, then `os.path.realpath` on the parent directory
+defeats symlink-escape. The directory rule is anchored to `parts[0]` of
+the project-root-relative path (not a substring match), so
+`agent/docs_handler/foo.py` does not accidentally match the `docs/` rule.
+
+Bash commands are NOT blocked but are audit-logged with the
+`[teammate-audit]` tag at INFO level (truncated to 500 chars). The audit
+call is wrapped in try/except so an audit failure cannot block the user.
+
+The block message contains the verbatim `valor-session create --role dev`
+command, so the model can surface the redirect to the human directly.
+
+See [Teammate Session Permissions](teammate-session-permissions.md) for
+the full design, the allowlist matrix, the threat model (including the
+accepted Bash-route escape), and the prompt rewrite that pairs with the
+enforcement.
 
 ## Architecture
 
@@ -506,7 +535,7 @@ The `dev-session` Agent tool entry has been removed from `agent/agent_definition
 | File | Purpose |
 |------|---------|
 | `models/agent_session.py` | AgentSession model with session_type discriminator |
-| `agent/agent_definitions.py` | Agent registry (builder, validator, code-reviewer); `validate_agent_files()` verifies expected `.claude/agents/*.md` files exist at process startup |
+| `agent/agent_definitions.py` | Agent registry (builder, validator, code-reviewer); `validate_agent_files()` verifies expected `.claude/agents/*.md` files are present AND parse cleanly at process startup (trial-parse covers missing, malformed, and unreadable files) |
 | `agent/agent_session_queue.py` | Queue dispatch surface — entry points (`enqueue_agent_session`, `register_callbacks`, worker loops); re-exports symbols from split modules |
 | `agent/session_completion.py` | Post-execution lifecycle: `_handle_dev_session_completion()`, `_create_continuation_pm()`, finalization |
 | `agent/session_executor.py` | Core execute loop: `_execute_agent_session()`, turn-boundary steering, nudge/re-enqueue |
@@ -541,7 +570,7 @@ Telegram message (DM)
 
 **Backward compatibility**: Older sessions without `project_config` (created before this field existed) fall back to loading from `projects.json` at execution time. This transitional fallback can be removed after one deploy cycle.
 
-**Config consumers**: `bridge/formatting.py` and `tools/agent_session_scheduler.py` load config from `projects.json` directly via `bridge.routing.load_config()` rather than relying on a module-level registry.
+**Config consumers**: `bridge/message_drafter.py` and `tools/agent_session_scheduler.py` load config from `projects.json` directly via `bridge.routing.load_config()` rather than relying on a module-level registry.
 
 ## Migration
 

@@ -230,3 +230,146 @@ class TestStopHookReviewGateFlow:
             assert session_id not in _review_state
         finally:
             os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Tool -> canonical-handler routing (issue #1369)
+#
+# These tests assert that ``tools/send_message.py`` ALWAYS routes through
+# ``agent.output_handler.TelegramRelayOutputHandler.send`` for both telegram
+# and email transports — there must be exactly one canonical handler call
+# site, no raw rpush in the default tool path, and no import of the
+# synchronous SMTP ``EmailOutputHandler`` from the tool process.
+# ---------------------------------------------------------------------------
+
+
+class TestToolCallHandlerRouting:
+    """The tool process delegates to TelegramRelayOutputHandler.send for both
+    transports. Each test mocks the handler and asserts call arity + kwargs.
+    """
+
+    def _stub_session(self, monkeypatch, session=object()):
+        """Patch ``tools.send_message._lookup_session`` to return ``session``."""
+        import tools.send_message as sm
+
+        monkeypatch.setattr(sm, "_lookup_session", lambda sid: session)
+        # Bypass the promise gate; it's tested elsewhere.
+        from bridge import promise_gate
+
+        monkeypatch.setattr(promise_gate, "cli_check_or_exit", lambda *a, **kw: None)
+
+    def test_telegram_path_invokes_canonical_handler(self, monkeypatch):
+        """``_send_via_telegram`` must call TelegramRelayOutputHandler.send
+        exactly once with the chat_id, drafted text, reply-to int, the
+        reconstituted session, and the CLI-supplied file_paths."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import tools.send_message as sm
+
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+        monkeypatch.setenv("TELEGRAM_REPLY_TO", "7")
+        monkeypatch.setenv("VALOR_SESSION_ID", "sess-tg")
+        monkeypatch.delenv("ALLOW_LEGACY_RPUSH_FALLBACK", raising=False)
+
+        fake_session = MagicMock()
+        fake_session.session_id = "sess-tg"
+        fake_session.extra_context = {"transport": "telegram"}
+        self._stub_session(monkeypatch, session=fake_session)
+
+        mock_send = AsyncMock(return_value=None)
+        with patch("agent.output_handler.TelegramRelayOutputHandler.send", new=mock_send):
+            sm._send_via_telegram("hello world", None)
+
+        mock_send.assert_awaited_once()
+        args, kwargs = mock_send.call_args
+        # When ``send`` is patched on the class, the bound-method call from
+        # the tool's handler instance descriptor-binds ``self`` AHEAD of
+        # AsyncMock, so call_args records (self, chat_id, text, reply_to_msg_id).
+        # Confirm by searching for the chat_id wherever it landed.
+        positional = list(args)
+        assert "12345" in positional, f"chat_id missing from args: {positional}"
+        assert "hello world" in positional, f"text missing from args: {positional}"
+        assert 7 in positional, f"reply_to_msg_id missing from args: {positional}"
+        assert kwargs["session"] is fake_session
+        assert kwargs.get("file_paths") is None
+
+    def test_email_path_invokes_same_canonical_handler(self, monkeypatch):
+        """``_send_via_email`` must call THE SAME handler class
+        (TelegramRelayOutputHandler.send) — NOT EmailOutputHandler.send.
+        This asserts the single-canonical-handler convergence."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import tools.send_message as sm
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "sess-email")
+        monkeypatch.setenv("EMAIL_REPLY_TO", "customer@example.com")
+        monkeypatch.setenv("EMAIL_SUBJECT", "Re: hi")
+        monkeypatch.delenv("ALLOW_LEGACY_RPUSH_FALLBACK", raising=False)
+
+        fake_session = MagicMock()
+        fake_session.session_id = "sess-email"
+        fake_session.extra_context = {"transport": "email"}
+        self._stub_session(monkeypatch, session=fake_session)
+
+        mock_send = AsyncMock(return_value=None)
+        with patch("agent.output_handler.TelegramRelayOutputHandler.send", new=mock_send):
+            sm._send_via_email("hello via email", None)
+
+        mock_send.assert_awaited_once()
+        args, kwargs = mock_send.call_args
+        positional = list(args)
+        assert "customer@example.com" in positional, f"recipient missing from args: {positional}"
+        assert "hello via email" in positional, f"text missing from args: {positional}"
+        assert 0 in positional, f"reply_to_msg_id sentinel missing: {positional}"
+        assert kwargs["session"] is fake_session
+
+    def test_missing_session_fails_closed_by_default(self, monkeypatch):
+        """Missing AgentSession + ALLOW_LEGACY_RPUSH_FALLBACK unset must
+        cause a non-zero exit — the tool refuses to silently bypass the
+        canonical handler."""
+        import tools.send_message as sm
+
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+        monkeypatch.setenv("VALOR_SESSION_ID", "missing-sess")
+        monkeypatch.delenv("ALLOW_LEGACY_RPUSH_FALLBACK", raising=False)
+        monkeypatch.setattr(sm, "_lookup_session", lambda sid: None)
+        from bridge import promise_gate
+
+        monkeypatch.setattr(promise_gate, "cli_check_or_exit", lambda *a, **kw: None)
+
+        with pytest.raises(SystemExit) as excinfo:
+            sm._send_via_telegram("hi", None)
+        assert excinfo.value.code != 0
+
+    def test_missing_session_with_fallback_flag_uses_raw_rpush(self, monkeypatch):
+        """Missing AgentSession + ALLOW_LEGACY_RPUSH_FALLBACK=1 must call the
+        legacy raw-rpush helper and exit 0 (diagnostic opt-in path)."""
+        from unittest.mock import patch
+
+        import tools.send_message as sm
+
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+        monkeypatch.setenv("VALOR_SESSION_ID", "missing-sess")
+        monkeypatch.setenv("ALLOW_LEGACY_RPUSH_FALLBACK", "1")
+        monkeypatch.setattr(sm, "_lookup_session", lambda sid: None)
+        from bridge import promise_gate
+
+        monkeypatch.setattr(promise_gate, "cli_check_or_exit", lambda *a, **kw: None)
+
+        with patch.object(sm, "_legacy_telegram_rpush") as mock_legacy:
+            sm._send_via_telegram("hi", None)
+            mock_legacy.assert_called_once()
+
+    def test_tool_does_not_import_email_output_handler(self):
+        """Static guarantee: ``tools/send_message.py`` must NOT reference
+        EmailOutputHandler. The tool talks only to the queue-side handler;
+        importing the synchronous SMTP handler would couple it to the wrong
+        layer (per #1369 design decision)."""
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[2] / "tools" / "send_message.py"
+        contents = src.read_text()
+        assert "EmailOutputHandler" not in contents, (
+            "tools/send_message.py must not reference EmailOutputHandler — "
+            "the canonical queue-side handler is TelegramRelayOutputHandler."
+        )

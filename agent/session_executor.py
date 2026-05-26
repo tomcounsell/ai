@@ -814,6 +814,27 @@ async def _execute_agent_session(session: AgentSession) -> None:
             if is_synthetic_slug:
                 resolved_branch = f"session/{slug}"
                 needs_wt = True
+            # Stageless dev sessions with a pre-provisioned worktree
+            # (typical for /do-todos batch dispatch: PM session creates
+            # dev sessions with working_dir already pointing at
+            # ``.worktrees/{slug}/`` but no ``current_stage`` set yet).
+            # ``resolve_branch_for_stage`` returns ``("main", False)`` in
+            # that case, which trips the branch-mismatch guard below
+            # because the worktree is on ``session/{slug}`` and
+            # ``git checkout main`` cannot succeed when main is owned by
+            # the primary checkout. Trust the worktree's branch.
+            _stype_early = getattr(session, "session_type", None)
+            if (
+                _stype_early == "dev"
+                and slug
+                and stage is None
+                and resolved_branch == "main"
+                and not needs_wt
+                and WORKTREES_DIR in str(working_dir)
+                and working_dir.exists()
+            ):
+                resolved_branch = f"session/{slug}"
+                needs_wt = True
             branch_name = resolved_branch
             # If branch resolution says we need a worktree and working_dir isn't one,
             # OR the path looks like a worktree but the directory is missing on disk
@@ -878,6 +899,29 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 f"main checkout contamination (issue #887)."
             )
 
+        # Branch-mismatch guard (issue #1377): a reused worktree handed off
+        # between SDLC stages may still be checked out to the previous stage's
+        # branch. If we proceed without verifying, the Claude Code subprocess
+        # launches on the wrong branch, produces no output, and is killed by
+        # startup-recovery 6+ minutes later. verify_worktree_branch
+        # auto-recovers clean worktrees and raises on dirty ones — the latter
+        # surfaces as a session failure with last_error populated instead of
+        # a silent hang.
+        if _stype == "dev" and slug and WORKTREES_DIR in str(working_dir):
+            from agent.worktree_manager import (  # noqa: PLC0415
+                WorktreeBranchMismatchError,
+                verify_worktree_branch,
+            )
+
+            try:
+                verify_worktree_branch(working_dir, branch_name)
+            except WorktreeBranchMismatchError as e:
+                logger.error(
+                    f"[worktree-branch-guard] Session {session.session_id} "
+                    f"slug={slug}: {e} — refusing to launch harness (issue #1377)"
+                )
+                raise
+
         # Compute task list ID for sub-agent task isolation
         # Tier 2: planned work uses the slug directly
         # Tier 1: ad-hoc sessions use thread-{chat_id}-{root_msg_id}
@@ -939,8 +983,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Determine session type for routing decisions
         _session_type = getattr(agent_session, "session_type", None) if agent_session else None
 
-        # Calendar heartbeat at session start
-        asyncio.create_task(_calendar_heartbeat(session.project_key, project=session.project_key))
+        # Calendar heartbeat at session start (only for planned Dev sessions with a slug)
+        if session.slug:
+            asyncio.create_task(_calendar_heartbeat(session.slug, project=session.project_key))
 
         # Create messenger with bridge callbacks, falling back to file output
         # Find the transport from extra_context to support multiple transports per project
@@ -1743,9 +1788,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 # Calendar + updated_at heartbeat on the 25-min cadence (preserved).
                 if elapsed >= CALENDAR_HEARTBEAT_INTERVAL:
                     elapsed = 0
-                    asyncio.create_task(
-                        _calendar_heartbeat(session.project_key, project=session.project_key)
-                    )
+                    if session.slug:
+                        asyncio.create_task(
+                            _calendar_heartbeat(session.slug, project=session.project_key)
+                        )
                     if agent_session:
                         try:
                             agent_session.updated_at = datetime.now(tz=UTC)

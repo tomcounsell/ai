@@ -7,7 +7,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | Feature | Description | Status |
 |---------|-------------|--------|
 | [Adding Reflection Tasks](adding-reflection-tasks.md) | Developer guide with copy-paste template for adding new reflection steps | Shipped |
-| [Agent Definition Fallback](agent-definition-fallback.md) | Graceful degradation when agent definition markdown files are missing — logs warning and continues with fallback prompt instead of crashing | Shipped |
+| [Agent Definition Fallback](agent-definition-fallback.md) | Graceful degradation when agent definition markdown files are missing, malformed, or unreadable — logs warning and continues with fallback prompt instead of crashing | Shipped |
 | [Agent Reply Terminus](agent-reply-terminus.md) | Conversation terminus detection (RESPOND/REACT/SILENT) in reply-to-Valor path to break infinite bot reply loops | Shipped |
 | [Agent Session Health Monitor](agent-session-health-monitor.md) | Detects and recovers stuck running sessions in the queue; runs three complementary orphan reapers (corrupted records, in-process subprocess reap, and cross-process OS-table reap with worker self-suicide guard via `worker:registered_pid:*`); per-tool timeout sub-loop with per-tier counters (internal/mcp/default) for sessions wedged on a single tool call (#1270) | Shipped |
 | [Agent Session Hierarchy](agent-session-scheduling.md#parent-child-session-hierarchy) | Parent-child session decomposition with completion propagation, progress tracking, and orphan/stuck parent self-healing | Shipped |
@@ -38,6 +38,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Config-Driven Chat Mode](config-driven-chat-mode.md) | Per-group persona field in projects.json controlling session type, classifier bypass, and passive listener behavior | Shipped |
 | [Context Fidelity Modes](context-fidelity-modes.md) | Right-sized context compression (full/compact/minimal/steering) for sub-agent dispatch | Shipped |
 | [Correlation IDs](correlation-ids.md) | End-to-end request tracing with shared correlation_id from Telegram receipt to response delivery | Shipped |
+| [Customer Resolver](customer-resolver.md) | Dynamic email-to-customer-ID routing: per-project resolver hook (subprocess or callable), Redis cache, fail-closed with `valor-retry` Gmail label, subject-line coalescing, `customer-service` persona substitution, `CUSTOMER_ID` env var injection | Shipped |
 | [Dashboard](dashboard.md) | Agent sessions table with parent/child hierarchy, staleness detection, session metadata (context_summary, expectations, activity counts), datetime timestamp handling, lifecycle iconography for all 8 non-terminal states, row-level freshness chip + ghost badge, modal Liveness section with `harness_pid` and process-alive probe, and enriched JSON API | Shipped |
 | [Deep Plan Analysis](deep-plan-analysis.md) | Prior Art, Data Flow, Failure Analysis, and Architectural Impact investigation sections in /do-plan | Shipped |
 | [Deployment](deployment.md) | Multi-instance deployment configuration with per-machine project routing | Shipped |
@@ -125,6 +126,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics and inline source file verification | Shipped |
 | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
 | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
+| [SDLC Parallel Execution](sdlc-parallel-execution.md) | Phase 1 multi-dev fan-out at BUILD via `sdlc-decompose` + sub-slug `{slug}-u{i}` Dev sessions; Phase 2 `MultiDispatch` for parallel-safe stage pairs (DOCS+PATCH) | Shipped |
 | [SDLC Pipeline](sdlc-pipeline.md) | Pipeline routing overview, G1–G7 legal dispatch guards, `_meta` field reference, plan-revising lock (G7), and CLI tool reference | Shipped |
 | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, MERGE pipeline stage, and structured review comment enforcement | Shipped |
 | [SDLC Pipeline State](sdlc-pipeline-state.md) | Local Claude Code session state tracking via `--issue-number` flag and `sdlc_session_ensure` tool, enabling stage markers to write to Redis without bridge env vars | Shipped |
@@ -153,6 +155,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Skill Context Injection](skill-context-injection.md) | Pre-resolved SDLC_* env vars from AgentSession into Claude Code subprocesses, plus /do-pr-review sub-skill decomposition | Shipped |
 | [Skills Audit](do-skills-audit.md) | Deterministic validation of all SKILL.md files with 12 rules and Anthropic best practices sync | Shipped |
 | [Skills Dependency Map](skills-dependency-map.md) | Visual map of skill-to-skill, skill-to-agent, and sub-file relationships for cleanup planning | Shipped |
+| [Skills Global](skills-global.md) | Global skill library in `.claude/skills-global/` — 42 skills synced to `~/.claude/skills/` via hardlinks; includes 6 new skills added in #1319: ontologies, grill-me, deepen, observability, zoom-out, tdd | Shipped |
 | [Skills Reorganization](skills-reorganization.md) | Canonical SKILL.md template, progressive disclosure, command consolidation, hardlink scoping | Shipped |
 | [Stall Retry](stall-retry.md) | Automatic retry of stalled agent sessions with exponential backoff, process cleanup, and Telegram notification on final failure | Shipped |
 | [Standardized Enums](standardized-enums.md) | StrEnum definitions for session types, personas, classifications, and chat modes replacing magic strings | Shipped |
@@ -164,6 +167,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [System Overview](system-overview.md) | High-level architecture and design principles | Archived |
 | [Task List Isolation Experiment](task-list-isolation.md) | Experiment results validating CLAUDE_CODE_TASK_LIST_ID behavior | Archived |
 | [Teammate Conversational Humility](qa-conversational-humility.md) | Direct, honest Teammate responses: brevity, hedged language for uncertain claims, stop-hook review gate for delivery control | Shipped |
+| [Teammate Session Permissions](teammate-session-permissions.md) | Code-level enforcement of the one teammate hard rule (writes to source-code paths require a Dev session); two-pass allowlist (normpath + realpath) closes path-traversal and symlink-escape; `[teammate-audit]` Bash log; capable prompt with TOOL POSTURE / OPERATIONAL WORK ENCOURAGED / WHEN BLOCKED blocks. Also fixes a latent PM MultiEdit gap. | Shipped |
 | [Telegram History & Links](telegram-history.md) | Searchable message history and link compilation from Telegram | Shipped |
 | [Telegram Message Edit Handling](telegram-message-edit-handling.md) | Handles Telegram MessageEdited events — steers running sessions with edited text or spawns a fresh session for completed ones | Shipped |
 | [Telegram Messaging](telegram-messaging.md) | Unified interface for reading and sending Telegram messages via `valor-telegram` CLI | Shipped |
@@ -183,6 +187,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Worker Hibernation](worker-hibernation.md) | Mid-execution session pause and drip resume on Anthropic API failures: `paused` status, `worker:hibernating` Redis flag, `circuit-health-gate` and `session-recovery-drip` reflections | Shipped |
 | [Worker Service](worker-service.md) | Standalone worker process for AgentSession processing, OutputHandler protocol, TelegramRelayOutputHandler (Redis outbox), FileOutputHandler fallback, launchd service | Shipped |
 | [Workspace Safety Invariants](workspace-safety-invariants.md) | Pre-launch validation of agent working directories with CWD existence, path containment, and slug sanitization | Shipped |
+| [Worktree Manager](worktree-manager.md) | Branch verification on worktree reuse — `verify_worktree_branch` auto-checks-out clean worktrees and raises `WorktreeBranchMismatchError` on dirty ones, preventing silent MERGE-stage hangs from slug reuse (#1377) | Shipped |
 | [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |
 | [xfail Hygiene](xfail-hygiene.md) | Three-layer xfail hygiene system preventing stale test markers after bug fixes land | Shipped |
 | [YouTube Search](youtube-search.md) | Search YouTube by query using yt-dlp, returning structured results (title, URL, duration, views) via `valor-youtube-search` CLI | Shipped |

@@ -15,6 +15,14 @@ INTERVAL=600  # 10 minutes in seconds
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
+# Only track planned Dev sessions (tier-2 work with a real AgentSession.slug).
+# Direct CLI sessions have no CLAUDE_CODE_TASK_LIST_ID; thread-scoped sessions
+# have a 'thread-' prefix. Both should produce no calendar events.
+TASK_LIST_ID="${CLAUDE_CODE_TASK_LIST_ID:-}"
+if [ -z "$TASK_LIST_ID" ] || echo "$TASK_LIST_ID" | grep -qE '^thread-'; then
+    exit 0
+fi
+
 # Skip excluded projects (too noisy for calendar tracking)
 EXCLUDED_PROJECTS="valor"
 PROJECTS_JSON_CHECK="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"

@@ -1045,14 +1045,21 @@ async def main():
         logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set")
         sys.exit(1)
 
-    # Validate agent definition files exist on disk. Missing files are not
-    # fatal — the SDK falls back gracefully — but we surface warnings early
-    # so operators can fix them before users hit degraded prompts.
+    # Validate agent definition files are usable on disk. Missing, malformed,
+    # or unreadable files are not fatal — the SDK falls back gracefully — but
+    # we surface warnings early so operators can fix them before users hit
+    # degraded prompts. `_parse_agent_markdown` already logs a precise warning
+    # (with exception class and path) for each fallback path, so we emit a
+    # concise startup-level summary here instead of a misleading per-path line.
     from agent.agent_definitions import validate_agent_files
 
-    missing_agent_files = validate_agent_files()
-    for missing_path in missing_agent_files:
-        logger.warning("Missing agent definition file: %s", missing_path)
+    problematic_agent_files = validate_agent_files()
+    if problematic_agent_files:
+        logger.warning(
+            "Unusable agent definition files detected at startup (%d): %s",
+            len(problematic_agent_files),
+            problematic_agent_files,
+        )
 
     logger.info("Starting Valor bridge")
     logger.info("Agent backend: Claude Agent SDK")
@@ -1253,7 +1260,34 @@ async def main():
             try:
                 from models.telegram import TelegramMessage
 
+                # Two silent failure modes are addressed here (see sdlc-1330):
+                #   1. `query.get(stored_msg_id)` can transiently return `None`
+                #      during a Popoto stale-index condition. The previous
+                #      code silently no-op'd the persist block; we now log a
+                #      WARNING and do ONE bounded re-query. We deliberately
+                #      do NOT call `keys(clean=True)` here — it's a heavy,
+                #      index-mutating call and the worker-side self-heal in
+                #      `bridge/enrichment.py` is the durable safety net.
+                #   2. `_download_media_with_retry` can return `(None, None)`
+                #      ("no_path" outcome) when `client.download_media`
+                #      reports success but the file is missing post-download.
+                #      The persist block sees no error, no path, and was
+                #      previously silent. We now log a WARNING so the
+                #      condition is observable in logs.
                 _record = TelegramMessage.query.get(stored_msg_id)
+                if _record is None:
+                    # Single bounded re-query before giving up.
+                    _record = TelegramMessage.query.get(stored_msg_id)
+                    if _record is None:
+                        logger.warning(
+                            f"[media] TelegramMessage.query.get returned None "
+                            f"(stored_msg_id={stored_msg_id} "
+                            f"chat_id={event.chat_id} "
+                            f"message_id={message.id} "
+                            f"local_path={_local_path} "
+                            f"download_error={_download_error}); "
+                            f"persist skipped, worker self-heal will attempt recovery"
+                        )
                 if _record is not None:
                     if _local_path is not None:
                         # Persist as absolute path so the worker can read it
@@ -1262,6 +1296,22 @@ async def main():
                     if _download_error is not None:
                         _record.media_download_error = _download_error
                     _record.save()
+
+                # Second silent path: download wrapper returned (None, None)
+                # with no error string. message.media truthy means there WAS
+                # media to download.
+                if (
+                    _local_path is None
+                    and _download_error is None
+                    and getattr(message, "media", None)
+                ):
+                    logger.warning(
+                        f"[media] download returned no path with no error "
+                        f"(stored_msg_id={stored_msg_id} "
+                        f"chat_id={event.chat_id} "
+                        f"message_id={message.id}); "
+                        f"file may be missing post-download, worker self-heal will attempt recovery"
+                    )
             except Exception as e:
                 logger.warning(f"[media] failed to persist media_local_path: {e}")
 

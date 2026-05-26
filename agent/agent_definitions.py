@@ -35,33 +35,70 @@ _READ_ONLY_TOOLS = [
 ]
 
 
-def _parse_agent_markdown(path: Path) -> dict[str, str | dict[str, str]]:
+def _fallback_definition(path: Path, reason: str) -> dict[str, str | dict[str, str] | bool]:
+    """Build a fallback agent definition dict.
+
+    The returned dict carries an explicit ``"_is_fallback": True`` marker so
+    callers (notably ``validate_agent_files``) can detect fallback dicts via
+    key lookup rather than parsing the free-text description.
+
+    ``reason`` is a short string suitable for logs and the agent's description
+    field (e.g. "missing file" or "ValueError: No YAML frontmatter found").
+    """
+    return {
+        "frontmatter": {"description": f"Fallback for unusable {path.name}: {reason}"},
+        "body": (
+            f"Agent definition file {path.name} is not available ({reason})."
+            " Operate with your best judgment."
+        ),
+        "_is_fallback": True,
+    }
+
+
+def _parse_agent_markdown(path: Path) -> dict[str, str | dict[str, str] | bool]:
     """Parse a markdown agent file into frontmatter fields and body.
 
     Returns a dict with string keys for each frontmatter field plus 'body'
     containing the markdown content after the closing '---'.
 
-    If the file does not exist, logs a warning and returns a fallback dict
-    with empty frontmatter and a minimal body. This prevents the entire
-    session from crashing when an agent definition file is missing (e.g.,
-    during deployment before file sync completes).
+    On any of the following failure modes, logs a warning and returns a
+    fallback dict (with ``"_is_fallback": True``) instead of raising — so
+    that a single broken agent file cannot kill the session:
+
+    - **Missing file**: ``path.exists() == False`` (fast-path check).
+    - **OSError and subclasses**: ``FileNotFoundError`` (race after the
+      ``exists()`` check), ``PermissionError``, other I/O failures from
+      ``path.read_text``.
+    - **ValueError and subclasses**: explicit ``ValueError`` raised when no
+      YAML frontmatter is found, plus ``UnicodeDecodeError`` (a
+      ``ValueError`` subclass) from decoding invalid UTF-8 bytes.
+
+    Exceptions outside the ``(OSError, ValueError)`` tree (e.g. ``KeyError``,
+    ``AttributeError``, ``TypeError``) propagate unchanged — those indicate
+    programmer error in this module, not an unusable input file.
     """
     if not path.exists():
         logger.warning("Agent definition file not found: %s — using fallback prompt", path)
-        return {
-            "frontmatter": {"description": f"Fallback for missing {path.name}"},
-            "body": (
-                f"Agent definition file {path.name} is not available."
-                " Operate with your best judgment."
-            ),
-        }
+        return _fallback_definition(path, "missing file")
 
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8")
 
-    # Match YAML frontmatter delimited by '---'
-    match = re.match(r"^---\n(.*?)\n---\n?(.*)", text, re.DOTALL)
-    if not match:
-        raise ValueError(f"No YAML frontmatter found in {path}")
+        # Match YAML frontmatter delimited by '---'
+        match = re.match(r"^---\n(.*?)\n---\n?(.*)", text, re.DOTALL)
+        if not match:
+            raise ValueError(f"No YAML frontmatter found in {path}")
+    # OSError covers FileNotFoundError, PermissionError, and other I/O errors.
+    # ValueError covers the explicit raise above plus UnicodeDecodeError (a
+    # ValueError subclass) from read_text() on invalid UTF-8.
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Agent definition %s unusable (%s: %s) — using fallback prompt",
+            path,
+            exc.__class__.__name__,
+            exc,
+        )
+        return _fallback_definition(path, f"{exc.__class__.__name__}: {exc}")
 
     frontmatter_text = match.group(1)
     body = match.group(2).strip()
@@ -131,15 +168,37 @@ _EXPECTED_AGENT_FILES = [
 
 
 def validate_agent_files() -> list[str]:
-    """Check that all expected agent definition files exist on disk.
+    """Check that all expected agent definition files are usable.
 
-    Returns a list of missing file paths (as strings). An empty list means
-    all files are present. Called during bridge startup to surface missing
-    files early via log warnings.
+    For each expected agent file, this checks:
+
+    1. **Existence**: if the file is missing, append its path to the returned
+       list. Per-path warnings are emitted by ``_parse_agent_markdown`` for
+       parse failures; the missing-file case is surfaced via the returned list
+       (callers log a summary).
+    2. **Trial-parse**: if the file exists, attempt to parse it via
+       ``_parse_agent_markdown``. Because that helper now returns a fallback
+       dict (with ``"_is_fallback": True``) for malformed YAML, OS read
+       errors, and Unicode-decode errors instead of raising, we detect those
+       failures via the marker key rather than by catching exceptions. Any
+       file that fell back to the placeholder is also appended to the
+       returned list. Reasons are logged by ``_parse_agent_markdown`` itself
+       — this function only returns the list of problematic paths.
+
+    Returns a list of problematic file paths (as strings). An empty list
+    means all files are present AND parse cleanly. Called during bridge and
+    worker startup to surface unusable files early via log warnings.
     """
-    missing = []
+    problematic: list[str] = []
     for filename in _EXPECTED_AGENT_FILES:
         path = _AGENTS_DIR / filename
         if not path.exists():
-            missing.append(str(path))
-    return missing
+            problematic.append(str(path))
+            continue
+        # File exists — trial-parse to surface malformed or unreadable files.
+        # _parse_agent_markdown already logs a warning on any fallback path,
+        # so we only need to record the path here.
+        result = _parse_agent_markdown(path)
+        if result.get("_is_fallback"):
+            problematic.append(str(path))
+    return problematic

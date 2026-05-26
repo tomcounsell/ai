@@ -18,6 +18,207 @@ WORKTREES_DIR = ".worktrees"
 VALID_SLUG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
 
+class WorktreeBranchMismatchError(RuntimeError):
+    """Raised when a reused worktree's HEAD does not match the expected branch
+    and cannot be auto-recovered (issue #1377).
+
+    The recoverable case (clean working tree) is handled by
+    ``verify_worktree_branch`` itself via ``git checkout``; this exception is
+    only raised when the worktree has uncommitted state or when the underlying
+    git command fails.
+
+    Attributes:
+        worktree_path: The worktree directory that was checked.
+        expected_branch: The branch the executor wanted the worktree on.
+        actual_branch: The branch git reported (may be empty / detached HEAD).
+        dirty_files: List of porcelain status lines explaining why auto-recovery
+            was refused (empty when the failure was a subprocess error).
+    """
+
+    def __init__(
+        self,
+        worktree_path: Path | str,
+        expected_branch: str,
+        actual_branch: str,
+        dirty_files: list[str] | None = None,
+        cause: str | None = None,
+    ) -> None:
+        self.worktree_path = Path(worktree_path)
+        self.expected_branch = expected_branch
+        self.actual_branch = actual_branch
+        self.dirty_files = list(dirty_files or [])
+        msg = (
+            f"Worktree branch mismatch at {self.worktree_path}: "
+            f"expected={expected_branch!r}, actual={actual_branch!r}"
+        )
+        if self.dirty_files:
+            msg += f", dirty_files={self.dirty_files}"
+        if cause:
+            msg += f" ({cause})"
+        super().__init__(msg)
+
+
+def verify_worktree_branch(worktree_path: Path, expected_branch: str) -> None:
+    """Verify a reused worktree is checked out to the expected branch.
+
+    This is the missing primitive identified by issue #1377: after a BUILD
+    session left ``.worktrees/{slug}/`` on ``session/{slug}``, a subsequent
+    MERGE dev session reusing the same path could end up running with the
+    wrong branch context, silently producing no output until the startup
+    watchdog killed it.
+
+    Behavior:
+      * Matching branch — return silently (no log noise).
+      * Mismatch + clean working tree — run ``git checkout <expected_branch>``
+        and log at INFO with slug/from/to. This is the "operator-friendly"
+        recovery path; the alternative would be to refuse every reused
+        worktree and force a manual cleanup.
+      * Mismatch + dirty working tree — raise :class:`WorktreeBranchMismatchError`
+        with the dirty file list, preserving uncommitted work for inspection.
+      * Underlying git failure (detached HEAD that cannot be parsed, corrupted
+        worktree, etc.) — raise :class:`WorktreeBranchMismatchError` with the
+        git stderr as the cause.
+
+    Args:
+        worktree_path: Absolute path to the worktree to check.
+        expected_branch: The branch name the caller expects (e.g. ``"main"``
+            or ``"session/sdlc-1377"``).
+
+    Raises:
+        TypeError: If ``worktree_path`` is None.
+        ValueError: If ``expected_branch`` is empty / whitespace-only.
+        WorktreeBranchMismatchError: If the worktree path is missing, the
+            branch differs and the worktree is dirty, or the underlying git
+            command fails.
+    """
+    if worktree_path is None:
+        raise TypeError("worktree_path must not be None")
+    if not isinstance(expected_branch, str) or not expected_branch.strip():
+        raise ValueError("expected_branch must be a non-empty string")
+
+    worktree_path = Path(worktree_path)
+    if not worktree_path.exists():
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            "",
+            cause=f"worktree path does not exist: {worktree_path}",
+        )
+
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            "",
+            cause=f"git rev-parse failed: {e.stderr.strip() if e.stderr else e}",
+        ) from e
+    except FileNotFoundError as e:  # pragma: no cover - git always installed
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            "",
+            cause=f"git executable not found: {e}",
+        ) from e
+
+    actual_branch = head.stdout.strip()
+    if actual_branch == expected_branch:
+        return
+
+    # Branch differs — inspect working tree cleanliness.
+    try:
+        status = subprocess.run(
+            ["git", "-C", str(worktree_path), "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            actual_branch,
+            cause=f"git status failed: {e.stderr.strip() if e.stderr else e}",
+        ) from e
+
+    dirty = [line for line in status.stdout.splitlines() if line.strip()]
+    if dirty:
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            actual_branch,
+            dirty_files=dirty,
+        )
+
+    # Pre-check: refuse early if expected_branch is locked by another worktree
+    # (issue #1412). Without this guard, `git checkout` below fails with a raw
+    # "'<branch>' is already used by worktree at '<path>'" stderr leak.
+    try:
+        common_dir = subprocess.run(
+            ["git", "-C", str(worktree_path), "rev-parse", "--git-common-dir"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            actual_branch,
+            cause=f"git rev-parse --git-common-dir failed: {e.stderr.strip() if e.stderr else e}",
+        ) from e
+
+    # --git-common-dir returns the .git directory of the main repo (may be a
+    # path relative to the worktree, e.g. just ".git" for a standalone repo);
+    # resolve it against the worktree before taking the parent.
+    common_dir_raw = Path(common_dir.stdout.strip())
+    if not common_dir_raw.is_absolute():
+        common_dir_raw = worktree_path / common_dir_raw
+    main_repo_root = common_dir_raw.resolve().parent
+    holding_path = _find_worktree_for_branch(main_repo_root, expected_branch)
+    if holding_path is not None and Path(holding_path).resolve() != worktree_path.resolve():
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            actual_branch,
+            cause=(
+                f"cannot checkout '{expected_branch}': already used by worktree at '{holding_path}'"
+            ),
+        )
+
+    # Clean — auto-recover by checking out the expected branch.
+    try:
+        subprocess.run(
+            ["git", "-C", str(worktree_path), "checkout", expected_branch],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            actual_branch,
+            cause=f"git checkout failed: {e.stderr.strip() if e.stderr else e}",
+        ) from e
+
+    slug = worktree_path.name
+    logger.info(
+        "[worktree-branch-recovery] slug=%s path=%s from=%s to=%s "
+        "(auto-checkout of clean worktree, issue #1377)",
+        slug,
+        worktree_path,
+        actual_branch,
+        expected_branch,
+    )
+
+
 def worktree_busy_check(repo_root: Path, slug: str) -> tuple[str, str] | None:
     """Check whether any non-terminal AgentSession references this worktree.
 

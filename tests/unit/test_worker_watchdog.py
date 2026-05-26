@@ -142,7 +142,7 @@ class TestEscalation:
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
             with (
-                patch.object(wwd, "_kickstart_worker", return_value=True) as kick,
+                patch.object(wwd, "_kickstart_worker_detailed", return_value=(True, 0, "")) as kick,
                 patch.object(wwd, "_verify_worker_alive", return_value=12345) as verify,
                 patch.object(wwd, "_enable_worker") as enable,
                 patch.object(wwd, "_record_critical_status") as critical,
@@ -162,27 +162,35 @@ class TestEscalation:
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
             with (
-                patch.object(wwd, "_kickstart_worker", return_value=True),
+                patch.object(wwd, "_kickstart_worker_detailed", return_value=(True, 0, "")),
                 patch.object(wwd, "_verify_worker_alive", return_value=999),
             ):
                 wwd._handle_missing_worker()
         mock_r.delete.assert_called_once()
 
     def test_l3_runs_enable_then_kickstart_when_l2_fails(self, isolated_state):
-        """When L2 kickstart fails to revive, L3 runs enable + kickstart."""
+        """When L2 kickstart fails to revive, L3 runs enable + kickstart.
+
+        Explicitly returns rc != 113 from L2 so the L2.5 bootstrap-recovery
+        branch is bypassed and L3 is still the test focus.
+        """
         mock_r = MagicMock()
         mock_r.incr.return_value = 2  # count == 2
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
             with (
-                patch.object(wwd, "_kickstart_worker", side_effect=[False, True]) as kick,
+                patch.object(
+                    wwd, "_kickstart_worker_detailed", return_value=(False, 3, "generic error")
+                ) as kick_detailed,
+                patch.object(wwd, "_kickstart_worker", return_value=True) as kick,
                 patch.object(wwd, "_enable_worker", return_value=True) as enable,
                 patch.object(wwd, "_verify_worker_alive", return_value=42),
                 patch.object(wwd, "_record_critical_status") as critical,
             ):
                 wwd._handle_missing_worker()
 
-                assert kick.call_count == 2  # L2 + L3
+                kick_detailed.assert_called_once()  # L2
+                kick.assert_called_once()  # L3 (plain wrapper)
                 enable.assert_called_once()
                 critical.assert_not_called()
         mock_r.delete.assert_called_once()
@@ -194,6 +202,9 @@ class TestEscalation:
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
             with (
+                patch.object(
+                    wwd, "_kickstart_worker_detailed", return_value=(False, 3, "generic error")
+                ),
                 patch.object(wwd, "_kickstart_worker", return_value=False),
                 patch.object(wwd, "_enable_worker", return_value=False),
                 patch.object(wwd, "_verify_worker_alive", return_value=None),
@@ -204,6 +215,7 @@ class TestEscalation:
                 critical.assert_called_once()
                 args, _kwargs = critical.call_args
                 reason, tick_count = args
+                # L2.5 was not attempted (rc != 113) → "kickstart+enable both failed" wording.
                 assert "kickstart+enable both failed" in reason
                 assert tick_count == 3
 
@@ -214,6 +226,9 @@ class TestEscalation:
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
             with (
+                patch.object(
+                    wwd, "_kickstart_worker_detailed", return_value=(False, 3, "generic error")
+                ),
                 patch.object(wwd, "_kickstart_worker", return_value=False),
                 patch.object(wwd, "_enable_worker", return_value=False),
                 patch.object(wwd, "_verify_worker_alive", return_value=None),
@@ -380,3 +395,243 @@ class TestVerifyWorkerAlive:
     def test_returns_none_when_absent(self, isolated_state):
         with patch.object(wwd, "_get_worker_pid", return_value=None):
             assert wwd._verify_worker_alive(grace_seconds=0) is None
+
+
+# --- L2.5 bootstrap-recovery (issue #1407) ------------------------------------
+
+
+class TestBootstrapRecovery:
+    """Cover the L2.5 bootstrap-recovery branch in _handle_missing_worker.
+
+    L2.5 fires only when ALL of:
+      (a) L2 kickstart failed
+      (b) failure was rc=113 or stderr contains "Could not find service"
+      (c) WORKER_PLIST_PATH exists on disk
+    """
+
+    def test_l25_revives_worker_when_rc113_and_plist_exists(self, isolated_state):
+        """rc=113 + plist exists → bootstrap → kickstart retried → worker revived."""
+        mock_r = MagicMock()
+        mock_r.incr.return_value = 2  # L2 trigger
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
+            with (
+                patch.object(
+                    wwd,
+                    "_kickstart_worker_detailed",
+                    return_value=(False, 113, "Could not find service ..."),
+                ) as kick_detailed,
+                patch.object(wwd, "_kickstart_worker", return_value=True) as kick,
+                patch.object(wwd, "_bootstrap_worker", return_value=True) as bootstrap,
+                patch.object(wwd, "_enable_worker") as enable,
+                patch.object(
+                    wwd, "WORKER_PLIST_PATH", MagicMock(exists=MagicMock(return_value=True))
+                ),
+                patch.object(wwd, "_verify_worker_alive", return_value=4242),
+                patch.object(wwd, "_record_critical_status") as critical,
+            ):
+                wwd._handle_missing_worker()
+
+                kick_detailed.assert_called_once()  # L2 attempted
+                bootstrap.assert_called_once()  # L2.5 attempted
+                kick.assert_called_once()  # L2.5 retry kickstart
+                enable.assert_not_called()  # L3 skipped (we revived)
+                critical.assert_not_called()
+        # L2.5 success → counter cleared.
+        mock_r.delete.assert_called_once()
+
+    def test_l25_skipped_when_plist_missing(self, isolated_state):
+        """rc=113 + plist missing → bootstrap NOT called, fall through to L3."""
+        mock_r = MagicMock()
+        mock_r.incr.return_value = 2
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
+            with (
+                patch.object(
+                    wwd,
+                    "_kickstart_worker_detailed",
+                    return_value=(False, 113, "Could not find service ..."),
+                ),
+                patch.object(wwd, "_kickstart_worker", return_value=False),
+                patch.object(wwd, "_bootstrap_worker") as bootstrap,
+                patch.object(wwd, "_enable_worker", return_value=True) as enable,
+                patch.object(
+                    wwd, "WORKER_PLIST_PATH", MagicMock(exists=MagicMock(return_value=False))
+                ),
+                patch.object(wwd, "_verify_worker_alive", return_value=None),
+                patch.object(wwd, "_record_critical_status"),
+            ):
+                wwd._handle_missing_worker()
+
+                bootstrap.assert_not_called()  # plist gate blocked L2.5
+                enable.assert_called_once()  # L3 ran
+
+    def test_l25_falls_through_to_l3_when_bootstrap_fails(self, isolated_state):
+        """rc=113 + bootstrap fails → fall through to L3."""
+        mock_r = MagicMock()
+        mock_r.incr.return_value = 2
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
+            with (
+                patch.object(
+                    wwd,
+                    "_kickstart_worker_detailed",
+                    return_value=(False, 113, "Could not find service ..."),
+                ),
+                patch.object(wwd, "_kickstart_worker", return_value=False) as kick,
+                patch.object(wwd, "_bootstrap_worker", return_value=False) as bootstrap,
+                patch.object(wwd, "_enable_worker", return_value=True) as enable,
+                patch.object(
+                    wwd, "WORKER_PLIST_PATH", MagicMock(exists=MagicMock(return_value=True))
+                ),
+                patch.object(wwd, "_verify_worker_alive", return_value=None),
+                patch.object(wwd, "_record_critical_status"),
+            ):
+                wwd._handle_missing_worker()
+
+                bootstrap.assert_called_once()
+                enable.assert_called_once()  # L3 still attempted
+                # _kickstart_worker called once by L3 only (L2.5 skipped post-bootstrap-fail).
+                assert kick.call_count == 1
+
+    def test_l25_skipped_when_non_113_failure(self, isolated_state):
+        """Non-113 kickstart failure → bootstrap NOT called, fall through to L3."""
+        mock_r = MagicMock()
+        mock_r.incr.return_value = 2
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
+            with (
+                patch.object(
+                    wwd,
+                    "_kickstart_worker_detailed",
+                    return_value=(False, 3, "some other error"),
+                ),
+                patch.object(wwd, "_kickstart_worker", return_value=False),
+                patch.object(wwd, "_bootstrap_worker") as bootstrap,
+                patch.object(wwd, "_enable_worker", return_value=True) as enable,
+                patch.object(
+                    wwd, "WORKER_PLIST_PATH", MagicMock(exists=MagicMock(return_value=True))
+                ),
+                patch.object(wwd, "_verify_worker_alive", return_value=None),
+                patch.object(wwd, "_record_critical_status"),
+            ):
+                wwd._handle_missing_worker()
+
+                bootstrap.assert_not_called()
+                enable.assert_called_once()
+
+    def test_l4_reason_mentions_bootstrap_when_attempted(self, isolated_state):
+        """If L2.5 was attempted and L3 also fails, the CRITICAL reason mentions bootstrap."""
+        mock_r = MagicMock()
+        mock_r.incr.return_value = 3  # L4 trigger
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
+            with (
+                patch.object(
+                    wwd,
+                    "_kickstart_worker_detailed",
+                    return_value=(False, 113, "Could not find service ..."),
+                ),
+                patch.object(wwd, "_kickstart_worker", return_value=False),
+                patch.object(wwd, "_bootstrap_worker", return_value=True),
+                patch.object(wwd, "_enable_worker", return_value=False),
+                patch.object(
+                    wwd, "WORKER_PLIST_PATH", MagicMock(exists=MagicMock(return_value=True))
+                ),
+                patch.object(wwd, "_verify_worker_alive", return_value=None),
+                patch.object(wwd, "_record_critical_status") as critical,
+            ):
+                wwd._handle_missing_worker()
+
+                critical.assert_called_once()
+                reason, _tick_count = critical.call_args[0]
+                assert "bootstrap" in reason
+
+    def test_operator_disable_blocks_bootstrap_recovery(self, isolated_state):
+        """Operator-disable short-circuits before _handle_missing_worker; bootstrap skipped."""
+        mock_r = MagicMock()
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
+            with (
+                patch.object(wwd, "_is_operator_disabled", return_value=True),
+                patch.object(wwd, "_handle_missing_worker") as handle,
+                patch.object(wwd, "_bootstrap_worker") as bootstrap,
+            ):
+                with patch("sys.argv", ["w"]):
+                    wwd.main()
+        handle.assert_not_called()
+        bootstrap.assert_not_called()
+
+
+class TestBootstrapHelper:
+    """Direct tests for the _bootstrap_worker helper."""
+
+    def test_bootstrap_success(self, isolated_state):
+        fake = subprocess.CompletedProcess(
+            args=["launchctl", "bootstrap", "gui/501", "x"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=fake):
+            assert wwd._bootstrap_worker() is True
+
+    def test_bootstrap_failure_returncode(self, isolated_state):
+        fake = subprocess.CompletedProcess(
+            args=["launchctl", "bootstrap", "gui/501", "x"],
+            returncode=37,
+            stdout="",
+            stderr="Operation not permitted",
+        )
+        with patch("subprocess.run", return_value=fake):
+            assert wwd._bootstrap_worker() is False
+
+    def test_bootstrap_timeout_swallowed(self, isolated_state):
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="launchctl", timeout=10),
+        ):
+            assert wwd._bootstrap_worker() is False
+
+    def test_bootstrap_exception_swallowed(self, isolated_state):
+        with patch("subprocess.run", side_effect=OSError("launchctl not found")):
+            assert wwd._bootstrap_worker() is False
+
+
+class TestKickstartDetailed:
+    """Tests for the new _kickstart_worker_detailed helper that exposes rc/stderr."""
+
+    def test_detailed_returns_rc_and_stderr_on_failure(self, isolated_state):
+        fake = subprocess.CompletedProcess(
+            args=["launchctl", "kickstart", "-k", "x"],
+            returncode=113,
+            stdout="",
+            stderr="Could not find service ...",
+        )
+        with patch("subprocess.run", return_value=fake):
+            ok, rc, stderr = wwd._kickstart_worker_detailed()
+        assert ok is False
+        assert rc == 113
+        assert "Could not find service" in stderr
+
+    def test_detailed_returns_success(self, isolated_state):
+        fake = subprocess.CompletedProcess(
+            args=["launchctl", "kickstart", "-k", "x"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=fake):
+            ok, rc, stderr = wwd._kickstart_worker_detailed()
+        assert ok is True
+        assert rc == 0
+        assert stderr == ""
+
+    def test_detailed_timeout_returns_negative_rc(self, isolated_state):
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="launchctl", timeout=10),
+        ):
+            ok, rc, stderr = wwd._kickstart_worker_detailed()
+        assert ok is False
+        assert rc == -1
+        assert stderr == "timeout"

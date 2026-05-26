@@ -78,7 +78,7 @@ Defined in `agent/output_handler.py`. Implements the `OutputHandler` protocol.
 | Redis key (telegram) | `telegram:outbox:{session_id}` |
 | Redis key (email) | `email:outbox:{session_id}` (when `extra_context.transport == "email"`) |
 | Telegram payload | `{"chat_id", "reply_to", "text", "session_id", "timestamp"}` -- same as `tools/send_telegram.py` |
-| Email payload | `{"session_id", "to", "subject", "body", "in_reply_to", "references", "from_addr", "attachments", "timestamp"}` -- matches `tools/send_message.py::_send_via_email` and the `email_relay.py` contract (see [Email Bridge](email-bridge.md) "Send path"). The handler reads `email_subject`, `email_message_id`, `email_from` from `session.extra_context` to populate `subject`, `in_reply_to`, and `to`. |
+| Email payload | `{"session_id", "to", "subject", "body", "in_reply_to", "references", "from_addr", "attachments", "timestamp"}` -- the unified shape consumed by `bridge/email_relay.py` (see [Email Bridge](email-bridge.md) "Send path"). The handler reads `email_subject`, `email_message_id`, `email_to_addrs`, `email_cc_addrs` from `session.extra_context` to populate `subject`, `in_reply_to`, and the reply-all `to` list. `tools/send_message.py::_send_via_email` delegates to this handler rather than emitting its own payload (issue #1369). |
 | TTL | 3600 seconds (1 hour) |
 | Redis operation | `RPUSH` (append to list) + `EXPIRE` |
 | Error handling | Caught and logged; never propagates to caller |
@@ -142,6 +142,17 @@ Telegram media (photos, voice, audio, documents) requires both Telethon RPC (dow
 - **Worker** reads `TelegramMessage.media_local_path` from the persisted record (no Telethon import in `worker/`) and calls `bridge.media.process_downloaded_media(path, media_type)` for the AI half. The worker also handles every "skipped" branch (download failed, file unreadable, no record) and emits a single `[enrichment] Summary: media=...` log line per session.
 
 Full contract and field-level reference live in [media-enrichment.md](media-enrichment.md). The sibling reply-chain branch in `bridge/enrichment.py` still requires a Telethon client and is silently skipped in the worker until a follow-up issue lands; that is **not** considered fixed by sdlc-1297.
+
+### Media Intake Resilience (issue #1330)
+
+The sdlc-1297 contract assumes (a) `TelegramMessage.query.get(stored_msg_id)` always returns the record the bridge just created, and (b) `_download_media_with_retry` returns either a path or a populated error string. Both assumptions can fail transiently — a Popoto stale-index condition can return `None` from `query.get`, and the size-aware retry wrapper can return `(None, None)` ("no_path" outcome) when `client.download_media` reports success but the file is missing post-download. Either case left the file orphaned on disk and the agent seeing only the `[media]` placeholder.
+
+Defense in depth lives in two layers:
+
+- **Bridge persist (loud failure)**: After `query.get(stored_msg_id)`, a single bounded re-query covers transient stale-index reads; if both calls return `None`, the bridge logs a `WARNING` with `stored_msg_id`, `chat_id`, `message_id`, `local_path`, and `download_error` and proceeds. Separately, if the download wrapper returned `(_local_path=None, _download_error=None)` while `message.media` is truthy, a second `WARNING` records the no-path-no-error condition. Neither path is silent anymore. The bridge deliberately does **not** call `query.keys(clean=True)` here — index-mutating calls on the hot intake path are too expensive; the worker-side fallback below is the durable safety net.
+- **Worker self-heal**: In `bridge/enrichment.py`, when `has_media=True` AND `media_local_path` is unset AND `media_download_error` is also unset, the worker globs `bridge.media.MEDIA_DIR` for `*_{message_id}.*` (the filename pattern is fully determined by `bridge/media.py::download_media`). On exactly one match it adopts the file with an `INFO` log (`self-heal: recovered orphan media file ...`) and runs AI enrichment as if `media_local_path` had been persisted. Zero matches or multiple matches fall through to the existing "older record?" `WARNING` so ambiguity surfaces rather than silently misroutes.
+
+**Explicit non-goal**: this work does not fix the upstream Popoto stale-index root cause. That is tracked under #617 / #860 — orphan-index hygiene is its own ongoing reflection. sdlc-1330 makes intake resilient to that condition; the root cause is unaffected.
 
 ### Execution Harness Routing
 
@@ -605,6 +616,7 @@ launchd's `ThrottleInterval` (configured at 10 seconds in `com.valor.worker.plis
 - After `asyncio.run(_run_worker(...))` returns, `main()` checks the flag and calls `sys.exit(1)` if it is set.
 - SIGINT (developer Ctrl-C) leaves the flag unset and exits 0 — a voluntary stop during development should not be penalized with a forced restart.
 - `stop_worker()` in `scripts/valor-service.sh` uses `launchctl bootout` (the modern macOS API) to remove the worker from the launchd domain, consistent with `scripts/install_worker.sh`.
+- `start_worker()` in `scripts/valor-service.sh` uses `launchctl bootout` (defensive, to clear any partial registration) followed by `launchctl bootstrap gui/<uid> <plist>` (issue #1407). This matches `stop_worker()` and `scripts/install_worker.sh`. Earlier code used `launchctl load`, which registered the service in a domain invisible to `gui/<uid>/` queries — this broke `KeepAlive` respawn and made the watchdog's recovery chain return rc=113. Bootstrap-based registration is the only path that keeps `KeepAlive` and `launchctl kickstart` working together.
 
 **Result:** Worker killed via SIGTERM restarts within 15 seconds (10s `ThrottleInterval` + margin) rather than the ~10-minute default.
 

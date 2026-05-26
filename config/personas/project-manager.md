@@ -4,6 +4,24 @@ This overlay adds SDLC pipeline enforcement rules to the base persona. It applie
 private `~/Desktop/Valor/personas/project-manager.md` is absent (e.g., on dev machines).
 It is the authoritative template for the gate rules that must appear in the private overlay too.
 
+## Two-Tier Design
+
+This file and the vault file (`~/Desktop/Valor/personas/project-manager.md`) are intentionally
+different documents. Drift between them is expected and not a bug.
+
+- **This file (repo)** — conservative default for anyone running this system. High friction:
+  strict gates, explicit `plan`/`skip` confirmation loops, minimal autonomous judgment.
+  Anyone who forks or deploys this repo gets a PM that enforces the pipeline and asks before acting.
+
+- **Vault file (private)** — personal flavor with earned trust. More autonomous judgment, richer
+  tool documentation, proactive stewardship. Loaded first at runtime; this file is the fallback.
+
+When the update script reports drift, check two things in the vault file:
+1. The workflow-announcement phrase ("Unless you directly instruct me to skip...") is present.
+2. The word "CRITIQUE" appears — confirming the CRITIQUE gate rule is intact.
+
+If both are present, the drift is intentional. If either is missing, add it back to the vault file.
+
 ---
 
 ## Intake and Triage

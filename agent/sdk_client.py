@@ -889,7 +889,24 @@ def _resolve_overlay_path(persona: str) -> Path:
     return PERSONAS_BASE_DIR / f"{persona}.md"
 
 
-def load_persona_prompt(persona: str = "developer") -> str:
+class _SafeFormatDict(dict):
+    """A dict subclass that preserves missing keys as literal {key} placeholders.
+
+    Used by load_persona_prompt to apply substitutions without raising KeyError
+    when the persona file contains brace-delimited tokens not in the provided
+    substitutions dict. Unreferenced braces are preserved verbatim.
+
+    Example:
+        d = _SafeFormatDict({"customer_id": "cust-42"})
+        "{customer_id} and {other_key}".format_map(d)
+        # -> "cust-42 and {other_key}"
+    """
+
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def load_persona_prompt(persona: str = "developer", substitutions: dict | None = None) -> str:
     """Load persona prompt from composable segments + overlay.
 
     Segments are assembled from config/personas/segments/ per manifest.json,
@@ -898,11 +915,16 @@ def load_persona_prompt(persona: str = "developer") -> str:
     falling back to config/personas/{persona}.md (in-repo, for development).
 
     Args:
-        persona: Persona name — one of "developer", "project-manager", "teammate".
-            Defaults to "developer".
+        persona: Persona name — one of "developer", "project-manager", "teammate",
+            "customer-service". Defaults to "developer".
+        substitutions: Optional dict of {placeholder: value} pairs applied to the
+            assembled prompt via _SafeFormatDict.format_map. Missing keys are
+            preserved as literal {key} placeholders (never raise KeyError).
+            Pass None (default) to skip substitution entirely (backward-compatible).
 
     Returns:
-        Combined persona prompt (assembled segments + overlay).
+        Combined persona prompt (assembled segments + overlay), with substitutions
+        applied if provided.
 
     Raises:
         FileNotFoundError: If identity config, segments, or overlay files are missing.
@@ -969,14 +991,21 @@ def load_persona_prompt(persona: str = "developer") -> str:
                 "Sync from config/personas/developer.md."
             )
         logger.info(f"Loaded persona '{persona}' from {overlay_path}")
-        return f"{base_content}\n\n---\n\n{overlay_content}"
+        result = f"{base_content}\n\n---\n\n{overlay_content}"
+        if substitutions:
+            # _SafeFormatDict preserves unreferenced {braces} as literal text.
+            result = result.format_map(_SafeFormatDict(substitutions))
+        return result
 
     # Invalid persona name — fall back to developer with warning
-    if persona not in ("developer", "project-manager", "teammate"):
+    if persona not in ("developer", "project-manager", "teammate", "customer-service"):
         logger.warning(f"Unknown persona '{persona}', falling back to developer persona")
         developer_path = _resolve_overlay_path("developer")
         if developer_path.exists():
-            return f"{base_content}\n\n---\n\n{developer_path.read_text()}"
+            result = f"{base_content}\n\n---\n\n{developer_path.read_text()}"
+            if substitutions:
+                result = result.format_map(_SafeFormatDict(substitutions))
+            return result
 
     # Persona overlay missing — fail loudly (no SOUL.md fallback)
     raise FileNotFoundError(
@@ -1475,6 +1504,7 @@ class ValorAgent:
         target_repo: str | None = None,
         session_type: str | None = None,
         model: str | None = None,
+        customer_id: str | None = None,
     ):
         """
         Initialize ValorAgent.
@@ -1501,6 +1531,9 @@ class ValorAgent:
             model: Optional Claude model name (e.g. "sonnet", "opus"). When set,
                 overrides the environment-level model for this session. None inherits
                 the CLI default. Used for per-SDLC-stage model selection.
+            customer_id: Optional customer ID. When set, injected as CUSTOMER_ID
+                env var in the Claude Code subprocess so target-repo tools can
+                load the customer's profile without parsing the system prompt.
         """
         default_dir = Path(__file__).parent.parent
         allowed_root = Path.home() / "src"
@@ -1518,6 +1551,7 @@ class ValorAgent:
         self.target_repo = target_repo
         self.session_type = session_type
         self.model = model or None  # Normalize empty string to None
+        self.customer_id = customer_id or None  # Normalize empty string to None
 
     def _create_options(self, session_id: str | None = None) -> ClaudeAgentOptions:
         """Create ClaudeAgentOptions configured for Valor with full permissions.
@@ -1563,6 +1597,11 @@ class ValorAgent:
         # FK stored in parent_agent_session_id on the child's AgentSession record.
         if self.agent_session_id and self.session_type in (SessionType.PM, SessionType.TEAMMATE):
             env["VALOR_PARENT_SESSION_ID"] = self.agent_session_id
+
+        # Customer ID: inject for customer-service sessions so target-repo tools
+        # can load the customer's profile without parsing the system prompt.
+        if self.customer_id:
+            env["CUSTOMER_ID"] = self.customer_id
 
         # Cross-repo gh resolution: set GH_REPO so all `gh` CLI commands in the
         # subprocess automatically target the correct repo (issue #375). This is
@@ -1974,6 +2013,7 @@ def _load_persona_overlay_with_log(
     request_id: str,
     session_id: str | None,
     fallback: str | None = None,
+    substitutions: dict | None = None,
 ) -> str | None:
     """Load a persona overlay and emit one canonical log line.
 
@@ -2006,13 +2046,15 @@ def _load_persona_overlay_with_log(
             for callers that don't have one in scope.
         fallback: Optional persona name to try when the requested overlay
             file is missing. ``None`` means no fallback.
+        substitutions: Optional dict passed through to load_persona_prompt for
+            placeholder substitution (e.g. {"customer_id": "cust-42"}).
 
     Returns:
         The persona prompt string, or ``None`` if both the requested overlay
         and the fallback are missing.
     """
     try:
-        prompt = load_persona_prompt(persona)
+        prompt = load_persona_prompt(persona, substitutions=substitutions)
         logger.info(
             f"[{request_id}] Persona overlay loaded: name={persona} "
             f"prompt_chars={len(prompt) if prompt else 0} "
@@ -2022,7 +2064,7 @@ def _load_persona_overlay_with_log(
     except FileNotFoundError:
         if fallback:
             try:
-                fallback_prompt = load_persona_prompt(fallback)
+                fallback_prompt = load_persona_prompt(fallback, substitutions=substitutions)
                 logger.warning(
                     f"[{request_id}] Persona overlay missing: requested={persona} "
                     f"fell_back_to={fallback} session_id={session_id}"
@@ -2967,6 +3009,9 @@ async def build_harness_turn_input(
     is_cross_repo: bool = False,
     *,
     skip_prefix: bool = False,
+    persona: str | None = None,
+    email_from: str | None = None,
+    email_sender_name: str | None = None,
 ) -> str:
     """Build context-enriched message for CLI harness execution.
 
@@ -2991,6 +3036,10 @@ async def build_harness_turn_input(
         classification: Classification type from bridge (e.g., "sdlc", "question").
         is_cross_repo: Whether this is a cross-repo project (project_key != "valor").
         skip_prefix: If True, return raw message without context headers.
+        persona: Resolved persona name. Passed to build_context_prefix so that
+            customer-service sessions are not given the teammate read-only restriction.
+        email_from: Email address of the contact being served (email bridge only).
+        email_sender_name: Display name paired with email_from.
 
     Returns:
         Enriched message string with context headers prepended, or raw message
@@ -3000,7 +3049,14 @@ async def build_harness_turn_input(
         return message
     from bridge.context import build_context_prefix
 
-    enriched = build_context_prefix(project, session_type, sender_id)
+    enriched = build_context_prefix(
+        project,
+        session_type,
+        sender_id,
+        persona=persona,
+        email_from=email_from,
+        sender_name=email_sender_name,
+    )
 
     if sender_name:
         enriched += f"\n\nFROM: {sender_name}"
@@ -3177,10 +3233,32 @@ async def get_agent_response_sdk(
         except Exception:
             pass
 
+    # Resolve persona early so build_context_prefix can suppress the teammate
+    # read-only restriction for customer-service sessions.
+    _early_persona, _, _ = _resolve_compose_args(
+        session_type=_session_type,
+        project=project,
+        transport=_session_extra_context.get("transport"),
+        chat_title=chat_title,
+        is_dm=(chat_title is None),
+        project_mode=project_mode,
+    )
+
+    # Extract email contact info so the agent knows who it's serving.
+    _email_from: str | None = _session_extra_context.get("email_from")
+    _email_sender_name: str | None = _session_extra_context.get("sender_name")
+
     # Build context-enriched message (includes user permission restrictions)
     from bridge.context import build_context_prefix
 
-    context = build_context_prefix(project, _session_type, sender_id)
+    context = build_context_prefix(
+        project,
+        _session_type,
+        sender_id,
+        persona=_early_persona,
+        email_from=_email_from,
+        sender_name=_email_sender_name,
+    )
     enriched_message = context
     enriched_message += f"\n\nFROM: {sender_name}"
     if chat_title:
@@ -3587,11 +3665,15 @@ async def get_agent_response_sdk(
         elif _access_level == AccessLevel.CUSTOMER_SERVICE:
             # Customer-service persona: action-oriented, no code writes. Use
             # the logging adapter for fallback semantics (teammate fallback).
+            # Pass customer_id substitution so {customer_id} placeholders in the
+            # persona file are filled with the resolved value from extra_context.
+            _cust_id = _session_extra_context.get("customer_id") or "unknown"
             custom_system_prompt = _load_persona_overlay_with_log(
                 "customer-service",
                 request_id=request_id,
                 session_id=session_id,
                 fallback="teammate",
+                substitutions={"customer_id": _cust_id},
             )
         elif _access_level == AccessLevel.TEAMMATE:
             # Teammate persona: casual mode, no WORKER_RULES.
@@ -3620,6 +3702,10 @@ async def get_agent_response_sdk(
         if _gh_repo:
             logger.info(f"[{request_id}] Cross-repo: GH_REPO={_gh_repo}")
 
+        # Extract customer_id from session extra_context so it can be injected
+        # as CUSTOMER_ID env var in the Claude Code subprocess (issue #1093).
+        _customer_id = _session_extra_context.get("customer_id") or None
+
         agent = ValorAgent(
             working_dir=working_dir,
             system_prompt=custom_system_prompt,
@@ -3633,6 +3719,7 @@ async def get_agent_response_sdk(
             target_repo=project_working_dir,
             session_type=_session_type,
             model=_session_model,
+            customer_id=_customer_id,
         )
         response = await agent.query(enriched_message, session_id=session_id)
 

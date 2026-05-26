@@ -165,7 +165,7 @@ class TestG7ThroughDecideNextDispatch:
     """Integration-style tests driving G7 through the full router."""
 
     def test_lock_set_critique_just_ran_routes_to_plan_via_g7(self):
-        """G7 routes to /do-plan when lock is set and critique just ran (via guard, not dispatch table).
+        """G7 routes to /do-plan when lock is set and critique just ran (via guard, not table).
 
         Uses READY TO BUILD (with concerns) verdict so G1 doesn't fire first.
         G1 only fires on NEEDS REVISION / MAJOR REWORK; G7 fires on any
