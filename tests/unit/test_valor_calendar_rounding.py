@@ -77,7 +77,8 @@ class TestRoundUp6:
             f"Expected hour {expected_hour}, got {result.hour} for {hour}:{minute:02d}:{second:02d}"
         )
         assert result.minute == expected_minute, (
-            f"Expected minute {expected_minute}, got {result.minute} for {hour}:{minute:02d}:{second:02d}"
+            f"Expected minute {expected_minute}, "
+            f"got {result.minute} for {hour}:{minute:02d}:{second:02d}"
         )
         assert result.second == 0
 
