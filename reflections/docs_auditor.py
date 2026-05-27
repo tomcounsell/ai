@@ -1307,6 +1307,36 @@ def run_docs_branch_sweeper() -> dict:
                 continue
 
             now = datetime.now(UTC)
+
+            # Branches with all PRs already closed/merged: delete if branch is old enough
+            open_prs = [p for p in prs if p.get("state", "").upper() == "OPEN"]
+            closed_prs = [p for p in prs if p.get("state", "").upper() != "OPEN"]
+            if prs and not open_prs:
+                # All PRs closed — delete branch if oldest closed PR is stale
+                newest_close = max((p.get("createdAt", "") for p in closed_prs), default="")
+                if newest_close:
+                    try:
+                        age_days = (
+                            now - datetime.fromisoformat(newest_close.replace("Z", "+00:00"))
+                        ).days
+                        if age_days >= STALE_BRANCH_AGE_DAYS:
+                            subprocess.run(
+                                ["git", "push", "origin", "--delete", branch],
+                                capture_output=True,
+                                timeout=20,
+                                cwd=str(PROJECT_ROOT),
+                                check=False,
+                            )
+                            branches_deleted += 1
+                            findings.append(
+                                f"Deleted branch with closed PR: {branch} ({age_days}d)"
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            f"sweeper: closed-PR branch cleanup failed for {branch}: {e}"
+                        )
+                continue
+
             if not prs:
                 # No PR ever; check branch age via creation time of the latest commit
                 try:
@@ -1335,7 +1365,7 @@ def run_docs_branch_sweeper() -> dict:
                     logger.warning(f"sweeper: branch-age check failed for {branch}: {e}")
                 continue
 
-            for pr in prs:
+            for pr in open_prs:
                 state = pr.get("state", "").upper()
                 if state not in ("OPEN",):
                     continue
