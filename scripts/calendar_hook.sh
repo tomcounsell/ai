@@ -27,9 +27,9 @@ fi
 EXCLUDED_PROJECTS="valor"
 PROJECTS_JSON_CHECK="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
 if [ -f "$PROJECTS_JSON_CHECK" ]; then
-    CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" '
+    CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" --arg home "$HOME" '
         .projects | to_entries[]
-        | select(.value.working_directory == $cwd)
+        | select((.value.working_directory | gsub("^~"; $home)) == $cwd)
         | .key
     ' "$PROJECTS_JSON_CHECK" 2>/dev/null || true)
     for excluded in $EXCLUDED_PROJECTS; do
@@ -58,9 +58,9 @@ fi
 if [ -n "$SAVED_SLUG" ]; then
     SLUG="$SAVED_SLUG"
 elif [ -f "$PROJECTS_JSON" ]; then
-    MATCH_KEY=$(jq -r --arg cwd "$PWD" '
+    MATCH_KEY=$(jq -r --arg cwd "$PWD" --arg home "$HOME" '
         .projects | to_entries[]
-        | select(.value.working_directory == $cwd)
+        | select((.value.working_directory | gsub("^~"; $home)) == $cwd)
         | .key
     ' "$PROJECTS_JSON" 2>/dev/null || true)
     if [ -n "$MATCH_KEY" ]; then
