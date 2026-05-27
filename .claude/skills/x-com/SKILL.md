@@ -415,6 +415,7 @@ Total under 250 words. Be blunt.
 7. **Draft v4** (only if any prior round graded below B+).
 8. **Final cold-read v4** with Generalist or Skeptic.
 9. **Ship the highest-graded version,** or drop the post if no version reaches B+. (Don't ship D-tier just because you've spent 4 rounds — premise might be the problem.)
+10. **Invoke `Skill('authenticity-pass')`** on `/tmp/x-post.txt` — PASS proceeds to publish; BLOCK returns the draft to the drafter with the blocking gaps as revision instructions (max 2 retries before dropping the post).
 
 ### Publish (verified live)
 

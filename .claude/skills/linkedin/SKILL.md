@@ -486,8 +486,9 @@ Total under 250 words. Be blunt.
 
 When the subagent returns the final draft, the parent session:
 1. Reads `/tmp/linkedin-post.txt`
-2. Renders the final post inline in the response
-3. **In the same turn**, attempts to publish (see ⚠️ below)
+2. **Invokes `Skill('authenticity-pass')`** — PASS proceeds; BLOCK returns the draft to the drafter with the blocking gaps as revision instructions (max 2 retries before dropping the post)
+3. Renders the final post inline in the response
+4. **In the same turn**, attempts to publish (see ⚠️ below)
 
 ### Publish
 
