@@ -5,7 +5,7 @@ Usage: valor-calendar [--project PROJECT] [--reauth] [--check] <session-slug>
 Routes to the correct Google Calendar by project name using
 config/calendar_config.json. Falls back to "default" calendar
 when no project is specified or no mapping exists.
-Creates or extends events using 12-minute minimum blocks, 6-minute increments.
+Creates or extends events using 20-minute minimum blocks, 10-minute increments.
 Falls back to offline queue on auth failure.
 
 Flags:
@@ -50,20 +50,20 @@ def get_calendar_id(project: str | None, config: dict) -> str | None:
     return None
 
 
-_SEGMENT_MINUTES = 6
-_MIN_BLOCK_MINUTES = 12
+_SEGMENT_MINUTES = 10
+_MIN_BLOCK_MINUTES = 20
 
 
-def round_down_6(dt: datetime) -> datetime:
-    """Round a datetime DOWN to the nearest 6-minute boundary."""
+def round_down_10(dt: datetime) -> datetime:
+    """Round a datetime DOWN to the nearest 10-minute boundary."""
     minute = (dt.minute // _SEGMENT_MINUTES) * _SEGMENT_MINUTES
     return dt.replace(minute=minute, second=0, microsecond=0)
 
 
-def round_up_6(dt: datetime) -> datetime:
-    """Round a datetime UP to the nearest 6-minute boundary.
+def round_up_10(dt: datetime) -> datetime:
+    """Round a datetime UP to the nearest 10-minute boundary.
 
-    Returns the same time if already on a 6-minute boundary with second=0.
+    Returns the same time if already on a 10-minute boundary with second=0.
     Handles hour rollover (e.g. 10:59 -> 11:00).
     """
     if dt.second == 0 and dt.minute % _SEGMENT_MINUTES == 0:
@@ -75,8 +75,8 @@ def round_up_6(dt: datetime) -> datetime:
 
 
 def current_segment(now: datetime) -> tuple[datetime, datetime]:
-    """Return segment boundaries: start rounded down to 6-min, end = start + 12 min."""
-    start = round_down_6(now)
+    """Return segment boundaries: start rounded down to 10-min, end = start + 20 min."""
+    start = round_down_10(now)
     end = start + timedelta(minutes=_MIN_BLOCK_MINUTES)
     return start, end
 
