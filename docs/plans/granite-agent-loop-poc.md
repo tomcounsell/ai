@@ -226,8 +226,14 @@ No concurrency concerns — the loop is fully sequential: PM turn completes befo
 
 ## No-Gos (Out of Scope)
 
-- `[SEPARATE-SLUG #1486]` Production replacement of `sdk_client.py` and `session_executor.py` — the PoC must succeed and be evaluated before any production wiring begins
-- `[EXTERNAL]` Max subscription concurrent session limit verification — requires testing on the actual subscription plan; the PoC will surface this if it's a real problem
+- `[SEPARATE-SLUG #1486]` Production replacement of `sdk_client.py` and `session_executor.py` — the PoC runs as a fully standalone script, explicitly outside the `AgentSession` lifecycle (13-state model), the worker's hourly cleanup reflection, and the `session_executor.py` turn-boundary logic. It is a parallel experiment, not a production integration. Production wiring is a follow-on issue once the PoC is evaluated.
+- `[SEPARATE-SLUG #1486]` Integration with `queued_steering_messages` / session steering — granite writes to Claude stdin directly, which is an alternative to the existing steering model, not a layer on top of it. If the PoC succeeds, the steering model gets replaced; that design decision is out of scope here.
+- `[EXTERNAL]` Max subscription concurrent session limit verification — requires testing on the actual subscription plan; the PoC uses sequential (not concurrent) session turns so this should be a non-issue, but surface it if discovered.
+
+**Kill criteria** (abandon architecture if hit):
+- granite4.1:3b JSON parse error rate > 20% on the 20-fixture smoke test → abandon granite routing approach
+- Persistent subprocess communication failures > 30% of turns → revert to AgentSDK
+- granite context truncation causes routing loop to lose task context before completion in > 50% of test runs → redesign context management
 
 ## Update System
 
@@ -268,6 +274,18 @@ No agent integration required at PoC stage — `scripts/granite_poc.py` is a dev
   - Resume: true
 
 ## Step by Step Tasks
+
+### 0. Granite smoke test (gate task)
+- **Task ID**: smoke-granite
+- **Depends On**: none
+- **Validates**: granite4.1:3b produces valid JSON tool calls reliably enough to act as operator
+- **Assigned To**: poc-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Create `scripts/granite_smoke_test.py`: generate 20 scripted operator decision scenarios (multiple-choice prompt, feedback request, "still working?", "done" signal)
+- Call `ollama.chat('granite4.1:3b', messages=[...], tools=[...])` for each; record whether `response.message.tool_calls` is non-empty and tool name matches expected
+- Print: total, parse-valid count, error rate
+- **Gate**: if error rate > 20%, print `KILL SIGNAL: abandon granite routing` and exit 1 — do not proceed
 
 ### 1. Implement ClaudeSession
 - **Task ID**: build-claude-session
@@ -313,6 +331,8 @@ No agent integration required at PoC stage — `scripts/granite_poc.py` is a dev
 - Append each turn to `logs/granite_poc_trace.jsonl`
 - Exit loop on `signal_done` action or `max_turns` hit
 - Create `scripts/granite_poc.py`: `if __name__ == "__main__": import sys; from agent.granite_agent_loop import GraniteAgentLoop; result = GraniteAgentLoop().run(sys.argv[1]); print(result)`
+- `GraniteAgentLoop.__init__` registers `atexit.register(self._cleanup)` and `signal.signal(SIGTERM, ...)` — both SIGTERM both subprocess handles to prevent zombie Claude processes on crash
+- Subprocess env includes `CLAUDE_CODE_TASK_LIST_ID=granite-poc-{uuid4()[:8]}` for task list isolation
 
 ### 4. Run the PoC end-to-end
 - **Task ID**: validate-poc-run
@@ -349,9 +369,22 @@ No agent integration required at PoC stage — `scripts/granite_poc.py` is a dev
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic | granite4.1:3b tool-call reliability unproven — entire control loop depends on reliable JSON function dispatch at 3b scale | Task 0 (new): granite smoke test gates proceeding; < 95% parse success = kill signal | Added as pre-gate task before any loop code |
+| BLOCKER | Skeptic | Persistent interactive subprocess is the entire hard problem, not a single task item — mixing three unknowns (granite routing + persistent processes + new topology) guarantees confounded results | Split: Task 1 validates persistent subprocess alone (no granite, no loop), Task 2 validates granite routing alone (mock sessions), Task 3 integrates | Tasks reordered to be independently testable checkpoints |
+| BLOCKER | Adversary | Deadlock: no per-readline timeout at subprocess level — if Claude hangs mid-output, granite waits indefinitely | `read_until_result()` uses `select()`/non-blocking reads with per-line 30s deadline; timeout appends synthetic `{"type":"timeout"}` | Already in plan conceptually; now explicit at the readline level |
+| BLOCKER | Adversary | No output framing contract — raw stdout mixes tool call JSON, markdown, system events, error traces | Both sessions use `--output-format stream-json` → every stdout line is parseable JSON; plan already specifies this | No change needed; critic missed this section of the plan |
+| BLOCKER | Archaeologist | Plan doesn't acknowledge it bypasses AgentSession lifecycle and session-steering; could be read as production replacement | No-Gos section strengthened — explicitly states PoC runs standalone outside AgentSession model; production integration is SEPARATE-SLUG follow-on | Addressed in No-Gos |
+| CONCERN | Operator | No structured trace log defined — assessment doc has no data to populate | `logs/granite_poc_trace.jsonl` schema defined explicitly: `{ts, turn, action, duration_ms, session, granite_tool_call, operator_events}` | Added to Task 3 implementation requirements |
+| CONCERN | Operator | MCP config, system prompt, permission flags not specified — Claude sessions will behave differently from production | Task 1 adds a checklist: audit `sdk_client.py` ClaudeCodeOptions and replicate `--permission-mode`, `--system-prompt-file`, cwd in subprocess cmd | Added to Task 1 |
+| CONCERN | Simplifier | "Granite as quality evaluator" is unfalsifiable — no fixture set to score against | Scope narrowed: granite is an operator only (routing, operator events, termination detection), not a quality judge. Quality assessment is PM's job. | GraniteRouter responsibilities simplified in plan |
+| CONCERN | User | Assessment doc too vague — no schema, no comparison baseline | `docs/plans/granite-agent-loop-poc-results.md` schema added: required fields `avg_turns`, `granite_parse_error_rate`, `operator_event_count`, `wall_clock_s`, `kill_criteria_hit` | Added to Task 4 |
+| CONCERN | Archaeologist | Conflicts with `queued_steering_messages` steering model — granite writes to stdin directly | Acknowledged in No-Gos: granite stdin routing is an alternative to, not a layer on top of, the existing steering model | Added to No-Gos |
+| MINOR | Adversary | granite context window (4096 tokens) — long sessions will truncate | GraniteRouter truncates its own history: keeps last 8 messages only, summarizes older turns | Added to GraniteRouter implementation spec |
+| MINOR | Operator | Zombie subprocess cleanup on crash | `atexit.register()` + `signal.signal(SIGTERM)` in GraniteAgentLoop terminates both subprocess handles | Added to Task 3 |
+| MINOR | Adversary | No kill criteria in No-Gos | Kill criteria added: > 20% granite parse error rate on fixtures = abandon granite routing; > 30% subprocess comms failures = revert to AgentSDK | Added to No-Gos |
+| MINOR | Archaeologist | `CLAUDE_CODE_TASK_LIST_ID` isolation missing | Added to subprocess env construction in Task 1 | Minor but correct |
 
 ---
 
