@@ -62,6 +62,7 @@ REDIS_SWEEPER_RUNNING_KEY = "docs_audit:sweeper:running"
 REDIS_LAST_COMPLETED_TS_KEY = "docs_audit:last_completed_run_ts"
 REDIS_LAST_COMPLETED_SUMMARY_KEY = "docs_audit:last_completed_run_summary"
 REDIS_ISSUE_DEDUP_PREFIX = "docs_audit:issues_filed"
+REDIS_DAILY_PR_KEY = "docs_audit:prs_today"  # capped at 1 PR per calendar day
 
 # Vault docs are picked at half the rate of repo docs by default (read-mostly).
 DEFAULT_VAULT_WEIGHT = 0.5
@@ -872,11 +873,69 @@ def _git_diff_quiet(repo_root: Path) -> bool:
         return False
 
 
+def _has_open_pr_for_slug(slug: str, repo_root: Path) -> bool:
+    """Return True if any open PR already targets a docs-audit branch for this slug."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "list", "--state", "open", "--json", "headRefName"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=str(repo_root),
+        )
+        if result.returncode != 0:
+            return False
+        prs = json.loads(result.stdout or "[]")
+        prefix = f"docs-audit/{slug}-"
+        return any(p.get("headRefName", "").startswith(prefix) for p in prs)
+    except Exception as e:
+        logger.warning(f"docs_auditor: open-PR check failed: {e}")
+        return False
+
+
+def _daily_pr_cap_reached(repo_root: Path) -> bool:
+    """Return True if a docs-audit PR was already created today (calendar day, UTC)."""
+    try:
+        r = _get_redis()
+        today = datetime.now(UTC).strftime("%Y%m%d")
+        key = f"{REDIS_DAILY_PR_KEY}:{today}"
+        return bool(r.exists(key))
+    except Exception as e:
+        logger.warning(f"docs_auditor: daily PR cap check failed: {e}")
+        return False
+
+
+def _record_daily_pr(repo_root: Path) -> None:
+    """Mark that a PR was created today so the daily cap is enforced."""
+    try:
+        r = _get_redis()
+        today = datetime.now(UTC).strftime("%Y%m%d")
+        key = f"{REDIS_DAILY_PR_KEY}:{today}"
+        r.set(key, "1", ex=86400 * 2)  # expires after 2 days
+    except Exception as e:
+        logger.warning(f"docs_auditor: daily PR cap record failed: {e}")
+
+
 def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
-    """Create timestamped branch, push, open PR. Returns PR URL or None on failure."""
+    """Create timestamped branch, push, open PR. Returns PR URL or None on failure.
+
+    Always returns the repo to the main branch afterward, even on error.
+    Skips PR creation if an open PR for the same slug already exists or if
+    the daily cap (1 PR per calendar day) has been reached.
+    """
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M")
     branch = f"docs-audit/{slug}-{ts}"
     try:
+        # Guard: daily cap
+        if _daily_pr_cap_reached(repo_root):
+            logger.info("docs_auditor: daily PR cap reached, skipping PR creation")
+            return None
+
+        # Guard: open PR already exists for this slug
+        if _has_open_pr_for_slug(slug, repo_root):
+            logger.info(f"docs_auditor: open PR already exists for {slug}, skipping")
+            return None
+
         subprocess.run(
             ["git", "checkout", "-b", branch],
             capture_output=True,
@@ -925,13 +984,24 @@ def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
             check=False,
         )
         url = (pr_result.stdout or "").strip().splitlines()[-1] if pr_result.stdout else None
-        return url if url and url.startswith("http") else None
+        if url and url.startswith("http"):
+            _record_daily_pr(repo_root)
+            return url
+        return None
     except subprocess.CalledProcessError as e:
         logger.warning(f"docs_auditor: branch/push/PR failed: {e}")
         return None
     except Exception as e:
         logger.warning(f"docs_auditor: branch/push/PR error: {e}")
         return None
+    finally:
+        # Always return to main so the next run starts from a clean base.
+        subprocess.run(
+            ["git", "checkout", "main"],
+            capture_output=True,
+            timeout=10,
+            cwd=str(repo_root),
+        )
 
 
 def _write_liveness(slug: str, status: str, pr_url: str | None, files_touched: int) -> None:
@@ -1102,11 +1172,77 @@ def run_docs_auditor() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
+    """Return True if a docs-audit PR meets the conservative auto-merge bar.
+
+    Heuristics (all must pass):
+    - Only ``docs/`` files changed (no code, no config)
+    - ≤ 5 files changed
+    - ≤ 50 net lines changed (additions + deletions)
+    - No reviews, review requests, or comments
+    - PR is between 1 and 7 days old (not brand-new, not stale)
+    """
+    try:
+        meta_res = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "files,reviews,reviewRequests,comments,createdAt,additions,deletions",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=str(PROJECT_ROOT),
+        )
+        if meta_res.returncode != 0:
+            return False
+        meta = json.loads(meta_res.stdout or "{}")
+
+        # No reviewer activity
+        if meta.get("reviews") or meta.get("reviewRequests") or meta.get("comments"):
+            return False
+
+        # File count and path guard
+        files = meta.get("files", [])
+        if not files or len(files) > 5:
+            return False
+        for f in files:
+            path = f.get("path", "")
+            if not (path.startswith("docs/") or path in ("README.md", "CLAUDE.md")):
+                return False
+
+        # Diff size guard
+        net_lines = meta.get("additions", 0) + meta.get("deletions", 0)
+        if net_lines > 50:
+            return False
+
+        # Age guard: 1–7 days
+        created_raw = meta.get("createdAt", "")
+        if not created_raw:
+            return False
+        age_days = (
+            datetime.now(UTC) - datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+        ).days
+        if age_days < 1 or age_days > 7:
+            return False
+
+        return True
+    except Exception as e:
+        logger.warning(f"docs_auditor: auto-merge eligibility check failed for #{pr_number}: {e}")
+        return False
+
+
 def run_docs_branch_sweeper() -> dict:
     """Sweep stale ``docs-audit/*`` branches and PRs.
 
     Conservative: only touches ``docs-audit/*`` branches, never any other
     prefix and never branches with reviewer activity.
+
+    Also auto-merges PRs that pass the conservative eligibility check (docs-only,
+    small diff, no reviewer activity, 1–7 days old).
     """
     if not _acquire_lock(REDIS_SWEEPER_RUNNING_KEY, SWEEPER_LOCK_TTL_SECONDS):
         return {
@@ -1118,6 +1254,7 @@ def run_docs_branch_sweeper() -> dict:
     findings: list[str] = []
     branches_deleted = 0
     prs_closed = 0
+    prs_merged = 0
 
     try:
         # List remote branches under docs-audit/
@@ -1211,8 +1348,35 @@ def run_docs_branch_sweeper() -> dict:
                     ).days
                 except Exception:
                     continue
+                pr_num = pr.get("number")
+                if not pr_num:
+                    continue
+
+                # Auto-merge eligible PRs before stale-close check
+                if _pr_is_auto_merge_eligible(pr_num):
+                    try:
+                        merge_res = subprocess.run(
+                            ["gh", "pr", "merge", str(pr_num), "--squash", "--delete-branch"],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            cwd=str(PROJECT_ROOT),
+                            check=False,
+                        )
+                        if merge_res.returncode == 0:
+                            prs_merged += 1
+                            findings.append(
+                                f"Auto-merged PR #{pr_num} (branch={branch}, {age_days}d)"
+                            )
+                            continue
+                        else:
+                            logger.warning(
+                                f"sweeper: auto-merge failed for #{pr_num}: {merge_res.stderr}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"sweeper: auto-merge error for #{pr_num}: {e}")
+
                 if age_days >= STALE_PR_AGE_DAYS:
-                    pr_num = pr.get("number")
                     try:
                         subprocess.run(
                             ["gh", "pr", "close", "--delete-branch", str(pr_num)],
@@ -1227,7 +1391,8 @@ def run_docs_branch_sweeper() -> dict:
                         logger.warning(f"sweeper: gh pr close failed for #{pr_num}: {e}")
 
         summary = (
-            f"do-docs-branch-sweeper: {branches_deleted} branches deleted, {prs_closed} PRs closed"
+            f"do-docs-branch-sweeper: {branches_deleted} branches deleted, "
+            f"{prs_closed} PRs closed, {prs_merged} PRs auto-merged"
         )
         logger.info(summary)
         return {"status": "ok", "findings": findings, "summary": summary}
