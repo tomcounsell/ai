@@ -36,13 +36,20 @@ Pass `--apply` to enable live writes:
 ```bash
 cd /Users/valorengels/src/ai && python -c "
 from reflections.sentry_triage import run_sentry_triage
-import json, os
 result = run_sentry_triage()
-print(result['summary'])
-if result.get('findings'):
-    print()
-    for line in result['findings']:
-        print(line)
+if result['status'] == 'disabled':
+    print(result['summary'])
+else:
+    print(result['summary'])
+    findings = result.get('findings', [])
+    show = False
+    for line in findings:
+        if line.startswith('Class C') or line.startswith('Class D'):
+            show = True
+        elif line.startswith('Class '):
+            show = False
+        if show:
+            print(line)
 "
 ```
 
@@ -52,11 +59,19 @@ if result.get('findings'):
 cd /Users/valorengels/src/ai && SENTRY_TRIAGE_APPLY=1 python -c "
 from reflections.sentry_triage import run_sentry_triage
 result = run_sentry_triage()
-print(result['summary'])
-if result.get('findings'):
-    print()
-    for line in result['findings']:
-        print(line)
+if result['status'] == 'disabled':
+    print(result['summary'])
+else:
+    print(result['summary'])
+    findings = result.get('findings', [])
+    show = False
+    for line in findings:
+        if line.startswith('Class C') or line.startswith('Class D'):
+            show = True
+        elif line.startswith('Class '):
+            show = False
+        if show:
+            print(line)
 "
 ```
 
@@ -64,10 +79,13 @@ if result.get('findings'):
 
 Check the user's invocation for `--apply`. If present, use the live mode command. Otherwise use dry-run.
 
-If the user says "apply changes", "file the issues", "do it for real", or similar — use live mode and confirm before running.
+If the user says "apply changes", "file the issues", "do it for real", or similar — first run the dry-run to show what will be actioned, state the count explicitly ("This will file N GitHub issues and update M Sentry issues"), then ask for confirmation before running live mode.
 
 ## After Running
 
-Report the summary line and the Class C (actionable) items to the user. If there are Class D (review) items, list them too. Omit Class A/B/E details unless the user asks.
+- Show the summary line (counts by class).
+- Show all Class C items — these are the actionable bugs.
+- Show Class D items — note that only the top 5 are listed even if more exist.
+- Omit Class A/B/E details unless the user asks.
 
 If running dry-run and Class C issues exist, offer: "Run `/sentry --apply` to file GitHub issues for the N actionable bugs."
