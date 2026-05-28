@@ -142,9 +142,9 @@ GraniteAgentLoop returns final result
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| `ollama` Python library installed | `python -c "import ollama; print(ollama.__version__)"` | GraniteRouter chat calls |
-| granite4.1:3b pulled | `ollama list \| grep granite4.1:3b` | Local operator model |
-| Claude Max subscription active | `claude auth status 2>&1 \| grep -i "logged in"` | PM and Dev session auth |
+| `ollama` Python library installed | `python -c "import ollama"` | GraniteRouter chat calls |
+| granite4.1:3b pulled | `ollama show granite4.1:3b` | Local operator model |
+| Claude Max subscription active | `claude auth status` | PM and Dev session auth |
 
 ## Solution
 
