@@ -61,6 +61,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Goal Gates](goal-gates.md) | Deterministic enforcement gates preventing SDLC pipeline from silently skipping stages | Shipped |
 | [Google Calendar Integration](google-calendar-integration.md) | Work session logging as Google Calendar events with segment rounding | Shipped |
 | [Google Workspace Auth](google-workspace-auth.md) | Error-resilient OAuth with verify_token(), --reauth/--check CLI flags, and actionable error messages | Shipped |
+| [Granite Agent Loop (PoC)](granite-agent-loop.md) | Standalone PoC: granite4.1:3b operator drives two persistent Claude Code sessions (Opus PM + Sonnet Dev) over `claude -p` stream-json stdio, with no `claude-agent-sdk` and no API key (Max OAuth only) | PoC |
 | [Happy Path Testing Pipeline](happy-path-testing-pipeline.md) | Three-stage pipeline (discover, generate, run) for deterministic browser regression tests without LLM tokens | Shipped |
 | [Harness Abstraction](harness-abstraction.md) | CLI harness execution for dev sessions via `claude -p` with env-var routing (`DEV_SESSION_HARNESS`), stream-json parsing, and startup health checks (Phases 1-2 of #780) | Shipped |
 | [Harness Session Continuity](harness-session-continuity.md) | Native `claude -p --resume <uuid>` continuity — persists the CLI session UUID on `AgentSession` after each turn, reuses it on next turn, falls back to full-context on any non-zero exit (#976) | Shipped |
