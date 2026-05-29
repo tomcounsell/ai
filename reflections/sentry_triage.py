@@ -79,6 +79,7 @@ _CLASS_A_PATTERNS = [
     "Pass 2 returned _HARNESS_NOT_FOUND",
     "MagicMock",
     "must be set",  # config errors like "TELEGRAM_API_ID and TELEGRAM_API_HASH must be set"
+    "ANTHROPIC_API_KEY",  # API key not configured — always a test/env-misconfiguration event
     "No such file or directory: '/nonexistent",
     'No such file or directory: "/nonexistent',
     'No such file or directory: "/tmp/fake',
@@ -86,6 +87,14 @@ _CLASS_A_PATTERNS = [
     "[test-project]",
     "[test]",
     "[test] failed",
+    "Test error",  # test sentinel error message
+    "surprise!",  # test sentinel
+    "unknown_backend",  # test sentinel for storage backend
+    "db dead",  # test sentinel
+    "DB on fire",  # test sentinel
+    "worker down",  # test sentinel
+    "noapikey",  # test podcast slug used in Stripe tests
+    "audit action=mcp_tool_call",  # security audit log lines, not errors
     "All drafting backends failed",
     "All summarization backends failed",
     "Refusing to clean up worktree",
@@ -100,8 +109,10 @@ _CLASS_B_PATTERNS = [
     "ConnectionRefusedError",
     "Connection refused",
     "connection lost",
+    "connection already closed",  # transient DB/socket connection drop
     "TimeoutError",
     "timed out",
+    "provider timeout",  # external LLM/API provider timeout
     "ETIMEDOUT",
     "ECONNREFUSED",
     "ECONNRESET",
@@ -116,9 +127,12 @@ _CLASS_B_PATTERNS = [
     "Redis connection lost",
     "API down",
     "API error",
+    "API server error",  # external provider 5xx (Grok, Perplexity, etc.)
+    "server error (500)",  # external provider 5xx
     "auth",
     "401",
     "403",
+    "404",
     "AuthenticationError",
     "Permission denied",
     "Event loop is closed",
