@@ -15,7 +15,7 @@ class TestEmojiLabels:
     """Test emoji label completeness and consistency."""
 
     def test_all_validated_reactions_have_labels(self):
-        """Every one of the 73 validated Telegram reactions should have a label."""
+        """Every validated Telegram reaction should have a label."""
         from bridge.response import VALIDATED_REACTIONS
         from tools.emoji_embedding import EMOJI_LABELS
 
@@ -23,7 +23,7 @@ class TestEmojiLabels:
         assert not missing, f"Missing labels for validated emojis: {missing}"
 
     def test_label_count_matches_validated(self):
-        """Label count should match the 73 validated reactions exactly."""
+        """Label count should match the validated reactions exactly."""
         from bridge.response import VALIDATED_REACTIONS
         from tools.emoji_embedding import EMOJI_LABELS
 
@@ -44,6 +44,62 @@ class TestEmojiLabels:
         for emoji, label in EMOJI_LABELS.items():
             assert isinstance(label, str), f"Label for {emoji} is not a string"
             assert label.strip(), f"Label for {emoji} is empty"
+
+
+class TestOffensiveEmojiBlocked:
+    """The middle finger 🖕 must never be selectable as a reaction."""
+
+    MIDDLE_FINGER = "\U0001f595"
+
+    def test_not_in_emoji_labels(self):
+        """🖕 must not be in the selection label set."""
+        from tools.emoji_embedding import EMOJI_LABELS
+
+        assert self.MIDDLE_FINGER not in EMOJI_LABELS
+
+    def test_not_in_validated_reactions(self):
+        """🖕 must not be in the validated reactions policy list."""
+        from bridge.response import VALIDATED_REACTIONS
+
+        assert self.MIDDLE_FINGER not in VALIDATED_REACTIONS
+
+    def test_in_blocklist(self):
+        """🖕 must be in the defensive selection-time blocklist."""
+        from tools.emoji_embedding import BLOCKED_REACTION_EMOJIS
+
+        assert self.MIDDLE_FINGER in BLOCKED_REACTION_EMOJIS
+
+    def test_never_selected_even_if_cached(self):
+        """Even a stale cache containing 🖕 must not produce it as a result.
+
+        Simulates a production machine whose on-disk cache predates the
+        removal: the blocklist filter in find_best_emoji must skip it, even
+        when its embedding is the nearest match to the query.
+        """
+        from tools.emoji_embedding import EmojiResult, clear_cache, find_best_emoji
+
+        clear_cache()
+
+        # Stale cache where 🖕 is the closest vector to the query.
+        fake_cache = {
+            self.MIDDLE_FINGER: [1.0, 0.0, 0.0],  # nearest to query below
+            "\U0001f44d": [0.0, 1.0, 0.0],  # thumbs up
+        }
+
+        with (
+            patch("tools.emoji_embedding._embedding_cache", fake_cache),
+            patch("tools.emoji_embedding._custom_embedding_cache", {}),
+            patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
+            patch(
+                "tools.emoji_embedding._compute_embedding",
+                return_value=[0.95, 0.05, 0.0],  # closest to 🖕 vector
+            ),
+        ):
+            result = find_best_emoji("furious")
+            assert isinstance(result, EmojiResult)
+            assert str(result) != self.MIDDLE_FINGER
+
+        clear_cache()
 
 
 class TestFallbackBehavior:

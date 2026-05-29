@@ -1,6 +1,6 @@
 """Emoji embedding index for fast reaction selection.
 
-Maps the 73 validated Telegram reaction emojis to descriptive feeling-word
+Maps the validated Telegram reaction emojis to descriptive feeling-word
 embeddings via cosine similarity. Also supports Premium custom emoji via
 a separate cached index of custom emoji sticker packs.
 
@@ -80,6 +80,12 @@ CUSTOM_CACHE_PATH = Path(__file__).parent.parent / "data" / "custom_emoji_embedd
 # Default fallback emoji (thinking face)
 DEFAULT_EMOJI = "\U0001f914"  # 🤔
 
+# Emojis that must never be selected as a reaction, even if a stale on-disk
+# cache still contains their embedding. Telegram accepts 🖕 as a valid
+# reaction, but reacting to a user's message with it is offensive — so it is
+# blocked at selection time regardless of cache state.
+BLOCKED_REACTION_EMOJIS = frozenset({"\U0001f595"})  # 🖕 middle finger
+
 # Placeholder character used for custom emoji in message text
 CUSTOM_EMOJI_PLACEHOLDER = "\u2753"  # ❓ (replaced by entity rendering)
 
@@ -126,7 +132,7 @@ class EmojiResult:
         return str(self)
 
 
-# Descriptive labels for each of the 73 validated Telegram reaction emojis.
+# Descriptive labels for each of the validated Telegram reaction emojis.
 # These labels are embedded and compared against input text via cosine similarity.
 # fmt: off
 EMOJI_LABELS: dict[str, str] = {
@@ -147,7 +153,6 @@ EMOJI_LABELS: dict[str, str] = {
     "\U0001f44c": "perfect, okay, fine, precise, excellent, on point",
     "\U0001f91d": "agreement, deal, handshake, partnership, cooperation",
     "\u270d": "writing, noting, composing, drafting, penning",
-    "\U0001f595": "rude, angry, offensive, middle finger, frustrated",
     # Positive faces
     "\U0001f601": "happy, grinning, joyful, cheerful, beaming smile",
     "\U0001f923": "hilarious, laughing hard, rolling on floor, so funny, comedy",
@@ -318,6 +323,8 @@ def find_best_emoji(feeling: str) -> EmojiResult:
     best_standard_score = -1.0
 
     for emoji, emb in embeddings.items():
+        if emoji in BLOCKED_REACTION_EMOJIS:
+            continue
         score = _cosine_similarity(query_embedding, emb)
         if score > best_standard_score:
             best_standard_score = score
