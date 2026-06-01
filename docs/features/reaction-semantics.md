@@ -38,7 +38,11 @@ Telegram only accepts a specific subset of emoji as reactions. Common emoji that
 - Hourglass: Not a valid Telegram reaction
 - Arrows: Not a valid Telegram reaction
 
-The full list of 75+ validated working reactions is maintained in `VALIDATED_REACTIONS` in `bridge/response.py`.
+The full list of validated working reactions is maintained in `VALIDATED_REACTIONS` in `bridge/response.py`.
+
+### Blocked Reactions (policy)
+
+Some emoji are *valid* Telegram reactions but are deliberately excluded from selection on policy grounds. The middle finger 🖕 is one such case — Telegram accepts it, but reacting to a user's message with it is offensive. It is removed from both `VALIDATED_REACTIONS` and the `EMOJI_LABELS` selection set, and additionally guarded by `BLOCKED_REACTION_EMOJIS` in `tools/emoji_embedding.py`, which `find_best_emoji()` filters at selection time. The blocklist is defensive against stale on-disk embedding caches (`data/emoji_embeddings.json`) that may still contain the emoji — see [Emoji Embedding Reactions](emoji-embedding-reactions.md#components).
 
 ## Auto-Continue Integration
 
