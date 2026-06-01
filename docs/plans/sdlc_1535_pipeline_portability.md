@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-01
 tracking: https://github.com/tomcounsell/ai/issues/1535
 last_comment_id:
+revision_applied: true
 ---
 
 # SDLC Pipeline Portability: 7 Generic Robustness Defects
@@ -198,13 +199,13 @@ Wrap each step so a failure (not a git repo, `git` missing) falls through to the
 next. This satisfies acceptance #1 (no env var → cwd git root) while keeping the
 env var as an intentional override.
 
-> **Design decision (flag for PM):** The issue text reads "derive from git
+> **Design decision (resolved):** The issue text reads "derive from git
 > toplevel (falling back to the env var, then ~/src/ai)", which would order
-> git-root *above* the env var. This plan inverts that to **env var → git root
-> → ~/src/ai** so an explicit `SDLC_TARGET_REPO` still wins as an override
-> (its original purpose) while the no-env-var default becomes the cwd git root.
-> Both orderings satisfy acceptance criterion #1; this one preserves existing
-> override semantics. See Open Question 1.
+> git-root *above* the env var. This plan deliberately inverts that to
+> **env var → git root → ~/src/ai** so an explicit `SDLC_TARGET_REPO` still
+> wins as an override (its original purpose) while the no-env-var default
+> becomes the cwd git root. Both orderings satisfy acceptance criterion #1;
+> env-var-wins preserves existing override semantics and is the settled order.
 
 **D2 — tracking-URL plan match** (`tools/_sdlc_utils.py:124-134`)
 
@@ -235,26 +236,40 @@ reordering the table, which the parity test cross-checks).
 **D4 — `pr_number` set + branch-head recovery**
 (`tools/sdlc_meta_set.py:50-83`, `tools/sdlc_stage_query.py:180-217,269-275`)
 
-Two complementary changes:
-1. Whitelist `pr_number` in `_KEY_REGISTRY` → `("_pr_number", int)`; add an
-   `int` branch to `_coerce_value` (reject non-positive / non-numeric → return
-   `{}`). Then `_compute_meta` reads `_pr_number` from `raw_states` as a
-   resolution source: `session.pr_number` → `raw_states["_pr_number"]` →
-   `_lookup_pr_number(...)`.
-2. Extend `_lookup_pr_number` to fall back to a branch-head search when the
-   issue-number search returns nothing:
-   `gh pr list --head session/sdlc-{issue_number} --state open --json number`.
-   This recovers out-of-band PRs whose body never referenced the issue.
+Ship **both** paths — the `meta-set` whitelist is the primary recovery path and
+the branch-head search is a genuine fallback (resolves OQ3):
+1. **Primary — `meta-set` whitelist.** Whitelist `pr_number` in `_KEY_REGISTRY`
+   → `("_pr_number", int)`; add an `int` branch to `_coerce_value` (reject
+   non-positive / non-numeric → return `{}`). Then `_compute_meta` reads
+   `_pr_number` from `raw_states` as a resolution source: `session.pr_number` →
+   `raw_states["_pr_number"]` → `_lookup_pr_number(...)`.
+2. **Fallback — branch-head search.** Extend `_lookup_pr_number` to fall back to
+   a branch-head search when the issue-number search returns nothing. The branch
+   must use the **canonical SDLC branch shape `session/{slug}`**, NOT
+   `session/sdlc-{issue_number}` (which is not a branch shape this repo ever
+   creates — see `worktree_manager.py:687,820,1182`; this plan's own branch is
+   `session/sdlc_1535_pipeline_portability`). Resolve the slug from the PM
+   session (`getattr(session, "slug", None)`); only run the branch-head search
+   when a slug is present:
+   `gh pr list --head session/{slug} --state open --json number`.
+   Constrain to `--state open`. This recovers out-of-band PRs whose body never
+   referenced the issue. Optional secondary fallback when no slug is available:
+   `gh pr list --search "in:title,body #{issue_number}" --state open --json number`.
 
 **D5 — G4 reset on real transition + explicit reset**
 (`agent/sdlc_router.py:1076-1131,377-395`; `tools/sdlc_stage_query.py:280-289`;
 `tools/sdlc_dispatch.py`)
 
-1. `compute_same_stage_count(stage_states, current_snapshot=None)`: when
-   `current_snapshot` is provided and its canonical form **differs** from the
-   most-recent history snapshot, the streak is broken — return `(0, skill)`
-   instead of the historical run length. (The existing `+1` on match is
-   retained.)
+1. `compute_same_stage_count(stage_states, current_snapshot=None)`. **Do NOT
+   rewrite the backward walk** — it already breaks the streak on recorded-
+   snapshot divergence (`sdlc_router.py:1112-1122`) and is recomputed fresh
+   every call (it does not persist). The ONLY behavior change is scoped to the
+   impending-`+1` `current_snapshot` suppression block (`sdlc_router.py:1124-1128`):
+   when `current_snapshot is not None` and its canonical form **differs** from
+   the most-recent history snapshot, the impending dispatch is a new stage —
+   return `(0, skill)` instead of incrementing. On match, keep the existing
+   `count += 1`. The genuinely-latched recorded-history case stays the domain of
+   the explicit `dispatch reset` escape hatch (point 3).
 2. `_compute_meta` builds the live snapshot
    (`build_stage_snapshot(raw_states, {"pr_number": pr_number})`) and passes it
    into `compute_same_stage_count`, so a stage/verdict correction recorded since
@@ -286,16 +301,25 @@ with no registration step.
 **D7 — loud degradation** (`tools/sdlc_stage_marker.py:96-202`;
 `.claude/skills-global/do-build/SKILL.md`, `do-pr-review/SKILL.md`)
 
-1. `sdlc_stage_marker`: distinguish two failure classes.
-   - **Substrate absent** (cannot import `models.agent_session` / Redis
-     unreachable): emit `{"status": "degraded", "stage": ..., "reason":
-     "state not persisted — substrate absent"}` and exit 0. This is the loud,
-     visible degraded-mode marker.
-   - **Substrate present but write failed** (session resolved, but
-     `start_stage`/`complete_stage` rejected or raised): print a clear stderr
-     diagnostic and exit non-zero (mirror `sdlc_dispatch.py:173-186`), so the
-     writeback fails loudly rather than no-op'ing. "No session found" in a
-     substrate-present repo is also loud (non-zero + stderr).
+1. `sdlc_stage_marker`: a **tri-state probe** replaces today's binary
+   present/absent check. Import-defined "present" cannot disambiguate a non-`ai`
+   repo (where no PM session legitimately exists) from a real wiring bug, so the
+   no-session case must be quiet (resolves OQ2):
+   - **`ABSENT`** — cannot import `models.agent_session` / Redis unreachable
+     (`ImportError` / `redis.ConnectionError`): emit `{"status": "degraded",
+     "stage": ..., "reason": "state not persisted — substrate absent"}` and
+     exit 0. The visible degraded-mode marker.
+   - **`PRESENT_NO_SESSION`** — substrate imports and Redis is reachable, but
+     `_find_session` returns `None` (`sdlc_stage_marker.py:119-120`): exit 0
+     with a degraded marker (**quiet**). This happens both in a non-`ai` repo
+     (expected) and as a possible wiring bug in `ai`; quiet is correct because
+     the marker cannot tell them apart, and a session-less local invocation must
+     not emit noise.
+   - **`PRESENT_WRITE_FAILED`** — session resolved, but `start_stage` /
+     `complete_stage` rejects or raises: print a clear stderr diagnostic and
+     exit non-zero (mirror `sdlc_dispatch.py:173-186`). **Loud is reserved ONLY
+     for this case.** Keep the idempotent already-completed path
+     (`sdlc_stage_marker.py:138-140`) returning exit 0.
 2. `do-build` / `do-pr-review` SKILL.md: add the substrate-probe step that
    `do-docs` already documents (`status: "disabled"` → skill-only mode), so a
    forked sub-skill announces "running in degraded mode (state not persisted)"
@@ -389,15 +413,17 @@ substrate-present-success, substrate-present-fail, and substrate-absent paths.
 ### Risk 2: D1 precedence change surprises callers exporting `SDLC_TARGET_REPO`
 **Impact:** If any caller relied on the env var being ignored, behavior shifts.
 **Mitigation:** Env var keeps top precedence (override semantics preserved), so
-existing exporters are unaffected; only the no-env-var default changes. Flagged
-as Open Question 1 for explicit PM confirmation.
+existing exporters are unaffected; only the no-env-var default changes. Resolved
+toward env-var-wins (see Critique Results / D1 disposition).
 
 ### Risk 3: branch-head PR lookup resolves the wrong PR
-**Impact:** `gh pr list --head session/sdlc-{n}` could match a stale/closed PR.
-**Mitigation:** Constrain to `--state open` and the issue-specific branch name
-`session/sdlc-{issue_number}` (the canonical SDLC branch). The issue-number
-search remains the primary path; branch-head is a fallback only when it returns
-nothing.
+**Impact:** A branch-head `gh pr list --head ...` could match a stale/closed PR.
+**Mitigation:** Search the **canonical SDLC branch `session/{slug}`** (the slug
+resolved from the PM session via `getattr(session, "slug", None)`), NOT a
+fabricated `session/sdlc-{issue_number}` shape that this repo never creates.
+Constrain to `--state open`, and only run the branch-head search when a slug is
+present. The issue-number search remains the primary path; branch-head is a
+fallback only when it returns nothing.
 
 ## Race Conditions
 
@@ -583,8 +609,9 @@ specialists required — this is bounded internal tooling work.
 - **Agent Type**: builder
 - **Parallel**: true
 - D3: 4b/4c predicates return False when `pr_number` set or `BUILD == completed`.
-- D4: whitelist `pr_number` (int) in `meta-set`; `_compute_meta` reads
-  `_pr_number`; `_lookup_pr_number` branch-head fallback.
+- D4: ship both — whitelist `pr_number` (int) in `meta-set` (primary);
+  `_compute_meta` reads `_pr_number`; `_lookup_pr_number` branch-head fallback
+  on `session/{slug}` (slug from PM session), never `session/sdlc-{n}`.
 - D5: `compute_same_stage_count` resets on live-snapshot divergence;
   `_compute_meta` passes the live snapshot; add `sdlc-tool dispatch reset`.
 - All `stage_states` writes go through `update_stage_states`.
@@ -599,8 +626,10 @@ specialists required — this is bounded internal tooling work.
 - **Parallel**: true
 - Author `.claude/skills-global/do-merge/SKILL.md` (verify → auth-file →
   squash-merge → cleanup); update `docs/sdlc/do-merge.md:2` reference.
-- `sdlc_stage_marker`: degraded marker (substrate absent, exit 0) vs loud
-  failure (substrate present + write fails, exit non-zero + stderr).
+- `sdlc_stage_marker`: tri-state probe — `ABSENT` (exit 0 degraded),
+  `PRESENT_NO_SESSION` (exit 0 degraded, quiet), `PRESENT_WRITE_FAILED` (exit
+  non-zero + stderr, loud — the only loud case). Keep idempotent
+  already-completed path at exit 0.
 - Add substrate-probe degraded-mode step to `do-build` and `do-pr-review`
   SKILL.md (mirror `do-docs`).
 
@@ -647,24 +676,21 @@ specialists required — this is bounded internal tooling work.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict: NEEDS REVISION** — 1 blocker, 3 concerns, 0 nits (critics: Skeptic,
+Operator, Archaeologist, Adversary, Simplifier, User). All findings addressed by
+this revision pass; the three Open Questions are resolved into the Technical
+Approach prose (env-var-wins, quiet-on-no-session, ship-both) and the Open
+Questions section is retired.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Adversary, Skeptic | D4 branch-head fallback targeted `session/sdlc-{issue_number}`, a branch shape this repo never creates. Canonical SDLC branch is `session/{slug}` (`worktree_manager.py:687,820,1182`; this plan's own branch is `session/sdlc_1535_pipeline_portability`). As written the fallback was dead code and Success Criterion #4 failed. | D4 Technical Approach + Risk 3 + Step-2 task rewritten | Branch-head search now resolves the slug from the PM session (`getattr(session, "slug", None)`) and runs `gh pr list --head session/{slug} --state open --json number` only when a slug is present; hardcoded `sdlc-{n}` removed. Optional secondary fallback: `gh pr list --search "in:title,body #{issue_number}"`. |
+| CONCERN | Skeptic, Adversary | D5 wording conflated two reset paths. The backward walk already breaks on recorded-snapshot divergence (`sdlc_router.py:1112-1122`) and is recomputed fresh each call (no persistence); the new `current_snapshot` logic only affects the impending `+1` turn (1124-1128). Risk: a builder rewrites the already-correct walk. | D5 Technical Approach point 1 rescoped | States precisely: leave the walk (1112-1122) untouched; the ONLY change is the `if current_snapshot is not None:` block (1124-1128) — on divergence `return (0, skill)`, on match keep `count += 1`. `dispatch reset` stays the escape hatch for the genuinely-latched recorded-history case. |
+| CONCERN | Operator | D7's present-vs-absent boundary was import-defined, but the ambiguous case is substrate imports + Redis reachable yet `_find_session` returns `None` (`sdlc_stage_marker.py:119-120`) — occurs both in a non-`ai` repo (quiet, expected) and as a real wiring bug in `ai` (loud). The binary check could not be implemented deterministically. | D7 Technical Approach point 1 + Risk 1 + Step-3 task rewritten as a tri-state probe | `ABSENT` (ImportError/redis.ConnectionError → exit 0 degraded); `PRESENT_NO_SESSION` (exit 0 degraded, **quiet** — resolves OQ2 toward quiet, since the marker cannot tell a non-`ai` repo from a wiring bug); `PRESENT_WRITE_FAILED` (`start_stage`/`complete_stage` raises → exit non-zero + stderr, the only loud case). Idempotent already-completed path (138-140) stays exit 0. |
+| CONCERN | Simplifier, User | Three unresolved Open Questions (OQ1 env-var precedence, OQ2 loud-failure threshold, OQ3 D4 scope) blocked a deterministic build — OQ3 in particular left the builder unsure whether D4 was one change or two. | Resolutions baked into Technical Approach prose; Open Questions section removed | OQ1 → env-var-wins (env → cwd git root → `~/src/ai`; preserves override semantics; D1 hedge dropped). OQ2 → quiet on no-session (see D7 tri-state). OQ3 → ship **both** — `meta-set` whitelist primary, branch-head fallback secondary on the corrected `session/{slug}` form. |
 
----
+### Open Questions
 
-## Open Questions
-
-1. **D1 precedence:** This plan orders resolution **env var → cwd git root →
-   ~/src/ai** (env var wins as an override), whereas the issue text literally
-   reads "git toplevel (falling back to the env var, then ~/src/ai)". Both
-   satisfy acceptance #1. Confirm the env-var-wins ordering, or switch to
-   git-root-wins if `SDLC_TARGET_REPO` should be a low-priority hint rather than
-   an override.
-2. **D7 loud-failure threshold:** Should "no PM session found" in a
-   substrate-*present* repo be a loud non-zero failure (this plan's choice), or
-   a quiet exit 0 like today? Loud is safer for catching real wiring bugs but
-   could add noise to legitimately session-less local invocations.
-3. **D4 scope:** Is doing *both* the `meta-set` whitelist AND the branch-head
-   `_lookup_pr_number` fallback acceptable, or should we ship only one (the
-   issue presents them as either/or)? This plan does both for belt-and-suspenders.
+Resolved — see Critique Results above. OQ1 (D1 precedence) → env-var-wins;
+OQ2 (D7 loud-failure threshold) → quiet on `PRESENT_NO_SESSION`; OQ3 (D4 scope)
+→ ship both paths. No open questions remain; the plan is BUILD-ready.
