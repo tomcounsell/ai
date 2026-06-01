@@ -142,6 +142,53 @@ class TestRow4cReadyWithConcernsRevisionApplied:
         assert result.row_id == "4c"
 
 
+class TestD3FinishedPrNeverRoutesBackToBuild:
+    """D3: rows 4b/4c defer once a PR exists or BUILD completed."""
+
+    def test_4b_defers_when_pr_number_set(self):
+        states = {"PLAN": "completed", "CRITIQUE": "completed", "REVIEW": "pending"}
+        meta = {
+            "latest_critique_verdict": "READY TO BUILD (with concerns)",
+            "revision_applied": False,
+            "pr_number": 99,
+        }
+        result = decide_next_dispatch(states, meta)
+        # Must NOT route back to plan/build; a PR exists so downstream owns it.
+        assert result.skill != SKILL_DO_PLAN
+        assert result.skill != SKILL_DO_BUILD
+
+    def test_4c_defers_when_build_completed(self):
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+        }
+        meta = {
+            "latest_critique_verdict": "READY TO BUILD (with concerns)",
+            "revision_applied": True,
+        }
+        result = decide_next_dispatch(states, meta)
+        # 4c must not re-propose build once BUILD is completed. With no PR yet
+        # and no downstream rule matching, the router defers (Blocked) rather
+        # than routing back to /do-build.
+        assert getattr(result, "skill", None) != SKILL_DO_BUILD
+
+    def test_4c_finished_pr_routes_to_review(self):
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "REVIEW": "pending",
+        }
+        meta = {
+            "latest_critique_verdict": "READY TO BUILD (with concerns)",
+            "revision_applied": True,
+            "pr_number": 123,
+        }
+        result = decide_next_dispatch(states, meta)
+        assert result.skill == SKILL_DO_PR_REVIEW
+
+
 class TestRow6TestsFailing:
     def test_test_failed_dispatches_patch(self):
         states = {

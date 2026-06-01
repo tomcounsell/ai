@@ -167,19 +167,29 @@ catches reviews that APPROVED a PR without the reviewer actually evaluating
 acceptance criteria; this preflight (#1112) catches reviews that APPROVED a PR
 that mechanically cannot merge.
 
-## Stage Marker
+## Stage Marker (with degraded-mode awareness)
 
-At the very start of this skill, write an in_progress marker:
+At the very start of this skill, write an in_progress marker and inspect its
+output for degraded mode (mirroring the `do-docs` substrate-probe pattern).
+Do NOT blanket-suppress the output with `2>/dev/null || true` — a forked
+sub-skill must announce degraded mode rather than silently lagging state:
 
 ```bash
-sdlc-tool stage-marker --stage REVIEW --status in_progress --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage REVIEW --status in_progress --issue-number {issue_number}
 ```
+
+Parse the JSON output:
+- `{"stage": "REVIEW", "status": "in_progress"}` — substrate present, state persisted; proceed normally.
+- `{"status": "degraded", ...}` — **announce at the top of your run**: "running in degraded mode (state not persisted)". The review itself depends only on `gh` and the diff, not the substrate, so proceed.
+- Non-zero exit — substrate present but the write genuinely failed; report the stderr diagnostic and proceed (do not silently swallow it).
 
 After posting the review (Step 6), on approval (no blockers):
 
 ```bash
-sdlc-tool stage-marker --stage REVIEW --status completed --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage REVIEW --status completed --issue-number {issue_number}
 ```
+
+Apply the same degraded-vs-loud interpretation to the completion marker.
 
 Note: If blockers found, leave as in_progress — the SDLC dispatcher will invoke /do-patch and then re-run review, which will complete the stage after fixes.
 

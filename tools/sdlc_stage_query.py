@@ -177,29 +177,16 @@ def _fetch_pr_merge_state(pr_number: int | None) -> tuple[str | None, bool | Non
         return None, None
 
 
-def _lookup_pr_number(issue_number: int | None) -> int | None:
-    """Attempt to find the open PR number for this issue via ``gh``.
+def _gh_pr_list(args: list[str]) -> int | None:
+    """Run ``gh pr list`` with the given args and return the first PR number.
 
-    Returns the PR number or None. Never raises.
+    Returns the PR number or None on any failure. Never raises.
     """
-    if not issue_number:
-        return None
-
     # GH_REPO is automatically respected by the ``gh`` CLI; no --repo flag
     # needed for cross-repo work.
     try:
         proc = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--search",
-                f"#{issue_number}",
-                "--state",
-                "open",
-                "--json",
-                "number",
-            ],
+            ["gh", "pr", "list", *args, "--json", "number"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -213,7 +200,34 @@ def _lookup_pr_number(issue_number: int | None) -> int | None:
         if isinstance(first, dict) and isinstance(first.get("number"), int):
             return first["number"]
     except Exception as e:
-        logger.debug(f"_lookup_pr_number failed: {e}")
+        logger.debug(f"_gh_pr_list failed: {e}")
+    return None
+
+
+def _lookup_pr_number(issue_number: int | None, slug: str | None = None) -> int | None:
+    """Attempt to find the open PR number for this issue via ``gh``.
+
+    Resolution order (D4):
+    1. Issue-number search (``gh pr list --search "#{issue_number}"``) —
+       primary path; resolves PRs whose body references the issue.
+    2. Branch-head fallback (``gh pr list --head session/{slug}``) — recovers
+       out-of-band PRs whose body never referenced the issue. Uses the
+       canonical SDLC branch shape ``session/{slug}`` (NOT a fabricated
+       ``session/sdlc-{issue_number}`` form this repo never creates); only
+       runs when a slug is available.
+
+    Returns the PR number or None. Never raises.
+    """
+    if issue_number:
+        pr = _gh_pr_list(["--search", f"#{issue_number}", "--state", "open"])
+        if pr is not None:
+            return pr
+
+    if slug:
+        pr = _gh_pr_list(["--head", f"session/{slug}", "--state", "open"])
+        if pr is not None:
+            return pr
+
     return None
 
 
@@ -267,23 +281,35 @@ def _compute_meta(
     latest_review = _extract_verdict_text(verdicts.get("REVIEW"))
 
     pr_number = None
-    # Prefer an explicit session attribute if present; otherwise fall back to gh.
+    # Resolution order (D4): explicit session attribute → the writable
+    # `_pr_number` meta key (set via `meta-set`, the primary out-of-band
+    # recovery path) → a gh lookup (issue-search then branch-head fallback).
     session_pr = getattr(session, "pr_number", None) if session is not None else None
+    meta_pr = raw_states.get("_pr_number")
+    slug = getattr(session, "slug", None) if session is not None else None
     if isinstance(session_pr, int) and session_pr > 0:
         pr_number = session_pr
+    elif isinstance(meta_pr, int) and meta_pr > 0:
+        pr_number = meta_pr
     else:
-        pr_number = _lookup_pr_number(issue_number)
+        pr_number = _lookup_pr_number(issue_number, slug=slug)
 
     # Fetch live PR merge state and CI status for G6 guard
     pr_merge_state, ci_all_passing = _fetch_pr_merge_state(pr_number)
 
-    # Compute dispatch-history derived fields
+    # Compute dispatch-history derived fields.
+    # D5: pass the LIVE stage snapshot so the count resets when state has
+    # moved past the last recorded dispatch (G4 self-clears on a real
+    # transition instead of latching on a stale recorded count).
     same_stage_count = 0
     last_skill: str | None = None
     try:
-        from agent.sdlc_router import compute_same_stage_count
+        from agent.sdlc_router import build_stage_snapshot, compute_same_stage_count
 
-        same_stage_count, last_skill = compute_same_stage_count(raw_states)
+        live_snapshot = build_stage_snapshot(raw_states, {"pr_number": pr_number})
+        same_stage_count, last_skill = compute_same_stage_count(
+            raw_states, current_snapshot=live_snapshot
+        )
     except Exception as e:
         logger.debug(f"_compute_meta: compute_same_stage_count failed: {e}")
 
