@@ -286,3 +286,26 @@ def test_history_not_truncated_below_threshold():
         router.route(pm_events=[])  # adds user+assistant+tool (4 total with system)
     assert router.messages[0]["role"] == "system"
     assert len(router.messages) <= HISTORY_KEEP_LAST_N + 1
+
+
+def test_truncation_never_orphans_tool_message():
+    """The tail after truncation must not begin on a role:"tool" message whose
+    parent assistant turn was sliced away -- that orphan has no tool_call to
+    answer and breaks the chat contract."""
+    router = GraniteRouter()
+    fake = _fake_response("probe_session", {"reason": "x"})
+    with mock.patch("agent.granite_router.ollama_chat", return_value=fake):
+        for _ in range(12):
+            router.route(pm_events=[{"type": "result", "result": "x"}])
+    # system is always first; the first message after system begins a coherent
+    # turn (user or assistant), never a dangling tool result.
+    assert router.messages[0]["role"] == "system"
+    assert router.messages[1]["role"] != "tool"
+    # Every tool message must be immediately preceded by an assistant turn
+    # carrying tool_calls.
+    for i, msg in enumerate(router.messages):
+        if msg.get("role") == "tool":
+            assert i > 0
+            prev = router.messages[i - 1]
+            assert prev.get("role") == "assistant"
+            assert prev.get("tool_calls")

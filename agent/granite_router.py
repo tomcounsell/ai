@@ -395,6 +395,12 @@ class GraniteRouter:
             return
         system_msg = self.messages[0]
         tail = self.messages[-HISTORY_KEEP_LAST_N:]
+        # A role:"tool" message is only valid when preceded by the assistant
+        # turn whose tool_calls it answers. If the tail window begins on one or
+        # more tool messages, their parent assistant turn was sliced away --
+        # drop the orphans so we never emit a tool message with no parent.
+        while tail and tail[0].get("role") == "tool":
+            tail = tail[1:]
         self.messages = [system_msg, *tail]
 
 
