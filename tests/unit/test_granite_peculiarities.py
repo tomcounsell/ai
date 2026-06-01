@@ -157,22 +157,24 @@ def test_loop_handles_feedback_prompt(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_poc_recovers_from_crash_by_restart_not_resume():
-    """The PoC has NO `--resume` capability -- it only respawns fresh.
+def test_poc_resumes_crashed_session_with_captured_id():
+    """Crash recovery preserves context via `claude --resume <session_id>`.
 
-    siteboon/claudecodeui captures `session_id` from any stream-json line and
-    reuses it via `claude --resume <uuid>`, preserving conversation context
-    across a crash. The PoC's ClaudeSession does neither: `_build_cmd` never
-    emits `--resume`, and no session_id is captured anywhere. Recovery is a
-    context-losing restart. This test pins that gap so closing it is a
-    deliberate, visible change.
+    Like siteboon/claudecodeui, `ClaudeSession` captures the `session_id` from
+    the stream-json output (or the on-exit `claude --resume <uuid>` hint) and
+    reuses it. `resume()` respawns with `--resume`; it only falls back to a
+    fresh session when no id has been seen yet. The fresh-start `restart()`
+    remains available for the genuinely-unrecoverable case.
     """
     from agent.claude_session import ClaudeSession, ClaudeSessionConfig, _build_cmd
 
-    cmd = _build_cmd(ClaudeSessionConfig(model="sonnet", cwd="/tmp"))
-    assert "--resume" not in cmd  # no resume support today
+    # A fresh start carries no --resume; resume with a known id does.
+    assert "--resume" not in _build_cmd(ClaudeSessionConfig(model="sonnet", cwd="/tmp"))
+    resumed = _build_cmd(
+        ClaudeSessionConfig(model="sonnet", cwd="/tmp"), resume_session_id="uuid-123"
+    )
+    assert resumed[resumed.index("--resume") + 1] == "uuid-123"
 
     session = ClaudeSession(ClaudeSessionConfig(model="sonnet", cwd="/tmp"))
-    # No session_id attribute is captured/exposed for resume.
-    assert not hasattr(session, "session_id")
-    assert not hasattr(session, "_session_id")
+    assert session.session_id is None  # nothing captured before any turn
+    assert hasattr(session, "resume")

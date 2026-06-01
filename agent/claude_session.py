@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import select
 import shutil
 import signal
@@ -40,6 +41,15 @@ from dataclasses import dataclass, field
 DEFAULT_READ_TIMEOUT_S = 120
 PER_LINE_READ_TIMEOUT_S = 30
 DEFAULT_BIN = "claude"
+
+# The session UUID Claude embeds in stream-json `session_id` fields and prints
+# in its on-exit hint line: `claude --resume <uuid>`. Capturing it lets a
+# crashed/interrupted session be resumed with full context instead of respawned
+# fresh.
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_RESUME_HINT_RE = re.compile(r"--resume\s+(" + _UUID_RE.pattern + r")")
 
 
 @dataclass
@@ -91,7 +101,7 @@ def _build_env(extra_env: dict[str, str], task_list_id: str) -> dict[str, str]:
     return env
 
 
-def _build_cmd(cfg: ClaudeSessionConfig) -> list[str]:
+def _build_cmd(cfg: ClaudeSessionConfig, resume_session_id: str | None = None) -> list[str]:
     binary = shutil.which(cfg.binary) or cfg.binary
     cmd: list[str] = [
         binary,
@@ -106,6 +116,8 @@ def _build_cmd(cfg: ClaudeSessionConfig) -> list[str]:
         "--permission-mode",
         cfg.permission_mode,
     ]
+    if resume_session_id:
+        cmd.extend(["--resume", resume_session_id])
     if cfg.system_prompt:
         cmd.extend(["--append-system-prompt", cfg.system_prompt])
     return cmd
@@ -145,14 +157,13 @@ class ClaudeSession:
         self._proc: subprocess.Popen[str] | None = None
         self._task_list_id = cfg.task_list_id or f"granite-poc-{uuid.uuid4().hex[:8]}"
         self._started_at: float | None = None
+        self._session_id: str | None = None
 
     # --- lifecycle ---------------------------------------------------------
 
-    def start(self) -> None:
-        if self._proc is not None and self._proc.poll() is None:
-            return  # already running
+    def _spawn(self, resume_session_id: str | None) -> None:
         env = _build_env(self.cfg.extra_env, self._task_list_id)
-        cmd = _build_cmd(self.cfg)
+        cmd = _build_cmd(self.cfg, resume_session_id=resume_session_id)
         self._proc = subprocess.Popen(  # noqa: S603 -- args are constructed locally
             cmd,
             stdin=subprocess.PIPE,
@@ -165,10 +176,30 @@ class ClaudeSession:
         )
         self._started_at = time.monotonic()
 
+    def start(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            return  # already running
+        self._spawn(resume_session_id=None)
+
     def restart(self) -> None:
-        """Kill the current subprocess (if any) and respawn a fresh one."""
+        """Kill the current subprocess and respawn a FRESH one (context lost)."""
         self.stop()
         self.start()
+
+    def resume(self) -> bool:
+        """Respawn resuming the captured Claude session, preserving context.
+
+        Uses `claude --resume <session_id>` when a session id was captured from
+        the stream-json output (or the on-exit hint). Returns True if a captured
+        id was used; False if it fell back to a fresh session because none is
+        known yet. This is the context-preserving counterpart to `restart()`.
+        """
+        self.stop()
+        if self._session_id:
+            self._spawn(resume_session_id=self._session_id)
+            return True
+        self._spawn(resume_session_id=None)
+        return False
 
     def stop(self, timeout_s: float = 5.0) -> None:
         """Terminate the subprocess. Safe to call multiple times."""
@@ -201,6 +232,11 @@ class ClaudeSession:
     @property
     def task_list_id(self) -> str:
         return self._task_list_id
+
+    @property
+    def session_id(self) -> str | None:
+        """The captured Claude session UUID, or None if not seen yet."""
+        return self._session_id
 
     @property
     def pid(self) -> int | None:
@@ -268,6 +304,7 @@ class ClaudeSession:
             try:
                 ready, _, _ = select.select([stdout], [], [], remaining)
             except (ValueError, OSError) as exc:
+                self._scan_stderr_for_session_id()
                 events.append({"type": "broken_pipe", "reason": f"select: {exc}"})
                 return events
             if not ready:
@@ -278,10 +315,13 @@ class ClaudeSession:
             try:
                 line = stdout.readline()
             except (BrokenPipeError, ValueError, OSError) as exc:
+                self._scan_stderr_for_session_id()
                 events.append({"type": "broken_pipe", "reason": f"readline: {exc}"})
                 return events
             if line == "":
-                # EOF -- subprocess closed stdout
+                # EOF -- subprocess closed stdout. Grab the resume hint Claude
+                # prints on exit if we never saw a session_id in the stream.
+                self._scan_stderr_for_session_id()
                 events.append({"type": "broken_pipe", "reason": "stdout EOF"})
                 return events
 
@@ -306,9 +346,52 @@ class ClaudeSession:
                 )
                 continue
 
+            self._capture_session_id(event.get("session_id"))
             events.append(event)
             if event.get("type") == "result":
                 return events
+
+    # --- resume support ----------------------------------------------------
+
+    def _capture_session_id(self, sid: object) -> None:
+        """Record the Claude session UUID from a stream-json event field."""
+        if isinstance(sid, str) and _UUID_RE.fullmatch(sid):
+            self._session_id = sid
+
+    def _scan_stderr_for_session_id(self, budget_s: float = 0.5) -> None:
+        """Fallback: read buffered stderr for the `claude --resume <uuid>` hint.
+
+        Claude prints this line when a session exits or is interrupted. We only
+        consult it when no session_id was seen in the stream-json output, so a
+        crash/ctrl-c that never emitted a `system/init` can still be resumed.
+        """
+        if self._session_id:
+            return
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return
+        deadline = time.monotonic() + budget_s
+        buf = ""
+        while time.monotonic() < deadline:
+            try:
+                ready, _, _ = select.select(
+                    [proc.stderr], [], [], max(0.0, deadline - time.monotonic())
+                )
+            except (ValueError, OSError):
+                break
+            if not ready:
+                break
+            try:
+                chunk = proc.stderr.readline()
+            except (ValueError, OSError):
+                break
+            if chunk == "":
+                break
+            buf += chunk
+            m = _RESUME_HINT_RE.search(buf)
+            if m:
+                self._session_id = m.group(1)
+                return
 
     # --- iteration helper --------------------------------------------------
 

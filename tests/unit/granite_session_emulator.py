@@ -187,10 +187,12 @@ class FakeClaudeSession:
     script: list[Turn] = field(default_factory=list)
     task_list_id: str = "granite-poc-fake1234"
     model: str = "sonnet"
+    session_id: str | None = None
 
     started: bool = field(default=False, init=False)
     stop_count: int = field(default=0, init=False)
     restart_count: int = field(default=0, init=False)
+    resume_count: int = field(default=0, init=False)
     sent_messages: list[str] = field(default_factory=list, init=False)
     _cursor: int = field(default=0, init=False)
     _pending: list[dict] | None = field(default=None, init=False)
@@ -209,6 +211,12 @@ class FakeClaudeSession:
     def restart(self) -> None:
         self.restart_count += 1
         self._running = True
+
+    def resume(self) -> bool:
+        """Context-preserving respawn. Returns True iff a session_id is known."""
+        self.resume_count += 1
+        self._running = True
+        return self.session_id is not None
 
     @property
     def is_running(self) -> bool:

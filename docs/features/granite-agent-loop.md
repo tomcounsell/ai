@@ -139,8 +139,11 @@ time, before any Claude logic runs.
   `{"type": "decode_error", "raw": "...", "error": "..."}` and surfaced
   as an operator event; the loop continues reading.
 - **Broken pipe / EOF** -- `{"type": "broken_pipe", "reason": "..."}`
-  is surfaced; the loop calls `target_session.restart()` and routes
-  with `operator_events: [{"type": "crash", "session": "dev|pm"}]`.
+  is surfaced; on the next send the loop calls `target_session.resume()`
+  (context-preserving `claude --resume <session_id>`, falling back to a fresh
+  session only if no id was captured) and routes with
+  `operator_events: [{"type": "crash", "session": "dev|pm",
+  "recovered_via": "resume|restart"}]`.
 - **granite itself fails** -- `GraniteRoutingError` is raised; the
   loop exits with `status="granite_routing_error"` and writes a final
   trace entry. This is the only path that surfaces an error to the
@@ -219,6 +222,7 @@ thing that can't be faked (granite actually *recognizing* a real question).
 | [`tests/unit/test_granite_peculiarities.py`](../../tests/unit/test_granite_peculiarities.py) | unit | multiple-choice, feedback-prompt, crash/resume-gap emulation |
 | [`tests/unit/test_granite_questions_game.py`](../../tests/unit/test_granite_questions_game.py) | unit | the questions-game harness parsing helpers |
 | [`tests/integration/test_granite_questions_game.py`](../../tests/integration/test_granite_questions_game.py) | integration (gated) | live: granite answering a real Claude quiz |
+| [`tests/integration/test_claude_session_resume.py`](../../tests/integration/test_claude_session_resume.py) | integration (gated) | live: ctrl-c a real session, resume, recall context |
 
 ### The emulator
 
@@ -262,17 +266,37 @@ Claude Code output in its raw-CLI era (which runs the same
 - **Crash.** `crash_turn()` raises `BrokenPipeError` on send; the loop catches
   it, calls `restart()`, and routes `operator_events=[{"type":"crash",...}]`.
 
-### Crash recovery is restart, not resume (known gap)
+### Crash recovery via `claude --resume` (context-preserving)
 
-`siteboon/claudecodeui` captures `session_id` from any stream-json line and
-recovers a crashed session with `claude --resume <uuid>`, preserving
-conversation context. **This PoC does neither**: `_build_cmd` never emits
-`--resume`, and no `session_id` is captured anywhere — recovery is a
-context-losing fresh `restart()`. `test_poc_recovers_from_crash_by_restart_not_resume`
-pins this so closing the gap is a deliberate, visible change. Adding true
-resume (capture `session_id` from `system/init`, pass `--resume`, and watch for
-the resume-duplication case where Claude mints a *new* session id) is tracked
-as follow-on production work, not PoC scope.
+A crashed or interrupted session is recovered **with its context intact**, the
+same way `siteboon/claudecodeui` does it:
+
+- `ClaudeSession` captures the Claude session UUID from the stream-json output —
+  every event carries `session_id`, and the `system/init` event is the first to
+  do so. `_capture_session_id()` records it as each line is parsed.
+- As a fallback, when no `session_id` was seen before the process died,
+  `_scan_stderr_for_session_id()` reads buffered stderr for the on-exit hint
+  Claude prints — `Resume this session with:\nclaude --resume <uuid>` — and
+  extracts the UUID via `--resume\s+<uuid>`.
+- `ClaudeSession.resume()` respawns with `claude --resume <session_id>`,
+  preserving the conversation. It returns `True` when a captured id was used,
+  or `False` if it fell back to a fresh session because none is known yet.
+  `restart()` remains the deliberate context-*losing* fresh respawn.
+- `GraniteAgentLoop`'s crash path calls `resume()` first and only falls back to
+  a fresh session if no id is known; the routed `operator_event` records
+  `recovered_via: "resume" | "restart"` so granite (and the trace) can see which
+  happened.
+
+**Ctrl-C semantics.** In headless `-p` mode a single SIGINT terminates the
+subprocess immediately — verified by
+`tests/integration/test_claude_session_resume.py`, which ctrl-c's a real
+session and then resumes it to recall a planted codeword. The interactive TUI
+behaves differently: the *first* ctrl-c shows `Interrupted · What should Claude
+do instead?` and stays in the session; only the *second* ctrl-c exits and
+prints the `claude --resume <uuid>` hint. That two-stage interjection is a TUI
+affordance and does not occur on the headless stdio path. On SIGINT/SIGTERM the
+loop's `_log_resume_hints()` logs `claude --resume <uuid>` for each live session
+so a human can pick the work back up by hand.
 
 ### Questions game (live operator benchmark)
 

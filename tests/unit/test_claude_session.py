@@ -13,7 +13,6 @@ Code process. The behaviours we want to lock down:
 
 from __future__ import annotations
 
-import io
 import json
 import os
 from unittest import mock
@@ -115,6 +114,21 @@ class _FakeStdout:
         return 0
 
 
+class _FakeStderr:
+    """Stand-in for subprocess.PIPE stderr that yields scripted lines."""
+
+    def __init__(self, lines: list[str] | None = None):
+        self._lines = list(lines or [])
+
+    def readline(self) -> str:
+        if not self._lines:
+            return ""  # EOF
+        return self._lines.pop(0)
+
+    def fileno(self) -> int:  # required by select.select
+        return 1
+
+
 class _FakeStdin:
     def __init__(self):
         self.written: list[str] = []
@@ -134,10 +148,15 @@ class _FakeStdin:
 
 
 class _FakeProc:
-    def __init__(self, stdout_lines: list[str], poll_value: int | None = None):
+    def __init__(
+        self,
+        stdout_lines: list[str],
+        poll_value: int | None = None,
+        stderr_lines: list[str] | None = None,
+    ):
         self.stdin = _FakeStdin()
         self.stdout = _FakeStdout(stdout_lines)
-        self.stderr = io.StringIO()
+        self.stderr = _FakeStderr(stderr_lines)
         self._poll_value = poll_value
         self.pid = 4242
         self.killed = False
@@ -362,3 +381,67 @@ def test_context_manager_starts_and_stops(monkeypatch):
     with ClaudeSession(cfg) as session:
         assert session.is_running
     assert session._proc is None  # stopped on exit
+
+
+# ---------------------------------------------------------------------------
+# Resume / session_id capture
+# ---------------------------------------------------------------------------
+
+_UUID = "636c494d-f552-499b-a2b4-0844f235e783"
+
+
+def test_build_cmd_includes_resume_when_session_id_set():
+    cmd = _build_cmd(ClaudeSessionConfig(model="sonnet", cwd="/tmp"), resume_session_id=_UUID)
+    assert cmd[cmd.index("--resume") + 1] == _UUID
+
+
+def test_read_until_result_captures_session_id_from_stream(monkeypatch):
+    lines = [
+        json.dumps({"type": "system", "subtype": "init", "session_id": _UUID}) + "\n",
+        _make_result_line(),
+    ]
+    session, _ = _make_session(lines)
+    monkeypatch.setattr("agent.claude_session.select.select", lambda r, w, x, t: (r, [], []))
+    session.read_until_result(timeout=5)
+    assert session.session_id == _UUID
+
+
+def test_stderr_resume_hint_captures_session_id_on_eof(monkeypatch):
+    """On crash/ctrl-c Claude prints `claude --resume <uuid>` -- capture it."""
+    fake = _FakeProc(
+        [],  # stdout immediately EOFs (process died)
+        stderr_lines=["Resume this session with:\n", f"claude --resume {_UUID}\n"],
+    )
+    session = ClaudeSession(ClaudeSessionConfig(model="sonnet", cwd="/tmp"))
+    session._proc = fake  # type: ignore[assignment]
+    monkeypatch.setattr("agent.claude_session.select.select", lambda r, w, x, t: (r, [], []))
+    events = session.read_until_result(timeout=5)
+    assert events[-1]["type"] == "broken_pipe"
+    assert session.session_id == _UUID
+
+
+def test_resume_respawns_with_resume_flag(monkeypatch):
+    session, _ = _make_session([])
+    session._session_id = _UUID
+    captured = {}
+
+    def fake_popen(cmd, *a, **k):
+        captured["cmd"] = cmd
+        return _FakeProc([_make_result_line()])
+
+    monkeypatch.setattr("agent.claude_session.subprocess.Popen", fake_popen)
+    assert session.resume() is True
+    assert captured["cmd"][captured["cmd"].index("--resume") + 1] == _UUID
+
+
+def test_resume_falls_back_to_fresh_without_session_id(monkeypatch):
+    session, _ = _make_session([])
+    captured = {}
+
+    def fake_popen(cmd, *a, **k):
+        captured["cmd"] = cmd
+        return _FakeProc([_make_result_line()])
+
+    monkeypatch.setattr("agent.claude_session.subprocess.Popen", fake_popen)
+    assert session.resume() is False
+    assert "--resume" not in captured["cmd"]

@@ -131,20 +131,41 @@ def test_empty_task_raises(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_send_failure_triggers_restart_and_routes_crash(monkeypatch, tmp_path):
-    loop, pm, dev, router = _loop(
-        monkeypatch,
-        dev_script=[crash_turn()],  # send_message raises BrokenPipeError
-        pm_script=[],
-        decisions=[send_to_dev("will crash"), done("recovered")],
-        tmp_path=tmp_path,
-    )
+def test_send_failure_resumes_when_session_id_known(monkeypatch, tmp_path):
+    from agent.granite_agent_loop import GraniteAgentLoop
+
+    # Dev already captured a session_id, so the crash is recovered via resume.
+    dev = FakeClaudeSession(script=[crash_turn()], model="sonnet", session_id="dev-uuid-123")
+    pm = FakeClaudeSession(script=[], model="opus")
+    patch_sessions(monkeypatch, pm, dev)
+    router = FakeRouter(decisions=[send_to_dev("will crash"), done("recovered")])
+    loop = GraniteAgentLoop(router=router, trace_path=str(tmp_path / "t.jsonl"))
+
     res = loop.run("task that crashes dev")
     assert res.status == "done"
-    assert dev.restart_count == 1
-    # The crash was surfaced to granite as an operator_event.
-    crash_call = router.calls[-1]
-    assert crash_call["operator_events"] == [{"type": "crash", "session": "dev"}]
+    assert dev.resume_count == 1
+    assert dev.restart_count == 0  # resumed, not respawned fresh
+    assert router.calls[-1]["operator_events"] == [
+        {"type": "crash", "session": "dev", "recovered_via": "resume"}
+    ]
+
+
+def test_send_failure_restarts_when_no_session_id(monkeypatch, tmp_path):
+    from agent.granite_agent_loop import GraniteAgentLoop
+
+    # No session_id captured -> resume() falls back to a fresh session.
+    dev = FakeClaudeSession(script=[crash_turn()], model="sonnet", session_id=None)
+    pm = FakeClaudeSession(script=[], model="opus")
+    patch_sessions(monkeypatch, pm, dev)
+    router = FakeRouter(decisions=[send_to_dev("will crash"), done("recovered")])
+    loop = GraniteAgentLoop(router=router, trace_path=str(tmp_path / "t.jsonl"))
+
+    res = loop.run("task that crashes dev")
+    assert res.status == "done"
+    assert dev.resume_count == 1
+    assert router.calls[-1]["operator_events"] == [
+        {"type": "crash", "session": "dev", "recovered_via": "restart"}
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -265,3 +286,46 @@ def test_construction_off_main_thread_does_not_raise():
     t.start()
     t.join()
     assert not errors  # signal.signal ValueError must be swallowed
+
+
+# ---------------------------------------------------------------------------
+# Ctrl-C (SIGINT) handling
+# ---------------------------------------------------------------------------
+
+
+def test_sigint_tears_down_both_sessions_and_exits_130():
+    import signal as _signal
+
+    from agent.granite_agent_loop import GraniteAgentLoop
+
+    loop = GraniteAgentLoop(router=FakeRouter(decisions=[done()]))
+    pm = FakeClaudeSession(script=[], model="opus", session_id="pm-uuid")
+    dev = FakeClaudeSession(script=[], model="sonnet", session_id="dev-uuid")
+    pm.start()
+    dev.start()
+    loop.pm_session = pm
+    loop.dev_session = dev
+
+    with pytest.raises(SystemExit) as ei:
+        loop._on_signal(_signal.SIGINT, None)
+    assert ei.value.code == 128 + _signal.SIGINT  # 130 for ctrl-c
+    assert pm.stop_count >= 1
+    assert dev.stop_count >= 1
+
+
+def test_sigint_logs_resume_command_for_each_session(caplog):
+    import logging
+    import signal as _signal
+
+    from agent.granite_agent_loop import GraniteAgentLoop
+
+    loop = GraniteAgentLoop(router=FakeRouter(decisions=[done()]))
+    loop.pm_session = FakeClaudeSession(script=[], model="opus", session_id="pm-uuid-aaa")
+    loop.dev_session = FakeClaudeSession(script=[], model="sonnet", session_id="dev-uuid-bbb")
+
+    with caplog.at_level(logging.WARNING), pytest.raises(SystemExit):
+        loop._on_signal(_signal.SIGINT, None)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("claude --resume pm-uuid-aaa" in m for m in messages)
+    assert any("claude --resume dev-uuid-bbb" in m for m in messages)

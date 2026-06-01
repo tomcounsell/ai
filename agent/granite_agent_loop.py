@@ -105,9 +105,17 @@ class GraniteAgentLoop:
 
     def _on_signal(self, signum, _frame) -> None:
         logger.warning("granite_agent_loop: received signal %s, tearing down", signum)
+        self._log_resume_hints()
         self._cleanup()
         # Re-raise default behavior for SIGTERM/SIGINT so the process actually exits
         sys.exit(128 + (signum or 0))
+
+    def _log_resume_hints(self) -> None:
+        """On ctrl-c / SIGTERM, surface how to resume each session by hand."""
+        for label, session in (("PM", self.pm_session), ("Dev", self.dev_session)):
+            sid = getattr(session, "session_id", None) if session else None
+            if sid:
+                logger.warning("granite_agent_loop: resume %s with: claude --resume %s", label, sid)
 
     def _cleanup(self) -> None:
         for session in (self.pm_session, self.dev_session):
@@ -243,9 +251,25 @@ class GraniteAgentLoop:
                     target_session.send_message(decision.payload or "continue")
                 except (ClaudeSessionError, BrokenPipeError) as exc:
                     self._trace({"turn": turn, "stage": "send_failed", "error": str(exc)})
-                    target_session.restart()
+                    # Prefer a context-preserving resume; fall back to a fresh
+                    # session if no session_id was captured before the crash.
+                    resumed = target_session.resume()
+                    self._trace(
+                        {
+                            "turn": turn,
+                            "stage": "resumed" if resumed else "restarted",
+                            "session": label,
+                            "session_id": getattr(target_session, "session_id", None),
+                        }
+                    )
                     decision = self.router.route(
-                        operator_events=[{"type": "crash", "session": label}]
+                        operator_events=[
+                            {
+                                "type": "crash",
+                                "session": label,
+                                "recovered_via": "resume" if resumed else "restart",
+                            }
+                        ]
                     )
                     continue
 
