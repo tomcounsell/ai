@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-01
 tracking: https://github.com/tomcounsell/ai/issues/1536
 last_comment_id:
+revision_applied: true
 ---
 
 # Session Telemetry Recorder (v1 of epic #1536)
@@ -72,8 +73,8 @@ No relevant external findings — proceeding with codebase context and PR #1487.
 1. **Entry point**: Worker executes a session → `agent/sdk_client.py` spawns `claude -p --output-format stream-json` (harness path) or runs the `ClaudeSDKClient` query loop.
 2. **Stream parse loop** (`agent/sdk_client.py` `_run_harness_subprocess` / the `ResultMessage`/`AssistantMessage` handlers ~1760-1820): each event is already iterated and dispatched to `record_session_activity`, `record_turn_count`, `accumulate_session_tokens`. **New:** alongside these calls, invoke `record_telemetry_event(session_id, event)` — no second parse.
 3. **Telemetry helper** (`agent/session_telemetry.py`, new): normalizes the event to `{session_id, ts, type, ...payload}`, derives `idle_gap` from the per-session last-event timestamp, and appends one JSON line to the session's trace file. Fire-and-forget (never raises into the hot loop).
-4. **Status transitions** (`models/agent_session.py` `transition_status`): emit a `status_transition` telemetry event including kill outcome where known (recovery path passes `kill_issued`/`subprocess_exited`).
-5. **Sink**: append-only `logs/session_telemetry/{session_id}.jsonl`. One writer per session (a session runs in a single executor task), so appends are serialized without locks.
+4. **Status transitions** (`models/session_lifecycle.py`): emit a `status_transition` telemetry event from BOTH `transition_status` (`:453`, non-terminal — captures the requeue-to-`pending` orphaning moment) AND `finalize_session` (`:217`, terminal — captures the eventual kill/fail that closes a hang's story). Both are free functions taking `(session, new_status, reason=...)`, NOT methods on `AgentSession`. Kill outcome (`kill_issued`/`subprocess_exited`/`pid`) is only known at the recovery call site (`agent/session_health.py:1184`), so thread it down via an optional kwarg / the `reason` string; it is `None` for transitions that originate elsewhere.
+5. **Sink**: append-only `logs/session_telemetry/{session_id}.jsonl`. The executor task is the sole writer of *stream* events, but `status_transition` events fire from the reflection-scheduler thread (via `finalize_session`/`transition_status`) — so writes are NOT lock-free. A per-session lock guards the full open-or-reuse-handle + write sequence (see Race Conditions).
 6. **Output**: `python -m tools.valor_session telemetry --id <session_id>` reads the JSONL and renders a human-readable timeline (and `--json` for raw). This is the v1 "consumer that proves value."
 
 ## Architectural Impact
@@ -109,9 +110,9 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/session_teleme
 ### Key Elements
 
 - **`agent/session_telemetry.py` (new)**: `record_telemetry_event(session_id, event)` — normalize → derive idle-gap → append one JSONL line; fail-silent. `read_session_timeline(session_id, limit=None)` — parse the JSONL back into ordered events. Module-level per-session last-event-ts map for idle-gap derivation and a bounded open-handle cache.
-- **Event schema (#1487-compatible)**: every line is `{"session_id": str, "ts": iso8601, "type": str, ...payload}`. Types: `turn_start`, `turn_end` (from `result`), `tool_use` (name + duration when derivable), `token_delta` (input/output/cache deltas + cost), `idle_gap` (seconds since prior event, emitted when the gap exceeds a threshold), `timeout` / `decode_error` / `broken_pipe` (reusing #1487's `{"type", "reason"|"raw"|"error"}` shape), and `status_transition` (`from`, `to`, `reason`, `kill_issued`, `subprocess_exited`, `pid`).
-- **Tap points (additive only)**: in `agent/sdk_client.py`'s existing event-dispatch loop, call `record_telemetry_event` next to the existing `record_*`/`accumulate_*` calls; in `models/agent_session.py::transition_status`, emit a `status_transition` event.
-- **Sink**: append-only `logs/session_telemetry/{session_id}.jsonl`, one writer per session. Per-session event cap (default 10k) → writes a final `{"type":"telemetry_truncated"}` marker and stops, so a runaway session can't fill the disk. Retention sweep (delete files older than N days) folded into the existing hourly `agent-session-cleanup` reflection.
+- **Event schema (#1487-compatible)**: every line is `{"session_id": str, "ts": iso8601, "type": str, ...payload}`. Types: `turn_start`, `turn_end` (from `result`), `tool_use` (name + duration when derivable), `token_usage` (the raw per-turn `usage` dict + `total_cost_usd`, recorded verbatim off the harness `result` event — NOT a computed delta; the consumer diffs if it wants deltas, which sidesteps the cumulative-vs-per-turn ambiguity), `idle_gap` (seconds since prior event, emitted when the gap exceeds a threshold), `timeout` / `decode_error` / `broken_pipe` (reusing #1487's `{"type", "reason"|"raw"|"error"}` shape), and `status_transition` (`from`, `to`, `reason`, `kill_issued`, `subprocess_exited`, `pid`).
+- **Tap points (additive only)**: in `agent/sdk_client.py`'s existing event-dispatch loop (harness `result` handler ~`:2773` + the SDK `ResultMessage` handler ~`:1760`), call `record_telemetry_event` next to the existing `record_*`/`accumulate_*` calls; in `models/session_lifecycle.py` emit `status_transition` from BOTH `transition_status` (non-terminal) and `finalize_session` (terminal).
+- **Sink**: append-only `logs/session_telemetry/{session_id}.jsonl`. Per-session event cap (default 10k) → writes a final `{"type":"telemetry_truncated"}` marker and stops, so a runaway session can't fill the disk. Retention sweep (delete files older than N days) folded into the existing `agent-session-cleanup` reflection at `agent/session_health.py:2144` (`cleanup_corrupted_agent_sessions()`). A bounded open-handle cache; eviction of a handle happens under the same per-session lock as writes (see Race Conditions C/Race 2).
 - **Consumer**: `tools/valor_session` gains a `telemetry --id <ID> [--json] [--tail N]` subcommand rendering the timeline (timestamp · type · summary), so "stuck vs working" is readable from the recording.
 
 ### Flow
@@ -122,8 +123,8 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/session_teleme
 
 - **No second parse**: the recorder consumes the events the parse loop already produces. The tap is a function call added beside existing `record_session_activity` / `accumulate_session_tokens` / `record_turn_count`.
 - **#1487 compatibility**: use `type` as the discriminator and reuse `timeout`/`decode_error`/`broken_pipe` payload shapes verbatim, so when #1487's `ClaudeSession` lands in `worker/` its synthetic events flow into the same sink with no schema change. Where the harness emits native `result`/`assistant` events, map them to `turn_end`/`tool_use` rather than inventing parallel names.
-- **Idle-gap derivation**: keep `last_event_monotonic[session_id]`; on each event, if `now - last > IDLE_GAP_THRESHOLD` (default 60s), emit a synthetic `idle_gap` event *before* the real event. Records silence as a fact without making it a kill signal (respects #1172).
-- **status_transition is the priority event** (per spike-1): wire it into `transition_status` so the orphaning sequence behind #1537 would be visible in the trace. The recovery path should pass `kill_issued`/`subprocess_exited` so future hangs are diagnosable.
+- **Idle-gap derivation**: keep `last_event_monotonic[session_id]`; on each event, if `now - last > IDLE_GAP_THRESHOLD` (default 60s), emit a synthetic `idle_gap` event *before* the real event. Records silence as a fact without making it a kill signal (respects #1172). **Important (C4):** during an ongoing hang there is no "next event," so the gap materializes only when the next event arrives — for a wedged session that is the terminal `status_transition` emitted by `finalize_session` (the kill). The terminal idle_gap therefore *depends on* the terminal-transition tap above; the e2e wedged-session test must kill via the `finalize_session` path so the gap actually appears.
+- **status_transition is the priority event** (per spike-1): wire it into both lifecycle functions so the FULL orphaning sequence behind #1537 is visible — the requeue-to-`pending` (`transition_status`) AND the terminal kill/fail (`finalize_session`). The recovery call site (`agent/session_health.py:1184`) passes `kill_issued`/`subprocess_exited`/`pid` down so future hangs are diagnosable end-to-end.
 - **Fail-silent**: wrap all recorder calls in try/except that logs at debug and returns — telemetry must never crash or slow the execution loop (same posture as the memory hooks).
 
 ## Failure Path Test Strategy
@@ -144,7 +145,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/session_teleme
 ## Test Impact
 
 - [ ] `tests/unit/test_sdk_client.py` (token accumulation tests) — UPDATE: assert `record_telemetry_event` is invoked alongside `accumulate_session_tokens` in the parse loop (mock the recorder; verify call, don't re-test token math).
-- [ ] `tests/unit/test_agent_session.py` (or wherever `transition_status` is covered) — UPDATE: assert a `status_transition` telemetry event is emitted on status change.
+- [ ] `tests/unit/` coverage of `models/session_lifecycle.py` `transition_status` AND `finalize_session` — UPDATE: assert a `status_transition` telemetry event is emitted on BOTH non-terminal and terminal transitions (terminal is the one that closes a hang's story — C1).
 - [ ] New `tests/unit/test_session_telemetry.py` — REPLACE/CREATE: full coverage of `record_telemetry_event`, idle-gap derivation, cap+truncation marker, fail-silent paths, and `read_session_timeline` parsing.
 - [ ] New `tests/integration/test_session_telemetry_e2e.py` — CREATE: run a short real session through the harness and assert its JSONL trace contains `turn_*`, `token_delta`, and `status_transition` events retrievable by `session_id`.
 
@@ -177,16 +178,16 @@ No other existing tests are affected — the change is additive (new module + ne
 
 ### Race 1: Concurrent appends to the same session trace file
 **Location:** `agent/session_telemetry.py` append path.
-**Trigger:** Two writers appending to `{session_id}.jsonl` simultaneously could interleave partial lines.
-**Data prerequisite:** A session's events all originate from a single executor task (one session = one running subprocess = one parse loop), so there is exactly one writer per file in normal operation.
-**State prerequisite:** The per-session last-event-ts map is read/written only by that single task.
-**Mitigation:** Rely on the single-writer-per-session invariant; additionally open in append mode and write each line in one `write()` call (line-buffered) so even an unexpected second writer cannot tear a line below typical sizes. Document the invariant. Cross-session writes target different files — no contention.
+**Trigger:** The executor parse-loop task and the reflection-scheduler thread (firing `status_transition` via `finalize_session`/`transition_status`) both append to `{session_id}.jsonl`. Stream events have a single writer (the executor task); status-transition events do NOT — so this is a genuine two-thread race, not a theoretical one.
+**Data prerequisite:** Same trace file, two threads. Also the bounded open-handle cache: a handle evicted mid-append would tear a line.
+**State prerequisite:** The per-session last-event-ts map is read/written by both the parse loop and (for the terminal idle_gap) the finalize path.
+**Mitigation (C3):** A per-session `threading.Lock` guards the ENTIRE open-or-reuse-handle → write → (possible evict) sequence, not just the bare `write()`. The lock registry is a module-level `dict[str, threading.Lock]` acquired via `_locks.setdefault(session_id, threading.Lock())` (atomic under the CPython GIL — document that assumption). Handle eviction from the bounded cache occurs only while holding that same per-session lock. Cross-session writes target different files/locks — no contention.
 
-### Race 2: `status_transition` emitted from a different thread than the parse loop
-**Location:** `models/agent_session.py::transition_status` (can be called by the reflection-scheduler thread, e.g. recovery).
-**Trigger:** A status transition fired by the health-check thread while the executor task is mid-append for the same session.
-**Data prerequisite:** Same trace file, two threads.
-**Mitigation:** Guard the append with a per-session `threading.Lock` (cheap, held only for the single write). This is the one place a lock is warranted; document why.
+### Race 2: Idle-gap last-event-ts read/write across threads
+**Location:** `agent/session_telemetry.py` idle-gap derivation.
+**Trigger:** The finalize path (scheduler thread) computes the terminal idle_gap against `last_event_monotonic[session_id]` that the executor task last wrote.
+**Data prerequisite:** Shared `last_event_monotonic` map.
+**Mitigation:** Read-modify-write of the per-session entry happens under the same per-session lock from Race 1, so the gap computation and the last-ts update are atomic together.
 
 ## No-Gos (Out of Scope)
 
@@ -201,9 +202,9 @@ No update system changes required — this feature is purely internal. It adds o
 ## Agent Integration
 
 The agent reaches the new capability through the **CLI entry point** surface (per this repo's Agent Integration convention), not MCP:
-- [ ] `tools/valor_session` gains a `telemetry` subcommand. `valor-session` is already a declared entry point, so the agent can invoke `python -m tools.valor_session telemetry --id <ID>` (or the `valor-session` console script) via its Bash tool with no new registration.
+- [ ] `tools/valor_session` gains a `telemetry` subcommand. **`valor-session` is NOT a declared console script** (verified: `pyproject.toml [project.scripts]` has no such entry; `tools/valor_session.py:1185` defines `main()` and `:1354` has a `__main__` guard). The agent invokes it as `python -m tools.valor_session telemetry --id <ID>` via its Bash tool — the same module form CLAUDE.md uses for every other `valor_session` command. No packaging change, so the "No update system changes required" claim holds.
 - [ ] No `.mcp.json` change and no bridge import needed — the recorder runs inside the executor the bridge already drives; the agent only *reads* traces via the CLI.
-- [ ] Integration test asserts the CLI subcommand returns a rendered timeline for a session that has a trace, and a clean "no telemetry" message otherwise.
+- [ ] Integration test asserts `python -m tools.valor_session telemetry` returns a rendered timeline for a session that has a trace, and a clean "no telemetry" message otherwise.
 
 ## Documentation
 
@@ -226,7 +227,7 @@ The agent reaches the new capability through the **CLI entry point** surface (pe
 - [ ] Per-session cap + retention sweep enforced (asserted); no silent truncation (marker emitted).
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
-- [ ] grep confirms `agent/sdk_client.py` references `record_telemetry_event` and `models/agent_session.py::transition_status` emits `status_transition`.
+- [ ] grep confirms `agent/sdk_client.py` references `record_telemetry_event` and `models/session_lifecycle.py` emits `status_transition` from both `transition_status` and `finalize_session`.
 
 ## Team Orchestration
 
@@ -282,8 +283,8 @@ The agent reaches the new capability through the **CLI entry point** surface (pe
 - **Assigned To**: recorder-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `record_telemetry_event` calls beside existing `record_*`/`accumulate_*` in `agent/sdk_client.py`'s event loop (harness + SDK paths).
-- Emit `status_transition` (from/to/reason/kill_issued/subprocess_exited/pid) in `models/agent_session.py::transition_status`; thread kill outcome from the recovery path where available.
+- Add `record_telemetry_event` calls beside existing `record_*`/`accumulate_*` in `agent/sdk_client.py`'s event loop (harness `result` handler ~`:2773` + SDK `ResultMessage` handler ~`:1760`). Record `token_usage` as the raw per-turn `usage` dict verbatim (C5) — no delta math.
+- Emit `status_transition` (from/to/reason/kill_issued/subprocess_exited/pid) in BOTH `models/session_lifecycle.py::transition_status` (non-terminal) and `::finalize_session` (terminal) (C1). Thread kill outcome from the recovery call site (`agent/session_health.py:1184`) via an optional kwarg.
 
 ### 3. Consumer CLI
 - **Task ID**: build-cli
@@ -297,10 +298,11 @@ The agent reaches the new capability through the **CLI entry point** surface (pe
 ### 4. Retention sweep
 - **Task ID**: build-retention
 - **Depends On**: build-recorder
+- **Validates**: tests/unit/test_session_telemetry.py::test_retention_deletes_old_traces (create)
 - **Assigned To**: recorder-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add a trace-file retention sweep (delete > N days) into the hourly `agent-session-cleanup` reflection; `log()` what was deleted.
+- Add a trace-file retention sweep (delete > N days) into `agent/session_health.py:2144` `cleanup_corrupted_agent_sessions()` (the `agent-session-cleanup` reflection); `log()` what was deleted.
 
 ### 5. Tests
 - **Task ID**: build-tests
@@ -336,21 +338,31 @@ The agent reaches the new capability through the **CLI entry point** surface (pe
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Tap wired (sdk) | `grep -n record_telemetry_event agent/sdk_client.py` | output > 0 |
-| status_transition emitted | `grep -n status_transition models/agent_session.py` | output contains status_transition |
+| status_transition emitted | `grep -n status_transition models/session_lifecycle.py` | output contains status_transition |
 | CLI subcommand present | `python -m tools.valor_session telemetry --help` | exit code 0 |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Critique verdict: **READY TO BUILD (with concerns)** — 0 blockers, 5 concerns, 3 nits. All folded into the plan below.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic/Adversary/Consistency | C1: `transition_status` is a free function in `models/session_lifecycle.py:453` (not a method on `agent_session.py`), and terminal kills go through `finalize_session:217` which the plan never tapped — so the END of a hang's story would be missing. | Data Flow #4, Solution tap points, Task 2, Test Impact, Success Criteria, Verification all rewired to `models/session_lifecycle.py` covering BOTH functions. | Verified via grep: both are free functions taking `(session, new_status, reason=...)`. Kill outcome known only at `session_health.py:1184` — threaded via kwarg. |
+| CONCERN | Operator/User | C2: plan claimed `valor-session` is a console script — it is not in `pyproject.toml [project.scripts]`. | Agent Integration corrected to `python -m tools.valor_session telemetry`; preserves "no update changes." | Verified: no script entry; `main()` at `tools/valor_session.py:1185`. |
+| CONCERN | Adversary | C3: per-session lock must cover open-or-reuse-handle + write + evict, and the lock registry creation is itself a micro-race. | Race Conditions Race 1 rewritten: lock guards full sequence; registry via `setdefault` (GIL-atomic); eviction under same lock. | — |
+| CONCERN | Skeptic/Adversary | C4: idle_gap is reactive (needs a "next event"); a silent hang emits none until the terminal transition — so the promised terminal idle_gap depends on C1. | Idle-gap derivation note + e2e test must kill via `finalize_session` path. | Order: emit synthetic `idle_gap`, then `status_transition`. |
+| CONCERN | Skeptic/Archaeologist | C5: schema said `token_delta` but the harness `result` event carries per-turn `usage`; computing a delta risks double-count. | Renamed to `token_usage`; record raw `usage` dict verbatim, consumer diffs. | Verified at `sdk_client.py:2773` — `usage` is per-turn per the inline comment. |
+| NIT | — | N1: Task 4 had no Validates. | Added `test_retention_deletes_old_traces`. | — |
+| NIT | — | N2: retention-sweep location unstated. | Pinned to `agent/session_health.py:2144 cleanup_corrupted_agent_sessions()`. | — |
+| NIT | — | N3: Open Question #1 (Popoto) already answered by the plan. | Converted to a stated decision. | — |
 
 ---
 
 ## Open Questions
 
-1. **Sink confirmation:** JSONL-on-disk under `logs/session_telemetry/` (chosen, matches #1487, avoids `session_events` RMW and the no-raw-Redis rule). Confirm we do NOT also want a queryable Popoto field in v1 — deferring that keeps v1 minimal. Agree?
-2. **Consumer surface:** CLI timeline for v1, dashboard view deferred. Acceptable, or is a `ui/` view required for v1 acceptance?
-3. **Retention window N:** default proposed 14 days for trace files. Right balance of diagnostic value vs disk?
-4. **Idle-gap threshold:** default 60s before emitting an `idle_gap` event. Too chatty / too coarse?
+1. **Consumer surface:** CLI timeline for v1, dashboard view deferred. Acceptable, or is a `ui/` view required for v1 acceptance?
+2. **Retention window N:** default proposed 14 days for trace files. Right balance of diagnostic value vs disk?
+3. **Idle-gap threshold:** default 60s before emitting an `idle_gap` event. Too chatty / too coarse?
+
+_(Sink choice resolved — JSONL-on-disk under `logs/session_telemetry/`; see Architectural Impact for why not Popoto/Redis. The no-raw-Redis rule is hook-enforced and the `session_events` RMW hazard is real, so this is a decision, not an open question.)_
