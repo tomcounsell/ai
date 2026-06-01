@@ -4,11 +4,11 @@ Embedding-based emoji reaction selection for Telegram messages, replacing the pr
 
 ## Overview
 
-When a Telegram message arrives, the bridge selects a contextual reaction emoji by embedding the message text and comparing it against pre-computed embeddings for all 73 validated Telegram reaction emojis via cosine similarity. This replaces the previous Ollama-based intent classifier that mapped messages to 10 hardcoded emojis with 2-10 second latency.
+When a Telegram message arrives, the bridge selects a contextual reaction emoji by embedding the message text and comparing it against pre-computed embeddings for the 72 validated Telegram reaction emojis via cosine similarity. This replaces the previous Ollama-based intent classifier that mapped messages to 10 hardcoded emojis with 2-10 second latency.
 
 The same embedding index powers the `send_telegram --react` flag, allowing the agent to set emoji reactions on messages by describing a feeling word.
 
-Premium accounts gain access to thousands of custom emoji (animated sticker-based emoji) in addition to the 73 standard reactions. The system indexes available custom emoji packs and includes them in the similarity search, with automatic fallback to standard emoji when custom emoji are unavailable.
+Premium accounts gain access to thousands of custom emoji (animated sticker-based emoji) in addition to the 72 standard reactions. The system indexes available custom emoji packs and includes them in the similarity search, with automatic fallback to standard emoji when custom emoji are unavailable.
 
 ## How It Works
 
@@ -58,7 +58,9 @@ The core module that maps feelings to emojis.
 - `clear_cache()` -- clears the in-memory cache (for testing)
 - `rebuild_custom_emoji_index(client)` -- async function to query Telethon for available custom emoji packs and rebuild the custom embedding cache
 
-**Standard emoji labels:** Each of the 73 validated Telegram reaction emojis has a descriptive label string (e.g., "fire, hot, trending, lit, exciting, impressive, awesome" for the fire emoji). These labels are embedded and compared against input text.
+**Standard emoji labels:** Each of the 72 validated Telegram reaction emojis has a descriptive label string (e.g., "fire, hot, trending, lit, exciting, impressive, awesome" for the fire emoji). These labels are embedded and compared against input text.
+
+**Blocked reactions:** `BLOCKED_REACTION_EMOJIS` is a frozenset of emojis that must never be selected as a reaction, even if a stale on-disk cache still contains their embedding. The middle finger 🖕 is blocked here — Telegram accepts it as a valid reaction, but reacting to a user's message with it is offensive. `find_best_emoji()` skips any emoji in this set at selection time, so the guarantee holds regardless of cache state: production machines may carry a `data/emoji_embeddings.json` that predates the label's removal, and the picker iterates that cached dict, so the blocklist (not just the absent label) is what keeps the emoji from ever being chosen.
 
 **Custom emoji labels:** Custom emoji from Premium sticker packs are labeled using the associated emoji character plus the sticker set title (e.g., "party celebration confetti" for a party popper custom emoji). These are embedded with the same model and stored separately.
 
@@ -143,16 +145,16 @@ The work-type classifier (`tools/classifier.py` / `classify_request_async`) was 
 
 | Metric | Old (Ollama) | New (Embedding) |
 |--------|-------------|-----------------|
-| Cold start | 2-10 seconds | ~1 second (compute 73 embeddings via API) |
+| Cold start | 2-10 seconds | ~1 second (compute 72 embeddings via API) |
 | Warm lookup | 2-10 seconds | Under 50ms (cosine similarity only) |
-| Emoji coverage | 10 hardcoded | All 73 validated reactions |
+| Emoji coverage | 10 hardcoded | All 72 validated reactions |
 | Timeout fallback | Frequent | Rare (only on API key missing) |
 
 ## Related Files
 
 | File | Purpose |
 |------|---------|
-| `tools/emoji_embedding.py` | Embedding index, `EmojiResult` dataclass, standard + custom emoji selection |
+| `tools/emoji_embedding.py` | Embedding index, `EmojiResult` dataclass, standard + custom emoji selection, `BLOCKED_REACTION_EMOJIS` blocklist |
 | `tools/send_telegram.py` | `--react` flag for agent reactions, `--emoji` flag for standalone emoji messages |
 | `bridge/telegram_bridge.py` | Message handler integration |
 | `bridge/telegram_relay.py` | Reaction and custom emoji message payload delivery |

@@ -83,7 +83,7 @@ for r in results:
 
 ### Emoji Embedding (`tools.emoji_embedding`)
 
-Embedding-based emoji selection for Telegram reactions. Maps feeling words to the nearest emoji via cosine similarity, searching both the 73 standard Telegram reaction emojis and any available Premium custom emoji packs.
+Embedding-based emoji selection for Telegram reactions. Maps feeling words to the nearest emoji via cosine similarity, searching both the 72 standard Telegram reaction emojis and any available Premium custom emoji packs.
 
 ```python
 from tools.emoji_embedding import find_best_emoji, find_best_emoji_for_message, EmojiResult

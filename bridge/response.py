@@ -55,7 +55,8 @@ VALIDATED_REACTIONS = [
     # Hearts/love
     "❤", "❤‍🔥", "💔", "💘", "😍", "🥰", "😘", "💋",
     # Hands
-    "👍", "👎", "👏", "🙏", "👌", "🤝", "✍", "🖕",
+    # 🖕 is a valid Telegram reaction but offensive to send at a user — excluded.
+    "👍", "👎", "👏", "🙏", "👌", "🤝", "✍",
     # Positive faces
     "😁", "🤣", "🤩", "😇", "😎", "🤓", "🤗", "🫡",
     # Negative faces
