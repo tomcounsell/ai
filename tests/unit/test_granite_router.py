@@ -218,3 +218,71 @@ def test_route_handles_missing_events_gracefully():
     user_msg = next(m for m in router.messages if m["role"] == "user")
     assert "No new session output" in user_msg["content"]
     chat.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Response-shape robustness
+# ---------------------------------------------------------------------------
+
+
+def test_route_handles_object_shaped_response():
+    """ollama may return attribute objects rather than dicts; both must work."""
+    from types import SimpleNamespace
+
+    fn = SimpleNamespace(name="extract_dev_prompt", arguments={"dev_prompt": "go"})
+    obj = SimpleNamespace(
+        message=SimpleNamespace(content="", tool_calls=[SimpleNamespace(function=fn)])
+    )
+    router = GraniteRouter()
+    with mock.patch("agent.granite_router.ollama_chat", return_value=obj):
+        decision = router.route(pm_events=[])
+    assert decision.action == "send_to_dev"
+    assert decision.payload == "go"
+
+
+def test_route_raises_when_ollama_not_installed():
+    router = GraniteRouter()
+    with mock.patch("agent.granite_router.ollama_chat", None):
+        with pytest.raises(GraniteRoutingError, match="not installed"):
+            router.route(task="x")
+
+
+# ---------------------------------------------------------------------------
+# Decision defaults
+# ---------------------------------------------------------------------------
+
+
+def test_handle_choice_defaults_to_option_one():
+    router = GraniteRouter()
+    with mock.patch(
+        "agent.granite_router.ollama_chat", return_value=_fake_response("handle_choice", {})
+    ):
+        decision = router.route(dev_events=[])
+    assert decision.payload == "1"
+
+
+def test_signal_done_tolerates_empty_summary():
+    router = GraniteRouter()
+    with mock.patch(
+        "agent.granite_router.ollama_chat", return_value=_fake_response("signal_done", {})
+    ):
+        decision = router.route(pm_events=[])
+    assert decision.action == "done"
+    assert decision.payload == ""
+
+
+# ---------------------------------------------------------------------------
+# History truncation boundary
+# ---------------------------------------------------------------------------
+
+
+def test_history_not_truncated_below_threshold():
+    """At <= HISTORY_KEEP_LAST_N + 1 messages the system prompt is never dropped."""
+    from agent.granite_router import HISTORY_KEEP_LAST_N
+
+    router = GraniteRouter()
+    fake = _fake_response("probe_session", {"reason": "x"})
+    with mock.patch("agent.granite_router.ollama_chat", return_value=fake):
+        router.route(pm_events=[])  # adds user+assistant+tool (4 total with system)
+    assert router.messages[0]["role"] == "system"
+    assert len(router.messages) <= HISTORY_KEEP_LAST_N + 1

@@ -24,6 +24,7 @@ from agent.claude_session import (
     ClaudeSession,
     ClaudeSessionConfig,
     ClaudeSessionError,
+    _build_cmd,
     _build_env,
     _envelope,
 )
@@ -52,6 +53,46 @@ def test_envelope_shape_is_stream_json_user_message():
         "type": "user",
         "message": {"role": "user", "content": "hello world"},
     }
+
+
+def test_build_cmd_includes_required_streamjson_flags():
+    """Regression guard for the Spike-3 correction.
+
+    `claude --input-format stream-json` is rejected unless paired with BOTH
+    `-p/--print` AND `--verbose`. If a refactor drops either flag the CLI
+    breaks at runtime with no Python-side error, so we pin the exact contract.
+    """
+    cmd = _build_cmd(ClaudeSessionConfig(model="sonnet", cwd="/tmp"))
+    assert "-p" in cmd
+    assert "--verbose" in cmd
+    # --input-format must be immediately followed by stream-json
+    assert cmd[cmd.index("--input-format") + 1] == "stream-json"
+    assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+    assert cmd[cmd.index("--model") + 1] == "sonnet"
+    assert cmd[cmd.index("--permission-mode") + 1] == "bypassPermissions"
+
+
+def test_build_cmd_appends_system_prompt_only_when_set():
+    with_prompt = _build_cmd(
+        ClaudeSessionConfig(model="opus", cwd="/tmp", system_prompt="be terse")
+    )
+    assert with_prompt[with_prompt.index("--append-system-prompt") + 1] == "be terse"
+    without = _build_cmd(ClaudeSessionConfig(model="opus", cwd="/tmp"))
+    assert "--append-system-prompt" not in without
+
+
+def test_build_env_extra_env_overrides_blanked_api_key():
+    """extra_env is merged last, so a caller can override the blanked key."""
+    with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "secret"}, clear=True):
+        env = _build_env({"ANTHROPIC_API_KEY": "override"}, "granite-poc-x")
+    assert env["ANTHROPIC_API_KEY"] == "override"
+
+
+def test_auto_task_list_id_format_when_none():
+    import re
+
+    session = ClaudeSession(ClaudeSessionConfig(model="sonnet", cwd="/tmp"))
+    assert re.fullmatch(r"granite-poc-[0-9a-f]{8}", session.task_list_id)
 
 
 # ---------------------------------------------------------------------------
@@ -261,3 +302,63 @@ def test_restart_replaces_process(monkeypatch):
     assert replaced["called"] is True
     assert session._proc is not original
     assert session.is_running
+
+
+# ---------------------------------------------------------------------------
+# read_until_result -- additional failure modes
+# ---------------------------------------------------------------------------
+
+
+def test_read_until_result_per_line_timeout(monkeypatch):
+    """Per-line 30s deadline fires before the (larger) overall deadline."""
+    session, _ = _make_session([])
+    monkeypatch.setattr("agent.claude_session.select.select", lambda r, w, x, t: ([], [], []))
+    # deadline=+300, per_line=+30, then now jumps past per_line but under deadline.
+    fake_time = iter([1000.0, 1000.0, 1100.0, 1100.0])
+    monkeypatch.setattr("agent.claude_session.time.monotonic", lambda: next(fake_time))
+    events = session.read_until_result(timeout=300)
+    assert events[-1]["type"] == "timeout"
+    assert "per-line" in events[-1]["reason"]
+
+
+def test_read_until_result_select_oserror_is_broken_pipe(monkeypatch):
+    session, _ = _make_session([_make_result_line()])
+
+    def boom(r, w, x, t):
+        raise OSError("bad file descriptor")
+
+    monkeypatch.setattr("agent.claude_session.select.select", boom)
+    events = session.read_until_result(timeout=10)
+    assert events[-1]["type"] == "broken_pipe"
+    assert "select" in events[-1]["reason"]
+
+
+def test_read_until_result_when_not_started():
+    session = ClaudeSession(ClaudeSessionConfig(model="sonnet", cwd="/tmp"))
+    events = session.read_until_result(timeout=1)
+    assert events == [{"type": "broken_pipe", "reason": "session not started"}]
+
+
+# ---------------------------------------------------------------------------
+# lifecycle: start idempotency + context manager
+# ---------------------------------------------------------------------------
+
+
+def test_start_is_idempotent_when_already_running(monkeypatch):
+    session, fake = _make_session([])  # fake.poll() returns None -> "running"
+
+    def fail_popen(*args, **kwargs):
+        raise AssertionError("Popen must not be called when already running")
+
+    monkeypatch.setattr("agent.claude_session.subprocess.Popen", fail_popen)
+    session.start()  # must early-return without spawning
+    assert session._proc is fake
+
+
+def test_context_manager_starts_and_stops(monkeypatch):
+    fake = _FakeProc([_make_result_line()])
+    monkeypatch.setattr("agent.claude_session.subprocess.Popen", lambda *a, **k: fake)
+    cfg = ClaudeSessionConfig(model="sonnet", cwd="/tmp")
+    with ClaudeSession(cfg) as session:
+        assert session.is_running
+    assert session._proc is None  # stopped on exit

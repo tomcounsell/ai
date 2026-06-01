@@ -199,6 +199,102 @@ python scripts/granite_smoke_test.py
 This must report parse-error-rate <= 20% or the architecture is
 considered abandoned (kill criterion in the plan).
 
+## Testing & emulation
+
+Claude Code sessions have peculiarities the operator must survive: a session
+can pose a numbered **multiple-choice question**, surface a **permission /
+feedback prompt**, **time out**, emit a malformed line, or **crash** mid-run.
+Reproducing those against a live `claude` subprocess is slow and flaky, so the
+suite emulates them deterministically and reserves one gated live test for the
+thing that can't be faked (granite actually *recognizing* a real question).
+
+### Test layout
+
+| File | Kind | Covers |
+|---|---|---|
+| [`tests/unit/granite_session_emulator.py`](../../tests/unit/granite_session_emulator.py) | fixture (not collected) | `FakeClaudeSession`, `FakeRouter`, stream-json + peculiarity event builders |
+| [`tests/unit/test_claude_session.py`](../../tests/unit/test_claude_session.py) | unit | env, envelope, `_build_cmd` flag guard, `read_until_result` failure modes, lifecycle |
+| [`tests/unit/test_granite_router.py`](../../tests/unit/test_granite_router.py) | unit | tool dispatch, dict/object response shapes, truncation, decision defaults, ollama-missing |
+| [`tests/unit/test_granite_agent_loop.py`](../../tests/unit/test_granite_agent_loop.py) | unit | every loop exit path, crash→restart, operator-event forwarding, teardown, trace log |
+| [`tests/unit/test_granite_peculiarities.py`](../../tests/unit/test_granite_peculiarities.py) | unit | multiple-choice, feedback-prompt, crash/resume-gap emulation |
+| [`tests/unit/test_granite_questions_game.py`](../../tests/unit/test_granite_questions_game.py) | unit | the questions-game harness parsing helpers |
+| [`tests/integration/test_granite_questions_game.py`](../../tests/integration/test_granite_questions_game.py) | integration (gated) | live: granite answering a real Claude quiz |
+
+### The emulator
+
+`tests/unit/granite_session_emulator.py` is a fixture library (no `test_`
+prefix, so pytest does not collect it). It provides:
+
+- **`FakeClaudeSession`** — API-compatible drop-in for `ClaudeSession`. It
+  replays a *script*: a list of turns, where each `(send_message,
+  read_until_result)` pair consumes one. A turn that is a `list[dict]` is
+  returned as events; a turn that is an `Exception` is raised from
+  `send_message` to emulate a crash. It records `sent_messages`,
+  `restart_count`, and `stop_count` so tests can assert routing and teardown.
+- **`FakeRouter`** — replays scripted `RouterDecision`s and records every
+  `route()` call (so a test can assert exactly which `operator_events` were
+  forwarded to granite). Exhaustion returns a `done` decision so loops never
+  hang; a scripted `Exception` raises to emulate `GraniteRoutingError`.
+- **`patch_sessions(monkeypatch, pm, dev)`** — patches the loop's internal
+  `ClaudeSession` constructor, dispatching PM (`model='opus'`) vs Dev
+  (`model='sonnet'`) to the right pre-scripted fake.
+- **Event/peculiarity builders** — `system_init_event`, `assistant_text_event`,
+  `result_event`, `timeout_event`, `decode_error_event`, `broken_pipe_event`,
+  plus `multiple_choice_turn`, `feedback_prompt_turn`, and `crash_turn`.
+
+### Peculiarity event shapes
+
+The shapes were cross-checked against how `siteboon/claudecodeui` parses
+Claude Code output in its raw-CLI era (which runs the same
+`claude --print --output-format stream-json --verbose` path this PoC uses):
+
+- **Multiple-choice question.** In headless `-p` mode Claude does NOT render an
+  interactive TUI menu; the question arrives as ordinary assistant/result
+  *text* containing numbered options. The canonical interactive shape is
+  `❯ N. text` (U+276F arrow on the selected row) matched by siteboon's option
+  regex `/[❯\s]*(\d+)\.\s+(.+)/`. `multiple_choice_text()` reproduces both
+  renderings. `summarize_events` surfaces the question + options to granite,
+  which is expected to answer via `handle_choice`.
+- **Permission / feedback prompt.** Under `--permission-mode bypassPermissions`
+  no approval prompt reaches stdout (siteboon likewise *avoids* them rather
+  than parsing them). `feedback_prompt_turn()` models the text one *would* take
+  so the operator's handling is exercised regardless.
+- **Crash.** `crash_turn()` raises `BrokenPipeError` on send; the loop catches
+  it, calls `restart()`, and routes `operator_events=[{"type":"crash",...}]`.
+
+### Crash recovery is restart, not resume (known gap)
+
+`siteboon/claudecodeui` captures `session_id` from any stream-json line and
+recovers a crashed session with `claude --resume <uuid>`, preserving
+conversation context. **This PoC does neither**: `_build_cmd` never emits
+`--resume`, and no `session_id` is captured anywhere — recovery is a
+context-losing fresh `restart()`. `test_poc_recovers_from_crash_by_restart_not_resume`
+pins this so closing the gap is a deliberate, visible change. Adding true
+resume (capture `session_id` from `system/init`, pass `--resume`, and watch for
+the resume-duplication case where Claude mints a *new* session id) is tracked
+as follow-on production work, not PoC scope.
+
+### Questions game (live operator benchmark)
+
+[`scripts/granite_questions_game.py`](../../scripts/granite_questions_game.py)
+is the live answer to "how well does granite actually *enter* answers?". It
+spawns one real `ClaudeSession`, asks it to run an N-question multiple-choice
+quiz one question per turn, and for each turn hands the events to the real
+`GraniteRouter`, requiring a `handle_choice` whose payload is an in-range
+option number. It reports `handle_choice_rate`, `in_range_rate`, and mean
+router latency to `logs/granite_questions_game.json`.
+
+```bash
+python scripts/granite_questions_game.py --questions 5 --model haiku
+```
+
+The gated integration test wraps this and asserts granite produces a valid
+in-range answer on the majority of question turns:
+
+```bash
+GRANITE_LIVE=1 pytest tests/integration/test_granite_questions_game.py -v -m slow
+```
+
 ## What this is NOT
 
 - **Not a production replacement.** `sdk_client.py`, `session_executor.py`,
