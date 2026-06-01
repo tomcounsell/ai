@@ -1,7 +1,8 @@
 """Tests for the commit-SHA-aware review filter (item 2 of sdlc-1155).
 
-The filter itself lives in a shell snippet inside
-``.claude/commands/do-merge.md``. We can't execute the full gate here
+The filter itself lives in a shell snippet inside this repo's merge-gate
+addendum ``docs/sdlc/do-merge.md`` (the portable ``/do-merge`` skill defers
+repo-specific gates to it). We can't execute the full gate here
 without a real PR, so these tests exercise the filter at the jq-expression
 level via a small Python shim: we feed a synthetic comment list (and a
 synthetic ``LATEST_COMMIT_DATE``) through ``jq`` directly and assert the
@@ -28,7 +29,10 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DO_MERGE_MD = REPO_ROOT / ".claude" / "commands" / "do-merge.md"
+# Repo-specific merge-gate logic moved from the retired
+# .claude/commands/do-merge.md into the SDLC addendum the portable
+# /do-merge skill (.claude/skills-global/do-merge/SKILL.md) defers to.
+DO_MERGE_MD = REPO_ROOT / "docs" / "sdlc" / "do-merge.md"
 
 
 def _run_filter(comments: list[dict], latest_date: str) -> str:
