@@ -271,7 +271,7 @@ class TestCLI:
         # - {"stage": "PLAN", "status": "completed"} if a session happens to
         #   exist. All are valid — the test verifies the CLI accepts
         #   --issue-number and produces well-formed JSON with exit 0.
-        assert (
-            output.get("status") == "degraded"
-            or output == {"stage": "PLAN", "status": "completed"}
-        )
+        assert output.get("status") == "degraded" or output == {
+            "stage": "PLAN",
+            "status": "completed",
+        }

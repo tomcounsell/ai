@@ -210,8 +210,7 @@ def main() -> None:
     rs = subparsers.add_parser(
         "reset",
         help=(
-            "Clear the dispatch history (operator escape hatch for a latched "
-            "G4 oscillation guard)."
+            "Clear the dispatch history (operator escape hatch for a latched G4 oscillation guard)."
         ),
     )
     rs.add_argument("--session-id", dest="session_id", default=None)
