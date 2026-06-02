@@ -298,6 +298,32 @@ affordance and does not occur on the headless stdio path. On SIGINT/SIGTERM the
 loop's `_log_resume_hints()` logs `claude --resume <uuid>` for each live session
 so a human can pick the work back up by hand.
 
+> **Note from spike #1547:** the TUI v2.1.160 first-ctrl-c text is actually
+> "Press Ctrl-C again to exit" (not `Interrupted · What should Claude do
+> instead?`). The two-stage behavior is correct, but the literal text above
+> is out of date. See the spike report at
+> [`docs/research/spikes/granite-tui-pty-spike.md`](../research/spikes/granite-tui-pty-spike.md)
+> (constraint C2) before relying on either form.
+
+## TUI PTY Spike
+
+The feasibility of driving a real interactive Claude Code TUI through a
+pseudo-terminal was tested in spike [#1547](https://github.com/tomcounsell/ai/issues/1547)
+(precondition for [#1546](https://github.com/tomcounsell/ai/issues/1546)).
+**Verdict: drivable with caveats — use pexpect.** The full report lives at
+[`docs/research/spikes/granite-tui-pty-spike.md`](../research/spikes/granite-tui-pty-spike.md);
+load-bearing constraints (submit key, ctrl-c text, resume-UUID gating, /help
+overlay, idle signal) are documented there as C1–C5.
+
+The spike produced two reusable scripts that survive as research tools (not
+production paths):
+- `scripts/granite_tui_pty_spike.py` — stdlib `pty`+`select` driver
+- `scripts/granite_tui_pty_spike_pexpect.py` — `pexpect` driver
+- `scripts/granite_tui_pty_spike_report.py` — post-run analyzer
+
+Re-runnable with the one-liner in the report's "Re-running the Spike"
+section.
+
 ### Questions game (live operator benchmark)
 
 [`scripts/granite_questions_game.py`](../../scripts/granite_questions_game.py)

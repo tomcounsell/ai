@@ -98,6 +98,8 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "ipykernel>=7.2.0",
+    "pexpect>=4.9.0",
+    "ptyprocess>=0.7.0",
 ]
 
 [tool.hatch.build.targets.wheel]
