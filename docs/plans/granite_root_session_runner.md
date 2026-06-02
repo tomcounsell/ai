@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Cancelled
 type: feature
 appetite: Large
 owner: Valor
@@ -10,6 +10,14 @@ revision_applied: true
 ---
 
 # Granite Root Session Runner — Production Cutover
+
+> **CANCELLED (2026-06-02).** This plan and its tracking issue #1542 are closed. The
+> cutover rested on the PR #1487 PoC, which drives Claude via headless `claude -p` and
+> *deliberately avoided* driving the real interactive Claude Code session (TUI) — which was
+> the entire point. A `-p` harness driven by granite is not meaningfully different from the
+> existing `sdk_client.py` harness. Superseded by a new PoC issue validating a local
+> operator driving a **real interactive Claude Code session via PTY** (no `claude -p`),
+> with PM/Dev/teammate personas primed via a first-message slash command, under Max OAuth.
 
 ## Problem
 
