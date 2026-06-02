@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-06-01
 tracking: https://github.com/tomcounsell/ai/issues/1542
 last_comment_id:
+revision_applied: true
 ---
 
 # Granite Root Session Runner — Production Cutover
@@ -120,8 +121,13 @@ the risk profile.
   Today ollama is only the summarizer; after cutover, if ollama is down, no session runs.
 - **Interface changes:** the executor's call into execution changes from
   `get_response_via_harness(...)` to a new runner entry point with an equivalent contract
-  (message in, result + side-effects out) plus model-per-role parameters. The 10 importer
-  sites (see Recon) migrate to the new surface.
+  (message in, result + side-effects out) plus model-per-role parameters. **Migration
+  surface (verified by grep at plan time, baseline `70198200`):** 4 runtime callers of
+  `get_response_via_harness` — `agent/session_executor.py`, `agent/session_completion.py`,
+  `monitoring/session_watchdog.py`, `worker/idle_sweeper.py` — plus the **`agent/__init__.py`
+  re-export** (lines 36 & 52) that must be removed; 13 modules import `agent.sdk_client`
+  more broadly; and **19 test files** reference `get_response_via_harness` (enumerated in
+  Test Impact) and must each be re-targeted or deleted.
 - **Coupling:** increases coupling to ollama; decreases coupling to `claude-agent-sdk`
   (already absent from the PoC). The operator becomes a new central component.
 - **Data ownership:** unchanged — `AgentSession` remains the source of truth for UUID,
@@ -190,23 +196,66 @@ Bridge/CLI enqueues → Worker pops → Executor assembles context → **`Sessio
 → (mode select) → drives 1 or 2 `claude -p` sessions under operator control → emits via
 `OutputHandler` nudge loop → bridge/user.
 
+### Turn-loop ownership, steering & per-turn output (resolves BLOCKER: impedance mismatch)
+
+Today `get_response_via_harness()` is a **single-turn primitive**: the executor owns the
+outer session loop (`session_executor.py` reads `queued_steering_messages`, calls the
+harness once at `:1703`, delivers one result, then loops for the next inbound/steering
+message). The granite loop is a **multi-turn orchestrator** that owns its own
+`for turn in range(1, max_turns+1)` PM↔Dev routing loop (`granite_agent_loop.py:209`) and
+today emits only a final JSONL trace. These are two different loops; the cutover must
+reconcile them, not pretend the runner is a per-turn drop-in.
+
+**Decision — topology (b), scoped:** `SessionRunner.run()` owns the **inner operator loop**
+(PM↔Dev routing for one inbound message → completion); the executor keeps the **outer
+session loop** (cross-message conversation, session lifecycle). Concretely:
+
+- The runner is **not** a per-turn primitive. The executor calls `SessionRunner.run(message,
+  ...)` once per inbound message; the runner internally drives the operator loop to
+  `signal_done`/completion and returns the final payload — exactly where the executor's
+  outer loop resumes for the next message/steering.
+- **Steering:** the runner re-reads `queued_steering_messages` at each operator turn
+  boundary (between PM↔Dev hops), so a steering message injected mid-orchestration is
+  honored without waiting for the whole task to finish; the executor's existing pre-call
+  steering read is preserved for between-message steering. (See updated Race 3.)
+- **Per-turn output:** the runner emits each PM-facing delta through the `OutputHandler` as
+  it is produced — not only the final payload. The PoC's JSONL-only trace is insufficient
+  for production; preserving today's per-turn delivery + nudge-loop behavior requires the
+  runner to push deltas, not batch.
+- The PoC's internal loop and final-only trace are therefore **extended** (turn-boundary
+  steering reads + per-turn `OutputHandler` emission), not reused as-is. This is build
+  task 3 (parity) scope.
+
 ### Technical Approach
 
 - **Phase A — Parity build (behind the existing call site, not yet wired):** extract the
   generic side-effect helpers from `sdk_client.py` into a shared module; build the runner
   to call them; wire persona/hooks/MCP/steering/output into the operator loop. The runner
-  must be a drop-in for `get_response_via_harness`'s contract.
+  matches `get_response_via_harness`'s *result + side-effect* contract but at a coarser
+  granularity (one inbound-message-to-completion, not one turn) — see "Turn-loop
+  ownership" above; the executor call site changes from per-turn to per-message.
 - **Phase B — Validation gates (must pass before cutover):** the results-doc prerequisites
   — N≥10 varied-task runs (stable mean-turns/latency/parse-error), a ≥20-turn run
   exercising granite history truncation (`HISTORY_KEEP_LAST_N=8`), a real-subprocess chaos
-  test (SIGKILL Dev mid-turn → `resume()`), and a concurrent-session test on Max OAuth
-  (≥5 concurrent, watching for the burst limiter from Research #2).
-- **Phase C — Single-session mode:** design + implement the degenerate path for
-  conversational teammate/Telegram turns (Open Question #2). Likely "operator + one
-  session," operator used only for `signal_done` / operator-event detection.
-- **Phase D — Cutover + deletion:** rewire `session_executor.py` and the 10 importer sites
-  to the runner; delete `get_response_via_harness` and its now-dead helpers; reconcile
-  `harness-abstraction.md`.
+  test (SIGKILL Dev mid-turn → `resume()`), and a concurrency test on Max OAuth at
+  **production-representative load, counting `claude` subprocesses (2 per dual session)**,
+  asserting the burst-limiter error is caught + surfaced retriably. This phase also
+  **measures headless `claude -p` credit consumption per session** so the billing go/no-go
+  (Open Question #1) is data-driven, not speculative.
+- **Phase C — Single-session mode (decided design):** one `claude -p` session + operator,
+  for conversational teammate/Telegram turns. The PoC starts BOTH pm+dev unconditionally
+  (`granite_agent_loop.py:141-173`), so this is net-new topology, not a trivial flag. **The
+  lone session has no PM "TASK COMPLETE" phrase** (the PoC's completion signal,
+  `:300`), so completion is detected by the operator inspecting the single session's
+  `result` event for end-of-turn semantics (the stream-json `result`/`success` event is
+  the natural boundary), with operator tools reduced to `probe_session` +
+  `signal_done` (no `extract_dev_prompt`/`summarize_for_pm` — there is no second session to
+  route to). Latency cost of routing a conversational reply through the operator is an
+  accepted tradeoff measured in Phase B; the directive forbids bypassing the runner.
+- **Phase D — Cutover + deletion:** rewire the 4 runtime callers (`session_executor.py`,
+  `session_completion.py`, `session_watchdog.py`, `idle_sweeper.py`), remove the
+  `agent/__init__.py` re-export, and re-target/delete all 19 referencing test files; delete
+  `get_response_via_harness` and its now-dead helpers; reconcile `harness-abstraction.md`.
 - **Phase E — Model-per-role config:** config schema + heuristic resolution + tests.
 - ollama tuning: set `OLLAMA_NUM_PARALLEL` / `OLLAMA_MAX_QUEUE` appropriately or run
   per-session operator calls; verified under the Phase B concurrency test.
@@ -218,8 +267,12 @@ Bridge/CLI enqueues → Worker pops → Executor assembles context → **`Sessio
   surviving handler in the runner must have a test asserting observable behavior (log,
   metric, or state change). The PoC's explicit-failure design (`GraniteRoutingError`,
   synthetic timeout/decode/broken_pipe events) must be preserved — no silent swallowing.
-- [ ] Test the operator-down path: ollama unreachable → runner surfaces a clear failure
-  to the session (Open Question #3 decides queue-vs-fail), never a silent hang.
+- [ ] Test the operator-down path (decided behavior): ollama unreachable → runner
+  **re-enqueues the `AgentSession` with bounded retries (e.g. 3, backoff)**; on exhaustion
+  it marks the session failed and surfaces a user-visible PM-persona message via
+  `OutputHandler` (per `feedback_telegram_persona_always`). Never a silent hang, never a
+  fallback to the old path (forbidden by the directive). Assert both the retry and the
+  terminal-failure rendering.
 
 ### Empty/Invalid Input Handling
 - [ ] Empty/whitespace task string → runner refuses with a clear error (mirror
@@ -244,15 +297,36 @@ Bridge/CLI enqueues → Worker pops → Executor assembles context → **`Sessio
   both dual- and single-session modes and the lifted side-effect helpers.
 - [ ] `tests/unit/granite_session_emulator.py` — UPDATE: emulator must produce the
   production output-routing + telemetry side effects the runner now triggers.
-- [ ] Existing `sdk_client` execution tests (token accumulation, UUID persistence,
-  stop-reason, turn count) — REPLACE: re-target at the lifted shared module / runner;
-  delete only the bodies that tested the now-removed `get_response_via_harness` path.
 - [ ] `tests/integration/test_claude_session_resume.py`,
   `tests/integration/test_granite_questions_game.py` — UPDATE: promote from gated PoC
   probes to part of the Phase B validation gate suite.
 - [ ] `scripts/capture_persona_baseline.py` callers / persona snapshot tests — UPDATE: the
   persona loaders move with the parity layer; keep the baseline assertions pointed at the
   new home.
+
+**Full `get_response_via_harness` test surface (19 files — verified by grep at baseline
+`70198200`).** The cutover grep gate excludes `tests/`, so each of these must be explicitly
+re-targeted (at the lifted shared module / runner) or deleted; none can be left dangling:
+- [ ] `tests/unit/test_sdk_client.py` — REPLACE: re-target side-effect assertions at the shared module; delete bodies testing the removed harness entry point.
+- [ ] `tests/unit/test_sdk_client_harness_counters.py` — REPLACE: turn/stop counters now live in the shared module.
+- [ ] `tests/unit/test_sdk_client_image_sentinel.py` — REPLACE: image fallback moves into the runner subprocess path.
+- [ ] `tests/unit/test_harness_model_coverage.py` — REPLACE: assert model-per-role resolution instead of single-model harness arg.
+- [ ] `tests/unit/test_harness_streaming.py` — REPLACE: stream parsing now in `ClaudeSession`.
+- [ ] `tests/unit/test_harness_token_capture.py` — REPLACE: token capture via shared module.
+- [ ] `tests/unit/test_harness_thinking_block_sentinel.py` — REPLACE: sentinel moves into the runner.
+- [ ] `tests/unit/test_harness_retry.py` — REPLACE: retry/circuit-breaker behavior in the runner.
+- [ ] `tests/unit/test_completion_runner_two_pass.py` — UPDATE: completion now driven by operator `signal_done`, not the two-pass harness path.
+- [ ] `tests/unit/test_deliver_pipeline_completion.py` — UPDATE: per-turn `OutputHandler` delivery now emitted by the runner.
+- [ ] `tests/unit/test_session_completion.py` — UPDATE: `session_completion.py` caller migrates to the runner.
+- [ ] `tests/unit/test_session_model_routing.py` — UPDATE: model routing now via model-per-role config.
+- [ ] `tests/integration/test_harness_env_pm_injection.py` — UPDATE: PM env injection now assembled by the parity layer.
+- [ ] `tests/integration/test_harness_no_op_contract.py` — UPDATE: re-express the no-op contract against the runner.
+- [ ] `tests/integration/test_harness_resume.py` — UPDATE: resume now via `ClaudeSession.resume()`.
+- [ ] `tests/integration/test_pm_final_delivery.py` — UPDATE: final delivery now from the runner's completion payload.
+- [ ] `tests/integration/test_session_finalization_decoupled.py` — UPDATE: finalization path migrates.
+- [ ] `tests/integration/test_session_spawning.py` — UPDATE: spawning now instantiates `SessionRunner`.
+- [ ] `tests/e2e/conftest.py` — UPDATE: e2e fixtures that stub `get_response_via_harness` must stub the runner entry point instead.
+- [ ] `agent/__init__.py` (not a test, but in the deletion surface) — UPDATE: remove the `get_response_via_harness` re-export (lines 36 & 52) so the symbol deletion does not break imports.
 
 ## Rabbit Holes
 
@@ -282,15 +356,22 @@ billing, the go/no-go decision changes. Do not delete the old path until this is
 **Impact:** Doubling `claude` subprocess count per session (PM + Dev) against a burst
 limiter that already throttles after ~3–4 concurrent sessions could starve real
 production traffic.
-**Mitigation:** Phase B concurrency gate (≥5 concurrent dual sessions) is a hard
-prerequisite. If throttled, single-session mode for non-SDLC work materially reduces
-process count; consider operator-mediated session pooling.
+**Mitigation:** Phase B concurrency gate is a hard prerequisite and must count
+**`claude` subprocesses, not logical sessions** — a dual-mode session spawns 2 processes,
+so N concurrent logical sessions = 2N processes against the ~3–4-session burst limiter.
+The gate runs at **production-representative concurrency** (derive from peak concurrent
+`AgentSession` count on the dashboard, not an arbitrary ≥5), and must assert that the
+burst-limiter error string (`Server is temporarily limiting requests`) is caught and
+surfaced as a **retriable PM-persona message**, not a hard session failure. Single-session
+mode (which halves process count for non-SDLC work) is the primary lever and is coupled to
+this gate's outcome.
 
 ### Risk 3: ollama operator becomes a throughput chokepoint
 **Impact:** One granite instance serializing all routing decisions adds queueing latency
 under concurrent load.
-**Mitigation:** Tune `OLLAMA_NUM_PARALLEL`/`OLLAMA_MAX_QUEUE`; measure operator latency
-under the concurrency gate; operator calls are ~1s so headroom exists, but verify.
+**Mitigation:** The Phase B concurrency gate reports operator p50/p99 latency under load;
+`OLLAMA_NUM_PARALLEL`/`OLLAMA_MAX_QUEUE` (and per-session operator instances if needed) are
+tuned **from that measurement**, not pre-judged.
 
 ### Risk 4: Irreversible cutover (NO-LEGACY-CODE vs. safety)
 **Impact:** Deleting `get_response_via_harness` with no fallback means a latent runner bug
@@ -324,12 +405,16 @@ history across sessions.
 **Mitigation:** runner instantiates per-session router state; ollama FIFO-queues at the
 server; verified under the Phase B concurrency gate.
 
-### Race 3: Steering injection at turn boundary
-**Location:** executor steering read → runner turn input.
-**Trigger:** a steering message arrives while a turn is mid-flight.
-**State prerequisite:** steering must be injected at a turn boundary, not mid-stream.
-**Mitigation:** preserve the executor's existing turn-boundary injection semantics; the
-runner reads `queued_steering_messages` between operator turns.
+### Race 3: Steering injection at operator turn boundary
+**Location:** `SessionRunner` operator loop ↔ `queued_steering_messages`.
+**Trigger:** a steering message arrives while the operator is mid-orchestration (between
+PM↔Dev hops) or mid-stream within a hop.
+**State prerequisite:** steering must be injected at an operator turn boundary, not
+mid-stream into a live subprocess.
+**Mitigation:** per the Turn-loop ownership decision, the runner re-reads
+`queued_steering_messages` at each operator turn boundary and injects before the next hop;
+the executor's pre-call read handles between-message steering. Steering is never written
+mid-stream to a subprocess stdin.
 
 ## No-Gos (Out of Scope)
 
@@ -456,11 +541,13 @@ runner reads `queued_steering_messages` between operator turns.
 ### 4. Single-session mode
 - **Task ID**: build-single-session
 - **Depends On**: build-parity
-- **Informed By**: Open Question #2 resolution
+- **Informed By**: Phase C decided design (operator + one session; completion via
+  `result`-event detection; tools reduced to `probe_session`/`signal_done`)
 - **Assigned To**: runner-builder
 - **Agent Type**: async-specialist
 - **Parallel**: false
-- Degenerate one-session path for conversational teammate/Telegram turns.
+- One-session path for conversational teammate/Telegram turns; operator detects completion
+  from the lone session's stream-json `result` event (no PM "TASK COMPLETE" phrase exists).
 
 ### 5. Phase B validation gates
 - **Task ID**: build-gates
@@ -469,17 +556,29 @@ runner reads `queued_steering_messages` between operator turns.
 - **Assigned To**: gate-engineer
 - **Agent Type**: test-engineer
 - **Parallel**: true
-- N≥10 runs, ≥20-turn truncation, SIGKILL chaos, ≥5-concurrent Max-OAuth.
+- N≥10 runs, ≥20-turn truncation, SIGKILL chaos, concurrency at production-representative
+  load counting `claude` subprocesses (2 per dual session) + assert burst-limiter error is
+  caught/retried.
+- **Measure headless `claude -p` credit consumption per session** (feeds the human billing
+  go/no-go, Open Question #1 — the agent cannot read Anthropic pricing policy, so it
+  supplies the consumption data, not the verdict).
 
 ### 6. Cutover + delete old path
 - **Task ID**: build-cutover
 - **Depends On**: build-single-session, build-gates
-- **Validates**: full suite; grep shows no `get_response_via_harness` callers
+- **Gated By (HUMAN)**: Open Question #1 — the billing go/no-go decision (informed by the
+  task-5 credit measurement) MUST be answered "go" before this task starts. No code in
+  tasks 1-5 is wasted if the answer is "no-go" (they leave the old path intact); this task
+  is the irreversible point.
+- **Validates**: full suite (incl. all 19 re-targeted test files); grep shows no
+  `get_response_via_harness` references anywhere (incl. `tests/` and `agent/__init__.py`)
 - **Assigned To**: cutover-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Rewire executor + 10 importers; delete `get_response_via_harness` + dead helpers;
-  reconcile harness-abstraction doc.
+- Rewire the 4 runtime callers (`session_executor.py`, `session_completion.py`,
+  `session_watchdog.py`, `idle_sweeper.py`); remove the `agent/__init__.py` re-export;
+  re-target/delete all 19 test files (Test Impact); delete `get_response_via_harness` +
+  dead helpers; reconcile harness-abstraction doc.
 
 ### 7. Parity + cutover validation
 - **Task ID**: validate-cutover
@@ -513,17 +612,19 @@ runner reads `queued_steering_messages` between operator turns.
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Old path deleted | `grep -rn "def get_response_via_harness" agent/` | exit code 1 |
-| No old-path callers | `grep -rn "get_response_via_harness" agent/ worker/ bridge/ monitoring/ scripts/` | exit code 1 |
-| Smoke gate passes | `python scripts/granite_smoke_test.py` | output contains "Parse error rate:   0" |
+| No old-path refs anywhere | `grep -rn "get_response_via_harness" agent/ worker/ bridge/ monitoring/ scripts/ tests/ ui/` | exit code 1 |
+| Smoke gate ≤20% (kill criterion) | `python scripts/granite_smoke_test.py && python -c "import json;assert json.load(open('logs/granite_smoke_results.json'))['parse_error_rate']<=0.20"` | exit code 0 |
 | No bypass flag | `grep -rni "use_granite\|granite_enabled\|legacy_runner\|use_sdk_client" agent/ config/` | exit code 1 |
 
 ## Critique Results
 
 **Verdict: NEEDS REVISION** — 2 BLOCKERs (turn-loop ownership impedance mismatch; under-counted migration surface) must be resolved before build. Structural validators all PASS.
 
+**Revision applied (all 8 findings addressed):** BLOCKER-1 → new Solution subsection "Turn-loop ownership, steering & per-turn output" (runner owns inner operator loop, executor keeps outer; turn-boundary steering re-reads; per-turn `OutputHandler` emission) + Race 3 + Phase A reworded. BLOCKER-2 → Architectural Impact + Test Impact corrected to the grep-verified surface (4 runtime callers, `agent/__init__.py` re-export, 13 module importers, 19 test files enumerated) + Task 6 + Verification grep now include `tests/`. CONCERN single-session → Phase C decided design (operator+one-session, `result`-event completion). CONCERN operator-down → decided (bounded re-enqueue → fail with PM-persona message). CONCERN billing → explicit HUMAN gate on Task 6 + credit measurement in Task 5. CONCERN concurrency → gate counts subprocesses at production-representative load + asserts burst-limiter error caught. NIT smoke-gate → Verification parses `parse_error_rate <= 0.20`. NIT Risk-3 → pre-judged "headroom exists" dropped. Residual human Open Questions: #1 (billing go/no-go, external) and #4 (model-per-role granularity).
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Skeptic, Adversary | **Turn-loop ownership impedance mismatch.** `get_response_via_harness()` is a *single-turn primitive* called inside the executor's own turn loop (`session_executor.py:1484` reads `queued_steering_messages`, then calls the harness once per turn at `:1703`, returning one result string). The granite loop (`granite_agent_loop.py:209` `for turn in range(1, max_turns+1)`) is a *multi-turn orchestrator* that owns its own loop up to `max_turns`. The plan calls `SessionRunner.run()` "a drop-in for `get_response_via_harness`'s contract" but never says where the turn loop lives after cutover. If the runner keeps its internal loop, the executor's per-turn steering injection (Race 3) and per-turn output delivery break; if it collapses to single-turn, the operator/PM↔Dev orchestration is gone. | NOT ADDRESSED — needs a new Solution subsection | Decide and document the loop topology: either (a) `SessionRunner.run()` returns after ONE operator turn and the executor keeps driving the outer loop + steering reads (preserves `session_executor.py:1484` steering semantics), or (b) the runner owns the full multi-turn loop and must internally re-read `queued_steering_messages` at each turn boundary and emit each turn's delta through `OutputHandler` (not just the final payload). The PoC does neither — it loops internally AND only emits a JSONL trace at the end. |
+| BLOCKER | Skeptic, Adversary | **Turn-loop ownership impedance mismatch.** `get_response_via_harness()` is a *single-turn primitive* called inside the executor's own turn loop (`session_executor.py:1484` reads `queued_steering_messages`, then calls the harness once per turn at `:1703`, returning one result string). The granite loop (`granite_agent_loop.py:209` `for turn in range(1, max_turns+1)`) is a *multi-turn orchestrator* that owns its own loop up to `max_turns`. The plan calls `SessionRunner.run()` "a drop-in for `get_response_via_harness`'s contract" but never says where the turn loop lives after cutover. If the runner keeps its internal loop, the executor's per-turn steering injection (Race 3) and per-turn output delivery break; if it collapses to single-turn, the operator/PM↔Dev orchestration is gone. | ADDRESSED — new Solution subsection "Turn-loop ownership, steering & per-turn output" + Race 3 + Phase A | Decide and document the loop topology: either (a) `SessionRunner.run()` returns after ONE operator turn and the executor keeps driving the outer loop + steering reads (preserves `session_executor.py:1484` steering semantics), or (b) the runner owns the full multi-turn loop and must internally re-read `queued_steering_messages` at each turn boundary and emit each turn's delta through `OutputHandler` (not just the final payload). The PoC does neither — it loops internally AND only emits a JSONL trace at the end. |
 | BLOCKER | Archaeologist, Operator | **Migration surface is under-counted; "10 importer sites" is wrong.** Grep shows `get_response_via_harness` has runtime callers the plan lists, but `sdk_client.py` itself has ~16 importing modules and ~20 test files call `get_response_via_harness` directly. The plan's Test Impact enumerates only ~7 items and folds all harness tests into one "REPLACE" line. Deleting the symbol breaks `agent/__init__.py` (re-export), `tests/unit/test_sdk_client.py`, `test_harness_*` (10+ files), and `tests/integration/test_harness_*` / `test_session_*`. | Test Impact (UPDATE) + Cutover task 6 | The cutover grep gate (`grep -rn "get_response_via_harness" agent/ worker/ bridge/ monitoring/ scripts/`) intentionally omits `tests/`, so deletion will leave ~20 red test files the gate does not catch. Add `tests/` to the migration inventory and either re-target or delete each: `test_sdk_client.py`, `test_harness_{model_coverage,streaming,token_capture,thinking_block_sentinel,retry}.py`, `test_sdk_client_{harness_counters,image_sentinel}.py`, `test_completion_runner_two_pass.py`, and the 6 integration `test_harness_*`/`test_session_*`/`test_pm_final_delivery.py`. Also fix `agent/__init__.py` re-export. |
 | CONCERN | Skeptic | **No single-session mode exists in the PoC; it is net-new design, not "degenerate path."** `GraniteAgentLoop.run()` unconditionally starts BOTH pm and dev sessions (`granite_agent_loop.py:141-173`). Single-session mode (Phase C / task 4 / Open Question #2) is undesigned new architecture on the critical path of every conversational Telegram/email turn, gated only by an unresolved Open Question. The plan treats it as a small "degenerate mode" but it is a from-scratch second runner topology. | Open Question #2 + task 4 | Resolve Open Question #2 (operator+one-session vs. operator-bypass-for-single-turn) BEFORE task 4 starts; task 4 currently has `Informed By: Open Question #2 resolution` but no fallback if the answer is "operator adds latency for no benefit." Specify the completion-detection mechanism for single-session (the PoC detects "TASK COMPLETE" from PM only — `granite_agent_loop.py:300`; a lone conversational session has no such phrase). |
 | CONCERN | Operator | **Operator-down behavior is unresolved (Open Question #3) yet ollama becomes a hard, no-fallback dependency for ALL execution.** Today ollama down only degrades summarization; after cutover, ollama down = zero sessions run, with no fallback path permitted by the directive. The plan defers the queue-vs-fail decision to an Open Question but ships the hard dependency regardless. | Open Question #3 + Update System gate | Decide before Phase D: on ollama unreachable, the runner must surface a user-visible PM-persona message via `OutputHandler` (per `feedback_telegram_persona_always`) and either re-enqueue the `AgentSession` (queue-and-retry) or mark it failed — never silent-hang. The `/update` green-light gate (Update System section) must hard-block a machine missing granite so the worker fails the gate rather than crash-looping on first session. |
@@ -536,16 +637,28 @@ runner reads `queued_steering_messages` between operator turns.
 
 ## Open Questions
 
-1. **[BILLING — decide before Phase D] Does the 2026-06-15 subscription billing change
+**Still open (need human input):**
+
+1. **[BILLING — HUMAN GATE on Task 6] Does the 2026-06-15 subscription billing change
    invalidate the economic premise?** Headless `claude -p` on subscription will draw from
    a separate monthly Agent SDK credit. A dual-session runner uses ~2× headless usage. Is
    the new credit pool still cheaper/preferable to the current API-key billing, given
-   production volume? This may change the go/no-go for the whole cutover.
-2. **How should a single conversational turn map onto a dual-session runner?** The directive
-   forbids bypassing the runner, but a teammate email reply has no Dev to drive. Confirm
-   the "operator + one session" degenerate mode is acceptable, vs. some other topology.
-3. **Operator-down failure behavior.** If ollama/granite is unavailable, should sessions
-   queue and wait, or hard-fail with a user-visible message? (No fallback to the old path
-   is permitted per the directive.)
+   production volume? Task 5 supplies measured per-session credit consumption; the human
+   makes the go/no-go before the irreversible Task 6. The agent cannot read Anthropic
+   pricing policy (No-Gos [EXTERNAL]).
 4. **Model-per-role config granularity.** Per-project, per-task-complexity, or a single
-   global triplet to start? (Affects the config schema in Phase E.)
+   global triplet to start? (Affects the config schema in Phase E. Defaulting to a single
+   global triplet unless directed otherwise.)
+
+**Resolved in this revision (recorded for traceability):**
+
+2. ~~How should a single conversational turn map onto a dual-session runner?~~ **RESOLVED:**
+   single-session mode = one `claude -p` session + operator (tools reduced to
+   `probe_session`/`signal_done`), completion detected from the lone session's stream-json
+   `result` event. Always through the runner per the directive; latency cost measured in
+   Phase B. See Phase C.
+3. ~~Operator-down failure behavior?~~ **RESOLVED:** on ollama/granite unreachable, the
+   runner re-enqueues the `AgentSession` with bounded retries, then on exhaustion marks it
+   failed and surfaces a PM-persona message via `OutputHandler`. Never silent-hang, never a
+   fallback to the old path. See Failure Path Test Strategy + Update System (the `/update`
+   green-light gate hard-blocks a machine missing granite).
