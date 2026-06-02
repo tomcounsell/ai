@@ -9,7 +9,7 @@
 
 Session transcripts capture the full content of each agent session — every turn, tool call, and tool result — in append-only `.txt` files on disk. The `AgentSession` Popoto model stores queryable metadata about each session.
 
-This replaces the sparse JSON snapshot approach in `agent/session_logs.py` (previously `bridge/session_logs.py`, which now re-exports for backward compatibility).
+This replaces the sparse JSON snapshot approach in `agent/agent_sessions.py` (previously `bridge/agent_sessions.py`, which now re-exports for backward compatibility).
 
 ## Architecture
 
@@ -47,7 +47,7 @@ This runs unconditionally — the legacy `--chat` flag is accepted but ignored s
 
 ### AgentSession Model
 
-`models/agent_session.py` — Unified model that replaced both `RedisJob` and `SessionLog`.
+`models/agent_session.py` — Unified model that replaced both `AgentSession` and `AgentSession`.
 
 | Field | Type | Description |
 |-------|------|-------------|
