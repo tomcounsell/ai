@@ -59,7 +59,7 @@ to characteristically-stable line numbers, and re-verified below).
 | #1546 (parent PoC) | OPEN, no PR | Spike is the precondition; #1546 should not start planning until the report lands |
 | #1542 (granite_root_session_runner, cancelled) | CANCELLED | The cancelled cutover plan; cited in issue body. Reason: PoC was non-interactive. Confirmed the cancellation narrative |
 | #1486 / PR #1487 (prior PoC, closed) | CLOSED | The prior interactive-PoC work; spike builds on its docs but not its code |
-| #1542 critique at `docs/plans/critiques/` | exists, multiple revisions | Provides "what was tried" context for the kernel question |
+| #1542 critique at `docs/plans/critiques/` | not on disk in this checkout (no `critique_granite_root_session_runner*` files in `docs/plans/critiques/`) | Cancellation narrative is reconstructed from issue #1542's closing comment and the cross-references in #1546 — the spike does not need the on-disk critique to answer its question |
 
 **Active plans overlapping this area:**
 
@@ -164,12 +164,49 @@ post-run analyzer, and the report.
 
 ## Solution
 
-Three deliverables, all under the spike's lane (no production paths touched):
+Four deliverables, all under the spike's lane (no production paths touched):
+
+### Scenario → Affordance Coverage Map
+
+Every scenario maps to a specific claim in `docs/features/granite-agent-loop.md:290-299`
+so the verdict is grounded in evidence. The **minimum scenario set for a
+"drivable" verdict** is **{1, 2, 4, 5}** — these exercise every prior-PoC
+claim about TUI affordances. Scenarios {3, 6, 7, 8} are diagnostic.
+
+| # | Affordance exercised | Source claim | Pass criterion | Min for verdict? |
+|---|---|---|---|---|
+| 1 | First-turn `>` prompt detection | `granite-agent-loop.md:290-299` ("interactive prompt") | Saw `>` prompt within 30s of `claude` spawn | ✅ |
+| 2 | First-message text submission | `granite-agent-loop.md:295-298` (first-message persona priming) | Sent "hello\n" → saw Claude's reply within 30s | ✅ |
+| 3 | Multi-turn conversation | (diagnostic — same surface as 2, but verifies it holds across 3+ turns) | 3 consecutive "user → Claude reply" cycles | ❌ |
+| 4 | Two-stage ctrl-c interject | `granite-agent-loop.md:294-296` (two-stage ctrl-c) | `\x03` → "Interrupted" prompt, second `\x03` → resume hint | ✅ |
+| 5 | Resume UUID capture from on-exit hint | `granite-agent-loop.md:298-299` (`claude --resume <uuid>` exit hint) | `_UUID_RE` from `agent/claude_session.py:49-51` matches a UUID in the captured bytes within 7s total | ✅ |
+| 6 | Numbered menu / slash command | `granite-agent-loop.md:296-298` (numbered menus) | `/help` → saw help output within 30s | ❌ |
+| 7 | Long-running session stability (no respawns) | `granite-agent-loop.md` (loop durability) | 5-minute idle hold, no crash, no PTY EOF | ❌ |
+| 8 | Negative control: no PTY (stdin pipe) | (n/a — establishes "what fails without a PTY") | Records the failure mode; no pass criterion | ❌ |
+
+**Verdict rubric (updated):** "drivable" requires scenarios {1, 2, 4, 5} to
+pass for at least one library. If a scenario in the minimum set fails for
+both libraries, the verdict is "not drivable, here's why." If it fails for
+one library but the other passes, the verdict is "drivable with caveats:
+use {winning library}, not {losing library}." Scenarios {3, 6, 7, 8}
+contribute findings to the "what's still unknown" section but do not
+gates the verdict.
 
 ### 1. `scripts/granite_tui_pty_spike.py` (stdlib path)
 
 - Imports: `os`, `pty`, `select`, `subprocess`, `time`, `sys`, `signal`,
-  `pathlib.Path`, `json`, `uuid`.
+  `termios`, `pathlib.Path`, `json`, `uuid`.
+- **At startup, before any scenario:** nuke any prior transcripts under
+  `/tmp/granite-pty-spike/stdlib/scenario-*.bin` so re-runs don't conflate
+  stale and new data (`pathlib.Path("/tmp/granite-pty-spike/stdlib").glob
+  ("scenario-*.bin") → f.unlink()`).
+- **Per-scenario terminal-mode save/restore is mandatory.** At the top of
+  each scenario, save the controlling terminal's `termios.tcgetattr
+  (STDIN_FILENO)`; in a `finally:` block call `tcsetattr(STDIN_FILENO,
+  TCSANOW, saved)` before `os.close(fd)` and `os.waitpid(pid, 0)`. This
+  is the standard pattern from `pty.spawn` source. Do not rely on
+  `os.close` alone to restore terminal state — sequential scenarios in
+  one process will leak termios between runs.
 - For each of the 8 scenarios:
   - Open a transcript file at
     `/tmp/granite-pty-spike/stdlib/scenario-{N}.bin` (binary write).
@@ -177,17 +214,34 @@ Three deliverables, all under the spike's lane (no production paths touched):
     "--model", "sonnet", "--permission-mode", "bypassPermissions"])`.
     `ANTHROPIC_API_KEY=""` in the child env (delete or blank the inherited
     key, same pattern as `agent/claude_session.py:_build_env`).
+  - **Set the master fd non-blocking** (`os.set_blocking(fd, False)`) and
+    read in a tight loop until `BlockingIOError` — this drains the
+    kernel PTY buffer (16-64 KiB on macOS) so `claude` doesn't block on
+    `write(2)` if it outpaces the reader. Count `buf_drain_iters` per
+    select-wakeup; if it exceeds 10, append a `[buffer-fill warning]`
+    line to the per-scenario transcript footer.
   - In the parent: `select.select([fd], [], [], timeout)` per turn; read
     available bytes, write verbatim to the transcript, and apply the
     scenario's expected prompts (e.g., send "hello\n" for scenario 2,
-    "\x03" for scenario 4, etc.).
+    "\x03" for scenario 4, etc.). Per-scenario timeouts: **30s for
+    scenarios 1-3, 60s for scenarios 4-5, 30s for scenarios 6-8** (matches
+    the 30-min wall-clock budget; 16 runs × 60s = 16 min worst case).
+  - **Scenario 4 (two-stage ctrl-c) and scenario 5 (resume UUID) replace
+    the fixed 2s post-ctrl-c sleep with a `select`-driven wait**: loop
+    `select.select([fd], [], [], 0.5)` accumulating `buf`, exit when
+    `re.search(_RESUME_HINT_RE, buf.decode("utf-8", errors="replace"))`
+    matches OR 10 iterations elapse (5s). Then an additional 2s grace
+    before closing. The captured UUID is the first match in `buf`; if
+    no match, scenario 5 fails with diagnostic "resume hint not
+    observed within 7s total."
   - Per-scenario pass/fail determined by an explicit assertion on the
     observed terminal state (e.g., "saw the `>` prompt within 30s" for
     scenario 1; "saw the two-stage interject prompt" for scenario 4).
   - Latency measured per turn via `time.monotonic()` deltas.
   - Parse-failure counter: incremented each time a scenario's expected
     prompt was not detected within its timeout.
-  - On exit, `os.close(fd)`, `os.waitpid(pid, 0)`.
+  - On exit, restore termios (see mandatory block above), `os.close(fd)`,
+    `os.waitpid(pid, 0)`.
 - All 8 scenarios run sequentially in a single process for stdlib (the
   pexpect version gets its own process per scenario for cleaner teardown,
   per the issue's "no respawns" requirement for scenario 7).
@@ -197,7 +251,10 @@ Three deliverables, all under the spike's lane (no production paths touched):
 - Same 8 scenarios, same assertions, same transcript format, same env
   stripping — but the driver is `pexpect.spawn("claude", ["--model",
   "sonnet", "--permission-mode", "bypassPermissions"], env={...,
-  "ANTHROPIC_API_KEY": ""}, echo=False, encoding="utf-8")`.
+  "ANTHROPIC_API_KEY": ""}, echo=False, encoding="utf-8",
+  preexec_fn=os.setsid)`. The **`preexec_fn=os.setsid`** isolates the
+  child in its own session so parent SIGINT/SIGTERM doesn't contaminate
+  per-scenario teardown.
 - Uses `child.expect(pattern, timeout=...)` for prompt detection
   (patterns include the `>` prompt regex, the `Interrupted · What should
   Claude do instead?` string for scenario 4, the `claude --resume <uuid>`
@@ -208,20 +265,20 @@ Three deliverables, all under the spike's lane (no production paths touched):
 ### 3. `scripts/granite_tui_pty_spike_report.py` (post-run analyzer)
 
 - Walks `/tmp/granite-pty-spike/stdlib/` and `/tmp/granite-pty-spike/pexpect/`.
-- For each scenario, emits:
-  - Pass/fail per library.
-  - Latency per turn (mean, p50, p95 across the two libraries).
-  - Parse-failure count per library.
-  - Path to the raw byte transcript.
-  - First 200 bytes of transcript for quick eyeballing (ANSI escapes
-    escaped for markdown readability).
+- Emits a Markdown table (scenario, stdlib pass/fail, pexpect pass/fail,
+  transcript path) and the verdict section.
+- The full report is hand-edited in
+  `docs/plans/granite-tui-pty-spike-report.md` after the runs complete,
+  citing the transcripts and the analyzer's table. Latency observations
+  appear in the hand-written report's findings section (operator reads
+  the transcripts, picks 2-3 notable observations, cites turn numbers).
 - Renders the verdict section: **drivable** / **not drivable, here's why** /
   **drivable with these specific caveats** — derived from a hard-coded
-  rubric: if any scenario that the prior-PoC docs claim is detectable
-  (scenarios 1, 2, 3, 4, 5) fails for *both* libraries, the verdict is
-  "not drivable." If it fails for one library but the other passes, the
-  verdict is "drivable with caveats: use {winning library}, not {losing
-  library}." If both pass, the verdict is "drivable."
+  rubric: if any scenario in the **minimum set {1, 2, 4, 5}** fails for
+  *both* libraries, the verdict is "not drivable." If it fails for one
+  library but the other passes, the verdict is "drivable with caveats:
+  use {winning library}, not {losing library}." If both pass, the
+  verdict is "drivable."
 - Writes `docs/plans/granite-tui-pty-spike-report.md` (committed by the
   spike's run, not by the spike scripts themselves — the scripts only
   write to `/tmp/`; the report is the human's commit at the end of the
@@ -232,17 +289,35 @@ Three deliverables, all under the spike's lane (no production paths touched):
 Required content per the issue's Acceptance Criteria:
 - Per-scenario pass/fail for both libraries, with raw byte transcripts
   linked (relative paths from repo root into `/tmp/granite-pty-spike/`).
-- Latency per turn, parse-failure counts, byte-loss observations.
+- Latency observations (inline in findings section, citing transcript
+  turn numbers).
 - Side-by-side library comparison (stdlib vs. pexpect) with a
   recommendation.
 - Falsifiable verdict on the kill-or-proceed gate.
 - An honest "what's still unknown after the spike" section.
+- A `## Constraints for #1546` section listing the load-bearing TUI
+  behaviors the next plan must preserve (e.g., 'prompt detection requires
+  regex X, not Y', 'resume UUID is only available after second ctrl-c',
+  'permissions mode X behaves as Y in TUI mode'), with at least 3
+  constraints, each with a transcript line citation.
+- A `## Re-running the spike` subsection with the one-liner
+  `rm -rf /tmp/granite-pty-spike/ && python scripts/granite_tui_pty_spike.py && python scripts/granite_tui_pty_spike_pexpect.py && python scripts/granite_tui_pty_spike_report.py`.
 - Explicit reference to which of #1546's open questions it resolves
   (resolves: #1 PTY library, #2 TUI drivable, partial #5 resume UUID)
   and which it does not (deferred: #3 persona priming, #4 event-bridge
   shape).
 - Explicit non-recommendation on persona priming, event-bridge shape,
   and orchestration.
+
+### Cleanup
+
+If the spike is hard-killed mid-run (`kill -9 $!` from a frustrated
+operator), a `claude` child may survive and hold the operator's terminal
+in a bad state. To clean up orphaned children:
+
+```bash
+pkill -f 'claude --model sonnet --permission-mode bypassPermissions'
+```
 
 ## Failure Path Test Strategy
 
@@ -365,6 +440,9 @@ agent-reachable code.
       becomes the durable breadcrumb so a future reader of the granite
       docs sees the substrate feasibility result alongside the loop
       description.
+- [ ] The report's `## Re-running the spike` subsection includes the
+      one-liner `rm -rf /tmp/granite-pty-spike/ && python scripts/granite_tui_pty_spike.py && python scripts/granite_tui_pty_spike_pexpect.py && python scripts/granite_tui_pty_spike_report.py`
+      in a callout block the operator can copy.
 
 ## Success Criteria
 
@@ -388,6 +466,9 @@ agent-reachable code.
 - [ ] `pexpect` and `ptyprocess` are added to `[dependency-groups] dev`
       in `pyproject.toml` (not `[project.dependencies]`).
 - [ ] Spike runtime under 30 minutes wall-clock for all 16 runs.
+- [ ] Report includes a `## Constraints for #1546` section with at
+      least 3 load-bearing behaviors, each with a transcript line
+      citation.
 
 ## Spike Results
 
