@@ -2,41 +2,26 @@
 
 ## Overview
 
-AI image generation using OpenRouter API, supporting multiple models including Gemini, DALL-E, and Flux.
+AI text-to-image generation with a provider switch. Pick the best model per image:
 
-**Current Implementation**: OpenRouter API with configurable model selection.
+| Provider | Model | Transport | Key |
+|----------|-------|-----------|-----|
+| `gemini` (default) | `google/gemini-3-pro-image-preview` | OpenRouter | `OPENROUTER_API_KEY` |
+| `openai` | `gpt-image-1` | OpenAI Images API | `OPENAI_API_KEY` |
 
-**Capabilities**: `generate`
+Gemini is the default so existing callers are unchanged. Provider/model constants live in `config/models.py` (`IMAGE_GEN_PROVIDERS`, `OPENROUTER_GEMINI_IMAGE_GEN`, `OPENAI_IMAGE_GEN`).
 
-## Installation
-
-Ensure `OPENROUTER_API_KEY` is set in your environment:
-
-```bash
-export OPENROUTER_API_KEY="your-api-key"
-```
-
-Get an API key at [openrouter.ai](https://openrouter.ai/).
-
-## Quick Start
-
-```python
-from tools.image_gen import generate_image
-
-# Generate an image
-result = generate_image("a serene mountain landscape at sunset")
-print(f"Image saved to: {result['path']}")
-```
-
-Or use the CLI wrapper:
+## CLI
 
 ```bash
-python -m tools.image_gen "a cat wearing a space helmet"
+valor-image-gen 'a cat in space'                       # default: gemini, 1:1
+valor-image-gen 'sunset over mountains' 16:9           # aspect ratio
+valor-image-gen 'a clean logo' --provider openai       # gpt-image-1
+valor-image-gen 'a clean logo' --model gpt-image-1     # explicit model override
+valor-image-gen --help                                 # full usage + aspect ratios
 ```
 
-## Workflows
-
-### Basic Generation
+## Python
 
 ```python
 from tools.image_gen import generate_image
@@ -44,95 +29,34 @@ from tools.image_gen import generate_image
 result = generate_image(
     prompt="a futuristic cityscape",
     aspect_ratio="16:9",
-    output_dir="./images"
+    provider="openai",          # "gemini" (default) or "openai"
+    # model="gpt-image-1",      # optional explicit override of the provider default
+    output_dir="./images",      # default: ./generated_images
 )
-# Returns: {'path': './images/image_20240119_123456.png', 'prompt': '...'}
+# result -> {
+#   "images": ["./images/image_20260602_055518_1.png"],  # saved file paths
+#   "text": None,                # any text the model returned (Gemini may include some)
+#   "provider": "openai",
+#   "model": "gpt-image-1",
+#   "aspect_ratio": "16:9",
+#   "dimensions": (1344, 768),
+#   "prompt": "a futuristic cityscape",
+# }
+# On failure: {"error": "..."}
 ```
-
-### With Model Selection
-
-```python
-from tools.image_gen import generate_image
-
-# Use DALL-E 3
-result = generate_image(
-    prompt="an oil painting of a sunset",
-    model="openai/dall-e-3"
-)
-
-# Use Flux
-result = generate_image(
-    prompt="photorealistic portrait",
-    model="black-forest-labs/flux-schnell"
-)
-```
-
-### Batch Generation
-
-```python
-from tools.image_gen import generate_images
-
-prompts = [
-    "a red apple",
-    "a green apple",
-    "a golden apple"
-]
-results = generate_images(prompts, output_dir="./apples")
-```
-
-## API Reference
-
-### `generate_image(prompt, **kwargs)`
-
-Generate a single image from a text prompt.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `prompt` | str | required | Text description of the image |
-| `model` | str | gemini-2.0-flash | Model to use for generation |
-| `aspect_ratio` | str | "1:1" | Aspect ratio (1:1, 16:9, 9:16, 4:3, 3:4) |
-| `output_dir` | str | "./generated_images" | Directory to save output |
-
-**Returns**: `dict` with keys:
-- `path`: Path to saved image file
-- `prompt`: The prompt used
-- `model`: Model used
-- `error`: Error message (if failed)
-
-### `generate_images(prompts, **kwargs)`
-
-Generate multiple images from a list of prompts.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `prompts` | list[str] | required | List of text prompts |
-| `**kwargs` | | | Same as `generate_image` |
-
-**Returns**: `list[dict]` - Results for each prompt
-
-## Supported Models
-
-| Model | ID | Notes |
-|-------|-----|-------|
-| Gemini 2.0 Flash | `google/gemini-2.0-flash-exp:free` | Free, supports aspect ratios |
-| DALL-E 3 | `openai/dall-e-3` | High quality, paid |
-| Flux Schnell | `black-forest-labs/flux-schnell` | Fast, good quality |
 
 ## Aspect Ratios
 
-| Ratio | Use Case |
-|-------|----------|
-| 1:1 | Square, social media posts |
-| 16:9 | Landscape, desktop wallpapers |
-| 9:16 | Portrait, phone wallpapers, stories |
-| 4:3 | Classic photo ratio |
-| 3:4 | Portrait photos |
+Eight ratios are supported (`1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `21:9`). Gemini honors each one natively. `gpt-image-1` only accepts a fixed size set, so ratios are mapped to the nearest supported size (square / landscape `1536x1024` / portrait `1024x1536`) via `OPENAI_IMAGE_SIZES` in `config/models.py`.
+
+Run `valor-image-gen --help` for the full ratio table with pixel dimensions and use cases.
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| API key error | Ensure `OPENROUTER_API_KEY` is set |
-| Timeout | Try a smaller model or simpler prompt |
-| Content filtered | Rephrase prompt to avoid restricted content |
-| Rate limited | Wait and retry, or upgrade API plan |
+| `OPENROUTER_API_KEY ... not set` | Set it (Gemini provider) |
+| `OPENAI_API_KEY ... not set` | Set it (OpenAI provider) |
+| Timeout | Simplify the prompt or retry |
+| Content filtered | Rephrase to avoid restricted content |
+| Rate limited | Wait and retry |

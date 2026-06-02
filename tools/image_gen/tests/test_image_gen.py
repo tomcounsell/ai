@@ -101,3 +101,43 @@ class TestErrorHandling:
 
         # Should return an error (either API error or request error)
         assert "error" in result or "path" in result  # Either outcome is valid
+
+
+class TestProviderSwitch:
+    """Test the gemini/openai provider switch."""
+
+    def test_invalid_provider(self):
+        """Unknown provider returns a clear error and never hits the network."""
+        result = generate_image("test", provider="nope")
+
+        assert "error" in result
+        assert "provider" in result["error"].lower()
+
+    def test_openai_missing_key(self, monkeypatch):
+        """OpenAI provider names OPENAI_API_KEY when the key is absent."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        result = generate_image("test prompt", provider="openai")
+
+        assert "error" in result
+        assert "OPENAI_API_KEY" in result["error"]
+
+    def test_provider_resolves_to_model(self):
+        """Each provider alias maps to a concrete model string."""
+        from config.models import (
+            IMAGE_GEN_PROVIDERS,
+            OPENAI_IMAGE_GEN,
+            OPENROUTER_GEMINI_IMAGE_GEN,
+        )
+
+        assert IMAGE_GEN_PROVIDERS["gemini"] == OPENROUTER_GEMINI_IMAGE_GEN
+        assert IMAGE_GEN_PROVIDERS["openai"] == OPENAI_IMAGE_GEN
+
+    def test_openai_size_mapping_covers_all_ratios(self):
+        """Every supported aspect ratio maps to a valid gpt-image-1 size."""
+        from config.models import IMAGE_ASPECT_RATIOS, OPENAI_IMAGE_SIZES
+
+        valid_sizes = {"1024x1024", "1536x1024", "1024x1536"}
+        for ratio in IMAGE_ASPECT_RATIOS:
+            assert ratio in OPENAI_IMAGE_SIZES, f"{ratio} missing from OPENAI_IMAGE_SIZES"
+            assert OPENAI_IMAGE_SIZES[ratio] in valid_sizes

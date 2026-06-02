@@ -74,10 +74,20 @@ OPENROUTER_PIXTRAL = "mistralai/pixtral-large"
 # For creating images from text prompts (Nano Banana style)
 # -----------------------------------------------------------------------------
 
-# Gemini 3 Pro - Native image generation with aspect ratio control
+# Gemini 3 Pro - Native image generation with aspect ratio control (via OpenRouter)
 OPENROUTER_GEMINI_IMAGE_GEN = "google/gemini-3-pro-image-preview"
 
-# Image generation aspect ratios (width x height)
+# OpenAI gpt-image-1 - native image generation (via OpenAI Images API directly)
+OPENAI_IMAGE_GEN = "gpt-image-1"
+
+# Provider alias -> default model. Lets callers say `--provider openai` instead of
+# memorizing model strings; Gemini stays the default so existing behavior is unchanged.
+IMAGE_GEN_PROVIDERS = {
+    "gemini": OPENROUTER_GEMINI_IMAGE_GEN,
+    "openai": OPENAI_IMAGE_GEN,
+}
+
+# Image generation aspect ratios (width x height) — Gemini's native vocabulary.
 IMAGE_ASPECT_RATIOS = {
     "1:1": (1024, 1024),  # Square
     "16:9": (1344, 768),  # Landscape wide
@@ -87,6 +97,19 @@ IMAGE_ASPECT_RATIOS = {
     "3:2": (1248, 832),  # Photo landscape
     "2:3": (832, 1248),  # Photo portrait
     "21:9": (1536, 672),  # Ultrawide/cinematic
+}
+
+# gpt-image-1 only accepts a fixed size set (1024x1024, 1536x1024, 1024x1536).
+# Map our richer aspect-ratio vocabulary onto the nearest supported size.
+OPENAI_IMAGE_SIZES = {
+    "1:1": "1024x1024",
+    "16:9": "1536x1024",
+    "4:3": "1536x1024",
+    "3:2": "1536x1024",
+    "21:9": "1536x1024",
+    "9:16": "1024x1536",
+    "3:4": "1024x1536",
+    "2:3": "1024x1536",
 }
 
 # -----------------------------------------------------------------------------
