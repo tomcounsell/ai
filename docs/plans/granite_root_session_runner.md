@@ -30,6 +30,30 @@ deliberate configuration surface is **model-per-role**: the operator, PM, and De
 are each selectable via config/heuristics as parameters of the runner, never as an escape
 hatch from it.
 
+## Three-LLM Role Taxonomy
+
+The architecture runs **three distinct LLMs** with non-overlapping jobs (aligned with the
+original goals in issue #1486). Naming them consistently everywhere — code, docs, dashboard
+— is a hard requirement of this plan, because the PoC's loose "PM/Dev/operator" language has
+been a source of confusion.
+
+| Role | LLM | What it does | Resumable? |
+|---|---|---|---|
+| **Operator** | `granite4.1:3b` (local, via ollama) | Routes between the two Claude sessions — "always in the middle." Translates driver→worker prompts and worker→driver summaries; handles operator events (multiple-choice, timeout, crash). | **No** — stateless ollama calls; history lives in-process. There is no `/resume` for the operator. |
+| **Driver** (= PM) | **Opus**, a Claude Code session | The directing "human": plans, reviews, decides what the worker should do next. Drives, does not implement. | Yes — `claude --resume <uuid>` |
+| **Worker** (= Dev) | **Sonnet**, a Claude Code session | Does the actual implementation work the driver directs. | Yes — `claude --resume <uuid>` |
+
+- Vocabulary contract: **driver ≡ PM/Opus**, **worker ≡ Dev/Sonnet**, **operator ≡ granite**.
+  These three terms are used consistently in the runner, the docs, and the dashboard.
+- The **operator is not a Claude Code session** — it is a local routing model. Only the
+  driver and worker have resumable Claude session UUIDs.
+- **One logical `AgentSession` → two Claude subprocesses (driver + worker).** This differs
+  from today's model, where a PM `AgentSession` spawns a *separate* Dev `AgentSession` via
+  the `valor_session` CLI. Under the granite loop both Claude sessions are subprocesses of a
+  single `GraniteAgentLoop`/`AgentSession`. **Consequence:** the `AgentSession` record must
+  store **two** Claude session UUIDs (driver + worker), not the single
+  `claude_session_uuid` it has today — see *Dashboard & data model* in Solution.
+
 ## Freshness Check
 
 **Baseline commit:** `70198200`
@@ -130,9 +154,10 @@ the risk profile.
   Test Impact) and must each be re-targeted or deleted.
 - **Coupling:** increases coupling to ollama; decreases coupling to `claude-agent-sdk`
   (already absent from the PoC). The operator becomes a new central component.
-- **Data ownership:** unchanged — `AgentSession` remains the source of truth for UUID,
-  tokens, turn count, exit code; the runner writes the same fields via the same helpers
-  (lifted out of `sdk_client.py` into a shared module rather than reimplemented).
+- **Data ownership:** `AgentSession` remains the source of truth for tokens, turn count,
+  and exit code (same helpers, lifted into a shared module). One change: it now stores
+  **two** Claude session UUIDs (driver + worker) instead of the single `claude_session_uuid`,
+  because one logical session runs two Claude subprocesses (see Three-LLM Role Taxonomy).
 - **Reversibility:** LOW once the old path is deleted. This is the central tension with
   NO-LEGACY-CODE — see Risks #4 and the staged-cutover approach in Solution.
 
@@ -226,6 +251,33 @@ session loop** (cross-message conversation, session lifecycle). Concretely:
   steering reads + per-turn `OutputHandler` emission), not reused as-is. This is build
   task 3 (parity) scope.
 
+### Dashboard & data model — two Claude sessions per AgentSession
+
+Today `AgentSession.claude_session_uuid` (`models/agent_session.py:198`) holds a *single*
+Claude UUID, and the session modal renders one `/resume <uuid>` copy chip
+(`ui/templates/_partials/session_modal_content.html:63`; the `copyResumeCommand` JS at
+`:250`). The granite loop runs **two** Claude subprocesses, so the model and the modal both
+change:
+
+- **Data model:** `AgentSession` gains two nullable UUID fields — one for the **worker**
+  (Dev/Sonnet) and one for the **driver** (PM/Opus) — each populated by the runner as the
+  corresponding `ClaudeSession` captures its `session_id`. Adding nullable fields needs no
+  extra back-compat code — `_heal_descriptor_pollution` walks fields generically
+  ([[feedback_field_backcompat_heal]], issues #1099/#1172). The legacy single
+  `claude_session_uuid` is migrated to the worker field and retired (NO-LEGACY-CODE), not
+  kept in parallel.
+- **Modal (per the requested UX):** render **two** resume chips — the **worker (Dev)
+  featured as the primary/main resume** (the session you'd most want to jump into), with the
+  **driver (PM) as a clearly-labeled secondary chip below it**. Each chip carries its own
+  UUID; `copyResumeCommand` already copies `/resume <uuid>` from `data-uuid`, so it
+  generalizes to two chips with distinct `data-uuid`s. Label them "worker" / "driver" so the
+  operator's absence of a resume is not mistaken for a missing session.
+- **Degenerate cases:** single-session (conversational) mode has only a worker session → one
+  chip, as today. Legacy/pre-cutover rows with only `claude_session_uuid` → one chip.
+- The **operator (granite) has no resume chip** — it is not a Claude session; surface its
+  liveness elsewhere (e.g. an operator-latency line in Timing & Liveness) rather than a
+  resume command.
+
 ### Technical Approach
 
 - **Phase A — Parity build (behind the existing call site, not yet wired):** extract the
@@ -257,6 +309,10 @@ session loop** (cross-message conversation, session lifecycle). Concretely:
   `agent/__init__.py` re-export, and re-target/delete all 19 referencing test files; delete
   `get_response_via_harness` and its now-dead helpers; reconcile `harness-abstraction.md`.
 - **Phase E — Model-per-role config:** config schema + heuristic resolution + tests.
+- **Phase F — Dashboard & data model:** add the two nullable Claude-UUID fields to
+  `AgentSession` (driver + worker), have the runner persist each, migrate/retire the legacy
+  `claude_session_uuid`, and update the session modal to render two resume chips (worker
+  primary, driver secondary). See *Dashboard & data model* above.
 - ollama tuning: set `OLLAMA_NUM_PARALLEL` / `OLLAMA_MAX_QUEUE` appropriately or run
   per-session operator calls; verified under the Phase B concurrency test.
 
@@ -327,6 +383,10 @@ re-targeted (at the lifted shared module / runner) or deleted; none can be left 
 - [ ] `tests/integration/test_session_spawning.py` — UPDATE: spawning now instantiates `SessionRunner`.
 - [ ] `tests/e2e/conftest.py` — UPDATE: e2e fixtures that stub `get_response_via_harness` must stub the runner entry point instead.
 - [ ] `agent/__init__.py` (not a test, but in the deletion surface) — UPDATE: remove the `get_response_via_harness` re-export (lines 36 & 52) so the symbol deletion does not break imports.
+
+**Dashboard & data-model tests:**
+- [ ] `models/` AgentSession tests covering UUID persistence — UPDATE: assert both the driver and worker UUID fields persist; assert the legacy `claude_session_uuid` migrates to the worker field.
+- [ ] Dashboard modal rendering tests (whatever currently exercises `session_modal_content.html` / `ui/app.py` session detail) — UPDATE: assert two resume chips render with distinct `data-uuid`s for a granite dual-session, worker chip primary; one chip for single-session/legacy rows. Add a test if none exists (greenfield for dual-chip rendering).
 
 ## Rabbit Holes
 
@@ -460,7 +520,10 @@ mid-stream to a subprocess stdin.
   production" framing; it becomes the substrate doc. Document the runner, dual vs.
   single-session modes, and model-per-role config.
 - [ ] Reconcile `docs/features/harness-abstraction.md` and
-  `docs/features/pm-dev-session-architecture.md` with the new substrate.
+  `docs/features/pm-dev-session-architecture.md` with the new substrate, using the
+  driver/worker/operator vocabulary from the Three-LLM Role Taxonomy.
+- [ ] Document the dashboard change (two resume chips per granite session, worker primary)
+  in the relevant dashboard/UI doc; note the operator has no resume.
 - [ ] Update `docs/features/README.md` index row.
 - [ ] Create `docs/infra/granite_root_session_runner.md` (new hard dependency, ollama
   tuning, rollback).
@@ -484,6 +547,14 @@ mid-stream to a subprocess stdin.
 - [ ] Phase B gates pass: N≥10 varied-task runs, ≥20-turn truncation run, real-subprocess
   chaos test, ≥5-concurrent Max-OAuth test (no production-starving throttle).
 - [ ] Single-session (conversational) mode specified, implemented, and tested.
+- [ ] `AgentSession` persists both driver and worker Claude UUIDs; the legacy single
+  `claude_session_uuid` is migrated and retired.
+- [ ] The session modal renders two resume chips for a granite dual-session — worker (Dev)
+  primary, driver (PM) secondary — and one chip for single-session/legacy rows; the operator
+  has no resume chip.
+- [ ] driver/worker/operator vocabulary is used consistently across the runner code, the
+  reconciled docs, and the dashboard (no leftover ambiguous "PM session = the worker"
+  phrasing).
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 
@@ -498,8 +569,12 @@ mid-stream to a subprocess stdin.
   Resume: true
 - **Test engineer (validation gates)** — Name: `gate-engineer` — Role: Phase B gates
   (N≥10, 20-turn, chaos, concurrency) — Agent Type: test-engineer — Resume: true
-- **Builder (cutover)** — Name: `cutover-builder` — Role: rewire executor + 10 importer
-  sites, delete old path — Agent Type: builder — Resume: true
+- **Builder (cutover)** — Name: `cutover-builder` — Role: rewire the 4 runtime callers +
+  `agent/__init__.py` re-export + 19 test files, delete old path — Agent Type: builder —
+  Resume: true
+- **Builder (dashboard & data model)** — Name: `dashboard-builder` — Role: add the two
+  Claude-UUID fields to `AgentSession`; update the session modal to render two resume chips
+  (worker primary, driver secondary) — Agent Type: builder — Resume: true
 - **Validator** — Name: `parity-validator` — Role: verify parity completeness + no
   remaining callers of the old path — Agent Type: validator — Resume: true
 - **Documentarian** — Name: `docs-writer` — Role: feature + infra docs — Agent Type:
@@ -527,6 +602,9 @@ mid-stream to a subprocess stdin.
 - **Parallel**: false
 - `SessionRunner.run()` entry point with the `get_response_via_harness` contract; mode
   select; operator/PM/Dev model resolution from config/heuristics with a default triplet.
+- Add two nullable Claude-UUID fields to `AgentSession` (driver + worker); the runner
+  persists each as its `ClaudeSession` captures `session_id`. Migrate the legacy
+  `claude_session_uuid` to the worker field (NO-LEGACY-CODE).
 
 ### 3. Wire parity layer into the runner
 - **Task ID**: build-parity
@@ -563,7 +641,19 @@ mid-stream to a subprocess stdin.
   go/no-go, Open Question #1 — the agent cannot read Anthropic pricing policy, so it
   supplies the consumption data, not the verdict).
 
-### 6. Cutover + delete old path
+### 6. Dashboard & data model (dual resume)
+- **Task ID**: build-dashboard
+- **Depends On**: build-runner
+- **Validates**: AgentSession UUID-persistence tests; session-modal rendering tests
+- **Assigned To**: dashboard-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Render two resume chips in `ui/templates/_partials/session_modal_content.html` — worker
+  (Dev) primary, driver (PM) secondary, each with its own `data-uuid`; one chip for
+  single-session/legacy rows; no chip for the operator. Confirm `copyResumeCommand`
+  generalizes to two chips.
+
+### 7. Cutover + delete old path
 - **Task ID**: build-cutover
 - **Depends On**: build-single-session, build-gates
 - **Gated By (HUMAN)**: Open Question #1 — the billing go/no-go decision (informed by the
@@ -580,7 +670,7 @@ mid-stream to a subprocess stdin.
   re-target/delete all 19 test files (Test Impact); delete `get_response_via_harness` +
   dead helpers; reconcile harness-abstraction doc.
 
-### 7. Parity + cutover validation
+### 8. Parity + cutover validation
 - **Task ID**: validate-cutover
 - **Depends On**: build-cutover
 - **Assigned To**: parity-validator
@@ -588,17 +678,17 @@ mid-stream to a subprocess stdin.
 - **Parallel**: false
 - Verify 12 parity clusters covered, no bypass path, no remaining old-path callers.
 
-### 8. Documentation
+### 9. Documentation
 - **Task ID**: document-feature
-- **Depends On**: build-cutover
+- **Depends On**: build-cutover, build-dashboard
 - **Assigned To**: docs-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Feature doc, infra doc, README index, harness/pm-dev reconciliation.
 
-### 9. Final validation
+### 10. Final validation
 - **Task ID**: validate-all
-- **Depends On**: validate-cutover, document-feature
+- **Depends On**: validate-cutover, build-dashboard, document-feature
 - **Assigned To**: parity-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -614,6 +704,8 @@ mid-stream to a subprocess stdin.
 | Old path deleted | `grep -rn "def get_response_via_harness" agent/` | exit code 1 |
 | No old-path refs anywhere | `grep -rn "get_response_via_harness" agent/ worker/ bridge/ monitoring/ scripts/ tests/ ui/` | exit code 1 |
 | Smoke gate ≤20% (kill criterion) | `python scripts/granite_smoke_test.py && python -c "import json;assert json.load(open('logs/granite_smoke_results.json'))['parse_error_rate']<=0.20"` | exit code 0 |
+| Modal renders two resume chips | `grep -c "copyResumeCommand" ui/templates/_partials/session_modal_content.html` | output > 1 |
+| AgentSession has dual UUID fields | `grep -cE "driver.*_uuid|worker.*_uuid" models/agent_session.py` | output > 1 |
 | No bypass flag | `grep -rni "use_granite\|granite_enabled\|legacy_runner\|use_sdk_client" agent/ config/` | exit code 1 |
 
 ## Critique Results
@@ -621,6 +713,8 @@ mid-stream to a subprocess stdin.
 **Verdict: NEEDS REVISION** — 2 BLOCKERs (turn-loop ownership impedance mismatch; under-counted migration surface) must be resolved before build. Structural validators all PASS.
 
 **Revision applied (all 8 findings addressed):** BLOCKER-1 → new Solution subsection "Turn-loop ownership, steering & per-turn output" (runner owns inner operator loop, executor keeps outer; turn-boundary steering re-reads; per-turn `OutputHandler` emission) + Race 3 + Phase A reworded. BLOCKER-2 → Architectural Impact + Test Impact corrected to the grep-verified surface (4 runtime callers, `agent/__init__.py` re-export, 13 module importers, 19 test files enumerated) + Task 6 + Verification grep now include `tests/`. CONCERN single-session → Phase C decided design (operator+one-session, `result`-event completion). CONCERN operator-down → decided (bounded re-enqueue → fail with PM-persona message). CONCERN billing → explicit HUMAN gate on Task 6 + credit measurement in Task 5. CONCERN concurrency → gate counts subprocesses at production-representative load + asserts burst-limiter error caught. NIT smoke-gate → Verification parses `parse_error_rate <= 0.20`. NIT Risk-3 → pre-judged "headroom exists" dropped. Residual human Open Questions: #1 (billing go/no-go, external) and #4 (model-per-role granularity).
+
+**Second revision pass (post-review feedback, #1542):** Added a **Three-LLM Role Taxonomy** (operator=granite / driver=PM-Opus / worker=Dev-Sonnet) aligned with issue #1486 to fix role ambiguity, and added **Dashboard & data model** scope that the first draft omitted — `AgentSession` now stores two Claude UUIDs (driver + worker), and the session modal renders two resume chips (worker primary, driver secondary; operator has no resume). Wired through Technical Approach (Phase F), Test Impact, Documentation, Team, Tasks (new build-dashboard), Success Criteria, and Verification.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
