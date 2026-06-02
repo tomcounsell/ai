@@ -17,6 +17,24 @@ agent (Claude Code) -> byob MCP server (node) -> byob-bridge -> Chrome extension
 
 All communication is local (Unix socket + native messaging). The Chrome extension key is unique per install; nothing is shared across machines.
 
+## Tab targeting discipline (always pass an explicit `tabId`)
+
+BYOB has **no content/URL-based tab matching**. It cannot "find the tab the user is showing." With no `tabId`, every tool falls back to one of two defaults, neither of which tracks user intent:
+
+- `browser_navigate` with no `tabId` → opens a **brand-new background tab** (`packages/extension/lib/handlers/navigate.ts`), never reuses an existing one.
+- Every other tool (`click`, `type`, `eval`, `read`, `screenshot`, …) with no `tabId` → `chrome.tabs.query({active: true, lastFocusedWindow: true})` (per-handler `activeTabId()` / `tab.ts` `openOrReuse` reuse-active path).
+
+`lastFocusedWindow: true` means "whichever Chrome window most recently held focus," **not** "the window the user is looking at." When the user runs Claude Code from a terminal and/or has more than one Chrome window open, this default is ambiguous and reliably lands on the wrong tab — in practice the same early/pinned tab every time, regardless of which tab the user left active. Telling the user to "leave the right tab active" does not fix it.
+
+**The only deterministic targeting is an explicit `tabId`.** The required discipline whenever driving BYOB:
+
+1. `browser_list_tabs` — returns every tab's `id`, `url`, `title`, `windowId`.
+2. Match the intended tab by URL/title.
+3. Pass that `tabId` into **every** subsequent `navigate`/`click`/`read`/`screenshot`/etc. call.
+4. Optionally `browser_switch_tab <id>` to bring it to the foreground first.
+
+Never rely on the active-tab default. Reach for `list_tabs → match → explicit tabId` by default.
+
 ## Bridge inference
 
 `agent/byob_skill_triggers.py` exposes `BYOB_SKILL_TRIGGERS` (registry) and `infer_requires_real_chrome(text)` (case-insensitive regex match with first-person/intent phrasing). Both Telegram and email bridge enqueue paths call this before `enqueue_agent_session()` so bridge-spawned sessions get the `requires_real_chrome` scheduler gate engaged automatically.
