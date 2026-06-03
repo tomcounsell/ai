@@ -789,7 +789,9 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
         if redis_client is not None:
             try:
                 redis_client.set(dedup_key, "1", ex=86400 * 30)
-            except Exception:
+            except (
+                Exception
+            ):  # swallow-ok: best-effort cache write; tracker already confirmed dedup
                 pass
         return False
 
@@ -822,7 +824,7 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
         if redis_client is not None:
             try:
                 redis_client.set(dedup_key, "1", ex=86400 * 30)
-            except Exception:
+            except Exception:  # swallow-ok: best-effort cache write after successful issue create
                 pass
         return True
     except Exception as e:
