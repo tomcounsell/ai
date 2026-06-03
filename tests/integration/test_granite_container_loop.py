@@ -65,8 +65,13 @@ def _model_reachable() -> bool:
         return False
 
 
+# Cached at module load so all tests see the same value (avoids races
+# when xdist forks workers and each forks its own `claude` subprocess).
+_MODEL_REACHABLE: bool = _model_reachable()
+
+
 @unittest.skipUnless(
-    _model_reachable(),
+    _MODEL_REACHABLE,
     "RESUME_SKIP model_unreachable — integration test gated on `claude --print ping`",
 )
 class TestGraniteContainerIntegration(unittest.TestCase):
