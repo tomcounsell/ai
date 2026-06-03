@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # --- Shared helpers ---
 
 
@@ -87,23 +89,39 @@ class TestReflectionsUtils:
         entries = [{"pattern": "redis connection", "ignored_until": "", "reason": ""}]
         assert is_ignored("unrelated bug pattern", entries) is False
 
-    def test_is_high_confidence_true(self):
-        """is_high_confidence() returns True for code_bug with pattern and prevention."""
+    @pytest.mark.parametrize(
+        "reflection,expected",
+        [
+            # code_bug with both supporting signals -> True
+            (
+                {"category": "code_bug", "pattern": "x" * 20, "prevention": "fix it"},
+                True,
+            ),
+            # code_bug with prevention only (empty pattern) -> True (plan success criterion)
+            ({"category": "code_bug", "prevention": "x", "pattern": ""}, True),
+            # code_bug with long pattern only (no prevention) -> True
+            ({"category": "code_bug", "pattern": "x" * 10, "prevention": ""}, True),
+            # code_bug pattern exactly 9 chars and no prevention -> False (neither signal)
+            ({"category": "code_bug", "pattern": "x" * 9, "prevention": "   "}, False),
+            # poor_planning with both supporting signals -> False (the #1414 failing case)
+            (
+                {"category": "poor_planning", "prevention": "x", "pattern": "x" * 20},
+                False,
+            ),
+            # process_gap with rich text -> still False (non-code-bug excluded)
+            (
+                {"category": "process_gap", "prevention": "do better", "pattern": "x" * 50},
+                False,
+            ),
+            # missing category -> False
+            ({"prevention": "x", "pattern": "x" * 20}, False),
+        ],
+    )
+    def test_is_high_confidence_gate(self, reflection, expected):
+        """Gate requires category == 'code_bug' AND (prevention OR pattern>=10)."""
         from reflections.utils import is_high_confidence
 
-        r = {
-            "category": "code_bug",
-            "pattern": "this is a long enough pattern",
-            "prevention": "fix it",
-        }
-        assert is_high_confidence(r) is True
-
-    def test_is_high_confidence_false(self):
-        """is_high_confidence() returns False when fewer than 2 criteria met."""
-        from reflections.utils import is_high_confidence
-
-        r = {"category": "misunderstanding", "pattern": "short", "prevention": ""}
-        assert is_high_confidence(r) is False
+        assert is_high_confidence(reflection) is expected
 
     def test_load_ignore_entries_empty_redis(self):
         """load_ignore_entries() returns empty list when model unavailable."""

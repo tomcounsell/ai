@@ -82,11 +82,17 @@ class TestAnalyzeSessionsFromRedis:
     """Tests for Redis-backed session analysis via reflections.session_intelligence."""
 
     def test_analyzes_sessions_from_redis(self):
-        """_analyze_sessions_from_redis queries AgentSession model."""
+        """_analyze_sessions_from_redis queries AgentSession model.
+
+        A high tool-call-to-turn ratio must NOT produce any thrash finding:
+        the false-positive thrash detector was removed (see #1414), so the
+        analysis dict no longer carries a ``thrash_sessions`` key.
+        """
         from models.agent_session import AgentSession
         from reflections.session_intelligence import _analyze_sessions_from_redis
 
-        # Create a session for today
+        # Create a session for today with a high tool-call-to-turn ratio that
+        # the old detector would have flagged as "thrashing".
         AgentSession.create(
             session_id="test-session-1",
             project_key="ai",
@@ -95,13 +101,13 @@ class TestAnalyzeSessionsFromRedis:
             started_at=time.time(),
             updated_at=datetime.now(tz=UTC),
             turn_count=5,
-            tool_call_count=20,  # High ratio = thrashing
+            tool_call_count=20,
         )
 
         today = __import__("bridge.utc", fromlist=["utc_now"]).utc_now().strftime("%Y-%m-%d")
         result = _analyze_sessions_from_redis(today)
         assert result["sessions_analyzed"] == 1
-        assert len(result["thrash_sessions"]) == 1
+        assert "thrash_sessions" not in result
 
     def test_detects_failed_sessions(self):
         """Failed sessions appear in error_patterns."""
