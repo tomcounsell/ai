@@ -57,14 +57,25 @@ def _model_reachable() -> bool:
     policy (prefer gemma*, fall back to non-granite*) must complete a
     round-trip. If the check fails (returncode != 0, timeout, or
     `claude` not on PATH), the spike-regression test is skipped.
+
+    The result is cached for the module's lifetime so all four
+    env-gated tests see the same value (avoiding per-test races when
+    pytest-xdist forks workers and each forks a different `claude`
+    subprocess).
     """
+    if not hasattr(_model_reachable, "_cache"):
+        _model_reachable._cache = _model_reachable_check()
+    return _model_reachable._cache
+
+
+def _model_reachable_check() -> bool:
     if not shutil.which("claude"):
         return False
     try:
         # Match the same model-pick policy as the substrate driver so
         # the prerequisite check exercises the same code path.
         tags = json.loads(
-            urllib.request.urlopen("http://localhost:11434/api/tags", timeout=5).read()
+            urllib.request.urlopen("http://localhost:11434/api/tags", timeout=10).read()
         )
         names = [m["name"] for m in tags.get("models", [])]
         if not names:
@@ -85,7 +96,7 @@ def _model_reachable() -> bool:
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=60,
         )
         return r.returncode == 0
     except (subprocess.TimeoutExpired, OSError, urllib.error.URLError, json.JSONDecodeError):
