@@ -33,8 +33,6 @@ CORRECTION_PATTERNS = [
     re.compile(r"\bplease\s+(don'?t|stop)\b", re.IGNORECASE),
 ]
 
-THRASH_RATIO_THRESHOLD = 0.5
-
 
 def load_local_projects() -> list[dict]:
     """Load projects from projects.json, filtered to those present on this machine.
@@ -285,11 +283,7 @@ def run_llm_reflection(analysis: dict[str, Any]) -> list[dict[str, str]]:
     except ImportError:
         anthropic = None  # type: ignore[assignment]
 
-    if (
-        analysis.get("sessions_analyzed", 0) == 0
-        and not analysis.get("corrections")
-        and not analysis.get("thrash_sessions")
-    ):
+    if analysis.get("sessions_analyzed", 0) == 0 and not analysis.get("corrections"):
         logger.info("No session findings for reflection, skipping LLM call")
         return []
 
@@ -409,17 +403,23 @@ def extract_structured_errors(log_file: Path) -> list[dict[str, str]]:
 
 
 def is_high_confidence(reflection: dict) -> bool:
-    """Check if a reflection meets the 2-of-3 confidence criteria for auto-fix.
+    """Check if a reflection clears the high-confidence gate for auto-fix.
+
+    The gate requires the reflection be a ``code_bug`` AND carry at least one
+    supporting signal (non-empty prevention, or a pattern of >=10 chars). This
+    deliberately excludes non-code-bug categories (e.g. ``poor_planning``,
+    ``process_gap``) from the auto-fix path even when they have rich prevention
+    and pattern text — those describe agent behaviour, not code defects, and
+    must not ride into the auto-filer on length alone (see #1414).
 
     Args:
         reflection: A reflection dict with category, prevention, pattern keys.
 
     Returns:
-        True if at least 2 of 3 criteria are met.
+        True only if category == "code_bug" AND (prevention OR pattern>=10).
     """
-    criteria = [
-        reflection.get("category") == "code_bug",
-        bool(reflection.get("prevention", "").strip()),
-        len(reflection.get("pattern", "")) >= 10,
-    ]
-    return sum(criteria) >= 2
+    if reflection.get("category") != "code_bug":
+        return False
+    return (
+        bool(reflection.get("prevention", "").strip()) or len(reflection.get("pattern", "")) >= 10
+    )

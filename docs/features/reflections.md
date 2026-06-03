@@ -418,15 +418,20 @@ Queries Redis for recent sessions and computes quality metrics.
 - **AgentSession** — turn count, tool call count, log file path, session tags
 - **BridgeEvent** — error events correlated to sessions
 
-### Thrash Ratio
+The runner caps analysis at the 20 most interesting sessions (sorted by turn count).
 
-Measures how much agent effort was wasted:
-
-```
-failure_ratio = max(0.0, 1.0 - (turn_count / tool_call_count))
-```
-
-Sessions above `THRASH_RATIO_THRESHOLD = 0.5` (50% failure rate) are flagged for LLM reflection. The runner caps analysis at the 20 most interesting sessions (sorted by turn count).
+> **Removed: thrash-ratio detection (#1414).** A prior heuristic flagged
+> sessions as "thrashing" when `1 - (turn_count / tool_call_count) > 0.5`.
+> Because `turn_count` is *total assistant turns* (not *successful* turns),
+> any session averaging more than ~2 tool calls per turn tripped the
+> threshold — roughly 50% of healthy, completed SDLC runs. The detector was
+> removed entirely rather than left emitting false positives that auto-filed
+> duplicate bug issues. Neither candidate replacement signal (repeated
+> identical tool calls, repeated tool errors) is cheaply derivable from the
+> available data: `AgentSession` exposes only scalar aggregates, and the
+> transcript format records tool inputs/results as truncated summary strings
+> with no structured args or `is_error` flag. A missing detector is strictly
+> better than one with a 50% false-positive rate.
 
 ### Correction Detection
 
@@ -464,13 +469,21 @@ When a reflection is categorized as `code_bug` and meets the confidence threshol
 
 ### Confidence Criteria
 
-An issue is filed when a reflection meets **2 of 3** criteria:
+An issue is filed only when a reflection is a **code bug AND** carries at least
+one supporting signal (`is_high_confidence()` in `reflections/utils.py`):
 
-| Criterion | Condition |
-|-----------|----------|
-| Category | `category == "code_bug"` |
-| Prevention | `prevention` field is non-empty |
-| Pattern length | `pattern` field is at least 10 characters |
+| Criterion | Condition | Role |
+|-----------|-----------|------|
+| Category | `category == "code_bug"` | **Required** — hard gate |
+| Prevention | `prevention` field is non-empty | Supporting (either suffices) |
+| Pattern length | `pattern` field is at least 10 characters | Supporting (either suffices) |
+
+This tightened the prior **2-of-3** rule (#1414). Under 2-of-3, a non-code-bug
+reflection (e.g. `category="poor_planning"`) could clear the gate on prevention
++ pattern length alone — which is how #1414, an agent-behaviour claim rather
+than a code defect, reached "high-confidence" and auto-filed itself. The gate
+now hard-requires `code_bug`, so only genuine code defects reach the auto-fix
+path.
 
 ### Ignore Log
 

@@ -19,7 +19,6 @@ from pathlib import Path
 
 from reflections.utils import (
     CORRECTION_PATTERNS,
-    THRASH_RATIO_THRESHOLD,
     has_existing_github_work,
     is_high_confidence,
     is_ignored,
@@ -36,7 +35,6 @@ def _analyze_sessions_from_redis(target_date: str) -> dict:
     result: dict = {
         "sessions_analyzed": 0,
         "corrections": [],
-        "thrash_sessions": [],
         "error_patterns": [],
     }
 
@@ -61,20 +59,6 @@ def _analyze_sessions_from_redis(target_date: str) -> dict:
         for session in target_sessions:
             result["sessions_analyzed"] += 1
             session_id = session.session_id or "unknown"
-
-            tool_calls = session.tool_call_count or 0
-            turn_count = session.turn_count or 0
-            if tool_calls > 5 and turn_count > 0:
-                failure_ratio = max(0.0, 1.0 - (turn_count / tool_calls))
-                if failure_ratio > THRASH_RATIO_THRESHOLD:
-                    result["thrash_sessions"].append(
-                        {
-                            "session_id": session_id,
-                            "tool_calls": tool_calls,
-                            "successes": turn_count,
-                            "failure_ratio": round(failure_ratio, 2),
-                        }
-                    )
 
             if session.log_path:
                 log_path = Path(session.log_path)
@@ -154,18 +138,13 @@ def run() -> dict:
             f"Detected {len(analysis['corrections'])} user corrections "
             f"across {analysis['sessions_analyzed']} sessions"
         )
-    if analysis["thrash_sessions"]:
-        findings.append(
-            f"Detected {len(analysis['thrash_sessions'])} thrashing sessions (high failure ratio)"
-        )
     error_patterns = analysis.get("error_patterns", [])
     if error_patterns:
         findings.append(f"Found {len(error_patterns)} error patterns in sessions/events")
 
     logger.info(
         f"Session analysis: sessions={analysis['sessions_analyzed']}, "
-        f"corrections={len(analysis['corrections'])}, "
-        f"thrash={len(analysis['thrash_sessions'])}"
+        f"corrections={len(analysis['corrections'])}"
     )
 
     # Sub-step 2: LLM reflection
