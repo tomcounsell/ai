@@ -313,6 +313,46 @@ class TestScheduleEvaluation:
         state.ran_at = now - 300
         assert is_reflection_due(entry, state, now) is True
 
+    def test_blank_record_with_recent_history_not_due(self, monkeypatch):
+        """Burst-fire guard: a blank every: record (ran_at lost during an
+        index-rebuild race) must NOT re-fire when ReflectionRun history shows a
+        recent run. Regression for the daily-digest burst-fire bug."""
+        import agent.reflection_scheduler as sched
+
+        now = time.time()
+        entry = ReflectionEntry(
+            name="system-health-digest",
+            description="",
+            schedule="every: 86400s",  # daily
+            priority="low",
+            execution_type="agent",
+            command="send digest",
+        )
+        state = MagicMock()
+        state.ran_at = None  # lost during the rebuild window
+        # History says it actually ran 1h ago — well within the daily interval.
+        monkeypatch.setattr(sched, "_latest_run_timestamp", lambda name: now - 3600)
+        assert is_reflection_due(entry, state, now) is False
+
+    def test_blank_record_without_history_is_due(self, monkeypatch):
+        """A genuinely never-run every: record (no ran_at, no history) stays due —
+        the guard must not suppress first-ever runs."""
+        import agent.reflection_scheduler as sched
+
+        now = time.time()
+        entry = ReflectionEntry(
+            name="system-health-digest",
+            description="",
+            schedule="every: 86400s",
+            priority="low",
+            execution_type="agent",
+            command="send digest",
+        )
+        state = MagicMock()
+        state.ran_at = None
+        monkeypatch.setattr(sched, "_latest_run_timestamp", lambda name: None)
+        assert is_reflection_due(entry, state, now) is True
+
 
 # === Skip-if-Running Tests ===
 

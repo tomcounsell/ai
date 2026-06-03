@@ -50,6 +50,8 @@ Each model is processed independently -- one model failure does not abort the sw
 
 `rebuild_indexes()` uses Redis SCAN (cursor-based, non-blocking) and only adds/removes index entries to match actual hash existence. Concurrent creates and deletes are safe and self-correcting -- any inconsistency introduced by a concurrent operation is fixed on the next run.
 
+**Exception -- live `get_or_create`-per-tick models.** `rebuild_indexes()` *deletes* a model's class-set and KeyField index sets before reconstructing them. During that window, `Model.query.filter(key=...)` returns empty even though the backing hash still exists. A model whose hot path is `get_or_create(name=...)` on a tight loop will therefore spawn a **fresh duplicate record** (e.g. `Reflection.ran_at=None`) if a tick lands inside the window. For `every:`-scheduled reflections a blank record reads as "never run" and fires every tick -- the daily-digest burst-fire bug. Such models are listed in `_SCHEDULER_STATE_MODELS` and skipped by `_get_all_models()`; they are small and continuously indexed by their own `save()` hooks, so a periodic destructive rebuild buys nothing. `is_reflection_due()` adds a second, trigger-agnostic guard: when `ran_at` is lost it recovers the true last-run from `ReflectionRun` history (never rebuilt -- not in `models.__all__`) so a blank record cannot re-fire.
+
 ## Key Files
 
 | File | Purpose |
