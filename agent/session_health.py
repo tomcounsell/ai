@@ -12,6 +12,7 @@ See ``docs/features/pm-session-liveness.md`` for the full model.
 """
 
 import asyncio
+import functools
 import logging
 import os
 import re
@@ -21,6 +22,7 @@ import time
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
 from agent.session_state import SessionHandle, _active_events, _active_sessions, _active_workers
 from analytics.collector import record_metric
@@ -955,9 +957,16 @@ def _increment_subprocess_kill_counter(session, *, escalated: bool) -> None:
     """Best-effort Redis counter for the recovery subprocess-kill escalation (#1537).
 
     ``escalated=True``  -> ``{project_key}:session-health:subprocess_kill_escalated``
-        (a kill was issued because ``task.cancel()`` left the subprocess alive).
+        (a kill signal — SIGTERM and/or SIGKILL — was actually delivered because
+        ``task.cancel()`` left the subprocess alive).
     ``escalated=False`` -> ``{project_key}:session-health:subprocess_kill_failed``
         (the subprocess could not be confirmed dead; session escalates to ``failed``).
+
+    The escalated counter intentionally does NOT fire on the *already-dead* path
+    (``task.cancel()`` sufficed and no signal was sent): counting that as an
+    escalation would inflate the metric and hide how often the SDK subprocess
+    genuinely ignores cancellation. See ``_confirm_subprocess_dead`` →
+    ``SubprocessKillResult.signal_sent``.
 
     A counter-backend failure must never propagate out of recovery.
     """
@@ -971,7 +980,26 @@ def _increment_subprocess_kill_counter(session, *, escalated: bool) -> None:
         logger.debug("[session-health] subprocess_kill counter failed (non-fatal): %s", e)
 
 
-def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> bool:
+class SubprocessKillResult(NamedTuple):
+    """Outcome of ``_confirm_subprocess_dead`` (issue #1537).
+
+    ``confirmed_dead``
+        ``True`` when the PID is confirmed gone; ``False`` when it cannot be
+        confirmed dead (still alive after SIGKILL, ``PermissionError``, or any
+        unexpected error). Drives the caller's requeue-vs-``failed`` branch.
+    ``signal_sent``
+        ``True`` only when a kill signal (SIGTERM and/or SIGKILL) was actually
+        delivered — i.e. the subprocess survived ``task.cancel()`` and had to be
+        escalated. ``False`` on the *already-dead* path (cancel sufficed, no PID,
+        or the very first liveness probe reports the process gone), so the caller
+        does NOT over-count those as kill escalations.
+    """
+
+    confirmed_dead: bool
+    signal_sent: bool
+
+
+def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> SubprocessKillResult:
     """Confirm a recovery target's ``claude -p`` subprocess is gone, escalating signals (#1537).
 
     ``task.cancel()`` does not guarantee the underlying SDK subprocess exited — a
@@ -979,11 +1007,24 @@ def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> bool:
     gap: it verifies liveness, then escalates SIGTERM -> SIGKILL, polling for exit
     within a short ``timeout`` so the liveness loop is never stalled.
 
-    Returns ``True`` only when the PID is confirmed gone (``os.kill(pid, 0)`` raises
-    ``ProcessLookupError``); ``False`` when it cannot be confirmed dead (still alive
-    after SIGKILL, ``PermissionError``, or any unexpected error). A non-confirmed
-    result is the signal for the caller to escalate the session to ``failed`` so the
-    orphan reaper owns cleanup, rather than requeuing an invisible orphan to ``pending``.
+    Returns a :class:`SubprocessKillResult` ``(confirmed_dead, signal_sent)``:
+
+    * ``confirmed_dead=True`` only when the PID is confirmed gone
+      (``os.kill(pid, 0)`` raises ``ProcessLookupError``); ``False`` when it cannot
+      be confirmed dead (still alive after SIGKILL, ``PermissionError``, or any
+      unexpected error). A non-confirmed result is the signal for the caller to
+      escalate the session to ``failed`` so the orphan reaper owns cleanup, rather
+      than requeuing an invisible orphan to ``pending``.
+    * ``signal_sent=True`` only when SIGTERM and/or SIGKILL was actually delivered.
+      It stays ``False`` on the already-dead path (no PID, or the process was gone
+      at the first probe because ``task.cancel()`` terminated it) so the caller can
+      distinguish "cancel sufficed" from "we had to kill it" and avoid inflating the
+      escalated counter.
+
+    NOTE: this helper is synchronous and uses ``time.sleep`` while polling. It must
+    NOT be awaited directly on the worker event loop; ``_apply_recovery_transition``
+    offloads it via ``run_in_executor`` so the kill grace period (up to ``timeout``
+    seconds) never stalls other worker coroutines.
 
     PID-reuse caveat: a recorded ``claude_pid`` could in principle be recycled by an
     unrelated process before recovery runs. The window is the sub-second recovery
@@ -992,7 +1033,7 @@ def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> bool:
     generations.
     """
     if pid is None or pid <= 0:
-        return True
+        return SubprocessKillResult(confirmed_dead=True, signal_sent=False)
 
     deadline = time.monotonic() + max(timeout, 0.0)
 
@@ -1009,15 +1050,15 @@ def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> bool:
             return False
         return False
 
-    # Already gone (e.g. task.cancel() did terminate it)?
+    # Already gone (e.g. task.cancel() did terminate it)? No signal was sent.
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return True
+        return SubprocessKillResult(confirmed_dead=True, signal_sent=False)
     except PermissionError:
-        return False
+        return SubprocessKillResult(confirmed_dead=False, signal_sent=False)
     except OSError:
-        return False
+        return SubprocessKillResult(confirmed_dead=False, signal_sent=False)
 
     def _poll_until_dead() -> bool:
         while time.monotonic() < deadline:
@@ -1026,28 +1067,30 @@ def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> bool:
             time.sleep(_SUBPROCESS_KILL_POLL_INTERVAL)
         return _is_dead()
 
-    # Escalation step 1: SIGTERM, then poll for graceful exit.
+    # Escalation step 1: SIGTERM, then poll for graceful exit. From here on a
+    # signal has been delivered, so signal_sent is True regardless of the outcome.
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
-        return True
+        # Raced to exit between the probe and SIGTERM — no signal landed.
+        return SubprocessKillResult(confirmed_dead=True, signal_sent=False)
     except (PermissionError, OSError) as e:
         logger.debug("[session-health] SIGTERM failed for recovery pid=%s: %s", pid, e)
-        return _is_dead()
+        return SubprocessKillResult(confirmed_dead=_is_dead(), signal_sent=False)
 
     if _poll_until_dead():
-        return True
+        return SubprocessKillResult(confirmed_dead=True, signal_sent=True)
 
     # Escalation step 2: SIGKILL only when SIGTERM failed to terminate it.
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
-        return True
+        return SubprocessKillResult(confirmed_dead=True, signal_sent=True)
     except (PermissionError, OSError) as e:
         logger.debug("[session-health] SIGKILL failed for recovery pid=%s: %s", pid, e)
-        return _is_dead()
+        return SubprocessKillResult(confirmed_dead=_is_dead(), signal_sent=True)
 
-    return _poll_until_dead()
+    return SubprocessKillResult(confirmed_dead=_poll_until_dead(), signal_sent=True)
 
 
 async def _apply_recovery_transition(
@@ -1217,14 +1260,26 @@ async def _apply_recovery_transition(
     # ``running``. Escalate SIGTERM -> SIGKILL against the recorded ``claude_pid``
     # and capture whether the process is confirmed gone. The requeue ``else``
     # branch below uses this to avoid silently parking an orphan at ``pending``.
-    _subprocess_confirmed_dead = _confirm_subprocess_dead(
-        getattr(entry, "claude_pid", None),
-        timeout=SUBPROCESS_KILL_TIMEOUT,
+    # ``_confirm_subprocess_dead`` is synchronous and may ``time.sleep`` for up to
+    # ``SUBPROCESS_KILL_TIMEOUT`` while polling a signalled PID. Offload it to a
+    # thread so the genuine-hang path never stalls the worker event loop (and every
+    # other coroutine sharing it). The helper keeps its sync signature so its unit
+    # tests stay unchanged.
+    _kill_result = await asyncio.get_running_loop().run_in_executor(
+        None,
+        functools.partial(
+            _confirm_subprocess_dead,
+            getattr(entry, "claude_pid", None),
+            timeout=SUBPROCESS_KILL_TIMEOUT,
+        ),
     )
+    _subprocess_confirmed_dead = _kill_result.confirmed_dead
     if not _subprocess_confirmed_dead:
         _increment_subprocess_kill_counter(entry, escalated=False)
-    elif getattr(entry, "claude_pid", None):
-        # A PID was recorded and is now confirmed gone — the kill path ran.
+    elif _kill_result.signal_sent:
+        # The subprocess survived task.cancel() and a SIGTERM/SIGKILL was actually
+        # delivered to terminate it — a true escalation. The already-dead path
+        # (cancel sufficed, signal_sent=False) is deliberately NOT counted.
         _increment_subprocess_kill_counter(entry, escalated=True)
 
     from models.session_lifecycle import (
