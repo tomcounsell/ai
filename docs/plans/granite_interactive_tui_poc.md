@@ -39,8 +39,8 @@ The PoC is the kernel validation for the architecture described in the issue's *
 - `docs/research/spikes/granite-tui-pty-spike.md` (v7 spike report, commit `8dc264ad`) - still authoritative for C1-C5 substrate facts. Holds.
 - `scripts/probe_slash_arguments.py` - still authoritative for F1-F4 persona-priming facts. Holds.
 - `docs/diagrams/granite-bridge-architecture.png` - present, 3-layer diagram. Holds.
-- `pyproject.toml` runtime deps - `pexpect` and `ptyprocess` are in `[project.optional-dependencies] dev`, **not** in runtime `dependencies`; the PoC must promote them to runtime. Holds.
-- `.claude/commands/` - currently empty; the PoC ships `prime-pm-role.md` and `prime-dev-role.md` as new files. Holds.
+- `pyproject.toml` runtime deps - `pexpect` and `ptyprocess` are in `[dependency-groups] dev` (PEP 735), **not** in runtime `dependencies`; the PoC must promote them to runtime. Holds.
+- `.claude/commands/` - currently empty; the PoC ships `granite-poc/prime-pm-role.md` and `granite-poc/prime-dev-role.md` as new files. Holds.
 
 **Cited sibling issues/PRs re-checked:**
 
@@ -83,7 +83,7 @@ External research is not applicable to the load-bearing substrate questions (C1-
 
 **Queries used:** none (skipped - the only relevant external resource is the slash-command docs link already cited in the issue's *Definitions* table).
 
-**Key findings:** The slash-command mechanism is fully documented; this repo has simply never authored any custom commands. The PoC ships `prime-pm-role.md` and `prime-dev-role.md` as part of the substrate (per the issue's *Revised* and *Dropped* lists). No new external research findings.
+**Key findings:** The slash-command mechanism is fully documented; this repo has simply never authored any custom commands. The PoC ships `granite-poc/prime-pm-role.md` and `granite-poc/prime-dev-role.md` as part of the substrate (per the issue's *Revised* and *Dropped* lists), namespaced under `granite-poc/` so they don't pollute interactive slash-command lists (C3 risk). No new external research findings.
 
 ## Spike Results
 
@@ -105,7 +105,7 @@ The PoC's data flow differs structurally from the prior PoC's stream-json I/O. T
 
 1. **Entry point**: Operator invokes the PoC CLI (e.g., `valor-granite-loop --user-message "..."`). The CLI creates a sandbox cwd (a fresh tempdir under the operator's control) and instantiates the container.
 2. **Container**: Spawns two `pexpect.spawn` children (PM + Dev) under separate PTYs, with `ANTHROPIC_API_KEY=""` (Max OAuth path) and `--permission-mode bypassPermissions`. CWD: the sandbox. Both children start as fresh interactive `claude` sessions, no `-p`.
-3. **Persona priming**: Container writes `/prime-pm-role <user message>\r` to PM's PTY and `/prime-dev-role <user message>\r` to Dev's PTY (F1-F4). Both sessions now have the user message as context; PM knows to address the developer or the user; Dev knows to wait.
+3. **Persona priming**: Container writes `/granite-poc:prime-pm-role <user message>\r` to PM's PTY and `/granite-poc:prime-dev-role <user message>\r` to Dev's PTY (F1-F4). Both sessions now have the user message as context; PM knows to begin its output with `[/dev]/[/user]/[/complete]`; Dev knows to wait.
 4. **Startup-phase parser**: Container's startup-state parser watches both PTYs for known startup shapes (login prompt, update notice, error modal, persona-prime acknowledgement, **trust-folder prompt** - see *Operator ergonomics note* below). The parser is a small Python function - a list of regex matches against a known enum, not a model. It does not interpret; it identifies which known shape was seen. When a known shape is detected, container asks granite for response text; container writes the text to the appropriate PTY.
 5. **Steady-state begins** when both PM and Dev PTYs reach idle. The container's main loop runs.
 6. **PM turn**: Container waits for PM's PTY to reach idle (glyph + bar + content-floor per C5). When idle fires, container reads the accumulated buffer (PM's output tail), strips ANSI, and passes it as a single ollama.chat() call to granite with: (a) a system prompt that defines the 3 tools (`extract_dev_prompt`, `summarize_for_pm`, `classify_pm_output`); (b) the current turn's content as the only user message.
@@ -129,7 +129,7 @@ The prior PoC (#1486, PR #1487) is the only prior attempt at the granite operato
 | Stream-json I/O via `claude -p` | Requires `-p`; bypasses the interactive TUI entirely. The richer affordances (real compaction, the two-stage ctrl-c interject, interactive menus, permission prompts) are inaccessible. The cancelled production cutover (#1542) confirmed a `-p` harness is not meaningfully different from `agent/sdk_client.py`. | `agent/claude_session.py:104-123`; issue body *Context* |
 | `GraniteRouter` 5-tool taxonomy (`extract_dev_prompt`, `summarize_for_pm`, `handle_choice`, `probe_session`, `signal_done`) | The 3 non-translation tools are judgment/detection calls, not translations. The prior PoC's results doc at `docs/plans/completed/granite-agent-loop-poc-results.md` shows `handle_choice` and `signal_done` were validated by synthetic smoke tests only - they were not exercised in the live 4-turn run. The new PoC reduces the taxonomy to 3 (translation x2 + classification x1) and routes judgment calls to PM (the persona with the user relationship). | `agent/granite_router.py:38-141`; results doc |
 | Custom PM-side tools (`send_to_dev`, `reply_to_user`) | Both rejected by invariant #6 and #7. A `send_to_dev` tool couples PM to Dev's interface, eliminating granite's translator value. A `reply_to_user` tool is a custom-tool-registration question; the user-address content is a regular PM output, classified by granite. | Issue *Bridge integration* invariants #6, #7 |
-| `--append-system-prompt` persona injection | Replaced by slash-command priming. The PoC ships `.claude/commands/prime-{pm,dev}-role.md` and invokes them as the first PTY input. | Issue *Revised*; `agent/sdk_client.py:1017` |
+| `--append-system-prompt` persona injection | Replaced by slash-command priming. The PoC ships `.claude/commands/granite-poc/prime-{pm,dev}-role.md` and invokes them as the first PTY input. | Issue *Revised*; `agent/sdk_client.py:1017` |
 | `HISTORY_KEEP_LAST_N = 8` in `GraniteRouter` | Each call now sees a whole PM output tail (a paragraph or two of natural language), which makes even an 8-message history lossy, slow, and prone to anchoring. Fresh context per turn is the right default. | `agent/granite_router.py:31`; invariant #5 |
 | Stream-json `session_id` field for resume | Replaced by scraping the on-exit hint only. C3 / Q5 partial. | Invariant #3; `agent/claude_session.py:49-52` |
 
@@ -137,12 +137,12 @@ The prior PoC (#1486, PR #1487) is the only prior attempt at the granite operato
 
 ## Architectural Impact
 
-- **New dependencies**: `pexpect>=4.9.0` and `ptyprocess>=0.7.0` are currently in `[project.optional-dependencies] dev`. The PoC promotes them to runtime `[project] dependencies`. The PoC ships its own stdlib fallback in a parallel module (`agent/granite_container/pty_driver_stdlib.py`) for the zero-dep path; the stdlib path is not exercised in the PoC's default run.
+- **New dependencies**: `pexpect>=4.9.0` and `ptyprocess>=0.7.0` are currently in `[dependency-groups] dev` (PEP 735). The PoC promotes them to runtime `[project] dependencies`. (The stdlib fallback the spike validated as competitive is not shipped in the PoC; the spike transcripts are preserved as evidence if a future refactor needs zero-dep.)
 - **Interface changes**: None to public APIs. `agent/sdk_client.py` and `agent/claude_session.py` are untouched. The PoC's container is a new module path (`agent/granite_container/`) that the operator CLI invokes end-to-end.
 - **Coupling**: The PoC *adds* a new boundary (the container) and *reduces* coupling between granite and the TUI (granite no longer has tools for judgment calls; PM absorbs them). The PoC does not couple to the bridge (no Telegram import; user-address output goes to a results log).
 - **Data ownership**: The container owns two PTYs and the loop. Granite is stateless (no cross-turn history). The persona-priming slash commands live in `.claude/commands/` (repo-owned) and are version-controlled.
-- **Reversibility**: The PoC is additive. Removing it deletes `agent/granite_container/`, `.claude/commands/prime-{pm,dev}-role.md`, the `valor-granite-loop` CLI entry point, and the runtime dep promotion - all small and atomic. The `agent/claude_session.py`, `agent/granite_router.py`, and `agent/sdk_client.py` files are untouched, so rollback does not affect the headless harness.
-- **Persistent artifacts**: `.claude/commands/prime-pm-role.md` and `.claude/commands/prime-dev-role.md` are persisted in the repo so the slash command shape is auditable. The two PTYs the PoC spawns are short-lived (per-invocation); no PTY state survives across invocations.
+- **Reversibility**: The PoC is additive. Removing it deletes `agent/granite_container/`, `.claude/commands/granite-poc/`, the `valor-granite-loop` CLI entry point, and the runtime dep promotion - all small and atomic. The `agent/claude_session.py`, `agent/granite_router.py`, and `agent/sdk_client.py` files are untouched, so rollback does not affect the headless harness.
+- **Persistent artifacts**: `.claude/commands/granite-poc/prime-pm-role.md` and `.claude/commands/granite-poc/prime-dev-role.md` are persisted in the repo so the slash command shape is auditable. The two PTYs the PoC spawns are short-lived (per-invocation); no PTY state survives across invocations.
 
 ## Appetite
 
@@ -175,22 +175,21 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_intera
 ### Key Elements
 
 - **`agent/granite_container/pty_driver.py`**: A thin pexpect-backed PTY driver class with `spawn()`, `write()`, `read_until_idle()`, `send_ctrl_c()`, `close()`. Honors C1 (`\r` submit), C2 (interjection regex), C5 (glyph+bar+floor idle signal). Reuses `_UUID_RE` and `_RESUME_HINT_RE` from `agent/claude_session.py:49-52` and the `INTERRUPTED_RE` from `scripts/granite_tui_pty_spike_pexpect.py:64-72`.
-- **`agent/granite_container/pty_driver_stdlib.py`**: A stdlib `pty` + `select` fallback in a parallel module, sharing the same interface. Not exercised in the default run; provided for the zero-dep path the spike validated as competitive.
 - **`agent/granite_container/startup_parser.py`**: A small Python function that watches both PTYs for known startup shapes (login prompt, update notice, error modal, persona-prime acknowledgement, trust-folder prompt). Returns a `StartupEvent` enum value; routes to granite for response text. Pattern-matches a small enum; does not interpret.
 - **`agent/granite_container/granite_classifier.py`**: A new granite router (not the existing `agent/granite_router.py`) with the reduced 3-tool taxonomy: `classify_pm_output` (returns `dev` / `user` / `complete`), `extract_dev_prompt` (translation: PM output tail → Dev user-turn prompt), `summarize_for_pm` (translation: Dev output → one-paragraph PM summary). Stateless: each call has only the system prompt + the current turn's content. Mirrors the Q4 event-bridge shape decision (see *Open Questions*).
 - **`agent/granite_container/container.py`**: The loop. Owns both PTYs. Runs the 12-step start-up sequence from the issue. The main loop alternates PM and Dev turns, calling granite between each, writing to the appropriate PTY, and waiting for idle.
-- **`.claude/commands/prime-pm-role.md`**: Persona-priming slash command. Authored as a write-time conversion of `config/personas/project-manager.md` + segments, with the routing instruction appended. Invoked as `/prime-pm-role <user message>`; the model sees the persona text and the user message; the input box shows only the literal typed text (F4).
-- **`.claude/commands/prime-dev-role.md`**: Same shape, persona is `config/personas/developer.md`. The body instructs Dev to wait for the project manager's instructions.
+- **`.claude/commands/granite-poc/prime-pm-role.md`**: Persona-priming slash command. Authored as a write-time conversion of `config/personas/project-manager.md` + segments, with the routing instruction appended. Invoked as `/granite-poc:prime-pm-role <user message>`; the model sees the persona text and the user message; the input box shows only the literal typed text (F4). The body instructs PM to begin every output with one of three literal prefix tokens on a line of its own: `[/dev]`, `[/user]`, or `[/complete]` (the routing convention consumed by `granite_classifier.py`). The body is a *persona prompt*, not a tool definition; PM has no custom tools (invariant #7). The subdirectory namespacing follows the existing Claude Code convention (subdirectories in `.claude/commands/` namespace the command name) and prevents a developer running `claude` interactively in the repo from accidentally seeing `/prime-pm-role` in their slash-command list (C3 risk).
+- **`.claude/commands/granite-poc/prime-dev-role.md`**: Same shape, persona is `config/personas/developer.md`. The body instructs Dev to wait for the project manager's instructions (no prefix-token convention; Dev's output is summarized by granite, not classified).
 - **`tools/granite_interactive_tui_poc/__init__.py` + `cli.py`**: The PoC CLI entry point. Declared in `pyproject.toml [project.scripts]` as `valor-granite-loop` (see *Agent Integration*). Invokes the container end-to-end with a user-message arg; writes the results JSON to a path the results doc reads.
-- **`docs/plans/granite_interactive_tui_poc-results.md`**: The results doc. Captures latency, reliability, parse-failure modes, **PM-output classification accuracy**, single-turn latency, and an honest "this is / isn't viable" verdict. New spikes or issues filed for any constraint the PoC discovers to be wrong.
+- **`docs/plans/granite_interactive_tui_poc-results.md`**: The results doc. Captures latency, reliability, parse-failure modes, **PM prefix-token compliance** (B1 role-boundary fix), single-turn latency, and an honest "this is / isn't viable" verdict. New spikes or issues filed for any constraint the PoC discovers to be wrong.
 
 ### Flow
 
 ```
 Operator → valor-granite-loop --user-message "..." → Container.spawn(pm_pty, dev_pty)
                                                               ↓
-                                  Container writes /prime-pm-role <msg>\r → PM PTY
-                                  Container writes /prime-dev-role <msg>\r → Dev PTY
+                                  Container writes /granite-poc:prime-pm-role <msg>\r → PM PTY
+                                  Container writes /granite-poc:prime-dev-role <msg>\r → Dev PTY
                                                               ↓
                               Startup-phase parser watches both PTYs; on trust-folder prompt,
                               asks granite for response text, writes "1\r" to dismiss
@@ -215,13 +214,13 @@ Operator → valor-granite-loop --user-message "..." → Container.spawn(pm_pty,
 ### Technical Approach
 
 - **Substrate driver before everything.** Phase 1 lands `pty_driver.py` and self-tests it against the v7 spike's scenarios 1, 2, 3, 6 in isolation. If the driver does not pass these four scenarios, the PoC is blocked at the substrate; do not move on. The v7 spike's `scripts/granite_tui_pty_spike_pexpect.py` is the reference implementation; the PoC's driver adapts its `wait_for_idle` and `_send` helpers directly.
-- **Persona priming before classification.** Phase 2 lands `.claude/commands/prime-{pm,dev}-role.md` and self-tests the priming path: spawn a single PTY, send `/prime-pm-role hello`, confirm the TUI reaches idle and the model responds to a follow-up. If the model does not respond, F2 substitution is broken in the env - investigate the model-reachability prerequisite before continuing.
+- **Persona priming before classification.** Phase 2 lands `.claude/commands/granite-poc/prime-{pm,dev}-role.md` and self-tests the priming path: spawn a single PTY, send `/granite-poc:prime-pm-role hello`, confirm the TUI reaches idle and the model responds to a follow-up. If the model does not respond, F2 substitution is broken in the env - investigate the model-reachability prerequisite before continuing.
 - **Two-PTY coordination is the early risk.** Phase 5 (steady-state loop) is the first time two TUIs run side-by-side under one Python process. The container's idle-heuristic tuning must validate this *before* deeper PM/Dev logic lands; a coordination problem in the idle heuristic is a fundamental blocker. The substrate-driver phase is single-PTY; Phase 5 is the first multi-PTY milestone. Build a minimal two-PTY test (spawn both, prime both, wait for both to idle, write a "ping" to PM, wait for PM to idle, write a "ping" to Dev, wait for Dev to idle) before adding the granite classification layer.
 - **Q4 event-bridge shape (decided in the plan):** map PTY output to the existing `list[dict]` event shape at the boundary. The new `granite_classifier.py` does not consume raw PTY bytes; the container strips ANSI, slices the buffer at the idle boundary, and wraps the text in `[{"type": "pm_output", "text": <tail>}]` (or `dev_output` for the Dev side). This keeps granite's interface stable across the prior PoC and the new PoC; the difference is in how events are *produced* (PTY → text slice) not how they are *consumed* (a small list of dicts). Justification: the granite `SYSTEM_PROMPT` and tool definitions are the same; the production cutover can adopt the new substrate without rewriting granite's prompt.
 - **Q5 resume-UUID disposition (decided in the plan):** exercise resume inside the PoC itself in a model-reachable env (option b in the issue's *Planner handoff*). The PoC's resume test runs as part of Phase 6; it requires the `claude --print "ping"` prerequisite check to pass. The PoC does not block on #1552 closing first; if #1552 closes before the PoC's resume phase, the PoC inherits the spike's findings.
-- **Q6 classification-accuracy measurement (decided in the plan):** the results doc reports classification accuracy on a *synthetic distribution* (constructed from the spike's transcripts) *plus* live measurements from the PoC's own runs. The test cases from the issue: (a) baseline with no overlay, (b) `/help` overlay state, (c) long output (1000+ tokens). Sub-95% accuracy is a *finding*, not necessarily a fail - but the plan must surface it. The classifier's prompt template is tuned against the measured data, not vibes.
+- **Q6 prefix-token compliance measurement (decided in the plan, post-B1 fix):** the results doc reports prefix-token compliance on a *synthetic distribution* (constructed from the spike's transcripts) *plus* live measurements from the PoC's own runs. The test cases from the issue: (a) baseline with no overlay, (b) `/help` overlay state, (c) long output (1000+ tokens). Sub-95% compliance is a *finding* that means PM's persona prompt is not enforcing the prefix convention; the plan surfaces it. PM's persona prompt (in `granite-poc/prime-pm-role.md`) is tuned against the measured data, not vibes.
 - **Idempotent teardown.** Each phase's self-test ends with both children closed (`child.close(force=True)`) and a `pkill` fallback for orphans (mirroring the probe's teardown at `scripts/probe_slash_arguments.py:367-373`). The PoC's main loop uses `try/finally` to ensure teardown on any exception.
-- **Idempotent slash-command authoring.** `.claude/commands/prime-{pm,dev}-role.md` are written once at Phase 2; the rest of the PoC invokes them by name. The persona-text content is a write-time conversion of `config/personas/{project-manager,developer}.md` (and the segments in `config/personas/segments/manifest.json`), not a live composition at runtime. The persona is versioned with the code; changing the persona is a code change.
+- **Idempotent slash-command authoring.** `.claude/commands/granite-poc/prime-{pm,dev}-role.md` are written once at Phase 2; the rest of the PoC invokes them by name (`/granite-poc:prime-pm-role`, `/granite-poc:prime-dev-role`). The persona-text content is a write-time conversion of `config/personas/{project-manager,developer}.md` (and the segments in `config/personas/segments/manifest.json`), not a live composition at runtime. The persona is versioned with the code; changing the persona is a code change.
 
 ## Failure Path Test Strategy
 
@@ -306,7 +305,7 @@ If the build discovers that the new tests in `tests/unit/granite_container/` col
 
 **Mitigation:** The substrate driver phase self-tests against scenarios 1, 2, 3, 6 *before* any other code is written. The spike's `pexpect/scenario-{1,2,3,6}.bin` transcripts are the regression reference. If a scenario fails, the failure mode is investigated at the substrate layer (idle heuristic, submit key, ANSI stripping) before moving on.
 
-### Risk 2: Q6 classification accuracy is below 95% in live runs
+### Risk 2: PM prefix-token compliance is below 95% in live runs (B1 role-boundary fix)
 
 **Impact:** The architecture's load-bearing routing decision is unreliable. Misrouting a developer-address as user-address (or vice versa) is exactly the unbounded failure mode the translator role is supposed to prevent.
 
@@ -397,14 +396,14 @@ If the build discovers that the new tests in `tests/unit/granite_container/` col
 - [ORDERED] Continuous token-by-token streaming load beyond a 5-minute idle hold. The spike exercised one long idle, not continuous streaming. The Q6 test case (c) for 1000+ token output is in scope; a sustained-streaming test is a follow-on.
 - [SEPARATE-SLUG] Cross-turn history accumulation in granite. The PoC uses fresh context per turn; a 1-line structured handoff field is a follow-on optimization. The PoC's data should be sufficient to justify either fresh-only or fresh + handoff.
 - [ORDERED] Model-per-role config at the runner level. The PoC hardcodes `claude --model sonnet --permission-mode bypassPermissions`; a per-persona model picker is a production-cutover concern.
-- [SEPARATE-SLUG] Full-distribution PM-output classification accuracy. The PoC reports accuracy on the synthetic distribution + live measurements from the PoC's own runs; a 1000-sample real-PM-output study is a follow-on.
+- [SEPARATE-SLUG] Full-distribution PM prefix-token compliance measurement. The PoC reports compliance on the synthetic distribution + live measurements from the PoC's own runs; a 1000-sample real-PM-output study is a follow-on.
 - [EXTERNAL] Bridging the spike's transcripts to the new driver as a one-shot import. The driver's regression test re-runs the scenarios and compares footers, not bytes. The spike's transcripts are reference material, not test fixtures.
 
 ## Update System
 
 The PoC is purely additive (new module path, new persona-priming slash commands, new CLI entry point, new runtime deps). No existing update-script paths are affected.
 
-- **`pyproject.toml` runtime dep promotion**: `pexpect>=4.9.0` and `ptyprocess>=0.7.0` are currently in `[project.optional-dependencies] dev`. The PoC promotes them to runtime `[project] dependencies`. The existing update script (`scripts/remote-update.sh`) syncs `pyproject.toml` on each machine, so the promotion is automatically propagated on the next `/update`.
+- **`pyproject.toml` runtime dep promotion**: `pexpect>=4.9.0` and `ptyprocess>=0.7.0` are currently in `[dependency-groups] dev` (PEP 735). The PoC promotes them to runtime `[project] dependencies`. The existing update script (`scripts/remote-update.sh`) syncs `pyproject.toml` on each machine, so the promotion is automatically propagated on the next `/update`.
 - **No new secrets, config files, or env vars.** The PoC forces Max OAuth by blanking `ANTHROPIC_API_KEY` on the subprocess env (mirroring `agent/claude_session.py:90-101`); no new env var is required.
 - **No new machines, services, or external API calls.** The PoC is local to the dev machine; the only external resource is the Claude Code TUI (already a runtime requirement) and `ollama` (already a runtime requirement for the prior PoC).
 - **No migration steps.** The PoC is additive; existing installations continue to work without the new module path. The persona-priming slash commands are read at TUI runtime, so they take effect on the next `claude` invocation in a directory with the new `.claude/commands/` content.
@@ -442,10 +441,10 @@ The agent receives Telegram messages via the bridge (`bridge/telegram_bridge.py`
 ## Success Criteria
 
 - [ ] A PoC script drives a real interactive `claude` session via PTY end-to-end, unattended, with zero `claude -p`. Grep confirms: `grep -rn 'claude -p\|--print' agent/granite_container/ tools/granite_interactive_tui_poc/` returns no matches in source code.
-- [ ] Both PM and Dev subprocesses are primed via persona-priming slash commands (`.claude/commands/prime-pm-role.md`, `prime-dev-role.md`) invoked as the first PTY input, with the user message passed as `$ARGUMENTS`. Both sessions know the user task; Dev's slash-command body instructs it to wait; PM's tells it to address the developer or the user.
+- [ ] Both PM and Dev subprocesses are primed via persona-priming slash commands (`.claude/commands/granite-poc/prime-pm-role.md`, `prime-dev-role.md`) invoked as the first PTY input, with the user message passed as `$ARGUMENTS`. Both sessions know the user task; Dev's slash-command body instructs it to wait; PM's tells it to begin every output with a `[/dev]/[/user]/[/complete]` prefix token (B1 role-boundary fix).
 - [ ] Granite handles, in a live run: a numbered multiple-choice menu, a permission/feedback prompt, ≥3 multi-turn PM↔Dev exchanges, a PM user-address message routed to the results log, and a `claude --resume` recovery after interruption with context intact (the last only if the model-reachable prerequisite passes; otherwise the test is skipped with a structured log).
 - [ ] Runs under Max OAuth. `ANTHROPIC_API_KEY=""` is set on the subprocess env (no API key in the parent env's reach).
-- [ ] The results doc records feasibility: latency, reliability, parse failure modes, **PM-output classification accuracy on the synthetic distribution + live measurements**, single-turn latency, and an honest "this is / isn't viable" verdict. New spikes or issues filed for any constraint the PoC discovers to be wrong.
+- [ ] The results doc records feasibility: latency, reliability, parse failure modes, **PM prefix-token compliance on the synthetic distribution + live measurements**, single-turn latency, and an honest "this is / isn't viable" verdict. New spikes or issues filed for any constraint the PoC discovers to be wrong.
 - [ ] Tests pass: `pytest tests/ -x -q` (with the model-reachable integration test gated on the prerequisite).
 - [ ] Lint clean: `python -m ruff check .` and `python -m ruff format --check .` exit 0.
 - [ ] Code quality standards met (new code lands in `agent/granite_container/`; existing `agent/claude_session.py`, `agent/granite_router.py`, `agent/sdk_client.py` are untouched).
@@ -460,13 +459,13 @@ When this plan is executed via `/do-build`, the lead agent orchestrates work usi
 
 - **Builder (substrate-driver)**
   - Name: substrate-builder
-  - Role: Land `agent/granite_container/pty_driver.py` + `pty_driver_stdlib.py`; self-test against spike scenarios 1, 2, 3, 6.
+  - Role: Land `agent/granite_container/pty_driver.py`; self-test against spike scenarios 1, 2, 3, 6.
   - Agent Type: builder
   - Resume: true
 
 - **Builder (persona-priming)**
   - Name: persona-builder
-  - Role: Author `.claude/commands/prime-pm-role.md` + `prime-dev-role.md`; self-test the priming path against a single PTY.
+  - Role: Author `.claude/commands/granite-poc/prime-pm-role.md` + `prime-dev-role.md`; self-test the priming path against a single PTY.
   - Agent Type: builder
   - Resume: true
 
@@ -530,7 +529,6 @@ When this plan is executed via `/do-build`, the lead agent orchestrates work usi
 - **Parallel**: true
 - Create `agent/granite_container/__init__.py` and `agent/granite_container/pty_driver.py` with `spawn()`, `write()`, `read_until_idle()`, `send_ctrl_c()`, `close()`. Reuse `_UUID_RE`, `_RESUME_HINT_RE` from `agent/claude_session.py:49-52` and `INTERRUPTED_RE` from `scripts/granite_tui_pty_spike_pexpect.py:64-72`.
 - Honor C1 (`\r` submit), C2 (interjection regex), C5 (glyph + bar + content-floor idle).
-- Create `agent/granite_container/pty_driver_stdlib.py` as a parallel stdlib fallback (not exercised in default run).
 - Self-test against spike scenarios 1, 2, 3, 6 in isolation. If any fail, the PoC is blocked at the substrate; investigate the failure mode before continuing.
 
 ### 2. Substrate regression validator
@@ -551,9 +549,9 @@ When this plan is executed via `/do-build`, the lead agent orchestrates work usi
 - **Assigned To**: persona-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Author `.claude/commands/prime-pm-role.md` (write-time conversion of `config/personas/project-manager.md` + segments, with the routing instruction appended).
-- Author `.claude/commands/prime-dev-role.md` (write-time conversion of `config/personas/developer.md` + segments, with the "wait for project manager" instruction appended).
-- Self-test by spawning a single PTY, sending `/prime-pm-role hello`, confirming the TUI reaches idle and the model responds to a follow-up.
+- Author `.claude/commands/granite-poc/prime-pm-role.md` (write-time conversion of `config/personas/project-manager.md` + segments, with the routing instruction + `[/dev]/[/user]/[/complete]` prefix-token convention appended).
+- Author `.claude/commands/granite-poc/prime-dev-role.md` (write-time conversion of `config/personas/developer.md` + segments, with the "wait for project manager" instruction appended).
+- Self-test by spawning a single PTY, sending `/granite-poc:prime-pm-role hello`, confirming the TUI reaches idle and the model responds to a follow-up.
 - Self-test the multi-line user message case (newlines, markdown, special characters). If the TUI rejects or the model sees a partial message, investigate the input-box escape / character encoding.
 
 ### 4. Startup-phase parser
@@ -600,7 +598,7 @@ When this plan is executed via `/do-build`, the lead agent orchestrates work usi
 - **Parallel**: false
 - Create `tools/granite_interactive_tui_poc/__init__.py` + `cli.py` with the `main()` entry point. CLI takes `--user-message <text>` (required) and `--max-turns <int>` (default 10) and `--output <path>` (default `./granite_poc_results.json`).
 - Declare `valor-granite-loop = "tools.granite_interactive_tui_poc.cli:main"` in `pyproject.toml [project.scripts]`.
-- Promote `pexpect>=4.9.0` and `ptyprocess>=0.7.0` from `[project.optional-dependencies] dev` to runtime `[project] dependencies`.
+- Promote `pexpect>=4.9.0` and `ptyprocess>=0.7.0` from `[dependency-groups] dev` (PEP 735) to runtime `[project] dependencies`.
 
 ### 8. Classification-accuracy validator
 - **Task ID**: validate-classification-accuracy
@@ -642,7 +640,7 @@ When this plan is executed via `/do-build`, the lead agent orchestrates work usi
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| No `claude -p` in new code | `grep -rn 'claude -p\|--print' agent/granite_container/ tools/granite_interactive_tui_poc/ .claude/commands/prime-*.md` | exit code 1 (no matches) |
+| No `claude -p` in new code | `grep -rn 'claude -p\|--print' agent/granite_container/ tools/granite_interactive_tui_poc/ .claude/commands/granite-poc/` | exit code 1 (no matches) |
 | Runtime dep promotion | `grep -A 20 '^\[project\]\ndependencies' pyproject.toml \| grep -E 'pexpect\|ptyprocess'` | exit code 0 (both present) |
 | CLI entry point registered | `grep 'valor-granite-loop' pyproject.toml` | exit code 0 |
 | Substrate driver regression | `python -c "from agent.granite_container.pty_driver import PTYDriver; driver = PTYDriver(); driver.spawn(); assert driver.wait_for_idle()"` (in a model-reachable env) | exit code 0 |
@@ -667,7 +665,7 @@ The issue identifies three open questions (Q4, Q5, Q6) the plan's job is to reso
 
 2. **Q5 (resume UUID):** Resolved. The PoC exercises resume inside itself in a model-reachable env (option b in the issue's *Planner handoff*). The test is gated on the `claude --print "ping"` prerequisite; if the env is unreachable, the test is *skipped* with a structured log line (`resume: skipped - env_unreachable`) and a follow-on issue is filed. The PoC does not block on #1552 closing first; if #1552 closes before the PoC's resume phase, the PoC inherits the spike's findings as a corroborating reference.
 
-3. **Q6 (PM-output classification accuracy):** Resolved. The PoC's results doc reports accuracy on a synthetic distribution (constructed from the spike's transcripts) *plus* live measurements from the PoC's own runs. Test cases per the issue: (a) baseline with no overlay, (b) `/help` overlay state (C4), (c) long output (1000+ tokens). Sub-95% accuracy is a *finding*, not necessarily a fail - but the plan surfaces it through the Q6 confusion matrix in the results doc. The classifier's prompt template is tuned against the measured data, not vibes.
+3. **Q6 (PM prefix-token compliance):** Resolved. After the B1 role-boundary fix, "classification accuracy" is replaced with "PM prefix-token compliance": granite's classifier is a deterministic regex parse (`^\[(/dev|/user|/complete)\]\s*$`) on the first line of PM's tail, not an LLM call. The results doc reports compliance rate (a parse metric) on a synthetic distribution (constructed from the spike's transcripts) *plus* live measurements from the PoC's own runs. Test cases per the issue: (a) baseline with no overlay, (b) `/help` overlay state (C4), (c) long output (1000+ tokens). Sub-95% compliance is a *finding* that means PM's persona prompt is not enforcing the prefix convention; the plan surfaces it through the compliance-vs-class confusion matrix. PM's persona prompt (in `granite-poc/prime-pm-role.md`) is tuned against the measured data, not vibes.
 
 4. **Steady-state multi-turn PM↔Dev coordination:** Resolved. The two-PTY coordination test is the first sub-task of the container phase, *before* the granite classification layer is added. A multi-PTY regression test in `tests/integration/test_granite_container_loop.py` is the durable guard against coordination regressions.
 
