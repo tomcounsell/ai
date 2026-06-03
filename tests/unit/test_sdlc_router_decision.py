@@ -129,6 +129,28 @@ class TestRow4bReadyWithConcernsNoRevision:
         assert result.skill == SKILL_DO_PLAN
         assert result.row_id == "4b"
 
+    def test_releases_once_pr_exists_even_without_revision_flag(self):
+        """Row 4b must NOT re-dispatch /do-plan after the PR is open.
+
+        Symmetry gap: row 4c got pr_number/BUILD guards but row 4b did not, so
+        a with-concerns plan whose revision_applied flag never got set would
+        loop /do-plan forever once a PR existed, never advancing to review.
+        """
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "REVIEW": "ready",
+        }
+        meta = {
+            "latest_critique_verdict": "READY TO BUILD (with concerns)",
+            "revision_applied": False,
+            "pr_number": 466,
+        }
+        result = decide_next_dispatch(states, meta)
+        assert result.skill != SKILL_DO_PLAN
+        assert result.row_id != "4b"
+
 
 class TestRow4cReadyWithConcernsRevisionApplied:
     def test_concerns_with_revision_flag_proceeds_to_build(self):
