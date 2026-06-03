@@ -268,6 +268,28 @@ The worker can also be installed separately via `./scripts/install_worker.sh`. S
 
 **Logger handler guard**: `telegram_bridge.py` may execute its module-level setup twice in some launch configurations (once as `__main__`, once as `bridge.telegram_bridge`). This would add a second `RotatingFileHandler` to the root logger, doubling every log line. A guard checks for an existing handler with the same log file path before adding a new one.
 
+### 12a. Silent Telethon Update Gap Handling (`bridge/dedup.py`, `bridge/catchup.py`, `bridge/reconciler.py`, `bridge/silent_stream.py`)
+
+**Problem** (issue #1408): Telethon can stop delivering `NewMessage` events for a specific chat with no error and no disconnect — the bridge believes it is connected, but the event handler simply stops firing for that chat (known unresolved upstream bugs; the Telethon library was archived 2026-02-21). Three compounding failures previously turned this into permanent message loss:
+
+1. **Catchup dead zone** — Section 12's catchup cutoff is `data/last_connected`, which advances on every 5-minute heartbeat. A message sent *inside* the connection window but silently dropped by Telethon falls *before* the cutoff on restart and is excluded from catchup.
+2. **Reconciler lookback too short** — The reconciler's fixed 10-minute lookback aged out messages before they could be recovered across multiple restarts while the worker was down.
+3. **Silent failure invisibility** — No log, no alert; the gap was undetectable until a human noticed a dropped message.
+
+**Solution** — three coordinated mechanisms, all best-effort (failures log a WARNING and fall back to prior behavior; they never crash the live handler, reconciler, or catchup):
+
+1. **Per-chat last-processed cursor** (`models/last_processed.py` `LastProcessedRecord`, `bridge/dedup.py` `record_last_processed` / `get_last_processed`). A Redis-backed Popoto model (30-day TTL) tracks the latest message ID + timestamp the bridge actually *dispatched* for each chat. It is distinct from `DedupRecord` (a *set* of recent IDs for membership checks) — this is a monotonic *cursor*. Written by the live handler (via `bridge/dispatch.py::dispatch_telegram_session`), the reconciler, and catchup on every successful dispatch. The cursor advances monotonically: an older message ID is a no-op, so concurrent writes from the live handler and the reconciler cannot regress it.
+
+2. **Smarter catchup cutoff** (`bridge/catchup.py`). For each chat, catchup computes `per_chat_cutoff = min(global_cutoff, last_processed_dt - 60s)`. It uses `min()` — never `max()` — so the scan looks back *at least* as far as the global `last_connected` cutoff, and *further* when the per-chat cursor is older (closing the dead zone). The 60-second safety margin guards against off-by-a-message edges, and the 24-hour global cap (Section 12) still bounds total lookback. If the cursor read fails or no cursor exists, catchup falls back to the global cutoff — today's behavior.
+
+3. **Extended reconciler lookback** (`bridge/reconciler.py`). `RECONCILE_LOOKBACK_MINUTES` is 30 (raised from 10) and `RECONCILE_MESSAGE_LIMIT` is 30 (raised from 20). The 30-minute window covers the worst-case multi-restart scenario; the limit bump keeps the window covered in busy chats while remaining a single `get_messages()` API call per chat per 3-minute scan (no increase in API call *rate*).
+
+4. **Silent-stream check** (`bridge/silent_stream.py` `check_silent_chat` / `check_silent_streams`, `SilentStreamState`). The silent-gap check **rides the reconciler's existing dialog pass** — it does *not* run its own loop. The reconciler already calls `client.get_dialogs()` every 180s and iterates every monitored group; `reconcile_once` invokes `check_silent_chat` for each dialog it already fetched, threading a shared `SilentStreamState` (bridge start timestamp + per-chat warning timestamps) across passes. This adds **no** recurring `get_dialogs()` call beyond the reconciler's existing one — a deliberate constraint of issue #1408 (must not increase the steady-state Telegram API call rate). The check compares the per-chat `bridge:last_event:{chat_id}` Redis key (set on *every* incoming event, before dedup/routing) against the silence threshold and logs a single `[silent-stream] WARNING` when a `respond_to_unaddressed: true` chat has had no events for 15+ minutes while the bridge has been continuously connected and the chat had prior activity in the session. **Observability only** — it does not re-dispatch (the reconciler and catchup own recovery), and a failure in the check is caught so it never interrupts the reconciler's recovery scan. False-positive suppression: only `respond_to_unaddressed` chats are watched; a chat with no `last_event` baseline is skipped; no warning fires within the first 15 minutes after startup; each chat warns at most once per 30-minute window.
+
+**Recovery latency**: a message sent 25 minutes before a restart is recovered within 30 minutes — either the extended reconciler lookback catches it during live connection, or the per-chat catchup cutoff catches it on the next restart.
+
+**Observable in `logs/bridge.log`** via the existing `[catchup] Found missed message` / `[reconciler] Recovered` lines and the new `[silent-stream]` WARNING lines.
+
 ### 13. Update Polling (`com.valor.update`)
 
 **Problem**: Code pushes to main could take up to 12 hours to propagate to all machines, since the update plist only ran at 6 AM and 6 PM.

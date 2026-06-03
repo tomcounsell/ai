@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 
 from agent.agent_session_queue import enqueue_agent_session
-from bridge.dedup import record_message_processed
+from bridge.dedup import record_last_processed, record_message_processed
 from config.enums import SessionType
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,7 @@ async def dispatch_telegram_session(
     project_config: dict | None = None,
     extra_context_overrides: dict | None = None,
     requires_real_chrome: bool = False,
+    message_ts=None,
 ) -> int:
     """Enqueue a Telegram-originating session and record dedup.
 
@@ -143,6 +144,10 @@ async def dispatch_telegram_session(
         telegram_message_id=telegram_message_id,
     )
     await record_message_processed(chat_id, telegram_message_id)
+    # Advance the per-chat last-processed cursor (issue #1408). ``message_ts``
+    # may be None (callers without the message date in scope) — the cursor helper
+    # coerces None to now(). The cursor only advances monotonically.
+    await record_last_processed(chat_id, telegram_message_id, message_ts)
     return depth
 
 

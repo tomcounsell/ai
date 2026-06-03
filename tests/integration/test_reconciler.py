@@ -89,6 +89,7 @@ class TestReconcilerGapDetection:
         with (
             patch("bridge.reconciler.is_duplicate_message", side_effect=mock_is_duplicate),
             patch("bridge.reconciler.record_message_processed", side_effect=mock_record),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
         ):
             # First scan: should detect messages 6 and 7 as missed
             result = await reconcile_once(
@@ -171,6 +172,7 @@ class TestReconcilerGapDetection:
         with (
             patch("bridge.reconciler.is_duplicate_message", side_effect=mock_is_duplicate),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
         ):
             result = await reconcile_once(
                 client=client,
@@ -183,3 +185,60 @@ class TestReconcilerGapDetection:
         assert result == 1
         assert enqueued[0]["telegram_message_id"] == 6
         assert enqueued[0]["message_text"] == "Real missed message"
+
+
+class TestReconcilerExtendedLookback:
+    """Issue #1408: the 30-minute lookback recovers older messages.
+
+    A message 20 minutes old would have aged out of the old 10-minute window
+    before the reconciler could act (the documented dead-zone scenario). With
+    the extended 30-minute lookback it must be recovered.
+    """
+
+    @pytest.mark.asyncio
+    async def test_constants_extended(self):
+        """Lookback is 30 minutes and the per-scan limit is 30 messages."""
+        from bridge.reconciler import RECONCILE_LOOKBACK_MINUTES, RECONCILE_MESSAGE_LIMIT
+
+        assert RECONCILE_LOOKBACK_MINUTES == 30
+        assert RECONCILE_MESSAGE_LIMIT == 30
+
+    @pytest.mark.asyncio
+    async def test_twenty_minute_old_message_recovered(self):
+        """A 20-minute-old message is recovered (would fail under the old 10-min window)."""
+        dialog = _make_dialog("Cyndra Dev", entity_id=700)
+        # 20 minutes old: outside the old 10-min window, inside the new 30-min window.
+        missed = _make_message(900, text="please review this", minutes_ago=20)
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[missed])
+
+        enqueued = []
+
+        async def mock_enqueue(**kwargs):
+            enqueued.append(kwargs)
+
+        should_respond_fn = AsyncMock(return_value=(True, False))
+        project = {"_key": "cyndra", "working_directory": "/tmp/cyndra"}
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["cyndra dev"],
+                should_respond_fn=should_respond_fn,
+                enqueue_agent_session_fn=mock_enqueue,
+                find_project_fn=MagicMock(return_value=project),
+            )
+
+        assert result == 1
+        assert len(enqueued) == 1
+        assert enqueued[0]["telegram_message_id"] == 900
