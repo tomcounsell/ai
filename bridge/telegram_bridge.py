@@ -2913,12 +2913,17 @@ async def main():
 
     _background_tasks.append(asyncio.create_task(_run_catchup()))
 
-    # Start message reconciler (detects live-session gaps)
+    # Start message reconciler (detects live-session gaps). The silent-stream
+    # watcher (issue #1408) rides this same dialog pass via silent_stream_state
+    # rather than running a separate loop with a redundant get_dialogs() call —
+    # it warns when a respond_to_unaddressed chat goes silent 15+ min while the
+    # bridge is connected. Observability only.
     try:
         from agent.agent_session_queue import (
             enqueue_agent_session as _reconciler_enqueue,
         )
         from bridge.reconciler import reconciler_loop
+        from bridge.silent_stream import SilentStreamState
 
         _background_tasks.append(
             asyncio.create_task(
@@ -2928,32 +2933,13 @@ async def main():
                     should_respond_fn=should_respond_async,
                     enqueue_agent_session_fn=_reconciler_enqueue,
                     find_project_fn=find_project_for_chat,
+                    silent_stream_state=SilentStreamState(bridge_start_ts=time.time()),
                 )
             )
         )
-        logger.info("Message reconciler started")
+        logger.info("Message reconciler started (with silent-stream observability)")
     except Exception as e:
         logger.error(f"Failed to start message reconciler: {e}")
-
-    # Start silent-stream watcher (issue #1408): warns when a respond_to_unaddressed
-    # chat goes silent for 15+ min while the bridge is connected — surfacing silent
-    # Telethon update gaps as observable log events. Observability only.
-    try:
-        from bridge.silent_stream import silent_stream_loop
-
-        _background_tasks.append(
-            asyncio.create_task(
-                silent_stream_loop(
-                    client=client,
-                    monitored_groups=ALL_MONITORED_GROUPS,
-                    find_project_fn=find_project_for_chat,
-                    bridge_start_ts=time.time(),
-                )
-            )
-        )
-        logger.info("Silent-stream watcher started")
-    except Exception as e:
-        logger.error(f"Failed to start silent-stream watcher: {e}")
 
     # Start session watchdog
     try:

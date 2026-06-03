@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bridge.reconciler import RECONCILE_LOOKBACK_MINUTES, reconcile_once
+from bridge.silent_stream import SILENCE_THRESHOLD_SECONDS, SilentStreamState
 
 
 def _make_message(msg_id, text="hello", out=False, minutes_ago=1):
@@ -394,3 +395,127 @@ class TestReconcileOnce:
 
         assert result == 2
         assert enqueue_fn.call_count == 2
+
+
+class TestReconcileOnceSilentStream:
+    """The silent-gap check (issue #1408) rides the reconciler's dialog pass.
+
+    The reconciler already fetches dialogs every pass; the silent-gap check
+    reuses them rather than running a separate loop with its own get_dialogs().
+    """
+
+    @pytest.mark.asyncio
+    async def test_silent_check_runs_on_existing_dialog_pass(self):
+        """When state is provided, a silent monitored chat warns using the same dialogs."""
+        import time
+
+        dialog = _make_dialog("Cyndra Dev", entity_id=900)
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[])
+
+        # Bridge up long ago; chat silent well past the threshold.
+        now = time.time()
+        state = SilentStreamState(bridge_start_ts=now - 10 * 3600)
+        project = {
+            "_key": "cyndra",
+            "working_directory": "/tmp/cyndra",
+            "telegram": {"respond_to_unaddressed": True},
+        }
+
+        with patch(
+            "bridge.silent_stream.get_last_event_ts",
+            new_callable=AsyncMock,
+            return_value=now - (SILENCE_THRESHOLD_SECONDS + 60),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["cyndra dev"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=AsyncMock(),
+                find_project_fn=MagicMock(return_value=project),
+                silent_stream_state=state,
+            )
+
+        # No messages to recover, but the silent-gap warning was recorded.
+        assert result == 0
+        assert dialog.id in state.warned_chats
+        # The reconciler fetched dialogs exactly once for both jobs.
+        client.get_dialogs.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_silent_state_is_a_noop(self):
+        """Without silent_stream_state the reconciler behaves exactly as before."""
+        dialog = _make_dialog("Test Group")
+        msg = _make_message(100, text="missed")
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[msg])
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+            patch("bridge.silent_stream.get_last_event_ts", new_callable=AsyncMock) as evt,
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["test group"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=AsyncMock(),
+                find_project_fn=MagicMock(return_value=_make_project()),
+            )
+
+        assert result == 1
+        # Silent-gap check never ran (no state), so it never touched Redis.
+        evt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_silent_check_failure_does_not_break_recovery(self):
+        """A failing silent-gap check must not stop message recovery."""
+        import time
+
+        dialog = _make_dialog("Cyndra Dev", entity_id=950)
+        msg = _make_message(123, text="recover me")
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[msg])
+
+        state = SilentStreamState(bridge_start_ts=time.time() - 10 * 3600)
+        project = {
+            "_key": "cyndra",
+            "working_directory": "/tmp/cyndra",
+            "telegram": {"respond_to_unaddressed": True},
+        }
+        enqueue_fn = AsyncMock()
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+            patch(
+                "bridge.silent_stream.get_last_event_ts",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("redis down"),
+            ),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["cyndra dev"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=enqueue_fn,
+                find_project_fn=MagicMock(return_value=project),
+                silent_stream_state=state,
+            )
+
+        # Recovery still succeeded despite the silent-gap check raising.
+        assert result == 1
+        enqueue_fn.assert_called_once()

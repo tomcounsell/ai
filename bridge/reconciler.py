@@ -17,6 +17,7 @@ from bridge.dedup import (
     record_last_processed,
     record_message_processed,
 )
+from bridge.silent_stream import SilentStreamState, check_silent_chat
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +38,17 @@ async def reconciler_loop(
     should_respond_fn,
     enqueue_agent_session_fn,
     find_project_fn,
+    silent_stream_state: SilentStreamState | None = None,
 ):
     """Run periodic reconciliation to detect missed messages.
 
     Scans monitored groups for messages that bypassed the event handler.
     Gates all re-dispatches through dedup to prevent duplicate processing.
+
+    When ``silent_stream_state`` is provided, the silent-gap observability check
+    (issue #1408) rides this same dialog pass — reusing the dialogs already
+    fetched here rather than running its own loop with a redundant
+    ``get_dialogs()`` call.
     """
     logger.info(
         "[reconciler] Started (interval=%ds, lookback=%dm, limit=%d)",
@@ -59,6 +66,7 @@ async def reconciler_loop(
                 should_respond_fn=should_respond_fn,
                 enqueue_agent_session_fn=enqueue_agent_session_fn,
                 find_project_fn=find_project_fn,
+                silent_stream_state=silent_stream_state,
             )
             if recovered > 0:
                 logger.warning("[reconciler] Recovered %d missed message(s)", recovered)
@@ -74,10 +82,16 @@ async def reconcile_once(
     should_respond_fn,
     enqueue_agent_session_fn,
     find_project_fn,
+    silent_stream_state: SilentStreamState | None = None,
 ) -> int:
     """Run a single reconciliation scan across all monitored groups.
 
     Returns the number of missed messages recovered and enqueued.
+
+    When ``silent_stream_state`` is provided, the silent-gap observability check
+    (issue #1408) runs for each monitored dialog using the dialogs already
+    fetched here — no separate ``get_dialogs()`` call. The check is purely
+    observability (logs a WARNING) and never affects the recovery count.
     """
     if not monitored_groups:
         logger.debug("[reconciler] No monitored groups, skipping scan")
@@ -98,6 +112,24 @@ async def reconcile_once(
             continue
 
         project = find_project_fn(chat_title)
+
+        # Silent-gap observability (issue #1408): ride this dialog pass instead
+        # of a separate loop. Best-effort — a failure here must never break the
+        # recovery scan. Runs even when the chat has no project config (the
+        # per-chat check applies its own respond_to_unaddressed gate).
+        if silent_stream_state is not None:
+            try:
+                await check_silent_chat(
+                    chat_id=dialog.id,
+                    chat_title=chat_title,
+                    project=project,
+                    state=silent_stream_state,
+                )
+            except Exception as e:
+                logger.error(
+                    "[silent-stream] check failed for %s: %s", chat_title, e, exc_info=True
+                )
+
         if not project:
             logger.debug("[reconciler] No project config for %s, skipping", chat_title)
             continue

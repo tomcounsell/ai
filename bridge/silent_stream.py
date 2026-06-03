@@ -7,6 +7,14 @@ reconciler and per-chat catchup cursor handle *recovery*; this watcher makes the
 *silent failure* visible by logging a WARNING when a chat that recently had
 activity goes quiet while the bridge is healthy.
 
+The silent-gap check **rides the reconciler's existing dialog pass** rather than
+running its own loop. The reconciler already calls ``client.get_dialogs()`` every
+``RECONCILE_INTERVAL_SECONDS`` and iterates every monitored group; this module
+provides the per-chat suppression logic the reconciler invokes inside that loop,
+reusing the dialogs it already fetched. This adds **no** recurring
+``get_dialogs()`` call beyond the reconciler's existing one (issue #1408 no-go:
+must not increase steady-state Telegram API call rate).
+
 False-positive suppression rules:
 
 - Only ``respond_to_unaddressed: true`` chats are watched — those are the chats
@@ -21,17 +29,29 @@ False-positive suppression rules:
   sustained gap.
 """
 
-import asyncio
 import logging
 import time
+from dataclasses import dataclass, field
 
 from bridge.dedup import get_last_event_ts
 
 logger = logging.getLogger(__name__)
 
-SILENT_STREAM_INTERVAL_SECONDS = 300  # 5 minutes between scans
 SILENCE_THRESHOLD_SECONDS = 15 * 60  # 15 minutes of silence triggers a warning
 WARN_SUPPRESSION_SECONDS = 30 * 60  # one warning per chat per 30 minutes
+
+
+@dataclass
+class SilentStreamState:
+    """Mutable state the silent-gap check carries across reconciler passes.
+
+    Threaded through ``reconcile_once`` so the silent-gap check can ride the
+    reconciler's existing dialog iteration instead of running its own loop with
+    a redundant ``get_dialogs()`` call (issue #1408).
+    """
+
+    bridge_start_ts: float
+    warned_chats: dict = field(default_factory=dict)
 
 
 def _is_respond_to_unaddressed(project: dict | None) -> bool:
@@ -41,24 +61,79 @@ def _is_respond_to_unaddressed(project: dict | None) -> bool:
     return bool(project.get("telegram", {}).get("respond_to_unaddressed", False))
 
 
-async def check_silent_streams(
-    client,
-    monitored_groups: list[str],
-    find_project_fn,
-    bridge_start_ts: float,
-    warned_chats: dict,
+async def check_silent_chat(
+    chat_id,
+    chat_title: str,
+    project: dict | None,
+    state: SilentStreamState,
     now: float | None = None,
-) -> int:
-    """Run a single silent-stream scan; return the number of warnings emitted.
+) -> bool:
+    """Run the silent-gap check for a single (already-fetched) dialog.
+
+    Designed to be called from inside the reconciler's dialog loop, reusing the
+    dialog the reconciler already enumerated — no independent ``get_dialogs()``
+    call. Returns ``True`` if a warning was emitted for this chat.
 
     Args:
-        client: TelegramClient (used to enumerate dialogs → chat ids/titles).
+        chat_id: the dialog id (``dialog.id``, with the -100 supergroup prefix).
+        chat_title: the dialog title (already matched against monitored groups).
+        project: the project config dict for this chat (or None).
+        state: shared mutable silent-stream state (start ts + per-chat
+            suppression timestamps), mutated in place across passes.
+        now: override for the current unix timestamp (testing).
+    """
+    now = time.time() if now is None else now
+
+    # Never warn before the bridge has been up at least the silence threshold —
+    # a cold last_event right after startup is expected, not anomalous.
+    if now - state.bridge_start_ts < SILENCE_THRESHOLD_SECONDS:
+        return False
+
+    if not _is_respond_to_unaddressed(project):
+        return False
+
+    last_event_ts = await get_last_event_ts(chat_id)
+    # No prior activity baseline → no signal.
+    if last_event_ts is None:
+        return False
+
+    silence = now - last_event_ts
+    if silence < SILENCE_THRESHOLD_SECONDS:
+        return False
+
+    # Per-chat suppression window.
+    last_warn = state.warned_chats.get(chat_id)
+    if last_warn is not None and (now - last_warn) < WARN_SUPPRESSION_SECONDS:
+        return False
+
+    state.warned_chats[chat_id] = now
+    logger.warning(
+        "[silent-stream] No events for chat %s (id=%s) in %d+ min — "
+        "possible Telethon update gap; reconciler will scan within 3 min",
+        chat_title,
+        chat_id,
+        int(silence // 60),
+    )
+    return True
+
+
+async def check_silent_streams(
+    dialogs,
+    monitored_groups: list[str],
+    find_project_fn,
+    state: SilentStreamState,
+    now: float | None = None,
+) -> int:
+    """Run the silent-gap check across an already-fetched dialog list.
+
+    Does **not** fetch dialogs itself — the caller (the reconciler) passes in the
+    dialogs it already retrieved. Returns the number of warnings emitted.
+
+    Args:
+        dialogs: the dialog list the reconciler already fetched this pass.
         monitored_groups: lowercase monitored group titles.
         find_project_fn: maps a chat title to its project config dict (or None).
-        bridge_start_ts: unix timestamp of bridge startup (suppresses cold-start
-            false positives).
-        warned_chats: mutable dict {chat_id: last_warn_ts} for per-chat
-            suppression; mutated in place across scans.
+        state: shared mutable silent-stream state.
         now: override for the current unix timestamp (testing).
     """
     if not monitored_groups:
@@ -66,81 +141,25 @@ async def check_silent_streams(
 
     now = time.time() if now is None else now
 
-    # Never warn before the bridge has been up at least the silence threshold —
-    # a cold last_event right after startup is expected, not anomalous.
-    if now - bridge_start_ts < SILENCE_THRESHOLD_SECONDS:
+    # Cheap top-level cold-start guard (the per-chat check repeats it, but this
+    # avoids touching Redis at all during the cold-start window).
+    if now - state.bridge_start_ts < SILENCE_THRESHOLD_SECONDS:
         return 0
 
     warnings_emitted = 0
-    dialogs = await client.get_dialogs()
-
     for dialog in dialogs:
         chat_title = getattr(dialog.entity, "title", None)
         if not chat_title or chat_title.lower() not in monitored_groups:
             continue
 
         project = find_project_fn(chat_title)
-        if not _is_respond_to_unaddressed(project):
-            continue
-
-        chat_id = dialog.id
-
-        last_event_ts = await get_last_event_ts(chat_id)
-        # No prior activity baseline → no signal.
-        if last_event_ts is None:
-            continue
-
-        silence = now - last_event_ts
-        if silence < SILENCE_THRESHOLD_SECONDS:
-            continue
-
-        # Per-chat suppression window.
-        last_warn = warned_chats.get(chat_id)
-        if last_warn is not None and (now - last_warn) < WARN_SUPPRESSION_SECONDS:
-            continue
-
-        warned_chats[chat_id] = now
-        warnings_emitted += 1
-        logger.warning(
-            "[silent-stream] No events for chat %s (id=%s) in %d+ min — "
-            "possible Telethon update gap; reconciler will scan within 3 min",
-            chat_title,
-            chat_id,
-            int(silence // 60),
-        )
+        if await check_silent_chat(
+            chat_id=dialog.id,
+            chat_title=chat_title,
+            project=project,
+            state=state,
+            now=now,
+        ):
+            warnings_emitted += 1
 
     return warnings_emitted
-
-
-async def silent_stream_loop(
-    client,
-    monitored_groups: list[str],
-    find_project_fn,
-    bridge_start_ts: float | None = None,
-) -> None:
-    """Background loop: periodically scan for silently-stalled chats.
-
-    Each iteration is wrapped so a transient failure (e.g. a Redis read error)
-    logs and the loop survives to the next cycle.
-    """
-    bridge_start_ts = time.time() if bridge_start_ts is None else bridge_start_ts
-    warned_chats: dict = {}
-
-    logger.info(
-        "[silent-stream] Started (interval=%ds, silence_threshold=%dm)",
-        SILENT_STREAM_INTERVAL_SECONDS,
-        SILENCE_THRESHOLD_SECONDS // 60,
-    )
-
-    while True:
-        await asyncio.sleep(SILENT_STREAM_INTERVAL_SECONDS)
-        try:
-            await check_silent_streams(
-                client=client,
-                monitored_groups=monitored_groups,
-                find_project_fn=find_project_fn,
-                bridge_start_ts=bridge_start_ts,
-                warned_chats=warned_chats,
-            )
-        except Exception as e:
-            logger.error("[silent-stream] Error in scan: %s", e, exc_info=True)
