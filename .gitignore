@@ -470,3 +470,4 @@ PROGRESS.md
 
 # Playwright CLI session snapshots
 .playwright-cli/
+.claude/scheduled_tasks.lock
