@@ -12,14 +12,23 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from bridge.dedup import is_duplicate_message, record_message_processed
+from bridge.dedup import (
+    is_duplicate_message,
+    record_last_processed,
+    record_message_processed,
+)
 
 logger = logging.getLogger(__name__)
 
 # Configuration
 RECONCILE_INTERVAL_SECONDS = 180  # 3 minutes
-RECONCILE_LOOKBACK_MINUTES = 10  # Look back 10 minutes
-RECONCILE_MESSAGE_LIMIT = 20  # Messages per group per scan
+# 30-minute lookback covers the worst-case multi-restart scenario (issue #1408)
+# where the worker was down across several restarts and a message would age out
+# of the old 10-minute window before the first effective reconciler scan.
+RECONCILE_LOOKBACK_MINUTES = 30
+# 30-message limit keeps the 30-minute window covered in busy chats; still a
+# single get_messages() API call regardless of limit (within the 100-msg cap).
+RECONCILE_MESSAGE_LIMIT = 30
 
 
 async def reconciler_loop(
@@ -181,6 +190,7 @@ async def reconcile_once(
                 )
 
                 await record_message_processed(chat_id, message.id)
+                await record_last_processed(chat_id, message.id, message.date)
                 recovered += 1
 
         except Exception as e:

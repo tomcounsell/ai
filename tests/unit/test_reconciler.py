@@ -224,12 +224,14 @@ class TestReconcileOnce:
         should_respond_fn = AsyncMock(return_value=(True, False))
         enqueue_fn = AsyncMock()
         record_fn = AsyncMock()
+        cursor_fn = AsyncMock()
 
         with (
             patch(
                 "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
             ),
             patch("bridge.reconciler.record_message_processed", record_fn),
+            patch("bridge.reconciler.record_last_processed", cursor_fn),
         ):
             result = await reconcile_once(
                 client=client,
@@ -249,6 +251,8 @@ class TestReconcileOnce:
         expected_chat_id = -(1000000000000 + 200)
         assert call_kwargs["chat_id"] == str(expected_chat_id)
         record_fn.assert_called_once_with(expected_chat_id, 555)
+        # Per-chat cursor is advanced alongside dedup (issue #1408)
+        cursor_fn.assert_called_once_with(expected_chat_id, 555, msg.date)
 
     @pytest.mark.asyncio
     async def test_old_message_outside_lookback_is_skipped(self):
@@ -304,6 +308,7 @@ class TestReconcileOnce:
                 "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
             ),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
         ):
             result = await reconcile_once(
                 client=client,
@@ -377,6 +382,7 @@ class TestReconcileOnce:
                 "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
             ),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
         ):
             result = await reconcile_once(
                 client=client,

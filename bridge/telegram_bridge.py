@@ -1108,6 +1108,14 @@ async def main():
             logger.info("Ignoring message during shutdown")
             return
 
+        # Record per-chat last-event timestamp for silent-stream observability
+        # (issue #1408). Done on EVERY incoming event, before dedup/routing, so the
+        # silent-stream watcher has an accurate "last time this chat was alive"
+        # baseline. Best-effort: never raises.
+        from bridge.dedup import record_last_event
+
+        await record_last_event(event.chat_id, getattr(event.message, "date", None))
+
         # Dedup: skip if we've already processed this message (catch_up replay)
         from bridge.dedup import is_duplicate_message
 
@@ -1855,6 +1863,7 @@ async def main():
                             project_config=project,
                             extra_context_overrides=_completed_extra_overrides,
                             session_type=getattr(completed, "session_type", None) or SessionType.PM,
+                            message_ts=message.date,
                         )
                         _steering_session_enqueued = True
                         logger.info(
@@ -2386,6 +2395,7 @@ async def main():
             project_config=project,
             extra_context_overrides=extra_overrides,
             requires_real_chrome=_byob_real_chrome,
+            message_ts=message.date,
         )
         logger.info(
             f"[{project_name}] Queued session for {sender_name} (msg {message_id}, depth={depth})"
@@ -2535,6 +2545,7 @@ async def main():
                     sender_id=sender_id,
                     session_type=None,
                     project_config=project,
+                    message_ts=message.date,
                 )
                 logger.info(
                     f"[edit] Spawned fresh session {new_session_id} for completed-session edit "
@@ -2923,6 +2934,26 @@ async def main():
         logger.info("Message reconciler started")
     except Exception as e:
         logger.error(f"Failed to start message reconciler: {e}")
+
+    # Start silent-stream watcher (issue #1408): warns when a respond_to_unaddressed
+    # chat goes silent for 15+ min while the bridge is connected — surfacing silent
+    # Telethon update gaps as observable log events. Observability only.
+    try:
+        from bridge.silent_stream import silent_stream_loop
+
+        _background_tasks.append(
+            asyncio.create_task(
+                silent_stream_loop(
+                    client=client,
+                    monitored_groups=ALL_MONITORED_GROUPS,
+                    find_project_fn=find_project_for_chat,
+                    bridge_start_ts=time.time(),
+                )
+            )
+        )
+        logger.info("Silent-stream watcher started")
+    except Exception as e:
+        logger.error(f"Failed to start silent-stream watcher: {e}")
 
     # Start session watchdog
     try:
