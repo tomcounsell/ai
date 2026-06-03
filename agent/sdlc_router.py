@@ -655,7 +655,16 @@ def _rule_critique_ready_with_concerns_revision_applied(
     verdict = _latest_critique_verdict(stage_states, meta).upper()
     if CRITIQUE_READY_TO_BUILD not in verdict or "WITH CONCERNS" not in verdict:
         return False
-    return bool(meta.get("revision_applied"))
+    if not bool(meta.get("revision_applied")):
+        return False
+    # Once build has produced a PR (or BUILD is already done), this row must
+    # release so routing can advance to review. Without these guards the row
+    # re-dispatches /do-build forever for every with-concerns plan. Mirror the
+    # guards on row 4a (_rule_critique_ready_no_concerns).
+    if meta.get("pr_number"):
+        return False
+    build_status = stage_states.get("BUILD")
+    return build_status in (None, "pending", "ready")
 
 
 def _rule_branch_exists_no_pr(stage_states: dict, meta: dict, context: dict) -> bool:

@@ -141,6 +141,28 @@ class TestRow4cReadyWithConcernsRevisionApplied:
         assert result.skill == SKILL_DO_BUILD
         assert result.row_id == "4c"
 
+    def test_releases_to_review_once_pr_exists(self):
+        """Row 4c must NOT re-dispatch /do-build after the PR is open.
+
+        Regression: row 4c lacked the pr_number/BUILD guards that row 4a has,
+        so a with-concerns plan with revision_applied=True looped /do-build
+        forever and never advanced to review.
+        """
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "REVIEW": "ready",
+        }
+        meta = {
+            "latest_critique_verdict": "READY TO BUILD (with concerns)",
+            "revision_applied": True,
+            "pr_number": 466,
+        }
+        result = decide_next_dispatch(states, meta)
+        assert result.skill != SKILL_DO_BUILD
+        assert result.row_id != "4c"
+
 
 class TestRow6TestsFailing:
     def test_test_failed_dispatches_patch(self):
