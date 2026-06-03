@@ -217,7 +217,7 @@ asyncio.create_task(watchdog_loop(telegram_client=client))
 
 Runs for the lifetime of the bridge process. No separate service or process management needed. The existing update system restarts the bridge, which automatically restarts the watchdog.
 
-**Relationship to PostToolUse health check**: The PostToolUse health check (`agent/health_check.py`) fires every 20 tool calls and uses a two-pronged kill mechanism when it detects an unhealthy session:
+**Relationship to PostToolUse health check**: The PostToolUse health check (`agent/health_check.py`) runs a deterministic consecutive-failure circuit breaker on every tool call (5 back-to-back failures trip it — issue #1413) plus a Haiku judge every 20 tool calls, and uses a two-pronged kill mechanism when it detects an unhealthy session:
 
 1. **`watchdog_unhealthy` flag**: Sets a reason string on the AgentSession model in Redis. The nudge loop in `agent/agent_session_queue.py` checks this flag via `is_session_unhealthy()` before auto-continuing. When flagged, the nudge loop delivers output to Telegram instead of sending "Keep working", breaking the auto-continue cycle.
 2. **`additionalContext` injection**: Returns a PostToolUse hook result with `additionalContext` telling Claude to stop immediately and summarize what blocked it.
