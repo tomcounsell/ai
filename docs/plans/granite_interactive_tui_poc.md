@@ -5,7 +5,8 @@ appetite: Large
 owner: Valor
 created: 2026-06-03
 tracking: https://github.com/tomcounsell/ai/issues/1546
-last_comment_id:
+last_comment_id: 4610801401
+revision_applied: true
 ---
 
 # PoC: Granite Operator Drives a Real Interactive Claude Code Session via PTY
