@@ -71,6 +71,20 @@ For non-terminal transitions. Logs the lifecycle transition and updates the stat
 
 See [Session Recovery Mechanisms](session-recovery-mechanisms.md) for the full audit of all recovery paths.
 
+### Recovery Confirms Subprocess Death (issue #1537)
+
+When the liveness check recovers a no-progress `running` session, `_apply_recovery_transition()` (`agent/session_health.py`) calls `handle.task.cancel()` with a `TASK_CANCEL_TIMEOUT` of 0.25s. Cancellation alone does **not** guarantee the underlying `claude -p` subprocess exited — a true hang ignores `CancelledError` and orphans the PID. Once the DB record leaves `running`, that orphan is invisible to every detector (the forward scan only queries `status="running"`; the in-process and PPID==1 reapers only act on terminal-status / launchd-reparented processes), so it wedges the worker's execution slot until a human runs `worker-restart`. This was the root cause of the 2026-05-31 incident (a 25.5h hang).
+
+Recovery now confirms subprocess termination before deciding how to transition:
+
+1. **`_confirm_subprocess_dead(pid, *, timeout)`** runs after the `task.cancel()` await. It probes liveness with `os.kill(pid, 0)`, then escalates **SIGTERM → SIGKILL** against the recorded `entry.claude_pid`, polling for exit within a short single-digit-second grace (`SUBPROCESS_KILL_TIMEOUT = 3.0`). SIGKILL is sent **only** when SIGTERM fails to terminate the PID. It returns `True` only when the PID is confirmed gone (`ProcessLookupError`); a `None`/non-positive PID short-circuits to `True` (nothing to kill); `PermissionError` or a PID that survives SIGKILL returns `False`.
+2. **The requeue `else` branch** (below `MAX_RECOVERY_ATTEMPTS`) branches on that boolean:
+   - **Confirmed dead** → the existing requeue-to-`pending` path runs (nulls `started_at`, bumps priority to `high`, `transition_status(..., "pending")`).
+   - **Not confirmed dead** → `finalize_session(entry, "failed", ...)` escalates the session to the `failed` terminal status so the in-process orphan reaper (which acts on `TERMINAL_STATUSES`) owns cleanup. `started_at` is **not** nulled into a `pending` record. This is the exact fix for #1537: a hung subprocess can never be silently parked at `pending` as an untracked orphan.
+3. **Observability:** best-effort Redis counters (failure never propagates out of recovery) — `{project_key}:session-health:subprocess_kill_escalated` when a recorded PID was confirmed dead via the kill path, and `:subprocess_kill_failed` when the subprocess could not be confirmed dead.
+
+**PID-reuse caveat:** a recorded `claude_pid` could in principle be recycled by an unrelated process before recovery runs. The window is the sub-second recovery path and this matches the existing PPID==1 reaper's assumptions; the residual risk is accepted rather than tracking PID generations.
+
 ## Kill-is-Terminal Invariant
 
 `valor-session kill` is a hard guarantee. Once a session is killed (or in any terminal state), no routine pipeline-progression code path may transition it to a different terminal status. This invariant is enforced symmetrically by both lifecycle entry points:

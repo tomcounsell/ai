@@ -943,6 +943,113 @@ def _tier2_reprieve_signal(
     return None
 
 
+# Total wall-clock budget for the SIGTERM->SIGKILL escalation in
+# ``_confirm_subprocess_dead``. Kept to single-digit seconds so the liveness
+# loop is never stalled by a slow kill (issue #1537 No-Go: short grace only).
+SUBPROCESS_KILL_TIMEOUT = 3.0
+# Poll interval while waiting for a signalled PID to exit.
+_SUBPROCESS_KILL_POLL_INTERVAL = 0.1
+
+
+def _increment_subprocess_kill_counter(session, *, escalated: bool) -> None:
+    """Best-effort Redis counter for the recovery subprocess-kill escalation (#1537).
+
+    ``escalated=True``  -> ``{project_key}:session-health:subprocess_kill_escalated``
+        (a kill was issued because ``task.cancel()`` left the subprocess alive).
+    ``escalated=False`` -> ``{project_key}:session-health:subprocess_kill_failed``
+        (the subprocess could not be confirmed dead; session escalates to ``failed``).
+
+    A counter-backend failure must never propagate out of recovery.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        project_key = getattr(session, "project_key", None) or "unknown"
+        suffix = "subprocess_kill_escalated" if escalated else "subprocess_kill_failed"
+        _R.incr(f"{project_key}:session-health:{suffix}")
+    except Exception as e:
+        logger.debug("[session-health] subprocess_kill counter failed (non-fatal): %s", e)
+
+
+def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> bool:
+    """Confirm a recovery target's ``claude -p`` subprocess is gone, escalating signals (#1537).
+
+    ``task.cancel()`` does not guarantee the underlying SDK subprocess exited — a
+    true hang ignores cancellation and orphans the PID. This helper closes that
+    gap: it verifies liveness, then escalates SIGTERM -> SIGKILL, polling for exit
+    within a short ``timeout`` so the liveness loop is never stalled.
+
+    Returns ``True`` only when the PID is confirmed gone (``os.kill(pid, 0)`` raises
+    ``ProcessLookupError``); ``False`` when it cannot be confirmed dead (still alive
+    after SIGKILL, ``PermissionError``, or any unexpected error). A non-confirmed
+    result is the signal for the caller to escalate the session to ``failed`` so the
+    orphan reaper owns cleanup, rather than requeuing an invisible orphan to ``pending``.
+
+    PID-reuse caveat: a recorded ``claude_pid`` could in principle be recycled by an
+    unrelated process before recovery runs. The window is the sub-second recovery
+    path and this matches the existing PPID==1 reaper's assumptions (issue #1537
+    Race Condition Analysis); we accept the residual risk rather than tracking PID
+    generations.
+    """
+    if pid is None or pid <= 0:
+        return True
+
+    deadline = time.monotonic() + max(timeout, 0.0)
+
+    def _is_dead() -> bool:
+        """``True`` iff signal 0 reports the PID is gone."""
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            # Process exists but is owned by another user — cannot confirm death.
+            return False
+        except OSError:
+            return False
+        return False
+
+    # Already gone (e.g. task.cancel() did terminate it)?
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    except OSError:
+        return False
+
+    def _poll_until_dead() -> bool:
+        while time.monotonic() < deadline:
+            if _is_dead():
+                return True
+            time.sleep(_SUBPROCESS_KILL_POLL_INTERVAL)
+        return _is_dead()
+
+    # Escalation step 1: SIGTERM, then poll for graceful exit.
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError) as e:
+        logger.debug("[session-health] SIGTERM failed for recovery pid=%s: %s", pid, e)
+        return _is_dead()
+
+    if _poll_until_dead():
+        return True
+
+    # Escalation step 2: SIGKILL only when SIGTERM failed to terminate it.
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError) as e:
+        logger.debug("[session-health] SIGKILL failed for recovery pid=%s: %s", pid, e)
+        return _is_dead()
+
+    return _poll_until_dead()
+
+
 async def _apply_recovery_transition(
     entry: AgentSession,
     *,
@@ -1104,6 +1211,22 @@ async def _apply_recovery_transition(
             entry.agent_session_id,
         )
 
+    # Confirm the SDK subprocess actually exited (issue #1537). ``task.cancel()``
+    # does not guarantee a hung ``claude -p`` exited; if it ignored cancellation
+    # it becomes an orphan that no detector tracks once the session leaves
+    # ``running``. Escalate SIGTERM -> SIGKILL against the recorded ``claude_pid``
+    # and capture whether the process is confirmed gone. The requeue ``else``
+    # branch below uses this to avoid silently parking an orphan at ``pending``.
+    _subprocess_confirmed_dead = _confirm_subprocess_dead(
+        getattr(entry, "claude_pid", None),
+        timeout=SUBPROCESS_KILL_TIMEOUT,
+    )
+    if not _subprocess_confirmed_dead:
+        _increment_subprocess_kill_counter(entry, escalated=False)
+    elif getattr(entry, "claude_pid", None):
+        # A PID was recorded and is now confirmed gone — the kill path ran.
+        _increment_subprocess_kill_counter(entry, escalated=True)
+
     from models.session_lifecycle import (
         StatusConflictError,
         finalize_session,
@@ -1149,6 +1272,34 @@ async def _apply_recovery_transition(
                 "[session-health] Finalized session %s as failed after %s recovery attempts",
                 entry.agent_session_id,
                 entry.recovery_attempts,
+            )
+        elif not _subprocess_confirmed_dead:
+            # Issue #1537: the recorded subprocess survived cancel + SIGTERM +
+            # SIGKILL (or could not be confirmed dead). Requeuing to ``pending``
+            # would park a live orphan that no detector tracks — the exact defect
+            # that wedged the worker for 25.5h on 2026-05-31. Escalate to the
+            # ``failed`` terminal status so the in-process orphan reaper
+            # (_TERMINAL_STATUSES) owns cleanup. Do NOT null ``started_at`` into
+            # a pending record.
+            finalize_session(
+                entry,
+                "failed",
+                reason=(
+                    f"health check: subprocess {getattr(entry, 'claude_pid', None)} "
+                    f"survived cancel+SIGTERM+SIGKILL; escalating to failed so the "
+                    f"orphan reaper owns cleanup (chat={worker_key}, "
+                    f"attempt {entry.recovery_attempts}, kind={reason_kind})"
+                ),
+            )
+            logger.warning(
+                "[session-health] Escalated session %s to failed — subprocess "
+                "pid=%s not confirmed dead after cancel+SIGTERM+SIGKILL "
+                "(chat=%s, attempt %s, kind=%s)",
+                entry.agent_session_id,
+                getattr(entry, "claude_pid", None),
+                worker_key,
+                entry.recovery_attempts,
+                reason_kind,
             )
         else:
             entry.priority = "high"
