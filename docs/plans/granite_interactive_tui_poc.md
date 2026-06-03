@@ -163,13 +163,14 @@ The PoC's appetite is large not because of coding volume but because the substra
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | `claude` CLI on PATH, TUI v2.1.160+ | `claude --version` | Substrate is the TUI; TUI version governs the C2 interjection text and idle signal |
-| `ollama` running with `granite4.1:3b` | `curl -s http://localhost:11434/api/tags \| python -c "import json,sys; assert any(m['name'].startswith('granite4.1:3b') for m in json.load(sys.stdin)['models'])"` | Granite is the local operator; the PoC cannot run without it |
-| Max subscription OAuth (no `ANTHROPIC_API_KEY` in env) | `[ -z "$ANTHROPIC_API_KEY" ]` | Invariant; the PoC forces Max OAuth by blanking the key on the subprocess env |
+| `ollama` running with `granite4.1:3b` | `python -c "import json,urllib.request; tags=json.loads(urllib.request.urlopen('http://localhost:11434/api/tags').read()); assert any(m['name'].startswith('granite4.1:3b') for m in tags['models'])"` | Granite is the local operator; the PoC cannot run without it |
+| `claude` TUI reachable with a model backend (Max OAuth or ollama-routed) | `claude --permission-mode bypassPermissions --print ping` exits 0 within 15s | The PoC's PM/Dev subprocesses are real `claude` TUI sessions; the TUI must complete one round-trip with a model. `claude` may be wired to Max OAuth (default) or to ollama via `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`; the PoC blanks `ANTHROPIC_API_KEY` in the subprocess env either way |
 | Python 3.11+ | `python --version` | `pexpect.spawn` with `preexec_fn` and `encoding="utf-8"` are stable on 3.11+ |
 | `pexpect>=4.9.0`, `ptyprocess>=0.7.0` | `python -c "import pexpect; assert pexpect.__version__ >= '4.9.0'"` | Promoted from dev to runtime in this PoC |
-| `claude` reachable from Max OAuth (model API responsive) | `claude --print "ping"` exits 0 within 10s | C3 + Q5: resume-UUID capture is environment-gated; the resume-acceptance test requires a model-reachable env |
 
-Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_interactive_tui_poc.md` (the check script is invoked by `/do-build` against the plan's *Prerequisites* table).
+Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_interactive_tui_poc.md` (the check script is invoked by `/do-build` against the plan's *Prerequisites* table). Note: check commands are shell commands and must not contain unescaped `|` characters (which collide with the table-cell separator); use Python with `urllib` or wrap multi-stage pipelines in `bash -c '...'` with `\|`-escaped pipes.
+
+**Resume test (Q5) is additionally gated** on a model-reachable env: when the TUI is wired to ollama but the ollama model is unreachable (network/auth), the resume acceptance test is skipped with a structured log line (`RESUME_SKIP model_unreachable`) and the PoC verdict reflects that the resume invariant is *unvalidated* rather than *failed*. The persona-priming and steady-state self-tests have the same gate.
 
 ## Solution
 
