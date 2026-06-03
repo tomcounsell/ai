@@ -177,6 +177,12 @@ When a nudge (auto-continue) is enqueued during session execution, the session s
 - If session no longer exists: nudge fallback recreated it, skip completion
 - Otherwise: proceed with normal completion via `finalize_session()`
 
+### Consecutive-Failure Circuit Breaker (issue #1413)
+
+`agent/health_check.py::watchdog_hook` runs a cheap deterministic check on **every** tool call (complementing the Haiku watchdog, which judges holistic progress every `CHECK_INTERVAL` calls). It counts back-to-back failed tool calls per session — a failure being a `tool_response` dict with `is_error == True` (or, on rare SDK paths, a string starting with `"Error: "`); all other shapes are treated as success. When `CONSECUTIVE_FAILURE_THRESHOLD` (default 5) failures occur in a row, the session is flagged via the shared `AgentSession.watchdog_unhealthy` field with a reason naming the last failing tools, e.g. `"5 consecutive tool failures (Bash, Bash, Edit, Read, Bash) — strategy reassessment required"`.
+
+Any successful tool call resets the counter and clears the recent-failure ring (`deque(maxlen=5)`). After the breaker fires, the counter resets so it re-fires every 5 *additional* consecutive failures. Because `watchdog_unhealthy` is read by the output router before auto-continuing, a tripped breaker pauses the nudge loop and surfaces the session to the operator/PM for reassessment. The counter and ring are process-local in-memory state (reset on worker restart) — no schema change, no Redis persistence.
+
 ## Stale Object Hazard and the `finalized_by_execute` Gate
 
 ### Three-Object Pattern
@@ -265,7 +271,7 @@ A stale caller can at worst append a spurious `session_events` entry. It cannot 
 
 **Primary liveness check — `updated_at` recency (30-minute window):** The function first checks each session's `updated_at` timestamp. If `updated_at` is within the last 30 minutes, the session is considered live and unconditionally skipped. The worker writes a periodic `updated_at` heartbeat every 25 minutes via `_heartbeat_loop` in `agent/agent_session_queue.py`, so even sessions blocked on a long Claude API call stay fresh in Redis. Sessions skipped for recent activity are counted and reported in the `/update` log as "Skipped N live session(s) (recent heartbeat)".
 
-**Fallback liveness check — `created_at` age (120-minute threshold):** When `updated_at` is `None` (sessions created before the heartbeat feature was added), the function falls back to checking `created_at` age. Sessions younger than 120 minutes are skipped. This preserves the original safety margin for legacy sessions.
+**Fallback liveness check — `created_at` age (120-minute threshold):** When `updated_at` is `None` (sessions created before the heartbeat feature was added), the function falls back to checking `created_at` age. Sessions younger than 120 minutes are skipped. This preserves the original safety margin for pre-heartbeat sessions.
 
 **Secondary defense — `_active_workers` registry:** Before either timestamp check, any session whose `worker_key` maps to a not-done asyncio Task in `_active_workers` is unconditionally skipped. Workers are keyed by `worker_key` (`project_key` for slugless PM/dev sessions and PM sessions at PLAN/ISSUE/CRITIQUE/MERGE stages; `slug` for slugged-dev sessions and PM sessions at BUILD/TEST/PATCH/REVIEW/DOCS stages; or `chat_id` for teammate sessions). This registry is only populated during in-process invocations and is always empty when the update script runs as a CLI subprocess.
 
