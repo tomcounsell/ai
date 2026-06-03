@@ -60,12 +60,55 @@ writes the SDLC stage marker and updates the plan frontmatter.
 
 | Detector | What it catches | Action |
 |----------|-----------------|--------|
-| Deleted target | `` `path.py` `` references with no rename in history | `gh issue create` (deduped) |
+| Deleted target | `` `path.py` `` references with no rename in history, after placeholder / fenced-block / deletion-heading filtering | `gh issue create` (deduped) |
 | Stub doc | Docs with <5 content lines | `gh issue create` (deduped) |
 | Orphan plan | `docs/plans/*.md` lacking a tracking-issue link | `gh issue create` (deduped) |
 
-Issues are deduped by SHA-256 of the title via `docs_audit:issues_filed:{hash}`
-Redis keys (30-day TTL).
+#### Deleted-target false-positive filtering
+
+The deleted-target detector runs three suppression passes before emitting a
+finding, so it never floods the tracker with illustrative or
+intentionally-documented paths:
+
+- **Placeholder / example paths** (`_is_placeholder_path`): a path is skipped if
+  any component (or the final file's stem) is a well-known stand-in — `foo`,
+  `bar`, `baz`, `qux`, `quux`, `example`, `your-module`, `mymodule`, `sample` —
+  or a single-letter directory. This suppresses paths like `foo/bar.py` and
+  `agent/docs_handler/foo.py`.
+- **Fenced code blocks** (`_build_line_context`): a single line-scan over the
+  doc tracks fenced ```` ``` ```` block state. Matches inside a fenced block are
+  treated as illustrative and skipped. Inline single-backtick code is **not**
+  suppressed — that is the normal way genuine references are written.
+- **Deletion headings & prose** (`_is_documented_deletion`): a match is skipped
+  if its nearest preceding heading names a deletion (`migration`, `removed`,
+  `deleted`, `deprecated`) or if its line / an adjacent line carries a deletion
+  cue (`deleted module`, `no longer in the codebase`, `no longer exists`,
+  `previously in`, `formerly`). This suppresses paths like `intent/__init__.py`
+  documented under a `## Migration ...` heading.
+
+Every suppressed match is logged at DEBUG so an operator can audit exactly what
+the filter dropped.
+
+#### Two-tier dedup
+
+Issue filing uses a two-tier dedup gate:
+
+1. **Local-Redis fast-path** (`docs_audit:issues_filed:{hash}`, SHA-256 of the
+   title, 30-day TTL): a per-machine cache. If the key exists, filing is skipped
+   without any GitHub call.
+2. **Live-tracker gate** (`_open_issue_exists`): the **authoritative**
+   cross-machine check. Before filing, it runs
+   `gh issue list --state open --label documentation --search "<title>"` and
+   confirms a hit with an exact normalized-title comparison (the title encodes
+   both the path and the doc, so it is a natural composite key). Local Redis
+   alone is insufficient because each machine keeps its own Redis, so the same
+   finding would otherwise be filed once per machine.
+
+The tracker query **fails open**: on any `gh` failure, non-zero exit, or
+malformed output it logs a warning and degrades to Redis-only dedup rather than
+silently dropping a genuine finding. This shrinks the cross-machine duplicate
+window to a brief TOCTOU race (two machines querying within a few seconds of
+each other) instead of one duplicate per machine per 30 days.
 
 ## Rotation State
 

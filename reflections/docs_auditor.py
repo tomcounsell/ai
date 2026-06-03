@@ -487,11 +487,139 @@ def _apply_fixes_to_file(path: Path, repo_root: Path, fixes: list[tuple[str, str
 # ---------------------------------------------------------------------------
 
 
+# Path components that are obvious illustrative stand-ins, not real module names.
+_PLACEHOLDER_PATH_COMPONENTS = frozenset(
+    {"foo", "bar", "baz", "qux", "quux", "example", "your-module", "mymodule", "sample"}
+)
+
+# Heading keywords whose presence means the doc is deliberately recording a deletion.
+_DELETION_HEADING_KEYWORDS = ("migration", "removed", "deleted", "deprecated")
+
+# Prose cues that a nearby line is documenting a deletion rather than a live reference.
+_DELETION_PROSE_CUES = (
+    "deleted module",
+    "no longer in the codebase",
+    "no longer exists",
+    "previously in",
+    "formerly",
+)
+
+
+def _is_placeholder_path(path: str) -> bool:
+    """Return True if a path is an illustrative placeholder, not a real module path.
+
+    A path is a placeholder when any of its components is a well-known stand-in
+    (``foo``, ``bar``, ``example`` ...) or a single lowercase letter directory.
+    Empty or single-segment paths return False (the detector regex guarantees a
+    ``dir/file.py`` shape, so this only guards malformed/odd input).
+    """
+    if not path or "/" not in path:
+        return False
+    components = path.split("/")
+    for i, component in enumerate(components):
+        # For the final component, compare the file stem (strip the .py suffix)
+        # so ``agent/docs_handler/foo.py`` is caught on its ``foo`` stem.
+        is_last = i == len(components) - 1
+        candidate = component[:-3] if is_last and component.endswith(".py") else component
+        lowered = candidate.lower()
+        if lowered in _PLACEHOLDER_PATH_COMPONENTS:
+            return True
+        # A single lowercase letter directory (e.g. ``a/foo.py``) is illustrative.
+        if len(candidate) == 1 and candidate.isalpha() and candidate.islower():
+            return True
+    return False
+
+
+def _build_line_context(content: str) -> tuple[list[bool], list[str]]:
+    """Single-scan precompute of per-line context for deletion-aware filtering.
+
+    Returns ``(in_fence, heading_for_line)`` where:
+    - ``in_fence[i]`` is True if line ``i`` sits inside a fenced ``` code block.
+    - ``heading_for_line[i]`` is the text of the nearest preceding Markdown
+      heading for line ``i`` (lowercased), or ``""`` if none precedes it.
+
+    No I/O; pure string scan over ``content``.
+    """
+    lines = content.splitlines()
+    in_fence: list[bool] = []
+    heading_for_line: list[str] = []
+    fence_open = False
+    current_heading = ""
+    for line in lines:
+        stripped = line.lstrip()
+        is_fence_marker = stripped.startswith("```")
+        # A fence marker line is itself part of the block boundary; treat the
+        # marker line as inside the fence so matches on it are suppressed too.
+        if is_fence_marker:
+            in_fence.append(True)
+            fence_open = not fence_open
+        else:
+            in_fence.append(fence_open)
+        # Track nearest preceding heading only outside fenced blocks.
+        if not fence_open and not is_fence_marker and stripped.startswith("#"):
+            current_heading = stripped.lstrip("#").strip().lower()
+        heading_for_line.append(current_heading)
+    return in_fence, heading_for_line
+
+
+def _is_documented_deletion(
+    line_idx: int, lines: list[str], in_fence: list[bool], heading_for_line: list[str]
+) -> bool:
+    """Return True if a match at ``line_idx`` is an illustrative or documented deletion.
+
+    Three conservative cues (any one suppresses the finding):
+    1. The match falls inside a fenced code block (illustrative example).
+    2. The nearest preceding heading names a deletion (migration/removed/
+       deleted/deprecated).
+    3. The match's line or an immediately adjacent line carries a deletion-prose
+       cue ("deleted module", "no longer exists", ...).
+
+    Inline single-backtick code is NOT suppressed — that is how genuine
+    references are written.
+    """
+    if line_idx < len(in_fence) and in_fence[line_idx]:
+        return True
+    if line_idx < len(heading_for_line):
+        heading = heading_for_line[line_idx]
+        if any(kw in heading for kw in _DELETION_HEADING_KEYWORDS):
+            return True
+    for adj in (line_idx - 1, line_idx, line_idx + 1):
+        if 0 <= adj < len(lines):
+            lowered = lines[adj].lower()
+            if any(cue in lowered for cue in _DELETION_PROSE_CUES):
+                return True
+    return False
+
+
 def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path) -> list[dict]:
-    """File issues for references to deleted (non-renamed) targets."""
+    """File issues for references to deleted (non-renamed) targets.
+
+    Suppresses three classes of false positive before emitting a finding:
+    placeholder/example paths (``foo/bar.py``), paths inside fenced illustrative
+    code blocks, and paths under a deletion-recording heading or deletion prose.
+    Every suppressed match is logged at DEBUG so operators can audit the filter.
+    """
     findings: list[dict] = []
+    lines = content.splitlines()
+    in_fence, heading_for_line = _build_line_context(content)
     for m in re.finditer(r"`((?:[\w.-]+/)+[\w.-]+\.py)`", content):
         path = m.group(1)
+        if _is_placeholder_path(path):
+            logger.debug(
+                "docs_auditor: suppressed deleted-target finding for placeholder path %s in %s",
+                path,
+                doc_path,
+            )
+            continue
+        line_idx = content.count("\n", 0, m.start())
+        if _is_documented_deletion(line_idx, lines, in_fence, heading_for_line):
+            logger.debug(
+                "docs_auditor: suppressed deleted-target finding for %s in %s "
+                "(fenced block or documented deletion)",
+                path,
+                doc_path,
+            )
+            continue
         if (repo_root / path).exists():
             continue
         renames = _git_log_follow_renames(path, repo_root)
@@ -567,8 +695,80 @@ def refresh_docs_in_memory(touched_paths: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_title(title: str) -> str:
+    """Collapse internal whitespace and strip — for exact title comparison."""
+    return " ".join(title.split())
+
+
+def _open_issue_exists(title: str, repo_root: Path) -> bool:
+    """Return True if an open `documentation` issue already has this exact title.
+
+    This is the authoritative cross-machine dedup gate: local Redis dedup keys
+    are per-machine and invisible across hosts, so two machines would otherwise
+    file the same finding. Queries the live tracker via
+    ``gh issue list --search`` (REST-backed full-text search) and confirms with
+    an exact normalized-title comparison in Python (the title already encodes
+    both the path and the doc, making it a natural composite key).
+
+    Fails open: on any `gh` failure, non-zero exit, or malformed output, log a
+    WARNING and return False so a genuine finding is never silently dropped —
+    the worst case is the duplicate this gate was meant to prevent, which the
+    Redis fast-path still suppresses on the next run.
+    """
+    normalized_query = _normalize_title(title)
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--label",
+                "documentation",
+                "--search",
+                title,
+                "--json",
+                "number,title",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            cwd=str(repo_root),
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "docs_auditor: gh issue list (dedup) failed for '%s' (rc=%d): %s "
+                "— falling back to Redis-only dedup",
+                title,
+                result.returncode,
+                result.stderr.strip()[:200],
+            )
+            return False
+        issues = json.loads(result.stdout or "[]")
+        for issue in issues:
+            if _normalize_title(issue.get("title", "")) == normalized_query:
+                return True
+        return False
+    except Exception as e:
+        logger.warning(
+            "docs_auditor: gh issue list (dedup) errored for '%s': %s "
+            "— falling back to Redis-only dedup",
+            title,
+            e,
+        )
+        return False
+
+
 def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
-    """File a GitHub issue via gh CLI, deduped by title hash. Returns True if filed."""
+    """File a GitHub issue via gh CLI, deduped by title. Returns True if filed.
+
+    Two-tier dedup: a local Redis fast-path (per-machine cache) gates the
+    expensive live-tracker query, and `_open_issue_exists` is the authoritative
+    cross-machine gate. Local Redis alone is insufficient because each machine
+    keeps its own Redis, so the same finding would be filed once per machine.
+    """
     title = finding.get("title", "").strip()
     if not title:
         return False
@@ -577,11 +777,23 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
     redis_client = None
     try:
         redis_client = _get_redis()
-        # Pre-check existence without writing — only commit dedup key after gh succeeds.
+        # Fast-path: if this machine already filed it, skip the tracker query entirely.
         if redis_client.exists(dedup_key):
             return False  # already filed
     except Exception:
         redis_client = None  # If Redis is unavailable, attempt to file without dedup
+
+    # Authoritative cross-machine gate: another machine may have already filed this.
+    if _open_issue_exists(title, repo_root):
+        # Record the local fast-path key so subsequent runs skip the tracker query.
+        if redis_client is not None:
+            try:
+                redis_client.set(dedup_key, "1", ex=86400 * 30)
+            except (
+                Exception
+            ):  # swallow-ok: best-effort cache write; tracker already confirmed dedup
+                pass
+        return False
 
     try:
         result = subprocess.run(
@@ -612,7 +824,7 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
         if redis_client is not None:
             try:
                 redis_client.set(dedup_key, "1", ex=86400 * 30)
-            except Exception:
+            except Exception:  # swallow-ok: best-effort cache write after successful issue create
                 pass
         return True
     except Exception as e:
