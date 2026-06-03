@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-03
 tracking: https://github.com/tomcounsell/ai/issues/1543
 last_comment_id:
+revision_applied: true
 ---
 
 # Docs-Auditor Deleted-Target Dedup & False-Positive Suppression
@@ -400,6 +401,11 @@ appetite does not justify it (documented in No-Gos).
   acceptable, not deferred work — if it ever matters, a new issue can be opened.
 - Filtering for the stub-doc and orphan-plan detectors — they are not part of the
   flood (architectural decision, in scope to *leave alone*).
+- [DEFERRED] Batching deleted-target findings into a rolling tracking issue
+  (resolved decision 1). The live-tracker dedup gate controls volume; a
+  rolling-issue system is deferred to a possible follow-up issue if the gate
+  proves insufficient in production. `_upsert_rolling_deleted_target_issue` and
+  `TestRollingDeletedTargetIssue` are NOT built for this slug.
 
 ## Update System
 
@@ -545,30 +551,45 @@ The lead NEVER builds directly — they deploy team members and coordinate.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Critique verdict: **READY TO BUILD (with concerns)** (recorded 2026-06-03). The
+plan is structurally sound; the concerns are the three Open Questions, which the
+critique flagged as needing resolution before build so the dev does not have to
+guess the scope. All three are resolved in this revision pass (see the resolved
+Open Questions section below). No structural rework was required.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| Concern | Operator | Batching (OQ1) left as an open scope fork — a dev could over-build a rolling-issue system that the live-tracker gate makes unnecessary. | Resolve OQ1 below | Batching DEFERRED. Ship dedup + filtering only; live-tracker gate controls volume. Batching moves to No-Gos. |
+| Concern | Skeptic | Dedup match strategy (OQ2) undecided — exact vs. fuzzy. | Resolve OQ2 below | Exact normalized-title match. Title already encodes (path, doc) as a composite key. |
+| Concern | Adversary | Filter aggressiveness (OQ3) undecided — risk of masking a genuine dead reference. | Resolve OQ3 below | Conservative: small heading set + fenced-blocks-only + DEBUG-log every suppressed match for auditability. |
 
 ---
 
-## Open Questions
+## Resolved Decisions (was Open Questions)
 
-1. **Batching: one rolling issue or one-per-doc (or no batching)?** The issue
-   "strongly considers" collapsing all deleted-target findings into a single
-   rolling tracking issue updated in place, instead of one issue per finding.
-   Options: (a) one global rolling issue, (b) one rolling issue per doc, (c) keep
-   per-finding filing but rely on the live-tracker dedup + filtering to control
-   volume. The live-tracker gate + filtering alone may reduce the flood enough
-   that batching is unnecessary complexity. Which do you want?
+The three open questions are resolved as follows for the build. These resolutions
+are the authoritative scope for `/do-build`.
 
-2. **Dedup match strategy: exact-title vs. fuzzy `(target, doc)` pair?** The plan
-   defaults to exact normalized-title match because the title already encodes both
-   path and doc. Is exact-title sufficient, or do you want fuzzy matching on the
-   `(target, doc)` pair to also catch near-duplicate titles?
+1. **Batching — DEFERRED (option c).** Do NOT build a rolling-tracking-issue
+   system. The live-tracker dedup gate + placeholder/illustrative/deletion-heading
+   filtering directly kill the flood at its source; batching on top of that is
+   speculative complexity disproportionate to the Medium appetite. Per-finding
+   filing is retained, now gated by the live-tracker query. Batching is moved to
+   No-Gos for this slug — if the dedup gate proves insufficient in production, a
+   follow-up issue can revisit it. This removes `_upsert_rolling_deleted_target_issue`
+   and `TestRollingDeletedTargetIssue` from build scope.
 
-3. **How aggressive should the documented-deletion / illustrative filter be?** The
-   plan uses a small, specific heading set (`migration, removed, deleted,
-   deprecated`) plus a few prose cues, and only skips *fenced* code blocks (not
-   inline code). Should it be more aggressive (risk masking a real dead reference)
-   or stay conservative (risk an occasional false positive that the live-tracker
-   dedup will at least not duplicate)?
+2. **Dedup match strategy — exact normalized-title match.** No fuzzy matching.
+   The issue title (`Doc references deleted target: {path} (in {doc_path})`)
+   already encodes both `path` and `doc`, making it a natural composite key.
+   `gh issue list --search "<title>"` fetches candidates; a Python-side
+   exact-comparison after whitespace normalization confirms the match. Fuzzy
+   matching is rejected as over-engineering (Rabbit Holes).
+
+3. **Filter aggressiveness — conservative.** Use the small, specific heading set
+   (`migration`, `removed`, `deleted`, `deprecated`) plus the named prose cues,
+   and skip *fenced* code blocks only (never blanket-skip inline single-backtick
+   code, which is how real references are written). Every suppressed match is
+   logged at DEBUG so an operator can audit exactly what the filter dropped. The
+   regression test (genuine dead reference in normal prose still flagged) is the
+   guardrail against over-filtering.
