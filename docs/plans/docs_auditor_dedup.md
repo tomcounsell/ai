@@ -263,54 +263,54 @@ issue) only if no open match exists → record local Redis fast-path key.
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_file_issue_if_new` already wraps `gh` in `try/except Exception` (lines
+- [x] `_file_issue_if_new` already wraps `gh` in `try/except Exception` (lines
       583, 618) returning `False` and logging a warning. The new `gh issue list`
       tracker query MUST be wrapped the same way: on `gh issue list` failure, log
       a warning and fall back to local-Redis-only dedup (do not silently swallow
       the finding). Test: patch `subprocess.run` for `issue list` to raise →
       assert a warning is logged AND filing still proceeds via the Redis path.
-- [ ] The new filtering helpers (`_is_placeholder_path`,
+- [x] The new filtering helpers (`_is_placeholder_path`,
       `_is_under_deletion_heading`) are pure functions over strings and raise on
       no input path — verify they handle empty/odd input (see below) rather than
       using broad `except`.
 
 ### Empty/Invalid Input Handling
-- [ ] `_is_placeholder_path("")` and on a path with no `/` → returns `False`
+- [x] `_is_placeholder_path("")` and on a path with no `/` → returns `False`
       (or is never reached because the regex guarantees `dir/file.py` shape).
       Add a unit test for the empty-string and single-segment cases.
-- [ ] `_detect_deleted_target_issues` on empty `content` → returns `[]` (no
+- [x] `_detect_deleted_target_issues` on empty `content` → returns `[]` (no
       matches). Add a test.
-- [ ] `_open_issue_exists` when `gh issue list` returns empty JSON `[]` → returns
+- [x] `_open_issue_exists` when `gh issue list` returns empty JSON `[]` → returns
       `False` (no open match → safe to file). Add a test.
-- [ ] Tracker query returns malformed/non-JSON output → caught, logged, treated
+- [x] Tracker query returns malformed/non-JSON output → caught, logged, treated
       as "no match found" (fail-open) so a real finding is not lost. Add a test.
 
 ### Error State Rendering
-- [ ] The auditor's user-visible output is the filed GitHub issue and the
+- [x] The auditor's user-visible output is the filed GitHub issue and the
       Telegram summary. Test that when all findings are suppressed by the new
       filters, `issues_filed == 0` and the Telegram summary reflects zero new
       issues (no crash, no empty-loop).
-- [ ] Verify a warning propagates to the logger (not swallowed) when the tracker
+- [x] Verify a warning propagates to the logger (not swallowed) when the tracker
       query fails, so operators can see the auditor degraded to Redis-only dedup.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_docs_auditor_substrate.py` — most existing tests patch
+- [x] `tests/unit/test_docs_auditor_substrate.py` — most existing tests patch
       `_file_issue_if_new` to `return_value=False` (lines 135, 152, 260, 298,
       383, 410, 433), so they are insulated from changes to that function's
       internals and **require no change** (UPDATE only if a signature changes —
       it does not).
-- [ ] `tests/unit/test_docs_auditor_substrate.py` — ADD a new test class
+- [x] `tests/unit/test_docs_auditor_substrate.py` — ADD a new test class
       `TestDeletedTargetFiltering` covering: placeholder paths suppressed
       (`foo/bar.py`, `agent/docs_handler/foo.py`), deletion-heading paths
       suppressed (`intent/__init__.py` under `## Migration ...`), fenced-block
       paths suppressed, and a genuine dead reference NOT suppressed (regression
       guard against over-filtering).
-- [ ] `tests/unit/test_docs_auditor_substrate.py` — ADD a new test class
+- [x] `tests/unit/test_docs_auditor_substrate.py` — ADD a new test class
       `TestCrossMachineDedup` covering: open-tracker match → skip filing,
       no open match → file proceeds, `gh issue list` failure → fall back to
       Redis-only + warning logged, Redis fast-path hit → tracker query skipped.
-- [ ] If batching (Open Question 1) is adopted: ADD `TestRollingDeletedTargetIssue`
+- [x] If batching (Open Question 1) is adopted: ADD `TestRollingDeletedTargetIssue`
       covering upsert-into-existing vs. create-new, and that stub-doc/orphan-plan
       filing is unchanged.
 
@@ -428,40 +428,40 @@ code path. The only external surface (`gh` CLI) is already wired.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/docs-auditor.md` — revise the "Deleted target" row in
+- [x] Update `docs/features/docs-auditor.md` — revise the "Deleted target" row in
       the File-as-issue table and the dedup description (currently: "Issues are
       deduped by SHA-256 of the title via `docs_audit:issues_filed:{hash}` Redis
       keys (30-day TTL)") to describe the new two-tier dedup (live-tracker query
       as authoritative gate + Redis fast-path cache) and the placeholder /
       illustrative / deletion-heading suppression rules.
-- [ ] If batching is adopted, document the rolling-tracking-issue behavior in
+- [x] If batching is adopted, document the rolling-tracking-issue behavior in
       `docs/features/docs-auditor.md` (replace "one issue per finding" with the
       rolling-issue model).
-- [ ] No `docs/features/README.md` index change — the auditor already has an entry.
+- [x] No `docs/features/README.md` index change — the auditor already has an entry.
 
 ### Inline Documentation
-- [ ] Docstrings on the new helpers (`_is_placeholder_path`,
+- [x] Docstrings on the new helpers (`_is_placeholder_path`,
       `_is_under_deletion_heading`/illustrative check, `_open_issue_exists`,
       and `_upsert_rolling_deleted_target_issue` if batching is adopted).
-- [ ] Comment on the fail-open fallback in `_file_issue_if_new` explaining why a
+- [x] Comment on the fail-open fallback in `_file_issue_if_new` explaining why a
       tracker-query failure degrades to Redis-only rather than dropping the finding.
 
 ## Success Criteria
 
-- [ ] `_detect_deleted_target_issues` no longer emits findings for
+- [x] `_detect_deleted_target_issues` no longer emits findings for
       `agent/docs_handler/foo.py`, `foo/bar.py`, or `intent/__init__.py` (verified
       by unit tests using the real doc content as fixtures).
-- [ ] `_file_issue_if_new` (or its batching replacement) queries the live tracker
+- [x] `_file_issue_if_new` (or its batching replacement) queries the live tracker
       and does not file when an open `documentation`-labelled issue with a matching
       title already exists (verified by unit test patching `gh issue list`).
-- [ ] A genuine dead `.py` reference in normal prose is still flagged (regression
+- [x] A genuine dead `.py` reference in normal prose is still flagged (regression
       guard — over-filtering does not mask real rot).
-- [ ] Tracker-query failure degrades to Redis-only dedup with a logged warning,
+- [x] Tracker-query failure degrades to Redis-only dedup with a logged warning,
       and the finding is still filed (no silent drop).
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`) — `docs/features/docs-auditor.md` reflects
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`) — `docs/features/docs-auditor.md` reflects
       the new dedup + filtering behavior.
-- [ ] `grep` confirms the auto-fix regex at `reflections/docs_auditor.py:382` is
+- [x] `grep` confirms the auto-fix regex at `reflections/docs_auditor.py:382` is
       untouched (scope guard).
 
 ## Team Orchestration
