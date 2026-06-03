@@ -7,6 +7,70 @@ from unittest.mock import MagicMock
 
 import pytest
 
+
+# ---------------------------------------------------------------------------
+# Production-Redis (db=0) flush guard
+# ---------------------------------------------------------------------------
+# A flushdb() against db=0 -- or any flushall() -- wipes the production dataset
+# (memories, Telegram history, chats, knowledge docs). The redis_test_db
+# fixture below isolates Popoto to a per-worker test db (db>=1), but test code
+# that constructs its OWN redis client bypasses that isolation: bare
+# redis.Redis() and redis.Redis.from_url(".../0") both default to db=0. On
+# 2026-06-03 exactly this footgun flushed production. We monkeypatch
+# flushdb/flushall on the sync and async Redis classes at conftest import time
+# (before collection) so any attempt to flush db=0 -- or call flushall, which
+# wipes EVERY db -- raises instead of destroying data. This patch lives in
+# conftest.py, so it only affects pytest runs; production code is untouched.
+def _install_redis_db0_flush_guard() -> None:
+    try:
+        import redis
+        import redis.asyncio as aioredis
+    except Exception:
+        return
+
+    def _db_of(client) -> int:
+        try:
+            return int(client.connection_pool.connection_kwargs.get("db", 0) or 0)
+        except Exception:
+            # If we cannot determine the db, assume the dangerous one (db=0).
+            return 0
+
+    def _make_guarded_flushdb(orig):
+        def _guarded_flushdb(self, *args, **kwargs):
+            if _db_of(self) == 0:
+                raise RuntimeError(
+                    "Refusing flushdb() on Redis db=0 (production) during tests. "
+                    "Use the autouse redis_test_db fixture, or build clients on the "
+                    "per-worker test db (see redis_url / tests/conftest.py). "
+                    "This guard exists because a db=0 flush wiped production on 2026-06-03."
+                )
+            return orig(self, *args, **kwargs)
+
+        _guarded_flushdb._db0_guarded = True
+        return _guarded_flushdb
+
+    def _make_guarded_flushall(orig):
+        def _guarded_flushall(self, *args, **kwargs):
+            raise RuntimeError(
+                "Refusing flushall() during tests -- it wipes ALL Redis dbs, including "
+                "production db=0. Flush the per-worker test db with flushdb() instead. "
+                "See tests/conftest.py."
+            )
+
+        _guarded_flushall._db0_guarded = True
+        return _guarded_flushall
+
+    for mod in (redis, aioredis):
+        cls = mod.Redis
+        if not getattr(cls.flushdb, "_db0_guarded", False):
+            cls.flushdb = _make_guarded_flushdb(cls.flushdb)
+        if not getattr(cls.flushall, "_db0_guarded", False):
+            cls.flushall = _make_guarded_flushall(cls.flushall)
+
+
+_install_redis_db0_flush_guard()
+
+
 # ---------------------------------------------------------------------------
 # Centralized claude_agent_sdk mock
 # ---------------------------------------------------------------------------
