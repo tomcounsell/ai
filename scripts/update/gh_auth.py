@@ -60,12 +60,37 @@ def configure_gh_auth(project_dir: Path | None = None) -> GhAuthResult:
 
     # gh refuses `auth login` when GITHUB_TOKEN is set in the environment
     # (it treats the env var as the active credential and rejects the command).
-    # Strip both GITHUB_TOKEN and GH_TOKEN from the subprocess env so the
-    # login proceeds cleanly. We are intentionally replacing those with the
-    # PAT stored via gh's credential store.
+    # Strip both GITHUB_TOKEN and GH_TOKEN from the subprocess env so both the
+    # status pre-check and the login operate on gh's stored credential, not the
+    # env var. We are intentionally relying on the PAT stored via gh's keyring.
     env = os.environ.copy()
     env.pop("GITHUB_TOKEN", None)
     env.pop("GH_TOKEN", None)
+
+    # Idempotency: if gh's stored credential already authenticates against
+    # github.com, skip the re-login entirely. Re-running `gh auth login
+    # --with-token` when the token is already in the keyring trips a gh quirk
+    # (observed on 2.88.1) that fails with a misleading "no token found"
+    # despite the token being valid. Checking status first avoids that noise
+    # and matches this module's documented idempotent contract.
+    try:
+        precheck = subprocess.run(
+            [gh_bin, "auth", "status", "--hostname", "github.com"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+        if precheck.returncode == 0:
+            return GhAuthResult(
+                success=True,
+                action="already_ok",
+                detail=(precheck.stdout.strip() or precheck.stderr.strip()),
+            )
+    except (subprocess.TimeoutExpired, OSError):
+        # Best-effort: fall through to an explicit login if the status check
+        # cannot run for any reason.
+        pass
 
     # Attempt the login
     try:
