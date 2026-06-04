@@ -46,7 +46,6 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
 
 import pexpect
 import pexpect.exceptions
@@ -54,7 +53,7 @@ import pexpect.exceptions
 # Reuse the headless harness's UUID/resume regexes. The spike (scripts/
 # granite_tui_pty_spike_pexpect.py) and the prior PoC both depend on
 # these being identical; the PoC inherits the same parser.
-from agent.claude_session import _RESUME_HINT_RE, _UUID_RE
+from agent.claude_session import _RESUME_HINT_RE
 
 # Reuse the spike's INTERRUPTED_RE. The regex accepts both the v2.1.160
 # TUI text and the older wording so the driver is robust to TUI version
@@ -96,11 +95,18 @@ DEFAULT_MIN_CONTENT_BYTES = 400
 # ceiling; the steady-state loop can tune this per role.
 DEFAULT_TIMEOUT_S = 60.0
 
-# The model-pick policy: prefer gemma* (small/fast, conversational),
-# fall back to any non-granite* model. Granite is the *operator*, never
-# the substrate model — running the substrate on granite would be
-# self-referential and degrade routing accuracy.
-MODEL_PICK_PREFER = ("gemma",)
+# The model-pick policy: prefer cloud models (e.g. `glm-5.1:cloud`) when
+# available, then gemma* (small/fast, conversational), then any non-granite
+# local model. Granite is the *operator*, never the substrate model.
+# Each entry is `(match_token, match_kind)` where match_kind is "suffix"
+# for tokens that end the model string (like ":cloud" tags) and "prefix"
+# for tokens that begin it. Cloud models get a longer cold-start budget
+# in `spawn()` and in the prerequisite check (see prereq table in
+# `docs/plans/granite_interactive_tui_poc.md`).
+MODEL_PICK_PREFER: tuple[tuple[str, str], ...] = (
+    (":cloud", "suffix"),
+    ("gemma", "prefix"),
+)
 MODEL_PICK_AVOID_PREFIX = ("granite",)
 
 
@@ -135,11 +141,17 @@ def _strip_ansi(text: str) -> str:
 def _pick_substrate_model() -> str:
     """Pick a model for the TUI subprocess, avoiding the operator's own model.
 
-    Prefer a `gemma*` model (small/fast, conversational). Fall back to any
-    non-granite* model. Last resort: pick the first model ollama reports.
+    Preference order (see `MODEL_PICK_PREFER`):
+      1. Any `*:cloud` model (e.g. `glm-5.1:cloud`) — strongest when reachable
+      2. Any `gemma*` model — small/fast/conversational
+      3. Any non-`granite*` model — last local fallback
+      4. The first model ollama reports (granite-acceptable as last resort)
 
-    Returns the bare model name (no tag prefix). Raises PTYDriverError
-    if ollama is unreachable or returns no models.
+    Returns the full ollama model identity (e.g. `glm-5.1:cloud` or
+    `gemma4:e2b`) — the tag is required for ollama to resolve the model.
+    Callers pass the result straight to `claude --model <full_identity>`.
+
+    Raises PTYDriverError if ollama is unreachable or returns no models.
     """
     try:
         with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=5) as r:
@@ -151,18 +163,22 @@ def _pick_substrate_model() -> str:
     if not names:
         raise PTYDriverError("ollama reports no models")
 
-    for prefer in MODEL_PICK_PREFER:
+    for prefer_token, match_kind in MODEL_PICK_PREFER:
         for n in names:
-            if n.startswith(prefer):
-                return n.split(":")[0]  # strip tag if present
+            if match_kind == "suffix":
+                if n.endswith(prefer_token):
+                    return n  # keep the full identity, e.g. "glm-5.1:cloud"
+            else:  # prefix
+                if n.startswith(prefer_token):
+                    return n  # keep the full identity, e.g. "gemma4:e2b"
 
     for n in names:
         if not any(n.startswith(p) for p in MODEL_PICK_AVOID_PREFIX):
-            return n.split(":")[0]
+            return n  # keep the tag — ollama needs it for resolution
 
     # All models are granite — return the first one as a last resort. The
     # operator's classifier is robust to this, just slower.
-    return names[0].split(":")[0]
+    return names[0]
 
 
 def _build_env() -> dict[str, str]:

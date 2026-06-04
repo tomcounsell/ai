@@ -19,17 +19,12 @@ driver's behavior matches the spike's observed_state on the real TUI.
 
 from __future__ import annotations
 
-import os
 import json
-import re
 import shutil
 import subprocess
-import sys
-import time
 import unittest
 import urllib.error
 import urllib.request
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pexpect
@@ -42,7 +37,6 @@ from agent.granite_container.pty_driver import (
     PROMPT_GLYPH,
     PTYDriver,
     PTYDriverError,
-    SUBMIT_KEY,
     _build_env,
     _pick_substrate_model,
     _strip_ansi,
@@ -81,8 +75,11 @@ def _model_reachable_check() -> bool:
         if not names:
             return False
         pick = next(
-            (n for n in names if n.startswith("gemma")),
-            next((n for n in names if not n.startswith("granite")), names[0]),
+            (n for n in names if ":cloud" in n),
+            next(
+                (n for n in names if n.startswith("gemma")),
+                next((n for n in names if not n.startswith("granite")), names[0]),
+            ),
         )
         r = subprocess.run(
             [
@@ -96,7 +93,7 @@ def _model_reachable_check() -> bool:
             ],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=180 if ":cloud" in pick else 60,
         )
         return r.returncode == 0
     except (subprocess.TimeoutExpired, OSError, urllib.error.URLError, json.JSONDecodeError):
@@ -230,6 +227,7 @@ class TestReadUntilIdle(unittest.TestCase):
         # raises TIMEOUT (so the loop terminates). Each call to
         # read_nonblocking pulls the next chunk.
         chunks_iter = iter(chunks)
+
         def read_nonblocking(size: int, timeout: float) -> str:
             try:
                 return next(chunks_iter)
@@ -237,6 +235,7 @@ class TestReadUntilIdle(unittest.TestCase):
                 # The driver catches pexpect.TIMEOUT to mean "no new data
                 # this tick; continue waiting". We mirror that here.
                 raise pexpect.TIMEOUT("mock timeout")
+
         mock_child.read_nonblocking.side_effect = read_nonblocking
         driver._child = mock_child
         return driver
@@ -244,10 +243,12 @@ class TestReadUntilIdle(unittest.TestCase):
     def test_saw_idle_when_bar_and_glyph_present(self) -> None:
         # First chunk has the bar; second adds the glyph. min_content_bytes=0
         # means we accept any bar+glyph frame.
-        driver = self._driver_with_mock([
-            "bypass permissions on\n",
-            "❯ hello world\n",
-        ])
+        driver = self._driver_with_mock(
+            [
+                "bypass permissions on\n",
+                "❯ hello world\n",
+            ]
+        )
         result = driver.read_until_idle(min_content_bytes=0, timeout_s=2.0)
         self.assertTrue(result.saw_idle, f"expected saw_idle; buffer={result.buffer!r}")
         self.assertIn("bypass permissions", result.buffer)
@@ -266,27 +267,46 @@ class TestReadUntilIdle(unittest.TestCase):
 
     def test_overlay_bar_also_idle(self) -> None:
         # C4: `/help` overlay shows `esc to cancel` — also idle.
-        driver = self._driver_with_mock([
-            "esc to cancel\n",
-            "❯ \n",
-        ])
+        driver = self._driver_with_mock(
+            [
+                "esc to cancel\n",
+                "❯ \n",
+            ]
+        )
         result = driver.read_until_idle(min_content_bytes=0, timeout_s=2.0)
         self.assertTrue(result.saw_idle, f"overlay should count as idle; got {result.buffer!r}")
 
     def test_min_content_bytes_floor(self) -> None:
         # Bar+glyph present but buffer < min_content_bytes → not idle.
-        driver = self._driver_with_mock([
-            "bypass permissions on\n",
-            "❯ \n",
-        ])
+        driver = self._driver_with_mock(
+            [
+                "bypass permissions on\n",
+                "❯ \n",
+            ]
+        )
         result = driver.read_until_idle(min_content_bytes=10_000, timeout_s=1.0)
         self.assertFalse(result.saw_idle, "floor should prevent premature idle")
 
 
 class TestPickSubstrateModel(unittest.TestCase):
-    """The model picker avoids granite (the operator) and prefers gemma."""
+    """The model picker prefers cloud > gemma > non-granite, returns full identity."""
 
-    def test_prefers_gemma(self) -> None:
+    def test_prefers_cloud_model(self) -> None:
+        fake_tags = {
+            "models": [
+                {"name": "granite4.1:3b"},
+                {"name": "gemma4:e2b"},
+                {"name": "glm-5.1:cloud"},
+            ]
+        }
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = (
+                str(fake_tags).replace("'", '"').encode("utf-8")
+            )
+            model = _pick_substrate_model()
+        self.assertEqual(model, "glm-5.1:cloud", f"cloud should win; got {model!r}")
+
+    def test_prefers_gemma_when_no_cloud(self) -> None:
         fake_tags = {
             "models": [
                 {"name": "granite4.1:3b"},
@@ -299,7 +319,8 @@ class TestPickSubstrateModel(unittest.TestCase):
                 str(fake_tags).replace("'", '"').encode("utf-8")
             )
             model = _pick_substrate_model()
-        self.assertTrue(model.startswith("gemma"), f"expected gemma; got {model!r}")
+        # Full identity is returned (e.g. "gemma3:4b"), not the stripped name.
+        self.assertEqual(model, "gemma3:4b", f"expected full gemma identity; got {model!r}")
 
     def test_falls_back_to_non_granite(self) -> None:
         fake_tags = {
@@ -314,6 +335,7 @@ class TestPickSubstrateModel(unittest.TestCase):
             )
             model = _pick_substrate_model()
         self.assertFalse(model.startswith("granite"), f"should avoid granite; got {model!r}")
+        self.assertEqual(model, "llama3:8b", f"expected full identity; got {model!r}")
 
     def test_raises_on_ollama_unreachable(self) -> None:
         with patch("urllib.request.urlopen") as mock_open:
@@ -372,7 +394,7 @@ class TestSpikeRegressionEnvGated(unittest.TestCase):
 
     @unittest.skipUnless(
         _model_reachable(),
-        "RESUME_SKIP model_unreachable — spike-regression test gated on `claude --print ping` succeeding",
+        "RESUME_SKIP model_unreachable: spike-regression gated on `claude --print ping`",
     )
     def test_scenario_1_idle_paint(self) -> None:
         """Scenario 1: spawn -> wait for idle -> assert bar+glyph present."""
@@ -404,7 +426,9 @@ class TestSpikeRegressionEnvGated(unittest.TestCase):
             self.assertTrue(initial.saw_idle)
             driver.write("hello")
             result = driver.read_until_idle(min_content_bytes=100, timeout_s=30.0)
-            self.assertTrue(result.saw_idle, f"expected idle after hello; got {result.buffer[-200:]!r}")
+            self.assertTrue(
+                result.saw_idle, f"expected idle after hello; got {result.buffer[-200:]!r}"
+            )
         finally:
             driver.close(force=True)
 
@@ -443,9 +467,9 @@ class TestSpikeRegressionEnvGated(unittest.TestCase):
             initial = driver.read_until_idle(min_content_bytes=0, timeout_s=30.0)
             self.assertTrue(initial.saw_idle)
             driver.write("/help")
-            overlay = driver.read_until_idle(min_content_bytes=0, timeout_s=5.0)
             # The overlay is itself idle (C4). After sending an Esc-like
             # follow-up we expect to see the bypass bar return.
+            driver.read_until_idle(min_content_bytes=0, timeout_s=5.0)
             driver.write("\x1b")  # Esc
             after = driver.read_until_idle(min_content_bytes=0, timeout_s=5.0)
             self.assertTrue(after.saw_idle)
