@@ -11,21 +11,20 @@
 # dozens of them.
 #
 # This wrapper:
-#   1. Snapshots xdist worker PIDs before launching pytest.
-#   2. Runs pytest under a trap that reaps them on EXIT, INT, TERM,
-#      HUP, PIPE — so the workers always die when the wrapper exits
-#      for any reason (success, failure, signal, or crash).
-#   3. As a last-resort fallback, kills any still-living workers
-#      matching the snapshot by exact command + age < 2 minutes.
+#   1. Reaps any pre-existing xdist orphans BEFORE pytest starts (a
+#      prior crash may have left workers behind).
+#   2. Runs pytest under a trap that reaps any xdist workers we see
+#      on EXIT, INT, TERM, HUP, PIPE. We re-snapshot at reap time
+#      rather than trusting the cached PID list, because fresh
+#      orphans may appear and stale PIDs may already be dead.
+#   3. Honors the caller's cwd (worktree agents test the worktree).
 #
 # Usage:
 #   scripts/pytest-clean.sh tests/unit/granite_container/
 #   scripts/pytest-clean.sh -k "test_pick" tests/unit/
 #   scripts/pytest-clean.sh -x   # all args pass through to pytest
 #
-# Replaces the bare `pytest tests/...` patterns in the dev / sdlc /
-# agent workflows. Does NOT change pytest's own behavior — the
-# reaping is purely a teardown safety net.
+# For an ad-hoc reaper (no test run), use scripts/reap-xdist.sh.
 
 set -u
 
@@ -40,29 +39,19 @@ else
     cd "$REPO_ROOT"
 fi
 
-# Snapshot the xdist-worker fingerprint so we can find any orphans
-# after pytest exits. We use the exact argv regex that xdist uses.
-XDIST_WORKER_RE='exec\(eval\(sys.stdin.readline\(\)\)\)'
-SNAPSHOT_PIDS=$(pgrep -f "$XDIST_WORKER_RE" | sort -u | tr '\n' ' ')
-
-# Defensive: if the snapshot is empty, that's fine — there are no
-# workers to reap, and pytest will spawn its own.
-if [ -z "$SNAPSHOT_PIDS" ]; then
-    SNAPSHOT_PIDS=""
-fi
+XDIST_WORKER_RE='exec\(eval\(sys\.stdin\.readline\(\)\)'
 
 reap_workers() {
-    # $SNAPSHOT_PIDS is space-separated. If empty, nothing to do.
-    if [ -z "${SNAPSHOT_PIDS:-}" ]; then
-        return 0
-    fi
-    # SIGTERM first (graceful), then SIGKILL after 1s for survivors.
-    # Use xargs to handle the empty-list case safely.
-    echo "$SNAPSHOT_PIDS" | tr ' ' '\n' | grep -E '^[0-9]+$' | while read -r pid; do
+    # Re-snapshot at reap time. The cached list (if any) is stale by
+    # the time the trap fires; the live list is what we want.
+    local now_pids
+    now_pids=$(pgrep -f "$XDIST_WORKER_RE" 2>/dev/null | sort -u | tr '\n' ' ' || true)
+    [ -z "$now_pids" ] && return 0
+    echo "$now_pids" | tr ' ' '\n' | grep -E '^[0-9]+$' | while read -r pid; do
         [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
     done
     sleep 1
-    echo "$SNAPSHOT_PIDS" | tr ' ' '\n' | grep -E '^[0-9]+$' | while read -r pid; do
+    echo "$now_pids" | tr ' ' '\n' | grep -E '^[0-9]+$' | while read -r pid; do
         [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null || true
     done
 }
@@ -72,6 +61,11 @@ reap_workers() {
 # shutdown; without it, a final SIGTERM to the wrapper can race with
 # the reap and abort the cleanup.
 trap reap_workers EXIT INT TERM HUP PIPE
+
+# Reap pre-existing orphans first. A prior crash may have left
+# workers behind; pytest would spawn its own fresh set on top and
+# we'd be in worse shape than before.
+reap_workers
 
 # Hand off to pytest. We intentionally do NOT use `exec` — we need
 # the wrapper process to stay alive so the trap can run on the way
