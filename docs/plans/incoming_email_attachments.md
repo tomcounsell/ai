@@ -489,21 +489,42 @@ bridge module itself.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns) — 0 blockers, 5 concerns, 2 nits.
+Critics: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User, Consistency Auditor.
+Run 2026-06-04 against baseline `ce1c852d`. Concerns C1–C5 carry implementation
+notes that BUILD must honor. Nits N1–N2 are optional polish.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Operator, Adversary | **C1: `read`-time disk writes.** Persistence + vault mirror live inside `parse_email_message`, which is also called by `tools/valor_email.py:_imap_fallback_fetch` on a cache-miss `valor-email read`. A read-only CLI read would write bytes to disk and fire the vault mirror — a write side-effect on a read path, possibly double-persisting. | Task 1 (inbound-parse) | Split into `_extract_attachment_metadata(msg)` (pure: filename/content-type/size, called inside `parse_email_message`) and `_persist_attachments(parsed, message_id)` (writes bytes + vault mirror). Call `_persist_attachments` ONLY from `_email_inbox_loop` (~`bridge/email_bridge.py:1085`) after parse returns, gated on `if parsed and parsed.get("attachments")`. On the fallback read path, `path` is `None` (bytes never persisted) — document that `path` is populated only for poll-loop-ingested messages. |
+| CONCERN | Skeptic, User | **C2: Read-output misses the IMAP fallback path.** Attachment exposure is scoped to `tools/email_history/` projections, but `valor-email read` falls back to `_imap_fallback_fetch` (re-parsing raw IMAP) when the cache is empty. Its result dicts are hand-shaped in the CLI, so attachments would be absent there. | Task 2 (history-context) | In `_imap_fallback_fetch`, the `results.append({...})` block must add `"attachments": parsed.get("attachments", [])`. Test BOTH cache-hit (`get_recent_emails`) and cache-miss (`_imap_fallback_fetch`) read paths project the field. |
+| CONCERN | Adversary | **C3: Empty/missing `Message-ID` breaks the storage subdir key.** `message_id` can be empty (providers omit it; `_record_history` guards `if not message_id`). With an empty Message-ID, `{msgid_hash}` collapses to a constant, so attachments from ALL Message-ID-less emails collide into one subdir and overwrite across messages. | Task 1 (inbound-parse) | Compute `key = message_id or f"{from_addr}:{subject}:{int(timestamp)}"` before hashing, OR generate a `uuid4().hex` subdir when `message_id` is falsy. Distinct from Risk 3 (same-message dupes via index-suffix); this is cross-message collision. Apply the same fallback to the vault target name (see C5). |
+| CONCERN | Adversary, Operator | **C4: Size cap is post-decode only.** `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES` bounds persisted bytes, but each part is `get_payload(decode=True)`'d into RAM before the cap rejects it. A multipart bomb forces full base64-decode of every part; `IMAP_MAX_BATCH=20` compounds it. | Task 1 (inbound-parse) | Keep the SINGLE cumulative knob (per PM Open Q1 — no per-file cap). But make the cap short-circuit the `walk()` loop: maintain a running total, and once it would exceed `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES`, stop decoding further parts (mark `truncated: true`) rather than decoding-then-skipping. Estimate from encoded `len(part.get_payload())` before `decode=True` where possible so an oversized part is rejected pre-decode. Add `EMAIL_ATTACHMENT_MAX_PARTS` count cap as a cheap bomb guard (default generous). |
+| CONCERN | Archaeologist | **C5: Vault-mirror naming key must include filename + handle empty msgid.** Reusing `_ingest_attachments`' shape, two different files named `report.pdf` from two senderless emails could collide in the flat vault dir. | Task 1 (inbound-parse) | Reuse the exact Telegram formula `f"{date_part}_{safe_sender}_{msg_id}_{src.name}"`, substituting the C3 fallback for `msg_id` when Message-ID is empty. Content-hash idempotency makes a genuine duplicate overwrite the prior sidecar — accepted (matches Telegram). Gated on Open Q2 = YES (resolved). |
+| NIT | Consistency Auditor | **N1: Race 1 prose drift.** `_record_history` already uses a `r.pipeline()` MULTI/EXEC + orphan-DEL design; Race 1 reads as if introducing the pipeline. | Task 2 (history-context) | Trim Race 1 prose to acknowledge the existing atomic pipeline rather than presenting it as new mitigation. Cosmetic. |
+| NIT | User | **N2: `--file` help text not updated.** Switching to `action="append"` without updating the help string ("File to attach…") to indicate it's repeatable. | Task 3 (outgoing-cli) | Update help to "File to attach; repeat for multiple files". |
+
+### Structural Checks
+All PASS: required sections present/non-empty; tasks 1–6 sequential, deps acyclic;
+13/13 referenced source/test files exist (`data/media/email-attachments/` intentionally
+new); cross-references sound (every Success Criterion maps to a task; No-Gos and Rabbit
+Holes absent from tasks).
 
 ---
 
 ## Open Questions
 
-1. **Size cap default.** Propose `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES` defaulting to
-   25 MiB (typical provider attachment ceiling). Acceptable, or do you want a
-   different default / per-file cap as well?
-2. **Vault mirror.** I plan to mirror inbound attachments into
-   `~/work-vault/email-attachments/` for KnowledgeWatcher indexing (matching
-   Telegram). Confirm you want emailed files auto-indexed into the knowledge base,
-   or should they stay in `data/media/` only (session-readable but not indexed)?
-3. **Disk cleanup.** I'm treating on-disk retention as accepted residual risk
-   (matching Telegram `data/media/`), with a reaper as future work. OK to ship
-   without a cleanup mechanism?
+All three resolved by PM (2026-06-04) with pattern-matching defaults — consistency
+with the existing Telegram inbound-media path.
+
+1. **Size cap default.** ✅ RESOLVED — `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES = 25 MiB`
+   cumulative total per email. Single knob; **no separate per-file cap.** (Critique
+   C4 still applies: the single cumulative cap must short-circuit the decode loop
+   rather than decode-then-skip, and a generous `EMAIL_ATTACHMENT_MAX_PARTS` count
+   cap guards against multipart bombs — neither introduces a per-file *size* cap.)
+2. **Vault mirror.** ✅ RESOLVED — YES. Mirror inbound attachments into
+   `~/work-vault/email-attachments/` for KnowledgeWatcher indexing, matching the
+   Telegram pattern. Unblocks the C5 vault-mirror code path.
+3. **Disk cleanup.** ✅ RESOLVED — ship WITHOUT a reaper. On-disk retention is
+   accepted residual risk (matches Telegram `data/media/`); a reaper is future work
+   (see Rabbit Holes / Risk 1).
