@@ -2,7 +2,11 @@
 Shared test fixtures for Valor AI tests.
 """
 
+import atexit
+import os
+import subprocess
 import sys
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -543,3 +547,90 @@ def django_project(sample_config):
     project = sample_config["projects"]["django-project-template"].copy()
     project["_key"] = "django-project-template"
     return project
+
+
+# ---------------------------------------------------------------------------
+# xdist worker reaper
+# ---------------------------------------------------------------------------
+# pytest-xdist workers run via
+#   `python -c "import sys; exec(eval(sys.stdin.readline()))"`
+# which installs no signal handlers. If the parent pytest process dies
+# (timeouts, agent tooling interrupting, a keyboard interrupt racing
+# with teardown) the workers get reparented to init and stay alive
+# consuming memory. On a 10-CPU box each leaked worker is ~15-25MB of
+# RAM, and one crash loop can leave 60+ zombies.
+#
+# The shell-level `scripts/pytest-clean.sh` covers the happy path. The
+# controller-level reaper below covers the case where the controller
+# itself exits without the wrapper's trap firing (e.g. SIGKILL of the
+# wrapper, or a pytest crash).
+#
+# IMPORTANT: this reaper runs on the CONTROLLER (xdist master), not in
+# the workers. It kills workers by matching the standard xdist worker
+# argv regex.
+XDIST_WORKER_RE = r"exec\(eval\(sys\.stdin\.readline\(\)\)\)"
+
+
+def _reap_xdist_workers() -> None:
+    """Find and kill any xdist worker processes we can see.
+
+    Uses `pgrep` so we don't need psutil. Idempotent. Catches every
+    exception so a reap failure never blocks pytest teardown.
+    """
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", XDIST_WORKER_RE],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return
+
+    pids = [p for p in result.stdout.split() if p.isdigit()]
+    if not pids:
+        return
+
+    for pid in pids:
+        try:
+            os.kill(int(pid), 15)  # SIGTERM
+        except (OSError, ValueError):
+            pass
+    time.sleep(0.5)
+    for pid in pids:
+        try:
+            os.kill(int(pid), 9)  # SIGKILL survivors
+        except (OSError, ValueError):
+            pass
+
+
+def pytest_unconfigure(config):
+    """Run the reap on pytest's normal teardown path.
+
+    Only the controller runs this hook; workers have `workerinput`
+    set on their config. The wrap in a try/except keeps the reap
+    out of the way on non-xdist runs and on import failures.
+    """
+    try:
+        import xdist  # noqa: F401
+    except ImportError:
+        return
+    if getattr(config, "workerinput", None):
+        # We are a worker; workers have no business reaping siblings.
+        return
+    _reap_xdist_workers()
+
+
+# atexit covers the case where pytest's unconfigure hook didn't fire
+# (e.g. the controller segfaulted, or the test runner killed the
+# process group). atexit runs on the normal Python interpreter exit
+# path, which is the strongest hook we can install at module load
+# time.
+#
+# Gated on PYTEST_XDIST_WORKER being unset so the worker processes
+# (which also import this conftest via xdist's path resolution) don't
+# re-register. The controller sets this env var to the worker name
+# (e.g. "gw0") once it forks; before that, it's unset, so this code
+# only runs in the controller and in non-xdist runs.
+if "PYTEST_XDIST_WORKER" not in os.environ:
+    atexit.register(_reap_xdist_workers)
