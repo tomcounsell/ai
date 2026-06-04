@@ -983,9 +983,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Determine session type for routing decisions
         _session_type = getattr(agent_session, "session_type", None) if agent_session else None
 
-        # Calendar heartbeat at session start (only for planned Dev sessions with a slug)
-        if session.slug:
-            asyncio.create_task(_calendar_heartbeat(session.slug, project=session.project_key))
+        # Calendar heartbeat at session start. Planned Dev sessions use their
+        # work-item slug as the event title; Telegram-originated sessions have no
+        # slug, so fall back to the project key so their activity still lands on
+        # the project's assigned calendar (rolls into one extending daily event).
+        # The calendar tool skips silently for projects without a mapping.
+        cal_slug = session.slug or session.project_key
+        if cal_slug:
+            asyncio.create_task(_calendar_heartbeat(cal_slug, project=session.project_key))
 
         # Create messenger with bridge callbacks, falling back to file output
         # Find the transport from extra_context to support multiple transports per project
@@ -1788,9 +1793,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 # Calendar + updated_at heartbeat on the 25-min cadence (preserved).
                 if elapsed >= CALENDAR_HEARTBEAT_INTERVAL:
                     elapsed = 0
-                    if session.slug:
+                    # Fall back to project key when there's no slug so ad-hoc
+                    # (Telegram-originated) sessions still record calendar activity.
+                    cal_slug = session.slug or session.project_key
+                    if cal_slug:
                         asyncio.create_task(
-                            _calendar_heartbeat(session.slug, project=session.project_key)
+                            _calendar_heartbeat(cal_slug, project=session.project_key)
                         )
                     if agent_session:
                         try:
