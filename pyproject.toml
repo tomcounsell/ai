@@ -132,6 +132,16 @@ python_functions = ["test_*"]
 # caches, host lockfiles, a single GitHub issue) and would otherwise fail
 # under inter-test parallelism. Loadfile is the simplest scheduler that
 # fixes that while preserving inter-file parallelism.
+#
+# Worker reaping: xdist workers run via
+# `python -c "import sys;exec(eval(sys.stdin.readline()))"` which
+# installs no signal handlers. If the parent shell dies (timeout,
+# agent interrupt, Ctrl-C) the workers get reparented to init and
+# stay alive consuming memory. Agent-invoked pytest runs should use
+# `scripts/pytest-clean.sh` instead of bare `pytest`; it snapshots
+# worker PIDs and reaps them on EXIT/INT/TERM/HUP/PIPE. If a
+# non-wrapper pytest run leaves orphans, `scripts/reap-xdist.sh`
+# kills them in one shot.
 addopts = "--tb=short -p no:postgresql -n auto --dist=loadfile"
 asyncio_mode = "auto"
 markers = [
