@@ -144,10 +144,12 @@ valor-email threads
 | `./scripts/valor-service.sh email-dead-letter replay --all` | Replay all dead-lettered emails |
 | `./scripts/install_email_bridge.sh` | Install launchd plist for boot-time email bridge (machine-gated, idempotent; opt-in) |
 | `tail -f logs/bridge.log` | Stream bridge logs |
-| `pytest tests/` | Run all tests (parallel by default — `-n auto --dist=loadfile` from `pyproject.toml`) |
+| `pytest tests/` | Run all tests (parallel by default — `-n auto --dist=loadfile` from `pyproject.toml`). **Prefer `scripts/pytest-clean.sh` over bare `pytest`** — the wrapper reaps xdist workers on exit; without it, interrupted runs leave orphan workers consuming memory (see xdist reaper note in `pyproject.toml`). |
 | `pytest tests/unit/` | Run unit tests only (~40s parallel) |
 | `pytest tests/unit/ -n0` | Force serial unit run (e.g. for debugging) |
 | `pytest tests/integration/` | Run integration tests only (~125s parallel) |
+| `scripts/pytest-clean.sh <pytest-args>` | Run pytest with automatic xdist worker reaping (drop-in for `pytest`) |
+| `scripts/reap-xdist.sh` | Kill any orphan xdist workers on the system (one-shot reaper, idempotent) |
 | `pytest -m sdlc` | Run tests for a specific feature (see `tests/README.md`) |
 | `python -m ruff format . && python -m ruff check .` | Format and lint |
 | `python -m ui.app` | Start web UI server on localhost:8500 |
