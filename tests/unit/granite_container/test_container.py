@@ -20,8 +20,6 @@ from agent.granite_container.container import (
     result_to_json,
 )
 from agent.granite_container.pty_driver import IdleResult, PTYDriver
-from agent.granite_container.granite_classifier import ClassificationResult
-from agent.granite_container.startup_parser import StartupEvent, StartupMatch
 
 
 def _idle_result(buffer_text: str = "fake buffer", saw_idle: bool = True) -> IdleResult:
@@ -88,62 +86,72 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
         # _cycle_idle(pm, min=0) once (both PTYs idle, no startup
         # event -> break). Then steady-state calls _cycle_idle(pm)
         # for the first turn. So PM has 2 read_until_idle calls.
-        pm_idle_buffers = iter([
-            _idle_result("", saw_idle=True),  # startup
-            _idle_result("[/complete]\nShipped PR #42.", saw_idle=True),  # steady-state
-        ])
+        pm_idle_buffers = iter(
+            [
+                _idle_result("", saw_idle=True),  # startup
+                _idle_result("[/complete]\nShipped PR #42.", saw_idle=True),  # steady-state
+            ]
+        )
         pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_idle_buffers)
         # Dev is idle for all reads.
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
-        with patch.object(c, "_spawn_pair") as spawn, \
-             patch.object(c, "_close_pair"), \
-             patch.object(c, "_prime_session"), \
-             patch.object(c, "_run_pkill_fallback"):
+        with (
+            patch.object(c, "_spawn_pair") as spawn,
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+        ):
             spawn.return_value = None
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
             result = c.run()
 
-        self.assertEqual(result.exit_reason, "pm_complete", f"got {result.exit_reason}: {result.exit_message}")
+        self.assertEqual(result.exit_reason, "pm_complete")
         self.assertEqual(len(result.turns), 1)
         self.assertEqual(result.turns[0].classification, "complete")
 
     def test_classify_dev_routes_to_dev(self) -> None:
-        """PM emits [/dev] with a payload -> container extracts a dev_prompt, writes to Dev, summarizes."""
+        """PM emits [/dev] with a payload -> container routes to Dev and summarizes."""
         c = Container(user_message="hello", max_turns=3)
         pm_mock, dev_mock = self._build_mock_pair("")
 
         # PM reads: 1 startup, then 2 per dev-turn (steady-state
         # PM read + await PM idle for summary write). For 3
         # max_turns (all dev), 1 + 2*3 = 7 PM reads total.
-        pm_idle_buffers = iter([
-            _idle_result("", saw_idle=True),  # startup
-            _idle_result("[/dev]\nturn 0", saw_idle=True),  # turn 0 steady-state
-            _idle_result("", saw_idle=True),  # turn 0 await PM idle
-            _idle_result("[/dev]\nturn 1", saw_idle=True),  # turn 1
-            _idle_result("", saw_idle=True),  # turn 1 await
-            _idle_result("[/dev]\nturn 2", saw_idle=True),  # turn 2
-            _idle_result("", saw_idle=True),  # turn 2 await
-        ])
+        pm_idle_buffers = iter(
+            [
+                _idle_result("", saw_idle=True),  # startup
+                _idle_result("[/dev]\nturn 0", saw_idle=True),  # turn 0 steady-state
+                _idle_result("", saw_idle=True),  # turn 0 await PM idle
+                _idle_result("[/dev]\nturn 1", saw_idle=True),  # turn 1
+                _idle_result("", saw_idle=True),  # turn 1 await
+                _idle_result("[/dev]\nturn 2", saw_idle=True),  # turn 2
+                _idle_result("", saw_idle=True),  # turn 2 await
+            ]
+        )
         pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_idle_buffers)
         dev_mock.read_until_idle.return_value = _idle_result(
             "I added foo to bar.py and ran tests.", saw_idle=True
         )
 
-        with patch.object(c, "_spawn_pair"), \
-             patch.object(c, "_close_pair"), \
-             patch.object(c, "_prime_session"), \
-             patch.object(c, "_run_pkill_fallback"), \
-             patch("agent.granite_container.container.extract_dev_prompt") as extract, \
-             patch("agent.granite_container.container.summarize_for_pm") as summarize:
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+            patch("agent.granite_container.container.extract_dev_prompt") as extract,
+            patch("agent.granite_container.container.summarize_for_pm") as summarize,
+        ):
             extract.return_value = "add foo to bar.py"
             summarize.return_value = "Dev added foo to bar.py and ran tests."
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
             result = c.run()
 
-        self.assertEqual(result.exit_reason, "pm_max_turns", f"got {result.exit_reason}: {result.exit_message}")
+        self.assertEqual(
+            result.exit_reason, "pm_max_turns", f"got {result.exit_reason}: {result.exit_message}"
+        )
         self.assertEqual(len(result.turns), 3)
         # All three turns were dev-routed.
         for t in result.turns:
@@ -158,23 +166,29 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
         c = Container(user_message="hello", max_turns=2)
         pm_mock, dev_mock = self._build_mock_pair("")
 
-        pm_idle_buffers = iter([
-            _idle_result("", saw_idle=True),  # startup
-            _idle_result("I'm thinking out loud about the design.", saw_idle=True),  # no prefix
-            _idle_result("[/complete]\nDone.", saw_idle=True),  # exit
-        ])
+        pm_idle_buffers = iter(
+            [
+                _idle_result("", saw_idle=True),  # startup
+                _idle_result("I'm thinking out loud about the design.", saw_idle=True),  # no prefix
+                _idle_result("[/complete]\nDone.", saw_idle=True),  # exit
+            ]
+        )
         pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_idle_buffers)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
-        with patch.object(c, "_spawn_pair"), \
-             patch.object(c, "_close_pair"), \
-             patch.object(c, "_prime_session"), \
-             patch.object(c, "_run_pkill_fallback"):
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+        ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
             result = c.run()
 
-        self.assertEqual(result.exit_reason, "pm_complete", f"got {result.exit_reason}: {result.exit_message}")
+        self.assertEqual(
+            result.exit_reason, "pm_complete", f"got {result.exit_reason}: {result.exit_message}"
+        )
         self.assertEqual(len(result.turns), 2)
         self.assertEqual(result.turns[0].classification, "unknown")
         self.assertTrue(result.turns[0].compliance_miss)
@@ -198,15 +212,19 @@ class TestContainerMaxTurns(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
-        with patch.object(c, "_spawn_pair"), \
-             patch.object(c, "_close_pair"), \
-             patch.object(c, "_prime_session"), \
-             patch.object(c, "_run_pkill_fallback"):
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+        ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
             result = c.run()
 
-        self.assertEqual(result.exit_reason, "pm_max_turns", f"got {result.exit_reason}: {result.exit_message}")
+        self.assertEqual(
+            result.exit_reason, "pm_max_turns", f"got {result.exit_reason}: {result.exit_message}"
+        )
         # Two user-address turns, both counted.
         user_turns = [t for t in result.turns if t.classification == "user"]
         self.assertEqual(len(user_turns), 2)
@@ -222,10 +240,12 @@ class TestContainerHang(unittest.TestCase):
         pm_mock.read_until_idle.return_value = _idle_result("", saw_idle=False)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
-        with patch.object(c, "_spawn_pair"), \
-             patch.object(c, "_close_pair"), \
-             patch.object(c, "_prime_session"), \
-             patch.object(c, "_run_pkill_fallback"):
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+        ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
             result = c.run()

@@ -10,12 +10,10 @@ output shape.
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from agent.granite_container.container import ContainerResult
 from tools.granite_interactive_tui_poc.cli import _build_arg_parser, main
@@ -50,15 +48,23 @@ class TestArgParser(unittest.TestCase):
 
     def test_overrides(self) -> None:
         p = _build_arg_parser()
-        args = p.parse_args([
-            "--user-message", "hi",
-            "--max-turns", "5",
-            "--output", "/tmp/results.json",
-            "--cwd", "/tmp/cwd",
-            "--pm-model", "gemma4:e2b",
-            "--dev-model", "gemma4:e2b",
-            "--verbose",
-        ])
+        args = p.parse_args(
+            [
+                "--user-message",
+                "hi",
+                "--max-turns",
+                "5",
+                "--output",
+                "/tmp/results.json",
+                "--cwd",
+                "/tmp/cwd",
+                "--pm-model",
+                "gemma4:e2b",
+                "--dev-model",
+                "gemma4:e2b",
+                "--verbose",
+            ]
+        )
         self.assertEqual(args.max_turns, 5)
         self.assertEqual(args.output, Path("/tmp/results.json"))
         self.assertEqual(args.cwd, "/tmp/cwd")
@@ -87,10 +93,14 @@ class TestMainRunPath(unittest.TestCase):
             out_path = Path(tmp) / "results.json"
             with patch("agent.granite_container.container.Container.run") as mock_run:
                 mock_run.return_value = _fake_result("pm_complete")
-                rc = main([
-                    "--user-message", "hello world",
-                    "--output", str(out_path),
-                ])
+                rc = main(
+                    [
+                        "--user-message",
+                        "hello world",
+                        "--output",
+                        str(out_path),
+                    ]
+                )
             self.assertEqual(rc, 0, f"expected exit 0, got {rc}")
             self.assertTrue(out_path.exists())
             payload = json.loads(out_path.read_text())
@@ -102,10 +112,14 @@ class TestMainRunPath(unittest.TestCase):
             out_path = Path(tmp) / "results.json"
             with patch("agent.granite_container.container.Container.run") as mock_run:
                 mock_run.return_value = _fake_result("pm_max_turns")
-                rc = main([
-                    "--user-message", "hello",
-                    "--output", str(out_path),
-                ])
+                rc = main(
+                    [
+                        "--user-message",
+                        "hello",
+                        "--output",
+                        str(out_path),
+                    ]
+                )
             self.assertEqual(rc, 1)
 
     def test_dev_hang_exits_2(self) -> None:
@@ -113,10 +127,14 @@ class TestMainRunPath(unittest.TestCase):
             out_path = Path(tmp) / "results.json"
             with patch("agent.granite_container.container.Container.run") as mock_run:
                 mock_run.return_value = _fake_result("dev_hang")
-                rc = main([
-                    "--user-message", "hello",
-                    "--output", str(out_path),
-                ])
+                rc = main(
+                    [
+                        "--user-message",
+                        "hello",
+                        "--output",
+                        str(out_path),
+                    ]
+                )
             self.assertEqual(rc, 2)
 
     def test_pm_hang_exits_2(self) -> None:
@@ -124,10 +142,14 @@ class TestMainRunPath(unittest.TestCase):
             out_path = Path(tmp) / "results.json"
             with patch("agent.granite_container.container.Container.run") as mock_run:
                 mock_run.return_value = _fake_result("pm_hang")
-                rc = main([
-                    "--user-message", "hello",
-                    "--output", str(out_path),
-                ])
+                rc = main(
+                    [
+                        "--user-message",
+                        "hello",
+                        "--output",
+                        str(out_path),
+                    ]
+                )
             self.assertEqual(rc, 2)
 
     def test_startup_unresolved_exits_3(self) -> None:
@@ -135,10 +157,14 @@ class TestMainRunPath(unittest.TestCase):
             out_path = Path(tmp) / "results.json"
             with patch("agent.granite_container.container.Container.run") as mock_run:
                 mock_run.return_value = _fake_result("startup_unresolved")
-                rc = main([
-                    "--user-message", "hello",
-                    "--output", str(out_path),
-                ])
+                rc = main(
+                    [
+                        "--user-message",
+                        "hello",
+                        "--output",
+                        str(out_path),
+                    ]
+                )
             self.assertEqual(rc, 3)
 
     def test_exception_exits_4(self) -> None:
@@ -146,10 +172,14 @@ class TestMainRunPath(unittest.TestCase):
             out_path = Path(tmp) / "results.json"
             with patch("agent.granite_container.container.Container.run") as mock_run:
                 mock_run.return_value = _fake_result("exception")
-                rc = main([
-                    "--user-message", "hello",
-                    "--output", str(out_path),
-                ])
+                rc = main(
+                    [
+                        "--user-message",
+                        "hello",
+                        "--output",
+                        str(out_path),
+                    ]
+                )
             self.assertEqual(rc, 4)
 
 
@@ -166,10 +196,14 @@ class TestMainStdoutSummary(unittest.TestCase):
                 mock_run.return_value = _fake_result("pm_complete")
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    main([
-                        "--user-message", "hello",
-                        "--output", str(out_path),
-                    ])
+                    main(
+                        [
+                            "--user-message",
+                            "hello",
+                            "--output",
+                            str(out_path),
+                        ]
+                    )
             line = buf.getvalue().strip()
             payload = json.loads(line)
             self.assertEqual(payload["exit_reason"], "pm_complete")

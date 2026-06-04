@@ -17,20 +17,16 @@ env-gated test — that is the Q6 measurement the plan calls for.
 
 from __future__ import annotations
 
-import json
 import unittest
 from unittest.mock import MagicMock, patch
 
 from agent.granite_container.granite_classifier import (
-    ClassificationResult,
-    Destination,
     SYSTEM_PROMPT,
     TRANSLATION_TOOLS,
     classify_pm_prefix,
     extract_dev_prompt,
     summarize_for_pm,
 )
-
 
 # ---------------------------------------------------------------------------
 # classify_pm_prefix: deterministic regex parse

@@ -15,7 +15,6 @@ import unittest
 
 from agent.granite_container.startup_parser import (
     StartupEvent,
-    StartupMatch,
     known_patterns,
     parse_startup_frame,
 )

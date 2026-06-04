@@ -120,6 +120,7 @@ def _model_reachable() -> bool:
     try:
         import json
         import urllib.request
+
         tags = json.loads(
             urllib.request.urlopen("http://localhost:11434/api/tags", timeout=10).read()
         )

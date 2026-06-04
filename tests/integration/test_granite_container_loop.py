@@ -26,7 +26,6 @@ import subprocess
 import unittest
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 from agent.granite_container.container import Container, ContainerResult
 

@@ -346,9 +346,7 @@ def _extract_tool_calls(response: Any) -> list[dict[str, Any]]:
         # ollama >= 0.4 uses a `function` namespace.
         if hasattr(tc, "function"):
             fn = tc.function
-            name = getattr(fn, "name", None) or (
-                fn.get("name") if isinstance(fn, dict) else None
-            )
+            name = getattr(fn, "name", None) or (fn.get("name") if isinstance(fn, dict) else None)
             arguments = getattr(fn, "arguments", None) or (
                 fn.get("arguments") if isinstance(fn, dict) else None
             )

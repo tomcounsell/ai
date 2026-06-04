@@ -31,11 +31,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from enum import Enum
-from typing import Optional
+from enum import StrEnum
 
 
-class StartupEvent(str, Enum):
+class StartupEvent(StrEnum):
     """A recognized startup-phase event the parser can detect.
 
     `UNKNOWN` is the catch-all when no pattern matches; the
@@ -56,7 +55,7 @@ class StartupMatch:
 
     event: StartupEvent
     matched_text: str  # the substring of the buffer that matched
-    response: Optional[str]  # the canned response the container should send (None = ask granite)
+    response: str | None  # the canned response the container should send (None = ask granite)
 
 
 # Pattern set, in priority order. Higher-priority patterns (errors
@@ -85,10 +84,12 @@ _UPDATE_PATTERNS = [
 # Error modal: a fatal-looking frame. The container surfaces the
 # event to the results JSON; the loop does not auto-respond.
 _ERROR_PATTERNS = [
-    (re.compile(r"(Authentication failed|Invalid API key|Login failed)", re.IGNORECASE),
-     "auth failed", None),
-    (re.compile(r"(fatal error|panic:|internal server error)", re.IGNORECASE),
-     "fatal error", None),
+    (
+        re.compile(r"(Authentication failed|Invalid API key|Login failed)", re.IGNORECASE),
+        "auth failed",
+        None,
+    ),
+    (re.compile(r"(fatal error|panic:|internal server error)", re.IGNORECASE), "fatal error", None),
 ]
 
 # Persona-prime ack: the model has received the slash command and
@@ -96,8 +97,11 @@ _ERROR_PATTERNS = [
 # This is informational; the container's idle heuristic will catch
 # the real "ready" state when the model finishes the prime.
 _PRIME_PATTERNS = [
-    (re.compile(r"(primed|loading persona|reading commands)", re.IGNORECASE),
-     "persona loading", None),
+    (
+        re.compile(r"(primed|loading persona|reading commands)", re.IGNORECASE),
+        "persona loading",
+        None,
+    ),
 ]
 
 # Trust-folder prompt: the F-probe (scripts/probe_slash_arguments.py:243-247)
@@ -110,7 +114,9 @@ _TRUST_FOLDER_PROMPT = re.compile(
 _TRUST_FOLDER_RESPONSE = "1"
 
 
-def _match_any(patterns: list[tuple[re.Pattern[str], str, Optional[str]]], buffer: str) -> Optional[StartupMatch]:
+def _match_any(
+    patterns: list[tuple[re.Pattern[str], str, str | None]], buffer: str
+) -> StartupMatch | None:
     for regex, label, response in patterns:
         m = regex.search(buffer)
         if m:
@@ -143,7 +149,7 @@ def _label_to_event(label: str) -> StartupEvent:
 
 # Priority order matters: errors and login are the most
 # load-bearing; prime ack is informational and gets shadowed.
-_PATTERN_GROUPS: list[list[tuple[re.Pattern[str], str, Optional[str]]]] = [
+_PATTERN_GROUPS: list[list[tuple[re.Pattern[str], str, str | None]]] = [
     _ERROR_PATTERNS,
     _LOGIN_PATTERNS,
     _UPDATE_PATTERNS,

@@ -26,8 +26,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -35,10 +33,9 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from agent.granite_container.granite_classifier import (
-    ClassificationResult,
     classify_pm_prefix,
     extract_dev_prompt,
     summarize_for_pm,
@@ -46,8 +43,6 @@ from agent.granite_container.granite_classifier import (
 from agent.granite_container.pty_driver import (
     DEFAULT_MIN_CONTENT_BYTES,
     PTYDriver,
-    PTYDriverError,
-    _strip_ansi,
 )
 from agent.granite_container.startup_parser import (
     StartupEvent,
@@ -119,9 +114,9 @@ class ContainerResult:
     total_dev_pty_bytes: int = 0
     parse_failures: int = 0
     classification_compliance_misses: int = 0
-    resume_uuid: Optional[str] = None
+    resume_uuid: str | None = None
     startup_events: list[dict[str, Any]] = field(default_factory=list)
-    coord_test_pass: Optional[bool] = None
+    coord_test_pass: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -162,10 +157,10 @@ class Container:
     def __init__(
         self,
         user_message: str,
-        cwd: Optional[str] = None,
+        cwd: str | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
-        pm_model: Optional[str] = None,
-        dev_model: Optional[str] = None,
+        pm_model: str | None = None,
+        dev_model: str | None = None,
     ) -> None:
         if not user_message.strip():
             raise ValueError("Container.user_message must be non-empty")
@@ -174,9 +169,9 @@ class Container:
         self.max_turns = max_turns
         self._pm_model = pm_model
         self._dev_model = dev_model
-        self._pm_pty: Optional[PTYDriver] = None
-        self._dev_pty: Optional[PTYDriver] = None
-        self._sandbox: Optional[tuple[str, str]] = None
+        self._pm_pty: PTYDriver | None = None
+        self._dev_pty: PTYDriver | None = None
+        self._sandbox: tuple[str, str] | None = None
 
     # -- Lifecycle --------------------------------------------------------
 
@@ -227,9 +222,7 @@ class Container:
 
     # -- Startup phase ----------------------------------------------------
 
-    def _handle_startup(
-        self, buffer_pm: str, buffer_dev: str
-    ) -> tuple[Optional[str], str, str]:
+    def _handle_startup(self, buffer_pm: str, buffer_dev: str) -> tuple[str | None, str, str]:
         """Run the startup-phase parser on both PTY buffers.
 
         Returns (response_for_pm, new_buffer_pm, new_buffer_dev)
@@ -496,9 +489,7 @@ class Container:
                 self._dev_pty.write(dev_prompt)
 
                 # Wait for Dev to respond and reach idle.
-                dev_idle, dev_buf, dev_marker, dev_ms = self._cycle_idle(
-                    self._dev_pty
-                )
+                dev_idle, dev_buf, dev_marker, dev_ms = self._cycle_idle(self._dev_pty)
                 if not dev_idle:
                     result.exit_reason = "dev_hang"
                     result.exit_message = f"Dev did not reach idle within {CYCLE_IDLE_TIMEOUT_S}s"
@@ -582,13 +573,9 @@ class Container:
             self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD)
             # Ping each in turn.
             self._pm_pty.write("ping")
-            pm_result = self._pm_pty.read_until_idle(
-                min_content_bytes=100, timeout_s=60.0
-            )
+            pm_result = self._pm_pty.read_until_idle(min_content_bytes=100, timeout_s=60.0)
             self._dev_pty.write("ping")
-            dev_result = self._dev_pty.read_until_idle(
-                min_content_bytes=100, timeout_s=60.0
-            )
+            dev_result = self._dev_pty.read_until_idle(min_content_bytes=100, timeout_s=60.0)
             return pm_result.saw_idle and dev_result.saw_idle
         except Exception as e:
             logger.warning("ping_pong failed: %s", e)
