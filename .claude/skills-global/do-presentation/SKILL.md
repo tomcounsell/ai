@@ -233,16 +233,16 @@ content...
 .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 10px; }
 .cols-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-top: 10px; }
 
-/* Callout — neutral/info (blue left accent) */
+/* Callout — neutral/info. Full border, NOT a left accent bar (see THEME_DETECTION "Avoid AI-Slop Tells") */
 .stat {
-  background: #eef2ff; border-left: 4px solid #2563a8;
-  padding: 12px 20px; margin: 10px 0;
+  background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 6px;
+  padding: 14px 20px; margin: 10px 0;
   font-size: 0.96em; font-weight: 600; color: #1a3a6b; line-height: 1.5;
 }
 
-/* Warning / risk callout (amber left accent) */
+/* Warning / risk callout. Full border, not a left accent bar. */
 .warn {
-  background: #fef3c7; border-left: 4px solid #f59e0b;
+  background: #fef3c7; border: 1px solid #fcd97a; border-radius: 6px;
   padding: 10px 18px; margin: 10px 0;
   font-size: 0.88em; color: #92400e; line-height: 1.5;
 }
@@ -256,6 +256,8 @@ content...
 ```
 
 Use `.cols` / `.cols-3` to break a slide that would otherwise be a dense list into scannable side-by-side sections. Use `.stat` for governing metrics and key facts. Use `.warn` for risks and blockers. Use `.path-card` inside `.cols-3` for A/B/C decision options.
+
+**Callouts use a full border, never a single colored left-edge stripe** (`border-left: 4px solid …` with one rounded side). That stripe is the top "AI slop" tell — see the "Avoid AI-Slop Tells" section in `THEME_DETECTION.md`.
 
 ### Step 8: Self-review pass (before export)
 
@@ -312,6 +314,7 @@ Tell the user:
 3. How to edit (it's just markdown) and re-export
 
 ## Version history
+- v1.3.0 (2026-05-31): Anti-slop hardening + audience-first title slide. Removed `border-left` accent-bar styling from the `.stat`/`.warn`/`blockquote` templates (THEME_DETECTION + SKILL) — the single biggest "AI-generated" tell — and added the "Avoid AI-Slop Tells" section to THEME_DETECTION.md. Added "The title slide: audience first" convention to CONTENT_GUIDE.md (client attribution on top, real name+photo at the bottom, deck title in the middle, via a full-height space-between flex column). Driven by a real client deck session.
 - v1.2.0 (2026-05-07): Added client-facing Why→How→What structure guidance (Step 3), self-review critique pass via subagent (Step 8), utility CSS classes in theme defaults (Step 7), "Client-Facing Decks" section in CONTENT_GUIDE.md. Driven by real session: first-pass deck opened with V0.5 scope before establishing client context; dense slides caught only after user review — both preventable with the review pass.
 - v1.1.0 (2026-04-13): Added Step 5 (brand logo collection via Simple Icons + Google Favicons), renumbered subsequent steps
 - v1.0.0 (2026-04-10): Initial — research, structure, theme detection, Marp export
