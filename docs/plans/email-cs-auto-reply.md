@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 owner: Valor Engels
 created: 2026-06-05
 tracking: https://github.com/tomcounsell/ai/issues/1573
 last_comment_id:
+revision_applied: true
 ---
 
 # Email Customer-Service Auto-Reply Layer for Cuttlefish
@@ -61,8 +62,12 @@ No prior attempt at email CS triage exists (closed-issue and merged-PR searches 
 **Key findings:**
 - **Structural tool-gating via the `tools=[]` array + `tool_choice`** ([Anthropic tool-use docs](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/implement-tool-use)): Claude can only call tools that are present in the request's `tools` array. `tool_choice={"type": "any"}` forces a tool call when at least one tool is provided; `{"type": "tool", "name": …}` forces a specific tool. **This is the enforcement mechanism for the escalation gate:** the Tier 2 action agent is built per-category with only that category's whitelisted tools in the array. A category with no safe tool (refund, takedown, invoice) is given an **empty tools array** — the agent literally cannot emit a mutating call and the gate forces `escalate` by construction, not by prompt discipline.
 - **Forced tool use is incompatible with extended thinking** — irrelevant here (Tier 2 uses `MODEL_FAST` = Haiku without thinking), but noted so the builder doesn't combine them.
+- **[C2] Tier 2 is REAL Anthropic tool-use, not the `tools/classifier.py` prose-JSON pattern.** Recon initially cited `tools/classifier.py` as the Tier 2 template, but that file uses **no** `tools=`/`tool_choice` — it is a plain `messages.create` with JSON-in-prose + post-hoc `json.loads` (`tools/classifier.py:86`), which provides **zero** structural tool gate. The safety-critical mechanism here is the tool array, so Tier 2 MUST be built as genuine tool-use: `messages.create(tools=TOOLS[category], tool_choice={"type":"any"}, ...)`, then parse `response.content` for the `tool_use` block (`block.type == "tool_use"` → `block.name`, `block.input`). The correct repo templates for forced tool-use are `bridge/promise_gate.py:524`, `agent/session_completion.py:687`, and `bridge/message_drafter.py:1509` — **not** `tools/classifier.py`. (Those repo sites use the named-tool form `{"type":"tool","name":…}`; see N1 for why this plan uses `{"type":"any"}` instead.)
+- **[C2] Empty tool array + `tool_choice={"type":"any"}` is an API error.** Anthropic rejects forcing a tool when none are provided. ESCALATE-only lanes therefore MUST short-circuit to escalate **before** any `create()` call: `if not TOOLS[category]: return escalate`. The empty-whitelist gate is enforced in Python, not by sending an empty-tools request.
 
-No PydanticAI findings pursued — the issue explicitly declines it to stay consistent with `_gemma_classify` (Tier 1) and `tools/classifier.py` (Tier 2). This plan honors that.
+- **[N1] `tool_choice={"type":"any"}` vs. repo convention `{"type":"tool","name":…}`:** the repo's forced-tool sites use the named-tool form because they force exactly one known tool. Tier 2 has *multiple* whitelisted tools per category and wants the model to pick the right one, so `{"type":"any"}` (force *some* whitelisted tool) is the correct choice. The divergence is intentional, not an oversight.
+
+No PydanticAI findings pursued — the issue explicitly declines it to stay consistent with `_gemma_classify` (Tier 1) and the repo's real tool-use sites (Tier 2). This plan honors that.
 
 ## Data Flow
 
@@ -71,12 +76,12 @@ No PydanticAI findings pursued — the issue explicitly declines it to stay cons
 3. **Customer resolution**: `resolve_customer()` → `customer_id` or None. **None → existing drop path (unchanged).**
 4. **NEW — Tier 1 triage** (`tools/email_cs/triage.py`): `triage_local(subject, body, customer_id)` → `ollama.chat(model="gemma4:e2b", temperature=0)` → tolerant JSON parse → `Triage` pydantic model `{category, confidence, escalation_signal, reason}`. Parse failure OR `customer_id is None` OR `confidence < threshold` OR any escalation signal → deterministic `Disposition.ESCALATE`.
 5. **NEW — escalation gate** (`tools/email_cs/gate.py`): given the `Triage`, decide `auto | draft | escalate`. The gate is the *only* thing between triage and a side effect. It checks: (a) escalation signals / low confidence → escalate; (b) does the category have a non-empty tool whitelist? no → escalate; yes → proceed to Tier 2.
-6. **NEW — Tier 2 action agent** (`tools/email_cs/agents.py`): per-category Anthropic SDK (`MODEL_FAST`) call with `tools = TOOLS[category]` (whitelist) and `tool_choice={"type":"any"}`. Agent picks one whitelisted tool + args. Invalid/absent tool name → `draft_for_human`. Agent's own `escalate()` signal → `route_to_human()`.
+6. **NEW — Tier 2 action agent** (`tools/email_cs/agents.py`): per-category **real Anthropic tool-use** (`MODEL_FAST`) call — `messages.create(tools=TOOLS[category], tool_choice={"type":"any"}, ...)`, parsing the `tool_use` content block for `block.name`/`block.input` (C2; NOT prose-JSON). Empty whitelist short-circuits to escalate **before** the call (C2). The `create()` is wrapped in `asyncio.wait_for(timeout=<bound>)` under an `anthropic_slot()` guard → `draft_for_human` on timeout (C4). Agent picks one whitelisted tool + args. Invalid/absent tool name → `draft_for_human`. Agent's own `escalate()` signal → `route_to_human()`.
 7. **NEW — cuttlefish subprocess** (`tools/email_cs/cuttlefish.py`): execute the chosen `manage.py <verb> … --email <customer> --json` via `asyncio.create_subprocess_exec` (argv-form, hard timeout, `cwd = cuttlefish working_directory`). Mirrors `_dispatch_subprocess_resolver`.
 8. **Reply / audit / handoff**:
    - **auto**: render reply from subprocess `--json` result → `email:outbox:{session_id}` via `EmailOutputHandler.send()` (reuse). Always call `manage.py customer note --session-id … --json` to audit.
-   - **draft**: `manage.py customer email draft …` (cuttlefish-side human-review queue) + Telegram ping to the Cuttlefish chat via `telegram:outbox:` + audit note. No customer-facing send.
-   - **escalate**: Telegram ping to the Cuttlefish chat + audit note + (shadow phases) no send. The original inbound stays handled — the existing AgentSession spawn is the fallback for escalate/draft lanes in early phases (see Solution → Phasing).
+   - **draft**: `manage.py customer email draft …` (cuttlefish-side human-review queue) + Telegram ping to the Cuttlefish ops chat via `telegram:outbox:{session_id}` **carrying an explicit `chat_id`** (C1) + audit note. No customer-facing send. **If the cuttlefish `projects.json` has no `telegram.groups` ops chat, the Telegram ping is skipped and the handler falls through to the existing AgentSession spawn** (the only other human path) — never a silent no-op (C1).
+   - **escalate**: Telegram ping to the Cuttlefish ops chat (explicit `chat_id`, C1) + audit note + (shadow phases) no send. The original inbound stays handled — the existing AgentSession spawn is the fallback for escalate/draft lanes (and the *sole* human sink when no ops chat is configured, C1) in early phases (see Solution → Phasing).
 9. **Output**: customer receives an auto-reply (auto lane only, phase ≥2), OR a human is pinged (draft/escalate). Every interaction is recorded as a cuttlefish `customer note`.
 
 ## Architectural Impact
@@ -113,6 +118,8 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/email-cs-auto-
 
 **Note:** The `projects.json` wiring (an `email` block with cuttlefish contacts/domains + a `customer_resolver`) is **private config** in `~/Desktop/Valor/projects.json` (not committed). Without it, `_process_inbound_email()` never enters the resolver branch and the triage layer is dead code. This is an `[EXTERNAL]` prerequisite (see No-Gos) — but the code must degrade gracefully when it's absent (the layer simply never runs).
 
+**[C1] Cuttlefish ops-chat `chat_id` source:** `route_to_human` (draft + escalate dispositions) needs a Telegram destination. The `chat_id` MUST come from a `telegram.groups.<ops-chat>` entry in the cuttlefish `projects.json` block — there is no auto-resolution from an email `session_id`. This is an additional `[EXTERNAL]` config requirement. **When the `telegram` block is absent, `route_to_human` falls through to the AgentSession spawn** (the only remaining human path), so the layer still degrades gracefully but with the AgentSession as the sole sink. Recon confirmed the cuttlefish entry has **no `telegram` block today** — adding the ops chat is part of wiring Phase 1 for real human visibility (otherwise every escalate/draft routes only through the fallback AgentSession).
+
 ## Solution
 
 ### Key Elements
@@ -120,7 +127,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/email-cs-auto-
 - **`tools/email_cs/schema.py`** — `Category` (enum: manage_podcast | manage_episode | other_customer_service | raise_to_human), `Disposition` (enum: auto | draft | escalate), `Triage` (pydantic BaseModel: category, confidence, escalation_signal, reason). Single source of truth for the type contract.
 - **`tools/email_cs/triage.py`** — Tier 1. `triage_local(subject, body, customer_id) -> Triage`. Mirrors `_gemma_classify`: `ollama.chat(model=OLLAMA_LOCAL_MODEL, options={"temperature": 0})`, tolerant JSON parse, **fail-safe → escalate** (never raises into the bridge).
 - **`tools/email_cs/gate.py`** — the escalation gate. `decide(triage, threshold) -> Disposition`. The *only* function before a side effect. Forces escalate for: low confidence, any escalation signal, any category whose tool whitelist is empty.
-- **`tools/email_cs/agents.py`** — Tier 2. Per-category `TOOLS` whitelist dict. `run_action_agent(category, triage, email) -> ActionResult`. Anthropic SDK (`MODEL_FAST`) with `tools=TOOLS[category]`, `tool_choice={"type":"any"}`. Empty whitelist → returns escalate without an API call. Invalid tool → `draft_for_human`.
+- **`tools/email_cs/agents.py`** — Tier 2. Per-category `TOOLS` whitelist dict. `run_action_agent(category, triage, email) -> ActionResult`. **Real Anthropic tool-use** (`MODEL_FAST`): `messages.create(tools=TOOLS[category], tool_choice={"type":"any"}, ...)`, then parse `response.content` for the `tool_use` block (`block.type=="tool_use"` → `block.name`, `block.input`). **NOT** the `tools/classifier.py` prose-JSON pattern (C2). **Empty whitelist → return escalate BEFORE any `create()` call** (`if not TOOLS[category]: return escalate`) — `tool_choice={"type":"any"}` with an empty `tools` array is an Anthropic API error (C2). Invalid/absent tool name in the response → `draft_for_human`. Wrap the `create()` in `asyncio.wait_for(timeout=<bound>)` → `draft_for_human` on `TimeoutError`, and acquire `anthropic_slot()` to cap concurrency (C4).
 - **`tools/email_cs/cuttlefish.py`** — subprocess wrapper. `run_manage_command(verb_argv, customer_email, timeout) -> dict`. argv-form `asyncio.create_subprocess_exec`, `cwd` = cuttlefish `working_directory` from `projects.json`, `--json` parse, hard timeout. Mirrors `_dispatch_subprocess_resolver`.
 - **`tools/email_cs/handler.py`** (new — the orchestration entry the bridge calls) — `async def handle_customer_email(parsed, project, customer_id, *, shadow_mode) -> HandlerOutcome`. Runs triage → gate → (Tier 2 if auto) → reply/draft/escalate. Returns a structured outcome so `_process_inbound_email()` can decide whether to still spawn the fallback AgentSession.
 
@@ -135,7 +142,8 @@ Inbound email (resolved customer) → **Tier 1 triage** (gemma4:e2b) → **escal
 
 - **Hook location** (resolves issue OQ1): the triage layer slots into `_process_inbound_email()` **after** the `customer_id` resolution succeeds (current line ~874, inside the `if customer_id is not None:` region) and **before** the `enqueue_agent_session()` call (line ~951). For **handled `auto` lanes it short-circuits** — replaces the AgentSession spawn. For `draft` and `escalate` lanes in early phases it **runs before and falls through** to the existing spawn so a human path still exists. A clean `if outcome.short_circuit: return` gate after the handler call.
 - **Inline, not a new AgentSession** (resolves issue OQ2): Tier 2 runs **inline in the bridge as a bounded subprocess-driving loop**, not via the worker/AgentSession machinery. Rationale: (a) latency — a status lookup must reply in seconds, not wait for the serial worker queue; (b) the single-machine-ownership model already runs the resolver subprocess inline here; (c) observability — the verdict + tool call + result log in one place. The existing AgentSession spawn remains the fallback for escalate/draft, preserving the full-agent path when triage punts.
-- **`route_to_human()`** (resolves issue OQ3): realized as (1) a Telegram ping to the Cuttlefish project chat via `telegram:outbox:{session_id}` (reuse the relay), AND (2) a cuttlefish `customer note` for the durable audit trail. No new mailbox-label machinery — the `valor-retry` label path already exists in the resolver for the not-a-customer case; human-handoff reuses the Telegram ping which is the existing operator surface.
+- **[C4] Bound the inline Tier 2 latency so it cannot stall the IMAP poll loop.** Tier 2 makes an **Anthropic API call** (`MODEL_FAST`) before the subprocess; an unbounded call (throttling, slow response) would block the poll loop for every subsequent email in the same batch. Two bounds: (1) wrap the `messages.create` in `asyncio.wait_for(..., timeout=<bound>)` — on `TimeoutError` return `draft_for_human` (never auto); (2) acquire the existing `anthropic_slot()` guard (`agent/anthropic_client.py:112`) so concurrent Tier 2 calls are capped. **Per-poll concurrency model:** when a poll batch contains multiple inbound customer emails, the handler calls are dispatched under a small bounded `asyncio` semaphore (gathered, not strictly sequential) so one slow customer email does not head-of-line-block the rest. The subprocess timeout (Risk 4) bounds the second leg; this note bounds the first (Anthropic) leg.
+- **`route_to_human()`** (resolves issue OQ3; tightened by C1): realized as (1) a Telegram ping to the Cuttlefish ops chat via `telegram:outbox:{session_id}` **with an explicit `chat_id`**, AND (2) a cuttlefish `customer note` for the durable audit trail. **[C1] There is no project→chat_id auto-resolution for email-originated sessions.** The relay payload (`bridge/telegram_relay.py`) keys on `session_id` but requires an explicit `chat_id` field in the message body — the email `session_id` does not derive one. `handler.py` MUST resolve the `chat_id` from `project["telegram"]["groups"][<cuttlefish-ops-chat>]` and include it in the `telegram:outbox` payload. **If the cuttlefish `projects.json` entry has no `telegram` block / ops-chat group, `route_to_human` MUST NOT silently no-op** — it falls through to the existing AgentSession spawn, which is the only other human-reachable path. This is the Phase-1 safety net: in shadow mode, escalate/draft IS the entire customer-facing behavior, so a dead Telegram sink would mean no human ever sees the mail. No new mailbox-label machinery — the `valor-retry` label path already exists in the resolver for the not-a-customer case.
 - **Confidence threshold & escalation signals** (resolves issue OQ4): start at **0.75** (issue placeholder) as a named constant in `schema.py`, **tunable via shadow-mode data**. The escalation-signal set is fixed up front (anger/churn/threats, legal/press/compliance, refund/credit mentions, identity mismatch, low confidence, VIP markers) and detected by Tier 1's `escalation_signal` field. Phase 1 logs every verdict so the threshold can be calibrated against real inbound before any auto-send.
 - **Subprocess auth/isolation** (resolves issue OQ5): mirror `_dispatch_subprocess_resolver` exactly — `asyncio.create_subprocess_exec` (argv-form only, **never shell**), `cwd` = cuttlefish `working_directory`, `stdin=DEVNULL`, hard `asyncio.wait_for` timeout, non-zero exit → raise → fail-safe to escalate. The cuttlefish venv python is `~/src/cuttlefish/.venv/bin/python` resolved from `working_directory`. Every command is scoped `--email <customer_id>` so an agent cannot touch another account.
 - **Shadow mode**: a `shadow_mode` flag (default `True`) read from the cuttlefish `projects.json` `email` block. When true: run triage + gate + (optionally) Tier 2 *planning* but **send nothing** to the customer; write only the `customer note` verdict and (optionally) a Telegram digest. This is the issue's Phase-1 default.
@@ -165,6 +173,9 @@ Inbound email (resolved customer) → **Tier 1 triage** (gemma4:e2b) → **escal
 ### Error State Rendering
 - [ ] Customer-visible auto-reply error path: if reply rendering fails after a successful mutation, the gate must escalate-with-context (the mutation happened, the reply didn't) — test asserts a human is pinged, not silence.
 - [ ] Escalation Telegram ping failure must not swallow — log at ERROR and still write the audit note; test asserts the audit note is written even when the ping fails.
+- [ ] **[C3]** `customer note` audit write failing *after* a successful mutation → log at ERROR and trigger escalate/ops-chat ping (un-audited mutation is an incident), never `except: pass`; test stubs a note-subprocess failure post-mutation and asserts a human is pinged.
+- [ ] **[C4]** Tier 2 Anthropic `messages.create` exceeding the `asyncio.wait_for` bound → `draft_for_human` (never auto); test stubs a slow/timed-out create and asserts draft.
+- [ ] **[C1]** `route_to_human` with no `telegram` block in the project config → falls through to AgentSession spawn (not a silent no-op); test asserts the fallback spawn is reached when no ops-chat `chat_id` resolves.
 
 ## Test Impact
 
@@ -196,9 +207,9 @@ No other existing tests are affected — `tools/email_cs/` is a greenfield packa
 **Impact:** A cuttlefish refactor renames a verb or changes `--json` shape; auto-replies start failing or rendering garbage.
 **Mitigation:** `cuttlefish.py` validates the `--json` envelope shape and fails-safe to escalate on any parse mismatch (never sends garbage). The Prerequisites check exercises `customer list --json` so a broken contract is caught at build/deploy. A companion cuttlefish issue tracks the command contract.
 
-### Risk 4: Subprocess resource exhaustion / hung manage.py
-**Impact:** A hung `manage.py` blocks the IMAP poll loop.
-**Mitigation:** Hard `asyncio.wait_for` timeout (mirrors resolver), `proc.kill()` on timeout, fail-safe to escalate. The handler is `await`ed within the existing async poll loop; the timeout bounds latency.
+### Risk 4: Inline Tier 2 stalls the IMAP poll loop (subprocess OR Anthropic latency)
+**Impact:** A hung `manage.py` **or a slow/throttled Anthropic call** blocks the IMAP poll loop, head-of-line-blocking every subsequent email in the same poll batch.
+**Mitigation (two legs):** (a) **Subprocess leg** — hard `asyncio.wait_for` timeout (mirrors resolver), `proc.kill()` on timeout, fail-safe to escalate. (b) **[C4] Anthropic leg** — wrap the Tier 2 `messages.create` in `asyncio.wait_for(..., timeout=<bound>)` → `draft_for_human` on `TimeoutError` (never auto), under the existing `anthropic_slot()` concurrency guard (`agent/anthropic_client.py:112`). **Batch concurrency:** multiple inbound emails in one poll are handled under a small bounded `asyncio` semaphore (gathered) rather than strictly sequentially, so one slow email does not block the batch. Both legs are `await`ed within the existing async poll loop; the timeouts bound worst-case added poll latency.
 
 ## Race Conditions
 
@@ -214,7 +225,7 @@ No other existing tests are affected — `tools/email_cs/` is a greenfield packa
 **Trigger:** Process crash or Redis hiccup after a mutation lands but before the reply queues.
 **Data prerequisite:** The audit note should record the mutation even if the reply fails.
 **State prerequisite:** No double-mutation on retry.
-**Mitigation:** Order of operations — write the audit `customer note` *immediately after* the mutation returns (before the reply), so a crash leaves a durable record. Mutations are idempotent where possible (`configure` is set-state, not increment). Phase 1/2 (read-only) have no mutation, so this race only applies in Phase 3 and is gated behind `auto_mutations=True`.
+**Mitigation:** Order of operations — write the audit `customer note` *immediately after* the mutation returns (before the reply), so a crash leaves a durable record. **[C3] The audit `customer note` write is itself a subprocess that can fail for the same reason the reply does.** If the note write fails *after* a successful mutation, the handler MUST log at ERROR and trigger an escalate / Telegram ops-chat ping — the mutation is now un-audited, which is a real incident — never `except: pass`. **[C3] Phase-3 dedup:** thread the inbound `message_id` (already stored at `email:msgid:{message_id}`, `email_bridge.py:921`) as an **idempotency key** to the mutating `manage.py` verb, so a reprocessed message is a cuttlefish-side no-op rather than a double-mutation. "Idempotent where possible" (`configure` is set-state, not increment) is the secondary defense; the `message_id` key is the primary one. Phase 1/2 (read-only) have no mutation, so this race only applies in Phase 3 and is gated behind `auto_mutations=True`; the dedup-key plumbing and the cuttlefish-side verb support are part of the Phase-3 work (and the companion cuttlefish issue).
 
 ## No-Gos (Out of Scope)
 
@@ -323,13 +334,13 @@ The triage layer is **bridge-internal**, not an agent-facing tool. It runs insid
 - **Task ID**: build-action
 - **Depends On**: build-triage (imports schema)
 - **Validates**: tests/unit/test_email_cs_agents.py (create), tests/unit/test_email_cs_cuttlefish.py (create)
-- **Informed By**: research (tools=[] + tool_choice any structural gate); recon (`_dispatch_subprocess_resolver` argv-form pattern)
+- **Informed By**: research (real tool-use `tools=TOOLS[category]` + `tool_choice={"type":"any"}` structural gate — NOT `tools/classifier.py` prose-JSON, C2); recon (`_dispatch_subprocess_resolver` argv-form pattern); critique C2/C4
 - **Assigned To**: action-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `tools/email_cs/agents.py` (per-category TOOLS whitelist; Anthropic MODEL_FAST; empty whitelist → escalate without API call; invalid tool → draft).
+- Create `tools/email_cs/agents.py`: **real Anthropic tool-use** — `messages.create(tools=TOOLS[category], tool_choice={"type":"any"})`, parse the `tool_use` content block (`block.name`/`block.input`); template is `bridge/promise_gate.py`/`agent/session_completion.py`, NOT `tools/classifier.py` (C2). **Empty whitelist → return escalate BEFORE the `create()` call** (empty `tools` + `tool_choice=any` is an API error, C2). Invalid tool name in response → draft. **Wrap `create()` in `asyncio.wait_for(timeout=<bound>)` → draft on TimeoutError, under `anthropic_slot()`** (C4).
 - Create `tools/email_cs/cuttlefish.py` (argv-form async subprocess, cwd from projects.json, hard timeout, `--json` parse + envelope validation, fail-safe escalate).
-- Unit tests: invalid tool name → draft; subprocess timeout/non-zero → escalate; malformed json → escalate.
+- Unit tests: invalid tool name → draft; empty whitelist short-circuits to escalate with no API call (C2); Anthropic timeout → draft (C4); subprocess timeout/non-zero → escalate; malformed json → escalate.
 
 ### 3. Build handler + bridge wiring + phasing flags
 - **Task ID**: build-handler
@@ -338,10 +349,10 @@ The triage layer is **bridge-internal**, not an agent-facing tool. It runs insid
 - **Assigned To**: handler-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `tools/email_cs/handler.py` (`handle_customer_email` orchestration; shadow_mode + auto_mutations flags; audit-note-before-reply ordering).
-- Wire `_process_inbound_email()`: call handler after `customer_id` resolution, short-circuit on auto, fall through on draft/escalate. Inert when no email-CS config.
-- Reuse `EmailOutputHandler` for auto replies; `telegram:outbox` ping for route_to_human.
-- Integration test: per-lane fixture inbound → expected disposition (subprocess stubbed).
+- Create `tools/email_cs/handler.py` (`handle_customer_email` orchestration; shadow_mode + auto_mutations flags; audit-note-before-reply ordering; **note-write-failure-after-mutation → ERROR log + escalate ping**, C3; **Phase-3 `message_id` idempotency key** threaded to mutating verbs, C3).
+- Wire `_process_inbound_email()`: call handler after `customer_id` resolution, short-circuit on auto, fall through on draft/escalate. Inert when no email-CS config. **Per-poll batch handler calls under a bounded `asyncio` semaphore** so one slow email doesn't block the batch (C4).
+- Reuse `EmailOutputHandler` for auto replies. **`route_to_human` writes `telegram:outbox:{session_id}` with an explicit `chat_id` resolved from `project["telegram"]["groups"][<ops-chat>]`; when no `telegram` block exists, fall through to the AgentSession spawn (never silent no-op)** (C1).
+- Integration tests: per-lane fixture inbound → expected disposition (subprocess stubbed); no-`telegram`-block → AgentSession fallback reached (C1); note-failure-post-mutation → human pinged (C3).
 
 ### 4. Validate escalation safety
 - **Task ID**: validate-gate
@@ -351,7 +362,10 @@ The triage layer is **bridge-internal**, not an agent-facing tool. It runs insid
 - **Parallel**: false
 - Verify no failure path reaches silent auto; every exception → escalate or draft.
 - Verify `--email` arg always equals resolved customer_id, never body-parsed.
-- Verify ESCALATE lanes have empty tool whitelists.
+- Verify ESCALATE lanes have empty tool whitelists AND short-circuit before any Anthropic `create()` (C2).
+- Verify Anthropic timeout → draft, never auto (C4).
+- Verify `route_to_human` never silently no-ops: no `telegram` block → AgentSession fallback reached (C1).
+- Verify a `customer note` failure after a successful mutation pings a human, never `except: pass` (C3).
 - Verify behavior unchanged for non-CS projects.
 
 ### 5. Documentation
@@ -384,9 +398,16 @@ The triage layer is **bridge-internal**, not an agent-facing tool. It runs insid
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns) — 0 blockers, 4 concerns (C1–C4), 2 nits. Revision pass applied: all four Implementation Notes embedded into the sections below.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Operator, Adversary | C1 — `route_to_human`/`draft` Telegram delivery target unresolved: cuttlefish `projects.json` has no `telegram` block, the bridge never writes `telegram:outbox` today, and the relay payload needs an explicit `chat_id`. Email-originated `session_id` does not auto-resolve to a Cuttlefish Telegram chat. In Phase 1 (shadow), escalate/draft IS the entire safety net — so the primary lane silently has no human-reachable sink. | Technical Approach (`route_to_human`), Data Flow step 8, Prerequisites table | `telegram:outbox:{session_id}` payload MUST carry an explicit `chat_id` sourced from `project["telegram"]["groups"][<cuttlefish-ops-chat>]` resolved in `handler.py`. There is no project→chat_id auto-resolution for email sessions. If that block is absent, `route_to_human` MUST fall through to the AgentSession spawn (the only other human path), never silently no-op. |
+| CONCERN | Skeptic, Consistency Auditor | C2 — "Mirrors `tools/classifier.py`" contradicts the `tools=[]` + `tool_choice` structural gate. `tools/classifier.py` uses NO tool-use — it's prose-JSON + post-hoc `json.loads`. A prose-JSON pattern provides no structural tool gate. | Research, Solution (`agents.py`), Data Flow step 6, Architectural Impact, Task 2 | Tier 2 MUST use real Anthropic tool-use: `messages.create(tools=TOOLS[category], tool_choice={"type":"any"}, ...)`, parsing `response.content` for the `tool_use` block (`block.type=="tool_use"`, `block.name`, `block.input`). The repo template is `bridge/promise_gate.py` / `agent/session_completion.py` (real tool-use), NOT `tools/classifier.py`. Empty-whitelist lane MUST short-circuit BEFORE the API call — Anthropic rejects `tool_choice={"type":"any"}` with `tools=[]`. Guard: `if not TOOLS[category]: return escalate` before any `create()`. |
+| CONCERN | Adversary, Operator | C3 — Race 2 (mutation succeeds, reply/audit fails) under-mitigated even in Phase 3; "idempotent where possible" is not a guarantee, and the `customer note` audit write can itself fail for the same reason the reply does. | Race Conditions (Race 2), Failure Path Test Strategy | The `customer note` audit write is itself a subprocess that can fail — on a note failure AFTER a successful mutation, log at ERROR and trigger an escalate/Telegram ping (the mutation is now un-audited, a real incident), never `except: pass`. For Phase 3 dedup, thread the inbound `message_id` (stored at `email:msgid:{message_id}`, `email_bridge.py:921`) as an idempotency key to the mutating verb so a reprocessed message is a cuttlefish-side no-op. |
+| CONCERN | Operator, Skeptic | C4 — Inline Tier 2 in the IMAP poll loop can serialize/stall inbound processing under Anthropic latency. Risk 4 only bounded the subprocess; the Anthropic API call is unbounded, and a batch of inbound emails head-of-line-blocks the poll loop. | Technical Approach (inline Tier 2), Risk 4, Data Flow step 6 | Wrap the Tier 2 `messages.create` in `asyncio.wait_for(..., timeout=<bound>)`; on `TimeoutError` return `draft_for_human` (never auto). Per-poll batch handler calls run under a small bounded `asyncio` semaphore so one slow customer email does not head-of-line-block the rest; use the existing `anthropic_slot()` guard (`agent/anthropic_client.py:112`) to cap Anthropic concurrency. |
+| NIT | Consistency Auditor | N1 — `tool_choice={"type":"any"}` diverges from the repo convention `{"type":"tool","name":...}`. | Research (noted intentional) | Divergence is intentional: multiple whitelisted tools per category, so "any" (force *some* tool) is correct; named-tool form would over-constrain. Noted in Research. |
+| NIT | User | N2 — Open Questions 1–3 remain open. None block build (all have stated defaults), but the phasing-trigger and draft-reuse answers affect C1's delivery path. | Open Questions (retained for supervisor) | Confirm the three during supervisor review; cheap and de-risk C1/C3. Build may proceed on the stated default assumptions. |
 
 ---
 
