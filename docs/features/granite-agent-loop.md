@@ -1,8 +1,17 @@
 # Granite Agent Loop (PoC)
 
-**Status:** Proof of concept -- not wired into production. See
+**Status:** Superseded by the
+[interactive TUI PoC](granite-interactive-tui.md) (issue #1546). This
+doc is historical; the new PoC is the source of truth. See the
+interactive-TUI doc for the 3-layer architecture, the 10 invariants,
+the persona-priming flow, the granite classification + translation
+taxonomy, and the steady-state loop. The interjection text on line
+294-296 of this doc is out of date (older TUI text); the new PoC's
+`INTERRUPTED_RE` regex accepts both forms.
+
+See
 [`docs/plans/granite-agent-loop-poc.md`](../plans/granite-agent-loop-poc.md)
-for the plan and
+for the original plan and
 [`docs/plans/granite-agent-loop-poc-results.md`](../plans/granite-agent-loop-poc-results.md)
 for the run assessment.
 
