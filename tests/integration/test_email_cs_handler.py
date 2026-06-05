@@ -225,3 +225,46 @@ async def test_audit_written_even_when_ping_has_no_chat(monkeypatch, fake_redis,
     out = await handle_customer_email(_parsed(), project, "cust_1", session_id="s1")
     assert out.audit_written is True
     assert any(c["verb_argv"] == ["customer", "note"] for c in manage_calls)
+
+
+# ---------------------------------------------------------------------------
+# _args_to_argv reserved-key filtering (cross-account leakage guard)
+# ---------------------------------------------------------------------------
+
+
+def test_args_to_argv_strips_reserved_email_key():
+    """Agent-supplied 'email' must never reach extra_args — it would override
+    the trusted customer_id injected by run_manage_command."""
+    from tools.email_cs.handler import _args_to_argv
+
+    result = _args_to_argv({"email": "attacker@evil.com", "plan": "pro"})
+    flat = " ".join(result)
+    assert "--email" not in flat, "reserved 'email' key must be stripped from extra_args"
+    assert "--plan" in flat
+
+
+def test_args_to_argv_strips_reserved_json_key():
+    """Agent-supplied 'json' must never reach extra_args — it would conflict
+    with the --json flag appended by run_manage_command."""
+    from tools.email_cs.handler import _args_to_argv
+
+    result = _args_to_argv({"json": "true", "limit": "5"})
+    flat = " ".join(result)
+    assert "--json" not in flat, "reserved 'json' key must be stripped from extra_args"
+    assert "--limit" in flat
+
+
+def test_args_to_argv_passes_safe_keys():
+    """Non-reserved keys must still be forwarded as --key value tokens."""
+    from tools.email_cs.handler import _args_to_argv
+
+    result = _args_to_argv({"plan_id": "abc", "format": "text"})
+    assert result == ["--plan-id", "abc", "--format", "text"]
+
+
+def test_args_to_argv_empty_and_none():
+    """Empty dict and None values must both produce an empty list."""
+    from tools.email_cs.handler import _args_to_argv
+
+    assert _args_to_argv({}) == []
+    assert _args_to_argv({"x": None}) == []

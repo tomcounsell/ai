@@ -326,9 +326,19 @@ async def _handle_escalate(
 
 
 def _args_to_argv(tool_args: dict) -> list[str]:
-    """Flatten an action agent's tool args dict to ``--key value`` argv tokens."""
+    """Flatten an action agent's tool args dict to ``--key value`` argv tokens.
+
+    Reserved keys (``email``, ``json``) are stripped before flattening so that
+    an agent-supplied ``email`` argument can never override the trusted
+    ``customer_id`` that ``run_manage_command`` always injects, and ``json``
+    cannot conflict with the ``--json`` flag that is always appended last.
+    """
+    # Keys the caller injects directly — agent must not override them.
+    _reserved = {"email", "json"}
     argv: list[str] = []
     for k, v in (tool_args or {}).items():
+        if str(k).lower() in _reserved:
+            continue
         if v is None:
             continue
         argv.extend([f"--{str(k).replace('_', '-')}", str(v)])
