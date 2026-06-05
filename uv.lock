@@ -290,20 +290,20 @@ wheels = [
 
 [[package]]
 name = "claude-agent-sdk"
-version = "0.2.90"
+version = "0.2.91"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "mcp" },
     { name = "sniffio" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0c/d6/0d215ffd601fae784344f098658846cc2555ed22f1c86afbb13764cc3c6a/claude_agent_sdk-0.2.90.tar.gz", hash = "sha256:00bebd2e6132ea448eb09343e0065cd4344dbd0a433d92e9155abd561108517b", size = 253307 }
+sdist = { url = "https://files.pythonhosted.org/packages/02/95/b89f19cc9ca617fe107118c2fc469a7fa0a09f476b6f815c24de19905b0d/claude_agent_sdk-0.2.91.tar.gz", hash = "sha256:7080efad1e9816ade813b0499e9d608b803d35b4cbc5c24aaa711a762aa04d82", size = 253641 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3e/99/4ccc944e5682f73ce6cc171c8c931d9ef889c6e823a44d46d6c6ca493d7a/claude_agent_sdk-0.2.90-py3-none-macosx_11_0_arm64.whl", hash = "sha256:1a00048896fd2932f29c9f4621d490e6f8b0a06bdc633ac74887e276ef319682", size = 64690218 },
-    { url = "https://files.pythonhosted.org/packages/24/fe/af406af5c6ad94d04ee255ff92292330d64af5acebc0167bdd534d5356b3/claude_agent_sdk-0.2.90-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:052ee830ac1752f31c75b280b9d22a9dae956c9ae7934202b247654928ac4465", size = 66726979 },
-    { url = "https://files.pythonhosted.org/packages/20/19/ad4151a3e3d8f17ca585f2bd7dbf8848560b5d700c46c91f68f9205bba74/claude_agent_sdk-0.2.90-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:20bcc8d9514040c8549101380e092ff316189cf10f5bfe65f8dc27434d7188e2", size = 74311402 },
-    { url = "https://files.pythonhosted.org/packages/af/15/cf29b53d4d3e2e7d4727d96d69429c31694e5fa52c2a0b1ff45f660e86fa/claude_agent_sdk-0.2.90-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:4854bf70ee006969c098ee61431b51300b9c49e9f2f86c4239ea3c50621db67c", size = 74484333 },
-    { url = "https://files.pythonhosted.org/packages/c2/87/7d82f52e8e5c83c606f35d875bc6ca355547206f1d8eca949c04072a2a7a/claude_agent_sdk-0.2.90-py3-none-win_amd64.whl", hash = "sha256:3783d89d10050c2e4551ffa0102aa0b671525a5c831be8c485f0ad5302a9fc3c", size = 75111916 },
+    { url = "https://files.pythonhosted.org/packages/74/62/b2a03a4da8d80be936a78a91e967a615f17d1244daa1b9b30dce597f8ed2/claude_agent_sdk-0.2.91-py3-none-macosx_11_0_arm64.whl", hash = "sha256:b36d4a57da0f406d995d8287850851c8ed0bf8ef86556d57a79dcab49c33308c", size = 64690337 },
+    { url = "https://files.pythonhosted.org/packages/de/d5/8ddb8e4f4ca8bd1861603a7821e1a024c6d449730dd47418ab7bb4801839/claude_agent_sdk-0.2.91-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:6ba15bc63ce27cbfc0559aea96570f9b006d75227272aabd821c01f6b9b9228b", size = 66737584 },
+    { url = "https://files.pythonhosted.org/packages/5d/7b/5d4adef696898791d00978e7d4edfe85e948c202e8888ad2d6df80d67bb4/claude_agent_sdk-0.2.91-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:c2f72274c4e638fee1109f0d643afa2b44e9344fecb467f4eb364518e6162a0a", size = 74312618 },
+    { url = "https://files.pythonhosted.org/packages/22/7f/ba95e469f14ff31f455c96c5380bcff1e605f905daf90d87d0a0b1924a49/claude_agent_sdk-0.2.91-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:4aad60ef6087366bfab8b0cafa92bb1d300dc5a7be2a48a0b0d409db0ece9771", size = 74498418 },
+    { url = "https://files.pythonhosted.org/packages/91/04/bb98a5e75d618c5976a492beec2aef68019357438ae26696051c40b9b597/claude_agent_sdk-0.2.91-py3-none-win_amd64.whl", hash = "sha256:50e17c819e45c8b21a9906da35367d908ddeddc78b6c1701f910b951d6b7c5ad", size = 75110928 },
 ]
 
 [[package]]
@@ -3314,11 +3314,9 @@ dependencies = [
     { name = "numpy" },
     { name = "ollama" },
     { name = "openai" },
-    { name = "pexpect" },
     { name = "pillow" },
     { name = "popoto" },
     { name = "psutil" },
-    { name = "ptyprocess" },
     { name = "pypdf" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
@@ -3356,12 +3354,14 @@ tts = [
 [package.dev-dependencies]
 dev = [
     { name = "ipykernel" },
+    { name = "pexpect" },
+    { name = "ptyprocess" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = "==0.105.2" },
-    { name = "claude-agent-sdk", specifier = "==0.2.90" },
+    { name = "claude-agent-sdk", specifier = "==0.2.91" },
     { name = "croniter", specifier = ">=2.0.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "google-api-python-client", specifier = ">=2.100.0" },
@@ -3379,11 +3379,9 @@ requires-dist = [
     { name = "onnxruntime", marker = "extra == 'knowledge'", specifier = ">=1.25.0" },
     { name = "onnxruntime", marker = "extra == 'tts'", specifier = ">=1.25.0" },
     { name = "openai", specifier = ">=1.0.0" },
-    { name = "pexpect", specifier = ">=4.9.0" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "popoto", specifier = ">=1.6.1" },
     { name = "psutil", specifier = ">=5.9.0" },
-    { name = "ptyprocess", specifier = ">=0.7.0" },
     { name = "pypdf", specifier = ">=6.10.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
@@ -3407,7 +3405,11 @@ requires-dist = [
 provides-extras = ["dev", "knowledge", "tts"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "ipykernel", specifier = ">=7.2.0" }]
+dev = [
+    { name = "ipykernel", specifier = ">=7.2.0" },
+    { name = "pexpect", specifier = ">=4.9.0" },
+    { name = "ptyprocess", specifier = ">=0.7.0" },
+]
 
 [[package]]
 name = "watchdog"

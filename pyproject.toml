@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "telethon==1.42.0", # CRITICAL — pin exact, upgrade via /update only
     "anthropic==0.105.2", # CRITICAL — pin exact, upgrade via /update only
-    "claude-agent-sdk==0.2.90", # CRITICAL — pin exact, upgrade via /update only
+    "claude-agent-sdk==0.2.91", # CRITICAL — pin exact, upgrade via /update only
     "mcp>=1.8.0", # Required by claude-agent-sdk for ToolAnnotations (see issue #235)
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
@@ -33,8 +33,6 @@ dependencies = [
     "jinja2>=3.1.0", # Template engine for web UI
     "pillow>=10.0.0", # Screenshot downscaling to stay within Claude's 2000px image dimension limit
     "croniter>=2.0.0", # Cron expression parser for unified Reflection schedule grammar (#1273)
-    "pexpect>=4.9.0",  # PTY spawn for the granite operator interactive TUI PoC (issue #1546); promoted from dev to runtime.
-    "ptyprocess>=0.7.0",  # pexpect's PTY backend; promoted from dev to runtime for the same reason.
 ]
 
 [project.optional-dependencies]
@@ -89,7 +87,6 @@ valor-ingest = "tools.valor_ingest:main"
 valor-tts = "tools.tts.cli:main"
 valor-computer = "tools.computer.cli:main"
 sdlc-decompose = "tools.sdlc_decompose:main"
-valor-granite-loop = "tools.granite_interactive_tui_poc.cli:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -101,6 +98,8 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "ipykernel>=7.2.0",
+    "pexpect>=4.9.0",
+    "ptyprocess>=0.7.0",
 ]
 
 [tool.hatch.build.targets.wheel]
