@@ -534,8 +534,12 @@ def restart_webui(project_dir: Path, force: bool = False) -> bool:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        time.sleep(2)
-        return is_webui_running()
+        # Poll up to 10 seconds; uvicorn needs a few seconds to bind the port.
+        for _ in range(20):
+            time.sleep(0.5)
+            if is_webui_running():
+                return True
+        return False
     except Exception:
         return False
 
