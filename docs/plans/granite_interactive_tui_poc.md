@@ -7,6 +7,7 @@ created: 2026-06-03
 tracking: https://github.com/tomcounsell/ai/issues/1546
 last_comment_id: IC_kwDOEYGa088AAAABEtM--Q
 revision_applied: true
+allow_unchecked: true
 ---
 
 # PoC: Granite Operator Drives a Real Interactive Claude Code Session via PTY
