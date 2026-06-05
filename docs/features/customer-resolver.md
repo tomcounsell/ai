@@ -200,3 +200,12 @@ marking or resolver cache stampedes.
 - Active retry loop consuming `label:valor-retry` Gmail messages (planned)
 - Cuttlefish-side resolver script, CLAUDE.md, and customer tools (Cuttlefish
   repo)
+
+## Downstream
+
+Once the resolver returns a `customer_id`, the
+[Email CS Auto-Reply](email-cs-auto-reply.md) layer triages the inbound email
+(two-tier classification + structural escalation gate) and decides whether to
+auto-handle, draft for a human, or escalate — before any fallback `AgentSession`
+is spawned. The resolver is the upstream gate: triage only runs for senders the
+resolver identifies as customers.
