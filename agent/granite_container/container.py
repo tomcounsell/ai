@@ -285,7 +285,7 @@ class Container:
         if chosen is None:
             return (None, buffer_pm, buffer_dev)
 
-        kind, r = chosen
+        _, r = chosen
         return (r.response, buffer_pm, buffer_dev)
 
     # -- Steady-state loop ------------------------------------------------

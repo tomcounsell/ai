@@ -33,6 +33,8 @@ dependencies = [
     "jinja2>=3.1.0", # Template engine for web UI
     "pillow>=10.0.0", # Screenshot downscaling to stay within Claude's 2000px image dimension limit
     "croniter>=2.0.0", # Cron expression parser for unified Reflection schedule grammar (#1273)
+    "pexpect>=4.9.0", # PTY driver for the granite operator interactive-TUI loop (#1546); imported at runtime by agent/granite_container/pty_driver.py
+    "ptyprocess>=0.7.0", # Low-level PTY spawn backing pexpect (#1546)
 ]
 
 [project.optional-dependencies]
@@ -87,6 +89,7 @@ valor-ingest = "tools.valor_ingest:main"
 valor-tts = "tools.tts.cli:main"
 valor-computer = "tools.computer.cli:main"
 sdlc-decompose = "tools.sdlc_decompose:main"
+valor-granite-loop = "tools.granite_interactive_tui_poc.cli:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -98,8 +101,6 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "ipykernel>=7.2.0",
-    "pexpect>=4.9.0",
-    "ptyprocess>=0.7.0",
 ]
 
 [tool.hatch.build.targets.wheel]
