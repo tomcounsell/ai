@@ -239,6 +239,43 @@ class TestFindSessionById:
         assert result is None
 
 
+class TestLookupPrNumber:
+    """D4: _lookup_pr_number issue-search primary + branch-head fallback."""
+
+    def test_issue_search_primary_path(self):
+        from tools.sdlc_stage_query import _lookup_pr_number
+
+        with patch("tools.sdlc_stage_query._gh_pr_list", return_value=55) as gh:
+            assert _lookup_pr_number(145, slug="some_slug") == 55
+        # First call is the issue-number search.
+        first_args = gh.call_args_list[0].args[0]
+        assert "--search" in first_args and "#145" in first_args
+
+    def test_branch_head_fallback_when_issue_search_empty(self):
+        from tools.sdlc_stage_query import _lookup_pr_number
+
+        # Issue search returns None, branch-head returns 88.
+        with patch("tools.sdlc_stage_query._gh_pr_list", side_effect=[None, 88]) as gh:
+            assert _lookup_pr_number(145, slug="my_slug") == 88
+        branch_args = gh.call_args_list[1].args[0]
+        assert "--head" in branch_args and "session/my_slug" in branch_args
+
+    def test_no_slug_no_branch_fallback(self):
+        from tools.sdlc_stage_query import _lookup_pr_number
+
+        # Only the issue search runs (returns None); no branch-head attempt.
+        with patch("tools.sdlc_stage_query._gh_pr_list", side_effect=[None]) as gh:
+            assert _lookup_pr_number(145, slug=None) is None
+        assert gh.call_count == 1
+
+    def test_gh_failure_returns_none(self):
+        from tools.sdlc_stage_query import _gh_pr_list
+
+        # subprocess raises -> None, never propagates.
+        with patch("tools.sdlc_stage_query.subprocess.run", side_effect=OSError("boom")):
+            assert _gh_pr_list(["--head", "session/x"]) is None
+
+
 class TestCLIOutput:
     """Tests for CLI invocation and output format."""
 
@@ -305,6 +342,26 @@ class TestEnrichedPayload:
         assert result["_meta"]["latest_critique_verdict"] == "NEEDS REVISION"
         assert result["_meta"]["latest_review_verdict"] == "APPROVED"
         assert result["_meta"]["pr_number"] == 42
+
+    def test_pr_number_resolved_from_meta_key(self):
+        """D4: _compute_meta resolves pr_number from the _pr_number meta key."""
+        from tools.sdlc_stage_query import query_enriched
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps(
+            {"ISSUE": "completed", "PLAN": "completed", "_pr_number": 777}
+        )
+        mock_session.pr_number = None  # no session attribute
+        mock_session.slug = None
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            # gh lookup must NOT be needed — the meta key wins.
+            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None) as lookup:
+                with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                    result = query_enriched(session_id="sid")
+
+        assert result["_meta"]["pr_number"] == 777
+        lookup.assert_not_called()
 
     def test_defaults_when_session_missing(self):
         from tools.sdlc_stage_query import query_enriched

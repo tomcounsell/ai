@@ -232,6 +232,21 @@ Lint and formatting are handled automatically -- agents should never waste itera
 
 ## Workflow
 
+### Step 0: Substrate Probe (degraded-mode awareness)
+
+Before initializing tasks, probe whether the orchestration substrate (PM
+session + Redis) is reachable, mirroring the `do-docs` pattern. A forked
+sub-skill must announce degraded mode rather than silently lagging state:
+
+```bash
+sdlc-tool stage-marker --stage BUILD --status in_progress --issue-number {issue_number}
+```
+
+Parse the JSON output:
+- `{"stage": "BUILD", "status": "in_progress"}` — substrate present, state persisted; proceed normally.
+- `{"status": "degraded", ...}` — **announce at the top of your run**: "running in degraded mode (state not persisted)". Continue the build; stage markers will not be recorded, but the build itself (worktree, agents, tests, PR) does not depend on the substrate.
+- Non-zero exit — substrate present but the write genuinely failed; report the stderr diagnostic and proceed (do not silently swallow it).
+
 ### Step 1: Initialize Task List
 
 Read the plan and create tasks:

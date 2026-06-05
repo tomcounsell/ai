@@ -170,16 +170,50 @@ class TestMetaSetWriteMeta:
 
         assert result == {}
 
+    def test_pr_number_coerced_to_int(self):
+        """D4: write_meta with pr_number stores _pr_number as an int."""
+        from tools.sdlc_meta_set import write_meta
+
+        mock_session = MagicMock()
+        mock_session.stage_states = "{}"
+
+        def fake_update(session, update_fn, **kwargs):
+            result = update_fn({})
+            assert result["_pr_number"] == 42
+            assert isinstance(result["_pr_number"], int)
+            return True
+
+        with (
+            patch("tools.sdlc_meta_set._find_session", return_value=mock_session),
+            patch("tools.stage_states_helpers.update_stage_states", side_effect=fake_update),
+        ):
+            result = write_meta(key="pr_number", value="42")
+
+        assert result == {"key": "pr_number", "value": 42}
+
+    def test_pr_number_invalid_returns_empty_dict(self):
+        """D4: non-numeric / non-positive pr_number is rejected by write_meta (fail-soft)."""
+        from tools.sdlc_meta_set import write_meta
+
+        mock_session = MagicMock()
+        mock_session.stage_states = "{}"
+
+        with patch("tools.sdlc_meta_set._find_session", return_value=mock_session):
+            for bad in ("0", "-1", "abc", ""):
+                assert write_meta(key="pr_number", value=bad) == {}
+
 
 class TestMetaSetWhitelist:
     """Tests for the key whitelist enforcement."""
 
     def test_whitelist_contains_expected_keys(self):
-        """_KEY_REGISTRY must contain exactly the two whitelisted keys."""
+        """_KEY_REGISTRY must contain the whitelisted keys."""
         from tools.sdlc_meta_set import _KEY_REGISTRY
 
         assert "plan_revising" in _KEY_REGISTRY
         assert "plan_hash_at_build_start" in _KEY_REGISTRY
+        assert "pr_number" in _KEY_REGISTRY
+        assert _KEY_REGISTRY["pr_number"] == ("_pr_number", int)
 
     def test_whitelist_maps_to_underscore_internal_keys(self):
         """Internal storage keys must use leading underscore convention."""
@@ -252,6 +286,25 @@ class TestMetaSetCLI:
         assert proc.returncode == 0
         output = proc.stdout.strip()
         assert output == "{}", f"Expected '{{}}' but got: {output!r}"
+
+    def test_pr_number_invalid_value_exits_2(self):
+        """D4: CLI exits 2 for an invalid pr_number value (known key, bad value)."""
+        for bad in ("0", "-5", "notanumber"):
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "tools.sdlc_meta_set",
+                    "--key",
+                    "pr_number",
+                    "--value",
+                    bad,
+                ],
+                capture_output=True,
+                text=True,
+                cwd=str(REPO_ROOT),
+            )
+            assert proc.returncode == 2, f"value {bad!r} should exit 2, got {proc.returncode}"
 
     def test_help_exits_0(self):
         """CLI --help exits 0."""

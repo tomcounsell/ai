@@ -383,6 +383,13 @@ def guard_g4_oscillation(
     dispatched the same sub-skill ``MAX_SAME_STAGE_DISPATCHES`` times in a
     row without the stage_snapshot changing, something is stuck and a human
     needs to intervene.
+
+    D5 — self-clearing + escape hatch: ``same_stage_dispatch_count`` resets
+    to 0 when the live stage snapshot diverges from the last recorded
+    dispatch (see ``compute_same_stage_count``), so G4 stops firing after a
+    real stage/verdict correction. For the genuinely-latched recorded-history
+    case, the operator clears the streak explicitly with
+    ``sdlc-tool dispatch reset --issue-number N``.
     """
     count = meta.get("same_stage_dispatch_count", 0)
     if count < MAX_SAME_STAGE_DISPATCHES:
@@ -390,7 +397,11 @@ def guard_g4_oscillation(
 
     skill = meta.get("last_dispatched_skill") or "<unknown>"
     return Blocked(
-        reason=(f"G4: stage oscillation — {skill} dispatched {count} times without state change"),
+        reason=(
+            f"G4: stage oscillation — {skill} dispatched {count} times without state change. "
+            "If state has since moved, this self-clears; otherwise clear it with "
+            "`sdlc-tool dispatch reset --issue-number N`."
+        ),
         guard_id="G4",
     )
 
@@ -641,7 +652,13 @@ def _rule_critique_ready_no_concerns(stage_states: dict, meta: dict, context: di
 def _rule_critique_ready_with_concerns_no_revision(
     stage_states: dict, meta: dict, context: dict
 ) -> bool:
-    """Plan critiqued (READY TO BUILD, concerns), revision_applied not set."""
+    """Plan critiqued (READY TO BUILD, concerns), revision_applied not set.
+
+    D3: defer to downstream PR-stage rows once a PR exists or BUILD has
+    completed — a finished PR must never route back to plan/build.
+    """
+    if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:
+        return False
     verdict = _latest_critique_verdict(stage_states, meta).upper()
     if CRITIQUE_READY_TO_BUILD not in verdict or "WITH CONCERNS" not in verdict:
         return False
@@ -660,7 +677,13 @@ def _rule_critique_ready_with_concerns_no_revision(
 def _rule_critique_ready_with_concerns_revision_applied(
     stage_states: dict, meta: dict, context: dict
 ) -> bool:
-    """Plan critiqued (READY TO BUILD, concerns), revision_applied true."""
+    """Plan critiqued (READY TO BUILD, concerns), revision_applied true.
+
+    D3: defer to downstream PR-stage rows once a PR exists or BUILD has
+    completed so row-4c stops re-proposing /do-build on a finished PR.
+    """
+    if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:
+        return False
     verdict = _latest_critique_verdict(stage_states, meta).upper()
     if CRITIQUE_READY_TO_BUILD not in verdict or "WITH CONCERNS" not in verdict:
         return False
@@ -1144,5 +1167,12 @@ def compute_same_stage_count(
             # The router is ABOUT to dispatch the same skill again on the
             # same state — count this impending turn too.
             count += 1
+        else:
+            # D5: the live state has moved past the last recorded dispatch
+            # snapshot — the impending dispatch is a genuinely new stage, not
+            # a repeat. Reset the streak so G4 self-clears on a real
+            # transition (e.g. a stage/verdict correction recorded since the
+            # last dispatch) instead of latching closed.
+            return (0, skill)
 
     return (count, skill)

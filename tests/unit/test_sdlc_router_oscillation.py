@@ -300,6 +300,42 @@ class TestSnapshotAndCounter:
         assert count == 1
         assert skill == SKILL_DO_PATCH
 
+    def test_d5_count_resets_when_live_snapshot_diverges(self):
+        """D5: a live snapshot that diverges from the last dispatch resets the streak to 0."""
+        states: dict = {"REVIEW": "in_progress"}
+        record_dispatch(states, SKILL_DO_PR_REVIEW)
+        record_dispatch(states, SKILL_DO_PR_REVIEW)
+        record_dispatch(states, SKILL_DO_PR_REVIEW)
+        # Live state has moved on (REVIEW completed since the last dispatch).
+        moved = {"REVIEW": "completed"}
+        live = build_stage_snapshot(moved, meta={"pr_number": None})
+        count, skill = compute_same_stage_count(states, current_snapshot=live)
+        assert count == 0
+        assert skill == SKILL_DO_PR_REVIEW
+
+    def test_d5_count_increments_when_live_snapshot_matches(self):
+        """D5: a matching live snapshot still counts the impending +1 turn."""
+        states: dict = {"REVIEW": "in_progress"}
+        record_dispatch(states, SKILL_DO_PR_REVIEW)
+        record_dispatch(states, SKILL_DO_PR_REVIEW)
+        # The impending dispatch is on the SAME state as the last recorded one.
+        same = build_stage_snapshot({"REVIEW": "in_progress"}, meta={"pr_number": None})
+        count, _ = compute_same_stage_count(states, current_snapshot=same)
+        assert count == 3  # 2 recorded + 1 impending
+
+    def test_d5_g4_does_not_fire_after_correction(self):
+        """D5: G4 self-clears — a stage correction drops same_stage_dispatch_count to 0."""
+        states: dict = {"REVIEW": "in_progress"}
+        for _ in range(MAX_SAME_STAGE_DISPATCHES):
+            record_dispatch(states, SKILL_DO_PR_REVIEW)
+        # Without divergence, the count would be at/above the G4 threshold.
+        latched, _ = compute_same_stage_count(states)
+        assert latched >= MAX_SAME_STAGE_DISPATCHES
+        # After a real transition, the live-snapshot reset zeroes it.
+        moved = build_stage_snapshot({"REVIEW": "completed"}, meta={"pr_number": 42})
+        cleared, _ = compute_same_stage_count(states, current_snapshot=moved)
+        assert cleared == 0
+
 
 class TestGuardOrdering:
     """Guards fire in G1..G6 order; first match wins."""

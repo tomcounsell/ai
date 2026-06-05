@@ -9,6 +9,7 @@ Tests cover:
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 
@@ -193,3 +194,92 @@ class TestMessageTextFallback:
         # The url_match must win because the issue_url pass runs first across
         # the whole list before the message_text fallback pass begins.
         assert result is url_match
+
+
+class TestFindPlanPath:
+    """Tests for find_plan_path portability + tracking-URL matching (D1, D2)."""
+
+    @staticmethod
+    def _write_plan(plans_dir, name, body):
+        plans_dir.mkdir(parents=True, exist_ok=True)
+        p = plans_dir / name
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_resolves_from_cwd_git_root_no_env(self, tmp_path, monkeypatch):
+        """D1: with no SDLC_TARGET_REPO, the plans dir comes from the cwd git root."""
+        from tools._sdlc_utils import find_plan_path
+
+        plans_dir = tmp_path / "docs" / "plans"
+        plan = self._write_plan(plans_dir, "feature.md", "tracking: #4242\n")
+
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        with patch("tools._sdlc_utils._git_toplevel", return_value=tmp_path):
+            result = find_plan_path(4242)
+
+        assert result == plan
+
+    def test_env_var_overrides_git_root(self, tmp_path, monkeypatch):
+        """D1: SDLC_TARGET_REPO wins over the cwd git root (override semantics)."""
+        from tools._sdlc_utils import find_plan_path
+
+        env_repo = tmp_path / "envrepo"
+        git_repo = tmp_path / "gitrepo"
+        env_plan = self._write_plan(env_repo / "docs" / "plans", "e.md", "#4242\n")
+        self._write_plan(git_repo / "docs" / "plans", "g.md", "#4242\n")
+
+        monkeypatch.setenv("SDLC_TARGET_REPO", str(env_repo))
+        with patch("tools._sdlc_utils._git_toplevel", return_value=git_repo):
+            result = find_plan_path(4242)
+
+        assert result == env_plan
+
+    def test_git_failure_falls_through_to_file_fallback(self, tmp_path, monkeypatch):
+        """D1: when git resolution fails and no env var, fall to __file__ fallback (no crash)."""
+        from tools._sdlc_utils import find_plan_path
+
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        # _git_toplevel returns None (not a repo / git missing); the __file__
+        # fallback dir is the real repo, which won't contain issue 999999999.
+        with patch("tools._sdlc_utils._git_toplevel", return_value=None):
+            result = find_plan_path(999999999)
+
+        assert result is None  # no crash, clean miss
+
+    def test_matches_tracking_url_form(self, tmp_path, monkeypatch):
+        """D2: a plan referencing the issue only by tracking URL is found."""
+        from tools._sdlc_utils import find_plan_path
+
+        plans_dir = tmp_path / "docs" / "plans"
+        plan = self._write_plan(
+            plans_dir,
+            "url.md",
+            "tracking: https://github.com/org/repo/issues/145\n",
+        )
+
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        with patch("tools._sdlc_utils._git_toplevel", return_value=tmp_path):
+            result = find_plan_path(145)
+
+        assert result == plan
+
+    def test_boundary_1455_does_not_match_145(self, tmp_path, monkeypatch):
+        """D2: #1455 must not satisfy a lookup for issue 145."""
+        from tools._sdlc_utils import find_plan_path
+
+        plans_dir = tmp_path / "docs" / "plans"
+        self._write_plan(plans_dir, "other.md", "see #1455 and issues/1455\n")
+
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        with patch("tools._sdlc_utils._git_toplevel", return_value=tmp_path):
+            result = find_plan_path(145)
+
+        assert result is None
+
+    def test_git_toplevel_handles_non_repo(self, tmp_path):
+        """_git_toplevel returns None outside a git repo rather than raising."""
+        from tools._sdlc_utils import _git_toplevel
+
+        # tmp_path is not inside a git repo (pytest tmp dirs are not under VCS).
+        result = _git_toplevel(cwd=tmp_path)
+        assert result is None or isinstance(result, os.PathLike)

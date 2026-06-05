@@ -96,52 +96,128 @@ class TestFindSession:
 
 
 class TestWriteMarker:
-    """Tests for write_marker function."""
+    """Tests for write_marker's tri-state degradation contract (D7).
+
+    write_marker now returns ``(result, exit_code)``:
+    - degraded / success / idempotent → exit 0
+    - genuine write failure (substrate present, session resolved) → exit 1
+    """
 
     def test_rejects_invalid_stage(self):
         from tools.sdlc_stage_marker import write_marker
 
-        result = write_marker(stage="BOGUS", status="completed")
+        result, code = write_marker(stage="BOGUS", status="completed")
         assert result == {}
+        assert code == 0
 
     def test_rejects_invalid_status(self):
         from tools.sdlc_stage_marker import write_marker
 
-        result = write_marker(stage="PLAN", status="bogus")
+        result, code = write_marker(stage="PLAN", status="bogus")
         assert result == {}
+        assert code == 0
 
-    def test_returns_empty_when_no_session(self):
-        from tools.sdlc_stage_marker import write_marker
+    def test_absent_substrate_emits_degraded_marker_exit_0(self):
+        """ABSENT: substrate probe fails → degraded marker, exit 0 (non-`ai` repo)."""
+        from tools.sdlc_stage_marker import SUBSTRATE_ABSENT, write_marker
 
-        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
-        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
+        with patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_ABSENT):
+            result, code = write_marker(stage="PLAN", status="completed")
 
-        with patch.dict(os.environ, clean_env, clear=True):
-            result = write_marker(stage="PLAN", status="completed")
+        assert code == 0
+        assert result["status"] == "degraded"
+        assert "substrate absent" in result["reason"]
+        assert result["stage"] == "PLAN"
 
-        assert result == {}
-
-    def test_passes_issue_number_to_find_session(self):
-        from tools.sdlc_stage_marker import write_marker
-
-        mock_session = MagicMock()
-        mock_session.stage_states = "{}"
+    def test_present_no_session_emits_degraded_marker_exit_0_quiet(self):
+        """PRESENT_NO_SESSION: substrate present but no session → degraded, exit 0, quiet."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
 
         strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
         clean_env = {k: v for k, v in os.environ.items() if k not in strip}
 
         with (
             patch.dict(os.environ, clean_env, clear=True),
-            patch("tools._sdlc_utils.find_session_by_issue", return_value=mock_session),
-            patch("agent.pipeline_state.PipelineStateMachine") as mock_psm_cls,
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker._find_session", return_value=None),
         ):
-            mock_psm = MagicMock()
-            mock_psm.set_stage_status.return_value = True
-            mock_psm_cls.return_value = mock_psm
+            result, code = write_marker(stage="PLAN", status="completed")
 
-            result = write_marker(stage="PLAN", status="completed", issue_number=941)
+        assert code == 0
+        assert result["status"] == "degraded"
+        assert "no PM session" in result["reason"]
 
+    def test_present_write_failed_exits_1_loud(self):
+        """PRESENT_WRITE_FAILED: session resolved but state-machine raises → exit 1."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_session = MagicMock()
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker._find_session", return_value=mock_session),
+            patch("agent.pipeline_state.PipelineStateMachine", side_effect=RuntimeError("boom")),
+        ):
+            result, code = write_marker(stage="PLAN", status="completed")
+
+        assert code == 1
+        assert result == {}
+
+    def test_present_start_stage_rejected_exits_1(self):
+        """PRESENT_WRITE_FAILED: start_stage raising ValueError (misorder) → exit 1."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_session = MagicMock()
+        mock_sm = MagicMock()
+        mock_sm.start_stage.side_effect = ValueError("predecessor not completed")
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker._find_session", return_value=mock_session),
+            patch("agent.pipeline_state.PipelineStateMachine", return_value=mock_sm),
+        ):
+            result, code = write_marker(stage="REVIEW", status="in_progress")
+
+        assert code == 1
+        assert result == {}
+
+    def test_idempotent_already_completed_exit_0(self):
+        """Idempotent already-completed path stays exit 0 (not loud)."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_session = MagicMock()
+        mock_sm = MagicMock()
+        mock_sm.states = {"PLAN": "completed"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker._find_session", return_value=mock_session),
+            patch("agent.pipeline_state.PipelineStateMachine", return_value=mock_sm),
+        ):
+            result, code = write_marker(stage="PLAN", status="completed")
+
+        assert code == 0
         assert result == {"stage": "PLAN", "status": "completed"}
+        mock_sm.complete_stage.assert_not_called()
+
+    def test_successful_write_exit_0(self):
+        """Happy path: session resolved, write succeeds → exit 0 + marker."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_session = MagicMock()
+        mock_sm = MagicMock()
+        mock_sm.states = {"PLAN": "in_progress"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker._find_session", return_value=mock_session),
+            patch("agent.pipeline_state.PipelineStateMachine", return_value=mock_sm),
+        ):
+            result, code = write_marker(stage="PLAN", status="completed", issue_number=941)
+
+        assert code == 0
+        assert result == {"stage": "PLAN", "status": "completed"}
+        mock_sm.complete_stage.assert_called_once_with("PLAN")
 
 
 class TestCLI:
@@ -189,8 +265,13 @@ class TestCLI:
         )
         assert result.returncode == 0
         output = json.loads(result.stdout.strip())
-        # Output depends on Redis state: {} if no session for issue 99999,
-        # or {"stage": "PLAN", "status": "completed"} if one exists.
-        # Both are valid — the test verifies CLI accepts --issue-number
-        # and produces well-formed JSON output.
-        assert output == {} or output == {"stage": "PLAN", "status": "completed"}
+        # Output depends on substrate state (D7 tri-state contract):
+        # - degraded marker if the substrate is absent or no session resolves
+        #   for issue 99999 (the common case in CI),
+        # - {"stage": "PLAN", "status": "completed"} if a session happens to
+        #   exist. All are valid — the test verifies the CLI accepts
+        #   --issue-number and produces well-formed JSON with exit 0.
+        assert output.get("status") == "degraded" or output == {
+            "stage": "PLAN",
+            "status": "completed",
+        }

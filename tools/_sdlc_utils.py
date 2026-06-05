@@ -11,11 +11,35 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
 from pathlib import Path
 
 from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
+
+
+def _git_toplevel(cwd: Path | None = None) -> Path | None:
+    """Return the git working-tree root for ``cwd`` (default: process cwd).
+
+    Returns None when ``git`` is missing, the directory is not a git repo, or
+    the call times out. Callers fall through to the next resolution step.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(cwd or Path.cwd()),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.debug(f"_git_toplevel failed: {e}")
+        return None
+    if result.returncode != 0:
+        return None
+    top = result.stdout.strip()
+    return Path(top) if top else None
 
 
 def find_session_by_issue(issue_number: int):
@@ -105,9 +129,21 @@ def find_session(session_id: str | None = None, issue_number: int | None = None)
 def find_plan_path(issue_number: int) -> Path | None:
     """Locate the plan file tracking this issue.
 
-    Walks ``docs/plans/`` and returns the first ``.md`` file containing
-    a reference to ``#{issue_number}``. Returns None if not found.
-    Respects the SDLC_TARGET_REPO env var for cross-repo work.
+    Walks ``docs/plans/`` and returns the first ``.md`` file referencing the
+    issue, matching either the bare ``#{issue_number}`` or the tracking-URL
+    forms (``issues/{issue_number}``). A trailing digit boundary prevents
+    ``#1455`` from matching issue ``145``. Returns None if not found.
+
+    Plans-directory resolution order (D1 — portability):
+
+    1. ``SDLC_TARGET_REPO`` env var (explicit override wins — preserves
+       backward-compatible cross-repo override semantics).
+    2. Else the cwd's git working-tree root (``git rev-parse --show-toplevel``)
+       so the pipeline finds plans in whatever repo it is invoked from.
+    3. Else the ``__file__``-relative ``~/src/ai/docs/plans`` fallback.
+
+    Each step falls through on failure (not a git repo, ``git`` missing) so a
+    missing env var degrades to "correct" rather than "silently wrong".
     """
     if not issue_number:
         return None
@@ -116,12 +152,18 @@ def find_plan_path(issue_number: int) -> Path | None:
     if repo_root_env:
         plans_dir = Path(repo_root_env) / "docs" / "plans"
     else:
-        plans_dir = Path(__file__).resolve().parent.parent / "docs" / "plans"
+        toplevel = _git_toplevel()
+        if toplevel is not None:
+            plans_dir = toplevel / "docs" / "plans"
+        else:
+            plans_dir = Path(__file__).resolve().parent.parent / "docs" / "plans"
 
     if not plans_dir.is_dir():
         return None
 
-    needle = f"#{issue_number}"
+    # Match `#145`, `issues/145`, and the full tracking URL, but NOT `#1455`
+    # (the trailing non-digit lookahead enforces the boundary).
+    ref_re = re.compile(rf"(?:#|issues/){issue_number}(?![0-9])")
     try:
         for entry in plans_dir.iterdir():
             if not entry.is_file() or entry.suffix != ".md":
@@ -130,7 +172,7 @@ def find_plan_path(issue_number: int) -> Path | None:
                 text = entry.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            if needle in text:
+            if ref_re.search(text):
                 return entry
     except Exception as e:
         logger.debug(f"find_plan_path walk failed: {e}")
