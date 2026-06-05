@@ -71,7 +71,9 @@ PROMPT_GLYPH = re.compile(r"[>❯]")
 
 # C4: the `/help` overlay swaps the bottom bar to "esc to cancel".
 # Treat the overlay as "not actively responding" so the loop can hold.
-OVERLAY_BAR = re.compile(r"esc to cancel", re.IGNORECASE)
+# The TUI may render this with whitespace collapsed (`Esctocancel`) or
+# with spaces (`Esc to cancel`); \s* matches both forms.
+OVERLAY_BAR = re.compile(r"esc\s*to\s*cancel", re.IGNORECASE)
 
 # C1: the submit key. Every text write ends with this.
 SUBMIT_KEY = b"\r"
@@ -129,6 +131,8 @@ def _strip_ansi(text: str) -> str:
 
     This is a best-effort basic strip — full SGR attribute parsing is
     out of scope. The classifier layer only needs the visible text.
+    Whitespace is preserved so that downstream matching (bypass bar,
+    overlay bar, content checks) can use readable substrings.
     """
     text = _ANSI_CSI_RE.sub("", text)
     text = _ANSI_OSC_RE.sub("", text)

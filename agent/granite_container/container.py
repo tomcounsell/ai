@@ -78,6 +78,15 @@ STARTUP_WINDOW_CYCLES = 10
 # dev_hang) and exits the loop.
 CYCLE_IDLE_TIMEOUT_S = 120.0
 
+# Cap on the size of `ContainerResult.exit_message`. A multi-KB
+# traceback or ollama error body can land here on the exception
+# branch, and the result is published into the Telegram relay —
+# keep the message bounded so a single failure doesn't flood a
+# chat. 500 chars matches the Telegram message clamp the relay
+# already enforces downstream; truncating here keeps the relay
+# clean and the JSON results doc readable.
+EXIT_MESSAGE_MAX_CHARS = 500
+
 
 @dataclass
 class TurnRecord:
@@ -122,6 +131,20 @@ class ContainerResult:
 # ---------------------------------------------------------------------------
 # Sandbox
 # ---------------------------------------------------------------------------
+
+
+def _truncate_exit_message(text: str) -> str:
+    """Bound `ContainerResult.exit_message` to `EXIT_MESSAGE_MAX_CHARS`.
+
+    The exception branch can capture multi-kilobyte tracebacks or
+    ollama error bodies; the result is published into the Telegram
+    relay, so we clamp the size here rather than letting a single
+    failure flood a chat. A short ellipsis marker preserves the
+    "we truncated" signal in the published message.
+    """
+    if len(text) <= EXIT_MESSAGE_MAX_CHARS:
+        return text
+    return text[: EXIT_MESSAGE_MAX_CHARS - 3] + "..."
 
 
 def _make_sandbox_cwd() -> tuple[str, str]:
@@ -312,7 +335,7 @@ class Container:
             self._spawn_pair()
         except Exception as e:
             result.exit_reason = "exception"
-            result.exit_message = f"spawn failed: {e}"
+            result.exit_message = _truncate_exit_message(f"spawn failed: {e}")
             self._run_pkill_fallback()
             return result
 
@@ -455,7 +478,7 @@ class Container:
                     dev_prompt = extract_dev_prompt(pm_buf)
                 except Exception as e:
                     result.exit_reason = "exception"
-                    result.exit_message = f"extract_dev_prompt failed: {e}"
+                    result.exit_message = _truncate_exit_message(f"extract_dev_prompt failed: {e}")
                     break
                 extract_ms = int((time.monotonic() - extract_start) * 1000)
 
@@ -503,7 +526,7 @@ class Container:
                     summary = summarize_for_pm(dev_buf)
                 except Exception as e:
                     result.exit_reason = "exception"
-                    result.exit_message = f"summarize_for_pm failed: {e}"
+                    result.exit_message = _truncate_exit_message(f"summarize_for_pm failed: {e}")
                     break
                 summarize_ms = int((time.monotonic() - summarize_start) * 1000)
 
@@ -538,7 +561,7 @@ class Container:
 
         except Exception as e:
             result.exit_reason = "exception"
-            result.exit_message = f"{type(e).__name__}: {e}"
+            result.exit_message = _truncate_exit_message(f"{type(e).__name__}: {e}")
         finally:
             # Try to capture a resume UUID from the dying PM.
             try:

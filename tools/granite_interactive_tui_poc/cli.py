@@ -63,13 +63,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--pm-model",
         type=str,
         default=None,
-        help="Override the substrate model for PM. Default: auto-pick (prefer gemma).",
+        help="Override the substrate model for PM. Default: auto-pick (prefer cloud > gemma).",
     )
     p.add_argument(
         "--dev-model",
         type=str,
         default=None,
-        help="Override the substrate model for Dev. Default: auto-pick (prefer gemma).",
+        help="Override the substrate model for Dev. Default: auto-pick (prefer cloud > gemma).",
     )
     p.add_argument(
         "--verbose",

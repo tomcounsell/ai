@@ -28,7 +28,13 @@ from pathlib import Path
 
 from agent.granite_container.pty_driver import PTYDriver
 
-REPO_ROOT = Path("/Users/valorengels/src/ai/.worktrees/granite_interactive_tui_poc")
+# Compute REPO_ROOT from this test file's location, not a hardcoded path.
+# A worktree-aware root would be `Path(__file__).resolve().parents[3]` (this
+# file lives at <root>/tests/unit/granite_container/test_persona_priming.py).
+# Using a hardcoded worktree path made the tests fail when the worktree
+# was collapsed back into the main checkout (see session/granite_interactive_tui_poc
+# review).
+REPO_ROOT = Path(__file__).resolve().parents[3]
 PM_PRIME = REPO_ROOT / ".claude" / "commands" / "granite-poc" / "prime-pm-role.md"
 DEV_PRIME = REPO_ROOT / ".claude" / "commands" / "granite-poc" / "prime-dev-role.md"
 

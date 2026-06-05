@@ -9,6 +9,7 @@ integration test.
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -44,8 +45,15 @@ class TestMakeSandboxCwd(unittest.TestCase):
     """The sandbox tempdir is created under /tmp/granite-poc/."""
 
     def test_sandbox_under_tmp(self) -> None:
+        # Use the platform's actual tempdir, not a hardcoded /tmp prefix.
+        # macOS resolves tempfile.gettempdir() to /var/folders/.../T (per-user),
+        # so a hardcoded /tmp assertion fails there even though the kernel
+        # itself is correct.
         cwd, label = _make_sandbox_cwd()
-        self.assertTrue(cwd.startswith("/tmp/"))
+        self.assertTrue(
+            cwd.startswith(tempfile.gettempdir()),
+            f"expected cwd under {tempfile.gettempdir()!r}, got {cwd!r}",
+        )
         self.assertIn("granite-poc", cwd)
         self.assertTrue(label.startswith("run-"))
 

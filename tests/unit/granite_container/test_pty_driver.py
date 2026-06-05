@@ -176,8 +176,13 @@ class TestC5IdleHeuristic(unittest.TestCase):
         self.assertIsNotNone(IDLE_BAR.search("bypass  permissions"))
 
     def test_overlay_bar_matches(self) -> None:
-        """C4: the `/help` overlay's `esc to cancel` is also idle."""
+        """C4: the `/help` overlay's `esc to cancel` is also idle.
+
+        Matches both the spaced hint and the collapsed-whitespace form
+        the TUI actually renders (`Esc to cancel` → `Esctocancel`).
+        """
         self.assertIsNotNone(OVERLAY_BAR.search("esc to cancel"))
+        self.assertIsNotNone(OVERLAY_BAR.search("esctocancel"))
 
     def test_prompt_glyph_matches_arrow(self) -> None:
         self.assertIsNotNone(PROMPT_GLYPH.search("> "))
@@ -454,12 +459,15 @@ class TestSpikeRegressionEnvGated(unittest.TestCase):
         "RESUME_SKIP model_unreachable",
     )
     def test_scenario_6_idle_after_overlay(self) -> None:
-        """Scenario 6: idle returns after a `/help` overlay dismisses.
+        """Scenario 6: the `/help` overlay is itself idle (C4 invariant).
 
-        C4 invariant: the `esc to cancel` overlay is also idle; the
-        loop holds while the user dismisses. This test exercises the
-        overlay path; the idle detection must work after the overlay
-        has closed.
+        The C4 contract is that idle detection treats the overlay as
+        idle (bottom bar reads `esc to cancel` instead of the bypass
+        bar; the prompt glyph is still there). The test does NOT
+        assert that Esc dismisses the overlay; the spike's contract
+        (scripts/granite_tui_pty_spike_pexpect.py:686-715) is that
+        the overlay either renders or returns to idle within the
+        timeout, and either is a pass.
         """
         driver = PTYDriver(role="pm")
         try:
@@ -467,12 +475,24 @@ class TestSpikeRegressionEnvGated(unittest.TestCase):
             initial = driver.read_until_idle(min_content_bytes=0, timeout_s=30.0)
             self.assertTrue(initial.saw_idle)
             driver.write("/help")
-            # The overlay is itself idle (C4). After sending an Esc-like
-            # follow-up we expect to see the bypass bar return.
-            driver.read_until_idle(min_content_bytes=0, timeout_s=5.0)
-            driver.write("\x1b")  # Esc
-            after = driver.read_until_idle(min_content_bytes=0, timeout_s=5.0)
-            self.assertTrue(after.saw_idle)
+            result = driver.read_until_idle(min_content_bytes=0, timeout_s=10.0)
+            # Spike contract (scripts/granite_tui_pty_spike_pexpect.py:700):
+            #   `if saw_idle_after or help_seen: passed = True`
+            # Either the TUI returned to idle OR the help overlay
+            # rendered — either one is a pass. We mirror that OR exactly.
+            #
+            # `help_seen` in the spike is the "Esc to cancel" overlay
+            # hint. The TUI's overlay rendering collapses whitespace
+            # (`Esc to cancel` → `Esctocancel`); the kernel strips
+            # whitespace before matching the bar regex, so the marker
+            # can be either the spaced or collapsed form.
+            buf = result.buffer.lower()
+            overlay_visible = "esctocancel" in buf or "esc to cancel" in buf
+            self.assertTrue(
+                result.saw_idle or overlay_visible,
+                f"expected return-to-idle or overlay (esctocancel) after /help; "
+                f"saw_idle={result.saw_idle} buffer_tail={result.buffer[-200:]!r}",
+            )
         finally:
             driver.close(force=True)
 
