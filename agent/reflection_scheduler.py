@@ -288,6 +288,33 @@ def _resolve_callable(dotted_path: str) -> Any:
     return getattr(module, func_name)
 
 
+def _latest_run_timestamp(name: str) -> float | None:
+    """Return the most recent ``ReflectionRun`` timestamp for a reflection name.
+
+    History-based fallback for ``is_reflection_due`` (burst-fire hotfix). When a
+    Reflection record's ``ran_at`` has been lost — e.g. a fresh duplicate record
+    spawned by ``get_or_create`` during a Redis index-rebuild window, where the
+    name index is transiently empty — the record looks "never run" and an
+    ``every:`` schedule would fire on every tick. ``ReflectionRun`` rows are NOT
+    in ``models.__all__`` and so are never destructively rebuilt, making their
+    timestamps a reliable record of when the job actually last ran.
+
+    Returns None if no history rows exist or on any error (fail-open to the
+    existing ``ran_at``-based behavior).
+    """
+    try:
+        from models.reflection_run import ReflectionRun
+
+        timestamps = [
+            r.timestamp
+            for r in ReflectionRun.query.filter(name=name)
+            if isinstance(r.timestamp, (int, float)) and r.timestamp > 0
+        ]
+        return max(timestamps) if timestamps else None
+    except Exception:
+        return None
+
+
 def is_reflection_due(entry: ReflectionEntry, state: Reflection, now: float) -> bool:
     """Check if a reflection is due to run.
 
@@ -308,6 +335,14 @@ def is_reflection_due(entry: ReflectionEntry, state: Reflection, now: float) -> 
     ran_at = state.ran_at if isinstance(state.ran_at, (int, float)) else None
 
     if entry.schedule:
+        # Burst-fire guard: a blank ``every:`` record (ran_at lost during an
+        # index-rebuild race) would be treated as "never run" and fire on every
+        # tick. Recover the true last-run from ReflectionRun history so the job
+        # stays suppressed until its real interval elapses. Scoped to ``every:``
+        # because ``cron:`` anchors on ``now`` (never immediately-due on a blank
+        # record) and ``at:`` is a one-shot.
+        if ran_at is None and entry.schedule.partition(":")[0].strip().lower() == "every":
+            ran_at = _latest_run_timestamp(entry.name)
         try:
             next_due = compute_next_due(entry.schedule, last_run=ran_at, now=now)
         except ValueError as e:

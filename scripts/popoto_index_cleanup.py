@@ -19,6 +19,17 @@ logger = logging.getLogger(__name__)
 
 _REBUILD_TIMEOUT_SECONDS = 30
 
+# Live scheduler-state models excluded from the destructive rebuild_indexes()
+# sweep. rebuild_indexes() deletes a model's class-set + KeyField indexes before
+# reconstructing them; during that window Reflection.query.filter(name=...)
+# returns empty, so a concurrent scheduler tick's get_or_create() spawns a fresh
+# duplicate record with ran_at=None — which an every:-scheduled job reads as
+# "never run" and fires on every tick (the daily-digest burst-fire bug). These
+# small, continuously-save()-indexed models gain nothing from a periodic
+# destructive rebuild; their orphans are negligible. (ReflectionRun is already
+# excluded — it is not in models.__all__.)
+_SCHEDULER_STATE_MODELS = frozenset({"Reflection"})
+
 
 def _has_embedding_field(model_class) -> bool:
     """Return True if a model has any EmbeddingField.
@@ -39,7 +50,9 @@ def _get_all_models() -> list:
     """Import and return all Popoto models from models/__init__.__all__.
 
     Excludes models with EmbeddingField — those require live Ollama calls
-    during rebuild_indexes() and are handled separately.
+    during rebuild_indexes() and are handled separately — and live
+    scheduler-state models (``_SCHEDULER_STATE_MODELS``) whose indexes must not
+    be destructively dropped while the scheduler is ticking.
     """
     try:
         import models as models_pkg
@@ -48,6 +61,12 @@ def _get_all_models() -> list:
         for name in models_pkg.__all__:
             obj = getattr(models_pkg, name, None)
             if obj is not None and hasattr(obj, "rebuild_indexes"):
+                if name in _SCHEDULER_STATE_MODELS:
+                    logger.debug(
+                        f"[popoto-cleanup] Skipping {name} "
+                        "(live scheduler-state — rebuild races get_or_create)"
+                    )
+                    continue
                 if _has_embedding_field(obj):
                     logger.debug(
                         f"[popoto-cleanup] Skipping {name} (has EmbeddingField — requires Ollama)"
