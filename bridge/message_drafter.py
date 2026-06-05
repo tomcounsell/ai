@@ -1370,6 +1370,9 @@ GENERAL RULES:
 - NEVER send empty promises. If the agent acknowledged feedback with "Got it", "Understood", \
 "Noted", "Will do" but made no concrete change (no commit, no file edit, no config update, \
 no memory write), flag it with ⚠️ and note that the promise lacks evidence.
+- NEVER offer or relay an offer of a phone or video call. Valor cannot make calls. If the raw \
+output contains any synchronous-voice invitation ("happy to hop on a quick call", "let's jump \
+on a Zoom", "give me a ring", "call me"), strip it — do NOT reproduce it in the response.
 - Lead with the outcome, not the process
 - Preserve commit hashes inline (e.g., `abc1234`)
 - Flag with ⚠️ ONLY for genuinely external blockers (missing credentials, need third-party \
