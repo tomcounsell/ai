@@ -925,6 +925,34 @@ async def _process_inbound_email(
         except Exception as e:
             logger.warning(f"[email] Failed to store inbound msgid mapping: {e}")
 
+    # --- Email customer-service triage layer (#1573) ---
+    # For projects with both a customer_resolver and an email.customer_service
+    # config block, run the two-tier triage pipeline inline. In shadow mode
+    # (Phase 1 default) it classifies + writes an audit note but sends nothing
+    # and does NOT short-circuit — the AgentSession spawn below remains the
+    # operator path. Auto/draft lanes (Phase >= 2) short-circuit and we return
+    # before enqueueing. The layer is inert (returns None) for any project
+    # without the config, so existing behavior is unchanged. Fail-safe: any
+    # exception here logs and falls through to the normal spawn.
+    if customer_id is not None:
+        try:
+            from tools.email_cs.handler import handle_customer_email
+
+            cs_outcome = await handle_customer_email(
+                parsed, project, customer_id, session_id=session_id
+            )
+            if cs_outcome is not None and cs_outcome.short_circuit:
+                logger.info(
+                    f"[email] email-cs handled session {session_id} "
+                    f"(disposition={cs_outcome.disposition.value}, "
+                    f"category={cs_outcome.category.value}); skipping AgentSession spawn"
+                )
+                return
+        except Exception as e:
+            logger.error(
+                f"[email] email-cs handler raised (non-fatal, falling through to AgentSession): {e}"
+            )
+
     # BYOB scheduler-gate inference (#1274): scan body + subject for
     # registered triggers (e.g. "linkedin"). Email sessions go through a
     # separate enqueue path from telegram_bridge.py, so the same inference
