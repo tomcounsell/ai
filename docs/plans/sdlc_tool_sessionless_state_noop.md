@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-06-03
 tracking: https://github.com/tomcounsell/ai/issues/1558
 last_comment_id:
+revision_applied: true
 ---
 
 # sdlc-tool state subcommands silently no-op when invoked outside /sdlc
@@ -27,11 +28,13 @@ sdlc-tool verdict get    --stage CRITIQUE --issue-number 1546 → {}   (still em
 sdlc-tool next-skill     --issue-number 1546 → {"skill":"/do-plan","reason":"Cannot build without a plan"}
 ```
 
-There is no error. Reads look like "nothing has happened yet" and writes appear to succeed but persist nothing. The router never reads plan frontmatter — only `session.stage_states` — so the on-disk `revision_applied: true` is invisible, producing a phantom "cannot build" loop.
+There is no error. Reads look like "nothing has happened yet" and writes appear to succeed but persist nothing.
+
+**Precise diagnosis (corrected per critique — the original framing was wrong):** the router *does* read plan frontmatter. `sdlc_stage_query._compute_meta()` (`tools/sdlc_stage_query.py:290-293`) calls `_find_plan_path(issue_number)` → `_parse_revision_applied(plan_path)` and reads `revision_applied: true` straight off the plan file. **But that read is gated behind session existence:** `query_enriched` short-circuits to `_default_meta()` (which hardcodes `revision_applied: False`) at `sdlc_stage_query.py:385-386` whenever `session is None`, so `_compute_meta` never runs sessionless. The on-disk `revision_applied: true` is therefore invisible *only because the read path is skipped*, producing a phantom "cannot build" loop. The fix is to make a session exist (via auto-ensure on writes) so the already-correct `_compute_meta` frontmatter read actually executes — **not** to add a new frontmatter read. `_parse_revision_applied` / `_compute_meta` must stay untouched.
 
 **Desired outcome:**
 
-It is impossible to touch SDLC state sessionless. Any entry point that reads or writes pipeline state ensures a PM session exists first, so state has a home regardless of how the pipeline is driven. The same `sdlc-tool` command sequence above, run in a direct Claude Code session, creates the PM session on first touch, persists the verdict, and `next-skill` reflects the recorded state.
+It is impossible to silently drop an SDLC state *write* sessionless. Any entry point that *writes* pipeline state ensures a PM session exists first, so the write has a home regardless of how the pipeline is driven. Reads stay side-effect-free (see Technical Approach — writes-only ensure scoping). The same `sdlc-tool` command sequence above, run in a direct Claude Code session, creates the PM session on the first *write* (`verdict record`), persists the verdict, and the subsequent `verdict get` / `next-skill` reads find that session and reflect the recorded state.
 
 ## Freshness Check
 
@@ -71,8 +74,8 @@ It is impossible to touch SDLC state sessionless. Any entry point that reads or 
 ## Architectural Impact
 
 - **New dependencies:** None new. `_sdlc_utils.py` already imports `models.agent_session`; the auto-ensure path imports `tools.sdlc_session_ensure.ensure_session` lazily (inside the function) to avoid any import-time cycle.
-- **Interface changes:** Add an `ensure: bool = False` parameter to the existing `find_session(session_id, issue_number)` in `_sdlc_utils.py`. Default `ensure=False` preserves today's pure read-only semantics, so existing read-only callers are unaffected with zero code change. State-touching callers pass `ensure=True` explicitly — the `True` at the call site is what makes the create-side-effect visible.
-- **Coupling:** Reduces coupling — collapses four divergent resolvers down to the shared `_sdlc_utils` resolver, and centralizes the ensure decision in one place.
+- **Interface changes:** Add an `ensure: bool = False` parameter to the existing `find_session(session_id, issue_number)` in `_sdlc_utils.py`. Default `ensure=False` preserves today's pure read-only semantics, so existing read callers are unaffected with zero code change. Only the three **write** callers pass `ensure=True` explicitly — the `True` at the call site is what makes the create-side-effect visible.
+- **Coupling:** Reduces coupling on the write paths — the three write resolvers (`sdlc_meta_set`, `sdlc_stage_marker`, `sdlc_verdict._cli_record`) collapse onto the shared `_sdlc_utils.find_session`, centralizing the ensure decision. `sdlc_stage_query`'s read resolvers are deliberately left as-is (de-scoped, see No-Gos) — a known, documented residual duplication, not an oversight.
 - **Data ownership:** Unchanged. `stage_states` still lives on the PM AgentSession; auto-ensure only guarantees the record exists before a write lands on it.
 - **Reversibility:** High. The parameter is additive with a safe default; reverting means dropping the `ensure=True` arg at the four call sites and removing the branch.
 
@@ -94,9 +97,15 @@ No prerequisites — this work has no external dependencies. It modifies interna
 
 ### Key Elements
 
-- **`find_session(session_id, issue_number, ensure=False)`** (extended, in `tools/_sdlc_utils.py`): with `ensure=False` (default) it behaves exactly as today — pure lookup, returns the session or `None`. With `ensure=True`, when no existing PM session is found AND an ensure is appropriate (valid `issue_number >= 1`, or a session-id env var is present), it calls `ensure_session()` to create/dedup one, then re-resolves and returns it. Auto-creating on a *read* like `stage-query` is an intended, documented side effect — gated behind the explicit `ensure=True` at the call site.
-- **Default-off behavior:** `ensure=False` keeps pure-lookup semantics for any caller that genuinely wants "does a session exist?" without creating one. Existing read-only callers need no edits.
-- **Caller convergence:** every state-touching subcommand resolves through `find_session(..., ensure=True)` instead of its bespoke local resolver. The four divergent resolvers (`sdlc_meta_set._find_session`, `sdlc_stage_marker._find_session`, `sdlc_stage_query._find_session_by_id/_by_issue`, and `sdlc_verdict`'s `find_session` alias) collapse onto the shared one.
+- **`find_session(session_id, issue_number, ensure=False)`** (extended, in `tools/_sdlc_utils.py`): with `ensure=False` (default) it behaves exactly as today — pure lookup, returns the session or `None`. With `ensure=True`, when no existing PM session is found AND an ensure is appropriate (valid `issue_number >= 1`, or a session-id env var is present), it calls `ensure_session()` to create/dedup one, then re-resolves and returns it. Only **write** call sites pass `ensure=True`.
+- **Default-off behavior:** `ensure=False` keeps pure-lookup semantics for every read caller. Reads never create a session.
+- **Write-path convergence (per resolved Concern 2 — `ensure=True` on writes only):** the three *write* subcommands resolve through `find_session(..., ensure=True)`:
+  - `sdlc_meta_set.write_meta` (was local `_find_session`) → delete local helper, import + call shared `find_session(..., ensure=True)`.
+  - `sdlc_stage_marker.write_marker` (was local `_find_session`) → delete local helper, import + call shared `find_session(..., ensure=True)`.
+  - `sdlc_verdict._cli_record` (already aliases the shared `find_session`) → pass `ensure=True` at this one call site.
+- **Read paths stay pure (`ensure=False`):**
+  - `sdlc_verdict._cli_get` keeps its existing `find_session(...)` call with no `ensure` — same shared alias, default-off.
+  - `sdlc_stage_query` (`query_stage_states` / `query_enriched`, and therefore `sdlc_next_skill`) is **left entirely unchanged**. It is read-only, correctly returns `_default_meta()` when no session exists, and finds the session once a write has ensured it. Converging its `_find_session_by_id`/`_find_session_by_issue` helpers would break ~20 existing test patch sites (`test_sdlc_stage_query.py`) for **zero** behavior change — explicitly de-scoped (see No-Gos).
 
 ### Flow
 
@@ -106,10 +115,10 @@ Direct `sdlc-tool verdict record --stage CRITIQUE --issue-number 1558` → subco
 
 - **Guards inside the `ensure=True` branch of `find_session` (mirror the existing `ensure_session` contract so we don't re-derive them):**
   - Resolve `session_id` arg → `VALOR_SESSION_ID` → `AGENT_SESSION_ID` first (the existing order). If that resolves a live PM session, return it without ensuring — this happens before the `ensure` branch is even reached, since it is the existing lookup path.
-  - Only attempt ensure when `issue_number is not None and issue_number >= 1`, OR a session-id env var is set. When neither holds, do NOT create — return `None` (e.g. a bare `sdlc-tool stage-query` with no `--issue-number` and no env still no-ops, which is correct: there is no issue context to attach state to). This is the "fail-by-returning-None loudly enough" answer to the issue's open question — we do not silently fabricate a sessionless session.
+  - Only attempt ensure when `issue_number is not None and issue_number >= 1`, OR a session-id env var is set. When neither holds, do NOT create — return `None` (e.g. a bare `sdlc-tool meta-set` with no `--issue-number` and no env still no-ops, which is correct: there is no issue context to attach state to). This is the "fail-by-returning-None loudly enough" answer to the issue's open question — we do not silently fabricate a sessionless session.
   - `ensure_session()` already enforces idempotency, PM-type gating, terminal-status gating, and bridge dedup (#1147). The `ensure=True` branch inherits all of it for free — do NOT reimplement.
-- **Where the ensure lives:** an `ensure: bool = False` parameter on the existing `find_session`, not a separate function (per resolved Open Question 1). Default-off means the only callers that can trigger creation are the ones that opt in with `ensure=True` — and that explicit `True` argument at the call site is what makes the "this read can create a session" behavior visible. Mitigates the boolean-trap concern via (a) safe default, (b) docstring on the param, (c) the side effect being opt-in and grep-able (`grep -n 'ensure=True'`).
-- **`revision_applied`:** no change needed. It is flipped by recording a CRITIQUE verdict via `verdict record`. Once `verdict record` resolves through `find_session(..., ensure=True)`, the write lands on a real session and `revision_applied` persists correctly. Auto-ensure + a working `verdict record` is sufficient; no new code path for `revision_applied`.
+- **Where the ensure lives:** an `ensure: bool = False` parameter on the existing `find_session`, not a separate function (per resolved Open Question 1). Default-off means the only callers that can trigger creation are the three *write* sites that opt in with `ensure=True` — and that explicit `True` argument at the call site is what makes the create-side-effect visible. Mitigates the boolean-trap concern via (a) safe default, (b) docstring on the param, (c) the side effect being opt-in and grep-able (`grep -rn 'ensure=True' tools/`).
+- **`revision_applied`:** no change needed, and **do NOT touch `_parse_revision_applied` or `_compute_meta`** (per Concern 1 — they already read frontmatter correctly). The flag is flipped by recording a CRITIQUE verdict via `verdict record`. Once `verdict record` resolves through `find_session(..., ensure=True)`, the write lands on a real session; the *next* `stage-query`/`next-skill` read finds that session, so `query_enriched` reaches `_compute_meta` (no longer short-circuiting to `_default_meta()`), which then reads `revision_applied: true` off the plan frontmatter exactly as it does today. The whole `revision_applied` chain works the moment a session exists — the only change required is making the write create that session.
 - **SKILL.md Step 1.5:** the explicit `session-ensure` call becomes redundant once auto-ensure is in the resolver, but it is harmless (idempotent). Per resolved Open Question 2, KEEP it (play-it-safe), but mark it findable for later cleanup: add an inline `<!-- REDUNDANT-AFTER-#1558: ... -->` comment in SKILL.md right at the call so a future grep (`grep -rn 'REDUNDANT-AFTER-#1558'`) surfaces it for removal once auto-ensure has proven itself in practice. Update the surrounding prose to note that auto-ensure now also guarantees a session for non-`/sdlc` callers, so the explicit step is belt-and-suspenders rather than the sole guarantee.
 - **Failure semantics:** preserve the existing "never crash the calling skill" contract. `ensure_session()` returns `{}` on any failure (e.g. `ProjectKeyResolutionError`); the `ensure=True` branch treats an empty/failed ensure as "no session" and returns `None`, so the subcommand degrades to today's no-op behavior rather than raising. The improvement is that the *common* path (valid issue_number, resolvable project) now succeeds.
 
@@ -131,26 +140,38 @@ Direct `sdlc-tool verdict record --stage CRITIQUE --issue-number 1558` → subco
 
 ## Test Impact
 
+**Symbol-deletion blast radius (Concern 3):** deleting the local `_find_session` helpers in `sdlc_meta_set` and `sdlc_stage_marker` breaks every `patch("...._find_session")` that targets them by name with `AttributeError`. The "patch where it's looked up" rule applies: callers do `from tools._sdlc_utils import find_session` (or keep an alias), so the patch target becomes the name **in the caller's module namespace** (`tools.sdlc_meta_set.find_session`), not `tools._sdlc_utils.find_session`. Every site below is enumerated with its repoint. **`sdlc_stage_query` is NOT changed**, so all ~20 `test_sdlc_stage_query.py` patch sites (`_find_session_by_id`/`_find_session_by_issue`) remain valid and need no edits.
+
 - [ ] `tests/unit/test_sdlc_utils.py` — UPDATE: add a `TestFindSessionEnsure` class covering the `ensure=True` guards (None/0/-1 → no create; valid issue → create; env session → return without ensure; ensure-raises → None) AND a `ensure=False` default case (valid issue, no session → returns `None`, no create — proves default-off). Existing `find_session` / `find_session_by_issue` tests are unaffected (the new param defaults to the old behavior).
 - [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE (if needed): confirm the `ensure=True` branch delegates to `ensure_session` and does not duplicate its guard logic. Likely no change to existing tests; add cross-reference assertions only if convenient.
-- [ ] `tests/unit/test_sdlc_meta_set.py` — UPDATE: `sdlc_meta_set` now resolves through the shared resolver. Update any test that asserts a sessionless `meta-set` no-ops to instead assert it now persists when an issue_number is supplied (the behavior change this issue mandates). Keep the genuinely-sessionless (no issue, no env) no-op test.
-- [ ] `tests/unit/test_sdlc_stage_marker.py` — UPDATE: same convergence; add a test that a sessionless-but-issue-numbered `stage-marker` now persists the marker.
-- [ ] `tests/unit/test_sdlc_stage_query.py` — UPDATE: add a test that `query_enriched(issue_number=N)` with no pre-existing session now auto-creates and returns a session-backed payload (was empty defaults). Keep the no-issue/no-env empty-defaults test.
-- [ ] `tests/unit/test_sdlc_verdict.py` — UPDATE: add a sessionless-but-issue-numbered `verdict record` → `verdict get` round-trip test proving the write persists.
-- [ ] Add (NEW): `tests/integration/test_sdlc_sessionless_e2e.py` — drive the actual `sdlc-tool` subcommands (subprocess) for a throwaway issue number in a clean env (no `VALOR_SESSION_ID`), asserting record→get→next-skill reflects persisted state. Clean up the `sdlc-local-{N}` session in teardown via Popoto (`AgentSession.query.filter(...).delete()`), per Manual Testing Hygiene.
+- [ ] `tests/unit/test_sdlc_meta_set.py` — UPDATE: 8 patch sites at lines 40, 64, 89, 110, 123, 148, 155, 168 patch `tools.sdlc_meta_set._find_session`. REPOINT each to `tools.sdlc_meta_set.find_session` (the imported name in meta_set's namespace). Additionally, update the line-110 sessionless test: it asserts `meta-set` no-ops with `return_value=None`; with `ensure=True` now passed, either keep it as a "ensure couldn't resolve → None → no-op" case (mock `find_session` → None) or add a sibling test asserting an issue-numbered `meta-set` persists. Keep the genuinely-sessionless (no issue, no env) no-op behavior covered.
+- [ ] `tests/integration/test_sdlc_pipeline_lock.py` — UPDATE: 3 patch sites at lines 145, 179, 200 patch `tools.sdlc_meta_set._find_session`. REPOINT each to `tools.sdlc_meta_set.find_session`.
+- [ ] `tests/unit/test_sdlc_stage_marker.py` — DELETE/REPLACE: the `TestFindSession` class (≈ lines 22-93) tests the local `_find_session` resolver directly as the unit under test. That helper is deleted (superseded by `test_sdlc_utils.py`'s shared-resolver tests) → DELETE this class. The `test_passes_issue_number_to_find_session` test (line 124) and any `write_marker` test that patches the resolver must REPOINT to `tools.sdlc_stage_marker.find_session`. ADD a test that a sessionless-but-issue-numbered `stage-marker` now persists the marker.
+- [ ] `tests/unit/test_sdlc_verdict.py` — UPDATE: add a sessionless-but-issue-numbered `verdict record` → `verdict get` round-trip test proving the write persists. `sdlc_verdict` keeps its `_find_session` alias (so `test_sdlc_tool_wrapper.py:164` `sdlc_verdict._find_session` patch survives) — `_cli_record` now calls `_find_session(..., ensure=True)`, `_cli_get` unchanged.
+- [ ] `tests/unit/test_sdlc_stage_query.py` — NO CHANGE: `sdlc_stage_query` is unchanged, so its ~20 patch sites stay valid. (Listed explicitly so a reviewer doesn't expect edits here.)
+- [ ] Add (NEW): `tests/integration/test_sdlc_sessionless_e2e.py` — see the dedicated note below (subprocess-boundary round-trip).
+
+### Integration test: subprocess-boundary round-trip (Concern 4)
+
+The test MUST prove persistence survives **process boundaries** (the real bug), not in-process Popoto object reuse:
+- [ ] Each step (`verdict record`, `verdict get`, `next-skill`) is a **distinct** `subprocess.run(["sdlc-tool", ...], capture_output=True, text=True, env={**os.environ, "VALOR_SESSION_ID": "", "AGENT_SESSION_ID": ""})` — the empty env vars force the clean-env local-create path.
+- [ ] Assert on **parsed stdout JSON** from a separate `get` subprocess: `json.loads(get_proc.stdout)["verdict"]` matches what `record` wrote. Do NOT assert against an in-process `AgentSession.query` result.
+- [ ] Use a high throwaway issue number (e.g. `999001+`) unlikely to collide with a real PM session.
+- [ ] Teardown in a `finally`: `AgentSession.query.filter(session_id=f"sdlc-local-{N}").delete()` via Popoto, per Manual Testing Hygiene.
 
 ## Rabbit Holes
 
 - **Refactoring `AgentSession`'s shape.** The issue explicitly says the schema is expected to shift before/around this work; do NOT lock the fix to the current field layout or attempt a schema migration. Fix the behavior at the resolver boundary only.
-- **Reading plan frontmatter in the router.** Tempting to make `next-skill` consult `revision_applied: true` on disk as a fallback. Out of scope — the router's contract is "state lives on the session." Auto-ensure makes the session the single source of truth; do not add a second source.
-- **Adding `ensure=True` defaults or auto-detecting "should I create?".** The flag defaults to `False` and is only flipped on by the four state-touching call sites, by hand. Do NOT make `ensure` default to `True`, and do NOT add heuristics that decide to create based on subcommand name or call context — the opt-in `ensure=True` argument is the entire contract. (Resolved Open Question 1 chose the inline flag over a separate function; the guard against the boolean-trap risk is the safe default + explicit opt-in, not a second function.)
+- **Touching `_parse_revision_applied` / `_compute_meta` in `sdlc_stage_query.py`.** These ALREADY read `revision_applied` off the plan frontmatter correctly (lines 290-293). The original plan framing said the router never reads frontmatter — that was wrong (see Problem → Precise diagnosis). The frontmatter read is merely *gated behind session existence*; once a write ensures the session, the existing read fires. Do NOT add a second frontmatter read, a `next-skill` disk fallback, or modify these functions.
+- **Converging `sdlc_stage_query`'s read resolvers.** Tempting (DRY) to fold `_find_session_by_id`/`_find_session_by_issue` into the shared `find_session`. De-scoped per Concern 2 (writes-only): stage_query is read-only, returns correct defaults sessionless, and finds the session once a write creates it. Converging it changes no behavior but breaks ~20 test patch sites. Leave it alone.
+- **Adding `ensure=True` defaults or auto-detecting "should I create?".** The flag defaults to `False` and is only flipped on by the three *write* call sites, by hand. Do NOT make `ensure` default to `True`, and do NOT add heuristics that decide to create based on subcommand name or call context — the opt-in `ensure=True` argument is the entire contract. (Resolved Open Question 1 chose the inline flag over a separate function; the guard against the boolean-trap risk is the safe default + explicit opt-in, not a second function.)
 - **Garbage-collecting `sdlc-local-{N}` sessions created by reads.** The existing `--kill-orphans` path in `sdlc_session_ensure.py` already reaps zombie `sdlc-local-*` PM sessions. Do not add new cleanup machinery.
 
 ## Risks
 
-### Risk 1: Read operations now have a write side effect (session creation)
-**Impact:** A bare `stage-query` could create a session unexpectedly, polluting the session list.
-**Mitigation:** The `ensure=True` branch only creates when `issue_number >= 1` or a session-id env is present, and is only reached when a caller explicitly passes `ensure=True`. A `stage-query` with a real issue number *should* have a session — that's the whole point. The explicit `ensure=True` argument makes the side effect visible and grep-able at every call site. Existing `--kill-orphans` reaps any zombies.
+### Risk 1: A write subcommand creates a session as a side effect
+**Impact:** `verdict record` / `meta-set` / `stage-marker` now create a PM session when none exists, potentially polluting the session list.
+**Mitigation:** This is the intended fix — a write must have a home. Creation is gated: only when `issue_number >= 1` or a session-id env is present, and only at the three write sites that explicitly pass `ensure=True`. **Reads (`stage-query`, `next-skill`, `verdict get`) do NOT create sessions** (resolved Concern 2 — writes-only), so the constant diagnostic read traffic has zero session-creation side effect. Existing `--kill-orphans` reaps any zombies.
 
 ### Risk 2: Duplicate session creation inside bridge/worker sessions
 **Impact:** Auto-ensure could spawn a `sdlc-local-{N}` duplicate alongside the live bridge PM session.
@@ -167,7 +188,9 @@ No race conditions identified. `ensure_session()` is idempotent (create-by-deter
 ## No-Gos (Out of Scope)
 
 - [SEPARATE-SLUG #1546] Any change to the `AgentSession` schema/shape — the issue explicitly defers the schema shift to other work and asks the planner not to lock to the current layout.
-- Nothing else deferred — every relevant resolver, caller, test, and the SKILL.md prose update is in scope for this plan.
+- **Converging `sdlc_stage_query`'s read resolvers** (`_find_session_by_id` / `_find_session_by_issue`) onto the shared `find_session`. Deliberately de-scoped (resolved Concern 2): stage_query is read-only and needs no behavior change for this fix; converging it would churn ~20 test patch sites for zero benefit. It keeps its own resolvers. Convergence remains available as future cleanup if a reader path ever needs ensure semantics.
+- **`ensure=True` on any read path.** Reads stay pure `ensure=False`. Only the three write sites opt in.
+- Otherwise nothing deferred — the write-path resolvers, callers, tests, docs, and the SKILL.md prose update are all in scope.
 
 ## Update System
 
@@ -192,15 +215,16 @@ No external documentation site for this repo — no action.
 
 ## Success Criteria
 
-- [ ] In a clean env (no `VALOR_SESSION_ID`/`AGENT_SESSION_ID`), `sdlc-tool verdict record --stage CRITIQUE --verdict "READY TO BUILD" --issue-number {N}` followed by `sdlc-tool verdict get --stage CRITIQUE --issue-number {N}` round-trips the verdict (no longer `{}`).
-- [ ] `sdlc-tool stage-query --issue-number {N}` against a fresh issue auto-creates the PM session and returns a session-backed payload.
+- [ ] In a clean env (no `VALOR_SESSION_ID`/`AGENT_SESSION_ID`), `sdlc-tool verdict record --stage CRITIQUE --verdict "READY TO BUILD" --issue-number {N}` followed by `sdlc-tool verdict get --stage CRITIQUE --issue-number {N}` round-trips the verdict (no longer `{}`). The `record` write creates the session; the `get` read finds it.
+- [ ] After a `verdict record`, `sdlc-tool stage-query --issue-number {N}` returns the session-backed payload (the write created the session; the read finds it).
 - [ ] `sdlc-tool next-skill --issue-number {N}` reflects recorded state instead of the phantom "cannot build" default after a verdict is recorded.
-- [ ] A bare `sdlc-tool stage-query` with no `--issue-number` and no env var still no-ops (returns empty defaults, exits 0) — no fabricated session.
-- [ ] The four divergent resolvers (`sdlc_meta_set`, `sdlc_stage_marker`, `sdlc_stage_query`, `sdlc_verdict`) all resolve through the shared `find_session(..., ensure=True)` for state-touching operations.
+- [ ] A bare `sdlc-tool stage-query` with no `--issue-number` and no env var still no-ops (returns empty defaults, exits 0) — no fabricated session. (Reads never create — this holds with or without a prior write.)
+- [ ] The three **write** resolvers (`sdlc_meta_set.write_meta`, `sdlc_stage_marker.write_marker`, `sdlc_verdict._cli_record`) resolve through the shared `find_session(..., ensure=True)`. Read paths (`sdlc_verdict._cli_get`, `sdlc_stage_query`) stay `ensure=False` / unchanged.
 - [ ] No duplicate `sdlc-local-{N}` session is created when run inside a bridge/worker session with `VALOR_SESSION_ID` set (dedup preserved).
+- [ ] `_parse_revision_applied` / `_compute_meta` in `sdlc_stage_query.py` are unmodified (Concern 1 — the frontmatter read was already correct).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] `grep` confirms each state-touching subcommand calls `find_session(..., ensure=True)`.
+- [ ] `grep -rn 'ensure=True' tools/` confirms exactly the three write call sites pass it (and `_sdlc_utils.find_session`'s signature defines it).
 
 ## Team Orchestration
 
@@ -208,7 +232,7 @@ No external documentation site for this repo — no action.
 
 - **Builder (resolver)**
   - Name: resolver-builder
-  - Role: Add the `ensure=True` flag to `find_session` in `_sdlc_utils.py`; converge the four callers onto it; update SKILL.md prose + cleanup marker.
+  - Role: Add the `ensure` flag to `find_session` in `_sdlc_utils.py`; converge the three write callers onto `find_session(..., ensure=True)` (leave stage_query reads untouched); update SKILL.md prose + cleanup marker.
   - Agent Type: builder
   - Resume: true
 
@@ -235,18 +259,18 @@ See template list — only `builder`, `validator`, and `documentarian` are neede
 - `ensure=False` (default) path is byte-for-byte today's behavior — no existing caller changes.
 - Docstring on the `ensure` param stating the opt-in create-side-effect, guards, safe default, and dedup reuse.
 
-### 2. Converge callers onto the shared resolver
+### 2. Converge the three WRITE callers onto the shared resolver
 - **Task ID**: build-callers
 - **Depends On**: build-resolver
-- **Validates**: tests/unit/test_sdlc_meta_set.py, tests/unit/test_sdlc_stage_marker.py, tests/unit/test_sdlc_stage_query.py, tests/unit/test_sdlc_verdict.py
+- **Validates**: tests/unit/test_sdlc_meta_set.py, tests/unit/test_sdlc_stage_marker.py, tests/unit/test_sdlc_verdict.py, tests/integration/test_sdlc_pipeline_lock.py
 - **Assigned To**: resolver-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace `sdlc_meta_set._find_session` body (or call site) so state writes resolve through `find_session(..., ensure=True)`.
-- Replace `sdlc_stage_marker._find_session` similarly.
-- Route `sdlc_stage_query.query_stage_states` / `query_enriched` through `find_session(..., ensure=True)` (keep the no-issue/no-env empty-defaults path).
-- Route `sdlc_verdict` record/get session resolution through `find_session(..., ensure=True)`.
-- Delete the now-dead local `_find_session` helpers where fully superseded (NO LEGACY CODE TOLERANCE).
+- `tools/sdlc_meta_set.py`: delete local `_find_session` (lines 86-127), `from tools._sdlc_utils import find_session`, change `write_meta`'s call (line 157) to `find_session(session_id, issue_number=issue_number, ensure=True)`.
+- `tools/sdlc_stage_marker.py`: delete local `_find_session` (lines 51-93), `from tools._sdlc_utils import find_session`, change `write_marker`'s call (line 118) to `find_session(session_id, issue_number=issue_number, ensure=True)`.
+- `tools/sdlc_verdict.py`: keep the existing `from tools._sdlc_utils import find_session as _find_session` alias (line 85). In `_cli_record` (line 316) add `ensure=True`. Leave `_cli_get` (line 346) unchanged (`ensure=False`).
+- **Do NOT touch `tools/sdlc_stage_query.py`** — it is read-only and de-scoped (No-Gos). Its `_find_session_by_id`/`_find_session_by_issue` helpers, `query_enriched`, `_compute_meta`, and `_parse_revision_applied` all stay as-is.
+- NO LEGACY CODE TOLERANCE: the two deleted local `_find_session` helpers must leave no commented-out remnant.
 
 ### 3. Update tests
 - **Task ID**: build-tests
@@ -256,8 +280,10 @@ See template list — only `builder`, `validator`, and `documentarian` are neede
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `TestFindSessionEnsure` to test_sdlc_utils.py (guards, env-session-without-create, ensure-raises→None, valid-issue+ensure=True→create, valid-issue+ensure=False→None).
-- Update the per-subcommand unit tests per the Test Impact section (flip issue-numbered sessionless cases to assert persistence; keep genuinely-sessionless no-op).
-- Create `tests/integration/test_sdlc_sessionless_e2e.py` driving the real `sdlc-tool` subcommands via subprocess in a clean env; teardown deletes the `sdlc-local-{N}` session via Popoto.
+- Repoint the broken patch sites per the Test Impact section: `test_sdlc_meta_set.py` (8 sites → `tools.sdlc_meta_set.find_session`), `test_sdlc_pipeline_lock.py` (3 sites → `tools.sdlc_meta_set.find_session`), `test_sdlc_stage_marker.py` (DELETE the `TestFindSession` class; repoint `write_marker` resolver patches to `tools.sdlc_stage_marker.find_session`).
+- Add the issue-numbered persistence tests: `meta-set`, `stage-marker`, and `verdict record`→`get` round-trips. Keep genuinely-sessionless (no issue, no env) no-op coverage.
+- Leave `test_sdlc_stage_query.py` untouched (stage_query unchanged).
+- Create `tests/integration/test_sdlc_sessionless_e2e.py` per the Concern-4 note: distinct `subprocess.run(["sdlc-tool", ...])` calls with `VALOR_SESSION_ID`/`AGENT_SESSION_ID` forced empty, assert on parsed stdout JSON across process boundaries, teardown deletes `sdlc-local-{N}` via Popoto in a `finally`.
 
 ### 4. Update SKILL.md prose
 - **Task ID**: build-skill-prose
@@ -274,8 +300,9 @@ See template list — only `builder`, `validator`, and `documentarian` are neede
 - **Agent Type**: validator
 - **Parallel**: false
 - Run all unit + the new integration test.
-- Grep-confirm each state-touching subcommand calls `find_session(..., ensure=True)`.
-- Confirm the bare `stage-query` (no issue, no env) still no-ops, and the env-set path does not create a duplicate.
+- Grep-confirm `ensure=True` appears at exactly the three write call sites (meta_set, stage_marker, verdict._cli_record) and nowhere in stage_query.
+- Confirm `git diff` shows `tools/sdlc_stage_query.py` unchanged (Concern 1 + Concern 2 de-scope).
+- Confirm the bare `stage-query` (no issue, no env) still no-ops, reads never create a session, and the env-set path does not create a duplicate.
 - Report pass/fail.
 
 ## Verification
@@ -284,17 +311,25 @@ See template list — only `builder`, `validator`, and `documentarian` are neede
 |-------|---------|----------|
 | Resolver unit tests | `pytest tests/unit/test_sdlc_utils.py -q` | exit code 0 |
 | Subcommand unit tests | `pytest tests/unit/test_sdlc_meta_set.py tests/unit/test_sdlc_stage_marker.py tests/unit/test_sdlc_stage_query.py tests/unit/test_sdlc_verdict.py tests/unit/test_sdlc_session_ensure.py -q` | exit code 0 |
+| Pipeline-lock integration test | `pytest tests/integration/test_sdlc_pipeline_lock.py -q` | exit code 0 |
 | Sessionless e2e | `pytest tests/integration/test_sdlc_sessionless_e2e.py -q` | exit code 0 |
-| Callers reference shared resolver | `grep -l 'ensure=True' tools/sdlc_meta_set.py tools/sdlc_stage_marker.py tools/sdlc_stage_query.py tools/sdlc_verdict.py` | output contains all four |
+| Write callers pass ensure=True | `grep -l 'ensure=True' tools/sdlc_meta_set.py tools/sdlc_stage_marker.py tools/sdlc_verdict.py` | output contains all three |
+| stage_query left unchanged | `git diff --quiet tools/sdlc_stage_query.py && echo unchanged` | prints `unchanged` |
 | SKILL.md cleanup marker present | `grep -rn 'REDUNDANT-AFTER-#1558' .claude/skills-global/sdlc/SKILL.md` | one match |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Critique run 2026-06-04 — verdict **READY TO BUILD (with concerns)**: 0 blockers, 4 concerns, 1 nit. All four concerns embedded in this revision.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Consistency Auditor, Skeptic, Archaeologist | Problem statement falsely claims "the router never reads plan frontmatter" — `_compute_meta` (sdlc_stage_query.py:290-293) DOES read `revision_applied`; it's just session-gated. | Problem → "Precise diagnosis"; `revision_applied` Technical Approach; Rabbit Holes; Success Criteria | Builder must NOT touch `_parse_revision_applied`/`_compute_meta`; the only change is making a write create the session so the existing read fires. |
+| CONCERN | Adversary, Operator, Simplifier | Auto-ensure on `next-skill`/`stage-query` makes read-only commands create sessions. | Solution → write-path convergence; Technical Approach; Risk 1; No-Gos — **DECISION: `ensure=True` on writes only** (user-confirmed 2026-06-04) | Only `write_meta`/`write_marker`/`_cli_record` pass `ensure=True`. Reads stay pure. stage_query de-scoped entirely. |
+| CONCERN | Operator, Skeptic | Deleting local `_find_session` helpers breaks ~15 test patch sites by name, not the handful listed. | Test Impact → enumerated patch sites + "patch where it's looked up" repoints | Writes-only scope means stage_query's ~20 patch sites are NOT touched; only meta_set (8) + pipeline_lock (3) repoint, stage_marker `TestFindSession` class DELETE. |
+| CONCERN | Skeptic | Integration test must round-trip through Redis across process boundaries, not in-process Popoto. | Test Impact → "Integration test: subprocess-boundary round-trip"; Task 3 | Distinct `subprocess.run` per step, empty `VALOR_SESSION_ID`/`AGENT_SESSION_ID`, assert on parsed stdout JSON, teardown via Popoto in `finally`. |
+| NIT | Simplifier | SKILL.md belt-and-suspenders `session-ensure` call is dead-on-arrival. | Accepted as-is (resolved Open Question 2) — kept + tagged `REDUNDANT-AFTER-#1558` for findable cleanup | No change required. |
 
 ---
 
@@ -302,5 +337,5 @@ See template list — only `builder`, `validator`, and `documentarian` are neede
 
 _All resolved by PM check-in 2026-06-04. Decisions folded into the plan above._
 
-1. **Function placement** — ✅ RESOLVED: inline an `ensure: bool = False` parameter into the existing `find_session` rather than a separate `find_or_ensure_session`. Boolean-trap risk mitigated by the safe default (`ensure=False`), an explicit opt-in `ensure=True` at each of the four call sites (grep-able), and a docstring on the param. Rabbit Holes updated to forbid `ensure=True` defaults / context-heuristics instead.
+1. **Function placement** — ✅ RESOLVED: inline an `ensure: bool = False` parameter into the existing `find_session` rather than a separate `find_or_ensure_session`. Boolean-trap risk mitigated by the safe default (`ensure=False`), an explicit opt-in `ensure=True` at each of the three write call sites (grep-able), and a docstring on the param. Rabbit Holes updated to forbid `ensure=True` defaults / context-heuristics instead.
 2. **SKILL.md Step 1.5** — ✅ RESOLVED: keep the explicit `session-ensure` call (play-it-safe), but mark it findable with an inline `<!-- REDUNDANT-AFTER-#1558: ... -->` comment so it can be tidied once the resolver auto-ensure is proven. A verification-table check asserts the marker is present.
