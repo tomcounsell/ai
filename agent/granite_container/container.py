@@ -382,6 +382,14 @@ class Container:
                     # track which PTY the parser saw the event on.
                     self._pm_pty.write(response)
                 result.startup_events.append({"cycle": cycle, "response": response})
+            else:
+                # All STARTUP_WINDOW_CYCLES exhausted without both PTYs going
+                # idle. The startup phase did not settle — declare
+                # startup_unresolved and exit early rather than entering the
+                # steady-state loop with an unsettled TUI state.
+                result.exit_reason = "startup_unresolved"
+                result.exit_message = f"startup did not settle after {STARTUP_WINDOW_CYCLES} cycles"
+                return result
 
             # Steady state.
             for turn in range(self.max_turns):

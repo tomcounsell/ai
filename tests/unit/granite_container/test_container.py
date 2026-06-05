@@ -304,14 +304,53 @@ class TestContainerMaxTurns(unittest.TestCase):
         self.assertEqual(len(dev_turns), 2)
 
 
+class TestContainerStartupUnresolved(unittest.TestCase):
+    """Startup phase exhausts all cycles without settling -> startup_unresolved."""
+
+    def test_startup_unresolved_exits_early(self) -> None:
+        # Neither PTY ever reaches idle during the startup window, so the
+        # for-loop's else-branch fires and the container exits before
+        # entering the steady-state loop.
+        from agent.granite_container.container import STARTUP_WINDOW_CYCLES
+
+        c = Container(user_message="hello", max_turns=5)
+        pm_mock, dev_mock = _mock_driver("", saw_idle=False), _mock_driver("", saw_idle=False)
+
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+        ):
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            result = c.run()
+
+        self.assertEqual(
+            result.exit_reason,
+            "startup_unresolved",
+            f"got {result.exit_reason!r}: {result.exit_message!r}",
+        )
+        self.assertIn(str(STARTUP_WINDOW_CYCLES), result.exit_message)
+        # No steady-state turns should have been recorded.
+        self.assertEqual(len(result.turns), 0)
+
+
 class TestContainerHang(unittest.TestCase):
     """PTY hang is treated as pm_hang / dev_hang exit reason."""
 
     def test_pm_hang_exits(self) -> None:
         c = Container(user_message="hello", max_turns=3)
-        pm_mock, dev_mock = _mock_driver("", saw_idle=False), _mock_driver("", saw_idle=False)
+        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
 
-        pm_mock.read_until_idle.return_value = _idle_result("", saw_idle=False)
+        # The startup phase must see both PTYs idle (saw_idle=True) to
+        # break out and enter the steady-state loop. Return idle=True
+        # for the startup read (min_content_bytes=0 path), then hang
+        # (saw_idle=False) for the first steady-state PM read.
+        startup_idle = _idle_result("", saw_idle=True)
+        hang_result = _idle_result("", saw_idle=False)
+        pm_buffers = iter([startup_idle, hang_result])
+        pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_buffers)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
         with (

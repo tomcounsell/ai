@@ -211,6 +211,11 @@ scrapes can't run).
 
 ## Constraints for #1546
 
+> **Validated by #1546 PoC** — the constraints below were confirmed by the
+> granite operator interactive-TUI PoC (PR #1570,
+> `agent/granite_container/`). C1-C5 are exercised by the substrate driver's
+> unit tests in `tests/unit/granite_container/test_pty_driver.py`.
+
 The next plan (#1546) must preserve the following load-bearing TUI
 behaviors. Each is a non-obvious substrate fact the spike
 established.
