@@ -202,20 +202,35 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
         self.assertTrue(result.turns[0].compliance_miss)
         # The compliance miss was counted.
         self.assertEqual(result.classification_compliance_misses, 1)
+        # The unknown turn re-prompts PM with a corrective nudge so
+        # the loop sees fresh output instead of spinning on the same
+        # non-compliant buffer until max_turns.
+        from agent.granite_container.container import PM_COMPLIANCE_NUDGE
+
+        pm_mock.write.assert_any_call(PM_COMPLIANCE_NUDGE)
 
 
-class TestContainerMaxTurns(unittest.TestCase):
-    """The max_turns safety cap fires when PM never emits [/complete]."""
+class TestContainerUserAddress(unittest.TestCase):
+    """A [/user] turn is terminal for a PoC invocation (no bridge).
 
-    def test_max_turns_exits_with_pm_max_turns(self) -> None:
-        c = Container(user_message="hello", max_turns=2)
+    With no user to relay to and no user reply to re-prompt PM with,
+    the container exits on pm_user after the first [/user] turn rather
+    than looping back to re-read an idle PM and reclassify the same
+    buffer until max_turns (the spin bug the review flagged).
+    """
+
+    def test_user_address_exits_with_pm_user(self) -> None:
+        c = Container(user_message="hello", max_turns=3)
         pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
 
-        # PM reads: startup, then 2 user-address steady-state.
+        # PM reads: startup, then a single [/user] steady-state turn.
         buffers = [
             _idle_result("", saw_idle=True),  # startup
             _idle_result("[/user]\nstatus update 1", saw_idle=True),  # turn 0
-            _idle_result("[/user]\nstatus update 2", saw_idle=True),  # turn 1
+            # A second [/user] buffer is provided to prove the loop
+            # does NOT consume it — the container must exit after the
+            # first [/user] turn.
+            _idle_result("[/user]\nstatus update 2", saw_idle=True),
         ]
         pm_mock.read_until_idle.side_effect = lambda **kw: buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
@@ -231,11 +246,62 @@ class TestContainerMaxTurns(unittest.TestCase):
             result = c.run()
 
         self.assertEqual(
+            result.exit_reason, "pm_user", f"got {result.exit_reason}: {result.exit_message}"
+        )
+        self.assertEqual(result.exit_message, "status update 1")
+        # Exactly one user-address turn was recorded — the loop did
+        # not burn additional turns re-reading the idle PM.
+        user_turns = [t for t in result.turns if t.classification == "user"]
+        self.assertEqual(len(user_turns), 1)
+        # The second [/user] buffer was never consumed.
+        self.assertEqual(len(buffers), 1)
+
+
+class TestContainerMaxTurns(unittest.TestCase):
+    """The max_turns safety cap fires when PM never emits [/complete].
+
+    A genuinely turn-consuming path (repeated [/dev] routing) runs the
+    cap down; [/user] and [/complete] are terminal and exercised
+    elsewhere.
+    """
+
+    def test_max_turns_exits_with_pm_max_turns(self) -> None:
+        c = Container(user_message="hello", max_turns=2)
+        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+
+        # PM reads: 1 startup, then 2 per dev-turn (steady-state read
+        # + await PM idle for the summary write). For 2 max_turns all
+        # dev-routed, 1 + 2*2 = 5 PM reads total.
+        buffers = [
+            _idle_result("", saw_idle=True),  # startup
+            _idle_result("[/dev]\nbuild turn 0", saw_idle=True),  # turn 0
+            _idle_result("", saw_idle=True),  # turn 0 await PM idle
+            _idle_result("[/dev]\nbuild turn 1", saw_idle=True),  # turn 1
+            _idle_result("", saw_idle=True),  # turn 1 await PM idle
+        ]
+        pm_mock.read_until_idle.side_effect = lambda **kw: buffers.pop(0)
+        dev_mock.read_until_idle.return_value = _idle_result("Dev did the work.", saw_idle=True)
+
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+            patch("agent.granite_container.container.extract_dev_prompt") as extract,
+            patch("agent.granite_container.container.summarize_for_pm") as summarize,
+        ):
+            extract.return_value = "do the work"
+            summarize.return_value = "Dev did the work."
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            result = c.run()
+
+        self.assertEqual(
             result.exit_reason, "pm_max_turns", f"got {result.exit_reason}: {result.exit_message}"
         )
-        # Two user-address turns, both counted.
-        user_turns = [t for t in result.turns if t.classification == "user"]
-        self.assertEqual(len(user_turns), 2)
+        # Two dev-routed turns, both counted.
+        dev_turns = [t for t in result.turns if t.classification == "dev"]
+        self.assertEqual(len(dev_turns), 2)
 
 
 class TestContainerHang(unittest.TestCase):

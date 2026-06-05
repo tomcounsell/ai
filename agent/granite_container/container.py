@@ -87,6 +87,20 @@ CYCLE_IDLE_TIMEOUT_S = 120.0
 # clean and the JSON results doc readable.
 EXIT_MESSAGE_MAX_CHARS = 500
 
+# Corrective nudge written to PM's PTY when PM emits a prefix the
+# classifier cannot route (no recognized [/dev]|[/user]|[/complete]
+# token, or a recognized token with an empty payload). Without a
+# write, PM stays idle on the same non-compliant buffer and the
+# loop reclassifies the identical output every tick until max_turns
+# — burning the safety cap on a stuck PM. The nudge re-prompts PM
+# to re-emit a compliant prefix, so the next read sees fresh output.
+PM_COMPLIANCE_NUDGE = (
+    "Your last reply did not start with a routing prefix on its own "
+    "line. Re-send your reply starting with exactly one of [/dev], "
+    "[/user], or [/complete] on the first line, followed by the "
+    "content."
+)
+
 
 @dataclass
 class TurnRecord:
@@ -109,9 +123,9 @@ class TurnRecord:
 class ContainerResult:
     """Final output of a container run.
 
-    `exit_reason` is one of: pm_complete, pm_max_turns, dev_hang,
-    pm_hang, startup_unresolved, exception. The PoC's results doc
-    renders this as the verdict.
+    `exit_reason` is one of: pm_complete, pm_user, pm_max_turns,
+    dev_hang, pm_hang, startup_unresolved, exception. The PoC's
+    results doc renders this as the verdict.
     """
 
     session_id: str
@@ -245,14 +259,14 @@ class Container:
 
     # -- Startup phase ----------------------------------------------------
 
-    def _handle_startup(self, buffer_pm: str, buffer_dev: str) -> tuple[str | None, str, str]:
+    def _handle_startup(self, buffer_pm: str, buffer_dev: str) -> str | None:
         """Run the startup-phase parser on both PTY buffers.
 
-        Returns (response_for_pm, new_buffer_pm, new_buffer_dev)
-        where response_for_pm is the text to write to PM's PTY (or
-        None for no action), and the buffers are the post-dismissal
-        state. The caller is responsible for slicing the buffer
-        delta and feeding it to the parser.
+        Returns the response text to write to PM's PTY, or None when
+        no known startup event is present. The parser is pure with
+        respect to the input buffers (it never mutates them), so the
+        caller keeps ownership of the buffer state and feeds the next
+        delta on the following cycle.
         """
         result_pm = parse_startup_frame(buffer_pm)
         result_dev = parse_startup_frame(buffer_dev)
@@ -283,10 +297,10 @@ class Container:
                     break
 
         if chosen is None:
-            return (None, buffer_pm, buffer_dev)
+            return None
 
         _, r = chosen
-        return (r.response, buffer_pm, buffer_dev)
+        return r.response
 
     # -- Steady-state loop ------------------------------------------------
 
@@ -350,7 +364,7 @@ class Container:
             for cycle in range(STARTUP_WINDOW_CYCLES):
                 pm_idle = self._cycle_idle(self._pm_pty, min_content_bytes=0)
                 dev_idle = self._cycle_idle(self._dev_pty, min_content_bytes=0)
-                response, _, _ = self._handle_startup(pm_idle[1], dev_idle[1])
+                response = self._handle_startup(pm_idle[1], dev_idle[1])
                 if response is None:
                     # No startup event in this window — break if
                     # both PTYs are idle, otherwise keep watching.
@@ -391,10 +405,11 @@ class Container:
                 if classification.destination == "unknown":
                     result.parse_failures += 1
                     # No usable routing; PM is the source of the
-                    # miss. The container treats this as a turn
-                    # without a routing target; we still log it
-                    # and continue (so the next PM turn has a
-                    # chance to be classified).
+                    # miss. Re-prompt PM with a corrective nudge so
+                    # the next read sees fresh output — without a
+                    # write PM stays idle on the same buffer and the
+                    # loop reclassifies the identical miss every tick
+                    # until max_turns.
                     turn_record = TurnRecord(
                         turn_index=turn,
                         pm_idle_ms=pm_ms,
@@ -409,6 +424,7 @@ class Container:
                         dev_idle_marker="",
                     )
                     result.turns.append(turn_record)
+                    self._pm_pty.write(PM_COMPLIANCE_NUDGE)
                     continue
 
                 # Routing.
@@ -432,8 +448,15 @@ class Container:
                     break
 
                 if classification.destination == "user":
-                    # User-address text goes to the results log
-                    # (the PoC does not wire to the bridge).
+                    # User-address text goes to the results log (the
+                    # PoC does not wire to the bridge). With no user
+                    # to relay to and no user reply to re-prompt PM
+                    # with, this invocation is terminal — exit on
+                    # pm_user rather than looping back to re-read an
+                    # idle PM and reclassify the same buffer until
+                    # max_turns. A bridge-wired deployment would
+                    # instead relay the payload and await the user's
+                    # reply before the next PM turn.
                     turn_record = TurnRecord(
                         turn_index=turn,
                         pm_idle_ms=pm_ms,
@@ -448,14 +471,18 @@ class Container:
                         dev_idle_marker="",
                     )
                     result.turns.append(turn_record)
-                    # Loop continues — PM may have more to say.
-                    continue
+                    result.exit_reason = "pm_user"
+                    result.exit_message = classification.payload
+                    break
 
                 # destination == "dev" — extract a developer
                 # instruction and write to Dev's PTY.
                 if not classification.payload.strip():
-                    # PM emitted [/dev] but no payload; treat as
-                    # compliance miss and continue.
+                    # PM emitted [/dev] but no payload; treat as a
+                    # compliance miss and re-prompt PM with the
+                    # corrective nudge so the next read sees fresh
+                    # output rather than spinning on the same empty
+                    # instruction until max_turns.
                     result.parse_failures += 1
                     turn_record = TurnRecord(
                         turn_index=turn,
@@ -471,6 +498,7 @@ class Container:
                         dev_idle_marker="",
                     )
                     result.turns.append(turn_record)
+                    self._pm_pty.write(PM_COMPLIANCE_NUDGE)
                     continue
 
                 extract_start = time.monotonic()
@@ -483,8 +511,11 @@ class Container:
                 extract_ms = int((time.monotonic() - extract_start) * 1000)
 
                 if not dev_prompt.strip():
-                    # Granite produced empty dev_prompt; treat as
-                    # parse failure and continue.
+                    # Granite produced an empty dev_prompt from a
+                    # well-formed [/dev] turn; re-prompt PM with the
+                    # corrective nudge so the next read yields fresh
+                    # output rather than re-extracting the same empty
+                    # result from the same buffer until max_turns.
                     result.parse_failures += 1
                     turn_record = TurnRecord(
                         turn_index=turn,
@@ -500,6 +531,7 @@ class Container:
                         dev_idle_marker="",
                     )
                     result.turns.append(turn_record)
+                    self._pm_pty.write(PM_COMPLIANCE_NUDGE)
                     continue
 
                 # Write to Dev's PTY (await idle first to enforce

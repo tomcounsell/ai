@@ -74,12 +74,14 @@ class TestPmPrimeShape(unittest.TestCase):
 
     def test_documents_classifier_regex(self) -> None:
         # The PM's prefix token is consumed by a deterministic regex
-        # in `granite_classifier.py`. The PM body should reference the
-        # token shape so the persona is self-documenting. The body
-        # documents the alternation `[/dev|/user|/complete]` as a
-        # substring (escaped for markdown backticks); we check both
-        # for the alternation shape and the trailing classifier note.
-        self.assertIn("(/dev|/user|/complete)", self.body)
+        # in `granite_classifier.py`. The PM body must quote that exact
+        # regex so the persona is self-documenting AND the doc cannot
+        # drift from the code (the nit-3 fix). We assert against the
+        # live compiled pattern rather than a hardcoded string so any
+        # future change to PREFIX_TOKEN_RE forces a doc update here.
+        from agent.granite_container.granite_classifier import PREFIX_TOKEN_RE
+
+        self.assertIn(PREFIX_TOKEN_RE.pattern, self.body)
         self.assertIn("deterministic", self.body.lower())
 
     def test_forbids_custom_pm_tools(self) -> None:

@@ -107,6 +107,26 @@ class TestMainRunPath(unittest.TestCase):
             self.assertEqual(payload["session_id"], "cli-test")
             self.assertEqual(payload["exit_reason"], "pm_complete")
 
+    def test_pm_user_exits_0(self) -> None:
+        # pm_user is a clean terminal exit (PM addressed the user with
+        # no further routing) and must map to exit code 0, not the
+        # exception fallback.
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "results.json"
+            with patch("agent.granite_container.container.Container.run") as mock_run:
+                mock_run.return_value = _fake_result("pm_user")
+                rc = main(
+                    [
+                        "--user-message",
+                        "what's the status?",
+                        "--output",
+                        str(out_path),
+                    ]
+                )
+            self.assertEqual(rc, 0, f"expected exit 0, got {rc}")
+            payload = json.loads(out_path.read_text())
+            self.assertEqual(payload["exit_reason"], "pm_user")
+
     def test_pm_max_turns_exits_1(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out_path = Path(tmp) / "results.json"

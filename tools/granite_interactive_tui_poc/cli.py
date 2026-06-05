@@ -136,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     # Map exit_reason to a process exit code.
     exit_code_map = {
         "pm_complete": 0,
+        "pm_user": 0,
         "pm_max_turns": 1,
         "dev_hang": 2,
         "pm_hang": 2,
