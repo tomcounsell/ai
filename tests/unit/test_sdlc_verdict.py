@@ -153,3 +153,51 @@ class TestGracefulFailure:
         record = record_verdict(session, "CRITIQUE", "NEEDS REVISION")
         # Because update_stage_states re-wrote from empty, it should succeed.
         assert record["verdict"] == "NEEDS REVISION"
+
+
+class TestCliRecordEnsure:
+    """#1558: `verdict record` resolves through find_session(..., ensure=True)
+    so a sessionless-but-issue-numbered record auto-creates a PM session and the
+    verdict round-trips via `verdict get` (which stays ensure=False)."""
+
+    def _args(self, **kw):
+        from types import SimpleNamespace
+
+        base = dict(
+            session_id=None,
+            issue_number=1558,
+            stage="CRITIQUE",
+            verdict="READY TO BUILD",
+            blockers=None,
+            tech_debt=None,
+            judges_json=None,
+            consensus_json=None,
+        )
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_cli_record_passes_ensure_true(self, fake_session_reload_patched):
+        from tools.sdlc_verdict import _cli_record
+
+        session = fake_session_reload_patched
+        with patch("tools.sdlc_verdict._find_session", return_value=session) as find_mock:
+            result = _cli_record(self._args())
+
+        assert result["verdict"] == "READY TO BUILD"
+        find_mock.assert_called_once_with(session_id=None, issue_number=1558, ensure=True)
+
+    def test_cli_get_stays_ensure_false(self, fake_session_reload_patched):
+        from tools.sdlc_verdict import _cli_get, _cli_record
+
+        session = fake_session_reload_patched
+        # Record first so the get round-trips against the same in-memory session.
+        with patch("tools.sdlc_verdict._find_session", return_value=session):
+            _cli_record(self._args())
+
+        with patch("tools.sdlc_verdict._find_session", return_value=session) as get_find_mock:
+            got = _cli_get(self._args())
+
+        assert got["verdict"] == "READY TO BUILD"
+        # get must NOT pass ensure (reads stay pure).
+        _, kwargs = get_find_mock.call_args
+        assert "ensure" not in kwargs or kwargs.get("ensure") is False

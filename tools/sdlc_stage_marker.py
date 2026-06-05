@@ -55,8 +55,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
+
+from tools._sdlc_utils import find_session
 
 logger = logging.getLogger(__name__)
 
@@ -103,51 +104,6 @@ def probe_substrate() -> str:
     return SUBSTRATE_PRESENT
 
 
-def _find_session(session_id: str | None, issue_number: int | None = None):
-    """Find a PM AgentSession by explicit ID, env vars, or issue number.
-
-    Resolution order:
-    1. --session-id argument (if provided)
-    2. VALOR_SESSION_ID env var
-    3. AGENT_SESSION_ID env var
-    4. --issue-number argument (primary path for local Claude Code sessions)
-
-    Returns the session object or None.
-    """
-    resolved_id = (
-        session_id or os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")
-    )
-    if not resolved_id:
-        # No session ID from args or env — try issue number as fallback
-        if issue_number is not None:
-            try:
-                from tools._sdlc_utils import find_session_by_issue
-
-                session = find_session_by_issue(issue_number)
-                if session:
-                    return session
-            except Exception as e:
-                logger.debug(f"sdlc_stage_marker: issue-number lookup failed: {e}")
-        logger.debug("sdlc_stage_marker: no session ID available (no arg, no env vars, no issue)")
-        return None
-
-    try:
-        from models.agent_session import AgentSession
-
-        sessions = list(AgentSession.query.filter(session_id=resolved_id))
-        if not sessions:
-            logger.debug(f"sdlc_stage_marker: no session found for ID {resolved_id!r}")
-            return None
-        # Prefer PM sessions (they own stage_states)
-        for s in sessions:
-            if getattr(s, "session_type", None) == "pm":
-                return s
-        return sessions[0]
-    except Exception as e:
-        logger.debug(f"sdlc_stage_marker: _find_session failed: {e}")
-        return None
-
-
 def _degraded(stage: str, reason: str) -> dict:
     """Build a visible degraded-mode marker payload (D7)."""
     return {"status": "degraded", "stage": stage, "reason": reason}
@@ -184,7 +140,9 @@ def write_marker(
 
     # Substrate is present. A missing session is QUIET (a session-less local
     # invocation, or a non-`ai` repo with no PM session) — degraded, exit 0.
-    session = _find_session(session_id, issue_number=issue_number)
+    # Writes opt into auto-ensure so a sessionless local invocation with issue
+    # context still gets a PM session to persist into (#1558).
+    session = find_session(session_id, issue_number=issue_number, ensure=True)
     if not session:
         return _degraded(stage, "state not persisted — no PM session resolved"), 0
 
