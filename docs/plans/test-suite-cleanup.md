@@ -174,9 +174,18 @@ fixes (parallel) → re-run full suite → 0 failures, 0 errors → refresh merg
   update asserted CSS classes / conditional render output to match.
 - `test_bridge_relay::TestSendQueuedMessage` (5): read `bridge/telegram_relay.py` current file-send
   API; update the 5 tests to the new contract (album send, file-only, backward-compat string path).
-- `test_sdlc_skill_md_parity` (3): the SDLC SKILL.md Step 4 gained a parenthetical and now references
-  the `next-skill` tool / blocked-output contract; update the parity test's expected strings to match
-  the current `agent/sdlc_router.py` + SKILL.md.
+- `test_sdlc_skill_md_parity` (3): **Precise root cause (verified at plan time):** all 3 failures stem
+  from the test's `_step4_section()` helper doing an **exact-string** match on the heading
+  `## Step 4: Dispatch ONE Sub-Skill` (`tests/unit/test_sdlc_skill_md_parity.py:41`), while the live
+  SKILL.md heading is `## Step 4: Dispatch ONE Sub-Skill (or a Parallel-Safe Pair)` — the parenthetical
+  suffix makes the locator return `""`, so all three tests fail at the `assert section` precondition
+  *before* they ever check their real assertions (`sdlc-tool next-skill` reference, no hand-authored
+  table, `blocked` output contract). **Fix = make the section-locator prefix-tolerant**, e.g. change the
+  line-41 comparison from `line.strip() == "## Step 4: Dispatch ONE Sub-Skill"` to
+  `line.strip().startswith("## Step 4: Dispatch ONE Sub-Skill")`. This is the minimal correct change: the
+  three behavioural assertions are already satisfied by the current SKILL.md (it references
+  `sdlc-tool next-skill`, contains no `| N |` dispatch rows, and documents the `blocked` JSON key). Do
+  NOT rewrite the assertions to chase the heading text — fix the locator so the existing assertions run.
 - `test_reflection_scheduler` (3, not 4): tests expect `interval: 300`; `config/reflections.yaml`
   uses `every: 300s`. Update the tests to read the `every` key (parse `300s` → 300) — the yaml schema
   is intentional. Confirm the registry-integrity and pm-briefings tests align with the current schema.
@@ -257,7 +266,7 @@ fixes (parallel) → re-run full suite → 0 failures, 0 errors → refresh merg
 
 - [ ] `tests/unit/test_session_modal_liveness_render.py` (6 cases) — UPDATE: assert current template CSS/conditional output.
 - [ ] `tests/unit/test_bridge_relay.py::TestSendQueuedMessage` (5 cases) — UPDATE: assert current file-send API contract.
-- [ ] `tests/unit/test_sdlc_skill_md_parity.py` (3 cases) — UPDATE: expected strings to match current SKILL.md Step 4 + router.
+- [ ] `tests/unit/test_sdlc_skill_md_parity.py` (3 cases) — UPDATE: make `_step4_section()` locator (line 41) prefix-tolerant (`startswith` not `==`) so it finds the parenthetical-suffixed Step 4 heading; the 3 behavioural assertions already pass once the section is located.
 - [ ] `tests/unit/test_reflection_scheduler.py` (3 cases) — UPDATE: read `every` key (parse `Ns`) instead of `interval`.
 - [ ] `tests/unit/test_model_relationships.py::TestTelegramMessageEnrichmentFields::test_enrichment_field_count` — UPDATE: `== 18` → `== 20`.
 - [ ] `tests/unit/test_long_task_checkpointing.py::test_progress_md_in_build_soft_check` — UPDATE: path `skills` → `skills-global`.
@@ -548,3 +557,14 @@ This pass corrected one material misclassification surfaced by re-verifying sour
   `pre_bump_attempts = entry.recovery_attempts or 0` must precede `and pre_bump_attempts == 0`), removing the
   prior hand-wavy "match the spec" framing.
 - **Open Questions resolved to explicit defaults** (above) so build proceeds without a human round-trip.
+
+### Revision pass 2 (post-critique)
+
+- **Category A `test_sdlc_skill_md_parity` — corrected the build instruction to the verified root cause.**
+  The prior text said "update the parity test's expected strings," which risked a wrong fix. Verified at
+  plan time: all 3 failures are the `_step4_section()` helper's **exact-match** on the Step 4 heading
+  (`tests/unit/test_sdlc_skill_md_parity.py:41`) failing to locate the now-parenthetical-suffixed heading
+  `## Step 4: Dispatch ONE Sub-Skill (or a Parallel-Safe Pair)`, so all three short-circuit at the
+  `assert section` precondition. The minimal correct fix is a **prefix-tolerant locator** (`startswith`),
+  after which the three behavioural assertions already pass against the current SKILL.md. Updated both the
+  Category A technical approach and the Test Impact line to name the exact file:line and the intended edit.
