@@ -618,7 +618,7 @@ Prunes zero-access memories below the weak-forgetting threshold:
 4-layer always-apply audit (see [`docs/features/subconscious-memory.md`](./subconscious-memory.md#memory-health-audit) for full design):
 
 - **Layer 0** — baseline zero-access (>30d) + low-confidence (<0.2) flags. Read-only; no issues filed.
-- **Layer 1** — deterministic supersede via `_looks_like_refusal` predicate. Sets `superseded_by="cleanup-junk-extraction"` on `extraction-*` records matching refusal/JSON-shrapnel patterns. Capped at `MAX_LAYER1_SUPERSEDES_PER_RUN=50` (operator-tunable via `MEMORY_AUDIT_LAYER1_CAP`). Subsumes the retired `scripts/cleanup_memory_extraction_junk.py` one-shot.
+- **Layer 1** — deterministic supersede via `_looks_like_refusal` predicate. Sets `superseded_by="cleanup-junk-extraction"` on `extraction-*` records matching refusal/JSON-shrapnel patterns. Capped at `MAX_LAYER1_SUPERSEDES_PER_RUN=50` (operator-tunable via `MEMORY_AUDIT_LAYER1_CAP`).
 - **Layer 2** — heuristic anomaly detection (no model). Four signals: `category-default-skew`, `importance-1.0-skew`, `agent-id-cluster`, `html-escape-rate`. Cross-threshold signals become candidates.
 - **Layer 3** — Gemma classification (`gemma4:e2b`, fail-soft). Samples up to 20 last-24h records; 30s wallclock budget; 10s `GEMMA_CALL_TIMEOUT_SEC` per call. Verdicts grouped by anomaly_signal; signals with ≥3 matches become candidates. Fails soft if Ollama is unavailable.
 - **Issue surfacing** — Layer-2/3 candidates → `gh issue create --label memory --label investigation`, deduped via title-prefix search. Layer 0/1 never file issues.
