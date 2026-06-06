@@ -161,7 +161,7 @@ The session execution engine (`agent/agent_session_queue.py`) has zero module-le
 | What | Canonical Location | Re-export Location |
 |------|-------------------|-------------------|
 | `REACTION_SUCCESS/COMPLETE/ERROR` | `agent/constants.py` | `bridge/response.py` |
-| `save_session_snapshot()` | `agent/session_logs.py` | (none) |
+| `save_session_snapshot()` | `agent/agent_sessions.py` | (none) |
 
 All 7 lazy `bridge/` imports inside functions are guarded with `try/except` for graceful degradation when running without Telegram.
 
