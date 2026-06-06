@@ -10,6 +10,7 @@ Tests system performance against defined baselines:
 """
 
 import asyncio
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -79,6 +80,16 @@ class TestMemoryPerformance:
 
     def test_baseline_memory_usage(self, baseline):
         """Test that baseline memory is within limits."""
+        # `ResourceSnapshot.capture()` reads whole-process RSS. Under xdist
+        # (`-n auto`, the default in pyproject.toml) a single worker process
+        # accumulates the RSS of every test module it has already imported, so
+        # the absolute baseline is contaminated by co-resident tests and the
+        # check is only meaningful when this test runs serially / in isolation
+        # (issue #1578). Skip under a distributed worker rather than weaken the
+        # threshold to a meaningless value.
+        if os.environ.get("PYTEST_XDIST_WORKER"):
+            pytest.skip("absolute-RSS baseline is not measurable inside a shared xdist worker")
+
         snapshot = ResourceSnapshot.capture()
         if snapshot.memory_mb == 0.0:
             pytest.skip("psutil not available for memory measurement")

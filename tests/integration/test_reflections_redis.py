@@ -198,7 +198,12 @@ class TestRedisIndexCleanupReflection:
         assert entry["execution_type"] == "function"
         assert entry["callable"] == "scripts.popoto_index_cleanup.run_cleanup"
         assert entry["enabled"] is True
-        assert entry["interval"] == 86400
+        # The registry schema uses `every: <N><unit>` (e.g. "86400s"), not a bare
+        # `interval: <seconds>` int (issue #1578 Category A drift). Parse it the
+        # same way the scheduler does.
+        from agent.reflection_schedule import parse_every_duration
+
+        assert parse_every_duration(entry["every"]) == 86400
         assert entry["priority"] == "low"
 
     def test_cleanup_callable_importable(self):
