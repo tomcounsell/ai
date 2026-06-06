@@ -55,6 +55,13 @@ def _local_work_vault() -> str:
 # --- 1. Byte-stability ------------------------------------------------------
 
 
+# Pin both byte-stability tests to a single xdist worker. They compose the
+# prompt from on-disk persona/segment files and the live work-vault CLAUDE.md
+# and compare byte-for-byte against a fixture; any concurrent test that mutates
+# shared global state (env vars, persona files) the composer reads can perturb
+# the bytes and flake the comparison under parallelism. Grouping isolates them
+# deterministically regardless of the --dist mode (issue #1578, Category E).
+@pytest.mark.xdist_group(name="compose_system_prompt_byte_stable")
 def test_dev_cell_byte_stable_against_local_fixture():
     """`(DEVELOPER, WORKER)` composer output must equal the local-machine
     baseline captured from `load_system_prompt()` on main."""
@@ -72,6 +79,7 @@ def test_dev_cell_byte_stable_against_local_fixture():
     )
 
 
+@pytest.mark.xdist_group(name="compose_system_prompt_byte_stable")
 def test_pm_cell_byte_stable_against_local_fixture():
     """`(PROJECT_MANAGER, PM_READONLY)` composer output must equal the
     local-machine baseline captured from `load_pm_system_prompt(work_dir)` on

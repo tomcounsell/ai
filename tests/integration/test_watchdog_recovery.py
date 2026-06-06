@@ -76,6 +76,25 @@ def _spawn_fake_worker() -> subprocess.Popen:
     )
 
 
+def _pid_lookup_for(proc: subprocess.Popen):
+    """Return a ``_get_worker_pid`` replacement scoped to a single spawned proc.
+
+    The real ``_get_worker_pid()`` does a *global* ``pgrep -if "python -m worker"``,
+    so on any machine where a real ``python -m worker`` is already running
+    (e.g. the worker box, PID 94409 here) it matches the real worker and
+    ``check()`` never returns ``"down"`` for our fabricated-then-killed worker.
+    Patching the lookup to track only *this* test's spawned PID isolates the
+    test from a coexisting real worker — it returns the fake worker's PID while
+    it lives and ``None`` once ``proc.poll()`` shows it has exited. ``check()``
+    itself is left unmocked so the down/ok/stale branch logic stays under test.
+    """
+
+    def _lookup() -> int | None:
+        return proc.pid if proc.poll() is None else None
+
+    return _lookup
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -118,7 +137,8 @@ class TestWatchdogDetectsUnexpectedExit:
         proc.wait()
 
         t0 = time.monotonic()
-        status = check()
+        with patch("monitoring.worker_watchdog._get_worker_pid", _pid_lookup_for(proc)):
+            status = check()
         elapsed = time.monotonic() - t0
 
         assert status["status"] == "down", (
@@ -140,7 +160,8 @@ class TestWatchdogDetectsUnexpectedExit:
         proc.wait()
 
         t0 = time.monotonic()
-        status = check()
+        with patch("monitoring.worker_watchdog._get_worker_pid", _pid_lookup_for(proc)):
+            status = check()
         elapsed_ms = (time.monotonic() - t0) * 1000
 
         assert status["status"] == "down"
@@ -185,7 +206,8 @@ class TestWatchdogDetectsUnexpectedExit:
         proc.kill()
         proc.wait()
 
-        status = check()
+        with patch("monitoring.worker_watchdog._get_worker_pid", _pid_lookup_for(proc)):
+            status = check()
         assert status["status"] == "down"
 
         # _handle_missing_worker() uses Redis INCR — mock Redis for isolation.
@@ -221,7 +243,8 @@ class TestWatchdogDetectsUnexpectedExit:
         proc.wait()
 
         # Watchdog runs check() on its tick — simulate that tick now
-        status = check()
+        with patch("monitoring.worker_watchdog._get_worker_pid", _pid_lookup_for(proc)):
+            status = check()
         detection_time = time.monotonic()
 
         detection_latency = detection_time - exit_time

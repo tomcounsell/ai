@@ -5,14 +5,22 @@ class TestMemoryIngestion:
     """Test Memory.save() for Telegram messages."""
 
     def test_human_message_creates_memory(self):
+        import os
+
         from popoto import InteractionWeight
 
         from models.memory import Memory
 
+        # Under xdist, two workers running this test concurrently would save
+        # identical content; Memory's ExistenceFilter bloom fingerprints on
+        # content, so the second save dedups to a filtered (None) result and the
+        # `assert m is not None` flakes. Scope the project_key AND the content
+        # to this xdist worker so each worker writes a distinct bloom fingerprint.
+        worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
         m = Memory.safe_save(
             agent_id="test-user",
-            project_key="test-ingestion",
-            content="Please deploy the latest version to staging",
+            project_key=f"test-ingestion-{worker}",
+            content=f"Please deploy the latest version to staging [{worker}]",
             importance=InteractionWeight.HUMAN,
             source="human",
         )
