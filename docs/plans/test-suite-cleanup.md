@@ -19,7 +19,7 @@ resolved, the suite cannot serve as a regression gate: every PR must manually di
 its own regressions from the known-bad baseline, which is error-prone and slow.
 
 **Current behavior:** Multiple test clusters fail on `main` across six root-cause
-categories (feature drift, real source bugs, env/install, flaky-under-parallelism, and
+categories (feature drift, post-refactor test drift, env/install, flaky-under-parallelism, and
 performance thresholds). Each PR must verify its failures are "pre-existing."
 
 **Desired outcome:** `scripts/pytest-clean.sh tests/ -q` on `main` exits 0 with 0 failures
@@ -61,7 +61,7 @@ by running each named cluster with `-n0` (serial) at plan time.
 **File:line references re-verified:**
 - `tools/knowledge/indexer.py` `full_scan` — issue claimed "cannot import name 'full_scan'" — **gone**: `full_scan` is defined at `indexer.py:449` and imports cleanly. `test_markitdown_ingestion` passes.
 - `.claude/commands/do-merge.md` — issue claimed tests read a worktree-only file — **drifted**: `test_do_merge_review_filter` now reads `docs/sdlc/do-merge.md` (REPO_ROOT/docs/sdlc/do-merge.md), which exists on `main`; all 15 tests pass. The "land `do-merge.md` or delete tests" product decision is **moot**.
-- `agent/session_executor.py` (Category C reprieve/OOM source) — **drifted**: `_agent_session_health_check` now lives in `agent/session_health.py:1422`. The OOM-backoff test (`test_harness_oom_backoff`) and the reprieve-scoping tests (`test_health_check_recovery_finalization::TestReprieveScopedToNoProgress`) `inspect.getsource` of `agent/session_health.py`. The "Fallback finalization" sub-test still inspects `agent/session_executor.py`. Category C fixes target **both** modules.
+- `agent/session_health.py` (Category C reprieve/OOM logic) — **logic moved, tests not updated**: the OOM-defer and reprieve-scoping logic the Category C tests assert was extracted from `_agent_session_health_check` (now `agent/session_health.py:1422`) into the shared helper `_apply_recovery_transition` (`agent/session_health.py:1096`) by refactor #1270. The failing tests still `inspect.getsource(_agent_session_health_check)`, which only *calls* the helper, so the pinned substrings are absent. **Category C is therefore test-only re-pointing, not a source change** (verified: every asserted string is present in `_apply_recovery_transition`). The fallback-finalization sub-tests that inspect `_execute_agent_session` / `_recover_interrupted_agent_sessions_startup` already pass and need no change.
 - **`monitoring/worker_watchdog.py` (watchdog cluster) — CORRECTED ROOT CAUSE:** The issue diagnosed the 4 `TestWatchdogDetectsUnexpectedExit` failures as "heartbeat TTL too permissive (132s-old heartbeat still healthy)." This is **wrong**. Verified at plan time: `check()` (`worker_watchdog.py:145`) returns `down` **only** when `_get_worker_pid()` returns `None`; the `HEARTBEAT_THRESHOLD` (=600s) branch is never reached when a PID is found. `_get_worker_pid()` (`worker_watchdog.py:119`) runs a **global** `pgrep -if "python -m worker"`. The test (`_spawn_fake_worker`) fabricates a process matching that pattern, kills it, and expects `down` — but on any machine where a **real worker is already running** (confirmed: PID 94409 = `python -m worker` on this box), the global pgrep matches the real worker, so `check()` returns `ok` and all 4 tests fail. This is a **test-isolation defect, not a source bug**: tightening the heartbeat TTL would not flip any of these 4 tests. Reclassified to **Category E** (environment/isolation). See the Category E technical approach for the fix.
 - `config/reflections.yaml` — issue claimed `every: 300s` vs test expecting `interval: 300` — **confirmed**: yaml uses `every: 300s`; tests `KeyError: 'interval'`.
 
@@ -109,9 +109,10 @@ reads the post-fix passing suite (see Update System).
 
 - **New dependencies**: None. `mcp` is already importable (Category D-`mcp` is resolved); no new
   packages are added.
-- **Interface changes**: Category C touches `agent/session_health.py` behaviour
-  (watchdog heartbeat TTL, OOM-backoff capture ordering, reprieve scoping). These are
-  internal-to-worker recovery semantics, not public APIs.
+- **Interface changes**: None. Category C is test-only re-pointing — the OOM-backoff and
+  reprieve-scoping behaviour already exists in `_apply_recovery_transition`; no worker recovery
+  semantics change. The only non-test edit is an optional re-export of `_apply_recovery_transition`
+  from `agent/agent_session_queue.py` for the tests to import.
 - **Coupling**: Unchanged. Edits are localized per category; categories deliberately do not share
   files, enabling parallel execution.
 - **Data ownership**: Unchanged.
@@ -125,10 +126,11 @@ reads the post-fix passing suite (see Update System).
 
 **Interactions:**
 - PM check-ins: 1-2 (confirm Category F disposition — fix vs. justify thresholds)
-- Review rounds: 1 (Category C source changes warrant code review; A/D/E/F are mechanical)
+- Review rounds: 1 (all categories are test-only or mechanical; a light review confirms no assertions were weakened)
 
 The coding is small per category; the bottleneck is breadth (6 categories) and the judgement call
-on Category C (real source bugs must be fixed to match documented spec, not patched to silence).
+on Category C (re-point the `inspect.getsource` calls to where #1270 moved the logic, adapting the
+asserted strings/ordering to match — never weaken an assertion to silence a failure).
 
 ## Prerequisites
 
@@ -147,10 +149,15 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/test-suite-cle
 - **Category A — drift (update tests, do NOT change source):** Read current source/templates,
   update test assertions to the *intended* current behaviour. Six independent clusters.
 - **Category B — RESOLVED:** No work. Add verification line-items asserting the clusters still pass.
-- **Category C — real bugs (fix source to match documented spec):** **Two** source defects in the
-  worker recovery path (the watchdog cluster was reclassified to E). Fix `agent/session_health.py`
-  (and `agent/session_executor.py` for the fallback-finalization sub-check) so behaviour matches the
-  spec the tests encode: (1) OOM `pre_bump_attempts` capture ordering, (2) reprieve scoping.
+- **Category C — post-refactor test drift (update tests, do NOT change source):** **Verified at plan
+  time:** the OOM-defer ordering and reprieve-scoping logic the tests assert *already exists in source* —
+  it was extracted from `_agent_session_health_check` into the shared helper
+  `agent/session_health.py::_apply_recovery_transition` (lines 1096–1419) by refactor #1270. The 6 tests
+  fail only because they `inspect.getsource(_agent_session_health_check)`, which now merely *calls* the
+  helper. Fix = re-point the `getsource` calls and adapt the asserted strings/ordering to the current
+  split (see Technical Approach). The watchdog cluster was separately reclassified to E. **No source
+  change** — adding the pinned lines to `_agent_session_health_check` would duplicate logic that already
+  lives in the helper (violates NO-LEGACY/no-duplication).
 - **Category D — env/install:** `mcp` is resolved; fix the `audit_skills` import so
   `test_skills_audit` collects (resolve the conftest/import path).
 - **Category E — environment/isolation (test-only fixes):** Isolate tests that fail because of shared
@@ -195,23 +202,39 @@ fixes (parallel) → re-run full suite → 0 failures, 0 errors → refresh merg
   `.claude/skills/do-build/SKILL.md`; canonical path is `.claude/skills-global/do-build/SKILL.md`.
   Update `REPO_ROOT / ".claude" / "skills" / "do-build"` → `"skills-global"`.
 
-**Category C (source fixes — 2 clusters, 6 failures):**
-- OOM backoff (`test_harness_oom_backoff`, 2): `_agent_session_health_check` in
-  `agent/session_health.py` must capture `pre_bump_attempts` BEFORE the OOM-defer condition so the defer
-  triggers only on OS kills (`pre_bump_attempts == 0`). The test (`test_oom_defer_uses_pre_bump_attempts`)
-  `inspect.getsource`s the function and asserts the **exact** strings and ordering:
-  - the line `pre_bump_attempts = entry.recovery_attempts or 0` must be present, AND
-  - its index must be `<` the index of the substring `and pre_bump_attempts == 0`.
-  A second test (`test_oom_defer_condition_grep_present`) asserts the defer block references
-  `exit_returncode == -9` and `pre_bump_attempts == 0`. Add the capture line above the existing OOM-defer
-  condition; do not rename the variable — the tests pin the literal text.
-- Reprieve scoping (`test_health_check_recovery_finalization::TestReprieveScopedToNoProgress` +
-  `TestRecoveryAttempts`, 4): the Tier 1/Tier 2 reprieve block must be gated on
-  `_reason_kind == "no_progress"` so a reprieve is not granted for all recovery types. Add the gating
-  condition, the `tier1_flagged_total` increment under that gate, and the degraded-Tier-2 debug log
-  ("Tier 2 reprieve will only see compaction state") when the handle is None. Source: `agent/session_health.py`.
-  Builder MUST `inspect.getsource` the asserted strings in the test before editing — these are textual
-  pins, so the source must contain the exact substrings the test greps for.
+**Category C (test-only re-pointing — 2 clusters, 6 failures):**
+
+**Ground truth (verified at plan time against `agent/session_health.py`):** the asserted logic lives in
+the helper `_apply_recovery_transition` (1096–1419), NOT in `_agent_session_health_check` (1422–1846)
+which the failing tests inspect. Confirmed present in the helper: `pre_bump_attempts = entry.recovery_attempts or 0`
+(1291), `getattr(entry, "exit_returncode", None) == -9` (1363), `and pre_bump_attempts == 0` (1364),
+`_is_memory_tight()`, `timedelta(seconds=120)`, `update_fields=["scheduled_at", "recovery_attempts"]`,
+`if reason_kind == "no_progress":` (1185), `tier1_flagged_total` (1189, exactly once), the degraded-Tier-2
+log `"Tier 2 reprieve will only see compaction state"` (1182), `_tier2_reprieve_signal`, `reprieve_count`,
+and `MAX_RECOVERY_ATTEMPTS`. So these are **post-refactor test drift** (same class as Category A), not
+source bugs. **Do NOT add any of these lines to `_agent_session_health_check`** — they would duplicate
+the helper.
+
+- OOM backoff (`test_harness_oom_backoff`, 2 — `test_pre_bump_capture_ordering` line 80,
+  `test_oom_defer_condition_grep_present` line 100): both `inspect.getsource(session_health._agent_session_health_check)`.
+  **Fix = re-point both to `session_health._apply_recovery_transition`.** Every asserted substring and the
+  `pre_bump_attempts ... < ... and pre_bump_attempts == 0` ordering already hold in the helper. No source edit.
+- `TestRecoveryAttempts::test_health_check_source_mentions_recovery_attempts_and_max` (line 805): asserts
+  `recovery_attempts`, `MAX_RECOVERY_ATTEMPTS`, `reprieve_count` in `q._agent_session_health_check`. **Fix =
+  re-point to `_apply_recovery_transition`** (all three present there). Re-export `_apply_recovery_transition`
+  from `agent/agent_session_queue.py` (next to the existing `_agent_session_health_check` re-export) or
+  import it directly from `agent.session_health` in the test.
+- `TestReprieveScopedToNoProgress` (3 — lines 995, 1019, 1047): these assert a **cross-function ordering
+  invariant** that #1270 split across two functions. The gate moved to the helper as
+  `reason_kind == "no_progress"` (no leading underscore), while the `_reason_kind = "no_progress"` assignment
+  and the `DISABLE_PROGRESS_KILL` kill path stayed in `_agent_session_health_check`. **Fix (test-only,
+  preserves the invariant's intent):** inspect the *combined* source of caller + helper
+  (`getsource(_agent_session_health_check) + getsource(_apply_recovery_transition)`) and update the asserted
+  gate string from `_reason_kind == "no_progress"` to the current `reason_kind == "no_progress"`; keep the
+  `idx_assignment < idx_gate < idx_tier1_counter < idx_reprieve` ordering checks (they hold in caller-then-helper
+  concatenation) and re-anchor the `tier1_flagged_total`-before-kill check to the caller's `DISABLE_PROGRESS_KILL`.
+  Builder MUST `inspect.getsource` and re-run after each edit — do NOT weaken any assertion; re-point and
+  re-anchor to where the logic now lives.
 
 **Category D:**
 - `test_skills_audit` collection error: `ModuleNotFoundError: No module named 'audit_skills'`. Resolve
@@ -248,14 +271,15 @@ fixes (parallel) → re-run full suite → 0 failures, 0 errors → refresh merg
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] Category C touches recovery/finalization branches that swallow or log exceptions; each modified
-      branch must keep its observable signal (logger.warning / metric / state change) and the tests
-      assert those signals (e.g. `tier1_flagged_total` increment, degraded-Tier-2 debug log).
+- [ ] Category C is test-only; no recovery/finalization branch is modified. The tests still assert the
+      existing observable signals (`tier1_flagged_total` increment, degraded-Tier-2 debug log) — confirm
+      the re-pointed `getsource` targets the function that actually contains those signals.
 - [ ] No new `except Exception: pass` blocks introduced.
 
 ### Empty/Invalid Input Handling
-- [ ] Category C OOM path: confirm `pre_bump_attempts == 0` handles the `recovery_attempts is None`
-      case via `or 0` (the capture line being added).
+- [ ] Category C OOM path: the `pre_bump_attempts = entry.recovery_attempts or 0` capture already handles
+      the `recovery_attempts is None` case in `_apply_recovery_transition` — no change, just verify the
+      re-pointed test still asserts the `or 0` form.
 - [ ] No agent-output processing changes; no silent-loop surface touched.
 
 ### Error State Rendering
@@ -271,8 +295,9 @@ fixes (parallel) → re-run full suite → 0 failures, 0 errors → refresh merg
 - [ ] `tests/unit/test_model_relationships.py::TestTelegramMessageEnrichmentFields::test_enrichment_field_count` — UPDATE: `== 18` → `== 20`.
 - [ ] `tests/unit/test_long_task_checkpointing.py::test_progress_md_in_build_soft_check` — UPDATE: path `skills` → `skills-global`.
 - [ ] `tests/integration/test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit` (4 cases) — UPDATE (Category E): mock `_get_worker_pid` to the fake worker's PID so the test is isolated from a coexisting real worker. No source change.
-- [ ] `tests/unit/test_harness_oom_backoff.py` (2 cases) — KEEP (Category C source fix makes them pass).
-- [ ] `tests/unit/test_health_check_recovery_finalization.py::TestReprieveScopedToNoProgress` + `::TestRecoveryAttempts` (4 cases) — KEEP (source fix makes them pass).
+- [ ] `tests/unit/test_harness_oom_backoff.py` (2 cases) — UPDATE (Category C): re-point both `inspect.getsource` calls from `_agent_session_health_check` to `_apply_recovery_transition`. No source change.
+- [ ] `tests/unit/test_health_check_recovery_finalization.py::TestRecoveryAttempts::test_health_check_source_mentions_recovery_attempts_and_max` (1 case) — UPDATE (Category C): re-point `getsource` to `_apply_recovery_transition`.
+- [ ] `tests/unit/test_health_check_recovery_finalization.py::TestReprieveScopedToNoProgress` (3 cases) — UPDATE (Category C): inspect combined caller+helper source; change asserted gate string `_reason_kind == "no_progress"` → `reason_kind == "no_progress"`; keep ordering/`tier1_flagged_total`/`DISABLE_PROGRESS_KILL` anchors. No source change.
 - [ ] `tests/unit/test_skills_audit.py` — KEEP: fix `audit_skills` import so the module collects.
 - [ ] `tests/unit/test_memory_ingestion.py::test_human_message_creates_memory` — UPDATE: add unique per-worker Redis key prefix.
 - [ ] `tests/unit/test_compose_system_prompt.py::test_pm_cell_byte_stable_against_local_fixture` — UPDATE: add `xdist_group` marker.
@@ -284,10 +309,11 @@ fixes (parallel) → re-run full suite → 0 failures, 0 errors → refresh merg
 
 ## Rabbit Holes
 
-- **Re-architecting the watchdog heartbeat system.** Category C asks only to tighten the down-detection
-  TTL so a killed worker reports `down`. Do not redesign the heartbeat protocol.
-- **Refactoring `_agent_session_health_check`.** It is a large function; the OOM and reprieve fixes are
-  surgical line additions/orderings. Resist a broader cleanup — it would explode review surface.
+- **Re-architecting the watchdog heartbeat system.** The watchdog cluster is a Category E test-isolation
+  fix (mock `_get_worker_pid`), not a heartbeat redesign. Do not touch the heartbeat protocol.
+- **Adding the pinned lines to `_agent_session_health_check`.** The OOM/reprieve logic already exists in
+  `_apply_recovery_transition` (#1270). Re-creating it in the caller to satisfy the stale `getsource`
+  targets would duplicate logic and violate NO-LEGACY. Re-point the tests instead.
 - **Chasing Category F into a profiling project.** If a threshold is genuinely close, recalibrate with a
   documented measurement. Only fix the slow path if it is clearly pathological.
 - **Deleting tests to reach zero.** The issue constraint forbids weakening assertions; deleting a failing
@@ -296,14 +322,15 @@ fixes (parallel) → re-run full suite → 0 failures, 0 errors → refresh merg
 
 ## Risks
 
-### Risk 1: Category C source fixes change recovery behaviour in production
-**Impact:** Changing reprieve scoping or OOM-defer ordering could make the worker less forgiving on
-recovery, affecting live session reliability. (The watchdog cluster is NO LONGER a source change — it
-moved to Category E as a test-only isolation fix, removing the production-behaviour risk it carried.)
-**Mitigation:** Make changes match the documented spec the tests already encode (these are
-under-implementations of agreed behaviour, not new policy). Route Category C through a code-review round.
-Run the full `test_health_check_recovery_finalization` suite, not just the failing subset, to confirm no
-neighbouring behaviour regresses.
+### Risk 1: Category C test re-pointing masks a genuine regression
+**Impact:** Category C is test-only (the OOM/reprieve logic already lives in `_apply_recovery_transition`).
+The risk is the opposite of a source change: if a builder re-points `getsource` to a function that does
+*not* actually contain the asserted invariant, the test would pass vacuously. (The watchdog cluster is a
+Category E test-isolation fix; no production behaviour changes anywhere in this plan.)
+**Mitigation:** For every re-pointed assertion, confirm the substring is genuinely present in the new
+target function (grep the line number), and run the full `test_health_check_recovery_finalization` +
+`test_harness_oom_backoff` suites (not just the failing subset) to confirm no sibling assertion breaks.
+Route Category C through a code-review round to confirm no assertion was weakened or mis-anchored.
 
 ### Risk 1b: Watchdog test mock diverges from production `check()` behaviour
 **Impact:** Mocking `_get_worker_pid` in the watchdog test could mask a future real regression in the
@@ -360,7 +387,7 @@ deterministic (sorted iteration / isolated copy).
 
 No agent integration required — this is a test-suite-and-source-cleanup chore. No new CLI entry point in
 `pyproject.toml [project.scripts]`, no new MCP server or `.mcp.json` change, and the bridge does not need to
-import anything new. Category C edits internal worker recovery code already invoked by the worker; no new
+import anything new. Category C is test-only re-pointing (the worker recovery code is unchanged); no new
 agent-reachable surface is added.
 
 ## Documentation
@@ -374,15 +401,17 @@ agent-reachable surface is added.
 
 ### Inline Documentation
 - [ ] Category F: inline comment on any recalibrated threshold citing the measured value and headroom.
-- [ ] Category C: brief comment on the watchdog TTL tightening and the `pre_bump_attempts` capture-ordering
-      rationale (reference issue #1578 / the OOM-defer semantics).
+- [ ] Category C: brief comment in each re-pointed test noting the `getsource` target moved to
+      `_apply_recovery_transition` per refactor #1270 (reference issue #1578), so future readers don't
+      "restore" the assertion to the caller.
 
 ## Success Criteria
 
 - [ ] `scripts/pytest-clean.sh tests/ -q` on `main` exits 0 with 0 failures and 0 collection errors
 - [ ] All Category A test files updated to match current source behaviour (no source changes for A)
-- [ ] Category C source bugs fixed: OOM `pre_bump_attempts` capture ordering and reprieve scoping gated on
-      `_reason_kind == "no_progress"`, both in `agent/session_health.py` (no `monitoring/worker_watchdog.py` change)
+- [ ] Category C tests re-pointed (test-only): the 6 OOM/reprieve tests now `inspect.getsource`
+      `_apply_recovery_transition` (where #1270 moved the logic) and pass with NO change to
+      `agent/session_health.py` source behaviour (no `monitoring/worker_watchdog.py` change either)
 - [ ] `test_skills_audit` collects and passes (`audit_skills` import resolved)
 - [ ] Category E (test-only) green: watchdog cluster passes with a real worker running (mock `_get_worker_pid`),
       and the two xdist clusters pass under `-n auto` (unique Redis key prefixes / `xdist_group`)
@@ -406,10 +435,10 @@ then a validator runs the full suite. Category B has no builder (verify-only).
   - Agent Type: builder
   - Resume: true
 
-- **Builder (category-C-bugs)**
-  - Name: builder-c-bugs
-  - Role: Fix the two source defects (OOM capture ordering, reprieve scoping) in `agent/session_health.py`
-  - Agent Type: debugging-specialist
+- **Builder (category-C-drift)**
+  - Name: builder-c-drift
+  - Role: Re-point the 6 OOM/reprieve tests' `inspect.getsource` calls to `_apply_recovery_transition` and adapt asserted strings/ordering to the post-#1270 split (test-only; no source change)
+  - Agent Type: builder
   - Resume: true
 
 - **Builder (category-D-env)**
@@ -450,17 +479,19 @@ then a validator runs the full suite. Category B has no builder (verify-only).
 - Do NOT modify any source file — Category A is test-only.
 - Run each file with `-n0` to confirm green.
 
-### 2. Category C — real source bugs (2 clusters)
-- **Task ID**: build-c-bugs
+### 2. Category C — post-refactor test drift (2 clusters, test-only)
+- **Task ID**: build-c-drift
 - **Depends On**: none
 - **Validates**: tests/unit/test_harness_oom_backoff.py, tests/unit/test_health_check_recovery_finalization.py
-- **Assigned To**: builder-c-bugs
-- **Agent Type**: debugging-specialist
+- **Assigned To**: builder-c-drift
+- **Agent Type**: builder
 - **Parallel**: true
-- Add `pre_bump_attempts = entry.recovery_attempts or 0` capture BEFORE the OOM-defer condition (`and pre_bump_attempts == 0`) in `agent/session_health.py::_agent_session_health_check`. The test pins exact source strings + ordering — `inspect.getsource` and verify before/after.
-- Gate Tier 1/Tier 2 reprieve on `_reason_kind == "no_progress"`; add `tier1_flagged_total` increment and the degraded-Tier-2 debug log ("Tier 2 reprieve will only see compaction state").
-- Do NOT touch `monitoring/worker_watchdog.py` — the watchdog cluster is Category E (test-only), not a source bug.
-- Run the FULL `test_health_check_recovery_finalization` suite (not just the failing subset) to confirm no neighbouring regressions.
+- The OOM-defer ordering and reprieve gating already exist in `agent/session_health.py::_apply_recovery_transition` (lines 1096–1419, per refactor #1270). **Do NOT add or change any source line** — re-point the tests.
+- `test_harness_oom_backoff` (2): change `inspect.getsource(session_health._agent_session_health_check)` → `_apply_recovery_transition` at both call sites (lines ~80, ~100). Verify each asserted substring (`pre_bump_attempts = entry.recovery_attempts or 0`, `and pre_bump_attempts == 0`, `exit_returncode", None) == -9`, `_is_memory_tight()`, `timedelta(seconds=120)`, `update_fields=["scheduled_at", "recovery_attempts"]`) is present in the new target.
+- `TestRecoveryAttempts::test_health_check_source_mentions_recovery_attempts_and_max` (1): re-point to `_apply_recovery_transition` (has `recovery_attempts`, `MAX_RECOVERY_ATTEMPTS`, `reprieve_count`). Re-export `_apply_recovery_transition` from `agent/agent_session_queue.py` or import from `agent.session_health` directly.
+- `TestReprieveScopedToNoProgress` (3): inspect combined caller+helper source; update gate string `_reason_kind == "no_progress"` → `reason_kind == "no_progress"`; keep the `idx_assignment < idx_gate < idx_tier1 < idx_reprieve` ordering and re-anchor the tier1-before-kill check to the caller's `DISABLE_PROGRESS_KILL`. Never weaken an assertion.
+- Do NOT touch `monitoring/worker_watchdog.py` — the watchdog cluster is Category E (test-only).
+- Run the FULL `test_health_check_recovery_finalization` + `test_harness_oom_backoff` suites with `-n0` to confirm no neighbouring regressions.
 
 ### 3. Category D — env/install
 - **Task ID**: build-d-env
@@ -496,7 +527,7 @@ then a validator runs the full suite. Category B has no builder (verify-only).
 
 ### 6. Full-suite validation
 - **Task ID**: validate-suite
-- **Depends On**: build-a-drift, build-c-bugs, build-d-env, build-e-env, build-f-perf
+- **Depends On**: build-a-drift, build-c-drift, build-d-env, build-e-env, build-f-perf
 - **Assigned To**: validator-suite
 - **Agent Type**: validator
 - **Parallel**: false
@@ -552,10 +583,32 @@ This pass corrected one material misclassification surfaced by re-verifying sour
   host (confirmed: a real worker runs on this machine). The 4 tests fail because they cannot isolate their
   fabricated worker from a real one — a **test-isolation defect**, not a source bug. The "tighten the TTL"
   approach would have flipped 0 of the 4 tests. Fix is now test-only (mock `_get_worker_pid`), with no
-  production-behaviour risk. Category C is correspondingly reduced to 2 source clusters (OOM + reprieve).
+  production-behaviour risk. Category C is correspondingly reduced to 2 clusters (OOM + reprieve) — later
+  reclassified to test-only re-pointing in revision pass 3 below.
 - **OOM/reprieve fixes now cite the exact source strings** the tests `inspect.getsource`-pin (e.g.
   `pre_bump_attempts = entry.recovery_attempts or 0` must precede `and pre_bump_attempts == 0`), removing the
   prior hand-wavy "match the spec" framing.
+
+### Revision pass 3 (post-critique) — Category C reclassified to test drift
+
+Re-verifying source at plan time confirmed the critique's load-bearing blocker: **Category C is NOT a source
+bug.** The OOM-defer ordering and reprieve-scoping logic the 6 tests assert already exists in
+`agent/session_health.py::_apply_recovery_transition` (1096–1419) — it was extracted from
+`_agent_session_health_check` by refactor #1270. Each asserted substring was located in the helper:
+`pre_bump_attempts = entry.recovery_attempts or 0` (1291), `getattr(entry, "exit_returncode", None) == -9`
+(1363), `and pre_bump_attempts == 0` (1364), `if reason_kind == "no_progress":` (1185), `tier1_flagged_total`
+(1189, once), the degraded-Tier-2 log (1182), `reprieve_count`/`MAX_RECOVERY_ATTEMPTS`. The tests fail only
+because they still `inspect.getsource(_agent_session_health_check)`, which now merely *calls* the helper.
+
+**Fix is test-only re-pointing** (same class as Category A): point the `getsource` calls at
+`_apply_recovery_transition`, and for `TestReprieveScopedToNoProgress` (whose invariant #1270 split across two
+functions) inspect the combined caller+helper source and update the gate string from
+`_reason_kind == "no_progress"` to the helper's `reason_kind == "no_progress"`. Adding the pinned lines to
+`_agent_session_health_check` (the prior plan's instruction) would **duplicate** existing logic and violate
+NO-LEGACY. The builder/agent-type for Category C changed from `debugging-specialist` (source fix) to `builder`
+(test edit), and Risk 1 was inverted (the risk is now a vacuous-pass from mis-anchored re-pointing, not a
+production behaviour change). With this, **no production code changes anywhere in the plan** — every category
+is test-only or mechanical.
 - **Open Questions resolved to explicit defaults** (above) so build proceeds without a human round-trip.
 
 ### Revision pass 2 (post-critique)
