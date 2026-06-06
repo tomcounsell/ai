@@ -313,7 +313,7 @@ def get_verdict(session, stage: str) -> dict:
 
 
 def _cli_record(args) -> dict:
-    session = _find_session(session_id=args.session_id, issue_number=args.issue_number)
+    session = _find_session(session_id=args.session_id, issue_number=args.issue_number, ensure=True)
     if session is None:
         return {}
     judges = None

@@ -45,10 +45,10 @@ After resolving the issue number, ensure a local SDLC session exists in Redis so
 
 ```bash
 SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || git remote get-url origin | sed 's/.*github.com[:/]//;s/.git$//')
-sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}" 2>/dev/null || true
+sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}" 2>/dev/null || true  <!-- REDUNDANT-AFTER-#1558: kept as belt-and-suspenders; remove once resolver auto-ensure is proven -->
 ```
 
-This is idempotent -- running it multiple times for the same issue reuses the same session. Inside a bridge-initiated session (where `VALOR_SESSION_ID` is set), the call is a true no-op — it returns the already-active session without creating a new record. Do NOT export `AGENT_SESSION_ID` -- env vars do not persist across Claude Code bash blocks. Instead, pass `--issue-number` to all subsequent `sdlc_stage_marker` and `sdlc_stage_query` invocations.
+As of #1558, this explicit call is **belt-and-suspenders rather than the sole guarantee**: the `find_session(..., ensure=True)` resolver auto-ensures a PM session on the first state *write* (`verdict record`, `meta-set`, `stage-marker`), so non-`/sdlc` callers (direct `sdlc-tool` invocations, individual `/do-*` skills) no longer silently no-op. Keeping the up-front ensure here makes a session exist before the first read too, which is harmless (idempotent). This is idempotent -- running it multiple times for the same issue reuses the same session. Inside a bridge-initiated session (where `VALOR_SESSION_ID` is set), the call is a true no-op — it returns the already-active session without creating a new record. Do NOT export `AGENT_SESSION_ID` -- env vars do not persist across Claude Code bash blocks. Instead, pass `--issue-number` to all subsequent `sdlc_stage_marker` and `sdlc_stage_query` invocations.
 
 ## Step 2: Assess Current State
 

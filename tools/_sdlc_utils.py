@@ -71,6 +71,26 @@ def find_session_by_issue(issue_number: int):
         return None
 
     try:
+        # Deterministic-id pass: a session auto-ensured by find_session(ensure=True)
+        # (or by sdlc_session_ensure) is keyed sdlc-local-{N} and may carry no
+        # issue_url / message_text. Match it by its deterministic id first so the
+        # READ path (verdict get, stage-query, next-skill) finds the same record a
+        # prior WRITE created. Without this, a sessionless write would persist but
+        # the subsequent read would miss it (#1558).
+        local_id = f"sdlc-local-{issue_number}"
+        try:
+            local = list(AgentSession.query.filter(session_id=local_id))
+            # Verify the returned record's id actually matches — a query backend
+            # (or test mock) that ignores the filter must not yield a false hit.
+            local = [s for s in local if getattr(s, "session_id", None) == local_id]
+            for s in local:
+                if getattr(s, "session_type", None) == "pm":
+                    return s
+            if local:
+                return local[0]
+        except Exception as e:
+            logger.debug(f"find_session_by_issue deterministic-id pass failed: {e}")
+
         # NOTE: Linear scan of PM sessions — acceptable for current scale (typically
         # <100 PM sessions). If PM session count grows significantly, consider adding
         # an indexed lookup by issue_url or caching issue->session mappings.
@@ -96,12 +116,40 @@ def find_session_by_issue(issue_number: int):
         return None
 
 
-def find_session(session_id: str | None = None, issue_number: int | None = None):
+def find_session(
+    session_id: str | None = None,
+    issue_number: int | None = None,
+    ensure: bool = False,
+):
     """Resolve a PM AgentSession by session_id or issue_number.
 
     Checks (in order): explicit session_id arg → VALOR_SESSION_ID env →
     AGENT_SESSION_ID env → issue_number lookup via find_session_by_issue.
     Returns the session object or None.
+
+    Args:
+        session_id: Optional explicit session ID.
+        issue_number: Optional GitHub issue number for issue-based lookup.
+        ensure: Opt-in auto-create flag. When ``False`` (the default) this is a
+            pure, side-effect-free lookup and is byte-for-byte the legacy
+            behavior — no session is ever created. **Only the three SDLC
+            *write* subcommands** (``sdlc_meta_set.write_meta``,
+            ``sdlc_stage_marker.write_marker``, ``sdlc_verdict._cli_record``)
+            pass ``ensure=True``, so a write always has a home regardless of how
+            the pipeline is driven. When ``True`` and no existing PM session is
+            found, this calls :func:`tools.sdlc_session_ensure.ensure_session`
+            to create (or dedup onto a live bridge session) a PM session, then
+            re-resolves and returns it. Creation is gated: it only happens when
+            ``issue_number >= 1`` OR a session-id env var is present — a bare
+            sessionless write with no issue context still returns ``None`` (no
+            fabricated session). The ensure path reuses ``ensure_session``'s
+            idempotency, PM-type gating, terminal-status gating, and bridge
+            dedup (#1147) verbatim; an ensure failure yields ``None`` rather
+            than raising. The side effect is opt-in and grep-able via
+            ``grep -rn 'ensure=True' tools/``.
+
+    Returns:
+        The PM AgentSession or None.
     """
     resolved_id = (
         session_id or os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")
@@ -119,9 +167,33 @@ def find_session(session_id: str | None = None, issue_number: int | None = None)
 
     if issue_number is not None:
         try:
-            return find_session_by_issue(issue_number)
+            found = find_session_by_issue(issue_number)
+            if found is not None:
+                return found
         except Exception as e:
             logger.debug(f"find_session_by_issue failed: {e}")
+
+    # Opt-in auto-ensure (writes only). Create a session so the write has a home.
+    # Gated: only when there is an issue context (issue_number >= 1) or a
+    # session-id env var is present. Reads (ensure=False) never reach this branch.
+    if ensure and (
+        (issue_number is not None and issue_number >= 1)
+        or os.environ.get("VALOR_SESSION_ID")
+        or os.environ.get("AGENT_SESSION_ID")
+    ):
+        try:
+            # Lazy import to avoid an import-time cycle (sdlc_session_ensure
+            # imports from this module).
+            from tools.sdlc_session_ensure import ensure_session
+
+            result = ensure_session(issue_number) if issue_number is not None else {}
+            ensured_id = result.get("session_id") if isinstance(result, dict) else None
+            if ensured_id:
+                # Re-resolve through the same id path so the returned object is a
+                # live AgentSession, not the ensure-result dict.
+                return find_session(session_id=ensured_id)
+        except Exception as e:
+            logger.debug(f"find_session auto-ensure failed: {e}")
 
     return None
 

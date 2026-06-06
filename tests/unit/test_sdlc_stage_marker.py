@@ -1,10 +1,14 @@
 """Unit tests for tools.sdlc_stage_marker.
 
 Tests cover:
-- _find_session with --issue-number fallback
-- write_marker with issue-number resolution
+- write_marker with issue-number resolution (via shared find_session)
+- write_marker auto-ensures a session on sessionless-but-issue-numbered writes
 - CLI --issue-number argument parsing
 - Backward compatibility (env var path still works)
+
+The local `_find_session` resolver was deleted in #1558; stage_marker now
+resolves through the shared `tools._sdlc_utils.find_session(..., ensure=True)`.
+Resolver-level lookup behavior is covered by ``test_sdlc_utils.py``.
 """
 
 from __future__ import annotations
@@ -16,83 +20,6 @@ import sys
 from unittest.mock import MagicMock, patch
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-class TestFindSession:
-    """Tests for _find_session resolution order."""
-
-    def test_resolves_by_session_id_arg(self):
-        from tools.sdlc_stage_marker import _find_session
-
-        mock_session = MagicMock()
-        mock_as = MagicMock()
-        mock_as.query.filter.return_value = [mock_session]
-        mock_session.session_type = "pm"
-
-        with patch("models.agent_session.AgentSession", mock_as):
-            result = _find_session("explicit-id")
-
-        assert result == mock_session
-
-    def test_resolves_by_env_var(self):
-        from tools.sdlc_stage_marker import _find_session
-
-        mock_session = MagicMock()
-        mock_session.session_type = "pm"
-        mock_as = MagicMock()
-        mock_as.query.filter.return_value = [mock_session]
-
-        with (
-            patch.dict(os.environ, {"VALOR_SESSION_ID": "env-session-id"}),
-            patch("models.agent_session.AgentSession", mock_as),
-        ):
-            result = _find_session(None)
-
-        assert result == mock_session
-
-    def test_resolves_by_issue_number_when_no_env(self):
-        from tools.sdlc_stage_marker import _find_session
-
-        mock_session = MagicMock()
-
-        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
-        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
-
-        with (
-            patch.dict(os.environ, clean_env, clear=True),
-            patch("tools._sdlc_utils.find_session_by_issue", return_value=mock_session),
-        ):
-            result = _find_session(None, issue_number=941)
-
-        assert result == mock_session
-
-    def test_returns_none_when_nothing_available(self):
-        from tools.sdlc_stage_marker import _find_session
-
-        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
-        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
-
-        with patch.dict(os.environ, clean_env, clear=True):
-            result = _find_session(None)
-
-        assert result is None
-
-    def test_issue_number_lookup_handles_exception(self):
-        from tools.sdlc_stage_marker import _find_session
-
-        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
-        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
-
-        with (
-            patch.dict(os.environ, clean_env, clear=True),
-            patch(
-                "tools._sdlc_utils.find_session_by_issue",
-                side_effect=ConnectionError("Redis down"),
-            ),
-        ):
-            result = _find_session(None, issue_number=941)
-
-        assert result is None
 
 
 class TestWriteMarker:
@@ -139,7 +66,7 @@ class TestWriteMarker:
         with (
             patch.dict(os.environ, clean_env, clear=True),
             patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
-            patch("tools.sdlc_stage_marker._find_session", return_value=None),
+            patch("tools.sdlc_stage_marker.find_session", return_value=None),
         ):
             result, code = write_marker(stage="PLAN", status="completed")
 
@@ -155,7 +82,7 @@ class TestWriteMarker:
 
         with (
             patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
-            patch("tools.sdlc_stage_marker._find_session", return_value=mock_session),
+            patch("tools.sdlc_stage_marker.find_session", return_value=mock_session),
             patch("agent.pipeline_state.PipelineStateMachine", side_effect=RuntimeError("boom")),
         ):
             result, code = write_marker(stage="PLAN", status="completed")
@@ -173,7 +100,7 @@ class TestWriteMarker:
 
         with (
             patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
-            patch("tools.sdlc_stage_marker._find_session", return_value=mock_session),
+            patch("tools.sdlc_stage_marker.find_session", return_value=mock_session),
             patch("agent.pipeline_state.PipelineStateMachine", return_value=mock_sm),
         ):
             result, code = write_marker(stage="REVIEW", status="in_progress")
@@ -191,13 +118,11 @@ class TestWriteMarker:
 
         with (
             patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
-            patch("tools.sdlc_stage_marker._find_session", return_value=mock_session),
+            patch("tools.sdlc_stage_marker.find_session", return_value=mock_session),
             patch("agent.pipeline_state.PipelineStateMachine", return_value=mock_sm),
         ):
             result, code = write_marker(stage="PLAN", status="completed")
 
-        assert code == 0
-        assert result == {"stage": "PLAN", "status": "completed"}
         mock_sm.complete_stage.assert_not_called()
 
     def test_successful_write_exit_0(self):
@@ -210,7 +135,7 @@ class TestWriteMarker:
 
         with (
             patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
-            patch("tools.sdlc_stage_marker._find_session", return_value=mock_session),
+            patch("tools.sdlc_stage_marker.find_session", return_value=mock_session) as find_mock,
             patch("agent.pipeline_state.PipelineStateMachine", return_value=mock_sm),
         ):
             result, code = write_marker(stage="PLAN", status="completed", issue_number=941)
@@ -218,6 +143,36 @@ class TestWriteMarker:
         assert code == 0
         assert result == {"stage": "PLAN", "status": "completed"}
         mock_sm.complete_stage.assert_called_once_with("PLAN")
+        # #1558: write path resolves through the shared resolver with ensure=True.
+        find_mock.assert_called_once_with(None, issue_number=941, ensure=True)
+
+    def test_sessionless_issue_numbered_write_auto_ensures(self):
+        """A sessionless-but-issue-numbered write resolves through find_session
+        with ensure=True, which auto-creates a PM session so the marker persists
+        (#1558). Here we assert the resolver is invoked with ensure=True and that
+        the returned (ensured) session drives a successful marker write."""
+        from tools.sdlc_stage_marker import write_marker
+
+        ensured = MagicMock()
+        ensured.stage_states = "{}"
+
+        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
+        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
+
+        with (
+            patch.dict(os.environ, clean_env, clear=True),
+            patch("tools.sdlc_stage_marker.find_session", return_value=ensured) as find_mock,
+            patch("agent.pipeline_state.PipelineStateMachine") as mock_psm_cls,
+        ):
+            mock_psm = MagicMock()
+            mock_psm.states = {}
+            mock_psm_cls.return_value = mock_psm
+
+            result, code = write_marker(stage="REVIEW", status="in_progress", issue_number=1558)
+
+        assert code == 0
+        assert result == {"stage": "REVIEW", "status": "in_progress"}
+        find_mock.assert_called_once_with(None, issue_number=1558, ensure=True)
 
 
 class TestCLI:

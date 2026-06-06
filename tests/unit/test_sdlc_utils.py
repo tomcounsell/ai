@@ -283,3 +283,148 @@ class TestFindPlanPath:
         # tmp_path is not inside a git repo (pytest tmp dirs are not under VCS).
         result = _git_toplevel(cwd=tmp_path)
         assert result is None or isinstance(result, os.PathLike)
+
+
+class TestFindSessionEnsure:
+    """Tests for the ensure=True auto-create branch of find_session (#1558).
+
+    Covers the resolver-boundary auto-ensure: writes-only opt-in, the create
+    guards, env-session short-circuit (no create), and failure-yields-None.
+    The default ensure=False path must remain a pure lookup with zero creates.
+    """
+
+    def test_default_ensure_false_no_create_returns_none(self, monkeypatch):
+        """ensure=False (default) with a valid issue and no session → None, no create."""
+        from tools import _sdlc_utils
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        ensure_mock = MagicMock()
+        with patch.object(_sdlc_utils, "find_session_by_issue", return_value=None):
+            with patch("tools.sdlc_session_ensure.ensure_session", ensure_mock):
+                result = _sdlc_utils.find_session(None, 1558)
+
+        assert result is None
+        ensure_mock.assert_not_called()
+
+    def test_ensure_true_valid_issue_creates_and_returns(self, monkeypatch):
+        """ensure=True with a valid issue and no existing session → ensure_session is
+        called and the re-resolved session is returned."""
+        from tools import _sdlc_utils
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        created = MagicMock(name="created_session")
+
+        # find_session_by_issue: first lookup misses; the re-resolve after ensure
+        # goes through the session_id env path (mocked AgentSession query below).
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [created]
+        type(created).session_type = "pm"
+
+        with patch.object(_sdlc_utils, "find_session_by_issue", return_value=None):
+            with patch(
+                "tools.sdlc_session_ensure.ensure_session",
+                return_value={"session_id": "sdlc-local-1558", "created": True},
+            ) as ensure_mock:
+                with patch("tools._sdlc_utils.AgentSession", mock_as):
+                    result = _sdlc_utils.find_session(None, 1558, ensure=True)
+
+        ensure_mock.assert_called_once_with(1558)
+        assert result is created
+
+    def test_ensure_true_none_issue_no_env_no_create(self, monkeypatch):
+        """ensure=True with issue_number=None and no env → no create, returns None."""
+        from tools import _sdlc_utils
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        ensure_mock = MagicMock()
+        with patch("tools.sdlc_session_ensure.ensure_session", ensure_mock):
+            result = _sdlc_utils.find_session(None, None, ensure=True)
+
+        assert result is None
+        ensure_mock.assert_not_called()
+
+    def test_ensure_true_zero_issue_no_create(self, monkeypatch):
+        """ensure=True with issue_number=0 → guarded out, no create, None."""
+        from tools import _sdlc_utils
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        ensure_mock = MagicMock()
+        with patch.object(_sdlc_utils, "find_session_by_issue", return_value=None):
+            with patch("tools.sdlc_session_ensure.ensure_session", ensure_mock):
+                result = _sdlc_utils.find_session(None, 0, ensure=True)
+
+        assert result is None
+        ensure_mock.assert_not_called()
+
+    def test_ensure_true_negative_issue_no_create(self, monkeypatch):
+        """ensure=True with issue_number=-1 → guarded out, no create, None."""
+        from tools import _sdlc_utils
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        ensure_mock = MagicMock()
+        with patch.object(_sdlc_utils, "find_session_by_issue", return_value=None):
+            with patch("tools.sdlc_session_ensure.ensure_session", ensure_mock):
+                result = _sdlc_utils.find_session(None, -1, ensure=True)
+
+        assert result is None
+        ensure_mock.assert_not_called()
+
+    def test_ensure_true_env_session_returns_without_ensure(self, monkeypatch):
+        """An env-resolved live PM session is returned before the ensure branch —
+        ensure_session is never called (dedup preserved)."""
+        from tools import _sdlc_utils
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "bridge-pm-1")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        env_session = MagicMock(name="env_session")
+        env_session.session_type = "pm"
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [env_session]
+
+        ensure_mock = MagicMock()
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            with patch("tools.sdlc_session_ensure.ensure_session", ensure_mock):
+                result = _sdlc_utils.find_session(None, 1558, ensure=True)
+
+        assert result is env_session
+        ensure_mock.assert_not_called()
+
+    def test_ensure_raises_yields_none(self, monkeypatch):
+        """If ensure_session raises, find_session swallows it and returns None."""
+        from tools import _sdlc_utils
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        with patch.object(_sdlc_utils, "find_session_by_issue", return_value=None):
+            with patch(
+                "tools.sdlc_session_ensure.ensure_session",
+                side_effect=RuntimeError("boom"),
+            ):
+                result = _sdlc_utils.find_session(None, 1558, ensure=True)
+
+        assert result is None
+
+    def test_ensure_returns_empty_dict_yields_none(self, monkeypatch):
+        """If ensure_session returns {} (failed resolve), find_session returns None."""
+        from tools import _sdlc_utils
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        with patch.object(_sdlc_utils, "find_session_by_issue", return_value=None):
+            with patch("tools.sdlc_session_ensure.ensure_session", return_value={}):
+                result = _sdlc_utils.find_session(None, 1558, ensure=True)
+
+        assert result is None

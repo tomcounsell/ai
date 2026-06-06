@@ -37,7 +37,7 @@ class TestMetaSetWriteMeta:
             return True
 
         with (
-            patch("tools.sdlc_meta_set._find_session", return_value=mock_session),
+            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
             patch(
                 "tools.stage_states_helpers.update_stage_states",
                 side_effect=fake_update_stage_states,
@@ -61,7 +61,7 @@ class TestMetaSetWriteMeta:
             return True
 
         with (
-            patch("tools.sdlc_meta_set._find_session", return_value=mock_session),
+            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
             patch(
                 "tools.stage_states_helpers.update_stage_states",
                 side_effect=fake_update_stage_states,
@@ -86,7 +86,7 @@ class TestMetaSetWriteMeta:
             return True
 
         with (
-            patch("tools.sdlc_meta_set._find_session", return_value=mock_session),
+            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
             patch(
                 "tools.stage_states_helpers.update_stage_states",
                 side_effect=fake_update_stage_states,
@@ -107,7 +107,7 @@ class TestMetaSetWriteMeta:
         """write_meta returns {} when no session can be found (fail-soft)."""
         from tools.sdlc_meta_set import write_meta
 
-        with patch("tools.sdlc_meta_set._find_session", return_value=None):
+        with patch("tools.sdlc_meta_set.find_session", return_value=None):
             result = write_meta(key="plan_revising", value="true")
 
         assert result == {}
@@ -120,7 +120,7 @@ class TestMetaSetWriteMeta:
         mock_session.stage_states = "{}"
 
         with (
-            patch("tools.sdlc_meta_set._find_session", return_value=mock_session),
+            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
             patch("tools.stage_states_helpers.update_stage_states", return_value=False),
         ):
             result = write_meta(key="plan_revising", value="true")
@@ -145,14 +145,14 @@ class TestMetaSetWriteMeta:
             return True
 
         with (
-            patch("tools.sdlc_meta_set._find_session", return_value=mock_session),
+            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
             patch("tools.stage_states_helpers.update_stage_states", side_effect=fake_update_true),
         ):
             r1 = write_meta(key="plan_revising", value="1")
         assert r1["value"] is True
 
         with (
-            patch("tools.sdlc_meta_set._find_session", return_value=mock_session),
+            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
             patch("tools.stage_states_helpers.update_stage_states", side_effect=fake_update_false),
         ):
             r2 = write_meta(key="plan_revising", value="0")
@@ -165,7 +165,7 @@ class TestMetaSetWriteMeta:
         mock_session = MagicMock()
         mock_session.stage_states = "{}"
 
-        with patch("tools.sdlc_meta_set._find_session", return_value=mock_session):
+        with patch("tools.sdlc_meta_set.find_session", return_value=mock_session):
             result = write_meta(key="plan_revising", value="not_a_bool")
 
         assert result == {}
@@ -184,7 +184,7 @@ class TestMetaSetWriteMeta:
             return True
 
         with (
-            patch("tools.sdlc_meta_set._find_session", return_value=mock_session),
+            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
             patch("tools.stage_states_helpers.update_stage_states", side_effect=fake_update),
         ):
             result = write_meta(key="pr_number", value="42")
@@ -198,9 +198,26 @@ class TestMetaSetWriteMeta:
         mock_session = MagicMock()
         mock_session.stage_states = "{}"
 
-        with patch("tools.sdlc_meta_set._find_session", return_value=mock_session):
+        with patch("tools.sdlc_meta_set.find_session", return_value=mock_session):
             for bad in ("0", "-1", "abc", ""):
                 assert write_meta(key="pr_number", value=bad) == {}
+
+    def test_write_passes_ensure_true_to_resolver(self):
+        """write_meta resolves through find_session(..., ensure=True) so a
+        sessionless-but-issue-numbered write auto-creates a PM session (#1558)."""
+        from tools.sdlc_meta_set import write_meta
+
+        mock_session = MagicMock()
+        mock_session.session_type = "pm"
+
+        with (
+            patch("tools.sdlc_meta_set.find_session", return_value=mock_session) as find_mock,
+            patch("tools.stage_states_helpers.update_stage_states", return_value=True),
+        ):
+            result = write_meta(key="plan_revising", value="true", issue_number=1558)
+
+        assert result == {"key": "plan_revising", "value": True}
+        find_mock.assert_called_once_with(None, issue_number=1558, ensure=True)
 
 
 class TestMetaSetWhitelist:
@@ -258,8 +275,10 @@ class TestMetaSetCLI:
         )
         assert proc.returncode != 0
 
-    def test_no_session_id_exits_0_with_empty_json(self):
-        """CLI exits 0 with {} output when no session can be found (fail-soft)."""
+    def test_no_session_no_issue_no_env_exits_0_with_empty_json(self):
+        """Genuinely sessionless (no --issue-number, no env) CLI write still
+        no-ops: exits 0 with {} output. Reads/writes never fabricate a session
+        when there is no issue context to attach state to (#1558)."""
         proc = subprocess.run(
             [
                 sys.executable,
@@ -269,20 +288,19 @@ class TestMetaSetCLI:
                 "plan_revising",
                 "--value",
                 "true",
-                "--issue-number",
-                "999999999",  # unlikely to match any real session
+                # NO --issue-number: no issue context → ensure guard returns None.
             ],
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
             env={
                 **__import__("os").environ,
-                # Remove session env vars so lookup falls through to issue number
+                # Remove session env vars so there is no resolvable session.
                 "VALOR_SESSION_ID": "",
                 "AGENT_SESSION_ID": "",
             },
         )
-        # Fail-soft: should exit 0 even when session not found
+        # Fail-soft: should exit 0 with no fabricated session.
         assert proc.returncode == 0
         output = proc.stdout.strip()
         assert output == "{}", f"Expected '{{}}' but got: {output!r}"

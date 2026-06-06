@@ -55,6 +55,25 @@ The wrapper has a hard-coded allowlist of subcommands. Unknown subcommands exit 
 
 Adding a new subcommand: append to `ALLOWED_SUBCOMMANDS` in `scripts/sdlc-tool`. The kebab-case name maps to `tools.sdlc_<snake_case>` automatically.
 
+## Session resolution and write-path auto-ensure (`find_session(..., ensure=True)`)
+
+All `sdlc-tool` subcommands store/read pipeline state on a **PM `AgentSession`'s `stage_states`** in Redis — not in the plan file or git. They resolve that session through the shared resolver `find_session(session_id=None, issue_number=None, ensure=False)` in `tools/_sdlc_utils.py`.
+
+Resolution order (unchanged): explicit `session_id` arg → `VALOR_SESSION_ID` env → `AGENT_SESSION_ID` env → `find_session_by_issue(issue_number)`.
+
+**The `ensure` parameter (issue #1558):**
+
+- **`ensure=False` (default)** — a pure, side-effect-free lookup. Returns the session or `None`. **No session is ever created.** Every *read* path uses this: `verdict get`, `stage-query`, `next-skill`, and `meta-set`/`stage-marker` when called by read-only code. This preserves the original pre-#1558 lookup behavior byte-for-byte.
+- **`ensure=True`** — opt-in auto-create. When no existing PM session is found **and** there is issue context (`issue_number >= 1`) **or** a session-id env var is set, the resolver calls `tools.sdlc_session_ensure.ensure_session(issue_number)` to create (or dedup onto a live bridge session) a `sdlc-local-{N}` PM session, then re-resolves and returns it. A bare sessionless call with no issue context still returns `None` — no fabricated session. An ensure failure (e.g. `ProjectKeyResolutionError`) yields `None` rather than raising.
+
+**Only the three *write* subcommands pass `ensure=True`:** `sdlc_meta_set.write_meta`, `sdlc_stage_marker.write_marker`, and `sdlc_verdict._cli_record`. This guarantees a state *write* always has a home regardless of how the pipeline is driven — a direct `sdlc-tool verdict record` in a clean (non-`/sdlc`) session now persists instead of silently no-op'ing. The opt-in is grep-able: `grep -rn 'ensure=True' tools/` surfaces exactly the three write sites plus the signature in `_sdlc_utils.py`.
+
+This **supersedes the per-skill `session-ensure` requirement for non-`/sdlc` callers.** The explicit `sdlc-tool session-ensure` call in `/sdlc` Step 1.5 is now belt-and-suspenders (tagged `REDUNDANT-AFTER-#1558` in `SKILL.md`) — auto-ensure on the first write covers callers that never pass through `/sdlc`.
+
+**Read-after-write within `find_session_by_issue`:** an auto-ensured `sdlc-local-{N}` session carries no `issue_url`/`message_text`, so the read paths match it by its **deterministic session id** (`sdlc-local-{issue_number}`) first, before the `issue_url`/`message_text` scans. This is what lets a sessionless `verdict record` be read back by a separate `verdict get`/`stage-query` process (verified end-to-end in `tests/integration/test_sdlc_sessionless_e2e.py`).
+
+`tools/sdlc_stage_query.py` is **read-only and intentionally left unchanged** — it keeps its own `_find_session_by_id`/`_find_session_by_issue` helpers (which delegate to the shared `find_session_by_issue`), returns correct `_default_meta()` defaults when no session exists, and finds the session once a write has ensured it. Its `_parse_revision_applied`/`_compute_meta` frontmatter reads were already correct; they fire as soon as a session exists.
+
 ## Loud-vs-silent policy
 
 The two load-bearing recorders (`verdict`, `dispatch`) exit 1 when their inner CLI handler raises. This is the core fix for issue #1175 — without these exit codes, removing `|| true` from skill markdown is cosmetic.

@@ -46,8 +46,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
+
+from tools._sdlc_utils import find_session
 
 logger = logging.getLogger(__name__)
 
@@ -103,50 +104,6 @@ def _coerce_value(key: str, raw_value: str):
     return raw_value
 
 
-def _find_session(session_id: str | None, issue_number: int | None = None):
-    """Find a PM AgentSession by explicit ID, env vars, or issue number.
-
-    Resolution order:
-    1. --session-id argument (if provided)
-    2. VALOR_SESSION_ID env var
-    3. AGENT_SESSION_ID env var
-    4. --issue-number argument (primary path for local Claude Code sessions)
-
-    Returns the session object or None.
-    """
-    resolved_id = (
-        session_id or os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")
-    )
-    if not resolved_id:
-        if issue_number is not None:
-            try:
-                from tools._sdlc_utils import find_session_by_issue
-
-                session = find_session_by_issue(issue_number)
-                if session:
-                    return session
-            except Exception as e:
-                logger.debug(f"sdlc_meta_set: issue-number lookup failed: {e}")
-        logger.debug("sdlc_meta_set: no session ID available (no arg, no env vars, no issue)")
-        return None
-
-    try:
-        from models.agent_session import AgentSession
-
-        sessions = list(AgentSession.query.filter(session_id=resolved_id))
-        if not sessions:
-            logger.debug(f"sdlc_meta_set: no session found for ID {resolved_id!r}")
-            return None
-        # Prefer PM sessions (they own stage_states)
-        for s in sessions:
-            if getattr(s, "session_type", None) == "pm":
-                return s
-        return sessions[0]
-    except Exception as e:
-        logger.debug(f"sdlc_meta_set: _find_session failed: {e}")
-        return None
-
-
 def write_meta(
     key: str,
     value: str,
@@ -174,7 +131,7 @@ def write_meta(
         logger.debug(f"sdlc_meta_set: value coercion failed for key {key!r}: {e}")
         return {}
 
-    session = _find_session(session_id, issue_number=issue_number)
+    session = find_session(session_id, issue_number=issue_number, ensure=True)
     if not session:
         return {}
 
