@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Large
 owner: Valor
 created: 2026-06-06
 tracking: https://github.com/tomcounsell/ai/issues/1578
 last_comment_id:
+revision_applied: true
 ---
 
 # Test Suite Cleanup — Zero Failures on `main`
@@ -46,7 +47,7 @@ by running each named cluster with `-n0` (serial) at plan time.
 | A | `test_long_task_checkpointing::test_progress_md_in_build_soft_check` | 1 | 1 FAIL | unchanged |
 | B | `test_do_merge_review_filter` | 10 | **0 FAIL (15 PASS)** | RESOLVED |
 | B | `test_markitdown_ingestion` | 1 | **0 FAIL (3 PASS)** | RESOLVED |
-| C | `test_watchdog_recovery::TestWatchdogDetectsUnexpectedExit` | 4 | 4 FAIL | unchanged |
+| ~~C~~ → **E** | `test_watchdog_recovery::TestWatchdogDetectsUnexpectedExit` | 4 | 4 FAIL | **RECLASSIFIED**: test-isolation bug, not a source bug (see below) |
 | C | `test_harness_oom_backoff` | 2 | 2 FAIL | unchanged |
 | C | `test_health_check_recovery_finalization` | 4 | 4 FAIL | unchanged |
 | D | `test_memory_mcp_server::test_fresh_shell_import_resolution` | 1 | **0 FAIL (PASS)** | RESOLVED (`mcp` installed) |
@@ -61,6 +62,7 @@ by running each named cluster with `-n0` (serial) at plan time.
 - `tools/knowledge/indexer.py` `full_scan` — issue claimed "cannot import name 'full_scan'" — **gone**: `full_scan` is defined at `indexer.py:449` and imports cleanly. `test_markitdown_ingestion` passes.
 - `.claude/commands/do-merge.md` — issue claimed tests read a worktree-only file — **drifted**: `test_do_merge_review_filter` now reads `docs/sdlc/do-merge.md` (REPO_ROOT/docs/sdlc/do-merge.md), which exists on `main`; all 15 tests pass. The "land `do-merge.md` or delete tests" product decision is **moot**.
 - `agent/session_executor.py` (Category C reprieve/OOM source) — **drifted**: `_agent_session_health_check` now lives in `agent/session_health.py:1422`. The OOM-backoff test (`test_harness_oom_backoff`) and the reprieve-scoping tests (`test_health_check_recovery_finalization::TestReprieveScopedToNoProgress`) `inspect.getsource` of `agent/session_health.py`. The "Fallback finalization" sub-test still inspects `agent/session_executor.py`. Category C fixes target **both** modules.
+- **`monitoring/worker_watchdog.py` (watchdog cluster) — CORRECTED ROOT CAUSE:** The issue diagnosed the 4 `TestWatchdogDetectsUnexpectedExit` failures as "heartbeat TTL too permissive (132s-old heartbeat still healthy)." This is **wrong**. Verified at plan time: `check()` (`worker_watchdog.py:145`) returns `down` **only** when `_get_worker_pid()` returns `None`; the `HEARTBEAT_THRESHOLD` (=600s) branch is never reached when a PID is found. `_get_worker_pid()` (`worker_watchdog.py:119`) runs a **global** `pgrep -if "python -m worker"`. The test (`_spawn_fake_worker`) fabricates a process matching that pattern, kills it, and expects `down` — but on any machine where a **real worker is already running** (confirmed: PID 94409 = `python -m worker` on this box), the global pgrep matches the real worker, so `check()` returns `ok` and all 4 tests fail. This is a **test-isolation defect, not a source bug**: tightening the heartbeat TTL would not flip any of these 4 tests. Reclassified to **Category E** (environment/isolation). See the Category E technical approach for the fix.
 - `config/reflections.yaml` — issue claimed `every: 300s` vs test expecting `interval: 300` — **confirmed**: yaml uses `every: 300s`; tests `KeyError: 'interval'`.
 
 **Cited sibling issues/PRs re-checked:** Issue body cites no blocking sibling issues. Prior-art
@@ -145,13 +147,17 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/test-suite-cle
 - **Category A — drift (update tests, do NOT change source):** Read current source/templates,
   update test assertions to the *intended* current behaviour. Six independent clusters.
 - **Category B — RESOLVED:** No work. Add verification line-items asserting the clusters still pass.
-- **Category C — real bugs (fix source to match documented spec):** Three source defects in the
-  worker recovery path. Fix `agent/session_health.py` (and `agent/session_executor.py` for the
-  fallback-finalization sub-check) so behaviour matches the spec the tests encode.
+- **Category C — real bugs (fix source to match documented spec):** **Two** source defects in the
+  worker recovery path (the watchdog cluster was reclassified to E). Fix `agent/session_health.py`
+  (and `agent/session_executor.py` for the fallback-finalization sub-check) so behaviour matches the
+  spec the tests encode: (1) OOM `pre_bump_attempts` capture ordering, (2) reprieve scoping.
 - **Category D — env/install:** `mcp` is resolved; fix the `audit_skills` import so
   `test_skills_audit` collects (resolve the conftest/import path).
-- **Category E — flaky under xdist:** Isolate the two parallel-only failures via `xdist_group`
-  marker or unique per-worker Redis key prefixes so they pass under `-n auto`.
+- **Category E — environment/isolation (test-only fixes):** Isolate tests that fail because of shared
+  external state (parallelism OR a coexisting real worker). Three sub-clusters: (1) the watchdog
+  `TestWatchdogDetectsUnexpectedExit` (4) — make the test track its **own** spawned PID instead of a
+  global pgrep; (2) `test_memory_ingestion` Redis collision under xdist; (3) `test_compose_system_prompt`
+  fixture-ordering under xdist. All Category E fixes are **test-only** — no source change.
 - **Category F — performance/timing:** Re-run at build time; for each, either fix the slow path or
   justify a recalibrated threshold with an inline comment. Live-Haiku tests get a `skipif` guard
   when the API key/CI signal is absent rather than a weakened assertion.
@@ -180,31 +186,48 @@ fixes (parallel) → re-run full suite → 0 failures, 0 errors → refresh merg
   `.claude/skills/do-build/SKILL.md`; canonical path is `.claude/skills-global/do-build/SKILL.md`.
   Update `REPO_ROOT / ".claude" / "skills" / "do-build"` → `"skills-global"`.
 
-**Category C (source fixes):**
-- Watchdog TTL (`test_watchdog_recovery::TestWatchdogDetectsUnexpectedExit`, 4): the watchdog reports
-  `ok` after the worker is killed because the heartbeat TTL is too permissive (a stale heartbeat still
-  reads healthy). Tighten the down-detection so a killed worker reports `down` immediately, matching
-  the acceptance-criterion timing the tests assert.
+**Category C (source fixes — 2 clusters, 6 failures):**
 - OOM backoff (`test_harness_oom_backoff`, 2): `_agent_session_health_check` in
-  `agent/session_health.py` must capture `pre_bump_attempts = entry.recovery_attempts or 0` BEFORE the
-  OOM-defer condition so the defer triggers only on OS kills (`pre_bump_attempts == 0`). Add the capture
-  line and ordering; the test asserts bytecode references `pre_bump_attempts` before the defer condition.
+  `agent/session_health.py` must capture `pre_bump_attempts` BEFORE the OOM-defer condition so the defer
+  triggers only on OS kills (`pre_bump_attempts == 0`). The test (`test_oom_defer_uses_pre_bump_attempts`)
+  `inspect.getsource`s the function and asserts the **exact** strings and ordering:
+  - the line `pre_bump_attempts = entry.recovery_attempts or 0` must be present, AND
+  - its index must be `<` the index of the substring `and pre_bump_attempts == 0`.
+  A second test (`test_oom_defer_condition_grep_present`) asserts the defer block references
+  `exit_returncode == -9` and `pre_bump_attempts == 0`. Add the capture line above the existing OOM-defer
+  condition; do not rename the variable — the tests pin the literal text.
 - Reprieve scoping (`test_health_check_recovery_finalization::TestReprieveScopedToNoProgress` +
   `TestRecoveryAttempts`, 4): the Tier 1/Tier 2 reprieve block must be gated on
   `_reason_kind == "no_progress"` so a reprieve is not granted for all recovery types. Add the gating
   condition, the `tier1_flagged_total` increment under that gate, and the degraded-Tier-2 debug log
   ("Tier 2 reprieve will only see compaction state") when the handle is None. Source: `agent/session_health.py`.
+  Builder MUST `inspect.getsource` the asserted strings in the test before editing — these are textual
+  pins, so the source must contain the exact substrings the test greps for.
 
 **Category D:**
 - `test_skills_audit` collection error: `ModuleNotFoundError: No module named 'audit_skills'`. Resolve
   the import — add the audit-skills source dir to the test path (conftest `sys.path` insert or a proper
   package import), matching how the module is actually shipped. Do not delete the test.
 
-**Category E:**
-- Add `@pytest.mark.xdist_group(name="...")` to co-locate the colliding tests on one worker, or give each
-  test a unique per-worker Redis key prefix (e.g. derive from `PYTEST_XDIST_WORKER`). Prefer unique key
-  prefixes for `test_memory_ingestion` (Redis collision) and an `xdist_group` for
-  `test_compose_system_prompt` (shared fixture / ordering).
+**Category E (environment/isolation — test-only, 3 sub-clusters, 6 failures):**
+- **Watchdog (`TestWatchdogDetectsUnexpectedExit`, 4):** The test fails whenever a real `python -m worker`
+  is running because `check()` → `_get_worker_pid()` does a **global** `pgrep -if "python -m worker"` that
+  matches the real worker, not just the test's fabricated one. Fix the **test** (not the source — the
+  global pgrep is correct production behaviour): patch `monitoring.worker_watchdog._get_worker_pid` within
+  each test to return the fake worker's actual PID while it lives and `None` after it's killed (track the
+  `proc.pid` from `_spawn_fake_worker` and check `proc.poll()`), OR `@pytest.mark.skipif` when a real
+  worker is detected on the host. **Preferred:** mock `_get_worker_pid` to the spawned PID so the test is
+  deterministic on every machine (including the worker box) — skipping silently drops coverage. The 4 tests
+  then exercise the real `check()` down/ok/stale branch logic against a controlled PID. Confirm the timing
+  assertions (`elapsed < MAX_DETECTION_LATENCY` = 130s) still hold — they will, since `check()` is
+  synchronous and sub-second once `_get_worker_pid` is deterministic.
+- **`test_memory_ingestion::test_human_message_creates_memory` (1, Redis collision):** Give the test a
+  unique per-worker Redis key prefix derived from `PYTEST_XDIST_WORKER` (or a Popoto-scoped unique project
+  key) so two xdist workers never touch the same key. Fixes the real collision rather than serializing.
+- **`test_compose_system_prompt::test_pm_cell_byte_stable_against_local_fixture` (1, fixture ordering):**
+  Pin to one worker via `@pytest.mark.xdist_group(name="compose_system_prompt")`, or make the fixture read
+  deterministic (sorted iteration / isolated copy). Prefer the deterministic-read fix if it's a small change;
+  fall back to `xdist_group` if the non-determinism is in shared global state another worker mutates.
 
 **Category F:**
 - Re-run all three clusters at build start. For `test_memory_prefetch` and `test_benchmarks`: profile;
@@ -238,8 +261,8 @@ fixes (parallel) → re-run full suite → 0 failures, 0 errors → refresh merg
 - [ ] `tests/unit/test_reflection_scheduler.py` (3 cases) — UPDATE: read `every` key (parse `Ns`) instead of `interval`.
 - [ ] `tests/unit/test_model_relationships.py::TestTelegramMessageEnrichmentFields::test_enrichment_field_count` — UPDATE: `== 18` → `== 20`.
 - [ ] `tests/unit/test_long_task_checkpointing.py::test_progress_md_in_build_soft_check` — UPDATE: path `skills` → `skills-global`.
-- [ ] `tests/integration/test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit` (4 cases) — KEEP (source fix makes them pass).
-- [ ] `tests/unit/test_harness_oom_backoff.py` (2 cases) — KEEP (source fix makes them pass).
+- [ ] `tests/integration/test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit` (4 cases) — UPDATE (Category E): mock `_get_worker_pid` to the fake worker's PID so the test is isolated from a coexisting real worker. No source change.
+- [ ] `tests/unit/test_harness_oom_backoff.py` (2 cases) — KEEP (Category C source fix makes them pass).
 - [ ] `tests/unit/test_health_check_recovery_finalization.py::TestReprieveScopedToNoProgress` + `::TestRecoveryAttempts` (4 cases) — KEEP (source fix makes them pass).
 - [ ] `tests/unit/test_skills_audit.py` — KEEP: fix `audit_skills` import so the module collects.
 - [ ] `tests/unit/test_memory_ingestion.py::test_human_message_creates_memory` — UPDATE: add unique per-worker Redis key prefix.
@@ -265,12 +288,21 @@ fixes (parallel) → re-run full suite → 0 failures, 0 errors → refresh merg
 ## Risks
 
 ### Risk 1: Category C source fixes change recovery behaviour in production
-**Impact:** Tightening watchdog TTL or reprieve scoping could make the worker more aggressive about
-declaring sessions down / less forgiving on recovery, affecting live session reliability.
+**Impact:** Changing reprieve scoping or OOM-defer ordering could make the worker less forgiving on
+recovery, affecting live session reliability. (The watchdog cluster is NO LONGER a source change — it
+moved to Category E as a test-only isolation fix, removing the production-behaviour risk it carried.)
 **Mitigation:** Make changes match the documented spec the tests already encode (these are
 under-implementations of agreed behaviour, not new policy). Route Category C through a code-review round.
-Run the full `test_watchdog_recovery` and `test_health_check_recovery_finalization` suites, not just the
-failing subset, to confirm no neighbouring behaviour regresses.
+Run the full `test_health_check_recovery_finalization` suite, not just the failing subset, to confirm no
+neighbouring behaviour regresses.
+
+### Risk 1b: Watchdog test mock diverges from production `check()` behaviour
+**Impact:** Mocking `_get_worker_pid` in the watchdog test could mask a future real regression in the
+global-pgrep liveness logic, since the mock bypasses the actual PID lookup.
+**Mitigation:** Mock ONLY `_get_worker_pid` (the environment-coupled boundary) and let the real `check()`
+exercise its down/ok/stale branch logic against the mocked PID. Do NOT mock `check()` itself. The
+production pgrep path is separately covered by `test_check_reports_healthy_while_worker_runs` against a
+genuinely-spawned process. Document in a test comment why the mock exists (coexisting-real-worker hazard).
 
 ### Risk 2: Fixing flaky tests (E) masks a real concurrency bug
 **Impact:** Forcing `xdist_group` could paper over a genuine shared-state defect.
@@ -340,10 +372,11 @@ agent-reachable surface is added.
 
 - [ ] `scripts/pytest-clean.sh tests/ -q` on `main` exits 0 with 0 failures and 0 collection errors
 - [ ] All Category A test files updated to match current source behaviour (no source changes for A)
-- [ ] Category C source bugs fixed: watchdog down-detection TTL, OOM `pre_bump_attempts` capture ordering
-      (`agent/session_health.py`), reprieve scoping gated on `_reason_kind == "no_progress"`
+- [ ] Category C source bugs fixed: OOM `pre_bump_attempts` capture ordering and reprieve scoping gated on
+      `_reason_kind == "no_progress"`, both in `agent/session_health.py` (no `monitoring/worker_watchdog.py` change)
 - [ ] `test_skills_audit` collects and passes (`audit_skills` import resolved)
-- [ ] Flaky xdist tests pass under `-n auto` (unique Redis key prefixes / `xdist_group`)
+- [ ] Category E (test-only) green: watchdog cluster passes with a real worker running (mock `_get_worker_pid`),
+      and the two xdist clusters pass under `-n auto` (unique Redis key prefixes / `xdist_group`)
 - [ ] Category F: each threshold either fixed or justified with an inline comment; live-Haiku tests guarded
 - [ ] Verify-only: `test_do_merge_review_filter` (15) and `test_markitdown_ingestion` (3) still pass
 - [ ] No test deleted and no assertion weakened to a tautology (issue constraint)
@@ -366,7 +399,7 @@ then a validator runs the full suite. Category B has no builder (verify-only).
 
 - **Builder (category-C-bugs)**
   - Name: builder-c-bugs
-  - Role: Fix the three source defects (watchdog TTL, OOM capture ordering, reprieve scoping)
+  - Role: Fix the two source defects (OOM capture ordering, reprieve scoping) in `agent/session_health.py`
   - Agent Type: debugging-specialist
   - Resume: true
 
@@ -376,9 +409,10 @@ then a validator runs the full suite. Category B has no builder (verify-only).
   - Agent Type: builder
   - Resume: true
 
-- **Builder (category-E-flaky)**
-  - Name: builder-e-flaky
-  - Role: Isolate the two parallel-only flaky tests (unique Redis prefixes / xdist_group)
+- **Builder (category-E-env)**
+  - Name: builder-e-env
+  - Role: Isolate the three environment/isolation clusters — watchdog (mock `_get_worker_pid`),
+    `test_memory_ingestion` (unique Redis prefix), `test_compose_system_prompt` (deterministic read / xdist_group)
   - Agent Type: async-specialist
   - Resume: true
 
@@ -407,17 +441,17 @@ then a validator runs the full suite. Category B has no builder (verify-only).
 - Do NOT modify any source file — Category A is test-only.
 - Run each file with `-n0` to confirm green.
 
-### 2. Category C — real source bugs
+### 2. Category C — real source bugs (2 clusters)
 - **Task ID**: build-c-bugs
 - **Depends On**: none
-- **Validates**: tests/integration/test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit, tests/unit/test_harness_oom_backoff.py, tests/unit/test_health_check_recovery_finalization.py
+- **Validates**: tests/unit/test_harness_oom_backoff.py, tests/unit/test_health_check_recovery_finalization.py
 - **Assigned To**: builder-c-bugs
 - **Agent Type**: debugging-specialist
 - **Parallel**: true
-- Tighten watchdog down-detection TTL so a killed worker reports `down` immediately.
-- Add `pre_bump_attempts = entry.recovery_attempts or 0` capture BEFORE the OOM-defer condition in `agent/session_health.py`.
-- Gate Tier 1/Tier 2 reprieve on `_reason_kind == "no_progress"`; add `tier1_flagged_total` increment and degraded-Tier-2 debug log.
-- Run the FULL `test_watchdog_recovery` and `test_health_check_recovery_finalization` suites (not just the failing subset) to confirm no neighbouring regressions.
+- Add `pre_bump_attempts = entry.recovery_attempts or 0` capture BEFORE the OOM-defer condition (`and pre_bump_attempts == 0`) in `agent/session_health.py::_agent_session_health_check`. The test pins exact source strings + ordering — `inspect.getsource` and verify before/after.
+- Gate Tier 1/Tier 2 reprieve on `_reason_kind == "no_progress"`; add `tier1_flagged_total` increment and the degraded-Tier-2 debug log ("Tier 2 reprieve will only see compaction state").
+- Do NOT touch `monitoring/worker_watchdog.py` — the watchdog cluster is Category E (test-only), not a source bug.
+- Run the FULL `test_health_check_recovery_finalization` suite (not just the failing subset) to confirm no neighbouring regressions.
 
 ### 3. Category D — env/install
 - **Task ID**: build-d-env
@@ -429,16 +463,17 @@ then a validator runs the full suite. Category B has no builder (verify-only).
 - Resolve `ModuleNotFoundError: No module named 'audit_skills'` (conftest `sys.path` insert or proper package import).
 - Confirm the file collects and all its cases pass with `-n0`.
 
-### 4. Category E — flaky under xdist
-- **Task ID**: build-e-flaky
+### 4. Category E — environment/isolation (test-only, 3 clusters)
+- **Task ID**: build-e-env
 - **Depends On**: none
-- **Validates**: tests/unit/test_memory_ingestion.py::test_human_message_creates_memory, tests/unit/test_compose_system_prompt.py::test_pm_cell_byte_stable_against_local_fixture
-- **Assigned To**: builder-e-flaky
+- **Validates**: tests/integration/test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit, tests/unit/test_memory_ingestion.py::test_human_message_creates_memory, tests/unit/test_compose_system_prompt.py::test_pm_cell_byte_stable_against_local_fixture
+- **Assigned To**: builder-e-env
 - **Agent Type**: async-specialist
 - **Parallel**: true
-- Give `test_memory_ingestion` a unique per-worker Redis key prefix (fix the real collision).
+- Watchdog (4): patch `monitoring.worker_watchdog._get_worker_pid` in each `TestWatchdogDetectsUnexpectedExit` test to return the fake worker's `proc.pid` while alive and `None` after kill (track `proc.poll()`), so a coexisting real worker no longer masks the kill. Do NOT mock `check()` itself. Add a comment explaining the coexisting-real-worker hazard. **Verify on this machine** (a real worker is running, PID `python -m worker`) — the cluster must go green with a live worker present.
+- Give `test_memory_ingestion` a unique per-worker Redis key prefix derived from `PYTEST_XDIST_WORKER` (fix the real collision).
 - Pin `test_compose_system_prompt` via `xdist_group` or make the fixture read deterministic.
-- Confirm both pass under `-n auto` across repeated runs.
+- Confirm all three pass under `-n auto` across repeated runs AND with a real worker running.
 
 ### 5. Category F — performance/timing
 - **Task ID**: build-f-perf
@@ -452,7 +487,7 @@ then a validator runs the full suite. Category B has no builder (verify-only).
 
 ### 6. Full-suite validation
 - **Task ID**: validate-suite
-- **Depends On**: build-a-drift, build-c-bugs, build-d-env, build-e-flaky, build-f-perf
+- **Depends On**: build-a-drift, build-c-bugs, build-d-env, build-e-env, build-f-perf
 - **Assigned To**: validator-suite
 - **Agent Type**: validator
 - **Parallel**: false
@@ -467,8 +502,9 @@ then a validator runs the full suite. Category B has no builder (verify-only).
 |-------|---------|----------|
 | Full suite green | `scripts/pytest-clean.sh tests/ -q` | exit code 0 |
 | Category A green | `.venv/bin/python -m pytest -n0 tests/unit/test_session_modal_liveness_render.py tests/unit/test_bridge_relay.py tests/unit/test_sdlc_skill_md_parity.py tests/unit/test_reflection_scheduler.py tests/unit/test_model_relationships.py tests/unit/test_long_task_checkpointing.py -q` | exit code 0 |
-| Category C green | `.venv/bin/python -m pytest -n0 tests/integration/test_watchdog_recovery.py tests/unit/test_harness_oom_backoff.py tests/unit/test_health_check_recovery_finalization.py -q` | exit code 0 |
+| Category C green | `.venv/bin/python -m pytest -n0 tests/unit/test_harness_oom_backoff.py tests/unit/test_health_check_recovery_finalization.py -q` | exit code 0 |
 | Category D collects | `.venv/bin/python -m pytest -n0 --collect-only tests/unit/test_skills_audit.py -q` | exit code 0 |
+| Category E green (with real worker running) | `.venv/bin/python -m pytest -n0 tests/integration/test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit -q` then `-n auto tests/unit/test_memory_ingestion.py tests/unit/test_compose_system_prompt.py -q` | exit code 0 |
 | Category B still green | `.venv/bin/python -m pytest -n0 tests/unit/test_do_merge_review_filter.py tests/integration/test_markitdown_ingestion.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
@@ -481,12 +517,34 @@ then a validator runs the full suite. Category B has no builder (verify-only).
 
 ---
 
-## Open Questions
+## Decisions (resolved from prior Open Questions)
 
-1. **Category F disposition:** For `test_memory_prefetch` (8.25s vs 5s budget) and the GC benchmark — do you
-   want the slow path profiled and fixed, or is recalibrating the threshold with a documented measurement
-   acceptable? Default assumption: recalibrate-with-comment unless the slow path is pathological.
-2. **Live-Haiku tests:** OK to `skipif`-guard `TestLiveHaikuReranking` when no API key / in CI, rather than
-   making them hard-required? Default assumption: yes, guard them.
-3. **Scope confirmation:** Category B (11) and the Category D-`mcp` item (1) are already green on `main`. The
-   plan treats them as verify-only. Confirm you don't want any additional hardening there.
+These were Open Questions at first draft; resolved to explicit defaults during the critique-revision pass so
+build is not blocked on round-trips. Each is reversible if the PM/human overrides during review.
+
+1. **Category F disposition — DECIDED: recalibrate-with-comment.** For `test_memory_prefetch` (8.25s vs 5s
+   budget) and the GC benchmark, the builder recalibrates the threshold and writes an inline comment citing
+   the measured value + headroom rationale, UNLESS profiling shows a pathological slow path (a single obvious
+   regression), in which case fix the slow path instead. Builder reports which choice was made per cluster.
+2. **Live-Haiku tests — DECIDED: `skipif`-guard.** `TestLiveHaikuReranking` gets a `skipif` guard on absent
+   `ANTHROPIC_API_KEY` (and a known-CI signal). When the key IS present, the assertions must run against the
+   current response contract — never weakened to a tautology. This keeps coverage where the key exists and
+   avoids non-deterministic CI failures where it does not.
+3. **Scope — DECIDED: verify-only for B and D-`mcp`.** Category B (now green) and the resolved D-`mcp` item are
+   verify-only line-items; no additional hardening is added (avoids scope creep on already-passing clusters).
+
+## Critique-Revision Changelog
+
+This pass corrected one material misclassification surfaced by re-verifying source at plan time:
+
+- **Watchdog cluster (`TestWatchdogDetectsUnexpectedExit`, 4) reclassified C → E.** The issue's "heartbeat
+  TTL too permissive" diagnosis was wrong: `check()` returns `down` only on `_get_worker_pid() is None`, and
+  `_get_worker_pid()` does a **global** `pgrep -if "python -m worker"` that matches any real worker on the
+  host (confirmed: a real worker runs on this machine). The 4 tests fail because they cannot isolate their
+  fabricated worker from a real one — a **test-isolation defect**, not a source bug. The "tighten the TTL"
+  approach would have flipped 0 of the 4 tests. Fix is now test-only (mock `_get_worker_pid`), with no
+  production-behaviour risk. Category C is correspondingly reduced to 2 source clusters (OOM + reprieve).
+- **OOM/reprieve fixes now cite the exact source strings** the tests `inspect.getsource`-pin (e.g.
+  `pre_bump_attempts = entry.recovery_attempts or 0` must precede `and pre_bump_attempts == 0`), removing the
+  prior hand-wavy "match the spec" framing.
+- **Open Questions resolved to explicit defaults** (above) so build proceeds without a human round-trip.
