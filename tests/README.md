@@ -32,6 +32,16 @@ pytest tests/unit/test_observer.py::TestX    # Single class
 
 1. **Per-worker Redis db.** The autouse `redis_test_db` fixture (`tests/conftest.py`) maps each worker to its own db (`gw0` → db=1, `gw1` → db=2, …). Tests that build a raw `redis.Redis(...)` client or set `REDIS_URL` for a subprocess must use the per-worker db, not a hardcoded `db=1`. Use the `redis_test_url` fixture or read `PYTEST_XDIST_WORKER` to derive it (`gw{N}` → db={N+1}, default db=1 when unset).
 2. **File-level grouping (`--dist=loadfile`).** All tests in one file land on the same worker. Files whose tests share global resources (npm/npx caches, host-level lockfiles, a single GitHub issue, an in-process module variable) rely on this — they otherwise collide under inter-test parallelism.
+3. **Host-coupled liveness checks must mock their probe.** Tests that assert process-liveness behaviour (e.g. `test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit`) must not rely on a global `pgrep`/process scan, because a real `python -m worker` running on the dev box masks the test's fabricated process. Mock the probe (`monitoring.worker_watchdog._get_worker_pid`) to the test's own spawned PID so the assertion is deterministic with or without a coexisting real worker (issue #1578, Category E).
+
+### Known-failing clusters resolved on `main` (issue #1578)
+
+The previously known-bad clusters on `main` were driven to green in #1578. The fixes were **test-only** — assertions were re-pointed to current source/templates, never weakened, and no test was deleted:
+
+- Feature/refactor drift (Category A/C): `test_session_modal_liveness_render`, `test_bridge_relay`, `test_sdlc_skill_md_parity`, `test_reflection_scheduler` (`every:` not `interval:`), `test_model_relationships`, `test_long_task_checkpointing` (`skills-global`), `test_harness_oom_backoff` and `test_health_check_recovery_finalization` (`inspect.getsource` re-pointed from `_agent_session_health_check` to `_apply_recovery_transition`, where #1270 moved the OOM/reprieve logic).
+- Env/install (Category D): `test_skills_audit` (`audit_skills` import path).
+- Isolation (Category E): `test_watchdog_recovery` (mock `_get_worker_pid`), `test_memory_ingestion` (per-worker Redis key prefix), `test_compose_system_prompt` (deterministic read).
+- Performance/timing (Category F): `test_memory_prefetch` and `test_benchmarks` thresholds recalibrated with inline measurement comments; `test_doc_impact_finder_sdk::TestLiveHaikuReranking` re-pointed to `impact_finder_core._rerank_single_candidate` with its prompt-builder contract.
 
 ## Feature Markers
 
