@@ -797,12 +797,18 @@ class TestRecoveryAttempts:
 
     def test_health_check_source_mentions_recovery_attempts_and_max(self):
         """Sanity: the health-check kill path references recovery_attempts
-        and MAX_RECOVERY_ATTEMPTS."""
+        and MAX_RECOVERY_ATTEMPTS.
+
+        The recovery transition logic was extracted from
+        ``_agent_session_health_check`` into the shared helper
+        ``_apply_recovery_transition`` by refactor #1270 (issue #1578); inspect
+        the helper where these references now live.
+        """
         import inspect
 
-        from agent import agent_session_queue as q
+        from agent.session_health import _apply_recovery_transition
 
-        src = inspect.getsource(q._agent_session_health_check)
+        src = inspect.getsource(_apply_recovery_transition)
         assert "recovery_attempts" in src
         assert "MAX_RECOVERY_ATTEMPTS" in src
         assert "reprieve_count" in src
@@ -990,19 +996,26 @@ class TestReprieveScopedToNoProgress:
         """
         import inspect
 
-        from agent import agent_session_queue as q
+        # The gate + Tier 1/Tier 2 reprieve logic was extracted from
+        # _agent_session_health_check into the shared helper
+        # _apply_recovery_transition by refactor #1270 (issue #1578). The gate
+        # now reads the `reason_kind` parameter (classified by the caller), so
+        # inspect the helper alone where the whole chain lives.
+        from agent.session_health import _apply_recovery_transition
 
-        src = inspect.getsource(q._agent_session_health_check)
-        assert '_reason_kind == "no_progress"' in src, (
-            "Expected Tier 1/Tier 2 block to be gated on _reason_kind == 'no_progress' "
+        src = inspect.getsource(_apply_recovery_transition)
+        assert 'reason_kind == "no_progress"' in src, (
+            "Expected Tier 1/Tier 2 block to be gated on reason_kind == 'no_progress' "
             "(tech debt 1+2 from #1039 review)"
         )
         # Confirm the gating sits between reason classification and kill path.
-        idx_kind = src.find('_reason_kind = "no_progress"')
-        idx_gate = src.find('_reason_kind == "no_progress"')
+        # `reason_kind` is now a function parameter — its definition site is the
+        # signature, which precedes the gate.
+        idx_kind = src.find("reason_kind")
+        idx_gate = src.find('reason_kind == "no_progress"')
         idx_tier1_counter = src.find("tier1_flagged_total")
         idx_reprieve = src.find("_tier2_reprieve_signal")
-        assert idx_kind < idx_gate, "_reason_kind must be assigned before it is gated"
+        assert idx_kind < idx_gate, "reason_kind must be defined before it is gated"
         assert idx_gate < idx_tier1_counter, (
             "Tier 1 flagged counter must sit INSIDE the no_progress gate"
         )
@@ -1014,9 +1027,10 @@ class TestReprieveScopedToNoProgress:
         inflating the counter (tech debt 1+2)."""
         import inspect
 
-        from agent import agent_session_queue as q
+        # Logic lives in the shared helper post-#1270 (issue #1578).
+        from agent.session_health import _apply_recovery_transition
 
-        src = inspect.getsource(q._agent_session_health_check)
+        src = inspect.getsource(_apply_recovery_transition)
 
         # The counter must be referenced exactly once (single increment site).
         count_refs = src.count("tier1_flagged_total")
@@ -1027,7 +1041,7 @@ class TestReprieveScopedToNoProgress:
 
         # Verify the single reference lives inside the no_progress gated block
         # by checking the text between the gate and the kill path contains it.
-        gate_idx = src.find('_reason_kind == "no_progress"')
+        gate_idx = src.find('reason_kind == "no_progress"')
         kill_idx = src.find("DISABLE_PROGRESS_KILL")
         assert gate_idx != -1 and kill_idx != -1
         gated_section = src[gate_idx:kill_idx]
@@ -1042,9 +1056,10 @@ class TestReprieveScopedToNoProgress:
         can fire)."""
         import inspect
 
-        from agent import agent_session_queue as q
+        # Logic lives in the shared helper post-#1270 (issue #1578).
+        from agent.session_health import _apply_recovery_transition
 
-        src = inspect.getsource(q._agent_session_health_check)
+        src = inspect.getsource(_apply_recovery_transition)
         assert "Tier 2 reprieve will only see compaction state" in src, (
             "Expected a degraded-Tier-2 debug log when handle is None"
         )
