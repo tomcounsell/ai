@@ -111,8 +111,8 @@ reads the post-fix passing suite (see Update System).
   packages are added.
 - **Interface changes**: None. Category C is test-only re-pointing — the OOM-backoff and
   reprieve-scoping behaviour already exists in `_apply_recovery_transition`; no worker recovery
-  semantics change. The only non-test edit is an optional re-export of `_apply_recovery_transition`
-  from `agent/agent_session_queue.py` for the tests to import.
+  semantics change. There is **no** non-test edit — the Category C tests import
+  `_apply_recovery_transition` directly from `agent.session_health` (no re-export added).
 - **Coupling**: Unchanged. Edits are localized per category; categories deliberately do not share
   files, enabling parallel execution.
 - **Data ownership**: Unchanged.
@@ -500,7 +500,7 @@ then a validator runs the full suite. Category B has no builder (verify-only).
 - **Parallel**: true
 - The OOM-defer ordering and reprieve gating already exist in `agent/session_health.py::_apply_recovery_transition` (lines 1096–1419, per refactor #1270). **Do NOT add or change any source line** — re-point the tests.
 - `test_harness_oom_backoff` (2): change `inspect.getsource(session_health._agent_session_health_check)` → `_apply_recovery_transition` at both call sites (lines ~80, ~100). Verify each asserted substring (`pre_bump_attempts = entry.recovery_attempts or 0`, `and pre_bump_attempts == 0`, `exit_returncode", None) == -9`, `_is_memory_tight()`, `timedelta(seconds=120)`, `update_fields=["scheduled_at", "recovery_attempts"]`) is present in the new target.
-- `TestRecoveryAttempts::test_health_check_source_mentions_recovery_attempts_and_max` (1): re-point to `_apply_recovery_transition` (has `recovery_attempts`, `MAX_RECOVERY_ATTEMPTS`, `reprieve_count`). Re-export `_apply_recovery_transition` from `agent/agent_session_queue.py` or import from `agent.session_health` directly.
+- `TestRecoveryAttempts::test_health_check_source_mentions_recovery_attempts_and_max` (1): re-point to `_apply_recovery_transition` (has `recovery_attempts`, `MAX_RECOVERY_ATTEMPTS`, `reprieve_count`). Import it directly via `from agent.session_health import _apply_recovery_transition` — do NOT add a re-export to `agent_session_queue.py`.
 - `TestReprieveScopedToNoProgress` (3): re-point each to `_apply_recovery_transition` (helper-ALONE — the whole gate→tier1→reprieve→kill chain lives there; a caller+helper concat fails because the caller's `DISABLE_PROGRESS_KILL` precedes the helper gate and empties the `src[gate_idx:kill_idx]` slice). Change gate string `_reason_kind == "no_progress"` → `reason_kind == "no_progress"`; re-anchor `idx_kind` on the `reason_kind` parameter (signature line 1100). Never weaken an assertion.
 - Do NOT touch `monitoring/worker_watchdog.py` — the watchdog cluster is Category E (test-only).
 - Run the FULL `test_health_check_recovery_finalization` + `test_harness_oom_backoff` suites with `-n0` to confirm no neighbouring regressions.
