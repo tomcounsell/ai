@@ -221,20 +221,32 @@ the helper.
   `pre_bump_attempts ... < ... and pre_bump_attempts == 0` ordering already hold in the helper. No source edit.
 - `TestRecoveryAttempts::test_health_check_source_mentions_recovery_attempts_and_max` (line 805): asserts
   `recovery_attempts`, `MAX_RECOVERY_ATTEMPTS`, `reprieve_count` in `q._agent_session_health_check`. **Fix =
-  re-point to `_apply_recovery_transition`** (all three present there). Re-export `_apply_recovery_transition`
-  from `agent/agent_session_queue.py` (next to the existing `_agent_session_health_check` re-export) or
-  import it directly from `agent.session_health` in the test.
-- `TestReprieveScopedToNoProgress` (3 — lines 995, 1019, 1047): these assert a **cross-function ordering
-  invariant** that #1270 split across two functions. The gate moved to the helper as
-  `reason_kind == "no_progress"` (no leading underscore), while the `_reason_kind = "no_progress"` assignment
-  and the `DISABLE_PROGRESS_KILL` kill path stayed in `_agent_session_health_check`. **Fix (test-only,
-  preserves the invariant's intent):** inspect the *combined* source of caller + helper
-  (`getsource(_agent_session_health_check) + getsource(_apply_recovery_transition)`) and update the asserted
-  gate string from `_reason_kind == "no_progress"` to the current `reason_kind == "no_progress"`; keep the
-  `idx_assignment < idx_gate < idx_tier1_counter < idx_reprieve` ordering checks (they hold in caller-then-helper
-  concatenation) and re-anchor the `tier1_flagged_total`-before-kill check to the caller's `DISABLE_PROGRESS_KILL`.
-  Builder MUST `inspect.getsource` and re-run after each edit — do NOT weaken any assertion; re-point and
-  re-anchor to where the logic now lives.
+  re-point to `_apply_recovery_transition`** (all three present there). **Prefer importing it directly from
+  `agent.session_health`** in the test (`from agent.session_health import _apply_recovery_transition`) — do
+  NOT add a new re-export to `agent_session_queue.py` (only `_agent_session_health_check` is re-exported
+  there today; a new re-export would be a non-test edit for no benefit).
+- `TestReprieveScopedToNoProgress` (3 — lines 995, 1019, 1047): all three assert a structural invariant
+  (no_progress gate precedes / contains the tier1 counter and the reprieve signal, ahead of the kill path)
+  that now lives **entirely inside `_apply_recovery_transition`**. **Verified at plan time** — the helper
+  contains the gate `reason_kind == "no_progress"` (1185), `tier1_flagged_total` (1189, exactly once),
+  `_tier2_reprieve_signal` (1193), `DISABLE_PROGRESS_KILL` (1217), and the degraded-Tier-2 log (1182), in
+  that order. So the **correct target is the helper ALONE** — *not* a caller+helper concatenation (that
+  fails: the caller's own `DISABLE_PROGRESS_KILL` precedes the helper's gate, collapsing
+  `gated_section = src[gate_idx:kill_idx]` to empty). Per-test fixes:
+  - `test_tier2_reprieve_only_applies_to_no_progress` (995): `getsource(_apply_recovery_transition)`; change
+    the asserted gate string `_reason_kind == "no_progress"` → `reason_kind == "no_progress"`. The
+    "defined-before-gated" check (`idx_kind < idx_gate`) re-anchors on the `reason_kind` **parameter** in the
+    helper signature (line 1100), which precedes the gate — `reason_kind` is now classified by the caller and
+    passed in, so its definition site is the signature. Keep `idx_gate < idx_tier1_counter` and
+    `idx_gate < idx_reprieve` unchanged (both hold in the helper).
+  - `test_tier1_flagged_metric_only_increments_for_no_progress` (1019): `getsource(_apply_recovery_transition)`;
+    `count("tier1_flagged_total") == 1`, `gate_idx = find('reason_kind == "no_progress"')`,
+    `kill_idx = find("DISABLE_PROGRESS_KILL")`, `gated_section = src[gate_idx:kill_idx]` contains the counter —
+    all hold in the helper unchanged except the gate-string underscore.
+  - `test_no_progress_handle_none_debug_log_present` (1047): `getsource(_apply_recovery_transition)`; the
+    `"Tier 2 reprieve will only see compaction state"` log is present — pure re-point.
+  Builder MUST `inspect.getsource` and re-run after each edit; do NOT weaken any assertion — re-point to the
+  helper and adjust only the gate-string underscore + the `idx_kind` anchor.
 
 **Category D:**
 - `test_skills_audit` collection error: `ModuleNotFoundError: No module named 'audit_skills'`. Resolve
@@ -297,7 +309,7 @@ the helper.
 - [ ] `tests/integration/test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit` (4 cases) — UPDATE (Category E): mock `_get_worker_pid` to the fake worker's PID so the test is isolated from a coexisting real worker. No source change.
 - [ ] `tests/unit/test_harness_oom_backoff.py` (2 cases) — UPDATE (Category C): re-point both `inspect.getsource` calls from `_agent_session_health_check` to `_apply_recovery_transition`. No source change.
 - [ ] `tests/unit/test_health_check_recovery_finalization.py::TestRecoveryAttempts::test_health_check_source_mentions_recovery_attempts_and_max` (1 case) — UPDATE (Category C): re-point `getsource` to `_apply_recovery_transition`.
-- [ ] `tests/unit/test_health_check_recovery_finalization.py::TestReprieveScopedToNoProgress` (3 cases) — UPDATE (Category C): inspect combined caller+helper source; change asserted gate string `_reason_kind == "no_progress"` → `reason_kind == "no_progress"`; keep ordering/`tier1_flagged_total`/`DISABLE_PROGRESS_KILL` anchors. No source change.
+- [ ] `tests/unit/test_health_check_recovery_finalization.py::TestReprieveScopedToNoProgress` (3 cases) — UPDATE (Category C): re-point each `getsource` to `_apply_recovery_transition` (helper-ALONE, not combined); change gate string `_reason_kind == "no_progress"` → `reason_kind == "no_progress"`; re-anchor `idx_kind` on the `reason_kind` param. No source change.
 - [ ] `tests/unit/test_skills_audit.py` — KEEP: fix `audit_skills` import so the module collects.
 - [ ] `tests/unit/test_memory_ingestion.py::test_human_message_creates_memory` — UPDATE: add unique per-worker Redis key prefix.
 - [ ] `tests/unit/test_compose_system_prompt.py::test_pm_cell_byte_stable_against_local_fixture` — UPDATE: add `xdist_group` marker.
@@ -489,7 +501,7 @@ then a validator runs the full suite. Category B has no builder (verify-only).
 - The OOM-defer ordering and reprieve gating already exist in `agent/session_health.py::_apply_recovery_transition` (lines 1096–1419, per refactor #1270). **Do NOT add or change any source line** — re-point the tests.
 - `test_harness_oom_backoff` (2): change `inspect.getsource(session_health._agent_session_health_check)` → `_apply_recovery_transition` at both call sites (lines ~80, ~100). Verify each asserted substring (`pre_bump_attempts = entry.recovery_attempts or 0`, `and pre_bump_attempts == 0`, `exit_returncode", None) == -9`, `_is_memory_tight()`, `timedelta(seconds=120)`, `update_fields=["scheduled_at", "recovery_attempts"]`) is present in the new target.
 - `TestRecoveryAttempts::test_health_check_source_mentions_recovery_attempts_and_max` (1): re-point to `_apply_recovery_transition` (has `recovery_attempts`, `MAX_RECOVERY_ATTEMPTS`, `reprieve_count`). Re-export `_apply_recovery_transition` from `agent/agent_session_queue.py` or import from `agent.session_health` directly.
-- `TestReprieveScopedToNoProgress` (3): inspect combined caller+helper source; update gate string `_reason_kind == "no_progress"` → `reason_kind == "no_progress"`; keep the `idx_assignment < idx_gate < idx_tier1 < idx_reprieve` ordering and re-anchor the tier1-before-kill check to the caller's `DISABLE_PROGRESS_KILL`. Never weaken an assertion.
+- `TestReprieveScopedToNoProgress` (3): re-point each to `_apply_recovery_transition` (helper-ALONE — the whole gate→tier1→reprieve→kill chain lives there; a caller+helper concat fails because the caller's `DISABLE_PROGRESS_KILL` precedes the helper gate and empties the `src[gate_idx:kill_idx]` slice). Change gate string `_reason_kind == "no_progress"` → `reason_kind == "no_progress"`; re-anchor `idx_kind` on the `reason_kind` parameter (signature line 1100). Never weaken an assertion.
 - Do NOT touch `monitoring/worker_watchdog.py` — the watchdog cluster is Category E (test-only).
 - Run the FULL `test_health_check_recovery_finalization` + `test_harness_oom_backoff` suites with `-n0` to confirm no neighbouring regressions.
 
@@ -543,6 +555,7 @@ then a validator runs the full suite. Category B has no builder (verify-only).
 | Full suite green | `scripts/pytest-clean.sh tests/ -q` | exit code 0 |
 | Category A green | `.venv/bin/python -m pytest -n0 tests/unit/test_session_modal_liveness_render.py tests/unit/test_bridge_relay.py tests/unit/test_sdlc_skill_md_parity.py tests/unit/test_reflection_scheduler.py tests/unit/test_model_relationships.py tests/unit/test_long_task_checkpointing.py -q` | exit code 0 |
 | Category C green | `.venv/bin/python -m pytest -n0 tests/unit/test_harness_oom_backoff.py tests/unit/test_health_check_recovery_finalization.py -q` | exit code 0 |
+| Category C not vacuous (substrings present in re-pointed target) | `.venv/bin/python -c "import inspect; from agent.session_health import _apply_recovery_transition as f; s=inspect.getsource(f); assert all(x in s for x in ['pre_bump_attempts = entry.recovery_attempts or 0','reason_kind == \"no_progress\"','tier1_flagged_total','Tier 2 reprieve will only see compaction state']); print('ok')"` | prints `ok` |
 | Category D collects | `.venv/bin/python -m pytest -n0 --collect-only tests/unit/test_skills_audit.py -q` | exit code 0 |
 | Category E green (with real worker running) | `.venv/bin/python -m pytest -n0 tests/integration/test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit -q` then `-n auto tests/unit/test_memory_ingestion.py tests/unit/test_compose_system_prompt.py -q` | exit code 0 |
 | Category B still green | `.venv/bin/python -m pytest -n0 tests/unit/test_do_merge_review_filter.py tests/integration/test_markitdown_ingestion.py -q` | exit code 0 |
@@ -551,9 +564,13 @@ then a validator runs the full suite. Category B has no builder (verify-only).
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). Re-critique of revision pass 3 (2026-06-06). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic, Adversary | `TestReprieveScopedToNoProgress` (3) cannot pass via "inspect combined caller+helper source" as the plan prescribes. The 2 source-audit sub-tests have conflicting `getsource` needs that no single concatenation satisfies. | TBD (revision) | `test_tier1_flagged_metric_only_increments_for_no_progress` does `src[gate_idx:kill_idx]` where `kill_idx=src.find("DISABLE_PROGRESS_KILL")`. In `caller+helper`, the caller's `DISABLE_PROGRESS_KILL` (idx 14688) precedes the helper's gate (idx 23344) → `gate_idx<kill_idx` is **False**, slice empty, assert fails. Use **helper-alone** source for this test (gate/tier1/reprieve/kill all live in helper, ordering holds). But `test_tier2_reprieve_only_applies_to_no_progress` needs the assignment `_reason_kind = "no_progress"` which exists **only in the caller** (line 1617) — not in helper. The two tests need DIFFERENT getsource targets; rework each assertion explicitly rather than one combined-source prescription. |
+| CONCERN | Skeptic | Plan's literal claim "the ordering checks hold in caller-then-helper concatenation" is factually wrong (verified). | TBD (revision) | In `caller+helper`: `gate < kill` is False because `DISABLE_PROGRESS_KILL` appears 3× (1 in caller, 2 in helper) and `.find` returns the caller's first. Correct the plan text in §Technical Approach Category C and Task 2 to specify per-test getsource targets. |
+| CONCERN | Operator | Verification command for Category C (`pytest -n0 test_harness_oom_backoff test_health_check_recovery_finalization`) will not catch the vacuous-pass risk Risk 1 names — passing tests don't prove the substring is in the *intended* function. | TBD (revision) | Builder must `inspect.getsource` and grep the target function for each pinned substring as a separate step (already in Task 2 prose); promote it to a Verification-table row: `python -c "import inspect; from agent.session_health import _apply_recovery_transition as f; assert 'pre_bump_attempts == 0' in inspect.getsource(f)"`. |
+| NIT | Simplifier | `_apply_recovery_transition` re-export from `agent_session_queue.py` is needed (only `_agent_session_health_check` is re-exported at line 77); tests could import from `agent.session_health` directly and skip the re-export. | TBD (revision) | Prefer the direct import `from agent.session_health import _apply_recovery_transition` in the test — avoids adding a new public-ish surface to `agent_session_queue.py` for a test-only need. |
 
 ---
 
