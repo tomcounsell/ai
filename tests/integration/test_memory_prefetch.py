@@ -272,10 +272,20 @@ class TestPrefetchLatencyBudget:
                 isolated_project_key,
             )
 
-        # Subprocess overhead dominates; allow a generous wall-clock slack
-        # but the in-process prefetch must stay close to the documented
-        # budget on a small fixture.
-        budget_seconds = max((PREFETCH_LATENCY_WARN_MS / 1000.0) * 10, 5.0)
+        # This test wall-clocks a *cold* Python subprocess (interpreter
+        # start + hook import + Redis query), so its runtime is dominated by
+        # interpreter/import cost, not by the prefetch query itself. Measured
+        # 2026-06 on a 10-core machine: ~3.3-4.9s quiet (single run), mean
+        # 5.54s / max 6.66s under 2x-oversubscribed CPU contention, and 8.25s
+        # observed under the full ~50-worker `-n auto` suite. The old 5.0s
+        # budget had effectively zero headroom even when idle and flaked under
+        # parallel load. Recalibrated to 15.0s: ~1.8x over the worst observed
+        # 8.25s — enough to absorb CPU-contention jitter while still catching a
+        # genuine multi-fold regression in interpreter/import/query cost. We
+        # keep the WARN_MS-derived term so a tightening of the documented
+        # budget still raises the floor; the literal floor is the recalibrated
+        # contention-safe value.
+        budget_seconds = max((PREFETCH_LATENCY_WARN_MS / 1000.0) * 10, 15.0)
 
         start = time.monotonic()
         _run_user_prompt_submit_hook(

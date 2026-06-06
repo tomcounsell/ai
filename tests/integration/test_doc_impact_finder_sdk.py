@@ -146,7 +146,12 @@ class TestLiveHaikuReranking:
         """Haiku should score a clearly relevant doc section >= 5."""
         import anthropic
 
-        from tools.doc_impact_finder import _rerank_single_candidate
+        # _rerank_single_candidate moved to impact_finder_core and now takes a
+        # pre-built prompt (built via the doc-specific prompt builder), not the
+        # raw change summary. Contract otherwise unchanged: returns
+        # (score, reason, chunk) for score >= 5, else None.
+        from tools.doc_impact_finder import _doc_rerank_prompt
+        from tools.impact_finder_core import _rerank_single_candidate
 
         client = anthropic.Anthropic()
         change = "Refactored session isolation to use slug-based worktrees instead of thread IDs"
@@ -161,7 +166,7 @@ class TestLiveHaikuReranking:
                 "Git worktrees provide filesystem isolation under .worktrees/{slug}/"
             ),
         }
-        result = _rerank_single_candidate(client, change, chunk)
+        result = _rerank_single_candidate(client, _doc_rerank_prompt(change, chunk), chunk)
         assert result is not None, "Haiku should score this chunk >= 5"
         score, reason, _ = result
         assert score >= 5, f"Expected score >= 5, got {score}: {reason}"
@@ -171,7 +176,8 @@ class TestLiveHaikuReranking:
         """Haiku should score a clearly irrelevant doc section < 5."""
         import anthropic
 
-        from tools.doc_impact_finder import _rerank_single_candidate
+        from tools.doc_impact_finder import _doc_rerank_prompt
+        from tools.impact_finder_core import _rerank_single_candidate
 
         client = anthropic.Anthropic()
         change = "Refactored session isolation to use slug-based worktrees instead of thread IDs"
@@ -189,7 +195,7 @@ class TestLiveHaikuReranking:
                 "- 1.5 cups all-purpose flour"
             ),
         }
-        result = _rerank_single_candidate(client, change, chunk)
+        result = _rerank_single_candidate(client, _doc_rerank_prompt(change, chunk), chunk)
         # Should return None (score < 5) for banana bread recipe
         assert result is None, f"Haiku should not flag banana bread as relevant: {result}"
 
@@ -199,7 +205,8 @@ class TestLiveHaikuReranking:
 
         import anthropic
 
-        from tools.doc_impact_finder import _rerank_single_candidate
+        from tools.doc_impact_finder import _doc_rerank_prompt
+        from tools.impact_finder_core import _rerank_single_candidate
 
         client = anthropic.Anthropic()
         change = "Added new CLI flag --verbose to bridge startup"
@@ -235,7 +242,10 @@ class TestLiveHaikuReranking:
         results = []
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = {
-                executor.submit(_rerank_single_candidate, client, change, c): c for c in chunks
+                executor.submit(
+                    _rerank_single_candidate, client, _doc_rerank_prompt(change, c), c
+                ): c
+                for c in chunks
             }
             for future in as_completed(futures):
                 r = future.result()
@@ -252,21 +262,25 @@ class TestLiveHaikuReranking:
         """Verify the code fence stripping fix works with real Haiku responses."""
         import anthropic
 
-        from tools.doc_impact_finder import _rerank_single_candidate
+        from tools.doc_impact_finder import _doc_rerank_prompt
+        from tools.impact_finder_core import _rerank_single_candidate
 
         client = anthropic.Anthropic()
         # Use a prompt that's clearly relevant to force a response
+        chunk = {
+            "path": "docs/deployment.md",
+            "section": "## Deployment Steps",
+            "content_preview": (
+                "## Deployment Steps\n\n1. Clone the repo\n2. Run setup script"
+                "\n3. Configure .env\n4. Start bridge"
+            ),
+        }
         result = _rerank_single_candidate(
             client,
-            "Completely rewrote the deployment guide with new instructions",
-            {
-                "path": "docs/deployment.md",
-                "section": "## Deployment Steps",
-                "content_preview": (
-                    "## Deployment Steps\n\n1. Clone the repo\n2. Run setup script"
-                    "\n3. Configure .env\n4. Start bridge"
-                ),
-            },
+            _doc_rerank_prompt(
+                "Completely rewrote the deployment guide with new instructions", chunk
+            ),
+            chunk,
         )
         # If fence stripping works, we get a parsed result (not a parse error → None)
         assert result is not None, (
