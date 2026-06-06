@@ -681,6 +681,49 @@ class TestDigestAnomalyPromptPlainLanguage(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# TestDigestSilentWhenNominal
+# ---------------------------------------------------------------------------
+
+
+class TestDigestSilentWhenNominal(unittest.TestCase):
+    """sustainability_digest() must send NOTHING and enqueue NOTHING on a healthy day."""
+
+    def test_digest_nominal_stays_silent(self):
+        """All signals nominal → no Telegram send, no agent session enqueued."""
+        import models.agent_session as asm
+        from agent.sustainability import sustainability_digest
+
+        # Healthy: closed circuits, throttle none, queue not paused, no clusters.
+        health_mod, resilience_mod, _cb = _build_health_stubs("closed")
+
+        r = MagicMock()
+        r.get.return_value = b"none"  # throttle_level = "none"
+        r.exists.return_value = 0  # queue not paused
+        r.scard.return_value = 0  # no fingerprint clusters
+
+        fake_session_cls = MagicMock()
+        fake_session_cls.query.filter.return_value = []  # no sessions → failed_24h = 0
+
+        with (
+            patch("agent.sustainability._get_redis", return_value=r),
+            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch.object(asm, "AgentSession", fake_session_cls),
+            patch.dict(
+                sys.modules,
+                {
+                    "bridge.health": health_mod,
+                    "bridge.resilience": resilience_mod,
+                },
+            ),
+        ):
+            sustainability_digest()
+
+        # Silent on healthy: no agent session enqueued. There is no Telegram
+        # path left on the nominal branch — it logs and returns.
+        fake_session_cls.create_and_enqueue.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # TestCircuitHealthGateRegistered
 # ---------------------------------------------------------------------------
 

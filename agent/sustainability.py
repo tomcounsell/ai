@@ -5,7 +5,7 @@ Seven standalone reflection functions, each registered in config/reflections.yam
 - session_recovery_drip: drip paused_circuit and paused sessions back to pending one at a time
 - session_count_throttle: throttle sessions per hour to prevent runaway execution
 - failure_loop_detector: deduplicate GitHub issues for repeated error patterns
-- sustainability_digest: daily Telegram health summary
+- sustainability_digest: daily health check, exception-only Telegram delivery (silent when nominal)
 - send_hibernation_notification: enqueue a Telegram notification for hibernation entry or wake
 
 All functions are synchronous (run in executor by the reflection scheduler).
@@ -493,13 +493,16 @@ def _file_github_issue(fingerprint: str, sessions: list, session_ids: list) -> N
 
 
 def sustainability_digest() -> None:
-    """Send a daily health summary to Telegram.
+    """Daily health check with exception-only Telegram delivery.
 
-    Checks all health signals locally. If everything is nominal, sends a
-    one-line "all clear" directly via valor-telegram (no agent session needed).
-    Only spins up a full agent session when there are anomalies worth reporting.
+    Checks all health signals locally. If everything is nominal, sends
+    NOTHING — the daily all-clear is intentional noise; live status is always
+    on the dashboard. Only spins up a full agent session to report when there
+    are anomalies worth Tom's attention.
 
-    This reflection is registered with interval 86400s (daily).
+    This reflection is registered with interval 86400s (daily) as a
+    function-type callable, so the silence-on-healthy contract is deterministic
+    rather than relying on an LLM agent to choose to send nothing.
     """
     try:
         from models.agent_session import AgentSession
@@ -561,9 +564,10 @@ def sustainability_digest() -> None:
         )
 
         if is_nominal:
-            # Send a one-liner directly — no agent session needed
-            _send_telegram("🩺 Daily health check — all clear, no surprises.")
-            logger.info("[system-health-digest] All nominal — sent one-liner")
+            # Exception-only delivery: on a healthy day, send NOTHING. The daily
+            # all-clear is intentional noise Tom does not want — live status is
+            # always on the dashboard (localhost:8500). Sending nothing is success.
+            logger.info("[system-health-digest] All nominal — staying silent (no all-clear ping)")
         else:
             # Something noteworthy — spin up an agent to investigate and report
             anomalies = []
@@ -613,22 +617,3 @@ def sustainability_digest() -> None:
             )
     except Exception:
         logger.exception("[system-health-digest] Unhandled exception — skipping tick")
-
-
-def _send_telegram(message: str) -> None:
-    """Send a message to the 'Dev: Valor' chat via valor-telegram CLI."""
-    try:
-        result = subprocess.run(
-            ["valor-telegram", "send", "--chat", "Dev: Valor", message],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            logger.error(
-                "[system-health-digest] valor-telegram send failed (rc=%d): %s",
-                result.returncode,
-                result.stderr.strip(),
-            )
-    except Exception as e:
-        logger.error("[system-health-digest] Failed to send Telegram message: %s", e)

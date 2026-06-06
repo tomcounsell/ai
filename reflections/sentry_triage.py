@@ -4,7 +4,10 @@ reflections/sentry_triage.py — Sentry issue triage reflection callable.
 Queries the Sentry API for unresolved issues across all projects in the org,
 classifies them (A–E), files GitHub issues for actionable ones, and updates
 Sentry state for A/B/E (gated by SENTRY_TRIAGE_APPLY env var, default off).
-A summary is sent to Telegram on every run.
+Telegram delivery is exception-only: a summary is sent ONLY when something
+needs Tom's attention (Class C actionable, Class D investigate, or an
+auto-action failure). Pure noise/transient/stale auto-actions complete
+silently — no daily all-clear ping.
 
 Classification:
   A — Ignore: test/mock/harness noise        -> Sentry status=ignored (permanent)
@@ -540,6 +543,23 @@ def run_sentry_triage() -> dict:
         summary += f", {issues_filed} GitHub issues filed"
 
     logger.info(summary)
+
+    # Exception-only delivery: stay silent unless something actually needs Tom's
+    # attention. Issues that were fully auto-actioned into noise/transient/stale
+    # (tiers A/B/E) are handled without human input and must not generate a
+    # daily all-clear ping. Notify only when there is a human-review pile
+    # (Class C actionable or Class D investigate) or an auto-action failure.
+    # Live status is always available on the dashboard; see issue thread on
+    # all-clear noise (#1561 follow-up).
+    needs_attention = bool(classified["C"]) or bool(classified["D"]) or total_failed > 0
+    if not needs_attention:
+        logger.info("sentry_triage: nothing requires attention; suppressing all-clear notification")
+        return {
+            "status": "ok",
+            "findings": findings,
+            "summary": summary,
+            "duration": elapsed,
+        }
 
     # Telegram summary (concise)
     tg_lines = [f"Sentry triage: {len(issues)} issues"]

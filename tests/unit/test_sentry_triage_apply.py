@@ -292,7 +292,13 @@ def test_dry_run_digest_marks_no_state_changes(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
     _patch_common(monkeypatch)
 
-    issues = [_stub_issue("1", "PROJ-A1", "test_noise")]
+    # Pair the noise (A) issue with a tier-D issue so the run has something
+    # needing attention and a notification fires; otherwise exception-only
+    # delivery suppresses the message (see test_all_clear_suppressed below).
+    issues = [
+        _stub_issue("1", "PROJ-A1", "test_noise"),  # tier A
+        _stub_issue("2", "PROJ-D1", "weird thing happened", count=3),  # tier D
+    ]
     monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
 
     captured: dict[str, str] = {}
@@ -334,3 +340,55 @@ def test_no_auto_actionable_issues_omits_block(monkeypatch: pytest.MonkeyPatch) 
     msg = captured["msg"]
     assert "Auto-actioned" not in msg
     assert "Would auto-action" not in msg
+
+
+def test_all_clear_suppressed_when_nothing_needs_attention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exception-only delivery: pure noise/transient/stale auto-actions send NO Telegram.
+
+    Issues that were fully auto-actioned into tiers A/B/E (and no C/D, no
+    failures) require no human input, so the daily all-clear ping is suppressed.
+    """
+    monkeypatch.setenv("SENTRY_TRIAGE_APPLY", "1")
+    _patch_common(monkeypatch)
+
+    stale_issue = _stub_issue("3", "PROJ-E1", "ancient regression", count=1)
+    stale_issue["lastSeen"] = "2020-01-01T00:00:00Z"  # tier E
+    issues = [
+        _stub_issue("1", "PROJ-A1", "test_something exploded"),  # tier A
+        _stub_issue("2", "PROJ-B1", "Connection refused upstream"),  # tier B
+        stale_issue,  # tier E
+    ]
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
+
+    sent: list[str] = []
+    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
+
+    with patch.object(sentry_triage.requests, "put") as mock_put:
+        mock_put.return_value = _mock_resp(200, "{}")
+        result = sentry_triage.run_sentry_triage()
+
+    # Auto-actions still ran (3 PUTs), but no Telegram message was sent.
+    assert mock_put.call_count == 3
+    assert sent == []
+    assert result["status"] == "ok"
+
+
+def test_actionable_issue_triggers_notification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Class C (actionable) issue must still produce a Telegram notification."""
+    monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
+    _patch_common(monkeypatch)
+
+    # High event count → tier C (actionable).
+    issues = [_stub_issue("1", "PROJ-C1", "NullPointer in checkout", count=5000)]
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
+
+    sent: list[str] = []
+    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
+
+    with patch.object(sentry_triage.requests, "put"):
+        sentry_triage.run_sentry_triage()
+
+    assert len(sent) == 1
+    assert "Sentry triage" in sent[0]
