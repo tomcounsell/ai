@@ -707,7 +707,6 @@ class TestDigestSilentWhenNominal(unittest.TestCase):
         with (
             patch("agent.sustainability._get_redis", return_value=r),
             patch("agent.sustainability._get_project_key", return_value="testproj"),
-            patch("agent.sustainability._send_telegram") as mock_send,
             patch.object(asm, "AgentSession", fake_session_cls),
             patch.dict(
                 sys.modules,
@@ -719,7 +718,8 @@ class TestDigestSilentWhenNominal(unittest.TestCase):
         ):
             sustainability_digest()
 
-        mock_send.assert_not_called()
+        # Silent on healthy: no agent session enqueued. There is no Telegram
+        # path left on the nominal branch — it logs and returns.
         fake_session_cls.create_and_enqueue.assert_not_called()
 
 

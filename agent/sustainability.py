@@ -617,22 +617,3 @@ def sustainability_digest() -> None:
             )
     except Exception:
         logger.exception("[system-health-digest] Unhandled exception — skipping tick")
-
-
-def _send_telegram(message: str) -> None:
-    """Send a message to the 'Dev: Valor' chat via valor-telegram CLI."""
-    try:
-        result = subprocess.run(
-            ["valor-telegram", "send", "--chat", "Dev: Valor", message],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            logger.error(
-                "[system-health-digest] valor-telegram send failed (rc=%d): %s",
-                result.returncode,
-                result.stderr.strip(),
-            )
-    except Exception as e:
-        logger.error("[system-health-digest] Failed to send Telegram message: %s", e)
