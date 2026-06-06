@@ -92,7 +92,12 @@ class TestSendQueuedMessage:
 
     @pytest.mark.asyncio
     async def test_sends_file_via_send_file(self):
-        """Should use client.send_file() when file_paths list is present."""
+        """Should use client.send_file() when file_paths list is present.
+
+        Current contract: the file is sent WITHOUT a caption; any accompanying
+        text is delivered as a separate follow-up send_message so Telegram's
+        narrow caption column doesn't constrain the text layout.
+        """
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             tmp_path = f.name
             f.write(b"fake image")
@@ -102,6 +107,7 @@ class TestSendQueuedMessage:
             mock_sent = MagicMock()
             mock_sent.id = 55
             mock_client.send_file = AsyncMock(return_value=mock_sent)
+            mock_client.send_message = AsyncMock()
 
             message = {
                 "chat_id": "12345",
@@ -117,7 +123,12 @@ class TestSendQueuedMessage:
             mock_client.send_file.assert_called_once_with(
                 12345,
                 tmp_path,
-                caption="Check this",
+                reply_to=67890,
+            )
+            # Text is delivered as a separate follow-up message.
+            mock_client.send_message.assert_called_once_with(
+                12345,
+                "Check this",
                 reply_to=67890,
             )
         finally:
@@ -125,7 +136,7 @@ class TestSendQueuedMessage:
 
     @pytest.mark.asyncio
     async def test_file_only_send_no_caption(self):
-        """Should send file with caption=None when text is empty."""
+        """Should send the file with no follow-up text when text is empty."""
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
             tmp_path = f.name
             f.write(b"fake pdf")
@@ -135,6 +146,7 @@ class TestSendQueuedMessage:
             mock_sent = MagicMock()
             mock_sent.id = 66
             mock_client.send_file = AsyncMock(return_value=mock_sent)
+            mock_client.send_message = AsyncMock()
 
             message = {
                 "chat_id": "12345",
@@ -149,9 +161,10 @@ class TestSendQueuedMessage:
             mock_client.send_file.assert_called_once_with(
                 12345,
                 tmp_path,
-                caption=None,
                 reply_to=None,
             )
+            # No text → no follow-up send_message.
+            mock_client.send_message.assert_not_called()
         finally:
             os.unlink(tmp_path)
 
@@ -203,6 +216,7 @@ class TestSendQueuedMessage:
             mock_sent = MagicMock()
             mock_sent.id = 88
             mock_client.send_file = AsyncMock(return_value=mock_sent)
+            mock_client.send_message = AsyncMock()
 
             # Legacy payload with file_path (string), not file_paths (list)
             message = {
@@ -218,7 +232,11 @@ class TestSendQueuedMessage:
             mock_client.send_file.assert_called_once_with(
                 12345,
                 tmp_path,
-                caption="Legacy payload",
+                reply_to=None,
+            )
+            mock_client.send_message.assert_called_once_with(
+                12345,
+                "Legacy payload",
                 reply_to=None,
             )
         finally:
@@ -239,6 +257,7 @@ class TestSendQueuedMessage:
             # Telethon returns list of Messages for albums
             mock_msgs = [MagicMock(id=101), MagicMock(id=102), MagicMock(id=103)]
             mock_client.send_file = AsyncMock(return_value=mock_msgs)
+            mock_client.send_message = AsyncMock()
 
             message = {
                 "chat_id": "12345",
@@ -253,7 +272,11 @@ class TestSendQueuedMessage:
             mock_client.send_file.assert_called_once_with(
                 12345,
                 tmp_files,
-                caption="Album caption",
+                reply_to=None,
+            )
+            mock_client.send_message.assert_called_once_with(
+                12345,
+                "Album caption",
                 reply_to=None,
             )
         finally:
@@ -272,6 +295,7 @@ class TestSendQueuedMessage:
             mock_sent = MagicMock()
             mock_sent.id = 99
             mock_client.send_file = AsyncMock(return_value=mock_sent)
+            mock_client.send_message = AsyncMock()
 
             message = {
                 "chat_id": "12345",
@@ -287,7 +311,11 @@ class TestSendQueuedMessage:
             mock_client.send_file.assert_called_once_with(
                 12345,
                 tmp_path,
-                caption="Partial album",
+                reply_to=None,
+            )
+            mock_client.send_message.assert_called_once_with(
+                12345,
+                "Partial album",
                 reply_to=None,
             )
         finally:

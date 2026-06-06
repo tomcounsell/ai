@@ -19,17 +19,41 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+from agent.reflection_schedule import parse_every_duration
 from agent.reflection_scheduler import (
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_FUNCTION_TIMEOUT,
     ReflectionEntry,
     ReflectionScheduler,
     _get_memory_rss,
+    _resolve_registry_path,
     is_reflection_due,
     is_reflection_running,
     load_registry,
     run_reflection,
 )
+
+
+def _registry_path() -> Path:
+    """Resolve the live reflections registry the way the scheduler does.
+
+    The in-repo ``config/reflections.yaml`` is only present after install
+    (install_worker.sh copies it from the iCloud-synced vault). Tests must use
+    the same vault-first resolver the scheduler uses so they read the real file
+    regardless of where it currently lives.
+    """
+    return _resolve_registry_path()
+
+
+def _entry_interval_seconds(entry: dict) -> int:
+    """Parse an entry's schedule into seconds.
+
+    The registry schema declares schedules as ``every: 300s`` (unified grammar),
+    not a bare ``interval: 300`` integer. This parses the ``every`` duration
+    string into an integer number of seconds.
+    """
+    return parse_every_duration(str(entry["every"]).strip())
+
 
 # === Registry Loading Tests ===
 
@@ -41,7 +65,7 @@ class TestRegistryLoading:
         """Registry file exists and parses valid entries (some may be disabled)."""
         import yaml
 
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        registry_path = _registry_path()
         assert registry_path.exists(), "Registry file should exist"
         with open(registry_path) as f:
             data = yaml.safe_load(f)
@@ -58,16 +82,17 @@ class TestRegistryLoading:
         """The pm-briefings entry (issue #1197) parses with the expected fields."""
         import yaml
 
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        registry_path = _registry_path()
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         entries = {r["name"]: r for r in data["reflections"]}
         assert "pm-briefings" in entries, (
-            "pm-briefings entry missing from config/reflections.yaml -- "
+            "pm-briefings entry missing from the reflections registry -- "
             "the feature is dead code without it (Blocker 1 from PR #1237 review)"
         )
         entry = entries["pm-briefings"]
-        assert entry["interval"] == 300
+        # Schema declares schedules as `every: 300s`, parsed to 300 seconds.
+        assert _entry_interval_seconds(entry) == 300
         assert entry["timeout"] == 1500
         assert entry["execution_type"] == "function"
         assert entry["callable"] == "reflections.pm_briefings.run"
@@ -515,26 +540,27 @@ class TestRegistryIntegrity:
 
     def test_registry_yaml_valid(self):
         """Registry file is valid YAML."""
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
-        assert registry_path.exists(), "config/reflections.yaml must exist"
+        registry_path = _registry_path()
+        assert registry_path.exists(), "reflections registry must exist"
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         assert "reflections" in data
 
     def test_all_entries_have_required_fields(self):
-        """All registry entries have name, interval, priority, execution_type."""
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        """All registry entries have name, every, priority, execution_type."""
+        registry_path = _registry_path()
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         for entry in data["reflections"]:
             assert "name" in entry, f"Entry missing name: {entry}"
-            assert "interval" in entry, f"Entry {entry.get('name')} missing interval"
+            # Schema uses `every: Ns` (unified grammar), not a bare `interval`.
+            assert "every" in entry, f"Entry {entry.get('name')} missing every"
             assert "priority" in entry, f"Entry {entry.get('name')} missing priority"
             assert "execution_type" in entry, f"Entry {entry.get('name')} missing execution_type"
 
     def test_health_check_is_high_priority(self):
         """Health check must be high priority."""
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        registry_path = _registry_path()
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         health_entries = [e for e in data["reflections"] if e["name"] == "session-liveness-check"]
@@ -543,15 +569,15 @@ class TestRegistryIntegrity:
 
     def test_health_check_interval_5_minutes(self):
         """Health check interval should be 300 seconds (5 minutes)."""
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        registry_path = _registry_path()
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         health_entries = [e for e in data["reflections"] if e["name"] == "session-liveness-check"]
-        assert health_entries[0]["interval"] == 300
+        assert _entry_interval_seconds(health_entries[0]) == 300
 
     def test_no_duplicate_names(self):
         """All reflection names should be unique."""
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        registry_path = _registry_path()
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         names = [e["name"] for e in data["reflections"]]
@@ -559,7 +585,7 @@ class TestRegistryIntegrity:
 
     def test_expected_reflections_present(self):
         """All expected reflections are declared in the registry."""
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        registry_path = _registry_path()
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         names = {e["name"] for e in data["reflections"]}

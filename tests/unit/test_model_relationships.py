@@ -100,13 +100,14 @@ class TestTelegramMessageEnrichmentFields:
         assert isinstance(pk_field, KeyField)
 
     def test_enrichment_field_count(self):
-        """TelegramMessage should have 18 total registered fields."""
+        """TelegramMessage should have 20 total registered fields."""
         from models.telegram import TelegramMessage
 
-        # 9 original + 9 new (project_key, has_media, media_type,
+        # 9 original + 9 enrichment (project_key, has_media, media_type,
         # youtube_urls, non_youtube_urls, reply_to_msg_id,
         # classification_type, classification_confidence, agent_session_id)
-        assert len(TelegramMessage._meta.field_names) == 18
+        # + 2 added media-tracking fields (media_local_path, media_download_error)
+        assert len(TelegramMessage._meta.field_names) == 20
 
 
 # ===================================================================
