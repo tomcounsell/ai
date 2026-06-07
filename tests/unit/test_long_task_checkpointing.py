@@ -81,7 +81,7 @@ def test_progress_md_in_build_soft_check():
         [ -f <something with PROGRESS.md> ] || echo
     This pattern ensures the check never returns nonzero (warn-only).
     """
-    skill_md = REPO_ROOT / ".claude" / "skills" / "do-build" / "SKILL.md"
+    skill_md = REPO_ROOT / ".claude" / "skills-global" / "do-build" / "SKILL.md"
     text = skill_md.read_text()
     pattern = re.compile(r"\[ -f .*PROGRESS\.md.* \] \|\| echo")
     assert pattern.search(text) is not None, (

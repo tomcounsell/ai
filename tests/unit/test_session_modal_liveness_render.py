@@ -112,7 +112,8 @@ class TestModalLivenessSection:
         tmpl = env.get_template("_partials/session_modal_content.html")
         pipeline = _make_pipeline(harness_pid=12345, process_alive=True)
         html = tmpl.render(pipeline=pipeline)
-        assert "<h3>Liveness</h3>" in html
+        # Timing + Liveness were merged into one compact table (one <h3>).
+        assert "<h3>Timing &amp; Liveness</h3>" in html
         assert "12345" in html
         assert "freshness-fresh" in html
         assert "alive" in html
@@ -121,7 +122,7 @@ class TestModalLivenessSection:
         tmpl = env.get_template("_partials/session_modal_content.html")
         pipeline = _make_pipeline(harness_pid=99999, process_alive=False)
         html = tmpl.render(pipeline=pipeline)
-        assert "<h3>Liveness</h3>" in html
+        assert "<h3>Timing &amp; Liveness</h3>" in html
         assert "ghost-badge" in html
         assert "ghost" in html
 
@@ -129,12 +130,13 @@ class TestModalLivenessSection:
         tmpl = env.get_template("_partials/session_modal_content.html")
         pipeline = _make_pipeline(harness_pid=12345, process_alive=None)
         html = tmpl.render(pipeline=pipeline)
-        assert "<h3>Liveness</h3>" in html
+        assert "<h3>Timing &amp; Liveness</h3>" in html
         assert "unknown" in html
 
     def test_no_pid_row_when_harness_pid_none(self, env):
         """When harness_pid is None but other liveness signals are present,
-        the Liveness section renders WITHOUT a PID row (graceful degradation)."""
+        the merged Timing & Liveness section renders WITHOUT a PID row
+        (graceful degradation)."""
         tmpl = env.get_template("_partials/session_modal_content.html")
         pipeline = _make_pipeline(
             harness_pid=None,
@@ -142,10 +144,11 @@ class TestModalLivenessSection:
             recovery_attempts=1,
         )
         html = tmpl.render(pipeline=pipeline)
-        assert "<h3>Liveness</h3>" in html
+        assert "<h3>Timing &amp; Liveness</h3>" in html
         assert '<td class="text-secondary">PID</td>' not in html
         assert "Bash" in html
-        assert "Recovery attempts" in html
+        # Recovery count row label is "Recoveries".
+        assert "Recoveries" in html
 
     def test_renders_recovery_and_reprieve_counts(self, env):
         tmpl = env.get_template("_partials/session_modal_content.html")
@@ -154,23 +157,25 @@ class TestModalLivenessSection:
             reprieve_count=5,
         )
         html = tmpl.render(pipeline=pipeline)
-        assert "Recovery attempts" in html
+        assert "Recoveries" in html
         assert "Reprieves" in html
         assert ">3<" in html
         assert ">5<" in html
 
     def test_renders_timestamps_via_format_filter(self, env):
+        """Evidence + heartbeat are merged into a single "Last active" row
+        (max of the two), rendered through the format_timestamp filter."""
         tmpl = env.get_template("_partials/session_modal_content.html")
         ts = time.time() - 60
         pipeline = _make_pipeline(
             last_evidence_at=ts,
             last_heartbeat_at=ts,
-            last_stdout_at=ts,
         )
         html = tmpl.render(pipeline=pipeline)
-        assert "Last evidence" in html
-        assert "Last heartbeat" in html
-        assert "Last stdout" in html
+        assert "Last active" in html
+        # The merged value renders via the format_timestamp filter (HH:MM).
+        expected = datetime.datetime.fromtimestamp(ts, tz=datetime.UTC).strftime("%H:%M")
+        assert expected in html
 
 
 class TestRowFreshnessChip:

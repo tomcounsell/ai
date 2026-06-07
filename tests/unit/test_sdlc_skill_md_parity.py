@@ -38,7 +38,7 @@ def _extract_step4_section(md: str) -> str:
     lines = md.splitlines()
     start = None
     for i, line in enumerate(lines):
-        if line.strip() == "## Step 4: Dispatch ONE Sub-Skill":
+        if line.strip().startswith("## Step 4: Dispatch ONE Sub-Skill"):
             start = i
             break
     if start is None:
