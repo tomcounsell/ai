@@ -153,10 +153,17 @@ def _stub_issue(issue_id: str, short_id: str, title: str, count: int = 5) -> dic
 
 
 def _patch_common(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub auth token + Telegram so triage runs without external side effects."""
+    """Stub auth token + Telegram so triage runs without external side effects.
+
+    Delta-state is stubbed to "state exists, nothing seen before" so every
+    current Class C/D issue counts as new — tests that exercise the
+    seed-silently and static-backlog paths override ``_load_seen_ids``.
+    """
     monkeypatch.setattr(sentry_triage, "_get_auth_token", lambda: "test-token")
     monkeypatch.setattr(sentry_triage, "_get_org_slug", lambda: "test-org")
     monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda _m: None)
+    monkeypatch.setattr(sentry_triage, "_load_seen_ids", lambda: set())
+    monkeypatch.setattr(sentry_triage, "_save_seen_ids", lambda _ids: None)
 
 
 def test_dry_run_makes_zero_put_calls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -392,3 +399,86 @@ def test_actionable_issue_triggers_notification(monkeypatch: pytest.MonkeyPatch)
 
     assert len(sent) == 1
     assert "Sentry triage" in sent[0]
+
+
+# ---------------------------------------------------------------------------
+# Delta-based notification: a STATIC backlog must stay silent; only genuinely
+# new Class C/D issues (or auto-action failures) ping. This is the "still
+# getting too many" fix — exception-only was firing daily because the standing
+# C/D pile is always non-empty in dry-run.
+# ---------------------------------------------------------------------------
+
+
+def test_first_run_seeds_silently(monkeypatch: pytest.MonkeyPatch) -> None:
+    """First run (no prior state) seeds the seen-set and sends NO notification."""
+    monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(sentry_triage, "_load_seen_ids", lambda: None)  # no state file yet
+
+    saved: list[set[str]] = []
+    monkeypatch.setattr(sentry_triage, "_save_seen_ids", lambda ids: saved.append(ids))
+
+    issues = [_stub_issue("1", "PROJ-C1", "NullPointer in checkout", count=5000)]  # tier C
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
+
+    sent: list[str] = []
+    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
+
+    with patch.object(sentry_triage.requests, "put"):
+        sentry_triage.run_sentry_triage()
+
+    assert sent == []  # seeded, not announced
+    assert saved == [{"PROJ-C1"}]  # current pile persisted for next time
+
+
+def test_static_backlog_is_suppressed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unchanged C/D backlog (already seen last run) sends NO notification."""
+    monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(sentry_triage, "_load_seen_ids", lambda: {"PROJ-C1", "PROJ-D1"})
+
+    issues = [
+        _stub_issue("1", "PROJ-C1", "NullPointer in checkout", count=5000),  # tier C
+        _stub_issue("2", "PROJ-D1", "ambiguous slow query", count=2),  # tier D
+    ]
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
+
+    sent: list[str] = []
+    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
+
+    with patch.object(sentry_triage.requests, "put"):
+        sentry_triage.run_sentry_triage()
+
+    assert sent == []  # nothing new — stay silent
+
+
+def test_new_issue_since_last_run_notifies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new C/D short-id not in the seen-set triggers exactly one notification."""
+    monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(sentry_triage, "_load_seen_ids", lambda: {"PROJ-C1"})  # old pile
+
+    issues = [
+        _stub_issue("1", "PROJ-C1", "NullPointer in checkout", count=5000),  # old, seen
+        _stub_issue("2", "PROJ-C2", "fresh crash in payments", count=5000),  # NEW
+    ]
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
+
+    sent: list[str] = []
+    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
+
+    with patch.object(sentry_triage.requests, "put"):
+        sentry_triage.run_sentry_triage()
+
+    assert len(sent) == 1
+    assert "(1 new)" in sent[0]  # header advertises the new-issue count
+
+
+def test_seen_ids_round_trip(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """_save_seen_ids then _load_seen_ids round-trips; missing file returns None."""
+    state_file = tmp_path / "sentry_triage_seen.json"
+    monkeypatch.setattr(sentry_triage, "_SEEN_STATE_PATH", state_file)
+
+    assert sentry_triage._load_seen_ids() is None  # no file yet → first run
+    sentry_triage._save_seen_ids({"PROJ-C1", "PROJ-D9"})
+    assert sentry_triage._load_seen_ids() == {"PROJ-C1", "PROJ-D9"}
