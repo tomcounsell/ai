@@ -4,10 +4,13 @@ reflections/sentry_triage.py — Sentry issue triage reflection callable.
 Queries the Sentry API for unresolved issues across all projects in the org,
 classifies them (A–E), files GitHub issues for actionable ones, and updates
 Sentry state for A/B/E (gated by SENTRY_TRIAGE_APPLY env var, default off).
-Telegram delivery is exception-only: a summary is sent ONLY when something
-needs Tom's attention (Class C actionable, Class D investigate, or an
-auto-action failure). Pure noise/transient/stale auto-actions complete
-silently — no daily all-clear ping.
+Telegram delivery is delta-based and exception-only: a summary is sent ONLY
+when a genuinely NEW Class C/D issue appears since the previous run, or an
+auto-action fails. The Class C/D human-review pile is a STANDING backlog — in
+dry-run nothing drains it, so re-announcing the same pile every day is pure
+noise. The set of already-surfaced C/D short-ids is persisted between runs; a
+static backlog stays silent (live status is always on the dashboard), and the
+first run seeds that set silently rather than replaying the whole backlog.
 
 Classification:
   A — Ignore: test/mock/harness noise        -> Sentry status=ignored (permanent)
@@ -27,6 +30,7 @@ All functions accept no arguments and return:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -41,6 +45,46 @@ from reflections.utils import PROJECT_ROOT, load_local_projects
 logger = logging.getLogger("reflections.sentry_triage")
 
 SENTRY_API_BASE = "https://yudame.sentry.io/api/0"
+
+# Persisted set of Class C/D issue short-ids surfaced to Tom on the previous run.
+# Delta-based notification reads this to stay silent on a static standing backlog
+# and ping only when a genuinely NEW actionable/investigate issue appears.
+_SEEN_STATE_PATH = PROJECT_ROOT / "data" / "sentry_triage_seen.json"
+
+
+def _load_seen_ids() -> set[str] | None:
+    """Return the Class C/D short-ids surfaced on the previous run.
+
+    Returns None when no state file exists yet (first run since delta-based
+    delivery shipped) so the caller can seed silently instead of re-announcing
+    the entire standing backlog. A corrupt/unreadable file is treated the same
+    as a missing one.
+    """
+    try:
+        raw = _SEEN_STATE_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        logger.warning(f"sentry_triage: could not read seen-state: {e}")
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(data, dict):
+        data = data.get("ids", [])
+    if not isinstance(data, list):
+        return None
+    return {str(x) for x in data}
+
+
+def _save_seen_ids(ids: set[str]) -> None:
+    """Persist the current Class C/D short-id set. Best-effort; never raises."""
+    try:
+        _SEEN_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SEEN_STATE_PATH.write_text(json.dumps({"ids": sorted(ids)}, indent=0), encoding="utf-8")
+    except OSError as e:
+        logger.warning(f"sentry_triage: could not persist seen-state: {e}")
 
 
 def _apply_enabled() -> bool:
@@ -544,16 +588,28 @@ def run_sentry_triage() -> dict:
 
     logger.info(summary)
 
-    # Exception-only delivery: stay silent unless something actually needs Tom's
-    # attention. Issues that were fully auto-actioned into noise/transient/stale
-    # (tiers A/B/E) are handled without human input and must not generate a
-    # daily all-clear ping. Notify only when there is a human-review pile
-    # (Class C actionable or Class D investigate) or an auto-action failure.
-    # Live status is always available on the dashboard; see issue thread on
-    # all-clear noise (#1561 follow-up).
-    needs_attention = bool(classified["C"]) or bool(classified["D"]) or total_failed > 0
+    # Delta-based exception delivery. The human-review pile (Class C actionable +
+    # Class D investigate) is a STANDING backlog — in dry-run nothing drains it,
+    # so re-announcing the same pile every day is pure noise (the "still getting
+    # too many" #1561/#1582 follow-up). Notify only when a genuinely NEW C/D
+    # short-id appears since the last run, or an auto-action actually failed.
+    # Tiers A/B/E are handled without human input and never notify. On the very
+    # first run (no state yet) seed silently so we don't replay the whole
+    # backlog. Live status is always available on the dashboard.
+    current_cd_ids = {
+        str(issue.get("shortId") or issue.get("id"))
+        for issue, _cls, _reason in (classified["C"] + classified["D"])
+    }
+    prev_seen = _load_seen_ids()
+    new_cd_ids: set[str] = set() if prev_seen is None else (current_cd_ids - prev_seen)
+    _save_seen_ids(current_cd_ids)
+
+    needs_attention = bool(new_cd_ids) or total_failed > 0
     if not needs_attention:
-        logger.info("sentry_triage: nothing requires attention; suppressing all-clear notification")
+        logger.info(
+            "sentry_triage: no new actionable issues since last run "
+            f"({len(current_cd_ids)} in standing backlog); suppressing notification"
+        )
         return {
             "status": "ok",
             "findings": findings,
@@ -561,8 +617,10 @@ def run_sentry_triage() -> dict:
             "duration": elapsed,
         }
 
-    # Telegram summary (concise)
-    tg_lines = [f"Sentry triage: {len(issues)} issues"]
+    # Telegram summary (concise). Lead with the new-issue count so it's clear why
+    # the otherwise-silent triage spoke up.
+    new_suffix = f" ({len(new_cd_ids)} new)" if new_cd_ids else ""
+    tg_lines = [f"Sentry triage: {len(issues)} issues{new_suffix}"]
     for cls_label, cls_key in [
         ("Noise", "A"),
         ("Transient", "B"),
