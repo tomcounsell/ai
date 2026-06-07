@@ -9,7 +9,7 @@
 
 Session transcripts capture the full content of each agent session — every turn, tool call, and tool result — in append-only `.txt` files on disk. The `AgentSession` Popoto model stores queryable metadata about each session.
 
-This replaces the sparse JSON snapshot approach (`save_session_snapshot()` in `agent/session_logs.py`).
+This replaces the sparse JSON snapshot approach (`save_session_snapshot()` in `agent/agent_sessions.py`).
 
 ## Architecture
 
