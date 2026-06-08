@@ -31,6 +31,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -198,6 +199,8 @@ class Container:
         max_turns: int = DEFAULT_MAX_TURNS,
         pm_model: str | None = None,
         dev_model: str | None = None,
+        on_user_payload: Callable[[str], None] | None = None,
+        on_complete_payload: Callable[[str], None] | None = None,
     ) -> None:
         if not user_message.strip():
             raise ValueError("Container.user_message must be non-empty")
@@ -206,6 +209,8 @@ class Container:
         self.max_turns = max_turns
         self._pm_model = pm_model
         self._dev_model = dev_model
+        self._on_user_payload = on_user_payload
+        self._on_complete_payload = on_complete_payload
         self._pm_pty: PTYDriver | None = None
         self._dev_pty: PTYDriver | None = None
         self._sandbox: tuple[str, str] | None = None
@@ -453,18 +458,27 @@ class Container:
                     result.turns.append(turn_record)
                     result.exit_reason = "pm_complete"
                     result.exit_message = classification.payload
+                    # BridgeAdapter hook: emit the trailing
+                    # summary to the user-visible channel
+                    # (Telegram relay) at the end of the run.
+                    if self._on_complete_payload is not None:
+                        try:
+                            self._on_complete_payload(classification.payload)
+                        except Exception as e:
+                            logger.warning(
+                                "[granite-container] on_complete_payload callback raised: %s",
+                                e,
+                            )
                     break
 
                 if classification.destination == "user":
-                    # User-address text goes to the results log (the
-                    # PoC does not wire to the bridge). With no user
-                    # to relay to and no user reply to re-prompt PM
-                    # with, this invocation is terminal — exit on
-                    # pm_user rather than looping back to re-read an
-                    # idle PM and reclassify the same buffer until
-                    # max_turns. A bridge-wired deployment would
-                    # instead relay the payload and await the user's
-                    # reply before the next PM turn.
+                    # User-address text goes to the user-visible
+                    # channel (Telegram relay) mid-loop. With no
+                    # user reply to re-prompt PM, the PoC's
+                    # headless invocation is terminal — exit on
+                    # pm_user. A bridge-wired deployment also
+                    # exits on pm_user; the adapter has already
+                    # delivered the payload to the chat.
                     turn_record = TurnRecord(
                         turn_index=turn,
                         pm_idle_ms=pm_ms,
@@ -481,6 +495,21 @@ class Container:
                     result.turns.append(turn_record)
                     result.exit_reason = "pm_user"
                     result.exit_message = classification.payload
+                    # BridgeAdapter hook: emit the user-address
+                    # payload to the user-visible channel
+                    # (Telegram relay) BEFORE exiting. The
+                    # callback is synchronous and blocks the
+                    # thread until delivery completes (per the
+                    # ADV-5 hardening); the thread holds for
+                    # the duration of the network call.
+                    if self._on_user_payload is not None:
+                        try:
+                            self._on_user_payload(classification.payload)
+                        except Exception as e:
+                            logger.warning(
+                                "[granite-container] on_user_payload callback raised: %s",
+                                e,
+                            )
                     break
 
                 # destination == "dev" — extract a developer
