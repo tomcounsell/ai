@@ -108,6 +108,55 @@ class TestClassifyPmPrefix(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# ANSI stripping: defense-in-depth
+# ---------------------------------------------------------------------------
+#
+# Synthetic coverage. Time-shifted regressions (TUI version drift, Ink/React
+# upgrades) may surface only on real TUI runs; the live smoke test in the
+# cutover plan is the second-line defense. Schedule a second live smoke
+# test ~24 hours after the first to catch time-shifted regressions.
+#
+# The classifier delegates to pty_driver._strip_ansi so the two layers
+# cannot drift. These tests pin the behavior at the classifier boundary.
+# ---------------------------------------------------------------------------
+
+
+class TestAnsiStripping(unittest.TestCase):
+    """ANSI escape sequences must not corrupt the prefix-token classification.
+
+    The PTY layer's read_until_idle already strips CSI+OSC, but defense
+    in depth at the classifier catches time-shifted TUI upgrades.
+    """
+
+    def test_strip_csi_does_not_corrupt_classification(self) -> None:
+        """Leading CSI SGR sequences (color codes) survive the PTY strip
+        in some TUI versions and would corrupt the first-line check."""
+        # \x1b[31m = red, \x1b[0m = reset
+        result = classify_pm_prefix("\x1b[31m[/dev]\x1b[0m\nadd a function `foo` to bar.py")
+        self.assertEqual(result.destination, "dev")
+        self.assertFalse(result.compliance_miss)
+        self.assertIn("add a function", result.payload)
+
+    def test_strip_osc_does_not_corrupt_classification(self) -> None:
+        """Leading OSC sequence (`ESC]0;titleBEL`) sets the window title.
+        The PTY strip removes it; the classifier must remain correct."""
+        # \x1b]0;title\x07 = OSC set window title
+        result = classify_pm_prefix("\x1b]0;title\x07[/dev]\nadd a function `foo` to bar.py")
+        self.assertEqual(result.destination, "dev")
+        self.assertFalse(result.compliance_miss)
+        self.assertIn("add a function", result.payload)
+
+    def test_strip_keypad_does_not_corrupt_classification(self) -> None:
+        """Leading keypad-mode ESC (`ESC=`) is a single-char ESC control.
+        The PTY strip removes it; the classifier must remain correct."""
+        # \x1b= = application keypad mode
+        result = classify_pm_prefix("\x1b=[/dev]\nadd a function `foo` to bar.py")
+        self.assertEqual(result.destination, "dev")
+        self.assertFalse(result.compliance_miss)
+        self.assertIn("add a function", result.payload)
+
+
+# ---------------------------------------------------------------------------
 # extract_dev_prompt / summarize_for_pm: mocked ollama path
 # ---------------------------------------------------------------------------
 

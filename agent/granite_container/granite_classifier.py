@@ -177,12 +177,16 @@ def classify_pm_prefix(pm_tail: str) -> ClassificationResult:
     The classification is **stateless** — no call history, no PM
     persona context, no ollama call. It is a regex parse.
     """
-    # Strip ANSI CSI sequences before parsing. The PTY layer already
+    # Strip ANSI escape sequences before parsing. The PTY layer already
     # strips them in read_until_idle, but cursor-positioning escapes
     # can survive and corrupt the first-line check (e.g. the TUI
     # re-renders the status bar after a response, leaving orphan CSI
-    # codes ahead of [/dev]).
-    pm_tail = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", pm_tail)
+    # codes ahead of [/dev]). We delegate to the upstream
+    # `_strip_ansi` helper so the classifier and the PTY driver stay
+    # in lockstep (CSI + OSC + keypad mode all stripped).
+    from agent.granite_container.pty_driver import _strip_ansi
+
+    pm_tail = _strip_ansi(pm_tail)
     # Find the first non-empty line.
     first_line = ""
     for line in pm_tail.splitlines():
