@@ -50,10 +50,15 @@ from dataclasses import dataclass
 import pexpect
 import pexpect.exceptions
 
-# Reuse the headless harness's UUID/resume regexes. The spike (scripts/
-# granite_tui_pty_spike_pexpect.py) and the prior PoC both depend on
-# these being identical; the PoC inherits the same parser.
-from agent.claude_session import _RESUME_HINT_RE
+# The session UUID Claude embeds in stream-json `session_id` fields and
+# prints in its on-exit hint line: `claude --resume <uuid>`. Capturing it
+# lets a crashed/interrupted session be resumed with full context instead
+# of respawned fresh. Inlined from agent.claude_session (deleted in
+# plan #1572, Task 5 — PoC deletion).
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_RESUME_HINT_RE = re.compile(r"--resume\s+(" + _UUID_RE.pattern + r")")
 
 # Reuse the spike's INTERRUPTED_RE. The regex accepts both the v2.1.160
 # TUI text and the older wording so the driver is robust to TUI version

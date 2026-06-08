@@ -34,9 +34,10 @@ import termios
 import time
 from pathlib import Path
 
-# Import the same regexes used by agent/claude_session.py to ensure parity
+# Import the same regexes used by agent/granite_container/pty_driver.py to
+# ensure parity (moved there in plan #1572 / Task 5 — PoC deletion).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from agent.claude_session import _RESUME_HINT_RE, _UUID_RE  # noqa: E402
+from agent.granite_container.pty_driver import _RESUME_HINT_RE, _UUID_RE  # noqa: E402
 
 TRANSCRIPT_DIR = Path("/tmp/granite-pty-spike/stdlib")
 PROJECT_CWD = "/Users/valorengels/src/ai"
