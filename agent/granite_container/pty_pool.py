@@ -363,3 +363,76 @@ class PTYPool:
             # set. Next acquirer blocks. Log loudly.
             logger.error("[pty-pool] respawn for slot %d failed: %s", slot.idx, e)
             # Do not set the event; the slot remains unavailable.
+
+
+# -- Module-level singleton + worker hooks (plan #1572) ------------------------
+
+
+# The pool is a process-local singleton owned by the worker. A new
+# process re-initializes from scratch; existing pids come from
+# `data/granite_pty_pids.json` so orphan cleanup still works across
+# restarts (OPS-3 / Risk 1).
+_pty_pool: PTYPool | None = None
+
+
+def initialize_pty_pool() -> PTYPool:
+    """Return (or build) the worker's singleton PTYPool.
+
+    Reads `GRANITE__PTY_POOL_SIZE` from `config.settings` (env-overridable
+    as GRANITE__PTY_POOL_SIZE). Pre-warms all slots. Idempotent: a second
+    call returns the existing pool.
+
+    This is the worker startup hook. The caller does not need to
+    pre-warm: `initialize_pty_pool()` is a sync helper that schedules
+    the pre-warm via `asyncio.run` only if no event loop is running.
+    The worker startup is async; it uses
+    `await _pty_pool.initialize()` instead.
+    """
+    global _pty_pool
+    if _pty_pool is not None:
+        return _pty_pool
+    # Late import: settings pulls pydantic; tests that don't use the
+    # pool should not need it.
+    from config.settings import settings
+
+    pool_size = settings.granite.pty_pool_size
+    _pty_pool = PTYPool(pool_size=pool_size)
+    return _pty_pool
+
+
+def get_pty_pool() -> PTYPool:
+    """Return the singleton pool, building it on first access. Raises
+    `PTYPoolError` if no pool is registered and settings cannot be read."""
+    if _pty_pool is None:
+        return initialize_pty_pool()
+    return _pty_pool
+
+
+def _kill_orphaned_pty_pids() -> int:
+    """Read `data/granite_pty_pids.json` (if any), kill the listed pids,
+    and clear the file. Returns the count killed.
+
+    This is the worker startup hook called BEFORE the pool singleton is
+    built: a fresh worker process needs to reap any orphans left by a
+    previous (now-dead) worker process. After the kill, the pool is
+    built and the fresh pool's `_load_persisted_pids` finds an empty
+    registry.
+    """
+    path = Path(DEFAULT_PID_REGISTRY_PATH)
+    if not path.exists():
+        return 0
+    try:
+        data = json.loads(path.read_text())
+        pids = {int(p) for p in data.get("pids", [])}
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        logger.warning("[pty-pool] could not read pid registry %s: %s", path, e)
+        return 0
+    killed = PTYPool.kill_orphans(pids)
+    if killed:
+        logger.info("[pty-pool] killed %d orphan pids from %s", killed, path)
+    # Truncate the registry so the new worker process starts clean.
+    try:
+        path.write_text(json.dumps({"pids": []}))
+    except OSError as e:
+        logger.warning("[pty-pool] could not clear pid registry %s: %s", path, e)
+    return killed
