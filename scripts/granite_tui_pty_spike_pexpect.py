@@ -43,9 +43,10 @@ from dataclasses import dataclass, field
 
 import pexpect
 
-# Reuse the exact regexes from agent/claude_session.py so the spike
-# exercises the same parser the prior PoC depended on.
-from agent.claude_session import _RESUME_HINT_RE, _UUID_RE  # noqa: E402
+# Reuse the exact regexes from agent/granite_container/pty_driver.py
+# (moved there in plan #1572 / Task 5 — PoC deletion) so the spike
+# exercises the same parser the production driver depends on.
+from agent.granite_container.pty_driver import _RESUME_HINT_RE, _UUID_RE  # noqa: E402
 
 REPO_ROOT = pathlib.Path("/Users/valorengels/src/ai")
 PEXPECT_DIR = pathlib.Path("/tmp/granite-pty-spike/pexpect")
