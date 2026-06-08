@@ -39,12 +39,9 @@ headless harness is untouched" invariant.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 
 import pexpect
@@ -102,19 +99,11 @@ DEFAULT_MIN_CONTENT_BYTES = 400
 # ceiling; the steady-state loop can tune this per role.
 DEFAULT_TIMEOUT_S = 60.0
 
-# The model-pick policy: prefer cloud models (e.g. `glm-5.1:cloud`) when
-# available, then gemma* (small/fast, conversational), then any non-granite
-# local model. Granite is the *operator*, never the substrate model.
-# Each entry is `(match_token, match_kind)` where match_kind is "suffix"
-# for tokens that end the model string (like ":cloud" tags) and "prefix"
-# for tokens that begin it. Cloud models get a longer cold-start budget
-# in `spawn()` and in the prerequisite check (see prereq table in
-# `docs/plans/granite_interactive_tui_poc.md`).
-MODEL_PICK_PREFER: tuple[tuple[str, str], ...] = (
-    (":cloud", "suffix"),
-    ("gemma", "prefix"),
-)
-MODEL_PICK_AVOID_PREFIX = ("granite",)
+# Fallback substrate aliases when settings can't be read (test envs that
+# import the driver without a Settings instance). The PM/Dev TUIs run on
+# the Claude subscription, NOT ollama — ollama is the granite *classifier*
+# only. Aliases are UNPINNED so the substrate tracks the latest version.
+_FALLBACK_SUBSTRATE_MODEL = {"pm": "opus", "dev": "sonnet"}
 
 
 class PTYDriverError(RuntimeError):
@@ -147,47 +136,29 @@ def _strip_ansi(text: str) -> str:
     return text
 
 
-def _pick_substrate_model() -> str:
-    """Pick a model for the TUI subprocess, avoiding the operator's own model.
+def _default_substrate_model(role: str) -> str:
+    """Resolve the Claude model alias for a TUI PTY by role.
 
-    Preference order (see `MODEL_PICK_PREFER`):
-      1. Any `*:cloud` model (e.g. `glm-5.1:cloud`) — strongest when reachable
-      2. Any `gemma*` model — small/fast/conversational
-      3. Any non-`granite*` model — last local fallback
-      4. The first model ollama reports (granite-acceptable as last resort)
+    The PM/Dev TUIs are real ``claude`` Code sessions on the Claude
+    subscription (OAuth — see ``_build_env``), run exactly like the
+    ``claude --permission-mode bypassPermissions`` shortcut but with the
+    model chosen at spawn time. ollama is the granite *classifier's*
+    substrate, never the PTY's.
 
-    Returns the full ollama model identity (e.g. `glm-5.1:cloud` or
-    `gemma4:e2b`) — the tag is required for ollama to resolve the model.
-    Callers pass the result straight to `claude --model <full_identity>`.
-
-    Raises PTYDriverError if ollama is unreachable or returns no models.
+    Reads ``settings.granite.pm_model`` / ``dev_model`` (env-overridable as
+    ``GRANITE__PM_MODEL`` / ``GRANITE__DEV_MODEL``); falls back to the
+    role-default alias if settings can't be loaded (e.g. a bare unit-test
+    import). Returns an UNPINNED alias so the substrate tracks the latest
+    version; callers pass it straight to ``claude --model <alias>``.
     """
     try:
-        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=5) as r:
-            tags = json.loads(r.read())
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError) as e:
-        raise PTYDriverError(f"ollama unreachable: {e}") from e
+        from config.settings import settings
 
-    names: list[str] = [m["name"] for m in tags.get("models", [])]
-    if not names:
-        raise PTYDriverError("ollama reports no models")
-
-    for prefer_token, match_kind in MODEL_PICK_PREFER:
-        for n in names:
-            if match_kind == "suffix":
-                if n.endswith(prefer_token):
-                    return n  # keep the full identity, e.g. "glm-5.1:cloud"
-            else:  # prefix
-                if n.startswith(prefer_token):
-                    return n  # keep the full identity, e.g. "gemma4:e2b"
-
-    for n in names:
-        if not any(n.startswith(p) for p in MODEL_PICK_AVOID_PREFIX):
-            return n  # keep the tag — ollama needs it for resolution
-
-    # All models are granite — return the first one as a last resort. The
-    # operator's classifier is robust to this, just slower.
-    return names[0]
+        if role == "dev":
+            return settings.granite.dev_model
+        return settings.granite.pm_model
+    except Exception:
+        return _FALLBACK_SUBSTRATE_MODEL.get(role, "sonnet")
 
 
 def _build_env() -> dict[str, str]:
@@ -239,7 +210,7 @@ class PTYDriver:
         `close()` first if they want to re-spawn.
 
         The model is picked automatically if not provided explicitly.
-        See `_pick_substrate_model` for the selection policy.
+        See `_default_substrate_model` for the model-by-role policy.
 
         macOS setsid note: pexpect's underlying `pty.fork()` already
         calls `setsid()`; a second `setsid()` from `preexec_fn` is a
@@ -251,7 +222,7 @@ class PTYDriver:
         if self._child is not None and self._child.isalive():
             raise PTYDriverError(f"PTYDriver({self.role}) already spawned; close() first")
 
-        model = self._explicit_model or _pick_substrate_model()
+        model = self._explicit_model or _default_substrate_model(self.role)
 
         self._child = pexpect.spawn(
             "claude",

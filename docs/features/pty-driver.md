@@ -108,16 +108,23 @@ force the Max subscription OAuth path even when a key happens to be
 present in the inherited environment. Mirrors `_build_env` in
 `agent/claude_session.py:90-101`.
 
-## Module-pick policy (avoid the operator's own model)
+## Model-by-role policy (Claude subscription substrate)
 
-The driver picks a substrate model automatically. It prefers `gemma*`
-(small/fast, conversational), falls back to any non-`granite*` model,
-and uses the first ollama model as a last resort. Granite is the
-*operator*, never the substrate model — running the substrate on
-granite would be self-referential and degrade routing accuracy.
+The PM/Dev TUIs are real `claude` Code sessions on the **Claude
+subscription** — spawned exactly like the
+`claude --permission-mode bypassPermissions` shortcut (`_build_env`
+blanks `ANTHROPIC_API_KEY` to force the OAuth path), with the model
+chosen at spawn time. The driver resolves the alias by role via
+`_default_substrate_model(role)`:
 
-The pick policy is exposed as a constant (`MODEL_PICK_PREFER`,
-`MODEL_PICK_AVOID_PREFIX`) for the prerequisite check to mirror.
+- PM → `settings.granite.pm_model` (default `opus`, env `GRANITE__PM_MODEL`)
+- Dev → `settings.granite.dev_model` (default `sonnet`, env `GRANITE__DEV_MODEL`)
+
+Aliases are **unpinned** (`opus`, `sonnet`, `haiku`) so the substrate
+tracks the latest version. ollama belongs to the granite *classifier*
+(`granite_classifier.py`, model `granite4.1:3b`) — never the PTY
+substrate. Running the PTY on ollama/glm does not drive the real TUI
+and is what the production cutover fixed.
 
 ## Cross-references
 
