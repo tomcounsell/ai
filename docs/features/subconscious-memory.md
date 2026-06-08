@@ -158,6 +158,9 @@ The PostToolUse hook in `agent/health_check.py` checks for relevant memories on 
 
 After a session completes, extraction is scheduled from `agent/session_executor.py` **after** `complete_transcript(...)` finalizes the session (hotfix #1055):
 
+> Granite PTY sessions participate in this extraction unchanged. The granite PTY container ([Granite PTY Container: Production Path](granite-pty-production.md)) is the session-execution substrate, not a separate completion path — `_schedule_post_session_extraction` fires for granite sessions exactly as for harness sessions, on the same `complete_transcript(...)` boundary.
+
+
 1. `_schedule_post_session_extraction(session_id, response_text)` registers a fire-and-forget `asyncio.create_task` in `_pending_extraction_tasks` (a `dict[str, asyncio.Task]` keyed by `session_id` for dedup). The scheduler is **synchronous** — it does not `await` — so the dev→PM nudge fires immediately, independent of extraction latency.
 2. Inside the task wrapper, `run_post_session_extraction()` runs extract_observations → detect_outcomes → cleanup in sequence.
 3. Haiku extracts novel observations as structured JSON (category, observation text, file_paths, tags), with a line-based fallback parser for robustness

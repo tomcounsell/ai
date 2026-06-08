@@ -77,3 +77,12 @@ config that syncs via iCloud, not via the update script.
 - A `manage.py` failure logs at WARNING (handler) and is recorded in the audit
   note; an escalate-after-successful-command (reply failed) logs at ERROR and
   pings the human.
+
+## Related
+
+Both this path and the granite PTY path produce `AgentSession` records when
+they spawn an agent. The granite path additionally produces a `ContainerResult`
+and writes `exit_summary` / `exit_anomaly` events to
+`AgentSession.session_events` — see
+[Granite PTY Container: Production Path](../features/granite-pty-production.md)
+for the session-execution substrate that runs bridge-originated sessions.
