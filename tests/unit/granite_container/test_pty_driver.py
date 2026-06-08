@@ -19,12 +19,9 @@ driver's behavior matches the spike's observed_state on the real TUI.
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 import unittest
-import urllib.error
-import urllib.request
 from unittest.mock import MagicMock, patch
 
 import pexpect
@@ -38,7 +35,7 @@ from agent.granite_container.pty_driver import (
     PTYDriver,
     PTYDriverError,
     _build_env,
-    _pick_substrate_model,
+    _default_substrate_model,
     _strip_ansi,
 )
 
@@ -66,37 +63,25 @@ def _model_reachable_check() -> bool:
     if not shutil.which("claude"):
         return False
     try:
-        # Match the same model-pick policy as the substrate driver so
-        # the prerequisite check exercises the same code path.
-        tags = json.loads(
-            urllib.request.urlopen("http://localhost:11434/api/tags", timeout=10).read()
-        )
-        names = [m["name"] for m in tags.get("models", [])]
-        if not names:
-            return False
-        pick = next(
-            (n for n in names if ":cloud" in n),
-            next(
-                (n for n in names if n.startswith("gemma")),
-                next((n for n in names if not n.startswith("granite")), names[0]),
-            ),
-        )
+        # The PTY substrate is the Claude subscription (OAuth), not ollama.
+        # Ping with the same default Dev alias the driver spawns so the
+        # prerequisite check exercises the real substrate path.
         r = subprocess.run(
             [
                 "claude",
                 "--permission-mode",
                 "bypassPermissions",
                 "--model",
-                pick,
+                _default_substrate_model("dev"),
                 "--print",
                 "ping",
             ],
             capture_output=True,
             text=True,
-            timeout=180 if ":cloud" in pick else 60,
+            timeout=60,
         )
         return r.returncode == 0
-    except (subprocess.TimeoutExpired, OSError, urllib.error.URLError, json.JSONDecodeError):
+    except (subprocess.TimeoutExpired, OSError):
         return False
 
 
@@ -293,60 +278,43 @@ class TestReadUntilIdle(unittest.TestCase):
         self.assertFalse(result.saw_idle, "floor should prevent premature idle")
 
 
-class TestPickSubstrateModel(unittest.TestCase):
-    """The model picker prefers cloud > gemma > non-granite, returns full identity."""
+class TestDefaultSubstrateModel(unittest.TestCase):
+    """The PTY substrate is the Claude subscription, model chosen by role.
 
-    def test_prefers_cloud_model(self) -> None:
-        fake_tags = {
-            "models": [
-                {"name": "granite4.1:3b"},
-                {"name": "gemma4:e2b"},
-                {"name": "glm-5.1:cloud"},
-            ]
-        }
-        with patch("urllib.request.urlopen") as mock_open:
-            mock_open.return_value.__enter__.return_value.read.return_value = (
-                str(fake_tags).replace("'", '"').encode("utf-8")
-            )
-            model = _pick_substrate_model()
-        self.assertEqual(model, "glm-5.1:cloud", f"cloud should win; got {model!r}")
+    ollama is the granite *classifier's* substrate — never the PTY's. The
+    resolver returns unpinned Claude aliases (opus/sonnet) from settings.
+    """
 
-    def test_prefers_gemma_when_no_cloud(self) -> None:
-        fake_tags = {
-            "models": [
-                {"name": "granite4.1:3b"},
-                {"name": "gemma3:4b"},
-                {"name": "llama3:8b"},
-            ]
-        }
-        with patch("urllib.request.urlopen") as mock_open:
-            mock_open.return_value.__enter__.return_value.read.return_value = (
-                str(fake_tags).replace("'", '"').encode("utf-8")
-            )
-            model = _pick_substrate_model()
-        # Full identity is returned (e.g. "gemma3:4b"), not the stripped name.
-        self.assertEqual(model, "gemma3:4b", f"expected full gemma identity; got {model!r}")
+    def test_pm_defaults_to_opus(self) -> None:
+        self.assertEqual(_default_substrate_model("pm"), "opus")
 
-    def test_falls_back_to_non_granite(self) -> None:
-        fake_tags = {
-            "models": [
-                {"name": "granite4.1:3b"},
-                {"name": "llama3:8b"},
-            ]
-        }
-        with patch("urllib.request.urlopen") as mock_open:
-            mock_open.return_value.__enter__.return_value.read.return_value = (
-                str(fake_tags).replace("'", '"').encode("utf-8")
-            )
-            model = _pick_substrate_model()
-        self.assertFalse(model.startswith("granite"), f"should avoid granite; got {model!r}")
-        self.assertEqual(model, "llama3:8b", f"expected full identity; got {model!r}")
+    def test_dev_defaults_to_sonnet(self) -> None:
+        self.assertEqual(_default_substrate_model("dev"), "sonnet")
 
-    def test_raises_on_ollama_unreachable(self) -> None:
-        with patch("urllib.request.urlopen") as mock_open:
-            mock_open.side_effect = OSError("connection refused")
-            with self.assertRaises(PTYDriverError):
-                _pick_substrate_model()
+    def test_reads_settings_override(self) -> None:
+        """The resolver reflects GRANITE__PM_MODEL / DEV_MODEL via settings."""
+        from config.settings import settings
+
+        with (
+            patch.object(settings.granite, "pm_model", "haiku"),
+            patch.object(settings.granite, "dev_model", "opus"),
+        ):
+            self.assertEqual(_default_substrate_model("pm"), "haiku")
+            self.assertEqual(_default_substrate_model("dev"), "opus")
+
+    def test_never_returns_ollama_identity(self) -> None:
+        """No `:cloud` / `granite` / `gemma` tags — those belong to the classifier."""
+        for role in ("pm", "dev"):
+            model = _default_substrate_model(role)
+            self.assertNotIn(":", model, f"alias must be unpinned/untagged; got {model!r}")
+            self.assertFalse(model.startswith(("granite", "gemma", "glm")))
+
+    def test_fallback_map_is_claude_aliases(self) -> None:
+        """The except-branch fallback (settings unavailable) yields Claude aliases."""
+        from agent.granite_container.pty_driver import _FALLBACK_SUBSTRATE_MODEL
+
+        self.assertEqual(_FALLBACK_SUBSTRATE_MODEL["pm"], "opus")
+        self.assertEqual(_FALLBACK_SUBSTRATE_MODEL["dev"], "sonnet")
 
 
 class TestLifecycle(unittest.TestCase):

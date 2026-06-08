@@ -258,6 +258,26 @@ class GraniteSettings(BaseModel):
             "Plan #1572 / docs/features/granite-pty-production.md."
         ),
     )
+    pm_model: str = Field(
+        default="opus",
+        description=(
+            "Claude model alias for the PM TUI PTY. The PM/Dev sessions run "
+            "on the Claude subscription (OAuth, ANTHROPIC_API_KEY blanked), "
+            "exactly like the `claude --permission-mode bypassPermissions` "
+            "shortcut, with the model chosen at spawn time. Use UNPINNED "
+            "aliases (opus, sonnet, haiku) so the substrate tracks the latest "
+            "version. ollama models belong to the granite classifier only, "
+            "never the PTY substrate. Override via GRANITE__PM_MODEL."
+        ),
+    )
+    dev_model: str = Field(
+        default="sonnet",
+        description=(
+            "Claude model alias for the Dev TUI PTY. See ``pm_model``. The "
+            "Dev role executes code under PM direction; sonnet is the cost/"
+            "latency default. Override via GRANITE__DEV_MODEL."
+        ),
+    )
 
 
 class PathSettings(BaseModel):
