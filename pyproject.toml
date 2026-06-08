@@ -170,4 +170,5 @@ markers = [
     "models: Redis/Popoto model relationships and persistence",
     "webui: Web UI dashboards, routes, templates",
     "analytics: Unified analytics collection, query, and dashboard",
+    "granite_integration: Granite PTY container production wiring tests (skippable in fast CI)",
 ]

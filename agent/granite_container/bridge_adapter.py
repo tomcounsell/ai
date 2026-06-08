@@ -74,6 +74,32 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _append_session_event(agent_session, event: dict) -> None:
+    """Append an observability event to ``agent_session.session_events``.
+
+    ``AgentSession.session_events`` is a ``ListField(null=True)``, so a
+    freshly created session has ``session_events is None`` rather than an
+    empty list. Earlier code early-returned on ``None`` and silently
+    dropped every granite event in production. This helper initializes the
+    list when it is ``None`` so the entry is never lost. All writes fail
+    silently — observability must never crash the run.
+    """
+    if agent_session is None:
+        return
+    try:
+        events = getattr(agent_session, "session_events", None)
+        if events is None:
+            events = []
+            agent_session.session_events = events
+        events.append(event)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(
+            "[bridge-adapter] could not write session_event %s: %s",
+            event.get("type"),
+            e,
+        )
+
+
 class BridgeAdapter:
     """Thin wrapper around Container that publishes per-turn output
     to the bridge's Telegram relay.
@@ -162,23 +188,16 @@ class BridgeAdapter:
         surface this entry; it is NOT delivered to Telegram
         (per the plan's `## Solution`).
         """
-        if self._agent_session is None:
-            return
-        try:
-            events = getattr(self._agent_session, "session_events", None)
-            if events is None:
-                return
-            events.append(
-                {
-                    "type": "exit_summary",
-                    "exit_reason": result.exit_reason,
-                    "turns": len(result.turns),
-                    "compliance_misses": result.classification_compliance_misses,
-                    "ts": _now_iso(),
-                }
-            )
-        except Exception as e:
-            logger.warning("[bridge-adapter] could not write exit_summary event: %s", e)
+        _append_session_event(
+            self._agent_session,
+            {
+                "type": "exit_summary",
+                "exit_reason": result.exit_reason,
+                "turns": len(result.turns),
+                "compliance_misses": result.classification_compliance_misses,
+                "ts": _now_iso(),
+            },
+        )
 
     def _maybe_publish_exit_anomaly(self, result: ContainerResult) -> None:
         """When the run ended on a hang / startup-unresolved
@@ -195,19 +214,14 @@ class BridgeAdapter:
             result.exit_reason,
             result.exit_message,
         )
-        try:
-            events = getattr(self._agent_session, "session_events", None)
-            if events is None:
-                return
-            events.append(
-                {
-                    "type": "exit_anomaly",
-                    "exit_reason": result.exit_reason,
-                    "ts": _now_iso(),
-                }
-            )
-        except Exception as e:
-            logger.warning("[bridge-adapter] could not write exit_anomaly event: %s", e)
+        _append_session_event(
+            self._agent_session,
+            {
+                "type": "exit_anomaly",
+                "exit_reason": result.exit_reason,
+                "ts": _now_iso(),
+            },
+        )
 
     # -- Bridge callbacks (sync wrappers around async send_cb) -----------
 
@@ -336,22 +350,15 @@ class BridgeAdapter:
         do NOT emit a user-visible "I tried to send you a
         message but it failed" delivery (would violate the
         no-spam rule)."""
-        if self._agent_session is None:
-            return
-        try:
-            events = getattr(self._agent_session, "session_events", None)
-            if events is None:
-                return
-            events.append(
-                {
-                    "type": "delivery_failure",
-                    "payload_chars": len(payload),
-                    "reason": reason,
-                    "ts": _now_iso(),
-                }
-            )
-        except Exception as e:
-            logger.warning("[bridge-adapter] could not write delivery_failure event: %s", e)
+        _append_session_event(
+            self._agent_session,
+            {
+                "type": "delivery_failure",
+                "payload_chars": len(payload),
+                "reason": reason,
+                "ts": _now_iso(),
+            },
+        )
 
     # -- send_cb=None fallback (BRIDGE-1) ---------------------------------
 
