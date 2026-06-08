@@ -1,9 +1,11 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-05
+revision_applied: true
+critique: 2026-06-08
 tracking: https://github.com/tomcounsell/ai/issues/1572
 last_comment_id:
 ---
@@ -92,6 +94,8 @@ PR #1570 (issue #1546) delivered a kernel-validated alternative: `agent/granite_
 - **No prior issues or PRs attempted the production wiring** of a PTY container into `_execute_agent_session`. This is greenfield wiring work.
 
 **Why previous fixes failed (or didn't address this):** The previous attempts all assumed a headless `claude -p` substrate. The cancelled `granite_root_session_runner` plan attempted the cutover on top of that wrong assumption. The PoC and the spike that fed it corrected the substrate assumption; this plan is the first attempt at the cutover on the corrected substrate.
+
+**Why the "no fallback" posture is acceptable this time** (hardens ARCH-1): the cancelled predecessor repeated the same all-or-nothing posture on the WRONG substrate. The cancellation's root cause was the substrate choice (headless `claude -p` cannot drive a real TUI), not the cutover shape. The PoC validates the substrate is correct (the kernel works end-to-end on a real `claude` TUI), so the cutover shape is the only remaining risk. The "no fallback" posture is being deliberately re-attempted because the PoC's kernel validation reduces the substrate risk to a regression-check level. The Task 9 live smoke test is the substrate-revalidation gate: a real TUI session reaching `Container.run` and producing a `[/user]` delivery to Telegram is the proof that the substrate assumption still holds. If the smoke test fails, the PR is reverted — not feature-flagged off.
 
 ## Research
 
@@ -192,6 +196,18 @@ Telegram inbound (or email inbound) → bridge enqueue → AgentSession in Redis
 - **New module:** `agent/granite_container/pty_pool.py` — `PTYPool` class with `acquire_pair()`/`release_pair()` blocking context manager. Singleton owned by the worker process, not re-created per session.
 - **New module:** `agent/granite_container/bridge_adapter.py` — `BridgeAdapter` class wrapping `Container` with: send_cb resolution, mid-loop `[/user]` delivery, progress-event publication, short-result formatting. Sized at ~150 lines including docstrings.
 - **New module:** `agent/granite_container/stream_short.py` (or inline in adapter) — `format_short_result(container_result) -> str` that produces a 1-2 line Telegram-friendly summary (not multi-KB JSON). Returns `""` for `pm_complete`/`pm_user` (the adapter already delivered the full payload mid-loop).
+
+  **Drop the standalone formatter, inline as session_events write** (hardens SIMP-1): `format_short_result`'s output goes to `BackgroundTask.run(..., send_result=False)`, which discards the return value (verified at `agent/messenger.py:263`). The function is dead code as written. Remove `format_short_result` as a standalone function. Move its body inline into `BridgeAdapter.run` as a `session_events` write:
+  ```python
+  agent_session.session_events.append({
+      "type": "exit_summary",
+      "exit_reason": result.exit_reason,
+      "turns": len(result.turns),
+      "compliance_misses": result.classification_compliance_misses,
+      "ts": datetime.now(UTC).isoformat(),
+  })
+  ```
+  `BridgeAdapter.run` returns `""` to `BackgroundTask`. The new `docs/features/granite-pty-production.md` documents the `exit_summary` event shape so operators know what to look for in `session_events`.
 - **Modified:** `agent/session_executor.py:1700-1756` — replace the `do_work` body with the new container-driven coroutine; add `send_result=False`. Approximately 30 lines changed, 0 lines removed from the harness path.
 - **New config field:** `config/settings.py::GRANITE_PTY_POOL_SIZE` (default 3, env-overridable as `GRANITE_PTY_POOL_SIZE`).
 - **New config field:** `config/settings.py::GRANITE_MAX_TURNS` (default 10, env-overridable; currently a module constant in `container.py:68`).
@@ -259,11 +275,25 @@ The cutover is all-or-nothing: there is no fallback path. The PR branch runs a l
 
 - **Background respawn correctness:** Slot lifecycle states: `idle` (available), `locked` (held by a session), `respawning` (background-restarting after release). `acquire_pair()` waits on the semaphore; if the assigned slot is `respawning`, it awaits a per-slot `asyncio.Event` that the respawn task sets. This is the bounded-concurrency invariant: at most `GRANITE_PTY_POOL_SIZE` PTY pairs are alive at any moment, and the pool's "in flight" count is exactly the semaphore count.
 
+  **Race-free respawn contract** (hardens POOL-1 + ADV-4): `PTYPool._respawn_slot(idx)` MUST call `self._slots[idx].event.clear()` as its first line, then perform the spawn, then `event.set()`. The per-slot `asyncio.Lock` is held across `event.clear()` and `pty.spawn(...)` so worker shutdown's `asyncio.CancelledError` cannot race a half-spawned slot. The respawn task's body is wrapped in `await asyncio.shield(self._slots[idx].lock)` so the cancellation only fires after the lock is released (i.e., after `event.set()` or after the spawn raised). Worker shutdown in `worker/__main__.py` MUST `await asyncio.gather(*self._pool._respawn_tasks, return_exceptions=True)` before the `pkill` step to drain in-flight respawns; otherwise a slot can be left in `respawning` permanently and the next `acquire_pair` blocks forever on its event. Without `event.clear()` as the first line, a previous `event.set()` from a prior respawn is still latched and the new `event.wait()` returns immediately with a stale `pty_pair`.
+
 - **BridgeAdapter call-injection:** The Container currently calls `classify_pm_prefix(pm_buf)` to get a routing decision (`dev`/`user`/`complete`/`unknown`). The adapter wraps this with a callback: after classification but before `extract_dev_prompt`, if `destination == "user"`, fire `send_cb(chat_id, payload, reply_to, agent_session)`. This is one extra conditional in the container's per-turn block, not a structural change. Similarly for `destination == "complete"`, fire the same callback with the trailing summary.
 
-- **Where to do this in the Container:** Add an optional `on_user_payload: Callable[[str], None]` and `on_complete_payload: Callable[[str], None]` parameter to `Container.__init__`. The bridge adapter passes async callables that schedule `send_cb` via `asyncio.run_coroutine_threadsafe(..., loop)` (since the Container runs on a thread). This keeps the Container substrate-agnostic — the PoC passes `None` (default) and behaves exactly as today.
+  **`send_cb=None` defensive default** (hardens BRIDGE-1): `BridgeAdapter.__init__` resolves `send_cb` via `agent_session_queue._resolve_callbacks(project_key, transport)`. Standalone worker runs (no bridge registered) return `(None, None)`. If `_send_cb is None`, `BridgeAdapter.__init__` MUST set `self._on_user_payload` and `self._on_complete_payload` to a logger-only no-op (`logger.warning("bridge callback missing — granite output will be logged but not delivered")`) rather than crashing mid-loop. The container's `on_user_payload` and `on_complete_payload` parameters default to `None`; the adapter only passes non-None callables when `_send_cb` is set. The integration test must include a case where `_resolve_callbacks` returns `(None, None)` and assert the container still runs to completion.
+
+- **Where to do this in the Container:** Add an optional `on_user_payload: Callable[[str], None]` and `on_complete_payload: Callable[[str], None]` parameter to `Container.__init__`. The bridge adapter passes sync callables that wrap `send_cb` in `try/except`, log warnings, write to `agent_session.session_events` on failure.
+
+  **Synchronous callback contract** (hardens ADV-5): the original sketch used `asyncio.run_coroutine_threadsafe(self._send_cb(...), loop)` from the container's thread, but `Container.run` returns with `pm_user` exit BEFORE the scheduled coroutine has actually executed. If `format_short_result` returns `""` based on `exit_reason` but the coroutine hasn't fired yet, the user sees no delivery. The Container's `on_user_payload` call MUST be synchronous. The bridge adapter's `_make_user_callback` wraps the async `send_cb` in a sync callable that does `asyncio.run_coroutine_threadsafe(self._send_cb(...), loop).result()` with a configurable timeout (default 30s) to block until delivered. The container's `run()` returns only after the delivery has completed. The thread blocks for the duration of the network call, which is acceptable per-turn (sessions last 6h, mid-loop network calls are ~1s).
 
 - **Session-events progress signals:** Use `agent_session.session_events` (Popoto field, list of dicts) for non-user-visible progress: `{turn: int, classification: str, compliance_miss: bool, pm_idle_ms: int, dev_idle_ms: int, granite_extract_ms: int, granite_summarize_ms: int}`. The dashboard and reflection sweeps can pick these up; Telegram is not spammed.
+
+  **Exit-anomaly alert signal** (hardens OPS-1): `BridgeAdapter.run` in `agent/granite_container/bridge_adapter.py` MUST log at ERROR and append a `session_events` entry when `result.exit_reason in ("pm_hang", "dev_hang", "startup_unresolved")`:
+  ```python
+  if result.exit_reason in ("pm_hang", "dev_hang", "startup_unresolved"):
+      logger.error("[granite-exit-anomaly] session=%s exit_reason=%s exit_message=%s", session.session_id, result.exit_reason, result.exit_message)
+      session_events.append({"type": "exit_anomaly", "exit_reason": result.exit_reason, "ts": datetime.now(UTC).isoformat()})
+  ```
+  This is the only on-call path for kernel regressions at 3am — the existing observability stack (Sentry log capture from `logger.error`, dashboard panel from Task 9) picks it up. No new Sentry alert config is required; the `logger.error` call is sufficient given Sentry's default log-capture wiring.
 
 - **Per-turn silence cap (not total runtime cap):** Sessions can last up to ~6 hours of wall-clock (PM and Dev are interactive; runtime is bounded by user-driven turn cadence). The bound is **per-turn silence**, not total runtime: `CYCLE_IDLE_TIMEOUT_S` (already 120s in `container.py:79`) is the per-cycle ceiling on a single PTY's idle wait. If a PTY does not reach idle within this window, the container treats it as `pm_hang`/`dev_hang` and exits. This is the right knob because: (a) the harness path already runs in multi-hour sessions, (b) the watchdog ticks at 60s and would catch a true hang within one cycle, (c) a wall-clock cap would force user-visible mid-session termination the operator does not want. No change to `max_turns` or `CYCLE_IDLE_TIMEOUT_S` from the PoC defaults.
 
@@ -327,7 +357,16 @@ The cutover is all-or-nothing: there is no fallback path. The PR branch runs a l
 
 ### Risk 1: PTY process orphans if the worker is SIGKILL'd mid-run
 **Impact:** Each orphaned `claude --permission-mode bypassPermissions` process consumes ~200 MB. The first live run left 6 orphans (~1.2 GB). A worker SIGKILL during a high-traffic moment could leave 24 orphans (~4.8 GB with the default pool size of 3 pairs × 8 concurrent sessions).
-**Mitigation:** The pool's `_respawn_slot` runs on a per-slot `asyncio.Event`. If the worker restarts, the next `acquire_pair` will block on slots whose respawn is in flight — but the orphaned PTYs are still alive from the previous worker process. **Add a startup hook in `worker/__main__.py` that runs `pkill -f "claude --permission-mode bypassPermissions"` before the pool is constructed** to clear any orphans from a previous SIGKILL. This is the same `_run_pkill_fallback` pattern but at worker startup. Document this in `agent/granite_container/pty_pool.py` module docstring.
+**Mitigation:** The pool's `_respawn_slot` runs on a per-slot `asyncio.Event`. If the worker restarts, the next `acquire_pair` will block on slots whose respawn is in flight — but the orphaned PTYs are still alive from the previous worker process.
+
+**PID-targeted startup kill, scoped to pool-spawned children** (hardens OPS-3): the original `pkill -f "claude --permission-mode bypassPermissions"` regex matches ANY process using that flag, including an operator's personal interactive `claude` session on a different project. Replace it with PID-targeted kill: `PTYPool.spawn_pair(idx)` records `pm_pid = self._slots[idx].pm_pty._child.pid; self._spawned_pids.add(pm_pid)` (same for dev). The startup hook in `worker/__main__.py` becomes:
+```python
+for pid in list(pty_pool.get_spawned_pids()):
+    try: os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError: pass
+pty_pool.clear_spawned_pids()
+```
+The pids are written to a small `data/granite_pty_pids.json` so they survive a worker process restart (the on-disk file is read at startup, killed, and truncated). Drop the `pkill -f` approach in favor of PID-targeted kill. Documented in `agent/granite_container/pty_pool.py` module docstring.
 
 ### Risk 2: 40-minute worst-case Container.run blocks the worker event loop
 **Impact:** Without `asyncio.to_thread`, a single container run could stall heartbeats, steering injection, and watchdog ticks for up to `max_turns × CYCLE_IDLE_TIMEOUT_S × 2 = 40 minutes`. This would break the worker's two-tier no-progress detector and the `valor-session status` liveness probes.
@@ -394,6 +433,14 @@ The cutover is all-or-nothing: there is no fallback path. The PR branch runs a l
 - **The update skill's Step 4.6 (`validate_projects_config`)** does not touch this change. The `projects.json` file is unchanged.
 - **The PoC code deletion is part of the same `git push`** — operators do not need to coordinate a separate cleanup PR. The PoC files are referenced by `scripts/granite_poc.py` and `scripts/granite_questions_game.py` only; deleting both scripts + the granite_agent_loop + granite_router + claude_session modules in the same PR is a clean cutover.
 
+**Revert runbook** (hardens OPS-2): the cutover is all-or-nothing with no runtime feature flag; revert is a `git revert` followed by a service restart. The plan adds a 3-line runbook to `docs/deployment.md` (in the "Granite PTY Pool" section from the Documentation checklist) titled "Reverting the granite cutover":
+1. `git revert <merge-sha>` (or `git revert -m 1 <merge-sha>` if revert of a merge commit) and `git push`.
+2. Restart the worker: `python -m tools.valor_service restart` (or `./scripts/valor-service.sh worker-restart`).
+3. Drain stuck sessions from `telegram:outbox:*` — inspect `redis-cli LRANGE telegram:outbox:{session_id} 0 -1` for any half-delivered granite payloads; the drafter is idempotent on retried `[/user]` payloads.
+4. No manual flag toggling, no env var changes.
+
+**Behavior change to operator** (corrects the prior "no behavior change" claim above; tracked here so reviewers can match docs to plan): `[/user]` payloads now arrive mid-loop, not at session end. This is documented in `docs/features/granite-pty-production.md` per the Documentation checklist. The Update System change is still a no-op (the update script doesn't touch session-execution substrate).
+
 ## Agent Integration
 
 - **No new MCP servers are required.** The bridge already calls `valor_session create` / `valor_session steer` / etc., and the existing `TelegramRelayOutputHandler` is the bridge integration point. The agent does not need a new MCP tool to use granite sessions.
@@ -406,10 +453,17 @@ The cutover is all-or-nothing: there is no fallback path. The PR branch runs a l
 ## Documentation
 
 - [ ] Create `docs/features/granite-pty-production.md` describing the production path, the PTYPool, the BridgeAdapter, and the per-turn silence cap. Reference the PoC plan and the spike plan.
+
+  **Add a "## User-visible behavior" section to `docs/features/granite-pty-production.md`** (hardens USER-2): the harness path delivers one final result at session end; the granite path delivers per-turn `[/user]` payloads mid-loop. The user will see responses "as the PM works" instead of "when the session ends." The doc must note:
+  - (a) `[/user]` payloads arrive mid-loop instead of at session end.
+  - (b) `[/complete]` still arrives at session end with the trailing summary.
+  - (c) The response cadence depends on the PM's `[/user]` decisions and is non-deterministic.
+  - (d) A second, silent `[/user]` payload at session end is possible if the PM's final turn classifies as `[/user]` — this is the same model behavior, just now visible to the operator in real time.
+  - The `## Reverting the granite cutover` runbook (see below) explains how to roll back to the harness path on incident.
 - [ ] Update `docs/features/README.md` index table to add the new feature doc.
 - [ ] Update `docs/features/subconscious-memory.md` to note that granite sessions participate in memory extraction (no behavioral change, but the doc should call it out so operators know the integration is end-to-end).
 - [ ] Update `docs/infra/email-cs-auto-reply.md` (existing) and the new `docs/features/granite-pty-production.md` cross-link so operators can see how the granite path interacts with the email-cs path (both produce `AgentSession` records; the granite path also produces `ContainerResult` events).
-- [ ] Add a `## Granite PTY Pool` section to `docs/deployment.md` documenting the one new env var (`GRANITE_PTY_POOL_SIZE`) and the relationship to `MAX_CONCURRENT_SESSIONS`. Include the inline note about the 3 → 6 growth path.
+- [ ] Add a `## Granite PTY Pool` section to `docs/deployment.md` documenting the one new env var (`GRANITE_PTY_POOL_SIZE`) and the relationship to `MAX_CONCURRENT_SESSIONS`. Include the inline note about the 3 → 6 growth path. **Sub-bullet:** include the "Reverting the granite cutover" runbook (git revert → worker restart → drain outbox → no manual flag toggling).
 - [ ] Update the developer-facing `CLAUDE.md` "System Architecture" diagram (if it currently shows the headless `claude -p` path) to reflect the PTY container path as the primary production path.
 
 ## Success Criteria
@@ -496,7 +550,11 @@ The cutover is all-or-nothing: there is no fallback path. The PR branch runs a l
 - **Agent Type**: builder
 - **Parallel**: true
 - Replace `granite_classifier.py:185`'s inline `re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", pm_tail)` with `from agent.granite_container.pty_driver import _strip_ansi; pm_tail = _strip_ansi(pm_tail)`
-- Add 3 unit tests to `tests/unit/granite_container/test_granite_classifier.py`: CSI parity (matches pty_driver behavior), leading OSC `ESC]0;titleBEL` does not corrupt `[/dev]`, leading keypad-mode `ESC=` does not corrupt `[/dev]`
+- Add 3 unit tests to `tests/unit/granite_container/test_granite_classifier.py`: CSI parity (matches pty_driver behavior), leading OSC `ESC]0;titleBEL` does not corrupt `[/dev]`, leading keypad-mode `ESC=` does not corrupt `[/dev]`. **Synthetic-vs-live gap acknowledgement** (hardens ARCH-2): the PoC's 20-scenario synthetic test passed, then the first LIVE run failed on ANSI escapes. Synthetic tests cannot catch live TUI ANSI/cursor/repaint drift. The three new tests must be:
+  - `test_strip_csi_does_not_corrupt_classification` — input with CSI SGR (`\x1b[31m[/dev]\x1b[0m`), output classifies `[/dev]` correctly.
+  - `test_strip_osc_does_not_corrupt_classification` — input with `ESC]0;titleBEL` (`\x1b]0;title\x07[/dev]`), output classifies `[/dev]` correctly.
+  - `test_strip_keypad_does_not_corrupt_classification` — input with `ESC=` (`\x1b=[/dev]`), output classifies `[/dev]` correctly.
+  A comment block above these three tests must read: "Synthetic coverage. Time-shifted regressions (TUI version drift, Ink/React upgrades) may surface only on real TUI runs; Task 9 manual smoke test is the second-line defense. Schedule a second live smoke test ~24 hours after the first to catch time-shifted regressions."
 - Verify all existing classifier tests still pass
 
 ### 2. Phase 2a — PTYPool (bounded slot pool)
@@ -512,7 +570,9 @@ The cutover is all-or-nothing: there is no fallback path. The PR branch runs a l
 - `acquire_pair` waits on `asyncio.Semaphore`; if assigned slot is `respawning`, awaits the per-slot event
 - `release_pair` closes old PTYs (`pty_driver.close(force=True)`) and schedules `asyncio.create_task(self._respawn_slot(idx))`
 - Singleton: lazy module-level init in `agent/granite_container/pty_pool.py`; `worker/__main__.py` startup hook calls the singleton's `initialize()` to pre-warm slots
-- Add 6-8 unit tests: pool_size=0 raises ValueError; acquire blocks when all slots locked; release respawns in background; failed spawn releases semaphore; cancellation cleans up; per-slot lock prevents stale read
+- **Race-free respawn contract** (from POOL-1 + ADV-4): `_respawn_slot(idx)` MUST `event.clear()` as its first line, then perform the spawn under per-slot `asyncio.Lock`, then `event.set()`. Wrap the spawn body in `await asyncio.shield(self._slots[idx].lock)` so worker-shutdown cancellation only fires after the lock is released. Maintain a module-level `self._spawned_pids: set[int]` and `get_spawned_pids()` / `clear_spawned_pids()` accessors; persist to `data/granite_pty_pids.json` so a worker-process restart can still kill orphans (hardens OPS-3 — see Risk 1).
+- **Worker shutdown drain** (POOL-1): `worker/__main__.py` shutdown hook MUST `await asyncio.gather(*self._pool._respawn_tasks, return_exceptions=True)` before the PID-targeted kill step.
+- Add 6-8 unit tests: pool_size=0 raises ValueError; acquire blocks when all slots locked; release respawns in background; failed spawn releases semaphore; cancellation cleans up; per-slot lock prevents stale read; **event.clear() as first respawn line prevents the latched-event race (new test)**
 
 ### 3. Phase 2b — BridgeAdapter (mid-loop output delivery)
 - **Task ID**: build-bridge-adapter
@@ -524,11 +584,14 @@ The cutover is all-or-nothing: there is no fallback path. The PR branch runs a l
 - **Parallel**: false (depends on PTYPool interface for `acquire_pair` usage)
 - Create `agent/granite_container/bridge_adapter.py` with `BridgeAdapter` class: `__init__(agent_session, project_key, transport)`, `async run(user_message, working_dir)` returns short string
 - Resolve `send_cb` once at construction via `agent_session_queue._resolve_callbacks(project_key, transport)`; store `chat_id`, `reply_to_msg_id` from the agent_session
+- **Defensive `send_cb=None` default** (BRIDGE-1): if `_resolve_callbacks` returns `(None, None)`, set `self._on_user_payload` and `self._on_complete_payload` to a logger-only no-op (`logger.warning("bridge callback missing — granite output will be logged but not delivered")`). The container's `on_user_payload` and `on_complete_payload` parameters default to `None`; the adapter only passes non-None callables when `_send_cb` is set.
 - Add `on_user_payload: Callable[[str], None]` and `on_complete_payload: Callable[[str], None]` to `Container.__init__` (in `agent/granite_container/container.py`); default `None` preserves PoC behavior
+- **Synchronous callback contract** (ADV-5): the Container's `on_user_payload` call MUST be sync, not `asyncio.run_coroutine_threadsafe` fire-and-forget. `BridgeAdapter._make_user_callback` wraps the async `send_cb` in a sync callable that does `asyncio.run_coroutine_threadsafe(self._send_cb(...), loop).result(timeout=30)` to block until delivered. The thread blocks for ~1s per mid-loop network call; this is acceptable per-turn for 6h sessions.
+- **Drop standalone `format_short_result`** (SIMP-1): inline the exit-summary write as a `session_events` entry: `{"type": "exit_summary", "exit_reason": result.exit_reason, "turns": len(result.turns), "compliance_misses": result.classification_compliance_misses, "ts": datetime.now(UTC).isoformat()}`. `BridgeAdapter.run` returns `""` to `BackgroundTask`.
+- **Exit-anomaly alert** (OPS-1): when `result.exit_reason in ("pm_hang", "dev_hang", "startup_unresolved")`, log at ERROR and append a `session_events` entry of `{"type": "exit_anomaly", "exit_reason": ..., "ts": ...}`.
 - In `BridgeAdapter.run`, pass callables that wrap `send_cb` in `try/except`, log warnings, write to `agent_session.session_events` on failure
-- Implement `format_short_result(result: ContainerResult) -> str`: returns 1-2 line summary, empty for `pm_complete`/`pm_user` (mid-loop delivery handled it)
-- Acquire PTY pair from the pool, run container in `asyncio.to_thread`, return short result
-- Add 6-8 unit tests: send_cb called for each `[/user]`; send_cb called once for `[/complete]`; failed send_cb logs and continues; session_events entries written; short result format for each exit_reason
+- Acquire PTY pair from the pool, run container in `asyncio.to_thread`, return `""` to BackgroundTask (which has `send_result=False`)
+- Add 6-8 unit tests: send_cb called for each `[/user]`; send_cb called once for `[/complete]`; failed send_cb logs and continues; session_events entries written; **`_resolve_callbacks` returning `(None, None)` runs container to completion (BRIDGE-1 regression test)**; `exit_anomaly` log + session_events entry for `pm_hang` exit_reason (OPS-1 regression test); sync callback returns only after `send_cb` completes (ADV-5 regression test)
 
 ### 4. Phase 3 — Executor wiring
 - **Task ID**: build-wiring
@@ -542,7 +605,7 @@ The cutover is all-or-nothing: there is no fallback path. The PR branch runs a l
 - In `agent/session_executor.py:1700`, replace the `get_response_via_harness` call with the new `BridgeAdapter.run` path (no branch — all-or-nothing cutover)
 - The new path: `task = BackgroundTask(messenger=messenger, working_dir=str(working_dir), project_key=...)`; `await task.run(adapter.run(...), send_result=False)`
 - Modify the existing `_handle_dev_session_completion` call site to skip the dev-completion nudge when in granite mode (granite has its own PM/Dev handoff)
-- In `worker/__main__.py` startup, add `pkill -f "claude --permission-mode bypassPermissions"` (best-effort) before the PTYPool singleton initializes
+- In `worker/__main__.py` startup, replace the original `pkill -f "claude --permission-mode bypassPermissions"` with **PID-targeted kill** (hardens OPS-3): read `data/granite_pty_pids.json` from a previous worker run (if present), `os.kill(pid, SIGKILL)` for each pid (best-effort, swallow `ProcessLookupError`), truncate the file. The PTYPool singleton's `initialize()` then registers the freshly spawned pids into the same file. This avoids killing an operator's personal interactive `claude` session.
 - Add 2-3 unit tests: `BridgeAdapter.run` is called from `_execute_agent_session`; `send_result=False` is the right call; the `_handle_dev_session_completion` skip path is exercised
 
 ### 5. Phase 4 — PoC deletion
@@ -572,7 +635,7 @@ The cutover is all-or-nothing: there is no fallback path. The PR branch runs a l
 - **Assigned To**: integration-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `tests/integration/test_granite_pty_production.py` with one test: simulates a bridge-originated session, mocks the pexpect layer to drive a deterministic PM→Dev cycle, asserts `send_cb` is called for each `[/user]` turn, `agent_session.status == "completed"`, and `telegram:outbox:{session_id}` contains the expected payloads
+- Create `tests/integration/test_granite_pty_production.py` with one test: simulates a bridge-originated session, mocks the pexpect layer to drive a deterministic PM→Dev cycle, asserts `send_cb` is called for each `[/user]` turn, `agent_session.status == "completed"`, and `telegram:outbox:{session_id}` contains the expected payloads. **Mark the test as a wiring test, not e2e** (hardens TEST-1): the test docstring should read "wiring test, not e2e — the live smoke test (Task 9) is the e2e gate." A comment in the task description must note that the manual smoke test in Task 9 is the only e2e signal; the PR template's "live smoke test" checkbox is what gates merge.
 - Mark the test `@pytest.mark.granite_integration` so it can be skipped in fast CI
 - The test does NOT spawn a real `claude` process — it mocks `pty_driver.PTYDriver.spawn` and drives a script of pre-canned byte responses
 
@@ -602,15 +665,20 @@ The cutover is all-or-nothing: there is no fallback path. The PR branch runs a l
 - Add `## Granite PTY Pool` section to `docs/deployment.md` (env vars, relationship to MAX_CONCURRENT_SESSIONS)
 - Update `CLAUDE.md` "System Architecture" diagram to show PTY container as primary path
 
-### 9. Live smoke test — modest dashboard improvements via SDLC
-- **Task ID**: validate-live-dashboard
+### 9. Live smoke test — regression check + stretch dashboard improvement
+- **Task ID**: validate-live-smoke
 - **Depends On**: validate-cross, build-docs
-- **Assigned To**: reviewer + builder (the live smoke test IS the work)
-- **Agent Type**: builder (a small dev session that drives the dashboard work) → reviewer (verifies the work)
+- **Assigned To**: reviewer (verifies the smoke test)
+- **Agent Type**: validator
 - **Parallel**: false
-- **Smoke-test scope:** the live smoke test is **not** a "did the cutover work?" check; it is a real, modest improvement to the Valor web dashboard (`ui/`, served on `localhost:8500`), driven through the SDLC pipeline. The reviewer confirms: a real `claude` TUI session reaches `Container.run` and produces a `[/user]` delivery to Telegram — that part is the regression check, completed first, before the dashboard work.
-- **Acceptance criteria for the smoke test:**
-  1. **Regression check (must pass first):** a real `claude` TUI session reaches `Container.run` mid-PR, produces a `[/user]` delivery to Telegram, and the `AgentSession` shows `completed` status. This is gated by the `curl localhost:8500/dashboard.json` showing the running session with `last_heartbeat_at < 120s`. The reviewer confirms this before unblocking the dashboard work.
-  2. **Dashboard improvement (the actual smoke-test work):** the builder spawns a dev session via SDLC to make a **modest, demonstrable improvement** to the dashboard. Example: a new "Granite Sessions" panel under `ui/` that shows the live PTY pool state (active / locked / respawning slot counts, last pool event timestamp). The improvement must (a) be small enough to ship in the same PR, (b) be observably useful to a human operator looking at the dashboard after the cutover, (c) be implemented through the full SDLC pipeline (issue → plan → build → test → review → docs → merge) inside the PR branch. **This proves the cutover end-to-end through the same path operators will use day-to-day.**
-  3. **The reviewer verifies the dashboard improvement** and confirms the PR is mergeable. There is no "fallback mitigation" — the regression check is a hard gate, and the dashboard work is the proof that the new substrate is exercised through the production paths.
-- **Why this is the right shape:** the live smoke test was previously a checkbox ("did the cutover work?"). Making it a real piece of work via SDLC (a) gives the smoke test a concrete deliverable, (b) exercises the SDLC pipeline on the new substrate (granite + dashboard), (c) produces a useful artifact (the dashboard panel) for operators, (d) ensures the cutover is not merged without a real PR-branch test of the production path. The dashboard panel is small enough that the PR stays focused; it is also a natural place to surface the PTY pool state that the new code path makes available.
+- **Scope:** the live smoke test is the **regression check** for the cutover. A real `claude` TUI session must reach `Container.run` mid-PR, produce a `[/user]` delivery to Telegram, and the `AgentSession` must show `completed` status. Gated by `curl localhost:8500/dashboard.json` showing the running session with `last_heartbeat_at < 120s`. **The PR template's "live smoke test" checkbox is gated only on this regression check — nothing else.**
+- **Acceptance criteria:** the reviewer confirms the regression check passes. No dashboard work is in scope for this task.
+
+### 10. Stretch goal — modest dashboard improvement via SDLC
+- **Task ID**: dashboard-pty-pool-panel
+- **Depends On**: validate-live-smoke
+- **Assigned To**: builder (a small dev session that drives the dashboard work) → reviewer
+- **Agent Type**: builder → reviewer
+- **Parallel**: false
+- **Note in task description:** "This is a stretch goal, not the smoke test. The cutover is mergeable without this task landing." If the stretch goal is too large to ship in the same PR, it can be deferred to a follow-on issue.
+- **Scope:** make a **modest, demonstrable improvement** to the dashboard — e.g., a new "Granite Sessions" panel under `ui/` (served on `localhost:8500`) that shows the live PTY pool state (active / locked / respawning slot counts, last pool event timestamp). The improvement must (a) be small enough to ship in the same PR, (b) be observably useful to a human operator looking at the dashboard after the cutover, (c) be implemented through the full SDLC pipeline (issue → plan → build → test → review → docs → merge) inside the PR branch. This proves the cutover end-to-end through the same path operators will use day-to-day.
