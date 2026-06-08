@@ -25,13 +25,14 @@ PR #1570 (issue #1546) delivered a kernel-validated alternative: `agent/granite_
 
 **Desired outcome:**
 
-- All bridge-originated sessions execute via `Container`, not `get_response_via_harness`.
-- A `PTYPool` enforces a hard maximum of N concurrent PM+Dev PTY pairs (configurable, default 3). No slot available → session waits in the Redis queue.
+- All bridge-originated sessions execute via `Container`, not `get_response_via_harness`. **All-or-nothing on first PR** — no fallback flag; the cutover is tested in the PR branch before merge.
+- A `PTYPool` enforces a hard maximum of N concurrent PM+Dev PTY pairs (configurable, default 3). No slot available → session waits in the Redis queue. Future work targets 6 once health/observability and memory management land (see inline note in `## Solution`).
 - Granite sessions appear in `dashboard.json`, `valor-session list`, and the watchdog like any other session.
 - Output classified as `[/user]` or `[/complete]` reaches Telegram/email via the existing `TelegramRelayOutputHandler` path, with progress signals written to `agent_session.session_events` (not chat).
 - ANSI escape sequences are stripped reliably before classification, and the stripping is unit-tested.
 - The PoC code (`agent/granite_agent_loop.py`, `agent/granite_router.py`, `agent/claude_session.py`, `scripts/granite_poc.py`, `scripts/granite_questions_game.py`) is deleted.
 - `sdk_client.py::get_response_via_harness` and the stream-json parser remain for now (explicitly out of scope per the issue's Recon Summary); a follow-on issue will handle their removal.
+- Sessions can last up to 6 hours; runtime is bounded by **per-turn silence** (idle-timeout on PM and Dev PTYs), not by a total wall-clock cap.
 
 ## Freshness Check
 
@@ -195,9 +196,9 @@ Telegram inbound (or email inbound) → bridge enqueue → AgentSession in Redis
 - **New config field:** `config/settings.py::GRANITE_PTY_POOL_SIZE` (default 3, env-overridable as `GRANITE_PTY_POOL_SIZE`).
 - **New config field:** `config/settings.py::GRANITE_MAX_TURNS` (default 10, env-overridable; currently a module constant in `container.py:68`).
 - **No new dependencies.** pexpect is already in use by the PoC (`agent/granite_container/pty_driver.py:50-51`).
-- **No new env vars required for the operator** beyond the two settings above.
+- **No new env vars required for the operator** beyond the one setting above (`GRANITE_PTY_POOL_SIZE`).
 - **No protocol changes.** `OutputHandler.send` is unchanged; `BackgroundTask.run` is unchanged; `AgentSession` model is unchanged.
-- **Reversibility:** Each change is independently revertible. The harness call at `session_executor.py:1708` is preserved as a fallback for the first release (gated by a feature flag `GRANITE_PTY_ENABLED`, default `True`); on a regression, setting the flag to `False` restores the headless path within a single restart. The feature flag and the harness fallback are removed in the follow-on issue that deletes `get_response_via_harness`.
+- **Reversibility:** Each change is independently revertible. The cutover is all-or-nothing: there is no fallback feature flag. If a regression lands on `main`, the PR is reverted rather than the path being feature-flagged off. The smoke test in `### 9. Live smoke test` is the gate; it runs in the PR branch before merge.
 - **Data ownership:** The Container owns the two PTYs and the sandbox tempdir. The BridgeAdapter owns the `send_cb` reference and the `agent_session` ORM record. The PTYPool owns the slot lifecycle.
 
 ## Appetite
@@ -232,7 +233,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_pty_pr
 
 - **`PTYPool`**: A singleton, asyncio-aware, bounded pool of pre-warmed PM+Dev PTY slot pairs. `acquire_pair()` returns `(pm_pty, dev_pty)` as an async context manager; `release_pair()` schedules a background respawn of the released slots so the next acquirer gets fresh PTYs. Pool size is the hard max-concurrency cap.
 - **`BridgeAdapter`**: A thin wrapper around `Container` that: (a) resolves the registered `send_cb` once at construction, (b) installs mid-loop progress callbacks on the container's per-turn path so `[/user]` payloads are delivered to Telegram as they happen, (c) writes per-turn observability data to `agent_session.session_events`, (d) returns a short final string for `BackgroundTask` (or empty when mid-loop delivery handled it).
-- **Harness fallback gate**: A `GRANITE_PTY_ENABLED` feature flag (env var, default `True`) gates the new path. When `False`, the existing `get_response_via_harness` call at `session_executor.py:1708` is the active path. The flag is removed when the follow-on issue deletes the harness path entirely.
+- **Harness removal is not part of this PR.** `sdk_client.py` is out of scope (3,759 lines, many non-harness callers) and is deleted in a follow-on issue. The agent does not retain a fallback gate: the cutover is all-or-nothing, and the new path is exercised in the PR branch before merge. If a regression lands on `main`, the PR is reverted rather than the path being feature-flagged off.
 - **Short-result formatter**: A 1-2 line Telegram-friendly summary produced from `ContainerResult` (`f"Granite session ended: {result.exit_reason} (turns={len(result.turns)}, compliance_misses={result.classification_compliance_misses})"`). Empty string when `exit_reason` is `pm_complete` or `pm_user` (the `[/complete]`/`[/user]` payload was already delivered mid-loop).
 - **ANSI hardening**: Replace the inline regex on `granite_classifier.py:185` with a call to `pty_driver._strip_ansi` (or replicate its union of CSI+OSC+keypad). Add 3 unit tests: leading OSC, leading keypad-mode escape, plain CSI parity.
 
@@ -250,6 +251,8 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_pty_pr
 
 **End state** → `AgentSession.status = completed/failed` → dashboard reflects session → Telegram has received each `[/user]` turn and the `[/complete]` summary.
 
+The cutover is all-or-nothing: there is no fallback path. The PR branch runs a live smoke test (see `### 9. Live smoke test`) before merge; if a regression surfaces on `main`, the PR is reverted, not feature-flagged off.
+
 ### Technical Approach
 
 - **PTYPool design:** Singleton initialized in `worker/__main__.py` (or `agent/session_executor.py` module-level lazy init) at worker startup. Uses an `asyncio.Semaphore(GRANITE_PTY_POOL_SIZE)` to gate `acquire_pair()`. Each slot is `(PTYDriver, PTYDriver)` for the PM and Dev pair. On `release_pair()`, the old PTYs are closed (with the existing `pty_driver.close(force=True)` teardown), and a `asyncio.create_task(self._respawn_slot(idx))` schedules a fresh spawn in the background — the next acquirer of slot N gets the respawned pair or waits for it.
@@ -262,7 +265,9 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_pty_pr
 
 - **Session-events progress signals:** Use `agent_session.session_events` (Popoto field, list of dicts) for non-user-visible progress: `{turn: int, classification: str, compliance_miss: bool, pm_idle_ms: int, dev_idle_ms: int, granite_extract_ms: int, granite_summarize_ms: int}`. The dashboard and reflection sweeps can pick these up; Telegram is not spammed.
 
-- **Harness fallback gating:** Add `GRANITE_PTY_ENABLED = os.environ.get("GRANITE_PTY_ENABLED", "true").lower() in ("1", "true", "yes")` to `agent/session_executor.py` module-level. The replacement at `session_executor.py:1700` branches on this flag: `True` → new container path, `False` → existing harness call. The flag is a temporary safety net; removing it is a follow-on issue.
+- **Per-turn silence cap (not total runtime cap):** Sessions can last up to ~6 hours of wall-clock (PM and Dev are interactive; runtime is bounded by user-driven turn cadence). The bound is **per-turn silence**, not total runtime: `CYCLE_IDLE_TIMEOUT_S` (already 120s in `container.py:79`) is the per-cycle ceiling on a single PTY's idle wait. If a PTY does not reach idle within this window, the container treats it as `pm_hang`/`dev_hang` and exits. This is the right knob because: (a) the harness path already runs in multi-hour sessions, (b) the watchdog ticks at 60s and would catch a true hang within one cycle, (c) a wall-clock cap would force user-visible mid-session termination the operator does not want. No change to `max_turns` or `CYCLE_IDLE_TIMEOUT_S` from the PoC defaults.
+
+- **Pool size growth path (inline note for the next agent):** `GRANITE_PTY_POOL_SIZE` defaults to 3. Once health/observability and memory management are in place — both follow-on issues, not this one — the default can grow to 6. The pool size is intentionally smaller than `MAX_CONCURRENT_SESSIONS=8` so the Redis queue absorbs over-cap sessions; the 3:8 ratio gives operators headroom to handle the orphan-after-SIGKILL case (Risk 1) without overcommitting memory. When raising the default, also: (a) verify `ThreadPoolExecutor` size (`min(32, os.cpu_count()+4)`) accommodates `MAX_CONCURRENT_SESSIONS × pool_size = 48` long threads on a multi-core machine, (b) update the test in `tests/unit/granite_container/test_pty_pool.py` that asserts the semaphore cap.
 
 - **Short-result formatter:** New function `format_short_result(result: ContainerResult) -> str` lives in `agent/granite_container/bridge_adapter.py`. Returns the 1-2 line summary as described above. The bridge adapter's coroutine returns this from `to_thread` so `BackgroundTask` has a string to log.
 
@@ -307,11 +312,11 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_pty_pr
 - [ ] `tests/unit/test_claude_session.py` — UPDATE or DELETE: `claude_session.py` is being deleted (it provided `_RESUME_HINT_RE` which is re-imported by `pty_driver.py:56`; verify that the import is moved to `pty_driver.py`'s local definition or to a new shared module before deletion).
 - [ ] `tests/unit/test_granite_questions_game.py` — DELETE: PoC's `scripts/granite_questions_game.py` is being deleted; the test goes with it.
 - [ ] `tests/unit/test_granite_poc.py` (if exists) — DELETE: PoC's `scripts/granite_poc.py` is being deleted; the test goes with it.
-- [ ] `tests/unit/test_session_executor.py` — UPDATE: any tests that mock `get_response_via_harness` need to mock the new `BridgeAdapter.run` path. Most existing tests should be untouched if the harness fallback gate is `True` by default and the test fixtures set `GRANITE_PTY_ENABLED=False`.
+- [ ] `tests/unit/test_session_executor.py` — UPDATE: any tests that mock `get_response_via_harness` need to mock the new `BridgeAdapter.run` path. The harness code path itself is preserved in `sdk_client.py` (out of scope), but the call at `session_executor.py:1708` is replaced; mocks targeting that call must move to target `BridgeAdapter.run`. Existing harness-path unit tests in `test_session_executor.py` that do not depend on `_execute_agent_session`'s call site remain green.
 
 ## Rabbit Holes
 
-- **Tempting: replace the harness path entirely in the same PR.** Issue's Recon Summary explicitly says `sdk_client.py` is out of scope (3,759 lines, many non-harness callers). Adding the harness removal here triples the diff and conflates the cutover with the cleanup. **Stay focused on the cutover + the PoC deletion; the harness path stays behind a flag for one release.**
+- **Tempting: replace the harness path entirely in the same PR.** Issue's Recon Summary explicitly says `sdk_client.py` is out of scope (3,759 lines, many non-harness callers). Adding the harness removal here triples the diff and conflates the cutover with the cleanup. **Stay focused on the cutover + the PoC deletion; the harness code path stays in `sdk_client.py` for the follow-on issue that rewrites its non-harness callers, but `_execute_agent_session` no longer calls it.**
 - **Tempting: per-machine `claude` model selection / fallback.** The PoC hardcodes `claude --model` via the `pm_model`/`dev_model` parameters on `Container.__init__`. Today, the production harness does the same. Adding a model-selection matrix is a feature, not a cutover. **Defer.**
 - **Tempting: optimize the granite classifier to use a smaller model or a regex-only path for `[/user]`.** The PoC is already O(N×granite_call); the classifier is the slow part. The PoC's 2-call per turn (extract + summarize) is the bottleneck, and replacing either call is a model-quality research project. **Defer.**
 - **Tempting: write a custom restart loop for the PTY driver on transient pexpect errors.** The `pty_driver.py` close+respawn path in the pool already handles this. Adding more logic inside the driver conflates substrate with pool. **Defer to a separate investigation if pexpect EOFs become a production issue.**
@@ -376,19 +381,18 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_pty_pr
 
 ## No-Gos (Out of Scope)
 
-- [EXTERNAL] **`sdk_client.py` deletion** — `get_response_via_harness` and `_run_harness_subprocess` stay for one release cycle, behind the `GRANITE_PTY_ENABLED=False` flag. The 3,759-line module has many non-harness callers (persona loading, prompt composition, etc.) that the agent cannot safely rewrite. **Sequenced for a follow-on issue** filed at plan-execution time.
-- [ORDERED] **Harness path removal follow-on** — must wait for at least one release cycle of the granite path in production to confirm stability. Filed as a separate issue at plan-execution time.
+- [EXTERNAL] **`sdk_client.py` deletion** — `get_response_via_harness` and `_run_harness_subprocess` stay in the file (out of scope for this plan), even though `_execute_agent_session` no longer calls them. The 3,759-line module has many non-harness callers (persona loading, prompt composition, etc.) that the agent cannot safely rewrite as part of a cutover. **Sequenced for a follow-on issue** filed at plan-execution time.
+- [ORDERED] **Harness path removal follow-on** — must wait for at least one release cycle of the granite path in production to confirm stability. Filed as a separate issue at plan-execution time. The follow-on rewrites the non-harness callers of `sdk_client.py` so the harness-specific functions can be deleted cleanly.
 - [DESTRUCTIVE] **Worker startup pkill hook** is added in the same PR but ONLY runs `pkill -f "claude --permission-mode bypassPermissions"`. It does not kill any other `claude` process (the regex is specific). Documented in `worker/__main__.py` startup code.
 - [SEPARATE-SLUG #1572] All 12 acceptance-criteria items in the issue are in scope; this No-Go list is the inverse — explicit deferrals. The single ordered deferral is the `sdk_client.py` deletion.
 
 ## Update System
 
-- **No update system changes required for the `/update` skill or `scripts/remote-update.sh`.** The change is purely code-level: new modules in `agent/granite_container/`, modified `agent/session_executor.py:1700-1756`, deleted `agent/granite_agent_loop.py` + `agent/granite_router.py` + `agent/claude_session.py` + `scripts/granite_poc.py` + `scripts/granite_questions_game.py`, two new config fields.
-- **Two new env vars are operator-facing** (in `~/Desktop/Valor/.env`): `GRANITE_PTY_POOL_SIZE` (default 3) and `GRANITE_PTY_ENABLED` (default `true`). **No new env vars are deployment-required** — the defaults are correct.
-- **No new config files are introduced.** `config/settings.py` gains two new fields; no new YAML/TOML/JSON.
+- **No update system changes required for the `/update` skill or `scripts/remote-update.sh`.** The change is purely code-level: new modules in `agent/granite_container/`, modified `agent/session_executor.py:1700-1756`, deleted `agent/granite_agent_loop.py` + `agent/granite_router.py` + `agent/claude_session.py` + `scripts/granite_poc.py` + `scripts/granite_questions_game.py`, one new config field.
+- **One new env var is operator-facing** (in `~/Desktop/Valor/.env`): `GRANITE_PTY_POOL_SIZE` (default 3). **No new env vars are deployment-required** — the default is correct.
+- **No new config files are introduced.** `config/settings.py` gains one new field; no new YAML/TOML/JSON.
 - **The update skill's Step 4.6 (`validate_projects_config`)** does not touch this change. The `projects.json` file is unchanged.
 - **The PoC code deletion is part of the same `git push`** — operators do not need to coordinate a separate cleanup PR. The PoC files are referenced by `scripts/granite_poc.py` and `scripts/granite_questions_game.py` only; deleting both scripts + the granite_agent_loop + granite_router + claude_session modules in the same PR is a clean cutover.
-- **The harness fallback gate (`GRANITE_PTY_ENABLED=False`)** is a temporary safety net. Operators on machines where the granite path is misbehaving can flip this to `False` to restore the headless path. Documented in the new `config/settings.py` docstring.
 
 ## Agent Integration
 
@@ -401,20 +405,20 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_pty_pr
 
 ## Documentation
 
-- [ ] Create `docs/features/granite-pty-production.md` describing the production path, the PTYPool, the BridgeAdapter, and the harness fallback flag. Reference the PoC plan and the spike plan.
+- [ ] Create `docs/features/granite-pty-production.md` describing the production path, the PTYPool, the BridgeAdapter, and the per-turn silence cap. Reference the PoC plan and the spike plan.
 - [ ] Update `docs/features/README.md` index table to add the new feature doc.
 - [ ] Update `docs/features/subconscious-memory.md` to note that granite sessions participate in memory extraction (no behavioral change, but the doc should call it out so operators know the integration is end-to-end).
 - [ ] Update `docs/infra/email-cs-auto-reply.md` (existing) and the new `docs/features/granite-pty-production.md` cross-link so operators can see how the granite path interacts with the email-cs path (both produce `AgentSession` records; the granite path also produces `ContainerResult` events).
-- [ ] Add a `## Granite PTY Pool` section to `docs/deployment.md` documenting the two new env vars (`GRANITE_PTY_POOL_SIZE`, `GRANITE_PTY_ENABLED`) and the relationship to `MAX_CONCURRENT_SESSIONS`.
-- [ ] Update the developer-facing `CLAUDE.md` "System Architecture" diagram (if it currently shows the headless `claude -p` path) to reflect the PTY container path as the primary production path with the headless path as a fallback.
+- [ ] Add a `## Granite PTY Pool` section to `docs/deployment.md` documenting the one new env var (`GRANITE_PTY_POOL_SIZE`) and the relationship to `MAX_CONCURRENT_SESSIONS`. Include the inline note about the 3 → 6 growth path.
+- [ ] Update the developer-facing `CLAUDE.md` "System Architecture" diagram (if it currently shows the headless `claude -p` path) to reflect the PTY container path as the primary production path.
 
 ## Success Criteria
 
 - [ ] `classify_pm_prefix` reuses `pty_driver._strip_ansi` (or its union of CSI+OSC+keypad), and 3 new unit tests cover each escape family — all green
 - [ ] `agent/granite_container/pty_pool.py` exists with `acquire_pair`/`release_pair` blocking context manager, semaphore-bounded at `GRANITE_PTY_POOL_SIZE` (default 3)
 - [ ] `agent/granite_container/bridge_adapter.py` exists with mid-loop `send_cb` delivery, `agent_session.session_events` progress writes, and short-result formatting
-- [ ] `_execute_agent_session` calls `BridgeAdapter.run` via `await asyncio.to_thread(...)`; the harness path is gated by `GRANITE_PTY_ENABLED` (default `True`)
-- [ ] Bridge-originated sessions route through `Container`; `claude -p stream-json` is NOT spawned when the flag is on
+- [ ] `_execute_agent_session` calls `BridgeAdapter.run` via `await asyncio.to_thread(...)`; the call at `session_executor.py:1708` to `get_response_via_harness` is replaced (the harness code in `sdk_client.py` remains for the follow-on issue)
+- [ ] Bridge-originated sessions route through `Container`; `claude -p stream-json` is NOT spawned for normal sessions (the harness subprocess in `sdk_client.py` is no longer called from `_execute_agent_session`)
 - [ ] A live `valor-granite-loop --user-message "handle PR 1568"` run produces at least one classified turn (not `pm_hang` after 2 unknowns)
 - [ ] A simulated bridge session reaches `Container.run`, produces an `AgentSession` record, calls `send_cb` for each `[/user]` turn, and reaches `completed` status in the integration test
 - [ ] `curl localhost:8500/dashboard.json` shows a running granite session mid-execution with `last_heartbeat_at` < 120s old
@@ -425,10 +429,9 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_pty_pr
 - [ ] Post-session memory extraction fires on exit (existing test surface; no regression)
 - [ ] After a 3-run test session, `ps aux | grep 'claude --permission-mode'` shows ≤ pool-size × MAX_CONCURRENT_SESSIONS processes (no orphan leak); the worker startup `pkill` hook clears any orphans from a prior SIGKILL
 - [ ] `agent/granite_agent_loop.py`, `agent/granite_router.py`, `agent/claude_session.py`, `scripts/granite_poc.py`, `scripts/granite_questions_game.py`, and related unit tests are deleted
-- [ ] `GRANITE_PTY_ENABLED=False` restores the headless path; the regression-tested harness path still works behind the flag
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] Live smoke test (the reviewer confirms a real `claude` TUI session reaches `Container.run` and produces a `[/user]` delivery to Telegram) is checked off in the PR template
+- [ ] Live smoke test (a real `claude` TUI session reaches `Container.run` and produces a `[/user]` delivery to Telegram) is checked off in the PR template, **and** a modest dashboard improvement is shipped in the same PR via the SDLC pipeline (regression check first, dashboard work second; both pass)
 
 ## Team Orchestration
 
@@ -454,7 +457,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_pty_pr
 
 - **Builder (executor-wiring)**
   - Name: wiring-builder
-  - Role: Modify `agent/session_executor.py:1700-1756` to call the new path; add `GRANITE_PTY_ENABLED` flag; `config/settings.py` new fields; `worker/__main__.py` startup pkill hook
+  - Role: Modify `agent/session_executor.py:1700-1756` to call the new path (replace the harness call, no fallback flag); `config/settings.py` `GRANITE_PTY_POOL_SIZE` field; `worker/__main__.py` startup pkill hook
   - Agent Type: builder
   - Resume: true
 
@@ -472,7 +475,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_pty_pr
 
 - **Validator (cross-cutting)**
   - Name: cross-validator
-  - Role: Run all tests, verify the harness fallback flag works, verify the live smoke test, check that no PoC files remain
+  - Role: Run all tests, verify the live smoke test, check that no PoC files remain
   - Agent Type: validator
   - Resume: true
 
@@ -525,22 +528,22 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_pty_pr
 - In `BridgeAdapter.run`, pass callables that wrap `send_cb` in `try/except`, log warnings, write to `agent_session.session_events` on failure
 - Implement `format_short_result(result: ContainerResult) -> str`: returns 1-2 line summary, empty for `pm_complete`/`pm_user` (mid-loop delivery handled it)
 - Acquire PTY pair from the pool, run container in `asyncio.to_thread`, return short result
-- Add 6-8 unit tests: send_cb called for each `[/user]`; send_cb called once for `[/complete]`; failed send_cb logs and continues; session_events entries written; short result format for each exit_reason; fallback flag disabled → existing harness path used
+- Add 6-8 unit tests: send_cb called for each `[/user]`; send_cb called once for `[/complete]`; failed send_cb logs and continues; session_events entries written; short result format for each exit_reason
 
 ### 4. Phase 3 — Executor wiring
 - **Task ID**: build-wiring
 - **Depends On**: build-bridge-adapter
-- **Validates**: `tests/unit/test_session_executor.py` (UPDATE: mock the new path; fallback flag tests)
+- **Validates**: `tests/unit/test_session_executor.py` (UPDATE: mock the new `BridgeAdapter.run` path)
 - **Informed By**: spike-2 (confirmed: `asyncio.to_thread` + BackgroundTask unchanged)
 - **Assigned To**: wiring-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `GRANITE_PTY_ENABLED` and `GRANITE_PTY_POOL_SIZE` to `config/settings.py` (env-overridable)
-- In `agent/session_executor.py:1700`, branch on `GRANITE_PTY_ENABLED`: `True` → new `BridgeAdapter.run` path; `False` → existing `get_response_via_harness` call (preserved)
+- Add `GRANITE_PTY_POOL_SIZE` to `config/settings.py` (env-overridable, default 3)
+- In `agent/session_executor.py:1700`, replace the `get_response_via_harness` call with the new `BridgeAdapter.run` path (no branch — all-or-nothing cutover)
 - The new path: `task = BackgroundTask(messenger=messenger, working_dir=str(working_dir), project_key=...)`; `await task.run(adapter.run(...), send_result=False)`
 - Modify the existing `_handle_dev_session_completion` call site to skip the dev-completion nudge when in granite mode (granite has its own PM/Dev handoff)
 - In `worker/__main__.py` startup, add `pkill -f "claude --permission-mode bypassPermissions"` (best-effort) before the PTYPool singleton initializes
-- Add 2-3 unit tests: `GRANITE_PTY_ENABLED=True` calls BridgeAdapter.run; `GRANITE_PTY_ENABLED=False` calls `get_response_via_harness`; send_result=False is the right call
+- Add 2-3 unit tests: `BridgeAdapter.run` is called from `_execute_agent_session`; `send_result=False` is the right call; the `_handle_dev_session_completion` skip path is exercised
 
 ### 5. Phase 4 — PoC deletion
 - **Task ID**: build-poc-delete
@@ -581,10 +584,10 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_pty_pr
 - **Parallel**: false
 - Run `pytest tests/ -n auto --dist=loadfile`; expect zero failures
 - Run `python -m ruff check . && python -m ruff format .`; expect zero issues
-- Run `grep -r 'claude -p' agent/ --include='*.py'`; expect only references in `agent/sdk_client.py` (the harness path, behind the flag)
-- Verify `GRANITE_PTY_ENABLED=False` restores the headless path: set the env var in a test, run `_execute_agent_session`, assert `get_response_via_harness` was called (mocked) and `BridgeAdapter.run` was NOT called
+- Run `grep -r 'claude -p' agent/ --include='*.py'`; expect only references in `agent/sdk_client.py` (the harness code, no longer called from `_execute_agent_session`)
 - Run `ps aux | grep 'claude --permission-mode'` before and after a 3-run test session; expect ≤ pool-size × MAX_CONCURRENT_SESSIONS processes
 - Verify no PoC files remain: `ls agent/granite_agent_loop.py agent/granite_router.py agent/claude_session.py scripts/granite_poc.py scripts/granite_questions_game.py 2>&1` returns all "No such file" errors
+- Verify `_execute_agent_session` no longer references `get_response_via_harness`: `grep -n 'get_response_via_harness' agent/session_executor.py` returns zero matches
 
 ### 8. Documentation cascade
 - **Task ID**: build-docs
@@ -592,19 +595,22 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_pty_pr
 - **Assigned To**: doc-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/granite-pty-production.md` (production path, PTYPool, BridgeAdapter, harness fallback flag)
+- Create `docs/features/granite-pty-production.md` (production path, PTYPool, BridgeAdapter, per-turn silence cap, all-or-nothing cutover)
 - Update `docs/features/README.md` index table
 - Update `docs/features/subconscious-memory.md` to note granite sessions participate in memory extraction
 - Cross-link `docs/infra/email-cs-auto-reply.md` and the new `docs/features/granite-pty-production.md`
 - Add `## Granite PTY Pool` section to `docs/deployment.md` (env vars, relationship to MAX_CONCURRENT_SESSIONS)
 - Update `CLAUDE.md` "System Architecture" diagram to show PTY container as primary path
 
-### 9. Live smoke test (PR template checkbox)
-- **Task ID**: validate-live
+### 9. Live smoke test — modest dashboard improvements via SDLC
+- **Task ID**: validate-live-dashboard
 - **Depends On**: validate-cross, build-docs
-- **Assigned To**: reviewer (via /do-pr-review)
-- **Agent Type**: reviewer
+- **Assigned To**: reviewer + builder (the live smoke test IS the work)
+- **Agent Type**: builder (a small dev session that drives the dashboard work) → reviewer (verifies the work)
 - **Parallel**: false
-- The PR template includes a "Live smoke test" checkbox
-- The reviewer confirms: a real `claude` TUI session reaches `Container.run`, produces a `[/user]` delivery to Telegram, and the `AgentSession` shows `completed` status
-- If the live smoke test fails, the reviewer requests changes; the harness fallback gate (`GRANITE_PTY_ENABLED=False`) is the immediate mitigation
+- **Smoke-test scope:** the live smoke test is **not** a "did the cutover work?" check; it is a real, modest improvement to the Valor web dashboard (`ui/`, served on `localhost:8500`), driven through the SDLC pipeline. The reviewer confirms: a real `claude` TUI session reaches `Container.run` and produces a `[/user]` delivery to Telegram — that part is the regression check, completed first, before the dashboard work.
+- **Acceptance criteria for the smoke test:**
+  1. **Regression check (must pass first):** a real `claude` TUI session reaches `Container.run` mid-PR, produces a `[/user]` delivery to Telegram, and the `AgentSession` shows `completed` status. This is gated by the `curl localhost:8500/dashboard.json` showing the running session with `last_heartbeat_at < 120s`. The reviewer confirms this before unblocking the dashboard work.
+  2. **Dashboard improvement (the actual smoke-test work):** the builder spawns a dev session via SDLC to make a **modest, demonstrable improvement** to the dashboard. Example: a new "Granite Sessions" panel under `ui/` that shows the live PTY pool state (active / locked / respawning slot counts, last pool event timestamp). The improvement must (a) be small enough to ship in the same PR, (b) be observably useful to a human operator looking at the dashboard after the cutover, (c) be implemented through the full SDLC pipeline (issue → plan → build → test → review → docs → merge) inside the PR branch. **This proves the cutover end-to-end through the same path operators will use day-to-day.**
+  3. **The reviewer verifies the dashboard improvement** and confirms the PR is mergeable. There is no "fallback mitigation" — the regression check is a hard gate, and the dashboard work is the proof that the new substrate is exercised through the production paths.
+- **Why this is the right shape:** the live smoke test was previously a checkbox ("did the cutover work?"). Making it a real piece of work via SDLC (a) gives the smoke test a concrete deliverable, (b) exercises the SDLC pipeline on the new substrate (granite + dashboard), (c) produces a useful artifact (the dashboard panel) for operators, (d) ensures the cutover is not merged without a real PR-branch test of the production path. The dashboard panel is small enough that the PR stays focused; it is also a natural place to surface the PTY pool state that the new code path makes available.
