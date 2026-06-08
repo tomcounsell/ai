@@ -341,6 +341,34 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Orphaned process cleanup failed (non-fatal): {e}")
 
+    # Step 4b: Kill orphaned granite PTY children from prior runs.
+    # The PTYPool records spawned PM/Dev PIDs to data/granite_pty_pids.json so
+    # a worker-process restart can still kill orphan PTYs (plan #1572, Risk 1
+    # / OPS-3). PID-targeted kill avoids pkill -f matching an operator's
+    # personal interactive `claude` session on a different project.
+    try:
+        from agent.granite_container.pty_pool import _kill_orphaned_pty_pids
+
+        killed_pids = _kill_orphaned_pty_pids()
+        if killed_pids:
+            logger.info(f"Killed {killed_pids} orphaned granite PTY subprocess(es)")
+    except Exception as e:
+        logger.warning(f"Granite PTY orphan cleanup failed (non-fatal): {e}")
+
+    # Step 4c: Initialize the granite PTY pool singleton (plan #1572).
+    # The pool pre-warms GRANITE__PTY_POOL_SIZE (default 3) interactive
+    # ``claude --permission-mode bypassPermissions`` pairs. Sessions
+    # acquire/release pairs via async context manager; over-cap sessions
+    # wait in the Redis queue.
+    try:
+        from agent.granite_container.pty_pool import initialize_pty_pool
+
+        _pty_pool = initialize_pty_pool()
+        await _pty_pool.initialize()
+        logger.info(f"Granite PTY pool initialized: pool_size={_pty_pool.pool_size}")
+    except Exception as e:
+        logger.warning(f"Granite PTY pool initialization failed (non-fatal): {e}")
+
     # Step 5: Start worker loops -- one per project's known chat_ids
     # Workers are started on-demand by _ensure_worker when sessions are enqueued.
     # For startup, we need to kick workers for any pending sessions.
@@ -539,6 +567,22 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
             await idle_sweep_task
         except asyncio.CancelledError:
             pass
+
+    # Drain the granite PTY pool's in-flight respawn tasks (POOL-1).
+    # The pool's per-slot `event` is only set after `_spawn_slot`
+    # completes; if the worker exits before a respawn finishes, the
+    # slot is left in `respawning` permanently and the next worker
+    # process's `_load_persisted_pids` will not see the in-flight
+    # spawn. We drain the asyncio.Tasks here so respawns either
+    # complete or are visibly cancelled.
+    try:
+        from agent.granite_container.pty_pool import get_pty_pool
+
+        _pool = get_pty_pool()
+        _pool.shutdown()
+        await _pool.drain_respawns()
+    except Exception as e:
+        logger.warning(f"Granite PTY pool drain failed (non-fatal): {e}")
 
     logger.info("Worker shutdown complete")
 
