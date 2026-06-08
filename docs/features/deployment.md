@@ -232,9 +232,54 @@ installed. `remove_newsyslog_config()` removes it via `sudo -n rm` during
 `/update --full`; when sudo isn't cached the cleanup is skipped with a
 warning and retried on the next update.
 
+## Granite PTY Pool
+
+Bridge-originated sessions execute through the granite PTY container (see
+[Granite PTY Container: Production Path](granite-pty-production.md)). The worker
+holds a bounded, singleton pool of interactive `claude` TUI pairs.
+
+**One env var, set in `~/Desktop/Valor/.env` (optional, default is correct):**
+
+```bash
+# Hard max concurrent PM+Dev PTY pairs. Note the DOUBLE underscore
+# (pydantic nested-settings delimiter). Default 3.
+GRANITE__PTY_POOL_SIZE=3
+```
+
+**Relationship to `MAX_CONCURRENT_SESSIONS`:** the pool size is intentionally
+**smaller** than `MAX_CONCURRENT_SESSIONS` (default 8) so the Redis queue
+absorbs over-cap sessions instead of overcommitting memory. Each
+`claude --permission-mode bypassPermissions` PTY consumes ~200 MB resident,
+so a full pool of 3 pairs is ~1.2 GB. Memory-constrained machines can set
+`GRANITE__PTY_POOL_SIZE=1` or `2`.
+
+**Growth path (3 → 6):** the default can rise to 6 once health/observability
+and memory management land (follow-on issues). When raising it, verify the
+`ThreadPoolExecutor` size (`min(32, os.cpu_count()+4)`) accommodates
+`MAX_CONCURRENT_SESSIONS × pool_size` long-lived threads, and update the
+semaphore-cap assertion in `tests/unit/granite_container/test_pty_pool.py`.
+
+**Orphan cleanup:** on a worker SIGKILL, PTY children survive. The next worker
+startup reads `data/granite_pty_pids.json` and PID-kills them (PID-targeted,
+never `pkill -f`, so an operator's personal `claude` session is untouched).
+
+### Reverting the granite cutover
+
+The cutover is all-or-nothing with no runtime feature flag. To roll back to the
+headless harness path on incident:
+
+1. `git revert <merge-sha>` (or `git revert -m 1 <merge-sha>` for a merge
+   commit) and `git push`.
+2. Restart the worker: `./scripts/valor-service.sh worker-restart`.
+3. Drain stuck sessions from `telegram:outbox:*` — inspect
+   `redis-cli LRANGE telegram:outbox:{session_id} 0 -1`; the drafter is
+   idempotent on retried `[/user]` payloads.
+4. No manual flag toggling, no env var changes.
+
 ## See Also
 
 - Run `/setup` for full machine configuration
 - See `config/projects.example.json` for template
 - Check `bridge/telegram_bridge.py` for routing logic
 - See [Worker Service](worker-service.md) for standalone worker details
+- See [Granite PTY Container: Production Path](granite-pty-production.md) for the session-execution substrate
