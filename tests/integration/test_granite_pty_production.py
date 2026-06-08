@@ -26,10 +26,9 @@ budget typical of integration tests.
 
 from __future__ import annotations
 
-import asyncio
 import tempfile
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -84,9 +83,7 @@ class TestGraniteProductionWiring:
     so the test does not require a real `claude` binary."""
 
     @pytest.mark.asyncio
-    async def test_simulated_bridge_session_completes_via_container(
-        self, redis_test_db
-    ):
+    async def test_simulated_bridge_session_completes_via_container(self, redis_test_db):
         """A simulated bridge-originated session reaches Container.run,
         BridgeAdapter publishes exit_summary, agent_session.status moves
         to completed, and the run returns '' (no double-delivery)."""
@@ -104,18 +101,16 @@ class TestGraniteProductionWiring:
         # `[/user]` payloads through the callbacks, then returns
         # `pm_complete`. The BridgeAdapter's `_publish_exit_summary`
         # and `_maybe_publish_exit_anomaly` are exercised.
-        delivered_payloads: list[str] = []
-
         def _fake_container_run(self):
             # Simulate two `[/user]` classifications and a
             # `[/complete]` at the end. The BridgeAdapter's
             # on_user_payload fires twice; the Container's run
             # returns a ContainerResult.
-            if self.on_user_payload is not None:
-                self.on_user_payload("First mid-loop reply.")
-                self.on_user_payload("Second mid-loop reply.")
-            if self.on_complete_payload is not None:
-                self.on_complete_payload("Trailing summary.")
+            if self._on_user_payload is not None:
+                self._on_user_payload("First mid-loop reply.")
+                self._on_user_payload("Second mid-loop reply.")
+            if self._on_complete_payload is not None:
+                self._on_complete_payload("Trailing summary.")
             return _make_container_result(
                 exit_reason="pm_complete",
                 exit_message="Trailing summary.",
@@ -126,8 +121,6 @@ class TestGraniteProductionWiring:
         # We patch the resolver to return a closure that records
         # calls. The Container's on_user_payload/on_complete_payload
         # are sync wrappers around this async send_cb.
-        from agent.granite_container import bridge_adapter
-
         resolved_calls: list[tuple] = []
 
         async def _fake_send_cb(chat_id, text, reply_to, agent_session):
@@ -137,9 +130,12 @@ class TestGraniteProductionWiring:
         def _fake_resolver(project_key, transport):
             return (_fake_send_cb, None)
 
-        with patch.object(Container, "run", _fake_container_run), patch(
-            "agent.granite_container.bridge_adapter._default_resolve_callbacks",
-            _fake_resolver,
+        with (
+            patch.object(Container, "run", _fake_container_run),
+            patch(
+                "agent.granite_container.bridge_adapter._default_resolve_callbacks",
+                _fake_resolver,
+            ),
         ):
             adapter = BridgeAdapter(
                 agent_session=session,
@@ -174,9 +170,7 @@ class TestGraniteProductionWiring:
         )
 
     @pytest.mark.asyncio
-    async def test_bridge_adapter_handles_send_cb_none_path(
-        self, redis_test_db
-    ):
+    async def test_bridge_adapter_handles_send_cb_none_path(self, redis_test_db):
         """BRIDGE-1: when no bridge callback is registered, the
         adapter logs a warning and runs the container to completion
         (no user-visible delivery, no crash)."""
@@ -197,9 +191,12 @@ class TestGraniteProductionWiring:
         def _fake_resolver(project_key, transport):
             return (None, None)  # No callback registered.
 
-        with patch.object(Container, "run", _fake_container_run), patch(
-            "agent.granite_container.bridge_adapter._default_resolve_callbacks",
-            _fake_resolver,
+        with (
+            patch.object(Container, "run", _fake_container_run),
+            patch(
+                "agent.granite_container.bridge_adapter._default_resolve_callbacks",
+                _fake_resolver,
+            ),
         ):
             adapter = BridgeAdapter(
                 agent_session=session,
@@ -241,9 +238,12 @@ class TestGraniteProductionWiring:
         def _fake_resolver(project_key, transport):
             return (None, None)
 
-        with patch.object(Container, "run", _fake_container_run), patch(
-            "agent.granite_container.bridge_adapter._default_resolve_callbacks",
-            _fake_resolver,
+        with (
+            patch.object(Container, "run", _fake_container_run),
+            patch(
+                "agent.granite_container.bridge_adapter._default_resolve_callbacks",
+                _fake_resolver,
+            ),
         ):
             adapter = BridgeAdapter(
                 agent_session=session,
