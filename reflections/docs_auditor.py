@@ -956,9 +956,20 @@ def audit(
     if scope_mode == "rotation":
         issue_findings.extend(_detect_orphan_plan_issues(root))
 
-    # File issues (deduped); only when applying
+    # File issues (deduped); only when applying.
+    # Hard per-run cap prevents flood: rotation allows up to 5, pr-changed-files up to 3.
+    per_run_cap = 5 if scope_mode == "rotation" else 3
     if apply_mode == "apply":
         for finding in issue_findings:
+            if issues_filed >= per_run_cap:
+                logger.warning(
+                    "docs_auditor: per-run cap (%d) reached for scope=%s — "
+                    "%d finding(s) suppressed; re-run to file remaining",
+                    per_run_cap,
+                    scope_mode,
+                    len(issue_findings) - issues_filed,
+                )
+                break
             if _file_issue_if_new(finding, root):
                 issues_filed += 1
 
