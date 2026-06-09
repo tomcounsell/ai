@@ -70,6 +70,20 @@ INTERRUPTED_RE = re.compile(
 # (`>` or `❯`). Both must be present.
 IDLE_BAR = re.compile(r"bypass.{0,30}permissions", re.DOTALL)
 PROMPT_GLYPH = re.compile(r"[>❯]")
+# Loading-indicator negative pattern: when the model is still
+# processing, the TUI paints a "· <verb>…" status line above the
+# prompt glyph. The bypass bar is ALSO visible during this period
+# (it's a persistent footer), so a naive C5 heuristic falsely
+# declares idle mid-load. We require the absence of this pattern
+# to confirm idle. Observed verbs (sampled across multiple PR
+# #1612 live runs): Sprouting, Whirlpooling, Cookin, Sock-hopping,
+# Honking, Thinking, Brewing, Spinning, Streaming, Drafting, plus
+# a long tail. The verb is followed by an ellipsis. We match the
+# structural shape (`· <word>+ …`) rather than enumerate verbs.
+LOADING_RE = re.compile(
+    r"[·•]\s*[A-Za-z][A-Za-z\-']{2,30}\s*[…\.]{1,3}",
+    re.IGNORECASE,
+)
 
 # C4: the `/help` overlay swaps the bottom bar to "esc to cancel".
 # Treat the overlay as "not actively responding" so the loop can hold.
@@ -162,14 +176,28 @@ def _default_substrate_model(role: str) -> str:
 
 
 def _build_env() -> dict[str, str]:
-    """Child env: inherit everything except blank the API key.
+    """Child env: inherit everything except blank the API key + base URL.
 
     Mirrors `_build_env` in `agent/claude_session.py:90-101`: blanking
     `ANTHROPIC_API_KEY` (rather than removing it) is the documented way
-    to force the Max subscription OAuth path.
+    to force the Max subscription OAuth path. But blanking ONLY the
+    key is not enough — if the operator's shell exports
+    `ANTHROPIC_BASE_URL=http://localhost:11434` (ollama) and
+    `ANTHROPIC_AUTH_TOKEN=ollama` (also from the ollama setup), the
+    TUI sees OAuth login but dispatches model calls to ollama, which
+    doesn't host Opus / Sonnet and errors with "issue with the
+    selected model" (observed live in PR #1612). We must blank all
+    three so the TUI uses the real Claude API endpoint that OAuth
+    resolves to.
+
+    The ollama substrate is the granite classifier only
+    (`granite_classifier.py`); it is intentionally NOT inherited
+    by the PTY child.
     """
     env = os.environ.copy()
     env["ANTHROPIC_API_KEY"] = ""
+    env["ANTHROPIC_BASE_URL"] = ""
+    env["ANTHROPIC_AUTH_TOKEN"] = ""
     return env
 
 
@@ -328,6 +356,12 @@ class PTYDriver:
                 continue
             accumulated += chunk
             stripped = _strip_ansi(accumulated)
+            # Loading-indicator negative: if the model is still
+            # processing, the bypass bar is up but the model hasn't
+            # actually responded yet. Don't declare idle while the
+            # loading verb is on screen.
+            if LOADING_RE.search(stripped):
+                continue
             # C4 + C5: idle = (bypass bar OR overlay bar) AND prompt glyph.
             bar_match = IDLE_BAR.search(stripped) or OVERLAY_BAR.search(stripped)
             if bar_match and PROMPT_GLYPH.search(stripped):

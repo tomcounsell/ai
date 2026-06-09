@@ -309,5 +309,94 @@ class TestBridgeAdapterCallbackInvocation(unittest.TestCase):
         self.assertEqual(session.session_events, [])
 
 
+class TestBridgeAdapterPrewarmedPair(unittest.TestCase):
+    """BridgeAdapter passes the pool's pre-warmed pair to Container,
+    instead of letting Container spawn a fresh pair on top of it.
+
+    Regression test for the pool double-spawn: when the pool's
+    pre-warmed pair is discarded, every session runs 2N `claude`
+    PTYs (N from the pool, N from Container), which regresses
+    issue #1572's orphan-leak acceptance criterion
+    (`ps aux | grep claude --permission-mode` ≤ pool_size × 2).
+    """
+
+    def test_run_passes_pool_pair_to_container(self) -> None:
+        """BridgeAdapter.run forwards the acquired (pm, dev) pair
+        to Container as pm_pty/dev_pty kwargs, and Container does
+        NOT call PTYDriver.spawn."""
+        from unittest.mock import patch as _patch
+
+        from agent.granite_container.pty_driver import PTYDriver
+
+        pool = _make_pool(size=1)
+        session = _FakeSession()
+
+        # Capture which (role, id) pairs are spawned. The pool's
+        # prewarm is the only spawn that should happen. We patch
+        # the spawn AT the module level (the path pty_driver.spawn
+        # looks up at call time) and init the pool inside the
+        # patch so prewarm is captured.
+        spawned: list[tuple[str, int]] = []
+        original_spawn = PTYDriver.spawn
+
+        def _tracking_spawn(self):  # type: ignore[no-untyped-def]
+            spawned.append((self.role, id(self)))
+            return original_spawn(self)
+
+        with (
+            _patch("agent.granite_container.pty_driver.PTYDriver.spawn", _tracking_spawn),
+            _patch_container_run_with_result(lambda: _make_container_result()),
+        ):
+            asyncio.run(pool.initialize())
+            adapter = BridgeAdapter(
+                agent_session=session,
+                project_key="t",
+                transport="telegram",
+                pool=pool,
+                resolve_callbacks=lambda p, t: (None, None),
+            )
+            asyncio.run(adapter.run("hello", "/tmp"))
+
+        # Exactly one pm + one dev spawn — both from the pool's
+        # prewarm. Zero additional spawns from Container.
+        roles = sorted(r for r, _ in spawned)
+        self.assertEqual(roles, ["dev", "pm"])
+        # No duplicate roles (i.e., Container did NOT spawn).
+        role_counts: dict[str, int] = {}
+        for r, _ in spawned:
+            role_counts[r] = role_counts.get(r, 0) + 1
+        for r, count in role_counts.items():
+            self.assertEqual(
+                count, 1, f"role {r!r} spawned {count}x, expected 1x (Container spawned fresh)"
+            )
+
+    def test_run_marks_pool_pair_as_released(self) -> None:
+        """The pool's (pm, dev) PTYs are marked _released_to_pool=True
+        so Container._close_pair does not double-close them."""
+        pool = _make_initialized_pool(size=1)
+        session = _FakeSession()
+
+        # Find the prewarmed pair.
+        slots = pool._slots
+        self.assertEqual(len(slots), 1)
+        prewarmed_pm, prewarmed_dev = slots[0].pty_pair
+
+        with (
+            _patch_container_run_with_result(lambda: _make_container_result()),
+        ):
+            adapter = BridgeAdapter(
+                agent_session=session,
+                project_key="t",
+                transport="telegram",
+                pool=pool,
+                resolve_callbacks=lambda p, t: (None, None),
+            )
+            asyncio.run(adapter.run("hello", "/tmp"))
+
+        # Both prewarmed PTYs are marked as pool-owned.
+        self.assertTrue(getattr(prewarmed_pm, "_released_to_pool", False))
+        self.assertTrue(getattr(prewarmed_dev, "_released_to_pool", False))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

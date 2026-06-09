@@ -164,11 +164,23 @@ class BridgeAdapter:
         # by GRANITE_PTY_POOL_SIZE; over-cap sessions wait in
         # Redis.
         async with self._pool.acquire_pair() as (pm, dev):
+            # Hand the pool's pre-warmed pair to Container so it
+            # reuses them instead of spawning a fresh pair. The
+            # pre-warm is the pool's whole point — discarding it
+            # doubled the live `claude` process count and broke
+            # the orphan-leak acceptance criterion (issue #1572).
+            # Mark the pair as pool-owned so Container._close_pair
+            # does not double-close; the pool's __aexit__ owns the
+            # close + respawn lifecycle.
+            pm._released_to_pool = True
+            dev._released_to_pool = True
             container = Container(
                 user_message=user_message,
                 cwd=working_dir,
                 on_user_payload=self._on_user_payload,
                 on_complete_payload=self._on_complete_payload,
+                pm_pty=pm,
+                dev_pty=dev,
             )
             # The container's run is sync (pexpect-driven). Run
             # it in a worker thread so the asyncio event loop
