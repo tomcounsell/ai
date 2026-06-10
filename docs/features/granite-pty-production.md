@@ -123,6 +123,51 @@ The adapter writes non-user-visible progress to `agent_session.session_events`
   PID-targeted, so an operator's personal interactive `claude` session on
   another project is never touched.
 
+## Known limitations (deep-dive audit, PR #1612)
+
+The cutover preserves the queue/steering/observability surface but **silently
+drops several per-session knobs** the harness path honored. These are
+architectural gaps, not bugs in the wrapper CLIs that set the knobs:
+
+1. **`working_dir` is ignored.** `BridgeAdapter.run(user_message, working_dir)`
+   passes `cwd` to `Container`, but a pool-prewarmed pair was already spawned
+   in the pool's `initialize(cwd=...)` directory (the worker's cwd today), and
+   `Container._spawn_pair` returns early for prewarmed pairs. Slug-based
+   worktree isolation (#887, #1272) is therefore bypassed on the granite path:
+   the PTYs run wherever the pool spawned them. Fixing this requires either
+   per-acquire respawn-with-cwd (forfeits prewarm latency) or `cd` injection
+   into the TUI before priming.
+2. **Per-session `model` is ignored.** The executor resolves
+   `_resolve_session_model(agent_session)` but never applies it; PTY models
+   are fixed at pool-spawn time from `GRANITE__PM_MODEL`/`GRANITE__DEV_MODEL`.
+3. **Persona overlays and harness env are not applied.** The executor still
+   computes `_pm_system_prompt` and `_harness_env` (`SESSION_TYPE`,
+   `CLAUDE_CODE_TASK_LIST_ID`, `VALOR_PARENT_SESSION_ID`, Telegram/Sentry
+   auth) for the harness path, but the granite container primes personas via
+   the `/granite-poc:prime-{pm,dev}-role` slash commands instead and the pool
+   PTYs inherit only the worker's env. PM Bash restrictions
+   (`pre_tool_use.py` keyed on `SESSION_TYPE`) and task-list isolation are
+   inactive inside granite PTYs.
+4. **Resume is a fresh session.** The container has no `claude --resume`
+   wiring; a `valor-session resume` re-enqueues and the granite path sends the
+   minimal message into a brand-new TUI without the prior transcript.
+5. **`[/dev]` turns hard-depend on local ollama.** `extract_dev_prompt` /
+   `summarize_for_pm` call `ollama.chat` (`granite4.1:3b`); if ollama is down
+   the container exits `exception` on the first dev-routed turn. Worker
+   startup does not health-check ollama.
+6. **Multi-turn conversations end at the first `[/user]`.** The container
+   exits on `pm_user`; a user reply spawns a new container run (fresh PTYs,
+   fresh context apart from the steering message).
+
+Hardenings landed by the same audit: mid-loop delivery now schedules onto the
+worker loop captured in `BridgeAdapter.run` (previously every delivery from
+the pexpect thread was skipped as `no_event_loop`); `Container` skips its
+machine-wide `pkill` fallback for pool-owned pairs; the pool respawns with the
+original `cwd`, checks pair liveness at acquire, clears the slot event at
+release, and prunes completed respawn tasks; `read_until_idle` checks the
+loading-spinner negative against only the trailing 400 chars so a historical
+spinner frame can no longer block idle detection for the rest of the call.
+
 ## Reverting the granite cutover
 
 The cutover is all-or-nothing with no runtime feature flag. To roll back to the

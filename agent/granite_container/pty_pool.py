@@ -120,6 +120,10 @@ class PTYPool:
         self._pid_registry_path = pid_registry_path
         self._respawn_tasks: list[asyncio.Task] = []
         self._initialized = False
+        # cwd used for every spawn (pre-warm AND respawn). Captured by
+        # `initialize()`; without it, respawned pairs silently fell back
+        # to the worker process's cwd instead of the configured one.
+        self._cwd: str | None = None
 
     # -- Inspection -------------------------------------------------------
 
@@ -142,6 +146,14 @@ class PTYPool:
         """Pre-warm all slots. Idempotent: calling twice is a no-op."""
         if self._initialized:
             return
+        self._cwd = cwd
+        # Load any pids persisted by a prior process BEFORE the first
+        # spawn — `_spawn_slot` calls `_persist_pids()`, which would
+        # otherwise overwrite the registry and lose the prior pids.
+        # (The worker startup hook `_kill_orphaned_pty_pids` normally
+        # reaps and clears them first; this ordering is the safety net
+        # for callers that skip that hook.)
+        self._load_persisted_pids()
         await asyncio.gather(
             *(self._spawn_slot(idx, cwd=cwd) for idx in range(self._pool_size)),
             return_exceptions=True,
@@ -153,7 +165,6 @@ class PTYPool:
         # either an idle pair or a respawning slot the next acquirer
         # will wait on.
         self._initialized = True
-        self._load_persisted_pids()
 
     def shutdown(self) -> None:
         """Best-effort cancel of in-flight respawn tasks. The caller
@@ -229,16 +240,38 @@ class PTYPool:
         """
         await self._sem.acquire()
         slot: _Slot | None = None
+        recycles = 0
         try:
-            slot = await self._wait_for_idle_slot()
-            if slot.state != "idle":
-                # Should not happen — `_wait_for_idle_slot` should
-                # have returned a slot whose event is set, which is
-                # the contract for `idle`. Defensive.
-                raise PTYPoolError(
-                    f"PTYPool slot {slot.idx} returned in non-idle state: {slot.state}"
-                )
-            slot.state = "locked"
+            while True:
+                slot = await self._wait_for_idle_slot()
+                if slot.state != "idle":
+                    # Should not happen — `_wait_for_idle_slot` should
+                    # have returned a slot whose event is set, which is
+                    # the contract for `idle`. Defensive.
+                    raise PTYPoolError(
+                        f"PTYPool slot {slot.idx} returned in non-idle state: {slot.state}"
+                    )
+                # Liveness check: an idle pair can have died while
+                # parked (claude crash, external kill, machine sleep).
+                # Handing out a dead pair guarantees a hung session —
+                # recycle the slot through a respawn and pick another.
+                if not self._pair_is_live(slot):
+                    recycles += 1
+                    if recycles > self._pool_size + 2:
+                        # Every recycle produced another dead pair —
+                        # spawning itself is broken (claude binary
+                        # missing, OOM-killer, ...). Fail loud instead
+                        # of recycling forever.
+                        raise PTYPoolError(
+                            f"PTYPool could not acquire a live pair after "
+                            f"{recycles} recycles; spawn appears broken"
+                        )
+                    logger.warning("[pty-pool] slot %d pair dead at acquire; recycling", slot.idx)
+                    await self._release_pair(slot)
+                    slot = None
+                    continue
+                slot.state = "locked"
+                break
             pm, dev = slot.pty_pair
             yield (pm, dev)
         finally:
@@ -274,11 +307,34 @@ class PTYPool:
             # `idle` now, or a different one might have become
             # `idle` while we waited.
 
+    def _pair_is_live(self, slot: _Slot) -> bool:
+        """Whether the slot holds a pair whose PTY children are both alive.
+
+        A driver with NO `_child` is treated as live: production
+        `_spawn_slot` always leaves a real pexpect child behind (dead
+        or alive), so `_child is None` only occurs when `spawn` was
+        patched to a no-op (unit tests) — distrusting it would recycle
+        forever. A driver whose real child reports dead is the actual
+        failure this check exists for.
+        """
+        if slot.pty_pair is None:
+            return False
+        for pty in slot.pty_pair:
+            if getattr(pty, "_child", None) is None:
+                continue
+            try:
+                if not pty.isalive():
+                    return False
+            except Exception:
+                return False
+        return True
+
     async def _release_pair(self, slot: _Slot) -> None:
         """Close old PTYs, transition slot to `respawning`, schedule
         background respawn. The semaphore is released by the caller
         in `acquire_pair`'s `finally`."""
         slot.state = "respawning"
+        slot.event.clear()
         # Close the old pair if any. Best-effort.
         if slot.pty_pair is not None:
             pm, dev = slot.pty_pair
@@ -288,7 +344,10 @@ class PTYPool:
                 except Exception:
                     pass
             slot.pty_pair = None
-        # Schedule respawn in the background.
+        # Schedule respawn in the background. Prune completed tasks
+        # first — without the prune, the list grows by one Task per
+        # session release for the worker's whole lifetime.
+        self._respawn_tasks = [t for t in self._respawn_tasks if not t.done()]
         task = asyncio.create_task(self._respawn_slot(slot))
         self._respawn_tasks.append(task)
 
@@ -351,7 +410,10 @@ class PTYPool:
             # 1. event.clear() inside the spawn (handled by _spawn_slot).
             # 2. Hold the per-slot lock across the spawn.
             # 3. Shield the lock-held section from cancellation.
-            await asyncio.shield(self._spawn_slot(slot.idx))
+            # The respawn reuses the cwd captured by `initialize()` so
+            # recycled pairs spawn in the same directory as pre-warmed
+            # ones (not the worker process's cwd).
+            await asyncio.shield(self._spawn_slot(slot.idx, cwd=self._cwd))
         except asyncio.CancelledError:
             # Worker shutdown. The shielded section has already
             # completed (or raised) by the time we see this — the

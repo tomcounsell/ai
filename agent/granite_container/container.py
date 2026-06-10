@@ -332,13 +332,31 @@ class Container:
                 except Exception:
                     pass
 
+    def _uses_pool_pair(self) -> bool:
+        """Whether this container runs on a PTYPool-prewarmed pair.
+
+        Pool-backed runs must NEVER use the pkill fallback: the
+        pattern matches every `claude --permission-mode
+        bypassPermissions` process on the machine, which includes
+        the pool's other slots (idle prewarmed pairs and pairs
+        mid-run in concurrent granite sessions) and any operator-
+        owned interactive session. The pool owns its PTY lifecycle
+        (close-on-release + PID-targeted orphan kill at worker
+        startup); the machine-wide pkill is only safe for the
+        self-spawned single-container path (tests, ping-pong).
+        """
+        return self._prewarmed_pm_pty is not None and self._prewarmed_dev_pty is not None
+
     def _run_pkill_fallback(self) -> None:
         """Last-ditch teardown: kill any orphaned `claude --bypassPermissions` PTYs.
 
         Mirrors the probe's teardown at
         `scripts/probe_slash_arguments.py:367-373`. The container
         prefers `child.close(force=True)`; this is the safety net.
+        Skipped entirely for pool-backed runs — see `_uses_pool_pair`.
         """
+        if self._uses_pool_pair():
+            return
         try:
             subprocess.run(
                 ["pkill", "-f", "claude --permission-mode bypassPermissions"],

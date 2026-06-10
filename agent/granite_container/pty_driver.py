@@ -84,6 +84,16 @@ LOADING_RE = re.compile(
     r"[·•]\s*[A-Za-z][A-Za-z\-']{2,30}\s*[…\.]{1,3}",
     re.IGNORECASE,
 )
+# The loading-indicator negative is checked against only the TRAILING
+# window of the accumulated buffer, not the whole capture. The capture
+# is an append-only byte stream: every spinner frame the TUI ever
+# painted stays in it, so a whole-buffer search matches forever once a
+# single "· Thinking…" frame lands — `read_until_idle` then can never
+# declare idle for that call and times out (the PR #1612 live-run
+# "saw_idle=False at 120s" symptom). The spinner is always part of the
+# CURRENT frame near the bottom of the screen; a trailing window covers
+# it while letting historical frames age out of scope.
+LOADING_TAIL_WINDOW = 400
 
 # C4: the `/help` overlay swaps the bottom bar to "esc to cancel".
 # Treat the overlay as "not actively responding" so the loop can hold.
@@ -359,8 +369,11 @@ class PTYDriver:
             # Loading-indicator negative: if the model is still
             # processing, the bypass bar is up but the model hasn't
             # actually responded yet. Don't declare idle while the
-            # loading verb is on screen.
-            if LOADING_RE.search(stripped):
+            # loading verb is on screen. Check only the trailing
+            # window — the capture is append-only, so a whole-buffer
+            # search would latch on the first spinner frame and block
+            # idle for the rest of the call (see LOADING_TAIL_WINDOW).
+            if LOADING_RE.search(stripped[-LOADING_TAIL_WINDOW:]):
                 continue
             # C4 + C5: idle = (bypass bar OR overlay bar) AND prompt glyph.
             bar_match = IDLE_BAR.search(stripped) or OVERLAY_BAR.search(stripped)

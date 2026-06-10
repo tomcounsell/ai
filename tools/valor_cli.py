@@ -35,6 +35,24 @@ _repo_root = Path(__file__).parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
+# Subcommand names recognized by `_build_parser`. The positional
+# shortcut in `main()` rewrites `valor "prompt"` to
+# `valor agent-session "prompt"` only when the first token is NOT in
+# this set. Adding a subparser without updating this set silently
+# mangles the new subcommand into a prompt —
+# tests/unit/test_valor_cli.py asserts the two stay in sync.
+KNOWN_SUBCOMMANDS = {
+    "agent-session",
+    "list",
+    "status",
+    "steer",
+    "kill",
+    "resume",
+    "inspect",
+    "children",
+    "release",
+}
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -232,24 +250,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # If the first token doesn't match a known subcommand and isn't a flag,
     # inject the `agent-session` subcommand so the user can omit it.
-    if (
-        argv
-        and not argv[0].startswith("-")
-        and argv[0]
-        not in {
-            "agent-session",
-            "list",
-            "status",
-            "steer",
-            "kill",
-            "resume",
-            "inspect",
-            "children",
-            "release",
-            "--help",
-            "-h",
-        }
-    ):
+    # (`--help`/`-h` start with `-`, so the flag check already excludes them.)
+    if argv and not argv[0].startswith("-") and argv[0] not in KNOWN_SUBCOMMANDS:
         argv = ["agent-session", *argv]
 
     parser = _build_parser()

@@ -35,10 +35,14 @@ a warning and runs the container to completion. The integration
 test must cover this path.
 
 **Synchronous callback contract** (ADV-5): the container's
-`on_user_payload` is called from a thread. The adapter wraps the
-async `send_cb` in a sync callable that does
-`asyncio.run_coroutine_threadsafe(self._send_cb(...), loop).result(timeout=30)`
-to block until delivery completes. The thread holds for the
+`on_user_payload` is called from the `asyncio.to_thread` worker
+thread, which has NO running event loop — `asyncio.get_running_loop()`
+raises there. `run()` therefore captures the worker's event loop
+(it always executes on the asyncio thread) into `self._loop`
+before handing the container to the thread, and `_deliver_sync`
+schedules the async `send_cb` onto that captured loop via
+`asyncio.run_coroutine_threadsafe(...).result(timeout=30)` to
+block until delivery completes. The thread holds for the
 duration of the network call, which is acceptable per-turn for
 6h sessions.
 
@@ -123,6 +127,12 @@ class BridgeAdapter:
         self._transport = transport
         self._pool = pool
         self._delivery_timeout_s = delivery_timeout_s
+        # The worker's event loop, captured by `run()` on the asyncio
+        # thread before the container is handed to `asyncio.to_thread`.
+        # The container's callbacks fire on the to_thread worker thread,
+        # where `asyncio.get_running_loop()` raises — this captured ref
+        # is the only way `_deliver_sync` can reach the loop.
+        self._loop: asyncio.AbstractEventLoop | None = None
 
         # Resolve the bridge callback. The default resolver looks
         # for a registered `agent_session_queue` callback; tests
@@ -159,6 +169,11 @@ class BridgeAdapter:
         delivered through the bridge callback. The container's
         `exit_summary` lands in `agent_session.session_events`.
         """
+        # Capture the running loop BEFORE entering the thread. The
+        # container's callbacks fire on the to_thread worker thread
+        # where no loop is running; `_deliver_sync` schedules onto
+        # this captured loop via `run_coroutine_threadsafe`.
+        self._loop = asyncio.get_running_loop()
         # Use the pool's async context manager to acquire a
         # (pm, dev) PTY pair. The pool's semaphore is bounded
         # by GRANITE_PTY_POOL_SIZE; over-cap sessions wait in
@@ -284,77 +299,73 @@ class BridgeAdapter:
         timeout_s: float,
     ) -> None:
         """Schedule the async send_cb on the worker's event loop
-        and block the calling thread until delivery completes
-        or the timeout fires.
+        (captured by `run()` into `self._loop`) and block the
+        calling thread until delivery completes or the timeout
+        fires.
 
-        On RuntimeError (no running loop — worker is shutting
-        down) or asyncio.TimeoutError, the error is logged and
-        a session_events entry is appended. The container keeps
-        running.
+        The caller is the container's `asyncio.to_thread` worker
+        thread — `asyncio.get_running_loop()` raises there, so the
+        captured loop ref is mandatory for async send_cbs. A sync
+        send_cb is called directly on the calling thread.
+
+        On a missing/closed loop or a delivery timeout, the error
+        is logged and a session_events entry is appended. The
+        container keeps running.
         """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop in this thread. The pexpect thread
-            # is not the asyncio thread. Use the worker
-            # thread's loop via run_coroutine_threadsafe against
-            # the worker loop, but we don't have a direct
-            # handle to it here. The simplest fallback: log and
-            # skip delivery. (In practice, the worker thread's
-            # loop is captured in `BridgeAdapter.__init__` via
-            # the resolve_callbacks hook and stashed; for the
-            # cutover, we accept this fallback for any path
-            # that runs from outside the asyncio thread.)
-            logger.warning(
-                "[bridge-adapter] send_cb called outside the asyncio loop; "
-                "delivery skipped (this should not happen in production)"
-            )
-            self._record_delivery_failure(payload, "no_event_loop")
-            return
-
-        # We're on the asyncio thread (the harness awaits
-        # `asyncio.to_thread` from here). The send_cb is async;
-        # we can just call it directly via `loop.create_task`
-        # and `await` on it via `asyncio.run_coroutine_threadsafe`
-        # only when the calling thread is not the asyncio thread.
-        # Since `container.run` is in a worker thread, we DO need
-        # `run_coroutine_threadsafe`. Capture the loop ref at
-        # call time and use the worker-loop pattern.
-        # For simplicity, we schedule and `await` directly here
-        # because the container's thread is the calling thread
-        # and `_on_user` is called from there, but Python's
-        # `asyncio.get_running_loop()` is per-thread. So we
-        # detect: if the calling thread is the asyncio thread,
-        # we can call directly; otherwise we use
-        # `run_coroutine_threadsafe`.
         import inspect
 
         try:
-            if inspect.iscoroutinefunction(send_cb):
-                coro = send_cb(chat_id, payload, reply_to, agent_session)
-            else:
-                # If send_cb is sync, just call it; the
-                # result is a coroutine-aware wrapper that the
-                # bridge uses today.
+            if not inspect.iscoroutinefunction(send_cb):
+                # Sync send_cb (test doubles, legacy wrappers): call
+                # directly on this thread.
                 send_cb(chat_id, payload, reply_to, agent_session)
                 return
-            # We're calling from a pexpect thread. Schedule on
-            # the worker's event loop and block.
+
+            loop = self._loop
+            if loop is None or loop.is_closed():
+                # run() was never awaited (direct Container use) or
+                # the worker loop is gone (shutdown). Without a live
+                # loop there is nowhere to schedule the coroutine.
+                logger.warning(
+                    "[bridge-adapter] no captured event loop for send_cb; "
+                    "delivery skipped (loop=%r)",
+                    loop,
+                )
+                self._record_delivery_failure(payload, "no_event_loop")
+                return
+
+            coro = send_cb(chat_id, payload, reply_to, agent_session)
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is loop:
+                # Same-thread call (sync container.run invoked on the
+                # asyncio thread, e.g. in tests). Blocking on a future
+                # here would deadlock the loop — schedule fire-and-
+                # forget instead.
+                loop.create_task(coro)
+                return
+            # Production path: pexpect worker thread → schedule on the
+            # captured worker loop and block until delivered.
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             future.result(timeout=timeout_s)
         except RuntimeError as e:
-            # Loop is closed (worker shutdown).
+            # Loop closed between the check and the schedule (worker
+            # shutdown race).
             logger.warning("[bridge-adapter] send_cb delivery failed (loop closed): %s", e)
             self._record_delivery_failure(payload, "loop_closed")
         except Exception as e:
-            # Anything else: log and continue. The container
-            # must not crash on a delivery failure.
+            # Anything else (including FutureTimeoutError): log and
+            # continue. The container must not crash on a delivery
+            # failure.
             logger.warning(
                 "[bridge-adapter] send_cb delivery raised: %s (payload=%d chars)",
                 e,
                 len(payload),
             )
-            self._record_delivery_failure(payload, str(e))
+            # Include the exception type: TimeoutError stringifies to "".
+            self._record_delivery_failure(payload, f"{type(e).__name__}: {e}")
 
     def _record_delivery_failure(self, payload: str, reason: str) -> None:
         """Append a `session_events` entry when a mid-loop

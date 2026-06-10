@@ -307,6 +307,31 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
         )
     )
 
+    # valor — the agent-session wrapper CLI (PR #1612). Same venv-bin
+    # check as valor-email: the entry point only exists after `uv sync`
+    # re-installs the project, so a stale venv is the common failure.
+    venv_valor = project_dir / ".venv" / "bin" / "valor"
+    valor_found = False
+    valor_err = None
+    if venv_valor.exists():
+        try:
+            result = run_cmd([str(venv_valor), "--help"], timeout=10)
+            valor_found = result.returncode == 0
+            if not valor_found:
+                valor_err = result.stderr.strip() or None
+        except Exception as e:
+            valor_err = str(e)
+    else:
+        valor_err = "Not in .venv/bin (run `uv sync` or `pip install -e .`)"
+
+    results.append(
+        ToolCheck(
+            name="valor",
+            available=valor_found,
+            error=valor_err if not valor_found else None,
+        )
+    )
+
     return results
 
 

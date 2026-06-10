@@ -1,6 +1,6 @@
 # `valor` CLI: The Agent-Session Wrapper
 
-**Status**: Shipped (PR #1602, on `session/granite-pty-production-cutover`)
+**Status**: Shipped (PR #1612, on `session/granite-pty-production-cutover`)
 
 ## Problem
 
@@ -27,10 +27,13 @@ schema changes.
 The interface:
 
 ```bash
-# Create — single positional prompt, defaults to PM role
-valor "fix the typo in app.py"
-valor agent-session "plan issue #1615"
-valor agent-session --role dev --model sonnet "build the feature"
+# Create — single positional prompt, defaults to PM role.
+# PM and dev sessions REQUIRE a slug: pass --slug, or include
+# "issue #N" in the prompt so the slug auto-derives to sdlc-N
+# (issues #1109 / #1272 — slugless invocations exit 1).
+valor "plan issue #1615"
+valor "fix the typo in app.py" --slug typo-fix
+valor agent-session --role dev --model sonnet --slug feature-x "build the feature"
 
 # Lifecycle
 valor list                          # recent 20 sessions
@@ -50,14 +53,16 @@ valor release --pr 1615             # clear retain_for_resume after PR merge/clo
 
 Two equivalent invocations for create:
 
-- `valor "fix the bug"` — positional shortcut (preferred for humans and agents)
-- `valor agent-session "fix the bug"` — explicit subcommand (preferred for scripts that need tab-completion or unambiguous error messages)
+- `valor "fix the bug" --slug fix-bug` — positional shortcut (preferred for humans and agents)
+- `valor agent-session "fix the bug" --slug fix-bug` — explicit subcommand (preferred for scripts that need tab-completion or unambiguous error messages)
 
 The wrapper detects the shortcut by sniffing argv: if the first token is not a
 known subcommand or a flag, it is prepended with `agent-session` before
-argparse runs. The first token is checked against a literal allowlist (8 names
-plus `--help`), so an accidental prompt that starts with `--kill-the-bug`
-doesn't get mangled.
+argparse runs. The first token is checked against the module-level
+`KNOWN_SUBCOMMANDS` set (9 names; anything starting with `-` is already
+excluded by the flag check), so an accidental prompt that starts with
+`--kill-the-bug` doesn't get mangled. A unit test asserts the set stays in
+sync with the subparser declarations.
 
 ## How It Works Well
 
@@ -122,19 +127,20 @@ is still broken in shells that load the stale alias.
 
 ### 2. The positional-shortcut disambiguation is a literal allowlist
 
-The first argv token is compared against a hardcoded set:
+The first argv token is compared against the module-level set:
 
 ```python
 KNOWN_SUBCOMMANDS = {"agent-session", "list", "status", "steer", "kill",
-                     "resume", "inspect", "children", "release", "--help", "-h"}
+                     "resume", "inspect", "children", "release"}
 ```
 
 If a future subcommand is added to the wrapper, it must be appended here or
-the new name will be silently rewritten to `agent-session`. There is no test
-for this — adding a new subcommand without updating the list produces a
-confusing error (`valor foo bar` becomes `valor agent-session foo bar`).
-The list is also a maintenance burden because it duplicates the subparser
-declarations.
+the new name will be silently rewritten to `agent-session` (`valor foo bar`
+becomes `valor agent-session foo bar`). The set duplicates the subparser
+declarations by design (it must be consulted before argparse runs);
+`tests/unit/test_valor_cli.py::test_known_subcommands_matches_parser`
+asserts the two stay in sync, so drift now fails CI instead of failing a
+user.
 
 ### 3. Worker pre-flight check uses a stale Redis cache
 
@@ -188,19 +194,38 @@ guard, but a future improvement could let `valor` itself do the
 worktree-attach dance before delegating to `valor-session create` for
 sub-session work.
 
-### 7. No test coverage of the wrapper itself
+### 7. The slug requirement contradicts the "no boilerplate" pitch
 
-The wrapper has zero unit tests. It is exercised by:
+The wrapper's whole point is `valor "do the thing"` — but the default role
+is `pm`, and `cmd_create` rejects slugless PM/dev sessions (issues #1109,
+#1272). So the shortest honest create is `valor "plan issue #1615"` (slug
+auto-derives) or `valor "do the thing" --slug thing`. Only `--role teammate`
+truly works with a bare prompt. This is the underlying CLI's (correct)
+isolation policy showing through the wrapper, not a wrapper bug — but the
+wrapper's help text and this doc must keep saying it loudly, because the
+failure (`exit 1` with a stderr explanation) is the FIRST experience most
+users will have with the bare-prompt form.
 
-- Manual smoke tests (create + dashboard observation)
-- The same end-to-end tests that cover `valor-session` underneath
+### 8. Per-session `--model` is currently ignored by the granite substrate
 
-The positional-shortcut logic, the argparse namespace translation, and the
-allowlist are all uncovered. If the wrapper grows — adding new subcommands,
-or supporting new flags — the existing tests will not catch a regression in
-its argument mapping. A 50-line `tests/unit/test_valor_cli.py` covering the
-shortcut rewrite and the per-subcommand namespace translation would close
-this.
+`valor agent-session --model sonnet ...` stores `model` on the AgentSession,
+and the executor resolves it (`_resolve_session_model`) — but the granite
+PTY path runs on pool-prewarmed PTYs whose models were fixed at spawn time
+from `GRANITE__PM_MODEL` / `GRANITE__DEV_MODEL`. The resolved per-session
+model is never applied. The same applies to `valor resume`: the granite
+container has no `--resume` wiring, so a "resumed" session re-runs in a
+fresh TUI without the prior transcript. Both are substrate gaps, not
+wrapper gaps — tracked in the granite production cutover doc's Known
+Limitations.
+
+### 9. Wrapper test coverage
+
+`tests/unit/test_valor_cli.py` covers the positional-shortcut rewrite, the
+allowlist/parser parity, the per-subcommand namespace translation (every
+`cmd_*` attribute the underlying CLI reads), the missing-prompt error, and
+the help paths. End-to-end behavior (enqueue, worker pickup) is still
+covered only by the `valor-session` integration tests plus manual smoke
+tests.
 
 ## Tests Run on the Branch
 
