@@ -90,6 +90,7 @@ valor-tts = "tools.tts.cli:main"
 valor-computer = "tools.computer.cli:main"
 sdlc-decompose = "tools.sdlc_decompose:main"
 valor-granite-loop = "tools.granite_interactive_tui_poc.cli:main"
+valor = "tools.valor_cli:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true
