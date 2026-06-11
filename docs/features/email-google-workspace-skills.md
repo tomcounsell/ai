@@ -83,7 +83,7 @@ gws --version
 
 The `/update` verify check (`scripts/update/verify.py`) uses an **optional-style** gate — it surfaces `gws` version/status when the binary is present, and stays silent (no warning, exit 0) when absent. This mirrors the `sentry-cli` pattern: machines that never use Google Workspace are not nagged.
 
-### Auth (one-time human step — NOT automated)
+### Auth (one-time human step, surfaced by `/update`)
 
 Installing the binary does not authenticate it. First use requires a human-completed OAuth flow:
 
@@ -92,7 +92,7 @@ gws auth setup   # provision a Google Cloud project and OAuth client
 gws auth login   # browser-based consent; credentials stored in OS keyring
 ```
 
-This step cannot be automated by the agent (it requires clicking through a Google consent screen). It is an `[EXTERNAL]` prerequisite documented in the plan.
+The OAuth *consent* itself cannot be automated (it requires clicking through a Google screen, and `gws auth setup` needs `gcloud` + a GCP project). But `/update` no longer treats this as an undocumented external footnote: the `gws_auth.py` step (`scripts/update/gws_auth.py`, run right after the `gh` auth step) **detects** the auth state on every run via `gws auth status` and surfaces the exact command to run when the binary is installed but unauthenticated — appending it to the run's warnings so the human sees it at the end of `/update`. It is detection-only and cron-safe: it never opens a browser or blocks a non-interactive (launchd) run, and stays silent once authenticated (`auth_method != "none"` → idempotent skip).
 
 After auth, credentials are encrypted at rest in the OS keyring (or `~/.config/gws/.encryption_key`). The agent never sees or stores Google credentials.
 
@@ -122,6 +122,7 @@ The `/email` skill echoes the draft-first rule: "prefer a draft the user reviews
 - `.claude/skills-global/google-workspace/SKILL.md` — `/google-workspace` skill (per-service table, behavioral guidance)
 - `scripts/update/npm_tools.py` — `MANAGED_PACKAGES` entry for `@googleworkspace/cli`
 - `scripts/update/verify.py` — optional-style `gws` presence check in `check_system_tools`
+- `scripts/update/gws_auth.py` — detects `gws` auth state and surfaces the one-time OAuth step during `/update`
 - `scripts/update/hardlinks.py` — hardlink sync that propagates both skills globally
 - `docs/plans/email-google-workspace-skill-upgrade.md` — full plan with research, critiques, and acceptance criteria
 - `docs/features/skills-global.md` — global skills library overview
