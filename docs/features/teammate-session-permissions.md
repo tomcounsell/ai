@@ -65,7 +65,7 @@ path, not a substring match. This means:
 - `agent/docs_handler/foo.py` does **not** match the `docs/` rule (would be
   a positional promiscuity bug otherwise).
 - `tools/wiki_scraper.py` does **not** match the `wiki/` rule.
-- `agent/skills_router.py` does **not** match the `skills/` rule.
+- `agent/byob_skill_triggers.py` does **not** match the `skills/` rule.
 
 A `len(parts) > 1` guard ensures a bare file literally named `docs` (no
 extension) at the project root does **not** match the directory rule.
