@@ -86,7 +86,7 @@ The defect is at step 3: the reader resolves a different `data/` path than the w
 ## Architectural Impact
 
 - **New dependencies**: none
-- **Interface changes**: `_check_worker_health()` return contract extended from `(healthy: bool, age_s: int | None)` to a three-state result (ok / stale / down) or equivalent; `--json` output keeps `worker_healthy` key for backward compatibility
+- **Interface changes**: `_check_worker_health()` keeps its `(healthy: bool, age_s: int | None)` shape with the threshold raised to 600s; `--json` output keeps `worker_healthy` and adds `worker_state` (`"ok"`/`"down"`) + `worker_heartbeat_age_s`
 - **Coupling**: none added — the CLI keeps reading a file, no new dependency on the dashboard HTTP endpoint (rejected, see Rabbit Holes)
 - **Data ownership**: unchanged — worker owns the heartbeat file; CLI is read-only
 - **Reversibility**: trivial (small, local diffs)
@@ -103,59 +103,58 @@ The defect is at step 3: the reader resolves a different `data/` path than the w
 
 ## Prerequisites
 
-No prerequisites — this work has no external dependencies. (The wrapper-specific verification tasks are conditioned on PR #1612 merge state at build time; see Step by Step Tasks.)
+No prerequisites — this work has no external dependencies. (Per Decision 1, PR #1612 merges together with this work, #1612 first; the wrapper-doc and wrapper-test tasks execute once it lands.)
 
 ## Solution
 
 ### Key Elements
 
 - **Alias removal (this machine)**: delete the stale `valor` alias from `~/.zshrc` so the venv binary resolves
-- **Verify-step alias-shadow check**: `/update` warns when interactive-shell `valor` resolves to anything other than `{project_dir}/.venv/bin/valor`, with a copy-paste fix in the warning
+- **Verify-step alias-shadow check**: `/update` warns when `~/.zshrc` carries an `alias valor=` line (static grep, no subprocess), with a copy-paste fix in the warning
 - **Worktree-proof heartbeat path**: `_check_worker_health()` resolves the heartbeat file against the main checkout (git common dir), not `__file__`
-- **Tiered, honest warning**: CLI mirrors the dashboard's ok / stale / down tiers; stale text says "session will start when the worker picks it up", down text says "no worker heartbeat on this machine" — neither claims a created session won't run
-- **Wrapper-test verification**: confirm the branch's 23 tests are green where the wrapper lives (no new wrapper test file)
+- **Honest warning, single 600s threshold**: `ok` (< 600s, silent) / `down` (≥ 600s or missing); down text says "no recent worker heartbeat on this machine" and names the start command — it never fires inside the worker's normal 300s write cadence
+- **Wrapper-test verification**: confirm the branch's 23 tests are green on main after #1612 merges (no new wrapper test file)
 
 ### Flow
 
-`valor "prompt"` in fresh zsh → venv binary resolves (no alias error) → session created → heartbeat read from main-checkout `data/` → (ok: silent | stale 360–600s: informational note | down >600s or missing: actionable warning) → operator/agent trusts the output.
+`valor "prompt"` in fresh zsh → venv binary resolves (no alias error) → session created → heartbeat read from main-checkout `data/` → (ok < 600s: silent | down ≥ 600s or missing: actionable warning) → operator/agent trusts the output.
 
 ### Technical Approach
 
 **Part 1 — alias (machine config + update system)**
 - One-time on this machine: remove `~/.zshrc:16`. The vault-synced `~/Desktop/Valor/zshenv.sh` (managed by `scripts/update/zshenv_sync.py`) is deliberately NOT used to repoint the alias — the venv binary already lands on PATH per machine; an alias adds a second source of truth.
-- Add `check_valor_alias_shadow()` to `scripts/update/verify.py` following the existing `ToolCheck` pattern (cf. `check_python_alias()` at verify.py:134, which already solves the same problem-shape for `python`). Implementation: run `zsh -ic 'whence -p valor; alias valor'` with a hard timeout (interactive shells can hang on slow rc files); pass when resolution is `{project_dir}/.venv/bin/valor` and no alias exists; warn otherwise with the exact `unalias`/rc-edit instruction. Non-fatal (warn, don't block) — machines are heterogeneous.
-- Wire the check into `check_valor_tools()` or `verify_environment()` so `/update` surfaces it (gated to interactive-capable environments; skip cleanly when `zsh -ic` itself fails for environmental reasons).
+- Add `check_valor_alias_shadow()` to `scripts/update/verify.py` following the existing `ToolCheck` pattern (cf. `check_python_alias()` at verify.py:134, which already solves the same problem-shape for `python`). Implementation (Decision 3): static read of `~/.zshrc` for a line matching `alias valor=` (commented-out lines excluded); pass when no such alias line exists; warn otherwise with the exact rc-edit instruction (line number + the offending line) in the message. No subprocess, no interactive shell — deterministic in launchd/update contexts. The venv-binary existence check already in `check_valor_tools` (since `6e8de6d8`) covers the not-on-PATH case. Non-fatal (warn, don't block) — machines are heterogeneous.
+- Wire the check into `check_valor_tools()` or `verify_environment()` so `/update` surfaces it (skip cleanly when `~/.zshrc` is absent or unreadable).
 
 **Part 2 — pre-flight trustworthiness (`tools/valor_session.py`)**
 - Path fix: resolve the heartbeat file via the git common directory so worktrees converge on the main checkout: `git -C <repo_root> rev-parse --git-common-dir` → `common_dir.parent / "data" / "last_worker_connected"`. Wrap in the same never-raise discipline; on any git failure fall back to the current `__file__`-relative path. Keep it lazy/cheap (one subprocess call, only at check time — not import time).
-- Tier fix: replace the boolean with three states mirroring `ui/app.py::_get_worker_health`: `ok` (< 360s), `stale` (360–600s), `down` (> 600s or missing). Spike-2(b) showed the 300s write cadence leaves only 60s margin at the current threshold — the `stale` tier absorbs that.
+- Threshold fix (Decision 2): keep the boolean shape but raise the threshold to a single 600s cutoff (2× the 300s write cadence): `ok` (< 600s) / `down` (≥ 600s or file missing). Spike-2(b) showed the old 360s threshold left only 60s of margin over the write cadence; 600s gives 300s of slack and matches the dashboard's outer boundary. Retire `HEARTBEAT_STALENESS_THRESHOLD_S = 360` in favor of the 600s constant (full cutover, no parallel thresholds).
 - Message fix (both `cmd_create` warning sites, `tools/valor_session.py:465` and `:703`):
-  - `stale`: `worker heartbeat is {age}s old — session created; it will start when the worker picks it up`
   - `down`: `no recent worker heartbeat on this machine ({age or 'no file'}) — session will stay pending until a worker is started (run: ./scripts/valor-service.sh worker-start)`
-  - `--json` mode: keep `worker_healthy` (true only for `ok`) and add `worker_heartbeat_age_s` + `worker_state` for agent callers.
+  - `ok`: silent (no output)
+  - `--json` mode: keep `worker_healthy` (true for `ok`) and add `worker_heartbeat_age_s` + `worker_state` (`"ok"`/`"down"`) for agent callers.
 - `_check_worker_health()` stays exception-silent end to end (the #980 contract).
 
 **Part 3 — wrapper tests (verify-only)**
-- If PR #1612 has merged by build time: run `pytest tests/unit/test_valor_cli.py -n0` on the build branch and confirm 23 green; update the feature doc's shortcoming items (see Documentation).
-- If not merged: nothing to build — the file exists and passes on the branch (spike-1). Record the verification in the PR body and leave doc updates conditioned as described in Step by Step Tasks.
+- Decision 1 makes this unconditional: #1612 merges together with this work (#1612 first). After #1612 lands, run `pytest tests/unit/test_valor_cli.py -n0` on the build branch and confirm 23 green; update the feature doc's shortcoming items (see Documentation). Spike-1's branch-side evidence (`6e8de6d8`, 23/23) is the fallback record if merge ordering slips mid-build.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
 - [ ] `_check_worker_health()` swallows all exceptions by design (#980). Existing `test_does_not_raise_on_permission_error` covers it; extend with a case where the git-common-dir subprocess fails (returns non-zero / binary missing) asserting fallback to the `__file__`-relative path and a `down`/`None` result rather than a raise
-- [ ] New verify-step check: `zsh` missing, `zsh -ic` timeout, and non-zero exit must each produce a warn-level `ToolCheck` (never crash `/update`) — one test per failure mode with the subprocess mocked
+- [ ] New verify-step check: `~/.zshrc` missing and `~/.zshrc` unreadable (PermissionError) must each produce a clean pass/skip-level `ToolCheck` (never crash `/update`) — one test per failure mode with the path/read mocked
 
 ### Empty/Invalid Input Handling
 - [ ] Heartbeat file exists but is empty or has future mtime: assert the check still returns a well-formed state (no negative-age weirdness leaking into messages)
-- [ ] `whence -p valor` returning empty output (binary not found anywhere): verify the alias-shadow check reports "not on PATH" rather than passing vacuously
+- [ ] `~/.zshrc` containing only a commented-out `# alias valor=` line: verify the alias-shadow check passes (no false warning on dead config)
 
 ### Error State Rendering
-- [ ] Assert the `stale` message contains "will start" and does NOT contain "no active worker" (the harmful claim this issue exists to kill)
+- [ ] Assert no warning is emitted for any heartbeat age under 600s, and that the literal "no active worker detected" string is gone (the harmful claim this issue exists to kill)
 - [ ] Assert the `down` message names the start command; assert `--json` carries `worker_state` so agent callers branch on structured data, not prose
 
 ## Test Impact
 
-- [ ] `tests/unit/test_worker_health_check.py::TestCheckWorkerHealth` (5 tests) — UPDATE: `test_healthy_worker`, `test_stale_worker`, `test_missing_heartbeat_file`, `test_exact_threshold_boundary` assert against the boolean contract; rewrite for the three-state contract (and add a 360–600s `stale`-tier boundary case + git-common-dir resolution cases using a real `tmp_path` worktree layout)
+- [ ] `tests/unit/test_worker_health_check.py::TestCheckWorkerHealth` (5 tests) — UPDATE: `test_healthy_worker`, `test_stale_worker`, `test_missing_heartbeat_file`, `test_exact_threshold_boundary` rewritten against the 600s threshold (a 360–599s age is now healthy); add git-common-dir resolution cases using a real `tmp_path` worktree layout plus the git-failure fallback case
 - [ ] `tests/unit/test_valor_cli.py` (branch-only) — no change; verify-only per spike-1
 - [ ] No other existing tests reference `_check_worker_health` or `check_valor_tools` (grep-verified at plan time)
 
@@ -164,18 +163,18 @@ No prerequisites — this work has no external dependencies. (The wrapper-specif
 - **Dashboard HTTP fallback** (issue candidate (b)): falling back to `GET localhost:8500/dashboard.json` couples the CLI to the UI server being up, adds a network call to a hot path, and the dashboard reads the same file anyway — fixing the path + tiers makes the fallback redundant. Skip.
 - **Auto-editing `~/.zshrc` from `/update`**: tempting "proactive maintenance", but programmatically rewriting user rc files from an update script is invasive and hard to make idempotent across heterogeneous machines. Warn with a copy-paste fix instead. (The one-time removal on THIS machine is done by hand in this plan, not by the script.)
 - **Deriving `KNOWN_SUBCOMMANDS` from the parser at runtime**: explicitly #1620's scope, not this plan's.
-- **Touching the worker's write cadence** (`AGENT_SESSION_HEALTH_CHECK_INTERVAL`): shortening it to widen the margin affects the whole health loop and the watchdog's 600s threshold math. The read-side tier fix achieves the same outcome with zero blast radius.
+- **Touching the worker's write cadence** (`AGENT_SESSION_HEALTH_CHECK_INTERVAL`): shortening it to widen the margin affects the whole health loop and the watchdog's 600s threshold math. The read-side threshold fix achieves the same outcome with zero blast radius.
 - **Granite PTY substrate interactions**: PR #1612's larger content (PTY pool, bridge adapter) is entirely out of scope; only the three named files matter here.
 
 ## Risks
 
-### Risk 1: PR #1612 doesn't merge before this work builds
-**Impact:** Wrapper-specific tasks (feature-doc shortcoming updates, on-main test verification) have no target files on main; acceptance criteria 1, 4, 5 of the issue can only be verified against the branch.
-**Mitigation:** Build order puts main-safe parts (1, 2) first; wrapper-conditional tasks check merge state at build time and either execute (merged) or record branch-side verification evidence in the PR body (not merged). The issue itself anticipated this ("targets the cutover branch if still open, otherwise main").
+### Risk 1: #1612 merge slips despite Decision 1
+**Impact:** Wrapper-specific tasks (feature-doc shortcoming updates, on-main test verification) have no target files on main until #1612 lands; merging this PR first would orphan those edits.
+**Mitigation:** Decision 1 fixes the merge order (#1612 first, this PR immediately after); build order still puts main-safe parts (1, 2) first, and spike-1's branch-side evidence (`6e8de6d8`, 23/23) is recorded in the PR body as fallback if ordering slips mid-build.
 
-### Risk 2: `zsh -ic` is slow or hangs in the update environment
-**Impact:** `/update` verify step stalls on machines with heavy rc files or no zsh.
-**Mitigation:** hard subprocess timeout (10s, matching existing `run_cmd` usage), warn-and-continue on timeout, skip cleanly when zsh is absent.
+### Risk 2: static `~/.zshrc` grep misses aliases defined elsewhere
+**Impact:** An alias in `~/.zprofile`, `~/.zshenv`, or a sourced file shadows the binary without triggering the warning.
+**Mitigation:** Accepted (Decision 3) — the check targets the one known artifact (`~/.zshrc` alias) and is warn-only; the venv-binary existence check in `check_valor_tools` independently catches a missing binary. A broader interactive-resolution probe was rejected for hang risk in launchd contexts.
 
 ### Risk 3: git-common-dir resolution surprises in unusual layouts
 **Impact:** Wrong path on bare repos, submodules, or non-git installs → false `down`.
@@ -191,15 +190,15 @@ No prerequisites — this work has no external dependencies. (The wrapper-specif
 **Location:** `agent/session_health.py:2037` (writer) vs `tools/valor_session.py:109` (reader)
 **Trigger:** CLI reads between the worker's 300s-cadence writes, or mid-replace
 **Data prerequisite:** none — writer uses `tmp` + `os.replace` (atomic), so the reader never sees a partial file
-**State prerequisite:** the `stale` tier (360–600s) must fully cover the worst-case write gap (300s cadence + health-check duration) — it does, with 300s of slack
-**Mitigation:** atomic replace already in place; tier widths absorb cadence jitter. No locking needed; the check is advisory only.
+**State prerequisite:** the 600s threshold must fully cover the worst-case write gap (300s cadence + health-check duration) — it does, with 300s of slack
+**Mitigation:** atomic replace already in place; the 2× cadence threshold absorbs jitter. No locking needed; the check is advisory only.
 
 No other concurrency concerns — the CLI path is synchronous and read-only.
 
 ## No-Gos (Out of Scope)
 
 - [SEPARATE-SLUG #1620] Wrapper shortcomings 4, 5, 6 (help after positional shortcut, PTY-boundary reframe, #1288 operator path) plus deriving the allowlist from subparsers — already filed as issue #1620
-- [ORDERED] Merging PR #1612 itself — human-gated merge of the granite-pty production cutover; this plan reads its state but never advances it
+- [ORDERED] Merging PR #1612 itself — human-gated merge of the granite-pty production cutover; this plan reads its state but never advances it. Decision 1 fixes the ordering at the MERGE stage (#1612 first, this PR immediately after)
 - [EXTERNAL] Removing the stale alias on OTHER machines' `~/.zshrc` — requires running on each machine; the `/update` verify warning (shipped here) is the mechanism that reaches them on their next update cycle
 
 ## Update System
@@ -213,22 +212,22 @@ No new agent integration required — `valor` and `valor-session` are already CL
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/valor-cli-wrapper.md` — shortcoming item 1 (alias): fixed status + the verify-step guard; item 3 (pre-flight): correct the misdiagnosis ("stale Redis cache" → file-mtime path divergence + tier semantics) and document the new three-state behavior; item 7/9 (tests): already-accurate, confirm wording. **Conditional:** this file exists only on the PR #1612 branch — execute when merged; otherwise record the needed edits in the implementation PR body and link from #1620
-- [ ] Update `docs/features/session-steering.md` (or the doc section covering `valor-session create`) with the new warning tiers and `--json` fields
+- [ ] Update `docs/features/valor-cli-wrapper.md` — shortcoming item 1 (alias): fixed status + the verify-step guard; item 3 (pre-flight): correct the misdiagnosis ("stale Redis cache" → file-mtime path divergence + threshold semantics) and document the 600s single-threshold behavior; item 7/9 (tests): already-accurate, confirm wording. This file lands on main with PR #1612, which merges together with this work (Decision 1) — execute after #1612 merges
+- [ ] Update `docs/features/session-steering.md` (or the doc section covering `valor-session create`) with the new warning semantics and `--json` fields
 - [ ] `docs/features/README.md` index — no new entry needed (existing pages updated in place)
 
 ### Inline Documentation
-- [ ] Docstring on the reworked `_check_worker_health()` documenting the three states, the git-common-dir resolution, and the #980 never-raise contract
+- [ ] Docstring on the reworked `_check_worker_health()` documenting the 600s threshold rationale (2× write cadence), the git-common-dir resolution, and the #980 never-raise contract
 - [ ] Comment on the verify-step check pointing at this issue for the heterogeneous-machines rationale
 
 ## Success Criteria
 
 - [ ] `valor "test prompt" --json` runs from a fresh interactive zsh on this machine with no alias error
-- [ ] `/update` verify warns when interactive `valor` resolves to anything other than the venv binary (covered by unit tests for pass/shadowed/missing/timeout cases)
-- [ ] Creating a session within 360s of a worker restart — and from a worktree cwd — produces no "no active worker" claim; stale-tier text says the session will start
+- [ ] `/update` verify warns when `~/.zshrc` carries an `alias valor=` line (covered by unit tests for pass/alias-present/commented/missing-rc/unreadable-rc cases)
+- [ ] Creating a session within 600s of the last heartbeat write — and from a worktree cwd — produces no warning at all
 - [ ] `--json` create output carries `worker_state` and `worker_heartbeat_age_s`
-- [ ] `tests/unit/test_worker_health_check.py` rewritten for the three-state contract, including worktree-path and git-fallback cases — green
-- [ ] Wrapper tests: 23/23 green where the wrapper lives (branch or main per merge state); no new wrapper test file written
+- [ ] `tests/unit/test_worker_health_check.py` rewritten for the 600s threshold, including worktree-path and git-fallback cases — green
+- [ ] Wrapper tests: 23/23 green on the build branch after #1612 merges; no new wrapper test file written
 - [ ] Repo grep shows no remaining emitter of the literal "no active worker detected" string
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -264,8 +263,8 @@ No new agent integration required — `valor` and `valor-session` are already CL
 - **Agent Type**: builder
 - **Parallel**: true
 - Resolve heartbeat path via `git rev-parse --git-common-dir` with `__file__`-relative fallback; never raise
-- Replace boolean with three-state (ok / stale / down) mirroring `ui/app.py` tiers (360s / 600s)
-- Update both warning sites (`cmd_create`, `cmd_status`) with tiered messages; extend `--json` with `worker_state`, `worker_heartbeat_age_s`; keep `worker_healthy`
+- Raise the staleness threshold to a single 600s cutoff (Decision 2); retire the 360s constant
+- Update both warning sites (`cmd_create`, `cmd_status`) with the honest `down` message; extend `--json` with `worker_state`, `worker_heartbeat_age_s`; keep `worker_healthy`
 - Grep repo for "no active worker detected" consumers; update any found
 - Rewrite `tests/unit/test_worker_health_check.py` per Test Impact
 
@@ -277,9 +276,9 @@ No new agent integration required — `valor` and `valor-session` are already CL
 - **Assigned To**: preflight-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `check_valor_alias_shadow(project_dir)` to `scripts/update/verify.py` (zsh -ic, 10s timeout, warn-only ToolCheck, copy-paste fix in the message)
+- Add `check_valor_alias_shadow()` to `scripts/update/verify.py` (static grep of `~/.zshrc` for `alias valor=`, warn-only ToolCheck, copy-paste fix in the message — Decision 3)
 - Wire into the verify flow next to `check_valor_tools`
-- Unit tests: pass / alias-shadowed / not-on-PATH / zsh-missing / timeout (subprocess mocked)
+- Unit tests: pass / alias-present / commented-out-alias / rc-file-missing / rc-file-unreadable (path mocked via tmp_path)
 - Remove the stale alias from `~/.zshrc` on this machine and confirm `zsh -ic 'whence -p valor'` resolves to the venv binary
 
 ### 3. Validate Parts 1+2
@@ -292,15 +291,15 @@ No new agent integration required — `valor` and `valor-session` are already CL
 - From a worktree cwd, run `valor-session create --role teammate --message "smoke" --json` against a fresh heartbeat and assert `worker_state: ok` and no warning; clean up the test session per Manual Testing Hygiene (recognizable project key, Popoto-only deletion)
 - Confirm fresh-shell `valor --help` works (acceptance criterion 1)
 
-### 4. Wrapper verification + conditional docs (Part 3)
+### 4. Wrapper verification + docs (Part 3)
 - **Task ID**: verify-wrapper
 - **Depends On**: validate-preflight
 - **Informed By**: spike-1 (23/23 green on branch @ 6e8de6d8)
 - **Assigned To**: preflight-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Check `gh pr view 1612 --json state` — if MERGED: run `pytest tests/unit/test_valor_cli.py -n0`, confirm 23 green on the build branch
-- If still OPEN: record spike-1's branch-side verification (commit `6e8de6d8`, 23 passed) in the implementation PR body; flag the conditional doc tasks for #1620 linkage
+- Decision 1: #1612 merges together with this work (#1612 first). Check `gh pr view 1612 --json state` — once MERGED: run `pytest tests/unit/test_valor_cli.py -n0`, confirm 23 green on the build branch
+- If #1612 is still OPEN at this step, record spike-1's branch-side verification (commit `6e8de6d8`, 23 passed) in the implementation PR body and proceed; the wrapper-doc edits land after #1612 does, before this PR merges
 
 ### 5. Documentation
 - **Task ID**: document-feature
@@ -338,8 +337,8 @@ No new agent integration required — `valor` and `valor-session` are already CL
 
 ---
 
-## Open Questions
+## Decisions (Open Questions resolved 2026-06-11)
 
-1. **Sequencing vs PR #1612**: this plan's build targets a `session/valor-cli-hardening` branch off main (Parts 1+2 are main-safe; `tools/valor_session.py` is identical on both branches so merge conflicts are unlikely). Wrapper-doc updates execute only if #1612 merges first. Acceptable, or should this plan block until #1612 merges so everything lands in one pass?
-2. **Warning tier thresholds**: the plan mirrors the dashboard's 360s/600s tiers for consistency. Alternative: single 600s threshold (2× write cadence) with one softened message. Preference?
-3. **`zsh -ic` in verify**: the alias-shadow check spawns an interactive zsh, which sources the operator's full rc. Comfortable with that (10s timeout, warn-only), or prefer a weaker but safer static grep of `~/.zshrc` for `alias valor=`?
+1. **Sequencing vs PR #1612**: RESOLVED — #1612 merges together with this work. Merge order at the MERGE stage: #1612 first, then this PR immediately after. The wrapper-conditional tasks (feature-doc updates, on-main wrapper-test verification) are therefore unconditional and execute as part of this plan.
+2. **Warning tier thresholds**: RESOLVED — single 600s threshold (2× the 300s write cadence). Two states: `ok` (< 600s) and `down` (≥ 600s or file missing). No `stale` tier.
+3. **`zsh -ic` in verify**: RESOLVED — static grep of `~/.zshrc` for `alias valor=`. Deterministic, zero hang risk in launchd/update contexts, and it targets exactly the known stale-alias artifact. The venv-binary existence check (already in `check_valor_tools` since `6e8de6d8`) covers the not-on-PATH case.
