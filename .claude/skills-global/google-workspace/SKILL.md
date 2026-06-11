@@ -2,19 +2,45 @@
 name: google-workspace
 description: "Use when accessing Google Workspace services including Gmail, Calendar, Docs, Sheets, Slides, Drive, and Chat. Triggered by requests for email, scheduling, document creation, or file management."
 allowed-tools: Read, Write, Edit, Bash, WebFetch
-user-invocable: false
+user-invocable: true
 ---
 
 # Google Workspace Extension - Behavioral Guide
 
 This guide provides behavioral instructions for effectively using the Google Workspace Extension tools. For detailed parameter documentation, refer to the tool descriptions in the extension itself.
 
+## 🧭 Tool Selection (read this first)
+
+Reach for the lightest tool that does the job. For every service, walk the
+priority order below top to bottom: try the `gws` CLI first, fall through to MCP
+only on tool absence OR auth failure, and use BYOB browser automation only as a
+last resort when nothing above can do the task at all. A present-but-
+unauthenticated `gws` (it needs a one-time `gws auth setup` / `gws auth login`
+human OAuth step) must hand off to the next tier — do not stall on it.
+
+| Service | 1st: `gws` CLI | 2nd: MCP (where it exists) | 3rd (last resort) |
+|---------|----------------|----------------------------|-------------------|
+| Gmail | `gws gmail` | `mcp__claude_ai_Gmail__*` | BYOB |
+| Calendar | `gws calendar` | `mcp__claude_ai_Google_Calendar__*` | BYOB |
+| Drive | `gws drive` | `mcp__claude_ai_Google_Drive__*` | BYOB |
+| Docs | `gws docs` | (no MCP) | BYOB |
+| Sheets | `gws sheets` | (no MCP) | BYOB |
+| Slides | `gws slides` | (no MCP) | BYOB |
+| People | `gws people` | (no MCP) | BYOB |
+| Chat | `gws chat` | (no MCP) | BYOB |
+| Forms | `gws forms` | (no MCP) | BYOB |
+| Keep | `gws keep` | (no MCP) | BYOB |
+
+For reading/sending mail specifically, prefer the `/email` skill's ladder
+(`valor-email` → `gws gmail` → Gmail MCP → BYOB), which puts the Redis-cached
+`valor-email` CLI ahead of `gws`.
+
 ## 🎯 Core Principles
 
 ### 1. User Context First
 **Always establish user context at the beginning of interactions:**
-- Use `people.getMe()` to understand who the user is
-- Use `time.getTimeZone()` to get the user's local timezone
+- Use `gws people people get --params '{"resourceName": "people/me"}'` to understand who the user is
+- Establish the user's local timezone (e.g. `gws calendar settings get --params '{"setting": "timezone"}'`)
 - Apply this context throughout all interactions
 - All time-based operations should respect the user's timezone
 
@@ -76,24 +102,24 @@ When creating documents in specific folders:
 3. Confirm successful completion
 
 ### Calendar Scheduling Workflow
-1. Get user's timezone with `time.getTimeZone()`
-2. Check availability with `calendar.listEvents()`
+1. Establish the user's timezone (see User Context First)
+2. Check availability with `gws calendar events list` (or `mcp__claude_ai_Google_Calendar__list_events`)
 3. Create event with proper timezone handling
 4. Always show times in user's local timezone
 
 ### Email Search and Response
-1. Search with `gmail.search()` using appropriate query syntax
-2. Get full content with `gmail.get()` if needed
+1. Search with `gws gmail users messages list` using Gmail query syntax (or `mcp__claude_ai_Gmail__search_threads`)
+2. Get full content with `gws gmail users messages get` if needed (or `mcp__claude_ai_Gmail__get_thread`)
 3. Preview any reply before sending
 4. Use threading context when responding
 
 ### Adding/Removing Labels from Emails
 1. For system labels, including "INBOX", "SPAM", "TRASH", "UNREAD", "STARRED", "IMPORTANT", the ID is the name itself.
-2. For user created custom labels, retrieve label ID with `gmail.listLabels()`.
-3. Use `gmail.modify()` to add or remove labels from emails with a single call using label IDs.
+2. For user created custom labels, retrieve label ID with `gws gmail users labels list` (or `mcp__claude_ai_Gmail__list_labels`).
+3. Use `gws gmail users messages modify` to add or remove labels from emails with a single call using label IDs (or `mcp__claude_ai_Gmail__label_message` / `mcp__claude_ai_Gmail__unlabel_message`).
 
 ### Event Deletion
-When using `calendar.deleteEvent`:
+When deleting a calendar event (`gws calendar events delete`, or `mcp__claude_ai_Google_Calendar__delete_event`):
 - This is a destructive action that permanently removes the event.
 - For organizers, this cancels the event for all attendees.
 - For attendees, this only removes it from their own calendar.
@@ -138,16 +164,16 @@ When asked about "next meeting" or "today's schedule":
 - Use appropriate reply vs. new message based on context
 
 ### Downloading Attachments
-1. **Find Attachment ID**: Use `gmail.get` with `format='full'` to retrieve message details, including `attachments` metadata (IDs and filenames).
-2. **Download**: Use `gmail.downloadAttachment` with the specific `messageId` and `attachmentId`.
-3. **Absolute Paths**: Always provide an **absolute path** for the `localPath` argument (e.g., `/Users/username/Downloads/file.pdf`). Relative paths will be rejected for security.
+1. **Find Attachment ID**: Use `gws gmail users messages get` with `format=full` to retrieve message details, including `attachments` metadata (IDs and filenames).
+2. **Download**: Use `gws gmail users messages attachments get` with the specific `messageId` and `attachmentId`.
+3. **Absolute Paths**: Always provide an **absolute path** for the output argument (e.g., `/Users/username/Downloads/file.pdf`). Relative paths will be rejected for security.
 
 ### Composing on Behalf of the User
 
 When drafting or replying to email on the user's behalf, apply these three constraints without exception:
 
 - **Async CTAs only** — Never offer calls, meetings, voice/video contact, or any form of synchronous communication. The agent cannot participate in real-time conversations. Use async alternatives instead: "happy to share more over email", "feel free to reply with questions", or leave the closing open with no CTA. Phrases like "let's jump on a call", "schedule a meeting", or "give us a ring" are prohibited.
-- **Draft-first rule** — All outbound composition must produce a draft via `gmail_create_draft`. Never call a send tool without an explicit user instruction to send. This is stricter than the general write-operation safety rule: even if the user says "write a reply", the result is a draft that the user reviews and sends manually.
+- **Draft-first rule** — All outbound composition must produce a draft (`gws gmail users drafts create`, or `mcp__claude_ai_Gmail__create_draft`). Never call a send tool without an explicit user instruction to send. This is stricter than the general write-operation safety rule: even if the user says "write a reply", the result is a draft that the user reviews and sends manually.
 - **Honest representation** — When composing outreach about the user's product or service, represent it accurately. If the product or operation is automated or AI-assisted, say so rather than implying a human-run team. Do not overclaim capabilities, team size, or operational structure. Inaccurate representation damages trust and creates expectations that cannot be met.
 
 ## 📄 Docs, Sheets, and Slides
@@ -166,7 +192,7 @@ Choose output format based on use case:
 ## 🚫 Common Pitfalls to Avoid
 
 ### Don't Do This:
-- ❌ Use `extractIdFromUrl` when other tools accept URLs
+- ❌ Manually extract IDs from URLs when tools accept URLs directly
 - ❌ Assume timezone without checking
 - ❌ Execute writes without preview and confirmation
 - ❌ Create files unless explicitly requested
@@ -184,8 +210,8 @@ Choose output format based on use case:
 ## 🔍 Error Handling Patterns
 
 ### Authentication Errors
-- If any tool returns `{"error":"invalid_request"}`, it likely indicates an expired or invalid session.
-- **Action:** Call `auth.clear` to reset credentials and force a re-login.
+- If any tool returns `{"error":"invalid_request"}` or a `gws` call fails with an auth error, it likely indicates an expired or invalid session.
+- **Action:** For `gws`, re-run the one-time human OAuth step (`gws auth setup` / `gws auth login`); for MCP, reset credentials and force a re-login. If the tool stays unauthenticated, **fall through to the next tier** in the Tool Selection ladder rather than stalling.
 - Inform the user that you are resetting authentication due to an error.
 
 ### Graceful Degradation
@@ -213,8 +239,8 @@ Choose output format based on use case:
 ## 📝 Session Management
 
 ### Beginning of Session
-1. Get user profile with `people.getMe()`
-2. Get timezone with `time.getTimeZone()`
+1. Get user profile (see User Context First — `gws people people get` with `resourceName=people/me`)
+2. Establish the user's timezone
 3. Establish any relevant context
 
 ### During Interaction

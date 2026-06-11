@@ -55,7 +55,6 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("commands", "setup.md"),
     # Project-only skills removed from user-level (only work in this repo's context)
     ("skills", "checking-system-logs"),
-    ("skills", "google-workspace"),
     ("skills", "reading-sms-messages"),
     ("skills", "telegram"),
 ]
@@ -68,7 +67,6 @@ PROJECT_ONLY_SKILLS: set[str] = {
     "telegram",
     "reading-sms-messages",
     "checking-system-logs",
-    "google-workspace",
 }
 
 # Standalone executable scripts hardlinked into ~/.local/bin so they're available

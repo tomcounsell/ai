@@ -6,7 +6,7 @@ Guidance for Claude Code when working with this repository.
 
 ## Google Workspace CLI (`gws`)
 
-Available at `~/src/node_modules/.bin/gws`. Pre-authenticated.
+On PATH after `npm install -g @googleworkspace/cli` (installed automatically on every machine by `/update`). **Not pre-authenticated** — first use requires a one-time human OAuth step: `gws auth setup` then `gws auth login`. If `gws` is present but unauthenticated, fall through to the next tool in the ladder (Gmail/Calendar/Drive MCP, then BYOB) rather than stalling.
 
 Usage: `gws <service> <resource> [sub-resource] <method> [flags]`
 

@@ -46,7 +46,6 @@ EXPECTED_PROJECT_ONLY = {
     "telegram",
     "reading-sms-messages",
     "checking-system-logs",
-    "google-workspace",
 }
 
 
