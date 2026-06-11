@@ -118,7 +118,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/email-google-w
 ### Key Elements
 
 - **`@googleworkspace/cli` as a managed npm prereq**: add to `MANAGED_PACKAGES` in `npm_tools.py` so `/update` installs it on every machine. Use `None` (latest) to track upstream — same convention as the existing entry.
-- **`gws` presence check in `verify.py`**: a non-fatal `check_command("gws", "--version")` surfaced as a warning when missing, consistent with the optional-tool pattern (`sentry-cli` at line 197).
+- **`gws` presence check in `verify.py`**: an **optional-style** check (silent until installed) modeled on the `sentry-cli` precedent at line 197 — the check is only surfaced when `gws` is on PATH, reporting its version/status; when absent it stays silent (no warning), since `gws` requires a separate OAuth flow that "install" alone cannot satisfy. [RESOLVED: optional-style, not always-on warning.]
 - **New `/email` skill** (`.claude/skills-global/email/SKILL.md`): a lightweight decision-tree skill, `user-invocable: true`, that documents the email tool ladder. Created in `skills-global/` so the existing hardlink sync propagates it to `~/.claude/skills/` automatically.
 - **Upgraded `google-workspace` skill**: `user-invocable: true`, a new per-service tool-selection preamble (CLI → MCP → BYOB), and **moved** from project-only `.claude/skills/` to `.claude/skills-global/` so it syncs globally. Removing it from `PROJECT_ONLY_SKILLS` and the retired-skills tombstone list in `hardlinks.py` is part of this.
 - **Doc corrections**: fix the stale `~/src/node_modules/.bin/gws` path in `CLAUDE.md`; add a `gws` line to the global `~/.claude/CLAUDE.md` so the tool is visible to agents in all repos.
@@ -131,7 +131,7 @@ Agent in cuttlefish needs email → loads `/email` (resolves globally) → tries
 
 - **Part 1 (prereq install + verify):**
   - `npm_tools.py`: append `("@googleworkspace/cli", None)` to `MANAGED_PACKAGES`. The existing `install_or_update()` loop handles install/skip/update with no other changes.
-  - `verify.py`: add a `gws` check. It is a **system/optional** tool, not a venv tool — model it on the `sentry-cli` optional pattern in `check_system_tools` (only append the check if relevant) OR add an always-present non-fatal `check_command("gws", "--version")` that reports `available=False` with a warning when missing. Decision: always-present non-fatal check (the issue wants the warning to surface on every `/update`, even pre-install). Place it in `check_system_tools` so it rides the existing aggregation into `VerificationResult`.
+  - `verify.py`: add a `gws` check. It is a **system/optional** tool, not a venv tool — model it on the `sentry-cli` optional pattern in `check_system_tools` (only surface the check when the tool is present). **Decision [RESOLVED]: optional-style (silent until installed).** When `gws` is on PATH, report its version/status; when absent, stay silent (no warning) — `gws` needs a separate OAuth flow that install alone cannot satisfy, so a pre-install warning would be noise on machines that never use Workspace. Place it in `check_system_tools` so it rides the existing aggregation into `VerificationResult`.
   - Confirm the result is **non-fatal**: `check_command` returns a `ToolCheck` with `available=False`; the update flow must not raise on it. Verify against how `valor-email`'s `available=False` is currently treated (warning, not abort).
 - **Part 2 (`/email` skill):**
   - Author `.claude/skills-global/email/SKILL.md` with frontmatter `name: email`, `description:` (trigger phrases for reading/sending mail), `allowed-tools: Bash`, `user-invocable: true`.
@@ -140,6 +140,7 @@ Agent in cuttlefish needs email → loads `/email` (resolves globally) → tries
   - Move the file: `git mv .claude/skills/google-workspace/ .claude/skills-global/google-workspace/`.
   - Flip frontmatter `user-invocable: false` → `true`.
   - Prepend a tool-selection preamble enumerating, per service (Gmail, Calendar, Drive, Docs, Sheets, Slides, People, Chat, Forms, Keep), the priority order `gws <service>` → MCP (`mcp__claude_ai_*` where it exists) → BYOB.
+  - **[RESOLVED: fold legacy cleanup in now]** Normalize the legacy MCP-shorthand references throughout the existing skill body (`gmail.search()`, `people.getMe()`, etc.) to the real `mcp__claude_ai_*` tool names, OR replace them with `gws <service>` invocations where that is now the preferred path. Do not relitigate the surrounding behavioral guidance (timezone, draft-first, previews) — only correct the tool-name references.
   - `hardlinks.py`: remove `"google-workspace"` from `PROJECT_ONLY_SKILLS` (line 71) and remove the retired-skills tombstone `("skills", "google-workspace")` (line 58) so the sync hardlinks the new `skills-global/` copy instead of pruning it.
 - **Part 4 (docs):**
   - `CLAUDE.md`: correct the `gws` path note (`~/src/node_modules/.bin/gws` → "on PATH after `npm install -g @googleworkspace/cli`").
@@ -156,8 +157,8 @@ Agent in cuttlefish needs email → loads `/email` (resolves globally) → tries
 - [ ] `verify.py` `gws` check: assert `available=False, error="Not found in PATH"` path when `shutil.which("gws")` is None (the pre-install state).
 
 ### Error State Rendering
-- [ ] `/update` output: when `gws` is missing, the run must print a **warning** and continue (exit 0), not fail. Test asserts the verification result contains the `gws` unavailable check and the overall run is non-fatal.
-- [ ] The error (missing `gws`) propagates to the user as a visible `/update` warning line, not swallowed.
+- [ ] `/update` output: when `gws` is missing, the run stays **silent** about it (optional-style) and continues (exit 0), never fails. Test asserts the overall run is non-fatal whether or not `gws` is present.
+- [ ] When `gws` IS present, `/update` surfaces its version/status as a normal check line. Test asserts the present-path renders status without raising.
 
 ## Test Impact
 
@@ -174,7 +175,7 @@ If the above greps find no existing coverage, ADD a minimal unit test asserting 
 - **Reverse-engineering / depending on the gato `gws` wrapper.** It is Nix/SOPS-coupled and only runs inside gato's dev shell. Tempting because it is already on this machine, but it is not a portable install path. Install the clean npm package instead.
 - **Building a `valor-calendar`/`valor-drive` CLI to parallel `valor-email`.** Out of scope — the Workspace skill points at `gws` for those, no new Python CLIs.
 - **Rewriting the entire `google-workspace` skill body.** The existing behavioral guidance (timezone, draft-first, previews) is good and stays. Only add the tool-selection preamble and flip frontmatter; do not relitigate the rest.
-- **Normalizing MCP tool names in the skill.** The current skill uses shorthand (`gmail.search()`, `people.getMe()`) that does not match the actual `mcp__claude_ai_Gmail__*` tool names. Correcting every reference is a large edit; scope this plan to the tool-selection preamble (which uses correct names) and leave the legacy body shorthand as-is unless it is trivially in a touched line.
+- **(No longer a rabbit hole — folded into scope.)** Normalizing the legacy MCP-shorthand tool names (`gmail.search()`, `people.getMe()`) to the real `mcp__claude_ai_*` names is now an explicit Part 3 task per the resolved open question. Keep it bounded: correct tool-name references only; do not rewrite the surrounding behavioral guidance.
 
 ## Risks
 
@@ -238,7 +239,7 @@ The agent reaches new functionality via a CLI on PATH (Bash tool) or a globally-
 ## Success Criteria
 
 - [ ] `which gws` succeeds on the skills machine after `/update` runs (`@googleworkspace/cli` installed; binary on PATH).
-- [ ] `/update` warns non-fatally if `gws` is missing, consistent with other optional CLI checks in `verify.py` (run exits 0).
+- [ ] `/update` reports `gws` status when it is present, and stays silent (no warning, exit 0) when absent — consistent with the optional `sentry-cli` check pattern in `verify.py`.
 - [ ] `.claude/skills-global/email/SKILL.md` exists, is `user-invocable: true`, and documents the ladder `valor-email` → `gws gmail` → Gmail MCP → BYOB.
 - [ ] `google-workspace` skill is `user-invocable: true`, lives in `.claude/skills-global/`, and lists tools per service in priority order.
 - [ ] `hardlinks.py` no longer marks `google-workspace` project-only; both skills appear under `~/.claude/skills/` after `/update`.
@@ -299,7 +300,7 @@ The agent reaches new functionality via a CLI on PATH (Bash tool) or a globally-
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `.claude/skills-global/email/SKILL.md` (`user-invocable: true`, four-tier ladder, fall-through-on-failure rule).
-- `git mv .claude/skills/google-workspace .claude/skills-global/google-workspace`; flip `user-invocable: true`; prepend the per-service tool-selection preamble.
+- `git mv .claude/skills/google-workspace .claude/skills-global/google-workspace`; flip `user-invocable: true`; prepend the per-service tool-selection preamble; normalize the legacy MCP-shorthand tool names in the body to real `mcp__claude_ai_*` names (folded into scope).
 - Fix the stale `gws` path in repo `CLAUDE.md`; add the `gws` line to `~/.claude/CLAUDE.md`.
 
 ### 3. Validate all
@@ -342,8 +343,8 @@ The agent reaches new functionality via a CLI on PATH (Bash tool) or a globally-
 
 ---
 
-## Open Questions
+## Open Questions — RESOLVED (2026-06-11)
 
-1. **Pin or float `@googleworkspace/cli`?** This plan uses `None` (latest) to match the existing `excalidraw-export` convention and track Google's actively-developed CLI. If you'd prefer a pinned version for reproducibility across machines, name the pin (current latest is `0.22.5`).
-2. **`gws` verify check: always-present vs. optional-style?** This plan makes it always-present and non-fatal (so the warning surfaces pre-install on every `/update`, per the issue). The `sentry-cli` precedent only adds its check when the tool is already present. Confirm you want the always-on warning rather than the optional-style silence-until-installed.
-3. **MCP tool-name shorthand in the existing `google-workspace` body.** The legacy body uses `gmail.search()`-style shorthand that doesn't match the real `mcp__claude_ai_Gmail__*` names. This plan scopes the fix to the new tool-selection preamble and leaves the legacy body shorthand as-is (correcting all of it is a large, separable edit). OK to leave the legacy shorthand for a follow-up, or fold it in now?
+1. **Pin or float `@googleworkspace/cli`?** → **FLOAT (latest).** Use `None` to match the existing `excalidraw-export` convention and track Google's actively-developed CLI.
+2. **`gws` verify check: always-present vs. optional-style?** → **OPTIONAL-STYLE (silent until installed).** Modeled on the `sentry-cli` precedent: report status when `gws` is present, stay silent (no warning) when absent. Avoids nagging on machines that never use Workspace, since `gws` needs a separate OAuth flow install cannot satisfy.
+3. **MCP tool-name shorthand in the existing `google-workspace` body.** → **FOLD IN NOW.** Normalize the legacy `gmail.search()`-style shorthand to real `mcp__claude_ai_*` names (or `gws <service>` where preferred) as part of this PR, per NO LEGACY CODE TOLERANCE. Bounded: tool-name references only.
