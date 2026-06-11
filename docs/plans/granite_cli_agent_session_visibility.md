@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-06-11
 tracking: https://github.com/tomcounsell/ai/issues/1571
 last_comment_id:
+revision_applied: true
 ---
 
 # Granite CLI session visibility (dashboard, valor-session list, watchdog)
@@ -102,8 +103,10 @@ No prior failed attempts to fix the CLI-path gap — this is the first fix.
 
 ## Architectural Impact
 
-- **New dependencies**: CLI imports `AgentSession` (`models.agent_session`) and
-  `finalize_session` (`models.session_lifecycle`). No new external deps.
+- **New dependencies**: CLI imports `AgentSession` (`models.agent_session`),
+  `finalize_session` (`models.session_lifecycle`), `SessionType`
+  (`config.enums`), plus stdlib `os`/`uuid` for `working_dir` resolution and the
+  `local-`-prefixed `session_id`. No new external deps.
 - **Interface changes**: none to `Container` — the wiring lives entirely in the
   CLI wrapper. The container keeps minting its internal `session_id`; the CLI
   reuses that value as the AgentSession `session_id` (see Technical Approach for
@@ -144,8 +147,9 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_cli_ag
   `failed`.
 - **`granite` session type**: add a `GRANITE = "granite"` member to the
   `SessionType` StrEnum so granite runs are a distinct, self-describing type
-  rather than mislabeled as `dev` — and wire it into the one place that needs an
-  explicit map (`valor_session list`'s `_role_to_session_type`).
+  rather than mislabeled as `dev`. `valor_session list --role granite` is served
+  by the raw `session_type == role_filter` match (`tools/valor_session.py:1003`),
+  so the enum member alone is sufficient — no `_role_to_session_type` edit needed.
 
 ### Flow
 
@@ -156,35 +160,78 @@ and after.
 
 ### Technical Approach
 
-- **Session id ordering wrinkle.** `Container.run()` mints the `session_id`
-  internally and only returns it inside `ContainerResult`. The AgentSession must
-  exist *before* `run()` so the run is visible *during* execution (the whole
-  point — orphan-reaper coverage and live dashboard). Resolution: the CLI mints
-  the `session_id` (same `uuid.uuid4().hex[:12]` shape) and creates the
-  AgentSession with it before calling `run()`. The container's internally-minted
-  id is logged/returned as before; the CLI does NOT need to thread its id into
-  the container for this fix (the container's id is an internal trace artifact;
-  the AgentSession is the canonical visibility record). The CLI's one-line stdout
-  summary keeps printing `result.session_id` (container's) for backward compat
-  and additionally prints the `agent_session_id`.
-- **session type.** Add `SessionType.GRANITE = "granite"` in `config/enums.py`.
-  Use it via `create_local(session_type=SessionType.GRANITE, ...)`. Confirm no
+- **Session id ordering wrinkle + recovery-safety prefix.** `Container.run()`
+  mints the `session_id` internally and only returns it inside `ContainerResult`.
+  The AgentSession must exist *before* `run()` so the run is visible *during*
+  execution (the whole point — orphan-reaper coverage and live dashboard).
+  Resolution: the CLI mints the `session_id` and creates the AgentSession with it
+  before calling `run()`. **The CLI MUST mint `session_id = "local-" +
+  uuid.uuid4().hex[:12]`** (keep the 12-hex body for the existing shape; prepend
+  the `local-` prefix). This is a *correctness requirement*, not cosmetic: the
+  worker's startup recovery (`_recover_interrupted_agent_sessions_startup`,
+  `agent/session_health.py:538`) discriminates sessions by
+  `is_local = entry.session_id.startswith("local")` — NOT by `session_type`. A
+  bare-hex `session_id` falls through to the bridge recovery path
+  (session_health.py:629), which re-queues `running` → `pending`
+  (`priority="high"`) and the worker would then execute the granite record as a
+  bridge session against stale context. A `local-` prefix routes the record
+  through the `elif is_local` branch (line 587): since
+  `is_local and session_type == SessionType.DEV` is False for a granite session,
+  it skips the dev re-queue (line 545) and lands on the safe **abandon** path
+  (line 594, `finalize_session(..., "abandoned")`). Adding `SessionType.GRANITE`
+  alone does NOT protect the record — the prefix is the load-bearing guard. The
+  container's internally-minted id is logged/returned as before; the CLI does NOT
+  thread its id into the container (the container's id is an internal trace
+  artifact; the AgentSession is the canonical visibility record). The stdout
+  summary prints BOTH ids, **labeled** (see "Labeled IDs" below).
+- **session type (explicit, never defaulted).** Add `SessionType.GRANITE =
+  "granite"` in `config/enums.py`. **`create_local` defaults `session_type` to
+  `SESSION_TYPE_DEV` (`models/agent_session.py:1375`)** — omitting the kwarg
+  silently registers a `dev` record, defeating the new enum and the `list --role
+  granite` criterion. The CLI MUST pass `session_type=SessionType.GRANITE`
+  explicitly, and Task 3 MUST assert `session.session_type == "granite"` on the
+  created record (not merely that `create_local` was called). Confirm no
   exhaustive `match`/branch on `SessionType` elsewhere breaks on a new member —
   recon found the switch sites (`agent/hooks/pre_tool_use.py`,
   `agent/session_executor.py`) all use `== PM` / `== TEAMMATE` / `== DEV`
   equality checks with sensible defaults, so a new member falls through safely.
-- **project_key / working_dir.** Use `project_key="valor"` (this repo) and
-  `working_dir` = the container's resolved `cwd` (or the repo root when `--cwd`
-  is the default sandbox). These satisfy `create_local`'s required fields and the
-  dashboard's `project_name` resolution.
+- **project_key / working_dir (resolved before create).** Use
+  `project_key="valor"` (this repo). `working_dir` is a *required* `create_local`
+  field; when `--cwd` is None the container's `cwd` is a fresh tempdir created
+  lazily inside container construction, so it is NOT safe to read before `run()`.
+  Resolve a concrete, existing directory independently: `working_dir = args.cwd
+  or os.getcwd()`, and assert `working_dir and os.path.isdir(working_dir)` before
+  the `create_local` call. Do NOT derive `working_dir` from the container's
+  sandbox tempdir.
 - **finalize mapping.** `pm_complete` / `pm_user` → `completed`; everything else
   (`pm_max_turns`, `dev_hang`, `pm_hang`, `startup_unresolved`, `exception`) →
   `failed`, with the `exit_reason` (or exception repr) as the `reason` string.
-- **failure isolation.** Wrap the AgentSession create and finalize in
-  best-effort guards: a Redis/Popoto failure must NOT change the CLI's exit code
-  or prevent the results JSON from being written — the visibility record is
-  additive, not load-bearing for the PoC's primary output. Log a warning on
-  failure and continue.
+- **double-finalize safety.** `container.run()` returns `exit_reason="exception"`
+  WITHOUT raising on spawn failure, so the post-run finalize marks the session
+  `failed` first; if a later line (e.g. the results-JSON `OSError` path) then
+  raises, the `except Exception` block would finalize a second time, and
+  `finalize_session` RAISES on terminal→different-terminal when
+  `reject_from_terminal=True` (the default, `models/session_lifecycle.py:225,299`).
+  The except-block finalize MUST pass `reject_from_terminal=False` so a repeat
+  `failed` finalize is a no-op instead of a raise.
+- **None-guard before finalize.** If the guarded `create_local` fails, `session`
+  is `None`. Every finalize call MUST be wrapped in an explicit `if session is not
+  None:` check — relying on the best-effort `try/except` to swallow an
+  `AttributeError` on `None` obscures intent. The best-effort guard stays inside
+  the `if session is not None:` branch.
+- **failure isolation + defined operator signal.** Wrap the AgentSession create
+  and finalize in best-effort guards: a Redis/Popoto failure must NOT change the
+  CLI's exit code or prevent the results JSON from being written — the visibility
+  record is additive, not load-bearing for the PoC's primary output. The
+  observable contract on persistence failure: **emit exactly one stderr line
+  `granite session not recorded: <reason>` and proceed.** stdout and the results
+  JSON are unchanged; the warning is stderr-only. This is the operator signal on a
+  Redis-less dev machine (the PoC's stated home) — not silent, not noisy.
+- **labeled IDs.** The stdout summary prints both ids, labeled, so operators know
+  which to feed `valor-session`: `{"session_id": <container>, "agent_session_id":
+  <local-...>, ...}`. `agent_session_id` (the `local-`-prefixed record) is the
+  operational id for `valor-session steer/kill`; the container `session_id` is a
+  trace artifact. Document this distinction in `granite-pty-production.md`.
 
 ## Failure Path Test Strategy
 
@@ -192,10 +239,14 @@ and after.
 - [ ] The CLI's existing `except Exception` around `container.run()` (cli.py:107)
       must finalize the AgentSession `failed` before returning exit code 4 — add a
       test asserting the session reaches `failed` when `run()` raises.
-- [ ] The new AgentSession create/finalize guards swallow Popoto/Redis errors;
-      each must log a `logger.warning` — assert the warning fires (and the CLI
-      still returns the correct exit code) when session persistence is patched to
-      raise.
+- [ ] The new AgentSession create/finalize guards swallow Popoto/Redis errors and
+      emit exactly one stderr line `granite session not recorded: <reason>` —
+      assert the line fires on stderr only (stdout + results JSON unchanged) and
+      the CLI still returns the correct exit code when session persistence is
+      patched to raise.
+- [ ] Double-finalize: when the post-run path finalizes `failed` and the
+      `except` block then finalizes again with `reject_from_terminal=False`, the
+      second call is a no-op, not a raise — assert no exception escapes.
 
 ### Empty/Invalid Input Handling
 - [ ] Empty `--user-message` returns 5 *before* any AgentSession is created —
@@ -249,10 +300,32 @@ and never alter the exit code or block the results JSON write.
 
 ## Race Conditions
 
-No race conditions identified — the CLI is a single synchronous process. The
-AgentSession is created before `run()` and finalized after it returns; there is
-no concurrent writer to this record (the standalone CLI is not the worker, and
-each run mints a fresh `session_id`).
+**There IS a concurrent writer: the worker's startup recovery.** On any machine
+where the worker also runs, the worker's
+`_recover_interrupted_agent_sessions_startup()` scans all `running` AgentSession
+records on startup. If the granite CLI is SIGKILLed between create and finalize —
+or a worker restarts mid-run — the worker sees a stale `running` granite record
+and tries to recover it. Recovery discriminates by the **`session_id` string
+prefix** (`is_local = entry.session_id.startswith("local")`,
+`agent/session_health.py:538`), NOT by `session_type`.
+
+**Hazard:** a bare-hex `session_id` (the container's `uuid.uuid4().hex[:12]`
+shape) is NOT `is_local`, so it falls through to the bridge recovery path
+(line 629), which re-queues `running` → `pending` (`priority="high"`); the worker
+then executes the granite record as a bridge session against stale context —
+mis-execution.
+
+**Mitigation (load-bearing):** the CLI mints `session_id = "local-" +
+uuid.uuid4().hex[:12]`. The `local-` prefix makes the record `is_local`. Because
+a granite session is not `SessionType.DEV`, it skips the local-dev re-queue
+branch (line 545) and lands on the `elif is_local` **abandon** path (line 587 →
+594), which finalizes the orphaned record `abandoned` rather than re-queuing it.
+No granite record is ever executed by the worker. Adding `SessionType.GRANITE`
+does NOT by itself protect the record — the prefix is the guard. The terminal
+finalize race (recovery abandons a record the CLI is about to finalize) is benign:
+`finalize_session` is called with `reject_from_terminal=False` in the CLI's
+except path (see Technical Approach), so a CLI finalize landing after a recovery
+abandon is a no-op, not a raise.
 
 ## No-Gos (Out of Scope)
 
@@ -293,14 +366,20 @@ needed for the agent to "see" it.
 
 ## Success Criteria
 
-- [ ] `valor-granite-loop` creates a `running` AgentSession before the container
-      runs and finalizes it `completed`/`failed` on exit.
-- [ ] A granite run appears in `curl -s localhost:8500/dashboard.json` sessions
-      list while running and as a terminal record after.
+- [ ] `valor-granite-loop` creates a `running` AgentSession (session_id prefixed
+      `local-`, session_type `granite`) before the container runs and finalizes it
+      `completed`/`failed` on exit.
+- [ ] The granite `session_id` starts with `local-` so worker startup recovery
+      routes an orphaned `running` record to the abandon path (never re-queues it
+      as a bridge session).
+- [ ] A granite run appears as a terminal record in `curl -s
+      localhost:8500/dashboard.json` after it exits (visibility while running is
+      best-effort — short PoC runs may finish before a dashboard poll).
 - [ ] `python -m tools.valor_session list --role granite` lists granite sessions.
 - [ ] `SessionType.GRANITE` exists and no existing `SessionType` consumer breaks.
-- [ ] Session persistence failures are guarded — a Redis outage does not change
-      the CLI exit code or block the results JSON.
+- [ ] Session persistence failures are guarded — a Redis outage emits exactly one
+      stderr line `granite session not recorded: <reason>` and does not change the
+      CLI exit code or block the results JSON write.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -332,7 +411,7 @@ needed for the agent to "see" it.
 - **Parallel**: false
 - Add `GRANITE = "granite"` to `SessionType` in `config/enums.py` with a docstring note.
 - Grep all `SessionType` / `session_type ==` consumers; confirm each handles an unknown member with a default (no exhaustive `match` without a fall-through).
-- Add `"granite": SessionType.GRANITE` to `_role_to_session_type` in `tools/valor_session.py`.
+- Do NOT edit `_role_to_session_type` in `tools/valor_session.py`: the `list --role granite` criterion is served by the raw `session_type == role_filter` match at `tools/valor_session.py:1003`, not by `_role_to_session_type` (line 383, which only gates the `create --role` path — itself constrained to `choices=["pm","dev","teammate"]` and never used to create granite sessions). The enum member alone satisfies the success criterion.
 
 ### 2. Wire AgentSession create/finalize into the CLI
 
@@ -342,10 +421,12 @@ needed for the agent to "see" it.
 - **Assigned To**: granite-cli-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `tools/granite_interactive_tui_poc/cli.py:main`, mint a `session_id`, then create a `running` AgentSession via `AgentSession.create_local(session_type=SessionType.GRANITE, project_key="valor", working_dir=<resolved cwd>, session_id=...)` BEFORE constructing/running the container — wrapped in a best-effort guard.
-- After `container.run()` returns, `finalize_session(session, "completed", reason=exit_reason)` for `pm_complete`/`pm_user`, else `"failed"` — guarded.
-- In the `except Exception` block, finalize the session `failed` with the exception repr before returning exit code 4 — guarded.
-- Add the `agent_session_id` to the stdout one-line summary; keep `result.session_id` for backward compat.
+- In `tools/granite_interactive_tui_poc/cli.py:main`, mint `session_id = "local-" + uuid.uuid4().hex[:12]` (the `local-` prefix is REQUIRED — it routes worker startup recovery to the safe abandon path; see Race Conditions). Resolve `working_dir = args.cwd or os.getcwd()` and assert `working_dir and os.path.isdir(working_dir)`. Then create a `running` AgentSession via `AgentSession.create_local(session_id=session_id, session_type=SessionType.GRANITE, project_key="valor", working_dir=working_dir)` BEFORE constructing/running the container — wrapped in a best-effort guard that, on failure, sets `session=None`, emits exactly one stderr line `granite session not recorded: <reason>`, and proceeds.
+- Pass `session_type=SessionType.GRANITE` **explicitly** (never rely on the `create_local` default, which is `dev`).
+- After `container.run()` returns, `if session is not None:` finalize — `finalize_session(session, "completed", reason=exit_reason)` for `pm_complete`/`pm_user`, else `"failed"` — guarded.
+- In the `except Exception` block, `if session is not None:` finalize the session `failed` with the exception repr, passing `reject_from_terminal=False` (so a repeat finalize after the post-run path is a no-op, not a raise), before returning exit code 4 — guarded.
+- Every finalize call is wrapped in `if session is not None:` with the best-effort `try/except Exception: logger.warning(...)` inside that branch.
+- Add a labeled `agent_session_id` to the stdout one-line summary alongside the container `session_id`: `{"session_id": <container>, "agent_session_id": <local-...>, ...}`. `agent_session_id` is the id for `valor-session` operations.
 - Update the CLI module docstring to reflect the new lifecycle.
 
 ### 3. Update tests
@@ -357,7 +438,9 @@ needed for the agent to "see" it.
 - **Agent Type**: builder
 - **Parallel**: false
 - Patch the session model so unit tests don't need live Redis (or split session-lifecycle assertions into an integration test).
-- Assert: running session created before `run()`; finalized `completed` for clean exits and `failed` for hangs/exceptions; `granite` type used; empty `--user-message` writes no session; persistence-failure path logs a warning and preserves the exit code.
+- Assert: running session created before `run()`; `session_id` starts with `local-` (recovery-safety prefix); `session.session_type == "granite"` on the created record (not merely that `create_local` was called); finalized `completed` for clean exits and `failed` for hangs/exceptions; empty `--user-message` writes no session.
+- Assert the persistence-failure path: patch `create_local` to raise, then confirm (a) the CLI exit code is unchanged, (b) stdout and the results JSON are unchanged, and (c) exactly one stderr line `granite session not recorded: <reason>` is emitted (stderr only).
+- Assert the double-finalize path: when the post-run finalize marks `failed` and a later error triggers the `except` block, the second finalize (with `reject_from_terminal=False`) does not raise.
 
 ### 4. Documentation
 
@@ -384,24 +467,187 @@ needed for the agent to "see" it.
 |-------|---------|----------|
 | CLI tests pass | `pytest tests/unit/granite_container/test_cli.py -q` | exit code 0 |
 | Granite executor tests pass | `pytest tests/unit/test_session_executor_granite.py -q` | exit code 0 |
-| granite type wired into list | `grep -n 'granite' tools/valor_session.py` | output contains granite |
 | granite enum member exists | `python -c "from config.enums import SessionType; assert SessionType.GRANITE == 'granite'"` | exit code 0 |
-| Lint clean | `python -m ruff check tools/granite_interactive_tui_poc/ config/enums.py tools/valor_session.py` | exit code 0 |
+| local- prefix minted in CLI | `grep -n '"local-"' tools/granite_interactive_tui_poc/cli.py` | output contains the prefixed mint |
+| Lint clean | `python -m ruff check tools/granite_interactive_tui_poc/ config/enums.py` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 9 total (1 blocker, 6 concerns, 2 nits)
+**Verdict**: NEEDS REVISION
+
+### Blockers
+
+#### Worker startup recovery mis-executes a CLI-created `running` granite session
+- **Severity**: BLOCKER
+- **Critics**: Operator, Adversary (x2 findings), corroborated by prior-pass structural note
+- **Location**: Race Conditions section / `agent/session_health.py:629`
+- **Finding**: The plan's Race Conditions section asserts "no concurrent writer ...
+  single synchronous process." This is **false** on any machine where the worker
+  also runs. `_recover_interrupted_agent_sessions_startup()` discriminates sessions
+  by `is_local = entry.session_id.startswith("local")` (session_health.py:538), NOT
+  by `session_type`. A granite session created with `session_id = uuid.uuid4().hex[:12]`
+  does not start with `"local"`, so it falls through to the **bridge path** (line 629),
+  which re-queues `running` -> `pending` (`priority="high"`) and the worker then picks
+  it up and **executes it as a bridge session** — replaying the granite container
+  against stale context. If the CLI is SIGKILLed between create and finalize (or a
+  worker restarts mid-run), this guarantees mis-execution.
+- **Suggestion**: Mint the granite `session_id` with a `local-` prefix
+  (e.g. `f"local-granite-{uuid.uuid4().hex[:12]}"`) so the existing `is_local` guard
+  fires. A `local` granite session still falls through line 545 (`is_local and == DEV`
+  is False) into line 587 (`elif is_local`) and is safely **abandoned** rather than
+  re-queued. Then correct the Race Conditions section: the writer IS concurrent (the
+  worker's startup recovery), and the `local-` prefix is the mitigation.
+- **Implementation Note**: The discriminator is a **string prefix on `session_id`**
+  (`session_health.py:538`), not a `session_type` check — adding `SessionType.GRANITE`
+  alone does NOT protect the record. Required change in Task 2: the CLI must mint
+  `session_id = "local-" + uuid.uuid4().hex[:12]` (keep the 12-hex body for the existing
+  shape; the `local-` prefix routes recovery to the abandon path at line 587). Update
+  the Race Conditions section to drop the "no concurrent writer" claim and document the
+  `local-` prefix as the recovery-safety guard.
+
+### Concerns
+
+#### Double-finalize raises inside the except-block guard
+- **Severity**: CONCERN
+- **Critics**: Skeptic
+- **Location**: Step 2 — finalize in `except Exception`
+- **Finding**: `container.run()` returns `exit_reason="exception"` WITHOUT raising on
+  spawn failure, so the post-run finalize marks the session `failed` first. If a later
+  line (e.g. the results-JSON `OSError` path) then raises, the `except Exception` block
+  finalizes a second time; `finalize_session` RAISES on terminal->different-terminal
+  with `reject_from_terminal=True`.
+- **Suggestion**: Make the except-block finalize unconditionally safe.
+- **Implementation Note**: `finalize_session(session, "failed", reason="exception", reject_from_terminal=False)`
+  — the kwarg already exists in the signature; passing `False` makes a repeat `failed`
+  finalize a no-op instead of a raise, regardless of guard scope.
+
+#### `working_dir` may be unresolved before `create_local`
+- **Severity**: CONCERN
+- **Critics**: Adversary
+- **Location**: Step 2 — `create_local(working_dir=<resolved cwd>)`
+- **Finding**: When `--cwd` is None the container's `cwd` is a fresh tempdir created
+  inside container construction. `working_dir` is a required `create_local` field;
+  passing None/empty stores a corrupt value or raises.
+- **Suggestion**: Resolve a concrete, existing directory before `create_local`.
+- **Implementation Note**: Compute `working_dir = args.cwd or os.getcwd()` (repo root)
+  and assert `working_dir and os.path.isdir(working_dir)` before the `create_local`
+  call; do not derive it from the container's lazily-created sandbox tempdir.
+
+#### Guard must short-circuit finalize when create failed (session is None)
+- **Severity**: CONCERN
+- **Critics**: Skeptic
+- **Location**: Step 2 — best-effort guards
+- **Finding**: If `create_local` is guarded and fails, `session` is `None`; downstream
+  `finalize_session(session, ...)` then runs on `None` and relies on the guard to
+  swallow an `AttributeError`, obscuring intent.
+- **Suggestion**: Explicit None-check before every finalize.
+- **Implementation Note**: `if session is not None:` wraps each finalize call; the
+  best-effort `try/except Exception: logger.warning(...)` stays inside that branch.
+
+#### `create_local` defaults `session_type` to `dev` — silent mislabel risk
+- **Severity**: CONCERN
+- **Critics**: Archaeologist
+- **Location**: Step 2 — `create_local(...)`
+- **Finding**: `create_local`'s default is `session_type=SESSION_TYPE_DEV`; omitting
+  `session_type=SessionType.GRANITE` silently registers a `dev` record, defeating the
+  new enum and the `list --role granite` criterion.
+- **Suggestion**: Pass `session_type=SessionType.GRANITE` explicitly and assert it in
+  the test (the task already lists the kwarg; add the assertion).
+- **Implementation Note**: Test in Task 3 must assert `session.session_type == "granite"`
+  on the created record, not just that `create_local` was called.
+
+#### Redis-unavailable behavior is an undefined operator experience
+- **Severity**: CONCERN
+- **Critics**: User
+- **Location**: Success Criteria — "Session persistence failures are guarded"
+- **Finding**: "Best-effort, no exit-code change" is an implementation note, not an
+  observable contract. On a Redis-less dev machine (the PoC's stated home) the operator
+  gets undefined output — silent, or noisy warnings on every run.
+- **Suggestion**: Specify the observable signal.
+- **Implementation Note**: Define it as: on persistence failure, emit exactly one
+  `stderr` warning line (`granite session not recorded: <reason>`) and proceed; assert
+  in Task 3 that stdout/results JSON are unchanged and the line is on stderr only.
+
+#### Two distinct IDs (container vs AgentSession) confuse the operator
+- **Severity**: CONCERN
+- **Critics**: Archaeologist, User, Simplifier (NIT-elevated by consensus)
+- **Location**: Technical Approach — "Session id ordering wrinkle"; stdout summary
+- **Finding**: The stdout summary prints `result.session_id` (container's internal id)
+  AND `agent_session_id`. Operators reaching for `valor-session steer/kill` need the
+  `agent_session_id`; printing both unlabeled forces them to know the distinction.
+- **Suggestion**: Label both IDs in stdout and the docs; call out `agent_session_id`
+  as the operational id for `valor-session`.
+- **Implementation Note**: Print `{"session_id": <container>, "agent_session_id": <local-...>, ...}`
+  with a one-line docs note in `granite-pty-production.md` stating `agent_session_id`
+  is the id for `valor-session` operations. (Note: if the `local-` prefix fix lands,
+  `agent_session_id` IS the canonical record; the container id remains a trace artifact.)
+
+### Nits
+
+#### `_role_to_session_type` edit serves no stated success criterion
+- **Severity**: NIT (Simplifier filed CONCERN; structural check downgrades — harmless)
+- **Critics**: Simplifier, structural cross-reference check
+- **Location**: Task 1 — `_role_to_session_type` edit in `tools/valor_session.py`
+- **Finding**: `list --role granite` (success criterion) is served entirely by the raw
+  `session_type == role_filter` match at `tools/valor_session.py:1003`. The
+  `_role_to_session_type` map (line 383) only gates the `create --role` path, which is
+  itself constrained by `choices=["pm","dev","teammate"]` (line 1288) — and the plan
+  never asks to create granite sessions via `valor-session create`. The map edit is
+  harmless but dead scope.
+- **Suggestion**: Optional — drop the `_role_to_session_type` edit from Task 1; keep
+  only the enum member. Leave `choices=["pm","dev","teammate"]` on `create` unchanged.
+
+#### "Appears while running" is hard to verify for short PoC runs
+- **Severity**: NIT
+- **Critics**: User
+- **Location**: Success Criteria — dashboard "while running"
+- **Finding**: Short granite runs may finish before a dashboard check; the "while
+  running" criterion is only demonstrable under artificially slow conditions.
+- **Suggestion**: Treat the terminal-record visibility as the verifiable user value;
+  keep "while running" as best-effort, not a hard gate.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
+| Task numbering | PASS | Tasks 1-5 sequential, no gaps |
+| Dependencies valid | PASS | All `Depends On` resolve; no cycles (1<-2<-3<-4<-5) |
+| File paths exist | PASS | 14/14 referenced paths exist |
+| Prerequisites met | PASS | Redis reachable (Popoto backend) |
+| Cross-references | CONCERN | `list --role granite` criterion served by raw filter (valor_session.py:1003), not by the Task 1 `_role_to_session_type` edit — that edit is dead scope (NIT) |
+
+### Verdict
+
+**NEEDS REVISION** — 1 blocker must be resolved before build.
+
+The blocker (worker startup recovery mis-executing a CLI-created `running` granite
+session, because recovery discriminates on the `session_id.startswith("local")` prefix
+rather than `session_type`) is a correctness/safety defect that the plan's Race
+Conditions section actively contradicts ("no concurrent writer"). The fix is small —
+mint the granite `session_id` with a `local-` prefix so the existing recovery guard
+routes it to the abandon path, and correct the Race Conditions section — but it changes
+the plan's central design claim and must be applied before build. The six concerns
+fold into the same revision pass (guard ordering, `working_dir` resolution,
+`reject_from_terminal=False`, explicit `session_type`, defined Redis-failure UX, labeled
+IDs). The two nits are optional cleanups.
+
+<!-- Verdict recorded via sdlc-tool verdict record --stage CRITIQUE --verdict "NEEDS REVISION" --issue-number 1571 -->
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Session type: new `granite` vs. reuse `dev`?** The issue offers both. This
-   plan proposes a new `SessionType.GRANITE` member (self-describing, no
-   mislabeling, list-filterable). Reusing `dev` is a smaller diff but conflates
-   granite PoC runs with real dev work in the dashboard. Confirm the new-type
-   direction, or say to reuse `dev`.
-2. **Should the orphan reaper actually protect CLI-spawned PTYs?** This plan
-   deliberately scopes to the AgentSession record + finalize (visibility), and
-   leaves full heartbeat-based reaper self-protection for CLI-spawned `claude`
-   PTYs out of scope. Is that acceptable, or is reaper protection part of the ask?
+1. **Session type: new `granite` vs. reuse `dev`?** RESOLVED — new
+   `SessionType.GRANITE`. This is now load-bearing: the critique fix requires a
+   self-describing type for `list --role granite` and for distinguishing granite
+   PoC runs from real dev work in the dashboard. (Note: the recovery-safety guard
+   is the `local-` `session_id` prefix, NOT the session type — see Race
+   Conditions.)
+2. **Should the orphan reaper actually protect CLI-spawned PTYs?** RESOLVED —
+   deferred / out of scope. This plan scopes to the AgentSession record + finalize
+   (visibility) plus the `local-` prefix that makes orphaned records abandon
+   safely. Full heartbeat-based reaper self-protection for CLI-spawned `claude`
+   PTYs remains a distinct, larger change (see No-Gos).
