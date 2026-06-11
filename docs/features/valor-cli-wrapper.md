@@ -114,16 +114,15 @@ agents a second interface — the agent-facing pattern in `pyproject.toml`
 
 ## Where It Falls Short
 
-### 1. The `valor` shell alias still shadows the venv binary
+### 1. The `valor` shell alias shadowing the venv binary — fixed
 
-The user's zsh `alias valor='cd /Users/valorengels/src/ai && ./scripts/telegram_run.sh'`
-points to a script that no longer exists. Running `valor` in a fresh shell
-errors with `./scripts/telegram_run.sh: No such file or directory`. The fix is
-to either (a) drop the alias, (b) point it at `.venv/bin/valor`, or (c) prepend
-`.venv/bin` to PATH ahead of alias resolution. The wrapper does not address
-this — it works when called as `python -m tools.valor_cli ...` or
-`/Users/valorengels/src/ai/.venv/bin/valor ...`, but the bare `valor` command
-is still broken in shells that load the stale alias.
+The stale `alias valor=…` line that pointed to the deleted
+`./scripts/telegram_run.sh` has been removed from the origin machine. The
+`/update` verify step now runs `check_valor_alias_shadow()` in
+`scripts/update/verify.py` on every machine. It performs a warn-only static
+scan of `~/.zshrc` for any non-comment line matching `^\s*alias\s+valor\s*=`,
+and emits a copy-paste fix in the warning message when found. No machine
+should encounter the stale alias going forward.
 
 ### 2. The positional-shortcut disambiguation is a literal allowlist
 
@@ -142,20 +141,32 @@ declarations by design (it must be consulted before argparse runs);
 asserts the two stay in sync, so drift now fails CI instead of failing a
 user.
 
-### 3. Worker pre-flight check uses a stale Redis cache
+### 3. Worker pre-flight false negatives — fixed
 
-`valor-session create` calls `_check_worker_health()` which reads a worker
-heartbeat key. After a worker restart, the key can lag the actual process
-state by 30-60 seconds. The wrapper surfaces the same warning:
+The false warnings had two root causes, both now resolved:
 
-```
-WARNING: no active worker detected — session will stay pending until a worker is started
-```
+1. **Worktree path divergence.** `_check_worker_health()` resolved the
+   heartbeat file path relative to its own `__file__` location. When called
+   from a worktree, that resolved to a path that either didn't exist or pointed
+   at a stale copy, making the worker appear down even when healthy.
 
-Even when the worker is running and healthy (verified via the dashboard
-`/dashboard.json` endpoint), the CLI can refuse to enqueue. The session does
-get created — the warning is misleading. A better signal would be a single
-"ready" check against the dashboard, not a Redis heartbeat read.
+2. **Thin threshold margin.** The worker writes its heartbeat every 300 seconds;
+   the CLI threshold was 360 seconds — a 60-second margin that any minor
+   scheduling jitter could blow through.
+
+The fix: `_resolve_heartbeat_path()` now resolves the heartbeat file via
+`git rev-parse --path-format=absolute --git-common-dir` (with a
+`__file__`-relative fallback), so the correct file is found from any worktree.
+The threshold is now a single constant `WORKER_DOWN_THRESHOLD_S = 600` (2×
+write cadence) in `agent/constants.py`, shared by both `valor-session` and
+`tools/agent_session_scheduler.py`. The warning text never claims a created
+session won't run.
+
+The `--json` output from `cmd_create` and `cmd_status` now carries two fields
+alongside `worker_healthy`: `worker_state` ("ok" or "down") and
+`worker_heartbeat_age_s` (the raw age in seconds, clamped to 0). See
+[Session Steering](session-steering.md) for the full worker pre-flight check
+semantics.
 
 ### 4. No help text on the positional shortcut
 
