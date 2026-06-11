@@ -212,26 +212,26 @@ When `valor_session create` is called on a machine where the worker is stopped, 
 
 ### At session creation (`valor_session create`)
 
-After enqueuing, the CLI reads `data/last_worker_connected` and checks its modification age:
+After enqueuing, the CLI reads the worker heartbeat file and checks its modification age:
 
 - **Plain-text mode**: prints a warning to stderr if the heartbeat is stale or absent
   ```
-  WARNING: no active worker detected — session will stay pending until a worker is started (run: ./scripts/valor-service.sh worker-start)
+  WARNING: no recent worker heartbeat on this machine (720s) — session will stay pending until a worker is started (run: ./scripts/valor-service.sh worker-start)
   ```
-- **JSON mode** (`--json`): adds `"worker_healthy": false` to the output dict instead of printing to stderr
+- **JSON mode** (`--json`): includes `worker_healthy`, `worker_state`, and `worker_heartbeat_age_s` in the output dict
 
 ### At status check (`valor_session status --id <ID>`)
 
 When a session has `status: pending`, the CLI also checks worker health:
 
-- **Plain-text mode**: prints `WARNING: No active worker — session may wait indefinitely.` to stderr
-- **JSON mode** (`--json`): adds `"worker_healthy"` field to the JSON dict (always present for pending sessions)
+- **Plain-text mode**: prints the same warning template to stderr when worker is down
+- **JSON mode** (`--json`): always includes `worker_state` and `worker_heartbeat_age_s` in the JSON dict — `null` when the session is not in `pending` status (compute is skipped to avoid the git subprocess on every call)
 
 Automated pollers using `--json` receive no stderr noise — only clean JSON.
 
 ### At queue status (`agent_session_scheduler status`)
 
-The scheduler's `status` command (which always outputs JSON via `_output()`) now includes two fields in every response:
+The scheduler's `status` command (which always outputs JSON via `_output()`) includes two fields in every response:
 
 ```json
 {
@@ -240,17 +240,43 @@ The scheduler's `status` command (which always outputs JSON via `_output()`) now
 }
 ```
 
-- `worker_healthy`: `true` if heartbeat age < 360s, `false` otherwise
+- `worker_healthy`: `true` if heartbeat age < 600s, `false` otherwise
 - `worker_heartbeat_age_s`: integer age in seconds, or `null` if the file is missing/unreadable
 
 This allows automated shepherding scripts to detect the no-worker condition programmatically.
 
+### JSON contract for `--json` callers
+
+`cmd_create` always emits all three fields:
+
+```json
+{
+  "worker_healthy": true,
+  "worker_state": "ok",
+  "worker_heartbeat_age_s": 112
+}
+```
+
+`cmd_status` emits `worker_state` and `worker_heartbeat_age_s` unconditionally (never silently absent); for non-pending sessions both are `null`. `worker_healthy` is only present when the session is pending:
+
+```json
+{
+  "worker_state": null,
+  "worker_heartbeat_age_s": null
+}
+```
+
+`worker_state` is `"ok"` or `"down"`. Agent callers should branch on `worker_state` rather than the prose warning text.
+
 ### Implementation
 
-The health check reads `data/last_worker_connected` via `stat().st_mtime` — matching the pattern already in `ui/app.py:_get_worker_health()`. Threshold is 360 seconds. Missing file equals unhealthy. All `OSError` paths are caught silently; the check never raises.
+The health check resolves the heartbeat path via `_resolve_heartbeat_path()` in `tools/valor_session.py`, then reads `stat().st_mtime`. The path resolver uses `git rev-parse --path-format=absolute --git-common-dir` so CLI invocations from git worktrees (`.worktrees/{slug}/`) always read the main checkout's `data/last_worker_connected` — the only copy the worker writes. Any git subprocess failure falls back to a `__file__`-relative path. Future-dated mtimes from clock skew are clamped to age 0 (reported as healthy).
 
-- `_check_worker_health()` in `tools/valor_session.py` — canonical helper
-- Equivalent inline 5-line check in `tools/agent_session_scheduler.py:cmd_status` — no cross-file import coupling
+Threshold is `WORKER_DOWN_THRESHOLD_S = 600s` (defined in `agent/constants.py`) — 2x the worker's 300s heartbeat write cadence, giving a full missed write cycle of margin. Missing file equals down (worker has never run on this machine). All exception paths are caught silently; the check never raises.
+
+- `_resolve_heartbeat_path()` in `tools/valor_session.py` — worktree-aware path resolution
+- `_check_worker_health()` in `tools/valor_session.py` — canonical health check helper
+- `tools/agent_session_scheduler.py` — uses the shared `_resolve_heartbeat_path` import and `WORKER_DOWN_THRESHOLD_S`
 
 ## Related Features
 

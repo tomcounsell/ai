@@ -330,7 +330,7 @@ python -m tools.valor_session children --id <SESSION_ID>
 python -m tools.valor_session steer --id <SESSION_ID> --message "Stop after critique"
 
 # Create a new session (project_key derived from cwd via projects.json)
-# Warns to stderr if no active worker is running; --json adds worker_healthy field
+# Warns to stderr if no recent worker heartbeat; --json adds worker_healthy, worker_state, worker_heartbeat_age_s
 # PM and dev roles both require --slug, or `issue #N` in the message for auto-derivation.
 python -m tools.valor_session create --role pm --message "Plan issue #735"
 python -m tools.valor_session create --role dev --slug fix-the-bug --message "Fix the bug" --parent <PARENT_ID>
