@@ -99,6 +99,11 @@ CYCLE_IDLE_TIMEOUT_S = 120.0
 # actual turn loop. Without this, the startup loop consumed
 # 120s idle waits per cycle on a slow persona load (PR #1612
 # live run, June 2026).
+# HARD FLOOR: must stay strictly above pty_driver.QUIESCENCE_S
+# (2.0s) — idle is only declared after that much byte-silence, so
+# a startup poll shorter than QUIESCENCE_S can NEVER observe idle
+# and silently reintroduces the startup_unresolved hang this
+# constant exists to bound.
 STARTUP_CYCLE_TIMEOUT_S = 3.0
 
 # Trust-folder prompt pattern matched against the raw TUI buffer

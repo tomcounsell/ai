@@ -209,9 +209,14 @@ worker loop captured in `BridgeAdapter.run` (previously every delivery from
 the pexpect thread was skipped as `no_event_loop`); `Container` skips its
 machine-wide `pkill` fallback for pool-owned pairs; the pool respawns with the
 original `cwd`, checks pair liveness at acquire, clears the slot event at
-release, and prunes completed respawn tasks; `read_until_idle` checks the
-loading-spinner negative against only the trailing 400 chars so a historical
-spinner frame can no longer block idle detection for the rest of the call.
+release, and prunes completed respawn tasks; `read_until_idle` declares idle
+only after `QUIESCENCE_S` (2.0s) of byte-silence, evaluated level-triggered
+against a persistent per-turn capture — an active turn repaints the spinner
+at ≥1 Hz and so can never pass the gate, while a settled-and-silent PTY (which
+an edge-triggered check could never observe) passes it on every poll. This
+replaced an earlier regex loading-spinner negative, which mid-turn cell-
+fragment repaints could both evade (false idle) and falsely latch (a stale
+spinner frame blocking idle for the rest of the call).
 
 ## Reverting the granite cutover
 

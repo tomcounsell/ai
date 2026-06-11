@@ -26,10 +26,14 @@ The TUI is a readline-style input field. `\r` is the submit key; `\n`
 is a literal newline within the field. Sending `hello\n` leaves the
 cursor in the input box; `hello\r` commits the message.
 
-The driver's `write()` method normalizes the trailing newline to `\r`
-automatically. Internal newlines are preserved (the TUI input box
-supports multi-line input via a literal `\n`; only the *final* newline
-is the submit key).
+The submit CR must additionally arrive in its **own input burst**: the
+TUI's paste-burst heuristic (observed on claude v2.1.173) treats a CR
+that lands in the same burst as the message body as a literal newline
+inside a paste, so `send("hello\r")` parks the text in the input box
+unsubmitted. The driver's `write()` therefore sends the body, sleeps
+`SUBMIT_KEY_DELAY_S` (0.5s), then sends `\r` as a separate send.
+Internal newlines are preserved (the TUI input box supports multi-line
+input via a literal `\n`; only the separately-sent final CR submits).
 
 ### C2 — first-ctrl-c interjection text
 
@@ -68,16 +72,37 @@ while the overlay is active. Idle detection must recognize the
 "esc to cancel" state; the loop holds while the user dismisses the
 overlay (typically with Esc).
 
-### C5 — idle signal is the bottom-bar text + glyph + content-floor
+### C5 — idle signal is byte-quiescence + bottom-bar text + glyph + content-floor
 
 The TUI's idle state is the bottom bar containing "bypass permissions"
-plus the prompt glyph (`>` or `❯`). Both must be present. The
-`min_content_bytes` floor (default 400) prevents false-positives from
-the TUI briefly re-rendering the bar while the model is still loading
-a response.
+plus the prompt glyph (`>` or `❯`), gated on **byte-quiescence**: idle
+is only declared after `QUIESCENCE_S` (2.0s) with zero new PTY bytes.
+An active model turn repaints the spinner animation at ≥1 Hz, so it
+can never be silent that long; a settled TUI paints nothing. Silence
+is the only reliable "running right now" negative — the spinner
+animates via cursor-positioned cell fragments (`✻i…`, `✽hg`) that no
+regex over the capture can reliably match.
+
+The heuristic is **level-triggered**: it is evaluated against a
+persistent per-turn screen capture (`_turn_text`, reset on every
+`write()`), on every poll tick — including ticks with no new bytes. A
+settled TUI paints nothing, so an edge-triggered check (fresh chunks
+only) can never observe idle on a quiescent PTY.
+
+The `min_content_bytes` floor (default 400, measured on the
+ANSI-stripped capture) plus the `SPINNER_EVIDENCE_RE` gate prevent
+false-positives from the command-echo frame: floor reads require proof
+that a model turn actually ran (a spinner frame or the "esc to
+interrupt" hint painted at some point this turn).
 
 The driver's `read_until_idle` returns an `IdleResult` with
-`saw_idle`, `buffer` (ANSI-stripped), `idle_marker`, and `elapsed_ms`.
+`saw_idle`, `buffer` (ANSI-stripped bytes read this call),
+`turn_buffer` (ANSI-stripped per-turn capture), `idle_marker`, and
+`elapsed_ms`.
+
+Constraint: `QUIESCENCE_S` must stay strictly below the container's
+`STARTUP_CYCLE_TIMEOUT_S` (3.0s) or startup polls can never observe
+idle; the floor is documented at both constants.
 
 ## Why pexpect over stdlib (subprocess + pty)
 
