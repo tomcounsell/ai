@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: Shipped
 type: bug
 appetite: Small
 owner: Valor Engels
