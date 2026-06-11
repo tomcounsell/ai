@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-06-11
 tracking: https://github.com/tomcounsell/ai/issues/1619
-last_comment_id: none
+last_comment_id: 4677448506
+revision_applied: true
 ---
 
 # valor CLI Hardening
@@ -86,7 +87,7 @@ The defect is at step 3: the reader resolves a different `data/` path than the w
 ## Architectural Impact
 
 - **New dependencies**: none
-- **Interface changes**: `_check_worker_health()` keeps its `(healthy: bool, age_s: int | None)` shape with the threshold raised to 600s; `--json` output keeps `worker_healthy` and adds `worker_state` (`"ok"`/`"down"`) + `worker_heartbeat_age_s`
+- **Interface changes**: `_check_worker_health()` keeps its `(healthy: bool, age_s: int | None)` shape, now judged against a new `WORKER_DOWN_THRESHOLD_S = 600` constant; `HEARTBEAT_STALENESS_THRESHOLD_S = 360` stays in place untouched for the dashboard (`ui/app.py:330,348`). New patchable helper `_resolve_heartbeat_path()` is the single path-resolution seam, shared with `tools/agent_session_scheduler.py`. `--json` output keeps `worker_healthy` and adds `worker_state` (`"ok"`/`"down"`) + `worker_heartbeat_age_s` in BOTH `cmd_create` and `cmd_status`
 - **Coupling**: none added — the CLI keeps reading a file, no new dependency on the dashboard HTTP endpoint (rejected, see Rabbit Holes)
 - **Data ownership**: unchanged — worker owns the heartbeat file; CLI is read-only
 - **Reversibility**: trivial (small, local diffs)
@@ -110,9 +111,9 @@ No prerequisites — this work has no external dependencies. (Per Decision 1, PR
 ### Key Elements
 
 - **Alias removal (this machine)**: delete the stale `valor` alias from `~/.zshrc` so the venv binary resolves
-- **Verify-step alias-shadow check**: `/update` warns when `~/.zshrc` carries an `alias valor=` line (static grep, no subprocess), with a copy-paste fix in the warning
-- **Worktree-proof heartbeat path**: `_check_worker_health()` resolves the heartbeat file against the main checkout (git common dir), not `__file__`
-- **Honest warning, single 600s threshold**: `ok` (< 600s, silent) / `down` (≥ 600s or missing); down text says "no recent worker heartbeat on this machine" and names the start command — it never fires inside the worker's normal 300s write cadence
+- **Verify-step alias-shadow check**: `/update` warns when `~/.zshrc` carries an `alias valor=` line (anchored regex `^\s*alias\s+valor\s*=` on non-comment lines, no subprocess), with a copy-paste fix in the warning
+- **Worktree-proof heartbeat path**: new `_resolve_heartbeat_path()` helper resolves the heartbeat file against the main checkout (`git rev-parse --git-common-dir --path-format=absolute` with a relative-output guard), not `__file__`; the same helper replaces the scheduler's duplicate inline path expression
+- **Honest warning, new 600s CLI threshold**: `ok` (< 600s, silent) / `down` (≥ 600s or missing) via new `WORKER_DOWN_THRESHOLD_S = 600`; the dashboard's `HEARTBEAT_STALENESS_THRESHOLD_S = 360` is untouched. Down text says "no recent worker heartbeat on this machine" and names the start command — it never fires inside the worker's normal 300s write cadence. Applied at both `cmd_create` and `cmd_status` warning sites
 - **Wrapper-test verification**: confirm the branch's 23 tests are green on main after #1612 merges (no new wrapper test file)
 
 ### Flow
@@ -123,16 +124,17 @@ No prerequisites — this work has no external dependencies. (Per Decision 1, PR
 
 **Part 1 — alias (machine config + update system)**
 - One-time on this machine: remove `~/.zshrc:16`. The vault-synced `~/Desktop/Valor/zshenv.sh` (managed by `scripts/update/zshenv_sync.py`) is deliberately NOT used to repoint the alias — the venv binary already lands on PATH per machine; an alias adds a second source of truth.
-- Add `check_valor_alias_shadow()` to `scripts/update/verify.py` following the existing `ToolCheck` pattern (cf. `check_python_alias()` at verify.py:134, which already solves the same problem-shape for `python`). Implementation (Decision 3): static read of `~/.zshrc` for a line matching `alias valor=` (commented-out lines excluded); pass when no such alias line exists; warn otherwise with the exact rc-edit instruction (line number + the offending line) in the message. No subprocess, no interactive shell — deterministic in launchd/update contexts. The venv-binary existence check already in `check_valor_tools` (since `6e8de6d8`) covers the not-on-PATH case. Non-fatal (warn, don't block) — machines are heterogeneous.
+- Add `check_valor_alias_shadow()` to `scripts/update/verify.py` following the existing `ToolCheck` pattern (cf. `check_python_alias()` at verify.py:134, which already solves the same problem-shape for `python`). Implementation (Decision 3, pattern pinned per critique C3): per line, skip lines whose first non-whitespace char is `#`, then match `re.search(r'^\s*alias\s+valor\s*=', line)`. This excludes comments, tolerates indentation and `alias valor =` spacing, and cannot match `valor-session`/`valor-*` aliases (the `\s*=` must immediately follow `valor`). Pass when no such alias line exists; warn otherwise with the exact rc-edit instruction (line number + the offending line) in the message. No subprocess, no interactive shell — deterministic in launchd/update contexts. The venv-binary existence check already in `check_valor_tools` (since `6e8de6d8`) covers the not-on-PATH case. Non-fatal (warn, don't block) — machines are heterogeneous.
 - Wire the check into `check_valor_tools()` or `verify_environment()` so `/update` surfaces it (skip cleanly when `~/.zshrc` is absent or unreadable).
 
-**Part 2 — pre-flight trustworthiness (`tools/valor_session.py`)**
-- Path fix: resolve the heartbeat file via the git common directory so worktrees converge on the main checkout: `git -C <repo_root> rev-parse --git-common-dir` → `common_dir.parent / "data" / "last_worker_connected"`. Wrap in the same never-raise discipline; on any git failure fall back to the current `__file__`-relative path. Keep it lazy/cheap (one subprocess call, only at check time — not import time).
-- Threshold fix (Decision 2): keep the boolean shape but raise the threshold to a single 600s cutoff (2× the 300s write cadence): `ok` (< 600s) / `down` (≥ 600s or file missing). Spike-2(b) showed the old 360s threshold left only 60s of margin over the write cadence; 600s gives 300s of slack and matches the dashboard's outer boundary. Retire `HEARTBEAT_STALENESS_THRESHOLD_S = 360` in favor of the 600s constant (full cutover, no parallel thresholds).
-- Message fix (both `cmd_create` warning sites, `tools/valor_session.py:465` and `:703`):
-  - `down`: `no recent worker heartbeat on this machine ({age or 'no file'}) — session will stay pending until a worker is started (run: ./scripts/valor-service.sh worker-start)`
+**Part 2 — pre-flight trustworthiness (`tools/valor_session.py` + `tools/agent_session_scheduler.py`)**
+- Path fix (critique B1 + C1): extract a patchable helper `_resolve_heartbeat_path(repo_root: Path | None = None) -> Path` in `tools/valor_session.py`, default anchor `Path(__file__).parent.parent`. Inside it: run `git -C <repo_root> rev-parse --git-common-dir --path-format=absolute` (git ≥ 2.31) and **guard against relative output** — `common = Path(output.strip()); abs_common = common if common.is_absolute() else (repo_root / common).resolve()` — then `abs_common.parent / "data" / "last_worker_connected"`. Never resolve against process cwd: bare `--git-common-dir` prints the relative string `.git` from the main checkout, which would re-introduce the cwd-dependence bug this plan exists to cure. Any subprocess failure (non-zero exit, missing git binary, exception) falls back to the `__file__`-relative path (preserves the #980 never-raise contract). The git subprocess lives entirely inside the helper, keeping `_check_worker_health` thin; the helper is the test patch seam (tests `monkeypatch.setattr(tools.valor_session, "_resolve_heartbeat_path", ...)` — they no longer patch a module-level constant). Lazy/cheap: one subprocess call, only at check time — not import time.
+- Threshold fix (Decision 2, revised per critique B2): **do NOT retire `HEARTBEAT_STALENESS_THRESHOLD_S = 360`** — it is consumed by the dashboard (`ui/app.py:330` bridge tiering, `ui/app.py:348` worker tiering) as the ok/running tier split and must stay untouched. Instead add a new constant `WORKER_DOWN_THRESHOLD_S = 600` to `agent/constants.py` (2× the 300s write cadence; spike-2(b) showed 360s left only 60s margin) and use it for the CLI pre-flight: `ok` (< 600s) / `down` (≥ 600s or file missing).
+- Scheduler alignment (critique B2): `tools/agent_session_scheduler.py:566-568` carries its own inline heartbeat check with the identical `__file__`-relative path defect and the 360s threshold. Replace its path expression with an import of `_resolve_heartbeat_path` and switch it to `WORKER_DOWN_THRESHOLD_S`, so both CLIs give the same `worker_healthy` answer from the same machine. The `worker_healthy` field name stays — backward-compatible.
+- Message fix (both warning sites: `cmd_create` at `tools/valor_session.py:491`, `cmd_status` at `:734` — the latter emits a DISTINCT harmful string, `"No active worker — session may wait indefinitely."`, critique C2):
+  - `down`: `no recent worker heartbeat on this machine ({age or 'no file'}) — session will stay pending until a worker is started (run: ./scripts/valor-service.sh worker-start)` — same template at both sites
   - `ok`: silent (no output)
-  - `--json` mode: keep `worker_healthy` (true for `ok`) and add `worker_heartbeat_age_s` + `worker_state` (`"ok"`/`"down"`) for agent callers.
+  - `--json` mode: keep `worker_healthy` (true for `ok`) and add `worker_heartbeat_age_s` + `worker_state` (`"ok"`/`"down"`) in **both** `cmd_create` and `cmd_status` JSON branches (C2 parity — agent callers branch on structured data at either call site).
 - `_check_worker_health()` stays exception-silent end to end (the #980 contract).
 
 **Part 3 — wrapper tests (verify-only)**
@@ -142,20 +144,23 @@ No prerequisites — this work has no external dependencies. (Per Decision 1, PR
 
 ### Exception Handling Coverage
 - [ ] `_check_worker_health()` swallows all exceptions by design (#980). Existing `test_does_not_raise_on_permission_error` covers it; extend with a case where the git-common-dir subprocess fails (returns non-zero / binary missing) asserting fallback to the `__file__`-relative path and a `down`/`None` result rather than a raise
+- [ ] `_resolve_heartbeat_path()` with git emitting a RELATIVE common dir (e.g. `.git`): assert the result resolves under the `repo_root` anchor, NOT the process cwd — run the assertion with cwd set elsewhere (`monkeypatch.chdir(tmp_path)`) (critique B1)
 - [ ] New verify-step check: `~/.zshrc` missing and `~/.zshrc` unreadable (PermissionError) must each produce a clean pass/skip-level `ToolCheck` (never crash `/update`) — one test per failure mode with the path/read mocked
 
 ### Empty/Invalid Input Handling
 - [ ] Heartbeat file exists but is empty or has future mtime: assert the check still returns a well-formed state (no negative-age weirdness leaking into messages)
 - [ ] `~/.zshrc` containing only a commented-out `# alias valor=` line: verify the alias-shadow check passes (no false warning on dead config)
+- [ ] `~/.zshrc` containing `alias valor-session=...` (or other `valor-*` aliases): verify the anchored pattern does NOT false-positive (critique C3 — fixture must include this line in the pass case)
 
 ### Error State Rendering
-- [ ] Assert no warning is emitted for any heartbeat age under 600s, and that the literal "no active worker detected" string is gone (the harmful claim this issue exists to kill)
-- [ ] Assert the `down` message names the start command; assert `--json` carries `worker_state` so agent callers branch on structured data, not prose
+- [ ] Assert no warning is emitted for any heartbeat age under 600s, and that BOTH harmful strings are gone — `"no active worker detected"` (cmd_create) and `"No active worker — session may wait indefinitely."` (cmd_status) — via the broadened case-insensitive grep in Verification (critique C2)
+- [ ] Assert the `down` message names the start command; assert `--json` carries `worker_state` in both `cmd_create` and `cmd_status` so agent callers branch on structured data, not prose
 
 ## Test Impact
 
-- [ ] `tests/unit/test_worker_health_check.py::TestCheckWorkerHealth` (5 tests) — UPDATE: `test_healthy_worker`, `test_stale_worker`, `test_missing_heartbeat_file`, `test_exact_threshold_boundary` rewritten against the 600s threshold (a 360–599s age is now healthy); add git-common-dir resolution cases using a real `tmp_path` worktree layout plus the git-failure fallback case
+- [ ] `tests/unit/test_worker_health_check.py::TestCheckWorkerHealth` (5 tests) — UPDATE: `test_healthy_worker`, `test_stale_worker`, `test_missing_heartbeat_file`, `test_exact_threshold_boundary` rewritten against the 600s threshold (a 360–599s age is now healthy). **Patch-seam migration (critique C1):** existing tests patch the module-level `tools.valor_session._WORKER_HEARTBEAT_FILE`; with resolution moving inside the helper, every test must be migrated to `monkeypatch.setattr(tools.valor_session, "_resolve_heartbeat_path", lambda **_: tmp_path / "last_worker_connected")` — otherwise they silently exercise the live filesystem. Add `_resolve_heartbeat_path` cases: real `tmp_path` worktree layout, relative-git-output guard (cwd elsewhere), git-failure fallback
 - [ ] `tests/unit/test_valor_cli.py` (branch-only) — no change; verify-only per spike-1
+- [ ] Tests covering `tools/agent_session_scheduler.py` `worker_healthy` output (if any reference the heartbeat path or 360s threshold) — UPDATE to the shared resolver + 600s threshold; grep at build time
 - [ ] No other existing tests reference `_check_worker_health` or `check_valor_tools` (grep-verified at plan time)
 
 ## Rabbit Holes
@@ -225,10 +230,12 @@ No new agent integration required — `valor` and `valor-session` are already CL
 - [ ] `valor "test prompt" --json` runs from a fresh interactive zsh on this machine with no alias error
 - [ ] `/update` verify warns when `~/.zshrc` carries an `alias valor=` line (covered by unit tests for pass/alias-present/commented/missing-rc/unreadable-rc cases)
 - [ ] Creating a session within 600s of the last heartbeat write — and from a worktree cwd — produces no warning at all
-- [ ] `--json` create output carries `worker_state` and `worker_heartbeat_age_s`
-- [ ] `tests/unit/test_worker_health_check.py` rewritten for the 600s threshold, including worktree-path and git-fallback cases — green
+- [ ] `--json` output carries `worker_state` and `worker_heartbeat_age_s` in both `cmd_create` and `cmd_status`
+- [ ] `tests/unit/test_worker_health_check.py` rewritten for the 600s threshold, patching the `_resolve_heartbeat_path` seam, including worktree-path, relative-git-output, and git-fallback cases — green
+- [ ] Dashboard tiering unchanged: `HEARTBEAT_STALENESS_THRESHOLD_S = 360` still in place and consumed by `ui/app.py`
+- [ ] `tools/agent_session_scheduler.py` heartbeat check uses the shared resolver + `WORKER_DOWN_THRESHOLD_S` (no contradictory `worker_healthy` answers between CLIs)
 - [ ] Wrapper tests: 23/23 green on the build branch after #1612 merges; no new wrapper test file written
-- [ ] Repo grep shows no remaining emitter of the literal "no active worker detected" string
+- [ ] Case-insensitive repo grep for "active worker" returns nothing in tools/, agent/, scripts/ (both harmful strings gone)
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -262,11 +269,12 @@ No new agent integration required — `valor` and `valor-session` are already CL
 - **Assigned To**: preflight-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Resolve heartbeat path via `git rev-parse --git-common-dir` with `__file__`-relative fallback; never raise
-- Raise the staleness threshold to a single 600s cutoff (Decision 2); retire the 360s constant
-- Update both warning sites (`cmd_create`, `cmd_status`) with the honest `down` message; extend `--json` with `worker_state`, `worker_heartbeat_age_s`; keep `worker_healthy`
-- Grep repo for "no active worker detected" consumers; update any found
-- Rewrite `tests/unit/test_worker_health_check.py` per Test Impact
+- Extract `_resolve_heartbeat_path(repo_root=None)` helper: `git rev-parse --git-common-dir --path-format=absolute` with relative-output guard (resolve against the `__file__` anchor, never cwd — critique B1) and `__file__`-relative fallback; never raise
+- Add `WORKER_DOWN_THRESHOLD_S = 600` to `agent/constants.py`; use it in the CLI pre-flight. **Leave `HEARTBEAT_STALENESS_THRESHOLD_S = 360` untouched** for the dashboard (critique B2)
+- Switch `tools/agent_session_scheduler.py:566-568` to the shared resolver + `WORKER_DOWN_THRESHOLD_S` (critique B2)
+- Update both warning sites (`cmd_create` :491, `cmd_status` :734) with the honest `down` message; extend `--json` with `worker_state`, `worker_heartbeat_age_s` at BOTH sites; keep `worker_healthy` (critique C2)
+- Case-insensitive grep repo for "active worker" consumers (both harmful strings); update any found
+- Rewrite `tests/unit/test_worker_health_check.py` per Test Impact — migrate every test to patch the `_resolve_heartbeat_path` seam (critique C1)
 
 ### 2. Verify-step alias-shadow check (Part 1)
 - **Task ID**: build-alias-check
@@ -276,9 +284,9 @@ No new agent integration required — `valor` and `valor-session` are already CL
 - **Assigned To**: preflight-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `check_valor_alias_shadow()` to `scripts/update/verify.py` (static grep of `~/.zshrc` for `alias valor=`, warn-only ToolCheck, copy-paste fix in the message — Decision 3)
+- Add `check_valor_alias_shadow()` to `scripts/update/verify.py` (anchored regex `^\s*alias\s+valor\s*=` on non-comment lines of `~/.zshrc` — critique C3; warn-only ToolCheck, copy-paste fix in the message — Decision 3)
 - Wire into the verify flow next to `check_valor_tools`
-- Unit tests: pass / alias-present / commented-out-alias / rc-file-missing / rc-file-unreadable (path mocked via tmp_path)
+- Unit tests: pass (fixture includes an `alias valor-session=...` line — must NOT match) / alias-present / commented-out-alias / rc-file-missing / rc-file-unreadable (path mocked via tmp_path)
 - Remove the stale alias from `~/.zshrc` on this machine and confirm `zsh -ic 'whence -p valor'` resolves to the venv binary
 
 ### 3. Validate Parts 1+2
@@ -325,20 +333,29 @@ No new agent integration required — `valor` and `valor-session` are already CL
 |-------|---------|----------|
 | Health-check tests | `pytest tests/unit/test_worker_health_check.py -n0 -q` | exit code 0 |
 | Alias-check tests | `pytest tests/unit/test_update_valor_alias.py -n0 -q` | exit code 0 |
-| Lint clean | `python -m ruff check tools/valor_session.py scripts/update/verify.py` | exit code 0 |
-| Format clean | `python -m ruff format --check tools/valor_session.py scripts/update/verify.py` | exit code 0 |
-| Harmful claim gone | `grep -rn "no active worker detected" tools/ agent/ scripts/` | exit code 1 |
-| JSON contract | `grep -n "worker_state" tools/valor_session.py` | output contains worker_state |
+| Lint clean | `python -m ruff check tools/valor_session.py tools/agent_session_scheduler.py scripts/update/verify.py` | exit code 0 |
+| Format clean | `python -m ruff format --check tools/valor_session.py tools/agent_session_scheduler.py scripts/update/verify.py` | exit code 0 |
+| Harmful claims gone (both strings, case-insensitive) | `grep -rni "active worker" tools/ agent/ scripts/` | exit code 1 |
+| JSON contract (create + status parity) | `grep -n "worker_state" tools/valor_session.py` | ≥ 2 hits (cmd_create and cmd_status JSON branches) |
+| Dashboard constant untouched | `grep -n "HEARTBEAT_STALENESS_THRESHOLD_S: int = 360" agent/constants.py` | exit code 0 |
+| Scheduler uses shared resolver | `grep -n "_resolve_heartbeat_path\|WORKER_DOWN_THRESHOLD_S" tools/agent_session_scheduler.py` | both present |
 
 ## Critique Results
 
+Critique 2026-06-11 (comment 4677448506, plan @ `6b988f3d`): NEEDS REVISION — 2 blockers, 3 concerns. All five incorporated in this revision.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | All (unanimous) | B1: bare `--git-common-dir` prints relative `.git` from the main checkout — planned path arithmetic was cwd-relative, re-introducing the bug class inverted | Technical Approach Part 2 (path fix); Failure Path Test Strategy; Task 1 | `--path-format=absolute` + guard: non-absolute output resolves against the `__file__` anchor (`(repo_root / common).resolve()`), never cwd; unit test asserts resolution with cwd set elsewhere |
+| BLOCKER | Operator (+4 cross-validated) | B2: `HEARTBEAT_STALENESS_THRESHOLD_S` is shared with `ui/app.py:330,348` and `tools/agent_session_scheduler.py:568` — retiring it breaks dashboard tiering and leaves a split-brain scheduler | Technical Approach Part 2 (threshold + scheduler alignment); Architectural Impact; Verification table; Task 1 | New `WORKER_DOWN_THRESHOLD_S = 600` in `agent/constants.py`; 360s constant untouched for the dashboard; scheduler's inline block switches to the shared resolver + 600s; `worker_healthy` field name unchanged |
+| CONCERN | Skeptic | C1: moving path resolution inside `_check_worker_health()` destroys the `_WORKER_HEARTBEAT_FILE` patch seam — rewritten tests would hit the live filesystem | Technical Approach Part 2; Test Impact; Task 1 | `_resolve_heartbeat_path(repo_root=None)` is the patchable seam; tests `monkeypatch.setattr(tools.valor_session, "_resolve_heartbeat_path", lambda **_: tmp_path / ...)` |
+| CONCERN | Skeptic +5 | C2: verification grep missed `cmd_status`'s distinct harmful string (`"No active worker — session may wait indefinitely."`); `cmd_status --json` lacked `worker_state` parity | Technical Approach Part 2 (message fix); Verification table; Success Criteria; Task 1 | Grep broadened to case-insensitive `grep -rni "active worker"` (expected exit 1); `cmd_status` :734 gets the same `down` template and the structured JSON fields |
+| CONCERN | Adversary | C3: unspecified alias grep pattern could false-positive on `valor-*` aliases or match commented lines | Technical Approach Part 1; Failure Path Test Strategy; Task 2 | `re.search(r'^\s*alias\s+valor\s*=', line)` on lines whose first non-whitespace char is not `#`; pass-case fixture includes `alias valor-session=...` |
 
 ---
 
 ## Decisions (Open Questions resolved 2026-06-11)
 
 1. **Sequencing vs PR #1612**: RESOLVED — #1612 merges together with this work. Merge order at the MERGE stage: #1612 first, then this PR immediately after. The wrapper-conditional tasks (feature-doc updates, on-main wrapper-test verification) are therefore unconditional and execute as part of this plan.
-2. **Warning tier thresholds**: RESOLVED — single 600s threshold (2× the 300s write cadence). Two states: `ok` (< 600s) and `down` (≥ 600s or file missing). No `stale` tier.
+2. **Warning tier thresholds**: RESOLVED — single 600s threshold (2× the 300s write cadence). Two states: `ok` (< 600s) and `down` (≥ 600s or file missing). No `stale` tier. *(Revised per critique B2: the 600s value lives in a NEW constant `WORKER_DOWN_THRESHOLD_S`; the shared `HEARTBEAT_STALENESS_THRESHOLD_S = 360` stays for the dashboard.)*
 3. **`zsh -ic` in verify**: RESOLVED — static grep of `~/.zshrc` for `alias valor=`. Deterministic, zero hang risk in launchd/update contexts, and it targets exactly the known stale-alias artifact. The venv-binary existence check (already in `check_valor_tools` since `6e8de6d8`) covers the not-on-PATH case.
