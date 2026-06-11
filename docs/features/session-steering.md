@@ -102,6 +102,36 @@ valor-session kill --all
 
 Add `--json` to any command for machine-readable output.
 
+### Worker pre-flight check (`create` and `status`)
+
+After enqueuing a session, `valor-session create` checks whether a worker is actively writing heartbeats. `valor-session status` runs the same check when the session is in `pending` status.
+
+**States:**
+
+- `ok` (heartbeat age < 600s) — silent; no output
+- `down` (heartbeat age ≥ 600s, or file missing) — warning to stderr:
+  ```
+  WARNING: no recent worker heartbeat on this machine (720s) — session will stay pending until a worker is started (run: ./scripts/valor-service.sh worker-start)
+  ```
+
+The warning never claims the session will not run — it reports the current heartbeat age so the operator can judge. The session is enqueued regardless; when a worker starts, it picks up pending sessions normally.
+
+**Threshold:** `WORKER_DOWN_THRESHOLD_S = 600s` (defined in `agent/constants.py`), 2x the worker's 300s heartbeat write cadence. This gives one full missed write cycle of margin before declaring the worker down.
+
+**Worktree-proof path resolution:** The heartbeat file lives at `data/last_worker_connected` in the main checkout. When the CLI runs from a git worktree (`.worktrees/{slug}/`), a naive `__file__`-relative path would point at the worktree's own `data/` dir, which the worker never writes. `_resolve_heartbeat_path()` uses `git rev-parse --path-format=absolute --git-common-dir` (flag order matters — `--path-format=absolute` must precede `--git-common-dir`) to locate the main checkout's `.git` dir and derive the canonical heartbeat path. Relative git output is resolved against the `__file__` anchor, never the process cwd. Any git subprocess failure falls back to the `__file__`-relative path silently.
+
+**JSON contract:** `--json` output always includes these fields:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `worker_state` | `"ok"` or `"down"` | Structured state for agent callers — always present |
+| `worker_heartbeat_age_s` | integer or `null` | Age of the heartbeat file in seconds; `null` if file is missing; clamped to ≥ 0 |
+| `worker_healthy` | boolean | `true` when `worker_state == "ok"` — kept for backward compatibility |
+
+In `cmd_create`, all three fields are always non-null. In `cmd_status`, `worker_state` and `worker_heartbeat_age_s` are unconditionally present but are `null` when the session is not `pending` (the compute is skipped to avoid running the git subprocess on every status call). `worker_healthy` only appears in `cmd_status` JSON when the session is pending.
+
+Agent callers should branch on `worker_state` rather than parsing the stderr warning text.
+
 ## Backward Compatibility
 
 All symbols that previously lived only in `agent/agent_session_queue.py` are re-exported from there for backward compatibility:

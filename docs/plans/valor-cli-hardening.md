@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -219,13 +219,13 @@ No new agent integration required — `valor` and `valor-session` are already CL
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/valor-cli-wrapper.md` — shortcoming item 1 (alias): fixed status + the verify-step guard; item 3 (pre-flight): correct the misdiagnosis ("stale Redis cache" → file-mtime path divergence + threshold semantics) and document the 600s single-threshold behavior; item 7/9 (tests): already-accurate, confirm wording. This file lands on main with PR #1612, which merges together with this work (Decision 1) — execute after #1612 merges
-- [ ] Update `docs/features/session-steering.md` (or the doc section covering `valor-session create`) with the new warning semantics and `--json` fields
-- [ ] `docs/features/README.md` index — no new entry needed (existing pages updated in place)
+- [ ] Update `docs/features/valor-cli-wrapper.md` — shortcoming item 1 (alias): fixed status + the verify-step guard; item 3 (pre-flight): correct the misdiagnosis ("stale Redis cache" → file-mtime path divergence + threshold semantics) and document the 600s single-threshold behavior; item 7/9 (tests): already-accurate, confirm wording. This file lands on main with PR #1612, which merges together with this work (Decision 1) — execute after #1612 merges. **DEFERRED — tracked in #1631** (file not on this branch; survives plan deletion at merge)
+- [x] Update `docs/features/session-steering.md` (or the doc section covering `valor-session create`) with the new warning semantics and `--json` fields
+- [x] `docs/features/README.md` index — no new entry needed (existing pages updated in place)
 
 ### Inline Documentation
-- [ ] Docstring on the reworked `_check_worker_health()` documenting the 600s threshold rationale (2× write cadence), the git-common-dir resolution, and the #980 never-raise contract
-- [ ] Comment on the verify-step check pointing at this issue for the heterogeneous-machines rationale
+- [x] Docstring on the reworked `_check_worker_health()` documenting the 600s threshold rationale (2× write cadence), the git-common-dir resolution, and the #980 never-raise contract
+- [x] Comment on the verify-step check pointing at this issue for the heterogeneous-machines rationale
 
 ## Success Criteria
 

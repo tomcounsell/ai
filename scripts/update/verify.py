@@ -181,6 +181,55 @@ def check_python_alias() -> ToolCheck:
         return ToolCheck(name="python", available=False, error=f"python --version failed: {e}")
 
 
+def check_valor_alias_shadow(zshrc_path: Path | None = None) -> ToolCheck:
+    """Warn when a stale `alias valor=...` in ~/.zshrc shadows .venv/bin/valor.
+
+    An old `alias valor="cd ... && ./scripts/telegram_run.sh"` predates the
+    venv `valor` entry point; the script it pointed at is gone, so typing
+    `valor` in an interactive shell errors instead of running the binary.
+
+    Warn-only by design (issue #1619): machines are heterogeneous and we
+    never auto-edit user rc files, so this check must never block /update.
+    No subprocess, no interactive shell — reads the rc file directly so it
+    stays deterministic under launchd.
+    """
+    path = zshrc_path if zshrc_path is not None else Path.home() / ".zshrc"
+
+    try:
+        content = path.read_text()
+    except FileNotFoundError:
+        return ToolCheck(
+            name="valor-alias",
+            available=True,
+            version="skipped (~/.zshrc not found)",
+        )
+    except (PermissionError, OSError):
+        return ToolCheck(
+            name="valor-alias",
+            available=True,
+            version="skipped (~/.zshrc unreadable)",
+        )
+
+    # `\s*=` must immediately follow `valor` so valor-session= etc. never match.
+    alias_re = re.compile(r"^\s*alias\s+valor\s*=")
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        if line.lstrip().startswith("#"):
+            continue
+        if alias_re.search(line):
+            return ToolCheck(
+                name="valor-alias",
+                available=False,
+                error=(
+                    f"stale `valor` alias shadows .venv/bin/valor — "
+                    f"~/.zshrc line {lineno}: {line.strip()} | "
+                    f"Fix: delete line {lineno} from ~/.zshrc, "
+                    f"then run: source ~/.zshrc"
+                ),
+            )
+
+    return ToolCheck(name="valor-alias", available=True, version="no shadowing alias")
+
+
 def check_system_tools() -> list[ToolCheck]:
     """Check system-level tools."""
     tools = [
@@ -991,6 +1040,7 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.valor_tools.append(check_telegram_session(project_dir))
     result.valor_tools.append(check_google_token(project_dir))
     result.valor_tools.append(check_env_completeness(project_dir))
+    result.valor_tools.append(check_valor_alias_shadow())
 
     if check_ollama_model:
         ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "gemma4:e2b")
