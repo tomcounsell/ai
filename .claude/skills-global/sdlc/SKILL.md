@@ -6,7 +6,7 @@ context: fork
 
 # SDLC — Single-Stage Router
 
-This skill is a **router**, not an orchestrator. It assesses where work stands, invokes ONE sub-skill, and returns. The PM session handles pipeline progression by re-invoking `/sdlc` after each stage completes.
+This skill is a **router**, not an orchestrator. It assesses where work stands, invokes ONE sub-skill, and returns. The PM session handles pipeline progression by re-invoking `/sdlc` after each stage completes. In a local Claude Code session (no PM loop), use `/do-sdlc` to supervise the full pipeline in one invocation.
 
 You MUST NOT write code, run tests, or create plans directly -- delegate everything to sub-skills.
 

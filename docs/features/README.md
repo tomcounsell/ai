@@ -132,6 +132,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SDK Modernization](sdk-modernization.md) | Upgrade to SDK v0.1.35 with programmatic agents and expanded hooks | Shipped |
 | [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics and inline source file verification | Shipped |
 | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
+| [SDLC Local Supervision](sdlc-local-supervision.md) | `/do-sdlc` loops the `/sdlc` router in local Claude Code sessions — stage subagents on opus/sonnet per the PM persona table, TEST/PATCH marker backfill, exits on merge/blocked/cap | Shipped |
 | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
 | [SDLC Parallel Execution](sdlc-parallel-execution.md) | Phase 1 multi-dev fan-out at BUILD via `sdlc-decompose` + sub-slug `{slug}-u{i}` Dev sessions; Phase 2 `MultiDispatch` for parallel-safe stage pairs (DOCS+PATCH) | Shipped |
 | [SDLC Pipeline](sdlc-pipeline.md) | Pipeline routing overview, G1–G7 legal dispatch guards, `_meta` field reference, plan-revising lock (G7), and CLI tool reference | Shipped |
