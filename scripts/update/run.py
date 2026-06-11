@@ -27,6 +27,7 @@ from scripts.update import (  # noqa: E402
     env_sync,
     gh_auth,
     git,
+    gws_auth,
     hardlinks,
     hooks,
     kokoro,
@@ -450,6 +451,22 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     elif not gh_auth_result.success:
         log(f"WARN: gh auth: {gh_auth_result.error}", v, always=True)
         result.warnings.append(f"gh auth: {gh_auth_result.error}")
+
+    # Step 1.69: Check Google Workspace CLI (`gws`) auth state.
+    # Detection only — the OAuth consent flow is human-gated and browser-based,
+    # so we surface an actionable step rather than auto-running it (cron-safe).
+    log("Checking gws auth...", v)
+    gws_auth_result = gws_auth.configure_gws_auth(project_dir)
+    if gws_auth_result.action == "already_ok":
+        log(f"gws auth: {gws_auth_result.detail}", v)
+    elif gws_auth_result.action == "skipped":
+        log(f"gws auth: skipped — {gws_auth_result.detail}", v)
+    elif gws_auth_result.action == "needs_auth":
+        log(f"WARN: gws auth: {gws_auth_result.detail}", v, always=True)
+        result.warnings.append(f"gws auth: {gws_auth_result.detail}")
+    elif not gws_auth_result.success:
+        log(f"WARN: gws auth: {gws_auth_result.error}", v, always=True)
+        result.warnings.append(f"gws auth: {gws_auth_result.error}")
 
     # Step 1.7: Audit skill hooks for dangerous patterns
     log("Auditing skill hooks...", v)
