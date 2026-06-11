@@ -366,7 +366,7 @@ needed for the agent to "see" it.
 
 ## Success Criteria
 
-- [ ] `valor-granite-loop` creates a `running` AgentSession (session_id prefixed
+- [x] `valor-granite-loop` creates a `running` AgentSession (session_id prefixed
       `local-`, session_type `granite`) before the container runs and finalizes it
       `completed`/`failed` on exit.
 - [ ] The granite `session_id` starts with `local-` so worker startup recovery

@@ -376,6 +376,13 @@ class TestMainAgentSessionLifecycle(unittest.TestCase):
         )
         self.assertEqual(kwargs["session_type"], "granite")
         self.assertEqual(kwargs["project_key"], "valor")
+        self.assertEqual(
+            kwargs.get("status"),
+            "running",
+            "create_local must be called with status='running' so the record is "
+            "visible to dashboard/valor-session-list/watchdog immediately; "
+            f"got status={kwargs.get('status')!r}",
+        )
         # container.run() must be called after create_local (run_order populated after create)
         self.assertIn("run", run_order, "container.run must be called")
 
@@ -509,7 +516,8 @@ class TestMainAgentSessionLifecycle(unittest.TestCase):
             self.assertEqual(
                 len(recorded_lines),
                 1,
-                f"expected exactly 1 stderr line about session not recorded, got: {stderr_output!r}",
+                "expected exactly 1 stderr line about session not recorded, "
+                f"got: {stderr_output!r}",
             )
             self.assertIn("Redis down", recorded_lines[0])
 

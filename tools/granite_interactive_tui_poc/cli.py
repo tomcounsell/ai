@@ -132,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
             session_type=SessionType.GRANITE,
             project_key="valor",
             working_dir=working_dir,
+            status="running",
         )
     except Exception as e:
         print(f"granite session not recorded: {e}", file=sys.stderr)
