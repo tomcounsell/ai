@@ -340,6 +340,18 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         if not parent_id.strip():
             _output({"status": "error", "message": "--parent-session cannot be empty."})
             return 1
+        # Stopgap (#1633): refuse NEW parent-attached session creation.
+        # See models/child_session_gate.py for rationale and escape hatch.
+        from models.child_session_gate import (
+            BYPASS_WARNING,
+            child_sessions_allowed,
+            child_sessions_disabled_json,
+        )
+
+        if not child_sessions_allowed():
+            _output({"status": "error", **child_sessions_disabled_json()})
+            return 2
+        print(BYPASS_WARNING, file=sys.stderr)
         parent_session = _get_parent_session(parent_id)
         if parent_session is None:
             _output(

@@ -249,3 +249,111 @@ class TestCreateDevRoleRequiresSlug:
         assert "PM and dev sessions must be created with --slug" not in captured.err, (
             f"Guard fired with explicit --slug present: {captured.err!r}"
         )
+
+
+class TestCreateChildSessionGate:
+    """Stopgap (#1633): cmd_create refuses NEW parent-attached session creation.
+
+    The granite PTY container (PR #1612) owns the PM/Dev split from a bounded
+    pool; parent-linked child sessions double-consume pool slots. The gate
+    fires before any filesystem or Redis work and is bypassed only by
+    VALOR_ALLOW_CHILD_SESSIONS=1 (loud stderr warning). Parentless creation
+    and existing-child lifecycle commands are untouched.
+    """
+
+    def _stub_downstream(self, monkeypatch, tmp_path, push_calls):
+        """Stub project resolution + enqueue so no Redis/filesystem is touched."""
+        import agent.agent_session_queue as queue_mod
+
+        monkeypatch.setattr(valor_session, "_check_worker_health", lambda: (True, 1))
+        monkeypatch.setattr(valor_session, "resolve_project_key", lambda cwd: "test-1633")
+        monkeypatch.setattr(
+            valor_session,
+            "_resolve_project_working_directory",
+            lambda key: (tmp_path, {"working_directory": str(tmp_path)}),
+        )
+
+        async def _fake_push(**kwargs):
+            push_calls.append(kwargs)
+            return 1
+
+        monkeypatch.setattr(queue_mod, "_push_agent_session", _fake_push)
+
+    def test_blocked_parent_create_exits_2_with_no_enqueue(self, capsys, monkeypatch, tmp_path):
+        """--parent without the bypass env: exit 2, nothing enqueued or resolved."""
+        monkeypatch.delenv("VALOR_ALLOW_CHILD_SESSIONS", raising=False)
+        push_calls: list[dict] = []
+        self._stub_downstream(monkeypatch, tmp_path, push_calls)
+        # The gate must fire BEFORE project/worktree resolution.
+        monkeypatch.setattr(
+            valor_session,
+            "_resolve_project_working_directory",
+            lambda key: pytest.fail("gate must fire before working-dir resolution"),
+        )
+
+        args = _make_args(
+            "child task", role="teammate", slug=None, parent="agt_parent123", json=False
+        )
+        rc = valor_session.cmd_create(args)
+        captured = capsys.readouterr()
+
+        assert rc == 2
+        assert "temporarily disabled (#1633)" in captured.err
+        assert "VALOR_ALLOW_CHILD_SESSIONS=1" in captured.err
+        assert push_calls == [], "refused path must not enqueue anything"
+
+    def test_blocked_parent_create_json_error_shape(self, capsys, monkeypatch, tmp_path):
+        """--parent --json: structured error object on stdout, exit 2, no create."""
+        import json as json_mod
+
+        monkeypatch.delenv("VALOR_ALLOW_CHILD_SESSIONS", raising=False)
+        push_calls: list[dict] = []
+        self._stub_downstream(monkeypatch, tmp_path, push_calls)
+
+        args = _make_args(
+            "child task", role="teammate", slug=None, parent="agt_parent123", json=True
+        )
+        rc = valor_session.cmd_create(args)
+        captured = capsys.readouterr()
+
+        assert rc == 2
+        payload = json_mod.loads(captured.out)
+        assert payload["error"] == "child_sessions_disabled"
+        assert payload["issue"] == 1633
+        assert payload["bypass"] == "VALOR_ALLOW_CHILD_SESSIONS=1"
+        assert push_calls == []
+
+    def test_escape_hatch_creates_with_loud_warning(self, capsys, monkeypatch, tmp_path):
+        """VALOR_ALLOW_CHILD_SESSIONS=1: creation proceeds, warning on stderr."""
+        monkeypatch.setenv("VALOR_ALLOW_CHILD_SESSIONS", "1")
+        push_calls: list[dict] = []
+        self._stub_downstream(monkeypatch, tmp_path, push_calls)
+        # --parent inheritance looks up the parent session; stub it to avoid Redis.
+        monkeypatch.setattr(valor_session, "_find_session", lambda _id: None)
+
+        args = _make_args(
+            "child task", role="teammate", slug=None, parent="agt_parent123", json=False
+        )
+        rc = valor_session.cmd_create(args)
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "WARNING: VALOR_ALLOW_CHILD_SESSIONS=1" in captured.err
+        assert len(push_calls) == 1
+        assert push_calls[0]["parent_agent_session_id"] == "agt_parent123"
+
+    def test_parentless_create_unaffected(self, capsys, monkeypatch, tmp_path):
+        """No --parent: creation proceeds normally with no gate output."""
+        monkeypatch.delenv("VALOR_ALLOW_CHILD_SESSIONS", raising=False)
+        push_calls: list[dict] = []
+        self._stub_downstream(monkeypatch, tmp_path, push_calls)
+
+        args = _make_args("plain task", role="teammate", slug=None, parent=None, json=False)
+        rc = valor_session.cmd_create(args)
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "temporarily disabled" not in captured.err
+        assert "WARNING: VALOR_ALLOW_CHILD_SESSIONS" not in captured.err
+        assert len(push_calls) == 1
+        assert push_calls[0]["parent_agent_session_id"] is None

@@ -147,6 +147,21 @@ Before consolidation, completion side effects were scattered across 4 paths, eac
 | Branch checkpoint | Path B only | All paths (unless `skip_checkpoint`) |
 | Parent finalization | Path B only | All paths (unless `skip_parent`) |
 
+## Child Session Creation Temporarily Disabled (#1633)
+
+Creation of NEW parent-attached child sessions is refused as a stopgap until the #1633 refactor lands. The granite PTY cutover (PR #1612) runs every session in a container that owns its own PM+Dev claude TUI pair from a bounded pool, so parent-spawned child AgentSessions (the old PM→Dev pattern) double-consume scarce pool slots and risk starvation/deadlock when a parent in `waiting_for_children` holds a slot its child needs. Dependent work should run as subagents inside the current session instead.
+
+Gated creation paths (all share `models/child_session_gate.py`):
+
+- `valor-session create --parent <id>` — exit 2 with a stderr error; `--json` emits `{"error": "child_sessions_disabled", "issue": 1633, ...}`. Nothing is written to Redis on the refused path.
+- `agent/agent_session_queue.py::_push_agent_session` — raises `ChildSessionsDisabledError` before any persistence when `parent_agent_session_id` is set (covers every enqueue caller).
+- `.claude/hooks/user_prompt_submit.py` — when `VALOR_PARENT_SESSION_ID` is set, the hook silently skips creating the parent-linked tracking record (the subprocess itself still runs).
+- `python -m tools.agent_session_scheduler schedule --parent-session <id>` — exit 2 with the structured error.
+
+**Escape hatch (genuine emergencies only):** `VALOR_ALLOW_CHILD_SESSIONS=1` bypasses the block with a loud warning at each creation site.
+
+**Unaffected:** existing child sessions keep working end to end — resume, steer, kill, the `children` subcommands, and `waiting_for_children` parent finalization (below) for already-linked sessions. PM continuation chains (`session_completion.py` `create_pm`, issue #1195) are deliberately exempt: their parents are terminal and hold no pool slot. The child-session pattern itself survives untouched per #1633; only NEW parent-attached creation is refused.
+
 ## Parent Finalization
 
 When a child session completes, `finalize_session()` checks if the parent should also be finalized:
