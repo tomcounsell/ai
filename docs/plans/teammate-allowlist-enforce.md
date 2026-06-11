@@ -292,7 +292,7 @@ Add (replacing the dropped block):
 - [ ] New file: `tests/unit/test_teammate_write_restriction.py` — REPLACE/CREATE: dedicated test module for `_teammate_is_allowed_write()` covering the full allow/deny matrix:
   - **Allow:** `docs/foo.md`, `docs/features/x.md`, `.claude/skills/y.md`, `.github/workflows/z.yml`, `wiki/Home.md`, `skills/custom.md`, `README.md`, `CHANGELOG.md`, `LICENSE`, `.gitignore`, `~/work-vault/notes/n.md`, `~/work-vault/AI Valor Engels System/foo.md`
   - **Deny — code paths:** `agent/sdk_client.py`, `bridge/telegram_bridge.py`, `worker/__main__.py`, `tools/foo.py`, `tests/unit/x.py`, `apps/web/page.tsx`, `packages/core/index.ts`
-  - **Deny — positional promiscuity:** `agent/docs_handler/foo.py` (must NOT match `/docs/` rule), `tools/wiki_scraper.py` (must NOT match `/wiki/` rule), `agent/skills_router.py` (must NOT match `/skills/` rule)
+  - **Deny — positional promiscuity:** `agent/docs_handler/foo.py` (must NOT match `/docs/` rule), `tools/wiki_scraper.py` (must NOT match `/wiki/` rule), `agent/byob_skill_triggers.py` (must NOT match `/skills/` rule)
   - **Deny — path traversal:** `docs/../agent/foo.py`, `.claude/../bridge/x.py`, `docs/sub/../../agent/y.py`
   - **Deny — symlink escape:** Set up a tmp dir with `ln -s ../agent docs/escape`, attempt write to `docs/escape/sdk_client.py`, assert denied via realpath check. Use `tmp_path` fixture and `monkeypatch` cwd.
   - **Deny — top-level non-allowlist file:** `pyproject.toml`, `package.json`, `Makefile`, `Dockerfile`, `manage.py`
