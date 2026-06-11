@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -124,8 +125,15 @@ class TestOrphanProcessReap:
         assert 2001 in staged_pids
 
     def test_3_orphan_claude_with_fresh_heartbeat_skipped(self, clean_state):
-        """Orphan claude whose owning session has a fresh heartbeat → skipped."""
-        proc = _fake_proc(pid=2002, ppid=1)
+        """Orphan claude whose owning session has a fresh heartbeat → skipped.
+
+        Uses a recent create_time: the default `-p` cmdline plus an ancient
+        create_time would legitimately trip the issue #1632 fast-kill
+        signature, which intentionally bypasses the heartbeat gate. This test
+        exercises the gate itself, so the process must be younger than
+        ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS.
+        """
+        proc = _fake_proc(pid=2002, ppid=1, create_time=time.time() - 60)
         live_session = SimpleNamespace(
             project_key="proj-a",
             status="running",
@@ -374,3 +382,238 @@ class TestInvariants:
         assert val is not None
         assert int(val) >= 1
         _R.delete(counter_key)
+
+
+# -----------------------------------------------------------------------------
+# Issue #1632 mode 1(a): fast-kill signature for stale `claude --print` one-shots
+# -----------------------------------------------------------------------------
+
+# Mirrors the observed orphan swarm: bare `claude` on PATH (NOT the bundled
+# path the legacy regex matches), one-shot `--print` mode, never exiting.
+_BARE_ONESHOT_CMD = [
+    "claude",
+    "--permission-mode",
+    "bypassPermissions",
+    "--model",
+    "sonnet",
+    "--print",
+    "ping",
+]
+_BARE_INTERACTIVE_CMD = ["claude", "--permission-mode", "bypassPermissions"]
+
+
+def _stale_ct() -> float:
+    """create_time older than the one-shot threshold."""
+    return time.time() - (session_health.ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS + 300)
+
+
+def _young_ct() -> float:
+    """create_time well inside the one-shot threshold."""
+    return time.time() - 60
+
+
+class TestStalePrintOneshotFastKill:
+    def test_stale_bare_print_oneshot_reaped_despite_fresh_heartbeat(self, clean_state):
+        """PPID==1 `claude --print` older than threshold is ALWAYS reapable.
+
+        Two gaps closed at once: the legacy regex only matched the bundled
+        path (bare `claude` slipped through), and the heartbeat gate shielded
+        anything an alive-looking session claimed. Neither protects a stale
+        one-shot — no legitimate `--print` invocation lives that long.
+        """
+        proc = _fake_proc(pid=2100, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=_stale_ct())
+        live_session = SimpleNamespace(
+            project_key="proj-fast",
+            status="running",
+            last_heartbeat_at=datetime.now(UTC) - timedelta(seconds=10),
+            claude_pid=2100,
+        )
+
+        with patch.object(psutil, "process_iter", return_value=[proc]):
+            with patch.object(
+                session_health.AgentSession, "find_by_claude_pid", return_value=live_session
+            ):
+                killed = session_health._reap_orphan_session_processes()
+
+        assert killed == 1
+        proc.terminate.assert_called_once()
+
+    def test_young_bare_print_oneshot_not_reaped(self, clean_state):
+        """A `--print` one-shot inside the age threshold is left alone."""
+        proc = _fake_proc(pid=2101, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=_young_ct())
+
+        with patch.object(psutil, "process_iter", return_value=[proc]):
+            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+                killed = session_health._reap_orphan_session_processes()
+
+        assert killed == 0
+        proc.terminate.assert_not_called()
+
+    def test_interactive_bare_claude_not_matched_by_oneshot_signature(self, clean_state):
+        """Bare `claude` WITHOUT --print (interactive) never matches fast-kill."""
+        proc = _fake_proc(pid=2102, ppid=1, cmdline=_BARE_INTERACTIVE_CMD, create_time=_stale_ct())
+
+        with patch.object(psutil, "process_iter", return_value=[proc]):
+            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+                killed = session_health._reap_orphan_session_processes()
+
+        assert killed == 0
+        proc.terminate.assert_not_called()
+
+    def test_worker_cmdline_never_matches_oneshot_signature(self, clean_state):
+        """`python -m worker --print-anything` can't match: argv[0] is not claude."""
+        assert not session_health._is_stale_print_oneshot(
+            ["python", "-m", "worker", "--print"], _stale_ct()
+        )
+
+    def test_zero_create_time_not_treated_as_stale(self, clean_state):
+        """Unknown create_time (0.0) must not be mistaken for infinitely old."""
+        assert not session_health._is_stale_print_oneshot(_BARE_ONESHOT_CMD, 0.0)
+
+
+# -----------------------------------------------------------------------------
+# Issue #1632 mode 1(b): dead-chain detection (orphaned-but-alive shell wrapper)
+# -----------------------------------------------------------------------------
+
+
+class TestDeadChainDetection:
+    def _wrapper(self, *, pid: int, ppid: int, cmdline=None):
+        return _fake_proc(
+            pid=pid,
+            ppid=ppid,
+            cmdline=cmdline or ["/bin/zsh", "-c", "python -m pytest tests/unit/ -n0"],
+        )
+
+    def test_claude_under_orphaned_zsh_wrapper_reaped(self, clean_state):
+        """claude whose parent is a PPID==1 `zsh -c` wrapper = dead chain → reaped."""
+        wrapper = self._wrapper(pid=555, ppid=1)
+        proc = _fake_proc(pid=2200, ppid=555)  # bundled-path claude default cmdline
+
+        def by_pid(pid):
+            return {555: wrapper, 2200: proc}.get(pid)
+
+        with patch.object(psutil, "process_iter", return_value=[proc]):
+            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+                with patch.object(session_health, "_psutil_process_for_pid", side_effect=by_pid):
+                    killed = session_health._reap_orphan_session_processes()
+
+        assert killed == 1
+        proc.terminate.assert_called_once()
+
+    def test_claude_under_attached_zsh_wrapper_not_reaped(self, clean_state):
+        """Wrapper shell whose own parent is alive (PPID!=1) shields the child."""
+        wrapper = self._wrapper(pid=556, ppid=4242)
+        proc = _fake_proc(pid=2201, ppid=556)
+
+        def by_pid(pid):
+            return {556: wrapper, 2201: proc}.get(pid)
+
+        with patch.object(psutil, "process_iter", return_value=[proc]):
+            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+                with patch.object(session_health, "_psutil_process_for_pid", side_effect=by_pid):
+                    killed = session_health._reap_orphan_session_processes()
+
+        assert killed == 0
+        proc.terminate.assert_not_called()
+
+    def test_claude_under_orphaned_non_shell_parent_not_reaped(self, clean_state):
+        """A PPID==1 parent that is NOT a `sh -c` wrapper is not a dead chain."""
+        parent = self._wrapper(pid=557, ppid=1, cmdline=["python", "-m", "worker"])
+        proc = _fake_proc(pid=2202, ppid=557)
+
+        def by_pid(pid):
+            return {557: parent, 2202: proc}.get(pid)
+
+        with patch.object(psutil, "process_iter", return_value=[proc]):
+            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+                with patch.object(session_health, "_psutil_process_for_pid", side_effect=by_pid):
+                    killed = session_health._reap_orphan_session_processes()
+
+        assert killed == 0
+        proc.terminate.assert_not_called()
+
+
+# -----------------------------------------------------------------------------
+# Issue #1632 mode 1(c): fast-cadence one-shot reaper wired into the health loop
+# -----------------------------------------------------------------------------
+
+
+class TestFastReapStalePrintOneshots:
+    def test_reaps_stale_oneshot_and_stages_sigkill(self, clean_state):
+        stale = _fake_proc(pid=2300, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=_stale_ct())
+        young = _fake_proc(pid=2301, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=_young_ct())
+        interactive = _fake_proc(
+            pid=2302, ppid=1, cmdline=_BARE_INTERACTIVE_CMD, create_time=_stale_ct()
+        )
+        attached = _fake_proc(
+            pid=2303, ppid=4242, cmdline=_BARE_ONESHOT_CMD, create_time=_stale_ct()
+        )
+
+        with patch.object(
+            psutil, "process_iter", return_value=[stale, young, interactive, attached]
+        ):
+            reaped = session_health._fast_reap_stale_print_oneshots()
+
+        assert reaped == 1
+        stale.terminate.assert_called_once()
+        young.terminate.assert_not_called()
+        interactive.terminate.assert_not_called()
+        attached.terminate.assert_not_called()
+        staged_pids = {p for p, _ in session_health._pending_sigkill_orphans}
+        assert 2300 in staged_pids
+
+    def test_escalates_to_sigkill_on_second_pass(self, clean_state):
+        """A survivor staged on a previous pass gets SIGKILL, tuple-verified."""
+        ct = _stale_ct()
+        survivor = _fake_proc(pid=2304, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=ct)
+        session_health._pending_sigkill_orphans.add((2304, ct))
+
+        with patch.object(psutil, "process_iter", return_value=[survivor]):
+            reaped = session_health._fast_reap_stale_print_oneshots()
+
+        assert reaped == 1
+        survivor.kill.assert_called_once()
+        survivor.terminate.assert_not_called()
+        assert (2304, ct) not in session_health._pending_sigkill_orphans
+
+    def test_self_pid_never_reaped(self, clean_state):
+        me = _fake_proc(pid=os.getpid(), ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=_stale_ct())
+
+        with patch.object(psutil, "process_iter", return_value=[me]):
+            reaped = session_health._fast_reap_stale_print_oneshots()
+
+        assert reaped == 0
+        me.terminate.assert_not_called()
+
+    def test_never_raises_on_process_iter_failure(self, clean_state):
+        with patch.object(psutil, "process_iter", side_effect=RuntimeError("boom")):
+            reaped = session_health._fast_reap_stale_print_oneshots()
+
+        assert reaped == 0
+
+    def test_kill_switch_short_circuits(self, clean_state, monkeypatch):
+        monkeypatch.setenv("DISABLE_ORPHAN_PROCESS_REAP", "1")
+
+        with patch.object(psutil, "process_iter") as mock_iter:
+            reaped = session_health._fast_reap_stale_print_oneshots()
+
+        assert reaped == 0
+        mock_iter.assert_not_called()
+
+    async def test_health_loop_invokes_fast_reaper(self, clean_state):
+        """One loop iteration calls the fast one-shot reaper, fail-silent."""
+        import asyncio
+
+        with (
+            patch.object(session_health, "_write_worker_heartbeat"),
+            # patch.object auto-detects async defs and substitutes AsyncMock.
+            patch.object(session_health, "_agent_session_health_check"),
+            patch.object(session_health, "_agent_session_hierarchy_health_check"),
+            patch.object(session_health, "_dependency_health_check"),
+            patch.object(session_health, "_fast_reap_stale_print_oneshots", return_value=0) as fr,
+            patch.object(asyncio, "sleep", side_effect=asyncio.CancelledError),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await session_health._agent_session_health_loop()
+
+        fr.assert_called_once()
