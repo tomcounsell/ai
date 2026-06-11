@@ -196,6 +196,11 @@ def check_system_tools() -> list[ToolCheck]:
 
     if shutil.which("sentry-cli"):
         results.append(check_command("sentry-cli", "--version"))
+    # gws (Google Workspace CLI) is optional — only surface when installed.
+    # It needs a separate OAuth flow that install alone cannot satisfy, so a
+    # pre-install warning would be noise on machines that never use Workspace.
+    if shutil.which("gws"):
+        results.append(check_command("gws", "--version"))
     return results
 
 

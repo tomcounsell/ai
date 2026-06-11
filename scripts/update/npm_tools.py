@@ -43,6 +43,10 @@ class NpmToolsResult:
 # Use pinned versions for stability; None means "latest".
 MANAGED_PACKAGES: list[tuple[str, str | None]] = [
     ("@moona3k/excalidraw-export", None),  # Excalidraw → PNG headless renderer
+    # Provides the `gws` binary (Google's official Workspace CLI). NOT the bare
+    # `gws` npm package, which is an unrelated combinatorial-testing tool.
+    # Float on latest to track Google's actively-developed CLI.
+    ("@googleworkspace/cli", None),
 ]
 
 
