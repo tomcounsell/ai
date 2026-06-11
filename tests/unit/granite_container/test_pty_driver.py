@@ -19,12 +19,11 @@ driver's behavior matches the spike's observed_state on the real TUI.
 
 from __future__ import annotations
 
-import json
+import os
 import shutil
 import subprocess
+import time
 import unittest
-import urllib.error
-import urllib.request
 from unittest.mock import MagicMock, patch
 
 import pexpect
@@ -38,19 +37,24 @@ from agent.granite_container.pty_driver import (
     PTYDriver,
     PTYDriverError,
     _build_env,
-    _pick_substrate_model,
+    _default_substrate_model,
     _strip_ansi,
 )
 
 
 def _model_reachable() -> bool:
-    """Check if the model-reachable prerequisite is satisfied.
+    """Check if the live spike-regression tests may run.
 
-    Mirrors the PoC's prerequisite check at the plan's *Prerequisites*
-    table: `claude --print "ping"` with the substrate's model-pick
-    policy (prefer gemma*, fall back to non-granite*) must complete a
-    round-trip. If the check fails (returncode != 0, timeout, or
-    `claude` not on PATH), the spike-regression test is skipped.
+    Gated on GRANITE_LIVE_SMOKE=1 (explicit operator opt-in) BEFORE any
+    process is spawned: this function runs at module import time (it is
+    a ``@skipUnless`` decorator argument), so without the gate merely
+    collecting this module spawned a real ``claude --print`` round-trip
+    that orphaned ~250MB processes (issue #1632 mode 3). The conftest
+    spawn guard cannot intercept import-time spawns, hence the env gate.
+
+    With the opt-in set, mirrors the PoC's prerequisite check:
+    `claude --print "ping"` with the driver's default substrate model
+    must complete a round-trip; otherwise the tests are skipped.
 
     The result is cached for the module's lifetime so all four
     env-gated tests see the same value (avoiding per-test races when
@@ -63,55 +67,51 @@ def _model_reachable() -> bool:
 
 
 def _model_reachable_check() -> bool:
+    if os.environ.get("GRANITE_LIVE_SMOKE") != "1":
+        return False
     if not shutil.which("claude"):
         return False
     try:
-        # Match the same model-pick policy as the substrate driver so
-        # the prerequisite check exercises the same code path.
-        tags = json.loads(
-            urllib.request.urlopen("http://localhost:11434/api/tags", timeout=10).read()
-        )
-        names = [m["name"] for m in tags.get("models", [])]
-        if not names:
-            return False
-        pick = next(
-            (n for n in names if ":cloud" in n),
-            next(
-                (n for n in names if n.startswith("gemma")),
-                next((n for n in names if not n.startswith("granite")), names[0]),
-            ),
-        )
+        # The PTY substrate is the Claude subscription (OAuth), not ollama.
+        # Ping with the same default Dev alias the driver spawns so the
+        # prerequisite check exercises the real substrate path.
         r = subprocess.run(
             [
                 "claude",
                 "--permission-mode",
                 "bypassPermissions",
                 "--model",
-                pick,
+                _default_substrate_model("dev"),
                 "--print",
                 "ping",
             ],
             capture_output=True,
             text=True,
-            timeout=180 if ":cloud" in pick else 60,
+            timeout=60,
         )
         return r.returncode == 0
-    except (subprocess.TimeoutExpired, OSError, urllib.error.URLError, json.JSONDecodeError):
+    except (subprocess.TimeoutExpired, OSError):
         return False
 
 
+@patch("agent.granite_container.pty_driver.SUBMIT_KEY_DELAY_S", 0)
 class TestC1SubmitKey(unittest.TestCase):
-    """C1: every text write ends with `\\r` (CR), never `\\n` (LF)."""
+    """C1: the submit `\\r` is sent as a SEPARATE keystroke after the body.
 
-    def test_write_appends_cr_not_lf(self) -> None:
-        """A bare text write must end in `\\r`, not `\\n`."""
+    The TUI's paste-burst heuristic treats a CR arriving in the same
+    burst as the text as a literal newline inside the paste, not a
+    submit (live-observed on v2.1.173 — the PR #1612 startup_unresolved
+    failure). The driver therefore sends body and CR as two `send()`
+    calls separated by `SUBMIT_KEY_DELAY_S` (patched to 0 here).
+    """
+
+    def test_write_sends_body_then_separate_cr(self) -> None:
         driver = PTYDriver(role="pm")
         mock_child = MagicMock()
         driver._child = mock_child
         driver.write("hello world")
-        sent: str = mock_child.send.call_args[0][0]
-        self.assertTrue(sent.endswith("\r"), f"write() must end in \\r; got {sent!r}")
-        self.assertFalse(sent.endswith("\n"), f"write() must not end in \\n; got {sent!r}")
+        sends = [c[0][0] for c in mock_child.send.call_args_list]
+        self.assertEqual(sends, ["hello world", "\r"])
 
     def test_write_rejects_empty_input(self) -> None:
         driver = PTYDriver(role="pm")
@@ -121,25 +121,45 @@ class TestC1SubmitKey(unittest.TestCase):
             driver.write("")
         mock_child.send.assert_not_called()
 
-    def test_write_normalizes_trailing_lf_to_cr(self) -> None:
-        """A text write ending in `\\n` is normalized to `\\r`."""
-        driver = PTYDriver(role="pm")
-        mock_child = MagicMock()
-        driver._child = mock_child
-        driver.write("hello\n")
-        sent: str = mock_child.send.call_args[0][0]
-        self.assertTrue(sent.endswith("\r"))
-        self.assertFalse(sent.endswith("\n"))
+    def test_write_strips_trailing_newline_from_body(self) -> None:
+        """A trailing `\\n` / `\\r` / `\\r\\n` is the submit intent — it is
+        stripped from the body and replaced by the separate CR send."""
+        for text in ("hello\n", "hello\r", "hello\r\n"):
+            driver = PTYDriver(role="pm")
+            mock_child = MagicMock()
+            driver._child = mock_child
+            driver.write(text)
+            sends = [c[0][0] for c in mock_child.send.call_args_list]
+            self.assertEqual(sends, ["hello", "\r"], f"input {text!r}")
 
     def test_write_preserves_internal_newlines(self) -> None:
-        """Internal `\\n` is preserved; only the trailing newline is the submit key."""
+        """Internal `\\n` is preserved in the body burst."""
         driver = PTYDriver(role="pm")
         mock_child = MagicMock()
         driver._child = mock_child
         driver.write("line one\nline two")
-        sent: str = mock_child.send.call_args[0][0]
-        self.assertIn("\n", sent, "internal newlines are preserved")
-        self.assertTrue(sent.endswith("\r"))
+        sends = [c[0][0] for c in mock_child.send.call_args_list]
+        self.assertEqual(sends, ["line one\nline two", "\r"])
+
+    def test_write_bare_cr_sends_only_cr(self) -> None:
+        """`write("\\r")` (e.g. dismissing an update notice) sends a
+        single CR keystroke with no body."""
+        driver = PTYDriver(role="pm")
+        mock_child = MagicMock()
+        driver._child = mock_child
+        driver.write("\r")
+        sends = [c[0][0] for c in mock_child.send.call_args_list]
+        self.assertEqual(sends, ["\r"])
+
+    def test_write_resets_turn_capture(self) -> None:
+        """A write starts a new turn: the per-turn screen capture is
+        cleared so stale idle frames cannot satisfy the next read."""
+        driver = PTYDriver(role="pm")
+        mock_child = MagicMock()
+        driver._child = mock_child
+        driver._turn_text = "❯ bypass permissions on (stale idle frame)"
+        driver.write("hello")
+        self.assertEqual(driver._turn_text, "")
 
 
 class TestC2InterruptedRegex(unittest.TestCase):
@@ -221,8 +241,14 @@ class TestBuildEnv(unittest.TestCase):
         self.assertIn("PATH", env)
 
 
+@patch("agent.granite_container.pty_driver.QUIESCENCE_S", 0)
 class TestReadUntilIdle(unittest.TestCase):
-    """`read_until_idle` honors glyph+bar+floor and the C4 overlay."""
+    """`read_until_idle` honors glyph+bar+floor and the C4 overlay.
+
+    `QUIESCENCE_S` is patched to 0 — the byte-silence gate has its own
+    dedicated tests (`TestQuiescenceGate`); these tests exercise the
+    bar/glyph/floor logic without real-time waits.
+    """
 
     def _driver_with_mock(self, chunks: list[str]) -> PTYDriver:
         """Build a driver whose pexpect child yields `chunks` in order."""
@@ -293,60 +319,226 @@ class TestReadUntilIdle(unittest.TestCase):
         self.assertFalse(result.saw_idle, "floor should prevent premature idle")
 
 
-class TestPickSubstrateModel(unittest.TestCase):
-    """The model picker prefers cloud > gemma > non-granite, returns full identity."""
+@patch("agent.granite_container.pty_driver.QUIESCENCE_S", 0)
+class TestLevelTriggeredIdle(unittest.TestCase):
+    """The C5 heuristic is level-triggered against the per-turn capture.
 
-    def test_prefers_cloud_model(self) -> None:
-        fake_tags = {
-            "models": [
-                {"name": "granite4.1:3b"},
-                {"name": "gemma4:e2b"},
-                {"name": "glm-5.1:cloud"},
-            ]
-        }
-        with patch("urllib.request.urlopen") as mock_open:
-            mock_open.return_value.__enter__.return_value.read.return_value = (
-                str(fake_tags).replace("'", '"').encode("utf-8")
-            )
-            model = _pick_substrate_model()
-        self.assertEqual(model, "glm-5.1:cloud", f"cloud should win; got {model!r}")
+    Regression tests for the PR #1612 `startup_unresolved` smoke
+    failure: a settled TUI paints nothing, so an edge-triggered idle
+    check (evaluated only on fresh chunks) could never observe idle on
+    a quiescent PTY — the startup loop burned its full 600s ceiling
+    with `pm_idle=False dev_idle=False` on every cycle.
+    """
 
-    def test_prefers_gemma_when_no_cloud(self) -> None:
-        fake_tags = {
-            "models": [
-                {"name": "granite4.1:3b"},
-                {"name": "gemma3:4b"},
-                {"name": "llama3:8b"},
-            ]
-        }
-        with patch("urllib.request.urlopen") as mock_open:
-            mock_open.return_value.__enter__.return_value.read.return_value = (
-                str(fake_tags).replace("'", '"').encode("utf-8")
-            )
-            model = _pick_substrate_model()
-        # Full identity is returned (e.g. "gemma3:4b"), not the stripped name.
-        self.assertEqual(model, "gemma3:4b", f"expected full gemma identity; got {model!r}")
+    IDLE_FRAME = "⏺ [/user] Online and ready.\n❯ \nbypass permissions on (shift+tab to cycle)\n"
 
-    def test_falls_back_to_non_granite(self) -> None:
-        fake_tags = {
-            "models": [
-                {"name": "granite4.1:3b"},
-                {"name": "llama3:8b"},
-            ]
-        }
-        with patch("urllib.request.urlopen") as mock_open:
-            mock_open.return_value.__enter__.return_value.read.return_value = (
-                str(fake_tags).replace("'", '"').encode("utf-8")
-            )
-            model = _pick_substrate_model()
-        self.assertFalse(model.startswith("granite"), f"should avoid granite; got {model!r}")
-        self.assertEqual(model, "llama3:8b", f"expected full identity; got {model!r}")
+    def _driver(self, chunk_batches: list[list[str]]) -> PTYDriver:
+        """Driver whose child yields one batch of chunks per read call
+        sequence; when a batch is exhausted, raises TIMEOUT until the
+        next `read_until_idle` call pulls the next batch."""
+        driver = PTYDriver(role="pm", timeout_s=2.0)
+        mock_child = MagicMock()
+        state = {"batch": None}
+        batches = iter(chunk_batches)
 
-    def test_raises_on_ollama_unreachable(self) -> None:
-        with patch("urllib.request.urlopen") as mock_open:
-            mock_open.side_effect = OSError("connection refused")
-            with self.assertRaises(PTYDriverError):
-                _pick_substrate_model()
+        def read_nonblocking(size: int, timeout: float) -> str:
+            if state["batch"] is None:
+                state["batch"] = iter(next(batches, []))
+            try:
+                return next(state["batch"])
+            except StopIteration:
+                raise pexpect.TIMEOUT("mock timeout")
+
+        mock_child.read_nonblocking.side_effect = read_nonblocking
+        driver._child = mock_child
+        driver._reset_batch = lambda: state.update(batch=None)  # type: ignore[attr-defined]
+        return driver
+
+    def test_quiescent_reread_still_sees_idle(self) -> None:
+        """A second read on a PTY that painted its idle frame during the
+        FIRST read (and is now silent) must still report idle."""
+        driver = self._driver([[self.IDLE_FRAME]])
+        first = driver.read_until_idle(min_content_bytes=0, timeout_s=2.0)
+        self.assertTrue(first.saw_idle)
+        # Second call: the child yields nothing (always TIMEOUT).
+        driver._reset_batch()  # type: ignore[attr-defined]
+        second = driver.read_until_idle(min_content_bytes=0, timeout_s=0.5)
+        self.assertTrue(
+            second.saw_idle,
+            "idle must be observable on a quiescent PTY whose idle frame "
+            "painted during an earlier read (PR #1612 startup_unresolved)",
+        )
+        self.assertEqual(second.buffer, "", "no new bytes were read this call")
+        self.assertIn("[/user]", second.turn_buffer)
+
+    def test_write_resets_turn_capture_blocks_stale_idle(self) -> None:
+        """After a write, the previous turn's idle frame must NOT satisfy
+        the idle check — the new turn has painted nothing yet."""
+        driver = self._driver([[self.IDLE_FRAME]])
+        first = driver.read_until_idle(min_content_bytes=0, timeout_s=2.0)
+        self.assertTrue(first.saw_idle)
+        with patch("agent.granite_container.pty_driver.SUBMIT_KEY_DELAY_S", 0):
+            driver.write("next task")
+        driver._reset_batch()  # type: ignore[attr-defined]
+        result = driver.read_until_idle(min_content_bytes=0, timeout_s=0.5)
+        self.assertFalse(result.saw_idle, "stale pre-write frames must not satisfy idle")
+
+    def test_floor_measured_on_stripped_content(self) -> None:
+        """ANSI escape bulk must not satisfy the content floor: the
+        live failure declared the prime done on the ANSI-heavy echo
+        frame whose stripped content was far below the floor."""
+        ansi_bulk = "\x1b[31m\x1b[0m" * 500  # 4000 raw chars, 0 stripped
+        driver = self._driver([[ansi_bulk + self.IDLE_FRAME]])
+        result = driver.read_until_idle(min_content_bytes=1500, timeout_s=0.5)
+        self.assertFalse(
+            result.saw_idle,
+            "raw ANSI bytes must not count toward the content floor",
+        )
+
+    def test_floor_read_requires_spinner_evidence(self) -> None:
+        """A floor read means 'the model responded'; bar+glyph+content
+        without any spinner frame is the command echo, not a response."""
+        echo_frame = ("❯ /granite-poc:prime-pm-role do the thing\n" * 20) + self.IDLE_FRAME
+        driver = self._driver([[echo_frame]])
+        result = driver.read_until_idle(min_content_bytes=400, timeout_s=0.5)
+        self.assertFalse(
+            result.saw_idle,
+            "echo frames without spinner evidence must not satisfy a floor read",
+        )
+
+    def test_floor_read_with_spinner_evidence_is_idle(self) -> None:
+        """Spinner frames earlier in the turn + a clean idle tail is the
+        real 'model responded then settled' shape."""
+        turn = ("✻ Sprouting…\n" * 40) + ("x" * 400) + "\n" + self.IDLE_FRAME
+        driver = self._driver([[turn]])
+        result = driver.read_until_idle(min_content_bytes=400, timeout_s=2.0)
+        self.assertTrue(
+            result.saw_idle,
+            f"expected idle after spinner+response+clean tail; turn={result.turn_buffer[-200:]!r}",
+        )
+
+
+class TestQuiescenceGate(unittest.TestCase):
+    """Idle requires `QUIESCENCE_S` of byte-silence (C5).
+
+    An active model turn repaints the spinner animation at >=1 Hz as
+    cursor-positioned cell FRAGMENTS (`✻i…`, `✽hg`) that no regex can
+    reliably classify as "running"; sustained silence is the only
+    trustworthy turn-is-over signal. Live-observed on TUI v2.1.173
+    (PR #1612 debugging): a tail-window spinner regex declared idle at
+    4.2s while the model was still painting fragments (false idle),
+    and a stale full spinner frame near the end of a settled capture
+    latched not-idle forever (false hang).
+    """
+
+    IDLE_FRAME = "⏺ [/user] ready.\n❯ \nbypass permissions on (shift+tab to cycle)\n"
+
+    def _driver(self, read_nonblocking) -> PTYDriver:
+        driver = PTYDriver(role="pm", timeout_s=2.0)
+        mock_child = MagicMock()
+        mock_child.read_nonblocking.side_effect = read_nonblocking
+        driver._child = mock_child
+        return driver
+
+    @patch("agent.granite_container.pty_driver.QUIESCENCE_S", 0.3)
+    def test_active_painting_blocks_idle(self) -> None:
+        """While animation fragments keep arriving, idle must NOT be
+        declared — even though the capture already has bar+glyph."""
+        frames = iter([self.IDLE_FRAME])
+
+        def read_nonblocking(size: int, timeout: float) -> str:
+            try:
+                return next(frames)
+            except StopIteration:
+                time.sleep(0.05)
+                return "✻"  # spinner animation cell fragment, forever
+
+        driver = self._driver(read_nonblocking)
+        result = driver.read_until_idle(min_content_bytes=0, timeout_s=1.0)
+        self.assertFalse(result.saw_idle, "active animation must block idle")
+
+    @patch("agent.granite_container.pty_driver.QUIESCENCE_S", 0.2)
+    def test_idle_after_silence(self) -> None:
+        """Once the TUI stops painting, idle is declared after the
+        quiescence window elapses."""
+        frames = iter([self.IDLE_FRAME])
+
+        def read_nonblocking(size: int, timeout: float) -> str:
+            try:
+                return next(frames)
+            except StopIteration:
+                time.sleep(0.02)
+                raise pexpect.TIMEOUT("mock timeout")
+
+        driver = self._driver(read_nonblocking)
+        result = driver.read_until_idle(min_content_bytes=0, timeout_s=2.0)
+        self.assertTrue(result.saw_idle, f"expected idle after silence; {result.buffer!r}")
+
+    @patch("agent.granite_container.pty_driver.QUIESCENCE_S", 0.2)
+    def test_stale_spinner_frame_does_not_block_idle(self) -> None:
+        """A full spinner frame earlier in the turn capture (still near
+        the tail because the final repaint was small) must not latch
+        not-idle once the TUI is silent — regression for the removed
+        tail-window LOADING_RE latch."""
+        settled_capture = (
+            "✳ Sprouting… (3s · esc to interrupt)\n"
+            "✻ Brewed for 6s\n"
+            "❯ \nbypass permissions on (shift+tab to cycle)\n"
+        )
+        frames = iter([settled_capture])
+
+        def read_nonblocking(size: int, timeout: float) -> str:
+            try:
+                return next(frames)
+            except StopIteration:
+                time.sleep(0.02)
+                raise pexpect.TIMEOUT("mock timeout")
+
+        driver = self._driver(read_nonblocking)
+        result = driver.read_until_idle(min_content_bytes=0, timeout_s=2.0)
+        self.assertTrue(
+            result.saw_idle,
+            "stale spinner frame in a silent capture must not block idle",
+        )
+
+
+class TestDefaultSubstrateModel(unittest.TestCase):
+    """The PTY substrate is the Claude subscription, model chosen by role.
+
+    ollama is the granite *classifier's* substrate — never the PTY's. The
+    resolver returns unpinned Claude aliases (opus/sonnet) from settings.
+    """
+
+    def test_pm_defaults_to_opus(self) -> None:
+        self.assertEqual(_default_substrate_model("pm"), "opus")
+
+    def test_dev_defaults_to_sonnet(self) -> None:
+        self.assertEqual(_default_substrate_model("dev"), "sonnet")
+
+    def test_reads_settings_override(self) -> None:
+        """The resolver reflects GRANITE__PM_MODEL / DEV_MODEL via settings."""
+        from config.settings import settings
+
+        with (
+            patch.object(settings.granite, "pm_model", "haiku"),
+            patch.object(settings.granite, "dev_model", "opus"),
+        ):
+            self.assertEqual(_default_substrate_model("pm"), "haiku")
+            self.assertEqual(_default_substrate_model("dev"), "opus")
+
+    def test_never_returns_ollama_identity(self) -> None:
+        """No `:cloud` / `granite` / `gemma` tags — those belong to the classifier."""
+        for role in ("pm", "dev"):
+            model = _default_substrate_model(role)
+            self.assertNotIn(":", model, f"alias must be unpinned/untagged; got {model!r}")
+            self.assertFalse(model.startswith(("granite", "gemma", "glm")))
+
+    def test_fallback_map_is_claude_aliases(self) -> None:
+        """The except-branch fallback (settings unavailable) yields Claude aliases."""
+        from agent.granite_container.pty_driver import _FALLBACK_SUBSTRATE_MODEL
+
+        self.assertEqual(_FALLBACK_SUBSTRATE_MODEL["pm"], "opus")
+        self.assertEqual(_FALLBACK_SUBSTRATE_MODEL["dev"], "sonnet")
 
 
 class TestLifecycle(unittest.TestCase):
@@ -399,7 +591,7 @@ class TestSpikeRegressionEnvGated(unittest.TestCase):
 
     @unittest.skipUnless(
         _model_reachable(),
-        "RESUME_SKIP model_unreachable: spike-regression gated on `claude --print ping`",
+        "RESUME_SKIP model_unreachable: spike-regression gated on GRANITE_LIVE_SMOKE=1",
     )
     def test_scenario_1_idle_paint(self) -> None:
         """Scenario 1: spawn -> wait for idle -> assert bar+glyph present."""

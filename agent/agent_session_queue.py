@@ -249,6 +249,21 @@ async def _push_agent_session(
             (issue #1256, Decision 2). Default False keeps the existing
             non-serialized scheduling behavior for ordinary sessions.
     """
+    # Stopgap (#1633): refuse NEW parent-attached session creation at the
+    # queue chokepoint. Covers every enqueue caller and fires before any
+    # Redis write (including the mark-superseded pass below). Existing
+    # child sessions (resume/steer/kill/waiting_for_children) are untouched.
+    if parent_agent_session_id:
+        from models.child_session_gate import (
+            BYPASS_WARNING,
+            ChildSessionsDisabledError,
+            child_sessions_allowed,
+        )
+
+        if not child_sessions_allowed():
+            raise ChildSessionsDisabledError()
+        logger.warning(BYPASS_WARNING)
+
     # Convert float timestamps to datetime (backward compat)
     if isinstance(scheduled_at, int | float):
         scheduled_at = datetime.fromtimestamp(scheduled_at, tz=UTC)

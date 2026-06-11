@@ -21,12 +21,13 @@ the substrate driver:
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import unittest
 from pathlib import Path
 
-from agent.granite_container.pty_driver import PTYDriver
+from agent.granite_container.pty_driver import PTYDriver, _default_substrate_model
 
 # Compute REPO_ROOT from this test file's location, not a hardcoded path.
 # A worktree-aware root would be `Path(__file__).resolve().parents[3]` (this
@@ -122,30 +123,32 @@ class TestDevPrimeShape(unittest.TestCase):
 
 
 def _model_reachable() -> bool:
-    """Reuse the same env check as test_pty_driver."""
+    """Whether the live smoke test may run.
+
+    Gated on GRANITE_LIVE_SMOKE=1 (explicit operator opt-in) BEFORE any
+    process is spawned. This function runs at module import time (it is
+    a ``@skipUnless`` decorator argument), so without the gate, merely
+    collecting this module spawned a real ``claude --print`` round-trip
+    — and the old probe picked an *ollama* model name (gemma*) for a
+    Claude-subscription binary, orphaning ~250MB ``claude`` processes
+    (issue #1632 mode 3). The conftest spawn guard cannot intercept
+    import-time spawns, hence the env gate here.
+    """
+    if os.environ.get("GRANITE_LIVE_SMOKE") != "1":
+        return False
     if not shutil.which("claude"):
         return False
     try:
-        import json
-        import urllib.request
-
-        tags = json.loads(
-            urllib.request.urlopen("http://localhost:11434/api/tags", timeout=10).read()
-        )
-        names = [m["name"] for m in tags.get("models", [])]
-        if not names:
-            return False
-        pick = next(
-            (n for n in names if n.startswith("gemma")),
-            next((n for n in names if not n.startswith("granite")), names[0]),
-        )
+        # The PTY substrate is the Claude subscription (opus/sonnet
+        # aliases), not ollama — probe with the driver's own default
+        # substrate model, mirroring test_pty_driver's check.
         r = subprocess.run(
             [
                 "claude",
                 "--permission-mode",
                 "bypassPermissions",
                 "--model",
-                pick,
+                _default_substrate_model("dev"),
                 "--print",
                 "ping",
             ],
@@ -171,7 +174,7 @@ class TestPersonaPrimingSmokeEnvGated(unittest.TestCase):
 
     @unittest.skipUnless(
         _model_reachable(),
-        "RESUME_SKIP model_unreachable — persona-priming smoke test gated on `claude --print ping`",
+        "RESUME_SKIP model_unreachable — smoke gated on GRANITE_LIVE_SMOKE=1",
     )
     def test_pm_priming_round_trip(self) -> None:
         driver = PTYDriver(role="pm", cwd=str(REPO_ROOT))

@@ -304,17 +304,63 @@ class TestContainerMaxTurns(unittest.TestCase):
         self.assertEqual(len(dev_turns), 2)
 
 
-class TestContainerStartupUnresolved(unittest.TestCase):
-    """Startup phase exhausts all cycles without settling -> startup_unresolved."""
+class TestContainerStartupHardCeiling(unittest.TestCase):
+    """Startup phase: hard wall-clock ceiling (PR #1612 review TD2).
 
-    def test_startup_unresolved_exits_early(self) -> None:
-        # Neither PTY ever reaches idle during the startup window, so the
-        # for-loop's else-branch fires and the container exits before
-        # entering the steady-state loop.
-        from agent.granite_container.container import STARTUP_WINDOW_CYCLES
+    The startup loop keeps polling on short reads until BOTH PTYs
+    reach idle — a slow Opus high-effort persona load simply keeps
+    the loop cycling cheaply. If the PTYs never settle within
+    `STARTUP_HARD_CEILING_S`, the run exits `startup_unresolved`.
+    That distinct exit reason is plan Risk 6's detection mode for a
+    broken `--permission-mode` flag (the bypass bar never paints, so
+    the C5 idle heuristic can never fire).
+    """
 
+    def test_never_idle_exits_startup_unresolved_at_ceiling(self) -> None:
+        # Neither PTY ever reaches idle AND no startup event is
+        # found. With the (patched, tiny) hard ceiling exhausted,
+        # the container exits `startup_unresolved` — NOT `pm_hang`.
         c = Container(user_message="hello", max_turns=5)
         pm_mock, dev_mock = _mock_driver("", saw_idle=False), _mock_driver("", saw_idle=False)
+
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+            patch("agent.granite_container.container.STARTUP_HARD_CEILING_S", 0.05),
+        ):
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            result = c.run()
+
+        self.assertEqual(
+            result.exit_reason,
+            "startup_unresolved",
+            f"got {result.exit_reason!r}: {result.exit_message!r}",
+        )
+        self.assertIn("hard ceiling", result.exit_message)
+        # The steady-state loop never ran — no classified turns.
+        self.assertEqual(len(result.turns), 0)
+
+    def test_late_settle_proceeds_to_steady_state(self) -> None:
+        # A slow cold start: the PTYs are NOT idle on the first
+        # startup cycles (persona still loading) but settle later.
+        # The loop must keep polling past the early cycles and then
+        # proceed to the steady state, not exit early.
+        c = Container(user_message="hello", max_turns=3)
+        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+
+        pm_buffers = iter(
+            [
+                _idle_result("", saw_idle=False),  # startup cycle 0: still loading
+                _idle_result("", saw_idle=False),  # startup cycle 1: still loading
+                _idle_result("", saw_idle=True),  # startup cycle 2: settled
+                _idle_result("[/complete]\nDone.", saw_idle=True),  # steady-state
+            ]
+        )
+        pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_buffers)
+        dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
         with (
             patch.object(c, "_spawn_pair"),
@@ -328,12 +374,221 @@ class TestContainerStartupUnresolved(unittest.TestCase):
 
         self.assertEqual(
             result.exit_reason,
-            "startup_unresolved",
+            "pm_complete",
             f"got {result.exit_reason!r}: {result.exit_message!r}",
         )
-        self.assertIn(str(STARTUP_WINDOW_CYCLES), result.exit_message)
-        # No steady-state turns should have been recorded.
-        self.assertEqual(len(result.turns), 0)
+
+    def test_ceiling_is_long_enough_for_cold_persona_load(self) -> None:
+        # The ceiling must comfortably exceed the prime post-write
+        # budget (360s) — a cold Opus high-effort persona load can
+        # run minutes past it (PR #1612 live run).
+        from agent.granite_container.container import (
+            PRIME_POST_WRITE_TIMEOUT_S,
+            STARTUP_HARD_CEILING_S,
+        )
+
+        self.assertGreater(STARTUP_HARD_CEILING_S, PRIME_POST_WRITE_TIMEOUT_S)
+
+
+class TestContainerPrimeHandlesTrustFolder(unittest.TestCase):
+    """PRIMING-1: a fresh PTY parked on the trust-folder screen
+    is dismissed with '1' before the prime slash command is sent.
+
+    This unsticks the 200s timeout observed in the live driver
+    (issue #1572, regression gate). The C5 idle heuristic requires
+    the bypass-permissions bar, which the trust-folder dialog does
+    NOT paint. The pre-C5 loop in `_prime_session` looks for the
+    trust pattern and dismisses with "1" (the documented response
+    from `scripts/probe_slash_arguments.py:241-247`), turning a
+    60s silent stall into a <2s dismiss + normal C5 wait.
+    """
+
+    def test_trust_folder_dismissed_before_prime(self) -> None:
+        c = Container(user_message="hello", max_turns=2)
+        pm_mock = _mock_driver("")
+        dev_mock = _mock_driver("")
+
+        # PM's read sequence with the new prime logic:
+        #   1. pre-C5 trust-dismissal loop: sees trust dialog
+        #   2. pre-C5 trust-dismissal loop: post-dismissal idle
+        #   3. pre-write C5 wait: welcome frame idle
+        #   4. post-write C5 wait: prime response idle ("Worked for Ns")
+        trust_buffer = "Do you trust this folder?\n1. Yes, I trust this folder\n2. No"
+        idle_buffer = "welcome frame ...bypass permissions on >"
+        primed_buffer = "prime response ... Worked for 35s ...bypass permissions on >"
+        pm_buffers = iter(
+            [
+                _idle_result(trust_buffer, saw_idle=False),  # 1: trust dialog
+                _idle_result(idle_buffer, saw_idle=True),  # 2: post-dismissal
+                _idle_result(idle_buffer, saw_idle=True),  # 3: pre-write C5
+                _idle_result(primed_buffer, saw_idle=True),  # 4: post-write C5
+            ]
+        )
+        pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_buffers)
+
+        with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            c._prime_session(pm_mock, "/granite-poc:prime-pm-role")
+
+        # Both writes happened on the same PTY, in order:
+        # trust dismissal first, then the prime slash command.
+        # We assert by index in the call_args_list (not by string
+        # lex-order — "1" sorts after "/granite-poc..." in ASCII).
+        self.assertEqual(pm_mock.write.call_count, 2)
+        first_call, second_call = pm_mock.write.call_args_list
+        self.assertEqual(first_call.args[0], "1")
+        self.assertTrue(
+            second_call.args[0].startswith("/granite-poc:prime-pm-role "),
+            f"expected prime slash command, got {second_call.args[0]!r}",
+        )
+
+    def test_prime_without_trust_folder_skips_dismiss(self) -> None:
+        """When no trust pattern is present and the PTY is idle
+        on first read, no dismissal write is made — the prime
+        goes through immediately."""
+        c = Container(user_message="hello", max_turns=2)
+        pm_mock = _mock_driver("")
+        pm_mock.read_until_idle.return_value = _idle_result(
+            "welcome ...bypass permissions on >", saw_idle=True
+        )
+
+        with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
+            c._pm_pty = pm_mock
+            c._dev_pty = _mock_driver("")
+            c._prime_session(pm_mock, "/granite-poc:prime-pm-role")
+
+        # Only the prime slash command was written — no "1".
+        self.assertEqual(pm_mock.write.call_count, 1)
+        self.assertTrue(pm_mock.write.call_args.args[0].startswith("/granite-poc:prime-pm-role "))
+
+    def test_prime_uses_post_dismissal_c5_budget(self) -> None:
+        """Post-write C5 budget is PRIME_POST_WRITE_TIMEOUT_S, raised
+        above the prior 60s/120s default. Persona loading on Opus
+        4.8 with high effort can take 90-180s for the first slash
+        command (the prime command plus the post-write wait for
+        the model's actual response). PR #1612 live run on June
+        2026 hit 120s saw_idle=False on PM; the post-write budget
+        absorbs that latency."""
+        from agent.granite_container.container import (
+            PRIME_POST_WRITE_MIN_CONTENT_BYTES,
+            PRIME_POST_WRITE_TIMEOUT_S,
+            PRIME_PRE_WRITE_TIMEOUT_S,
+        )
+
+        self.assertGreaterEqual(PRIME_PRE_WRITE_TIMEOUT_S, 30.0)
+        # The post-write budget is the long one (persona load).
+        self.assertGreaterEqual(PRIME_POST_WRITE_TIMEOUT_S, 300.0)
+        # Pre-write is short (welcome frame); post-write is the
+        # long one. The split must be enforced.
+        self.assertLess(PRIME_PRE_WRITE_TIMEOUT_S, PRIME_POST_WRITE_TIMEOUT_S)
+        # The post-write read needs a content floor; without it,
+        # the bypass-permissions bar (a persistent footer) matches
+        # the C5 idle heuristic on the stale pre-write buffer.
+        self.assertGreaterEqual(PRIME_POST_WRITE_MIN_CONTENT_BYTES, 1000)
+
+
+class TestContainerSpawnPairReusesPrewarmed(unittest.TestCase):
+    """PTYPool pre-warmed pair is reused by Container, not duplicated.
+
+    Regression test for the pool double-spawn that regressed
+    issue #1572's orphan-leak acceptance criterion.
+    """
+
+    def test_prewarmed_pair_skips_spawn(self) -> None:
+        from agent.granite_container.pty_driver import PTYDriver
+
+        prewarmed_pm = MagicMock(spec=PTYDriver)
+        prewarmed_dev = MagicMock(spec=PTYDriver)
+
+        # Pass the prewarmed pair via ctor.
+        c2 = Container(
+            user_message="hello",
+            max_turns=2,
+            pm_pty=prewarmed_pm,
+            dev_pty=prewarmed_dev,
+        )
+
+        # Track any new spawn attempts.
+        with patch.object(PTYDriver, "spawn") as spawn_method:
+            c2._spawn_pair()
+            spawn_method.assert_not_called()
+
+        # The prewarmed pair was assigned, not a fresh one.
+        self.assertIs(c2._pm_pty, prewarmed_pm)
+        self.assertIs(c2._dev_pty, prewarmed_dev)
+
+    def test_no_prewarmed_pair_spawns_fresh(self) -> None:
+        """Backward compat: ctor with no prewarmed PTYs still
+        spawns a fresh pair (used by tests + run_ping_pong_test)."""
+        c = Container(user_message="hello", max_turns=2)
+        self.assertIsNone(c._prewarmed_pm_pty)
+        self.assertIsNone(c._prewarmed_dev_pty)
+        # _spawn_pair is normally covered by the existing test
+        # suite; we just confirm the ctor doesn't pre-populate.
+        self.assertIsNone(c._pm_pty)
+        self.assertIsNone(c._dev_pty)
+
+    def test_close_pair_skips_pool_owned_ptys(self) -> None:
+        """PTYs marked _released_to_pool=True are not closed by
+        Container._close_pair (the pool's __aexit__ owns them)."""
+        from agent.granite_container.pty_driver import PTYDriver
+
+        c = Container(user_message="hello", max_turns=2)
+        pool_pm = MagicMock(spec=PTYDriver)
+        pool_dev = MagicMock(spec=PTYDriver)
+        pool_pm._released_to_pool = True
+        pool_dev._released_to_pool = True
+        c._pm_pty = pool_pm
+        c._dev_pty = pool_dev
+
+        c._close_pair()
+
+        pool_pm.close.assert_not_called()
+        pool_dev.close.assert_not_called()
+
+
+class TestContainerOnTurnHook(unittest.TestCase):
+    """PR #1612 review TD1: the optional `on_turn` hook fires once per
+    classified PM turn (every destination), and a raising hook never
+    crashes the loop."""
+
+    def _run_with_hook(self, on_turn) -> ContainerResult:
+        c = Container(user_message="hello", max_turns=3, on_turn=on_turn)
+        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_buffers = iter(
+            [
+                _idle_result("", saw_idle=True),  # startup
+                _idle_result("no prefix here", saw_idle=True),  # turn 0: unknown
+                _idle_result("[/complete]\nDone.", saw_idle=True),  # turn 1: complete
+            ]
+        )
+        pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_buffers)
+        dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
+
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+        ):
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            return c.run()
+
+    def test_on_turn_called_once_per_classified_turn(self) -> None:
+        calls: list[int] = []
+        result = self._run_with_hook(lambda: calls.append(1))
+        self.assertEqual(result.exit_reason, "pm_complete")
+        # One unknown turn + one complete turn = two classifications.
+        self.assertEqual(len(calls), 2)
+
+    def test_raising_on_turn_does_not_crash_loop(self) -> None:
+        def _boom() -> None:
+            raise RuntimeError("liveness write failed")
+
+        result = self._run_with_hook(_boom)
+        self.assertEqual(result.exit_reason, "pm_complete")
 
 
 class TestContainerHang(unittest.TestCase):

@@ -236,8 +236,8 @@ class TestMainCallChain:
 
         mock_create.assert_called_once()
 
-    def test_main_creates_session_when_parent_set(self, monkeypatch):
-        """VALOR_PARENT_SESSION_ID set -> create AgentSession."""
+    def test_main_blocks_parent_linked_create_by_default(self, monkeypatch):
+        """VALOR_PARENT_SESSION_ID set -> NO AgentSession created (#1633 stopgap)."""
         hook = _load_hook_module()
 
         fake_hook_input = {
@@ -246,10 +246,38 @@ class TestMainCallChain:
             "cwd": "/tmp",
         }
         fake_sidecar = {}
+
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+        monkeypatch.delenv("VALOR_ALLOW_CHILD_SESSIONS", raising=False)
+        monkeypatch.setenv("VALOR_PARENT_SESSION_ID", "agt_parent123")
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value=fake_sidecar),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+            patch("models.agent_session.AgentSession.create_local") as mock_create,
+        ):
+            hook.main()
+
+        mock_create.assert_not_called()
+
+    def test_main_creates_parent_linked_session_with_bypass(self, monkeypatch):
+        """VALOR_PARENT_SESSION_ID + VALOR_ALLOW_CHILD_SESSIONS=1 -> create with parent."""
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "Child session",
+            "session_id": "test-session-ps-bypass",
+            "cwd": "/tmp",
+        }
+        fake_sidecar = {}
         fake_agent_session = MagicMock()
         fake_agent_session.agent_session_id = "mock-agent-id-ps"
 
         monkeypatch.delenv("SESSION_TYPE", raising=False)
+        monkeypatch.setenv("VALOR_ALLOW_CHILD_SESSIONS", "1")
         monkeypatch.setenv("VALOR_PARENT_SESSION_ID", "agt_parent123")
 
         with (
@@ -268,8 +296,39 @@ class TestMainCallChain:
         call_kwargs = mock_create.call_args.kwargs
         assert call_kwargs.get("parent_agent_session_id") == "agt_parent123"
 
+    def test_main_blocks_create_when_both_env_vars_set_without_bypass(self, monkeypatch):
+        """SESSION_TYPE + VALOR_PARENT_SESSION_ID without bypass -> NO create (#1633).
+
+        Guards against an implementation that silently creates a parentless
+        record instead of skipping: the parent env var forces a full skip.
+        """
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "Both env vars, blocked",
+            "session_id": "test-session-both-blocked",
+            "cwd": "/tmp",
+        }
+        fake_sidecar = {}
+
+        monkeypatch.setenv("SESSION_TYPE", "teammate")
+        monkeypatch.delenv("VALOR_ALLOW_CHILD_SESSIONS", raising=False)
+        monkeypatch.setenv("VALOR_PARENT_SESSION_ID", "agt_parent456")
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value=fake_sidecar),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+            patch("models.agent_session.AgentSession.create_local") as mock_create,
+        ):
+            hook.main()
+
+        mock_create.assert_not_called()
+
     def test_main_creates_session_when_both_env_vars_set(self, monkeypatch):
-        """Both env vars set -> create AgentSession."""
+        """Both env vars set with bypass -> create AgentSession."""
         hook = _load_hook_module()
 
         fake_hook_input = {
@@ -282,6 +341,7 @@ class TestMainCallChain:
         fake_agent_session.agent_session_id = "mock-agent-id-both"
 
         monkeypatch.setenv("SESSION_TYPE", "teammate")
+        monkeypatch.setenv("VALOR_ALLOW_CHILD_SESSIONS", "1")
         monkeypatch.setenv("VALOR_PARENT_SESSION_ID", "agt_parent456")
 
         with (

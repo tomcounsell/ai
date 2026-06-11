@@ -55,6 +55,22 @@ _MCP_SERVER_CMDLINE_RE = re.compile(r"mcp_servers/[\w_]+\.py\b")
 # Heartbeat-freshness threshold for the per-PID gate (30 minutes).
 ORPHAN_PROCESS_HEARTBEAT_GRACE_SECONDS = 1800
 
+# === Fast-kill signature for stale `claude --print` one-shots (issue #1632) ===
+#
+# Observed 2026-06-11: rogue orphan subagents spawned bare `claude ... --print`
+# one-shots (~250 MB each) that never exited; 21 accumulated at PPID==1. The
+# bundled-path regex above missed them (argv[0] was bare `claude` on PATH) and
+# the heartbeat gate is irrelevant — no legitimate `--print` one-shot lives
+# longer than a few minutes. Any PPID==1 `claude` process in `--print`/`-p`
+# mode older than this threshold is ALWAYS reapable. Conservative 10 minutes.
+ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS = 600
+
+# Shell executables whose `-c` invocations count as transient wrappers for
+# dead-chain detection (issue #1632 mode 1b): a wrapper that is itself
+# PPID==1 is alive only because it is blocked waiting on its child forever —
+# the chain above the child is dead.
+_SHELL_WRAPPER_NAMES = frozenset({"sh", "zsh", "bash", "dash"})
+
 # Redis key prefix for positive-ID self-protection. Worker writes
 # ``worker:registered_pid:{hostname}:{pid}`` at startup with TTL, refreshed on
 # every heartbeat tick. The reaper reads all keys matching the prefix and adds
@@ -2065,6 +2081,11 @@ async def _agent_session_health_loop() -> None:
             await _agent_session_health_check()
             await _agent_session_hierarchy_health_check()
             await _dependency_health_check()
+            # Issue #1632 mode 1c: stale `--print` one-shots accumulate at
+            # ~4/min during an orphan cascade — the hourly cleanup reflection
+            # is too slow. The fast reaper is itself fail-silent (never
+            # raises); the outer try/except here is a second safety layer.
+            _fast_reap_stale_print_oneshots()
         except Exception as e:
             logger.error("[session-health] Error in health check: %s", e, exc_info=True)
         await asyncio.sleep(AGENT_SESSION_HEALTH_CHECK_INTERVAL)
@@ -2578,6 +2599,66 @@ def _psutil_process_for_pid(pid: int):
         return None
 
 
+def _is_stale_print_oneshot(cmdline: list, create_time: float) -> bool:
+    """True if ``cmdline`` is a `claude --print` one-shot older than the threshold.
+
+    Issue #1632 mode 1(a). Matches a `claude` executable (bare on PATH or any
+    absolute path, including the bundled SDK path) running in one-shot mode
+    (`--print` or its `-p` alias) whose age exceeds
+    ``ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS``.
+
+    Deliberately narrow:
+      - argv[0] (or argv[1], for `node /path/claude` shapes) must have
+        basename exactly ``claude`` — `python -m worker` can never match.
+      - interactive `claude` (no `--print`/`-p` token) never matches.
+      - ``create_time`` of 0/None (unknown) is treated as NOT stale.
+    """
+    if not cmdline:
+        return False
+    head = [str(x) for x in cmdline[:2]]
+    if not any(tok.rsplit("/", 1)[-1] == "claude" for tok in head):
+        return False
+    args = [str(x) for x in cmdline[1:]]
+    if "--print" not in args and "-p" not in args:
+        return False
+    if not create_time:
+        return False
+    try:
+        age = time.time() - float(create_time)
+    except (TypeError, ValueError):
+        return False
+    return age > ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS
+
+
+def _parent_is_orphaned_shell_wrapper(ppid: int) -> bool:
+    """True if PID ``ppid`` is a live `sh -c`-style wrapper whose own PPID==1.
+
+    Issue #1632 mode 1(b): when a session process dies, its `zsh -c` Bash-tool
+    wrappers reparent to launchd (PPID==1) but stay alive, blocked waiting on
+    their child forever. A claude/MCP/pytest child under such a wrapper is an
+    orphan even though its immediate parent is technically alive — the chain
+    above it is dead.
+
+    Only consults the single parent level; failure of any psutil call returns
+    False (keep the child — conservative default).
+    """
+    if not ppid or ppid <= 1:
+        return False
+    parent = _psutil_process_for_pid(ppid)
+    if parent is None:
+        return False
+    try:
+        if parent.ppid() != 1:
+            return False
+        pcmd = [str(x) for x in (parent.cmdline() or [])]
+    except Exception:
+        return False
+    if len(pcmd) < 2:
+        return False
+    exe = pcmd[0].rsplit("/", 1)[-1]
+    return exe in _SHELL_WRAPPER_NAMES and "-c" in pcmd[1:3]
+
+
 def _session_is_alive(session) -> bool:
     """Return True if the owning session's heartbeat is fresh enough to skip.
 
@@ -2735,15 +2816,22 @@ def _reap_orphan_session_processes() -> int:
                 continue
             if pid in skip_pids:
                 continue
-            if ppid != 1:
-                continue
             if not cmdline:
                 continue
 
             cmdline_str = " ".join(str(x) for x in cmdline)
             is_claude = bool(_CLAUDE_CMDLINE_RE.search(cmdline_str))
             is_mcp = bool(_MCP_SERVER_CMDLINE_RE.search(cmdline_str))
-            if not (is_claude or is_mcp):
+            is_stale_oneshot = _is_stale_print_oneshot(cmdline, create_time)
+            if not (is_claude or is_mcp or is_stale_oneshot):
+                continue
+
+            # Orphan gate: PPID==1, OR (issue #1632 mode 1b) the immediate
+            # parent is itself an orphaned (PPID==1) `sh -c`/`zsh -c` wrapper —
+            # alive only because it is blocked waiting on this child forever.
+            # The wrapper lookup runs only for signature-matched processes, so
+            # the per-tick psutil cost is a handful of parent reads at most.
+            if ppid != 1 and not _parent_is_orphaned_shell_wrapper(ppid):
                 continue
 
             # === Per-PID heartbeat gate ===
@@ -2762,7 +2850,17 @@ def _reap_orphan_session_processes() -> int:
                         e,
                     )
 
-            if session is not None and _session_is_alive(session):
+            if is_stale_oneshot:
+                # Fast-kill signature (issue #1632 mode 1a): no legitimate
+                # `--print` one-shot lives this long. The heartbeat gate is
+                # intentionally bypassed — an alive owning session does not
+                # legitimize a stuck one-shot child.
+                logger.info(
+                    "[orphan-reap] Stale --print one-shot PID %d (age > %ds) — fast-kill",
+                    pid,
+                    ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS,
+                )
+            elif session is not None and _session_is_alive(session):
                 logger.debug("[orphan-reap] Skip PID %d — owning session is alive", pid)
                 continue
 
@@ -2820,6 +2918,85 @@ def _reap_orphan_session_processes() -> int:
             continue
 
     return parent_kills
+
+
+def _fast_reap_stale_print_oneshots() -> int:
+    """Fast-cadence reaper for stale `claude --print` one-shots (issue #1632 mode 1c).
+
+    A trimmed-down sibling of ``_reap_orphan_session_processes`` applying ONLY
+    the fast-kill signature (``_is_stale_print_oneshot`` + PPID==1). It runs
+    from the worker's ``_agent_session_health_loop`` every
+    ``AGENT_SESSION_HEALTH_CHECK_INTERVAL`` seconds because the hourly
+    `agent-session-cleanup` reflection is far too slow for a
+    multiple-spawns-per-minute orphan cascade (observed: ~4/min, ~250 MB each).
+
+    Deliberately minimal surface:
+      - No heartbeat gate, no Redis skip-set scan, no descendant walk — the
+        signature alone is decisive, and a `--print` one-shot has no useful
+        descendants. ``os.getpid()`` is still skipped, and the signature
+        cannot match `python -m worker` (argv[0] basename must be `claude`).
+      - Escalation: first sighting → SIGTERM + stage ``(pid, create_time)``
+        into ``_pending_sigkill_orphans``; if the same tuple is sighted again
+        on a later pass → SIGKILL (the create_time match guards against PID
+        recycling, same contract as the hourly drain).
+      - Fail-silent: every failure path logs at DEBUG and the function never
+        raises — the health loop must not be destabilized by a reap pass.
+
+    Returns the number of processes acted on (TERM or KILL).
+    """
+    if os.environ.get("DISABLE_ORPHAN_PROCESS_REAP") == "1":
+        return 0
+
+    reaped = 0
+    try:
+        import psutil
+
+        proc_iter = iter(psutil.process_iter(["pid", "ppid", "cmdline", "create_time"]))
+        self_pid = os.getpid()
+        while True:
+            try:
+                proc = next(proc_iter)
+            except StopIteration:
+                break
+            except Exception as e:
+                logger.debug("[fast-oneshot-reap] iter exception (stopping): %s", e)
+                break
+
+            try:
+                info = proc.info or {}
+                pid = info.get("pid")
+                ppid = info.get("ppid")
+                cmdline = info.get("cmdline") or []
+                create_time = info.get("create_time") or 0.0
+
+                if pid is None or pid == self_pid or ppid != 1:
+                    continue
+                if not _is_stale_print_oneshot(cmdline, create_time):
+                    continue
+
+                staged = (pid, create_time)
+                if staged in _pending_sigkill_orphans:
+                    proc.kill()
+                    _pending_sigkill_orphans.discard(staged)
+                    logger.info(
+                        "[fast-oneshot-reap] SIGKILL'd surviving stale one-shot PID %d", pid
+                    )
+                else:
+                    proc.terminate()
+                    _pending_sigkill_orphans.add(staged)
+                    logger.info(
+                        "[fast-oneshot-reap] SIGTERM'd stale --print one-shot PID %d (cmd=%s)",
+                        pid,
+                        " ".join(str(x) for x in cmdline)[:100],
+                    )
+                reaped += 1
+                _increment_orphan_process_counter(None)
+            except Exception as e:
+                logger.debug("[fast-oneshot-reap] per-PID exception (continuing): %s", e)
+                continue
+    except Exception as e:
+        logger.debug("[fast-oneshot-reap] pass failed (non-fatal): %s", e)
+    return reaped
 
 
 def _cleanup_orphaned_claude_processes() -> int:

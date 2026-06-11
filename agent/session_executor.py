@@ -1511,15 +1511,18 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"[{session.project_key}] Steering check failed (non-fatal): {_steer_err}"
                 )
 
-        # All session types route to CLI harness (claude -p)
+        # All session types route to the granite PTY container (plan #1572).
+        # The CLI harness in `agent/sdk_client.py` is preserved for the
+        # follow-on issue (per the plan's No-Gos) but no longer called from
+        # this path. The cutover is all-or-nothing: no fallback flag, no
+        # feature gate.
+        from agent.granite_container.bridge_adapter import BridgeAdapter
+        from agent.granite_container.pty_pool import get_pty_pool
         from agent.sdk_client import (
-            HarnessThinkingBlockCorruptionError,
-            _get_prior_session_uuid,
             _load_persona_overlay_with_log,
             _resolve_compose_args,
             _resolve_sentry_auth_token,
             build_harness_turn_input,
-            get_response_via_harness,
             load_pm_system_prompt,
         )
         from config.enums import AccessLevel, PersonaType
@@ -1528,9 +1531,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
         _classification = (
             getattr(agent_session, "classification_type", None) if agent_session else None
         )
-
-        # Look up prior Claude Code session UUID for --resume (#976, extends PR #909 pattern)
-        _prior_uuid = _get_prior_session_uuid(session.session_id)
 
         _harness_input = await build_harness_turn_input(
             message=_turn_input,
@@ -1545,26 +1545,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
             is_cross_repo=(project_key != "valor"),
         )
 
-        # On resumed turns, also build the minimal message (no context prefix)
-        _minimal_input = None
-        if _prior_uuid:
-            _minimal_input = await build_harness_turn_input(
-                message=_turn_input,
-                session_id=session.session_id,
-                sender_name=session.sender_name,
-                chat_title=session.chat_title,
-                project=project_config,
-                task_list_id=task_list_id,
-                session_type=_session_type,
-                sender_id=session.sender_id,
-                classification=_classification,
-                is_cross_repo=(project_key != "valor"),
-                skip_prefix=True,
-            )
-
         logger.info(
-            f"{log_prefix} Routing {_session_type or 'unknown'} session to CLI harness"
-            + (f" (--resume {_prior_uuid[:8]}...)" if _prior_uuid else " (first turn)")
+            f"{log_prefix} Routing {_session_type or 'unknown'} session to the "
+            "granite PTY container"
         )
 
         # Streaming chunks from the CLI harness are suppressed for all session types
@@ -1595,12 +1578,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
             if _sentry_token:
                 _harness_env["SENTRY_AUTH_TOKEN"] = _sentry_token
 
-        _harness_requeued = False
-
         # D1 precedence cascade: session.model > settings > codebase default.
+        # Applied to the PM TUI PTY via the spawn-on-acquire spec below; the
+        # Dev PTY stays on GRANITE__DEV_MODEL.
         _effective_model = _resolve_session_model(agent_session)
 
-        # Persona overlay resolution for the harness path.
+        # Persona overlay resolution for the granite container path. The
+        # composed overlay is passed to the PM PTY spawn as
+        # `--append-system-prompt` via the BridgeAdapter's spawn spec.
         #
         # PM sessions get the SDLC orchestration overlay (issue #1148). Email-
         # spawned sessions get the persona named in `project.email.persona`
@@ -1702,43 +1687,46 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     "may be wrong-voice — review email:outbox: payload before relay."
                 )
 
+        # Build the BridgeAdapter for the granite PTY container path.
+        # The adapter is single-shot (one BridgeAdapter, one Container.run,
+        # one user-message). It resolves the bridge send_cb once at
+        # construction and publishes mid-loop `[/user]` / `[/complete]`
+        # payloads through the registered callback. No mid-loop delivery
+        # surfaces via BackgroundTask — the adapter's `run` returns `""`
+        # and BackgroundTask has `send_result=False` so the harness layer
+        # does NOT double-deliver (plan #1572, "Drop standalone
+        # format_short_result" / SIMP-1).
+        # The adapter receives the per-session env (SESSION_TYPE for the
+        # pre_tool_use PM Bash restrictions, AGENT_SESSION_ID for hook
+        # attribution, CLAUDE_CODE_TASK_LIST_ID for task-list isolation,
+        # VALOR_PARENT_SESSION_ID for child-session linking), the composed
+        # persona overlay, and the D1-resolved model. It forwards them to
+        # the PTYPool as a spawn spec; the pool spawns a fresh pair with
+        # them at acquire time (env and system prompt can only be injected
+        # at process spawn — PR #1612 review B1+B2).
+        _bridge_adapter = BridgeAdapter(
+            agent_session=agent_session,
+            project_key=project_key,
+            transport=_transport or "telegram",
+            pool=get_pty_pool(),
+            session_env=_harness_env,
+            pm_system_prompt=_pm_system_prompt,
+            pm_model=_effective_model,
+        )
+
+        # The message the container receives. The container has no
+        # `claude --resume` wiring, so EVERY container run is a brand-new
+        # TUI session — the minimal-context message the harness paired
+        # with `--resume {prior_uuid}` would arrive as a context-free
+        # fragment. Always send the full-context turn input so resumed
+        # (reply-to) threads keep their conversation context.
+        _container_message = _harness_input
+
         async def do_work() -> str:
-            nonlocal _harness_requeued
-            try:
-                raw = await get_response_via_harness(
-                    message=_minimal_input if _prior_uuid else _harness_input,
-                    working_dir=str(working_dir),
-                    env=_harness_env,
-                    prior_uuid=_prior_uuid,
-                    session_id=session.session_id,
-                    full_context_message=_harness_input,
-                    model=_effective_model,
-                    system_prompt=_pm_system_prompt,
-                    # Two-tier no-progress detector callbacks (#1036). These route
-                    # through messenger.notify_* wrappers so exceptions are caught
-                    # and the queue-layer closures bump ORM fields on AgentSession.
-                    on_sdk_started=messenger.notify_sdk_started,
-                    on_stdout_event=messenger.notify_stdout_event,
-                )
-            except HarnessThinkingBlockCorruptionError as exc:
-                # Mode 1 of issue #1099 — extended-thinking + compaction has
-                # corrupted the transcript beyond in-process recovery. Surface a
-                # clean user-facing message and re-raise so BackgroundTask._run_work
-                # records the failure (task.error truthy → session finalizes as
-                # "failed"). No retry — the sentinel only fires after the stale-UUID
-                # fallback has already failed.
-                logger.warning(
-                    "[%s] Harness thinking-block corruption detected; finalizing as failed: %s",
-                    session.session_id,
-                    exc,
-                )
-                raise
-            if raw.startswith(_HARNESS_NOT_FOUND_PREFIX):
-                result, requeued = await _handle_harness_not_found(raw, agent_session)
-                if requeued:
-                    _harness_requeued = True
-                return result
-            return raw
+            return await _bridge_adapter.run(
+                user_message=_container_message,
+                working_dir=str(working_dir),
+            )
 
         # Pass working_dir so BackgroundTask._watchdog can detect a vanished
         # worktree mid-run (issue #1357). Pre-existing local `working_dir` is
@@ -1753,7 +1741,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
             working_dir=str(working_dir),
             project_key=getattr(session, "project_key", None),
         )
-        await task.run(do_work(), send_result=True)
+        # `send_result=False` is the right call: the BridgeAdapter publishes
+        # `[/user]` and `[/complete]` payloads mid-loop through the bridge
+        # callback. Returning "" keeps the harness layer from double-delivering.
+        await task.run(do_work(), send_result=False)
 
         # === Two-tier no-progress detector: populate cancellable task ref (#1036) ===
         # Now that BackgroundTask.run() has created its session-scoped task at
@@ -1826,14 +1817,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 )
         finally:
             heartbeat.cancel()
-
-        # Post-completion SDLC handling for dev sessions (Phase 3)
-        # Skip if the session was silently re-queued for harness retry — the re-queued
-        # session hasn't run yet, so calling _handle_dev_session_completion with an empty
-        # result would emit a spurious "fail" outcome to the PM pipeline before the retry
-        # has a chance to succeed.
-        if _harness_requeued:
-            return
 
         # Update session status in Redis via AgentSession
         # When auto-continue deferred, session is still active (not completed)
@@ -1923,10 +1906,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # own finalize_session call. This call is guarded by `_session_type == "dev"`,
         # not by `defer_reaction`, so it executes on both the nudge and non-nudge paths.
         #
-        # Skip if the session was silently re-queued for harness retry — the re-queued
-        # session hasn't run yet, so calling _handle_dev_session_completion with an empty
-        # result would emit a spurious "fail" outcome to the PM pipeline before the retry
-        # has a chance to succeed. (The _harness_requeued early-return above handles this.)
+        # Granite note (plan #1572): in granite mode, the container is the
+        # PM/Dev handoff — the user message goes through `BridgeAdapter.run`,
+        # not through a PM→Dev spawn. A bridge-originated session with
+        # `_session_type == "dev"` is not the granite path. The granite cutover
+        # is all-or-nothing: this guard is preserved as-is.
         if _session_type == "dev" and not task.error:
             await _handle_dev_session_completion(
                 session=session,

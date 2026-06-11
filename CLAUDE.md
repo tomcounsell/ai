@@ -337,7 +337,8 @@ Standalone Worker (python -m worker) → Sole session execution engine
                                            → Hourly `agent-session-cleanup` reflection: corrupted records + cross-process orphan reap (claude/MCP, PPID==1, heartbeat-gated; issue #1271)
                                            → Executes PM session (AgentSession session_type=pm, read-only)
                                                → PM creates Dev session via valor_session CLI
-                                                   → Worker executes Dev session via CLI harness (claude -p → Claude API)
+                                                   → Worker executes session via granite PTY container (interactive claude TUI, PTYPool-bounded)
+                                                     (BridgeAdapter → Container.run; bridge-originated sessions; see docs/features/granite-pty-production.md)
                                                    → _handle_dev_session_completion() → steers PM
                                            → Uses OutputHandler protocol (agent/output_handler.py)
                                            → TelegramRelayOutputHandler writes to Redis outbox

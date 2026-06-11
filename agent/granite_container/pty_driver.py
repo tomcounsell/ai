@@ -11,9 +11,17 @@ This module is the PoC's **substrate** — every other component in
 narrow: it models the Claude Code TUI's submit/idle/interject surface
 (per the v7 spike report's C1-C5 findings) and nothing more.
 
-C1 (submit key): every text write ends with `\\r` (CR), never `\\n` (LF).
-    The TUI is a readline-style input box; `\\n` is a literal newline
-    within the field, not a submit.
+C1 (submit key): the submit key is `\\r` (CR), never `\\n` (LF), and it
+    MUST be sent as a separate keystroke after a short delay
+    (`SUBMIT_KEY_DELAY_S`). The TUI's paste-burst heuristic treats a CR
+    arriving in the same input burst as the text as a literal newline
+    inside the pasted content, NOT as a submit — observed live on TUI
+    v2.1.173 (PR #1612 smoke failure): `text+\\r` in one `send()` left
+    the command sitting in the input box forever, the model never ran,
+    and the startup loop burned its full 600s ceiling with
+    `pm_idle=False dev_idle=False` on every cycle. Sending the body,
+    sleeping `SUBMIT_KEY_DELAY_S`, then sending `\\r` as its own
+    keystroke submits reliably.
 C2 (interjection): the regex `INTERRUPTED_RE` matches both the v2.1.160
     text ("Press Ctrl-C again to exit") and the older text
     ("Interrupted · What should Claude do instead?"). The first ctrl-c
@@ -25,10 +33,26 @@ C4 (`/help` overlay): idle detection must recognize the `esc to cancel`
     bottom-bar text. The `wait_for_idle` heuristic checks for the
     bypass-permissions bar; an overlay swaps that bar for `esc to cancel`.
     Callers should treat both as "not actively responding".
-C5 (idle signal): the bottom-bar text + prompt glyph + a content floor
-    (default 400 bytes for post-reply). The glyph alone is not enough;
-    the TUI briefly re-renders the bar while the model is still loading
-    a response.
+C5 (idle signal): byte-quiescence + the bottom-bar text + prompt glyph
+    + a content floor (default 400 stripped chars for post-reply). The
+    heuristic is evaluated against the driver's persistent per-turn
+    screen capture (`_turn_text`, reset on every `write()`), NOT only
+    against bytes read during the current `read_until_idle` call: a
+    fully settled TUI paints NOTHING, so an idle check that only runs
+    on fresh chunks can never observe idle on a quiescent PTY (the PR
+    #1612 `startup_unresolved` smoke failure — 99 startup cycles, zero
+    new bytes, `saw_idle=False` for 10 minutes). Idle is only declared
+    after `QUIESCENCE_S` of byte-silence: while a model turn is active
+    the TUI repaints the spinner animation at >=1 Hz, but those
+    repaints arrive as cursor-positioned cell FRAGMENTS (`✻i…`,
+    `✽hg`), not full `✻ Sprouting…` frames, so no regex over the
+    capture can reliably tell "running now" from "settled" — sustained
+    silence is the physical signal (live-observed on v2.1.173: a
+    mid-turn read with only fragments in its tail false-idled at 4.2s
+    while the model was still painting). Reads with a content floor
+    (> 0) additionally require spinner evidence somewhere in the turn
+    capture — proof the model actually ran a turn — so the post-write
+    wait cannot declare idle on the command-echo frame alone.
 
 Reuse policy: the regexes (`_UUID_RE`, `_RESUME_HINT_RE`,
 `INTERRUPTED_RE`) are imported from the spike / headless harness rather
@@ -39,21 +63,23 @@ headless harness is untouched" invariant.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 
 import pexpect
 import pexpect.exceptions
 
-# Reuse the headless harness's UUID/resume regexes. The spike (scripts/
-# granite_tui_pty_spike_pexpect.py) and the prior PoC both depend on
-# these being identical; the PoC inherits the same parser.
-from agent.claude_session import _RESUME_HINT_RE
+# The session UUID Claude embeds in stream-json `session_id` fields and
+# prints in its on-exit hint line: `claude --resume <uuid>`. Capturing it
+# lets a crashed/interrupted session be resumed with full context instead
+# of respawned fresh. Inlined from agent.claude_session (deleted in
+# plan #1572, Task 5 — PoC deletion).
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_RESUME_HINT_RE = re.compile(r"--resume\s+(" + _UUID_RE.pattern + r")")
 
 # Reuse the spike's INTERRUPTED_RE. The regex accepts both the v2.1.160
 # TUI text and the older wording so the driver is robust to TUI version
@@ -68,6 +94,38 @@ INTERRUPTED_RE = re.compile(
 # (`>` or `❯`). Both must be present.
 IDLE_BAR = re.compile(r"bypass.{0,30}permissions", re.DOTALL)
 PROMPT_GLYPH = re.compile(r"[>❯]")
+# Spinner-evidence pattern for content-floor reads: proof that a model
+# turn actually RAN at some point this turn (the spinner painted, or
+# the "esc to interrupt" processing hint did). Floor reads mean "the
+# model responded"; without this, the echo frame of the submitted
+# command (bar + glyph + enough bytes) satisfies the heuristic before
+# the model has started (live-observed in the PR #1612 smoke runs).
+# Observed spinner verbs (sampled across multiple PR #1612 live runs):
+# Sprouting, Whirlpooling, Cookin, Sock-hopping, Honking, Thinking,
+# Brewing, Crunching, Spinning, Streaming, Drafting, plus a long tail.
+# We match the structural shape (`<glyph> <word>+ …`) rather than
+# enumerate verbs; the leading glyph CYCLES per frame (·, ✻, ✶, ✳, ✢,
+# ✽ on v2.1.173, plus • historically). The full shape paints at least
+# once when the spinner line first renders; subsequent animation
+# frames are cell-fragments and are deliberately NOT used as a
+# "running right now" negative — see QUIESCENCE_S.
+SPINNER_EVIDENCE_RE = re.compile(
+    r"[·•✻✶✳✢✽]\s*[A-Za-z][A-Za-z\-']{2,30}\s*[…\.]{1,3}|esc to interrupt",
+    re.IGNORECASE,
+)
+# Quiescence gate (C5): idle is only declared after this many seconds
+# with zero new PTY bytes. While a model turn is active the TUI
+# repaints the spinner animation and the elapsed-seconds counter at
+# >=1 Hz, so an active turn can never be silent this long; a settled
+# TUI paints nothing. This is the only reliable "running right now"
+# negative: the animation repaints arrive as cursor-positioned cell
+# FRAGMENTS (`✻i…`, `✽hg`), not full `✻ Sprouting…` frames, so a
+# regex over the capture's tail misses an active turn (false idle
+# mid-load, live-observed) and a stale full spinner frame near the
+# end of a settled capture latches not-idle forever (false hang).
+# Must stay below STARTUP_CYCLE_TIMEOUT_S (3s) so the startup loop's
+# short polls can still observe idle. Module-level so tests can patch.
+QUIESCENCE_S = 2.0
 
 # C4: the `/help` overlay swaps the bottom bar to "esc to cancel".
 # Treat the overlay as "not actively responding" so the loop can hold.
@@ -75,8 +133,21 @@ PROMPT_GLYPH = re.compile(r"[>❯]")
 # with spaces (`Esc to cancel`); \s* matches both forms.
 OVERLAY_BAR = re.compile(r"esc\s*to\s*cancel", re.IGNORECASE)
 
-# C1: the submit key. Every text write ends with this.
+# C1: the submit key. Sent as a SEPARATE keystroke after the text body.
 SUBMIT_KEY = b"\r"
+# C1: delay between sending the text body and the submit CR. The TUI's
+# paste-burst heuristic treats a CR arriving in the same burst as the
+# text as a literal newline inside the paste, not a submit (observed
+# live on v2.1.173 — the PR #1612 startup_unresolved failure). 0.5s is
+# the live-calibrated gap that reliably registers the CR as a
+# standalone Enter keystroke. Module-level so tests can patch it to 0.
+SUBMIT_KEY_DELAY_S = 0.5
+
+# Cap on the per-turn screen capture retained across read_until_idle
+# calls. A long Dev turn repaints spinner frames for minutes; trimming
+# from the front keeps memory bounded while preserving the trailing
+# frames the idle heuristic and the classifier care about.
+TURN_TEXT_MAX_CHARS = 256_000
 
 # ANSI CSI-stripping regex (basic). The TUI paints styled output; for
 # downstream classification we strip CSI sequences and the OSC sequences
@@ -97,19 +168,11 @@ DEFAULT_MIN_CONTENT_BYTES = 400
 # ceiling; the steady-state loop can tune this per role.
 DEFAULT_TIMEOUT_S = 60.0
 
-# The model-pick policy: prefer cloud models (e.g. `glm-5.1:cloud`) when
-# available, then gemma* (small/fast, conversational), then any non-granite
-# local model. Granite is the *operator*, never the substrate model.
-# Each entry is `(match_token, match_kind)` where match_kind is "suffix"
-# for tokens that end the model string (like ":cloud" tags) and "prefix"
-# for tokens that begin it. Cloud models get a longer cold-start budget
-# in `spawn()` and in the prerequisite check (see prereq table in
-# `docs/plans/granite_interactive_tui_poc.md`).
-MODEL_PICK_PREFER: tuple[tuple[str, str], ...] = (
-    (":cloud", "suffix"),
-    ("gemma", "prefix"),
-)
-MODEL_PICK_AVOID_PREFIX = ("granite",)
+# Fallback substrate aliases when settings can't be read (test envs that
+# import the driver without a Settings instance). The PM/Dev TUIs run on
+# the Claude subscription, NOT ollama — ollama is the granite *classifier*
+# only. Aliases are UNPINNED so the substrate tracks the latest version.
+_FALLBACK_SUBSTRATE_MODEL = {"pm": "opus", "dev": "sonnet"}
 
 
 class PTYDriverError(RuntimeError):
@@ -118,12 +181,23 @@ class PTYDriverError(RuntimeError):
 
 @dataclass
 class IdleResult:
-    """Result of a `read_until_idle` call."""
+    """Result of a `read_until_idle` call.
+
+    `buffer` is the ANSI-stripped text read during THIS call only —
+    edge-triggered, suitable for startup-event parsing (an event must
+    not be re-detected and re-answered on every poll cycle).
+    `turn_buffer` is the ANSI-stripped screen capture since the last
+    `write()` — level-triggered, suitable for classification (the PM's
+    routed output may have streamed during an earlier read call, e.g.
+    the prime's post-write wait, while the classifying read sees a
+    quiescent PTY).
+    """
 
     saw_idle: bool
-    buffer: str  # ANSI-stripped accumulated text
+    buffer: str  # ANSI-stripped text read during this call
     idle_marker: str  # short slice of the trailing buffer at the moment of idle
     elapsed_ms: int
+    turn_buffer: str = ""  # ANSI-stripped capture since the last write()
 
 
 def _strip_ansi(text: str) -> str:
@@ -142,58 +216,54 @@ def _strip_ansi(text: str) -> str:
     return text
 
 
-def _pick_substrate_model() -> str:
-    """Pick a model for the TUI subprocess, avoiding the operator's own model.
+def _default_substrate_model(role: str) -> str:
+    """Resolve the Claude model alias for a TUI PTY by role.
 
-    Preference order (see `MODEL_PICK_PREFER`):
-      1. Any `*:cloud` model (e.g. `glm-5.1:cloud`) — strongest when reachable
-      2. Any `gemma*` model — small/fast/conversational
-      3. Any non-`granite*` model — last local fallback
-      4. The first model ollama reports (granite-acceptable as last resort)
+    The PM/Dev TUIs are real ``claude`` Code sessions on the Claude
+    subscription (OAuth — see ``_build_env``), run exactly like the
+    ``claude --permission-mode bypassPermissions`` shortcut but with the
+    model chosen at spawn time. ollama is the granite *classifier's*
+    substrate, never the PTY's.
 
-    Returns the full ollama model identity (e.g. `glm-5.1:cloud` or
-    `gemma4:e2b`) — the tag is required for ollama to resolve the model.
-    Callers pass the result straight to `claude --model <full_identity>`.
-
-    Raises PTYDriverError if ollama is unreachable or returns no models.
+    Reads ``settings.granite.pm_model`` / ``dev_model`` (env-overridable as
+    ``GRANITE__PM_MODEL`` / ``GRANITE__DEV_MODEL``); falls back to the
+    role-default alias if settings can't be loaded (e.g. a bare unit-test
+    import). Returns an UNPINNED alias so the substrate tracks the latest
+    version; callers pass it straight to ``claude --model <alias>``.
     """
     try:
-        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=5) as r:
-            tags = json.loads(r.read())
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError) as e:
-        raise PTYDriverError(f"ollama unreachable: {e}") from e
+        from config.settings import settings
 
-    names: list[str] = [m["name"] for m in tags.get("models", [])]
-    if not names:
-        raise PTYDriverError("ollama reports no models")
-
-    for prefer_token, match_kind in MODEL_PICK_PREFER:
-        for n in names:
-            if match_kind == "suffix":
-                if n.endswith(prefer_token):
-                    return n  # keep the full identity, e.g. "glm-5.1:cloud"
-            else:  # prefix
-                if n.startswith(prefer_token):
-                    return n  # keep the full identity, e.g. "gemma4:e2b"
-
-    for n in names:
-        if not any(n.startswith(p) for p in MODEL_PICK_AVOID_PREFIX):
-            return n  # keep the tag — ollama needs it for resolution
-
-    # All models are granite — return the first one as a last resort. The
-    # operator's classifier is robust to this, just slower.
-    return names[0]
+        if role == "dev":
+            return settings.granite.dev_model
+        return settings.granite.pm_model
+    except Exception:
+        return _FALLBACK_SUBSTRATE_MODEL.get(role, "sonnet")
 
 
 def _build_env() -> dict[str, str]:
-    """Child env: inherit everything except blank the API key.
+    """Child env: inherit everything except blank the API key + base URL.
 
     Mirrors `_build_env` in `agent/claude_session.py:90-101`: blanking
     `ANTHROPIC_API_KEY` (rather than removing it) is the documented way
-    to force the Max subscription OAuth path.
+    to force the Max subscription OAuth path. But blanking ONLY the
+    key is not enough — if the operator's shell exports
+    `ANTHROPIC_BASE_URL=http://localhost:11434` (ollama) and
+    `ANTHROPIC_AUTH_TOKEN=ollama` (also from the ollama setup), the
+    TUI sees OAuth login but dispatches model calls to ollama, which
+    doesn't host Opus / Sonnet and errors with "issue with the
+    selected model" (observed live in PR #1612). We must blank all
+    three so the TUI uses the real Claude API endpoint that OAuth
+    resolves to.
+
+    The ollama substrate is the granite classifier only
+    (`granite_classifier.py`); it is intentionally NOT inherited
+    by the PTY child.
     """
     env = os.environ.copy()
     env["ANTHROPIC_API_KEY"] = ""
+    env["ANTHROPIC_BASE_URL"] = ""
+    env["ANTHROPIC_AUTH_TOKEN"] = ""
     return env
 
 
@@ -216,13 +286,33 @@ class PTYDriver:
         cwd: str | None = None,
         model: str | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
+        env: dict[str, str] | None = None,
+        append_system_prompt: str | None = None,
     ) -> None:
         self.role = role
         self.cwd = cwd
         self._explicit_model = model
         self.timeout_s = timeout_s
+        # Per-session env overlay merged ON TOP of `_build_env()` at spawn
+        # time (session identity: AGENT_SESSION_ID, SESSION_TYPE,
+        # CLAUDE_CODE_TASK_LIST_ID, VALOR_PARENT_SESSION_ID, ...). The
+        # ANTHROPIC_* blanking in `_build_env` is applied first and is not
+        # expected to be overridden by callers.
+        self._extra_env = dict(env) if env else None
+        # Composed persona overlay passed to `claude --append-system-prompt`
+        # at spawn time (spawn-on-acquire path, PR #1612 review B2). The
+        # interactive TUI supports the flag, so the persona is a real
+        # system-prompt append rather than user-visible prime text.
+        self._append_system_prompt = append_system_prompt
         self._child: pexpect.spawn | None = None
         self._spawned_at: float | None = None
+        # Per-turn screen capture (raw, ANSI-laden). Accumulates every
+        # chunk read by `read_until_idle` across calls; reset by
+        # `write()` (a new turn starts) and `close()`. The C5 idle
+        # heuristic is evaluated against this capture so a quiescent
+        # PTY whose idle frame painted during an EARLIER read call is
+        # still observable as idle (level-triggered).
+        self._turn_text: str = ""
 
     # -- Lifecycle --------------------------------------------------------
 
@@ -234,7 +324,7 @@ class PTYDriver:
         `close()` first if they want to re-spawn.
 
         The model is picked automatically if not provided explicitly.
-        See `_pick_substrate_model` for the selection policy.
+        See `_default_substrate_model` for the model-by-role policy.
 
         macOS setsid note: pexpect's underlying `pty.fork()` already
         calls `setsid()`; a second `setsid()` from `preexec_fn` is a
@@ -246,12 +336,20 @@ class PTYDriver:
         if self._child is not None and self._child.isalive():
             raise PTYDriverError(f"PTYDriver({self.role}) already spawned; close() first")
 
-        model = self._explicit_model or _pick_substrate_model()
+        model = self._explicit_model or _default_substrate_model(self.role)
+
+        args = ["--model", model, "--permission-mode", "bypassPermissions"]
+        if self._append_system_prompt:
+            args += ["--append-system-prompt", self._append_system_prompt]
+
+        env = _build_env()
+        if self._extra_env:
+            env.update(self._extra_env)
 
         self._child = pexpect.spawn(
             "claude",
-            ["--model", model, "--permission-mode", "bypassPermissions"],
-            env=_build_env(),
+            args,
+            env=env,
             echo=False,
             encoding="utf-8",
             preexec_fn=lambda: None,
@@ -276,29 +374,49 @@ class PTYDriver:
             pass
         self._child = None
         self._spawned_at = None
+        self._turn_text = ""
 
     # -- I/O --------------------------------------------------------------
 
     def write(self, text: str) -> None:
-        """Write text + `\\r` to the PTY (C1 submit key).
+        """Write text to the PTY, then submit with a separate `\\r` (C1).
 
-        Empty input is rejected. If the caller already appended `\\r`
-        or `\\n`, the trailing newline is normalized to `\\r`. Literal
+        Empty input is rejected. A single trailing `\\r`/`\\n`/`\\r\\n`
+        on the input is stripped (it IS the submit intent); literal
         newlines WITHIN the input are preserved (the TUI input box
-        supports multi-line input via the bracketed paste or a literal
-        `\\n`; only the *final* newline is the submit key).
+        treats a rapid burst as a paste, so internal `\\n` become
+        newlines inside the field).
+
+        The submit CR is sent as its own keystroke after
+        `SUBMIT_KEY_DELAY_S`: the TUI's paste-burst heuristic treats a
+        CR arriving in the same burst as the text as a literal newline
+        inside the paste, not a submit (live-observed on v2.1.173 —
+        the PR #1612 startup_unresolved failure mode, where the prime
+        command sat unsubmitted in the input box for the full 600s
+        startup ceiling).
+
+        A write starts a new turn: the per-turn screen capture
+        (`_turn_text`) is reset BEFORE sending so the C5 idle heuristic
+        and content floor measure only frames painted after this
+        submit.
         """
         if not text:
             raise PTYDriverError("PTYDriver.write() rejected empty input")
         if self._child is None:
             raise PTYDriverError("PTYDriver.write() called before spawn()")
 
-        if text.endswith("\n") and not text.endswith("\r\n"):
-            text = text[:-1] + "\r"
-        elif not text.endswith("\r"):
-            text = text + "\r"
+        if text.endswith("\r\n"):
+            body = text[:-2]
+        elif text.endswith(("\r", "\n")):
+            body = text[:-1]
+        else:
+            body = text
 
-        self._child.send(text)
+        self._turn_text = ""
+        if body:
+            self._child.send(body)
+            time.sleep(SUBMIT_KEY_DELAY_S)
+        self._child.send("\r")
 
     def send_ctrl_c(self) -> None:
         """Send a single ctrl-c to the TUI (the first stage of C2 interject).
@@ -322,13 +440,38 @@ class PTYDriver:
         C5 heuristic: the idle state is the bottom-bar text + the prompt
         glyph. The C4 overlay (`/help` showing `esc to cancel`) is also
         treated as idle — the loop holds while the user dismisses the
-        overlay. The `min_content_bytes` floor (default 400) prevents
-        false-positives from the TUI briefly re-rendering the bar while
-        the model is still loading a response.
+        overlay.
+
+        The heuristic is **level-triggered**: it is evaluated against
+        the per-turn screen capture (`_turn_text`, everything painted
+        since the last `write()`), on every poll tick — including ticks
+        where no new bytes arrived. A settled TUI paints nothing, so an
+        edge-triggered check (only on fresh chunks) can never observe
+        idle on a quiescent PTY and times out forever (the PR #1612
+        startup_unresolved failure mode).
+
+        Idle additionally requires `QUIESCENCE_S` of byte-silence
+        observed within this call: an active model turn repaints the
+        spinner animation at >=1 Hz (as cell fragments no regex can
+        reliably match), so sustained silence is the signal that the
+        turn is over and the capture's bar/glyph reflect a settled
+        screen rather than a mid-load repaint.
+
+        The `min_content_bytes` floor (default 400) is measured against
+        the ANSI-stripped turn capture and prevents false-positives
+        from the TUI re-rendering the bar while the model is still
+        loading. Floor reads (> 0) additionally require spinner
+        evidence somewhere in the turn capture — the echo of the
+        submitted command paints the bypass bar and the prompt glyph
+        BEFORE the model starts, and ANSI-heavy echo frames can exceed
+        a byte floor on their own (live-observed: the prime post-write
+        wait returned `saw_idle=True` on the echo frame while the model
+        had not run).
 
         Returns an `IdleResult` with `saw_idle=False` if the timeout
-        fires before the idle signal stabilizes. The buffer is
-        ANSI-stripped and is whatever the TUI has painted so far.
+        fires before the idle signal stabilizes. `buffer` is the
+        ANSI-stripped text read during this call; `turn_buffer` is the
+        ANSI-stripped capture since the last write.
         """
         if self._child is None:
             raise PTYDriverError("PTYDriver.read_until_idle() called before spawn()")
@@ -338,32 +481,58 @@ class PTYDriver:
         saw_idle = False
         idle_marker = ""
         start = time.monotonic()
+        last_chunk_at = start
 
         while time.monotonic() < deadline:
             try:
                 chunk = self._child.read_nonblocking(size=8192, timeout=0.5)
             except pexpect.TIMEOUT:
-                continue
+                chunk = ""
             except pexpect.EOF:
                 break
             except pexpect.exceptions.ExceptionPexpect:
                 break
-            if not chunk:
+            if chunk:
+                accumulated += chunk
+                self._turn_text += chunk
+                if len(self._turn_text) > TURN_TEXT_MAX_CHARS:
+                    self._turn_text = self._turn_text[-TURN_TEXT_MAX_CHARS:]
+                # The TUI is actively painting — a model turn is in
+                # flight (spinner animation / streaming response).
+                # Re-read; idle can only be declared after silence.
+                last_chunk_at = time.monotonic()
                 continue
-            accumulated += chunk
-            stripped = _strip_ansi(accumulated)
+            # Quiescence gate: require sustained byte-silence observed
+            # WITHIN this call before judging the capture. An active
+            # turn repaints at >=1 Hz, so it can never pass this gate;
+            # a settled PTY passes it QUIESCENCE_S after its last paint
+            # (or QUIESCENCE_S into the call if it was already silent).
+            if time.monotonic() - last_chunk_at < QUIESCENCE_S:
+                continue
+            stripped = _strip_ansi(self._turn_text)
+            if not stripped:
+                continue
             # C4 + C5: idle = (bypass bar OR overlay bar) AND prompt glyph.
             bar_match = IDLE_BAR.search(stripped) or OVERLAY_BAR.search(stripped)
             if bar_match and PROMPT_GLYPH.search(stripped):
-                if min_content_bytes == 0 or len(accumulated) >= min_content_bytes:
-                    saw_idle = True
-                    tail = stripped[-200:]
-                    m = IDLE_BAR.search(tail) or OVERLAY_BAR.search(tail)
-                    if m:
-                        s = max(0, m.start() - 20)
-                        e = m.end() + 20
-                        idle_marker = tail[s:e]
-                    break
+                if min_content_bytes > 0:
+                    if len(stripped) < min_content_bytes:
+                        continue
+                    # Spinner evidence: a content-floor read means "the
+                    # model responded"; require that a loading verb (or
+                    # the esc-to-interrupt hint) was painted at some
+                    # point this turn. The trailing window above
+                    # already proved the spinner is gone NOW.
+                    if not SPINNER_EVIDENCE_RE.search(stripped):
+                        continue
+                saw_idle = True
+                tail = stripped[-200:]
+                m = IDLE_BAR.search(tail) or OVERLAY_BAR.search(tail)
+                if m:
+                    s = max(0, m.start() - 20)
+                    e = m.end() + 20
+                    idle_marker = tail[s:e]
+                break
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return IdleResult(
@@ -371,6 +540,7 @@ class PTYDriver:
             buffer=_strip_ansi(accumulated),
             idle_marker=idle_marker,
             elapsed_ms=elapsed_ms,
+            turn_buffer=_strip_ansi(self._turn_text),
         )
 
     def isalive(self) -> bool:

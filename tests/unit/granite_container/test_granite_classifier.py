@@ -107,6 +107,121 @@ class TestClassifyPmPrefix(unittest.TestCase):
         self.assertTrue(result.compliance_miss)
 
 
+class TestAnchoredPaintedFrames(unittest.TestCase):
+    """Real painted TUI captures: the `⏺`-anchored token wins.
+
+    The per-turn capture the container classifies contains the echo of
+    whatever the container just wrote AHEAD of the model's reply
+    (prime command, granite summary, compliance nudge), so first-line /
+    first-200-chars parsing reads the echo. The transcript bullet `⏺`
+    anchors the model's actual output (PR #1612 smoke debugging).
+    """
+
+    def test_anchored_token_wins_over_echo(self) -> None:
+        capture = (
+            "❯ /granite-poc:prime-pm-role Send a one-line confirmation.\n"
+            "────────────────────────────\n"
+            "✻ Sprouting…\n"
+            "⏺ [/user] Online and ready.\n"
+            "────────────────────────────\n"
+            "⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+        )
+        result = classify_pm_prefix(capture)
+        self.assertEqual(result.destination, "user")
+        self.assertEqual(result.payload, "Online and ready.")
+        self.assertFalse(result.compliance_miss)
+
+    def test_anchored_token_collapsed_whitespace(self) -> None:
+        """The TUI may paint with whitespace collapsed: `⏺[/user]Online...`."""
+        capture = "❯ some echo\n⏺[/dev]Run the unit tests in tests/unit.\n────────\n"
+        result = classify_pm_prefix(capture)
+        self.assertEqual(result.destination, "dev")
+        self.assertIn("Run the unit tests", result.payload)
+
+    def test_anchored_beats_nudge_echo_poisoning(self) -> None:
+        """The compliance nudge names the literal tokens; its echo must
+        not be classified as the PM's routing decision."""
+        capture = (
+            "❯ Your last reply did not start with a routing prefix on its "
+            "own line. Re-send your reply starting with exactly one of "
+            "[/dev], [/user], or [/complete] on the first line.\n"
+            "✻ Thinking…\n"
+            "⏺ [/complete] Confirmation sent; nothing further needed.\n"
+        )
+        result = classify_pm_prefix(capture)
+        self.assertEqual(result.destination, "complete")
+        self.assertIn("Confirmation sent", result.payload)
+
+    def test_last_anchored_match_wins(self) -> None:
+        """Repaints duplicate the reply; the LAST anchored token is the
+        final frame."""
+        capture = "⏺ [/dev] partial repai\n...\n⏺ [/dev] partial repaint now complete\n"
+        result = classify_pm_prefix(capture)
+        self.assertEqual(result.destination, "dev")
+        self.assertEqual(result.payload, "partial repaint now complete")
+
+    def test_payload_cut_at_frame_artifacts(self) -> None:
+        capture = "⏺ [/user] All done here.\n⏵⏵ bypass permissions on\n❯ \n"
+        result = classify_pm_prefix(capture)
+        self.assertEqual(result.destination, "user")
+        self.assertEqual(result.payload, "All done here.")
+
+    def test_clean_synthetic_input_unaffected(self) -> None:
+        """Inputs without a bullet marker keep the strict first-line path."""
+        result = classify_pm_prefix("[/dev]\nadd a function `foo` to bar.py")
+        self.assertEqual(result.destination, "dev")
+        self.assertFalse(result.compliance_miss)
+
+
+# ---------------------------------------------------------------------------
+# ANSI stripping: defense-in-depth
+# ---------------------------------------------------------------------------
+#
+# Synthetic coverage. Time-shifted regressions (TUI version drift, Ink/React
+# upgrades) may surface only on real TUI runs; the live smoke test in the
+# cutover plan is the second-line defense. Schedule a second live smoke
+# test ~24 hours after the first to catch time-shifted regressions.
+#
+# The classifier delegates to pty_driver._strip_ansi so the two layers
+# cannot drift. These tests pin the behavior at the classifier boundary.
+# ---------------------------------------------------------------------------
+
+
+class TestAnsiStripping(unittest.TestCase):
+    """ANSI escape sequences must not corrupt the prefix-token classification.
+
+    The PTY layer's read_until_idle already strips CSI+OSC, but defense
+    in depth at the classifier catches time-shifted TUI upgrades.
+    """
+
+    def test_strip_csi_does_not_corrupt_classification(self) -> None:
+        """Leading CSI SGR sequences (color codes) survive the PTY strip
+        in some TUI versions and would corrupt the first-line check."""
+        # \x1b[31m = red, \x1b[0m = reset
+        result = classify_pm_prefix("\x1b[31m[/dev]\x1b[0m\nadd a function `foo` to bar.py")
+        self.assertEqual(result.destination, "dev")
+        self.assertFalse(result.compliance_miss)
+        self.assertIn("add a function", result.payload)
+
+    def test_strip_osc_does_not_corrupt_classification(self) -> None:
+        """Leading OSC sequence (`ESC]0;titleBEL`) sets the window title.
+        The PTY strip removes it; the classifier must remain correct."""
+        # \x1b]0;title\x07 = OSC set window title
+        result = classify_pm_prefix("\x1b]0;title\x07[/dev]\nadd a function `foo` to bar.py")
+        self.assertEqual(result.destination, "dev")
+        self.assertFalse(result.compliance_miss)
+        self.assertIn("add a function", result.payload)
+
+    def test_strip_keypad_does_not_corrupt_classification(self) -> None:
+        """Leading keypad-mode ESC (`ESC=`) is a single-char ESC control.
+        The PTY strip removes it; the classifier must remain correct."""
+        # \x1b= = application keypad mode
+        result = classify_pm_prefix("\x1b=[/dev]\nadd a function `foo` to bar.py")
+        self.assertEqual(result.destination, "dev")
+        self.assertFalse(result.compliance_miss)
+        self.assertIn("add a function", result.payload)
+
+
 # ---------------------------------------------------------------------------
 # extract_dev_prompt / summarize_for_pm: mocked ollama path
 # ---------------------------------------------------------------------------

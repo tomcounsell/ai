@@ -6,6 +6,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 
 | Feature | Description | Status |
 |---------|-------------|--------|
+| [`valor` CLI Wrapper](valor-cli-wrapper.md) | Thin positional-prompt wrapper around `valor-session` (delegation-only, no new state). 5 strengths, 7 documented shortcomings (stale shell alias, literal-allowlist shortcut rewrite, stale worker pre-flight cache, help on positional, PTY path implicit, #1288 worktree-bound commits, zero wrapper unit tests) | Shipped |
 | [Adding Reflection Tasks](adding-reflection-tasks.md) | Developer guide with copy-paste template for adding new reflection steps | Shipped |
 | [Agent Definition Fallback](agent-definition-fallback.md) | Graceful degradation when agent definition markdown files are missing, malformed, or unreadable — logs warning and continues with fallback prompt instead of crashing | Shipped |
 | [Agent Reply Terminus](agent-reply-terminus.md) | Conversation terminus detection (RESPOND/REACT/SILENT) in reply-to-Valor path to break infinite bot reply loops | Shipped |
@@ -65,6 +66,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Google Workspace Auth](google-workspace-auth.md) | Error-resilient OAuth with verify_token(), --reauth/--check CLI flags, and actionable error messages | Shipped |
 | [Granite Agent Loop (PoC)](granite-agent-loop.md) | Standalone PoC: granite4.1:3b operator drives two persistent Claude Code sessions (Opus PM + Sonnet Dev) over `claude -p` stream-json stdio, with no `claude-agent-sdk` and no API key (Max OAuth only) — superseded by the new interactive-TUI PoC; this doc is historical | Superseded |
 | [Granite Operator: Interactive TUI](granite-interactive-tui.md) | Kernel validation PoC: granite4.1:3b operator drives a real interactive Claude Code session via PTY (zero `claude -p`), with persona-priming slash commands, deterministic prefix-token routing, and the 12-step start-up sequence. Replaces the prior `-p`-driven PoC as the source of truth. | PoC |
+| [Granite PTY Container: Production Path](granite-pty-production.md) | Production cutover of the granite PTY kernel: all bridge sessions run through `Container` (not `claude -p`), bounded by `PTYPool` (default 3 pairs), with mid-loop `[/user]` delivery via `BridgeAdapter` and `session_events` observability. All-or-nothing, no fallback flag. | Shipped |
 | [Happy Path Testing Pipeline](happy-path-testing-pipeline.md) | Three-stage pipeline (discover, generate, run) for deterministic browser regression tests without LLM tokens | Shipped |
 | [Harness Abstraction](harness-abstraction.md) | CLI harness execution for dev sessions via `claude -p` with env-var routing (`DEV_SESSION_HARNESS`), stream-json parsing, and startup health checks (Phases 1-2 of #780) | Shipped |
 | [Harness Session Continuity](harness-session-continuity.md) | Native `claude -p --resume <uuid>` continuity — persists the CLI session UUID on `AgentSession` after each turn, reuses it on next turn, falls back to full-context on any non-zero exit (#976) | Shipped |

@@ -229,6 +229,57 @@ class FeatureSettings(BaseModel):
     )
 
 
+class GraniteSettings(BaseModel):
+    """Granite PTY container configuration (plan #1572).
+
+    The granite container drives an interactive ``claude`` TUI session via
+    two persistent PTYs (PM + Dev) per session. The PTY pool caps
+    concurrent interactive pairs at ``pty_pool_size``; over-cap sessions
+    wait in the Redis queue. The pool size is intentionally SMALLER than
+    ``MAX_CONCURRENT_SESSIONS`` so the Redis queue absorbs over-cap
+    sessions, giving operators headroom to handle orphan-after-SIGKILL
+    without overcommitting memory.
+
+    Growth path: default 3 → 6 once health/observability and memory
+    management land. Each PTY pair is ~400 MB resident, so pool=3 with
+    MAX_CONCURRENT_SESSIONS=8 bounds worker memory at ~9.6 GB worst case.
+    See ``docs/features/granite-pty-production.md``.
+    """
+
+    pty_pool_size: int = Field(
+        default=3,
+        ge=1,
+        le=16,
+        description=(
+            "Hard maximum concurrent PM+Dev PTY pairs. Each pair is two "
+            "interactive ``claude`` processes (~200 MB each) driving the "
+            "granite container. The PTY pool is a singleton owned by the "
+            "worker process. Override via GRANITE__PTY_POOL_SIZE env var. "
+            "Plan #1572 / docs/features/granite-pty-production.md."
+        ),
+    )
+    pm_model: str = Field(
+        default="opus",
+        description=(
+            "Claude model alias for the PM TUI PTY. The PM/Dev sessions run "
+            "on the Claude subscription (OAuth, ANTHROPIC_API_KEY blanked), "
+            "exactly like the `claude --permission-mode bypassPermissions` "
+            "shortcut, with the model chosen at spawn time. Use UNPINNED "
+            "aliases (opus, sonnet, haiku) so the substrate tracks the latest "
+            "version. ollama models belong to the granite classifier only, "
+            "never the PTY substrate. Override via GRANITE__PM_MODEL."
+        ),
+    )
+    dev_model: str = Field(
+        default="sonnet",
+        description=(
+            "Claude model alias for the Dev TUI PTY. See ``pm_model``. The "
+            "Dev role executes code under PM direction; sonnet is the cost/"
+            "latency default. Override via GRANITE__DEV_MODEL."
+        ),
+    )
+
+
 class PathSettings(BaseModel):
     """Path settings derived from project root. No hardcoded usernames."""
 
@@ -295,6 +346,7 @@ class Settings(BaseSettings):
     models: ModelSettings = Field(default_factory=ModelSettings)
     paths: PathSettings = Field(default_factory=PathSettings)
     features: FeatureSettings = Field(default_factory=FeatureSettings)
+    granite: GraniteSettings = Field(default_factory=GraniteSettings)
 
     @field_validator("environment")
     @classmethod

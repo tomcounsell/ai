@@ -13,8 +13,8 @@ runs the loop described in the plan's *Data Flow* section:
      PTY -> wait for Dev idle -> call granite to summarize_for_pm
      (ollama) -> write summary to PM PTY -> repeat
   5. exit on PM [/complete] prefix, max_turns safety cap, dev
-     hang (await_idle timeout), startup_unresolved (parser
-     UNKNOWN past the startup window), or any exception
+     hang (await_idle timeout), startup_unresolved (neither PTY
+     settles within STARTUP_HARD_CEILING_S), or any exception
 
 Two-PTY coordination is the early risk (per the plan's *Technical
 Approach*). The container's loop is single-threaded; reads from
@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -67,16 +69,84 @@ TRUST_FOLDER_DISMISSAL = "1"
 # safety net; the steady-state exit is the PM [/complete] prefix.
 DEFAULT_MAX_TURNS = 10
 
-# Startup window: how many idle cycles to spend watching for
-# startup events before declaring startup_unresolved. The trust-
-# folder prompt and update notice typically appear within the
-# first 1-2 cycles; 10 is a comfortable safety margin.
-STARTUP_WINDOW_CYCLES = 10
+# Hard wall-clock ceiling for the startup phase. The startup loop
+# keeps polling (short 3s reads) until both PTYs are idle; if they
+# never settle within this ceiling, the container exits
+# `startup_unresolved`. This is plan Risk 6's detection mode for a
+# broken `--permission-mode` flag: when the flag is renamed or
+# removed by a TUI upgrade, the bypass-permissions bar never paints,
+# the C5 idle heuristic never fires, and the run exits with the
+# distinct `startup_unresolved` signature instead of burning the
+# steady-state budget and reporting a misleading `pm_hang`. The
+# ceiling is deliberately long — persona load on a cold Opus
+# high-effort PTY can run minutes past the prime post-write budget
+# (PR #1612 live run, June 2026), and the short per-cycle reads
+# make the extended wait cheap.
+STARTUP_HARD_CEILING_S = 600.0
 
 # Per-cycle idle timeout. If a PTY doesn't reach idle within this
 # many seconds, the container treats it as a hang (pm_hang /
 # dev_hang) and exits the loop.
 CYCLE_IDLE_TIMEOUT_S = 120.0
+
+# Per-cycle idle budget for the startup-phase poll loop. Short by
+# design: the loop's job is to detect transient startup events
+# (trust-folder, update notice), not to wait for a long model
+# turn. A short per-read budget means the startup loop polls
+# cheaply and frequently while waiting for the PTYs to settle
+# under STARTUP_HARD_CEILING_S, and only burns the long
+# steady-state budget (CYCLE_IDLE_TIMEOUT_S) once it enters the
+# actual turn loop. Without this, the startup loop consumed
+# 120s idle waits per cycle on a slow persona load (PR #1612
+# live run, June 2026).
+# HARD FLOOR: must stay strictly above pty_driver.QUIESCENCE_S
+# (2.0s) — idle is only declared after that much byte-silence, so
+# a startup poll shorter than QUIESCENCE_S can NEVER observe idle
+# and silently reintroduces the startup_unresolved hang this
+# constant exists to bound.
+STARTUP_CYCLE_TIMEOUT_S = 3.0
+
+# Trust-folder prompt pattern matched against the raw TUI buffer
+# BEFORE the C5 idle heuristic. The workspace-trust dialog does
+# NOT paint the bypass-permissions bar (different security layer
+# from the per-tool permission dialogs that `bypassPermissions`
+# suppresses), so the C5 heuristic's `bypass.{0,30}permissions`
+# regex never matches. Dismissing with "1" unsticks the prime in
+# <2s on the trust-folder path; the prior behavior silently
+# burned 60s on `saw_idle=False` and never sent the prime
+# command, deadlocking both PM and Dev (issue #1572 live run).
+TRUST_FOLDER_RE = re.compile(r"(Yes, I trust this folder|trust this folder\?)", re.IGNORECASE)
+# Pre-C5 trust dismissal budget: short, because we want to dismiss
+# quickly and re-read. 10s catches a slow first paint without
+# burning the full prime budget.
+PRIME_TRUST_DISMISS_TIMEOUT_S = 10.0
+# Pre-write C5 budget: the welcome frame paints fast, so this only
+# has to cover initial render + any post-dismissal re-render.
+PRIME_PRE_WRITE_TIMEOUT_S = 30.0
+# Post-write C5 budget: persona body load + first-token wait. The
+# pool's prewarmed PTY starts cold (no conversation history), so
+# Opus 4.8 high-effort can take 90-180s for the slash command to
+# actually be processed and "Worked for Ns" to print. PR #1612
+# live run on June 2026 hit 120s saw_idle=False on PM; raise the
+# post-write budget to absorb that latency without churning the
+# startup-phase loop. The pre-write budget stays tight because it
+# is bounded by render speed, not model latency.
+PRIME_POST_WRITE_TIMEOUT_S = 360.0
+# Legacy alias kept for tests and existing references. New code
+# should reference the pre/post-write pair explicitly.
+PRIME_C5_TIMEOUT_S = PRIME_POST_WRITE_TIMEOUT_S
+# Post-write content floor. The bypass-permissions bar is a
+# persistent footer, so an empty/minimal buffer can match the C5
+# idle heuristic even before the model has produced any response
+# content (the bar is what gated `_prime_session`'s pre-write
+# read). Without a floor, the post-write read returns
+# saw_idle=True on the stale pre-write buffer and `_prime_session`
+# returns while the slash command is still being processed (PR
+# #1612 live run, June 2026: Dev prime returned in 5ms with
+# buffer_len=223 — the model never had time to load). 1500 bytes
+# comfortably exceeds the welcome frame but is well under the
+# persona-load response length.
+PRIME_POST_WRITE_MIN_CONTENT_BYTES = 1500
 
 # Cap on the size of `ContainerResult.exit_message`. A multi-KB
 # traceback or ollama error body can land here on the exception
@@ -198,6 +268,11 @@ class Container:
         max_turns: int = DEFAULT_MAX_TURNS,
         pm_model: str | None = None,
         dev_model: str | None = None,
+        on_user_payload: Callable[[str], None] | None = None,
+        on_complete_payload: Callable[[str], None] | None = None,
+        on_turn: Callable[[], None] | None = None,
+        pm_pty: PTYDriver | None = None,
+        dev_pty: PTYDriver | None = None,
     ) -> None:
         if not user_message.strip():
             raise ValueError("Container.user_message must be non-empty")
@@ -206,6 +281,25 @@ class Container:
         self.max_turns = max_turns
         self._pm_model = pm_model
         self._dev_model = dev_model
+        self._on_user_payload = on_user_payload
+        self._on_complete_payload = on_complete_payload
+        # Per-turn progress hook: called once per classified PM turn
+        # (every destination, including unknown). BridgeAdapter uses it
+        # to bump `agent_session.last_turn_at` so the two-tier
+        # no-progress detector's sub-check A stays live for granite
+        # sessions (PR #1612 review TD1). Exceptions are swallowed —
+        # progress signaling must never crash the loop.
+        self._on_turn = on_turn
+        # Optional pre-warmed PTY pair from the PTYPool. When both
+        # are provided, Container skips _spawn_pair() and reuses
+        # the pool's prewarmed pair (BridgeAdapter is the caller in
+        # production). When None, Container spawns its own (used by
+        # tests and run_ping_pong_test). The pool marks the pair
+        # as _released_to_pool=True on its async with entry, so
+        # _close_pair will NOT close them — the pool's __aexit__
+        # owns the close.
+        self._prewarmed_pm_pty = pm_pty
+        self._prewarmed_dev_pty = dev_pty
         self._pm_pty: PTYDriver | None = None
         self._dev_pty: PTYDriver | None = None
         self._sandbox: tuple[str, str] | None = None
@@ -213,7 +307,17 @@ class Container:
     # -- Lifecycle --------------------------------------------------------
 
     def _spawn_pair(self) -> None:
-        """Spawn both PTYs and prime both personas."""
+        """Spawn both PTYs and prime both personas.
+
+        Reuses a prewarmed pair when the ctor received one
+        (production path: PTYPool -> BridgeAdapter -> Container).
+        Spawns a fresh pair otherwise (tests, run_ping_pong_test).
+        """
+        if self._prewarmed_pm_pty is not None and self._prewarmed_dev_pty is not None:
+            self._pm_pty = self._prewarmed_pm_pty
+            self._dev_pty = self._prewarmed_dev_pty
+            return
+
         if self.cwd is None:
             self._sandbox = _make_sandbox_cwd()
             cwd = self._sandbox[0]
@@ -226,12 +330,20 @@ class Container:
         self._dev_pty.spawn()
 
     def _close_pair(self) -> None:
+        # Skip PTYs the pool already owns — its __aexit__ does the
+        # close. Double-closing races the pool's respawn and can
+        # leave the pool's respawned pair in a half-closed state
+        # (see PTYPool contract: the slot's PTY is closed exactly
+        # once, on release).
         for pty in (self._pm_pty, self._dev_pty):
-            if pty is not None:
-                try:
-                    pty.close(force=True)
-                except Exception:
-                    pass
+            if pty is None:
+                continue
+            if getattr(pty, "_released_to_pool", False):
+                continue
+            try:
+                pty.close(force=True)
+            except Exception:
+                pass
         if self._sandbox is not None:
             sandbox_path = Path(self._sandbox[0])
             if sandbox_path.exists():
@@ -240,13 +352,31 @@ class Container:
                 except Exception:
                     pass
 
+    def _uses_pool_pair(self) -> bool:
+        """Whether this container runs on a PTYPool-prewarmed pair.
+
+        Pool-backed runs must NEVER use the pkill fallback: the
+        pattern matches every `claude --permission-mode
+        bypassPermissions` process on the machine, which includes
+        the pool's other slots (idle prewarmed pairs and pairs
+        mid-run in concurrent granite sessions) and any operator-
+        owned interactive session. The pool owns its PTY lifecycle
+        (close-on-release + PID-targeted orphan kill at worker
+        startup); the machine-wide pkill is only safe for the
+        self-spawned single-container path (tests, ping-pong).
+        """
+        return self._prewarmed_pm_pty is not None and self._prewarmed_dev_pty is not None
+
     def _run_pkill_fallback(self) -> None:
         """Last-ditch teardown: kill any orphaned `claude --bypassPermissions` PTYs.
 
         Mirrors the probe's teardown at
         `scripts/probe_slash_arguments.py:367-373`. The container
         prefers `child.close(force=True)`; this is the safety net.
+        Skipped entirely for pool-backed runs — see `_uses_pool_pair`.
         """
+        if self._uses_pool_pair():
+            return
         try:
             subprocess.run(
                 ["pkill", "-f", "claude --permission-mode bypassPermissions"],
@@ -312,10 +442,34 @@ class Container:
         Returns (saw_idle, buffer, idle_marker, elapsed_ms). If the
         timeout fires without an idle, the buffer is whatever the
         TUI has painted so far and saw_idle is False.
+
+        The buffer is the PTY's per-turn capture (everything painted
+        since the last write to that PTY), not just the bytes read
+        during this call: the routed output may have streamed during an
+        earlier read (e.g. PM's prime response streams during the
+        prime's post-write wait), and the steady-state read then sees a
+        quiescent PTY. The `or result.buffer` fallback covers drivers
+        that don't populate `turn_buffer` (unit-test mocks).
         """
         result = pty.read_until_idle(
             min_content_bytes=min_content_bytes, timeout_s=CYCLE_IDLE_TIMEOUT_S
         )
+        buffer = result.turn_buffer or result.buffer
+        return (result.saw_idle, buffer, result.idle_marker, result.elapsed_ms)
+
+    # -- Startup phase ----------------------------------------------------
+
+    def _startup_cycle_idle(self, pty: PTYDriver) -> tuple[bool, str, str, int]:
+        """Startup-phase idle read with a short per-cycle budget.
+
+        Same return shape as `_cycle_idle`. The startup phase is a
+        poll for transient events, not a wait for a model turn, so
+        3s per cycle is enough to catch an event the moment the
+        TUI paints it without blocking the loop on persona-load
+        latency. saw_idle=False here is expected and benign — the
+        outer loop keeps cycling.
+        """
+        result = pty.read_until_idle(min_content_bytes=0, timeout_s=STARTUP_CYCLE_TIMEOUT_S)
         return (result.saw_idle, result.buffer, result.idle_marker, result.elapsed_ms)
 
     def _prime_session(self, pty: PTYDriver, slash_cmd: str) -> None:
@@ -324,16 +478,76 @@ class Container:
         The slash command body is invisible to the operator (F4);
         the only substrate signal is "did the model respond?". This
         helper sends the slash command and waits for the TUI to
-        return to idle. The model may not have finished priming
-        (e.g., still loading the persona) — that's fine, the
-        steady-state loop's first read will see the prime-ack in
-        the buffer.
+        return to idle TWICE: once for the welcome frame (pre-write),
+        and once for the model to actually finish processing the
+        prime (post-write). The post-write wait is critical because
+        the bypass bar is a persistent footer that is visible WHILE
+        the model is still loading — without the post-write wait,
+        `_prime_session` returns while the model is still
+        "Sprouting…" / "Synthesizing…", and the startup-phase
+        loop's idle-break condition (both PTYs idle) fires
+        immediately on the stale buffer, racing past the actual
+        prime. The steady-state loop then reads the still-stale
+        buffer and misclassifies as `unknown`, hitting `pm_hang`
+        on the first turn (PR #1612 live run, June 2026).
+
+        Pre-C5 trust dismissal: a fresh PTY in an untrusted cwd
+        (e.g., a per-session sandbox tempdir) shows the workspace
+        trust dialog as its first paint. The dialog does NOT paint
+        the bypass-permissions bar, so the C5 idle heuristic
+        cannot recognize it as idle. We loop briefly, looking for
+        the trust pattern, and dismiss with "1" (the documented
+        response — see `scripts/probe_slash_arguments.py:241-247`).
+        This converts a 60s silent stall into a <2s dismiss + a
+        normal C5 wait.
         """
+        for _ in range(5):
+            result = pty.read_until_idle(
+                min_content_bytes=0,
+                timeout_s=PRIME_TRUST_DISMISS_TIMEOUT_S,
+            )
+            if result.saw_idle:
+                break
+            if TRUST_FOLDER_RE.search(result.buffer):
+                pty.write("1")
+                # TUI may re-render briefly after dismissal; loop
+                # and re-read until C5 idle or the buffer changes
+                # shape (then fall through to the C5 wait).
+                continue
+            # No trust pattern, no idle — the TUI may be still
+            # painting its first frame. Fall through to the C5
+            # wait, which has the full prime budget.
+            break
         # Wait for the TUI's initial idle (no content floor — the
         # first paint is the welcome frame, not a response).
-        pty.read_until_idle(min_content_bytes=0, timeout_s=60.0)
+        pty.read_until_idle(min_content_bytes=0, timeout_s=PRIME_PRE_WRITE_TIMEOUT_S)
         # Send the slash command + the user message as $ARGUMENTS.
         pty.write(f"{slash_cmd} {self.user_message}")
+        # Wait for the model to actually finish the prime. The
+        # quiescence gate in read_until_idle blocks idle declaration
+        # while the TUI is still painting (spinner animation /
+        # streaming response repaint at >=1 Hz), so this read waits
+        # for the model's response to settle (or times out at
+        # PRIME_POST_WRITE_TIMEOUT_S).
+        #
+        # The content floor is critical: without it, the bypass-
+        # permissions bar (a persistent footer) satisfies the C5
+        # idle heuristic on the stale pre-write buffer, and
+        # `_prime_session` returns while the model is still
+        # processing the slash command. The pre-write C5 read
+        # already declared idle on the welcome frame; the post-
+        # write read needs a content floor that proves the model
+        # actually produced response content.
+        post = pty.read_until_idle(
+            min_content_bytes=PRIME_POST_WRITE_MIN_CONTENT_BYTES,
+            timeout_s=PRIME_POST_WRITE_TIMEOUT_S,
+        )
+        logger.info(
+            "container: prime post-write wait saw_idle=%s buffer_len=%d elapsed_ms=%d",
+            post.saw_idle,
+            len(post.buffer),
+            post.elapsed_ms,
+        )
 
     def run(self) -> ContainerResult:
         """Run the steady-state loop end-to-end.
@@ -353,23 +567,54 @@ class Container:
             self._run_pkill_fallback()
             return result
 
+        logger.info(
+            "container: spawned pair (cwd=%s)",
+            self.cwd or "<sandbox>",
+        )
+
         try:
             # Persona priming.
+            logger.info("container: priming PM")
             self._prime_session(self._pm_pty, PM_PRIME_SLASH_CMD)
+            logger.info("container: PM prime done")
+            logger.info("container: priming Dev")
             self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD)
+            logger.info("container: Dev prime done; entering startup loop")
 
             # Startup-phase loop. Watch both PTYs for known startup
-            # events. Trust-folder is the most likely; the parser
-            # dismisses it with "1\r".
-            for cycle in range(STARTUP_WINDOW_CYCLES):
-                pm_idle = self._cycle_idle(self._pm_pty, min_content_bytes=0)
-                dev_idle = self._cycle_idle(self._dev_pty, min_content_bytes=0)
+            # events (trust-folder, update notice — the parser
+            # dismisses them) and keep cycling on short 3s reads
+            # until BOTH PTYs reach idle. The persona load on Opus
+            # high-effort can run minutes past the prime post-write
+            # budget, so a slow cold start simply keeps polling here
+            # cheaply until the TUIs settle. If they never settle
+            # within STARTUP_HARD_CEILING_S, the run exits
+            # `startup_unresolved` — the distinct failure signature
+            # plan Risk 6 relies on for a broken `--permission-mode`
+            # flag (the bypass bar never paints, so idle never
+            # fires).
+            startup_settled = False
+            startup_deadline = time.monotonic() + STARTUP_HARD_CEILING_S
+            cycle = 0
+            while time.monotonic() < startup_deadline:
+                pm_idle = self._startup_cycle_idle(self._pm_pty)
+                dev_idle = self._startup_cycle_idle(self._dev_pty)
                 response = self._handle_startup(pm_idle[1], dev_idle[1])
+                logger.info(
+                    "container: startup cycle=%d pm_idle=%s dev_idle=%s response=%r",
+                    cycle,
+                    pm_idle[0],
+                    dev_idle[0],
+                    response,
+                )
                 if response is None:
                     # No startup event in this window — break if
                     # both PTYs are idle, otherwise keep watching.
                     if pm_idle[0] and dev_idle[0]:
+                        logger.info("container: startup both idle, breaking")
+                        startup_settled = True
                         break
+                    cycle += 1
                     continue
                 # The parser chose a startup event; respond. For
                 # trust-folder, "1" is the dismissal. For update
@@ -382,13 +627,13 @@ class Container:
                     # track which PTY the parser saw the event on.
                     self._pm_pty.write(response)
                 result.startup_events.append({"cycle": cycle, "response": response})
-            else:
-                # All STARTUP_WINDOW_CYCLES exhausted without both PTYs going
-                # idle. The startup phase did not settle — declare
-                # startup_unresolved and exit early rather than entering the
-                # steady-state loop with an unsettled TUI state.
+                cycle += 1
+            if not startup_settled:
                 result.exit_reason = "startup_unresolved"
-                result.exit_message = f"startup did not settle after {STARTUP_WINDOW_CYCLES} cycles"
+                result.exit_message = (
+                    f"startup did not settle within {STARTUP_HARD_CEILING_S:.0f}s "
+                    f"hard ceiling ({cycle} cycles)"
+                )
                 return result
 
             # Steady state.
@@ -408,6 +653,17 @@ class Container:
                 # whether we route to Dev, route to user (results
                 # log), or exit on complete.
                 classification = classify_pm_prefix(pm_buf)
+                # Per-turn progress hook (TD1): every classified PM
+                # turn counts as progress for the two-tier no-progress
+                # detector, regardless of destination.
+                if self._on_turn is not None:
+                    try:
+                        self._on_turn()
+                    except Exception as e:
+                        logger.warning(
+                            "[granite-container] on_turn callback raised: %s",
+                            e,
+                        )
                 if classification.compliance_miss:
                     result.classification_compliance_misses += 1
                 if classification.destination == "unknown":
@@ -453,18 +709,27 @@ class Container:
                     result.turns.append(turn_record)
                     result.exit_reason = "pm_complete"
                     result.exit_message = classification.payload
+                    # BridgeAdapter hook: emit the trailing
+                    # summary to the user-visible channel
+                    # (Telegram relay) at the end of the run.
+                    if self._on_complete_payload is not None:
+                        try:
+                            self._on_complete_payload(classification.payload)
+                        except Exception as e:
+                            logger.warning(
+                                "[granite-container] on_complete_payload callback raised: %s",
+                                e,
+                            )
                     break
 
                 if classification.destination == "user":
-                    # User-address text goes to the results log (the
-                    # PoC does not wire to the bridge). With no user
-                    # to relay to and no user reply to re-prompt PM
-                    # with, this invocation is terminal — exit on
-                    # pm_user rather than looping back to re-read an
-                    # idle PM and reclassify the same buffer until
-                    # max_turns. A bridge-wired deployment would
-                    # instead relay the payload and await the user's
-                    # reply before the next PM turn.
+                    # User-address text goes to the user-visible
+                    # channel (Telegram relay) mid-loop. With no
+                    # user reply to re-prompt PM, the PoC's
+                    # headless invocation is terminal — exit on
+                    # pm_user. A bridge-wired deployment also
+                    # exits on pm_user; the adapter has already
+                    # delivered the payload to the chat.
                     turn_record = TurnRecord(
                         turn_index=turn,
                         pm_idle_ms=pm_ms,
@@ -481,6 +746,21 @@ class Container:
                     result.turns.append(turn_record)
                     result.exit_reason = "pm_user"
                     result.exit_message = classification.payload
+                    # BridgeAdapter hook: emit the user-address
+                    # payload to the user-visible channel
+                    # (Telegram relay) BEFORE exiting. The
+                    # callback is synchronous and blocks the
+                    # thread until delivery completes (per the
+                    # ADV-5 hardening); the thread holds for
+                    # the duration of the network call.
+                    if self._on_user_payload is not None:
+                        try:
+                            self._on_user_payload(classification.payload)
+                        except Exception as e:
+                            logger.warning(
+                                "[granite-container] on_user_payload callback raised: %s",
+                                e,
+                            )
                     break
 
                 # destination == "dev" — extract a developer

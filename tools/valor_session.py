@@ -352,6 +352,29 @@ def cmd_create(args: argparse.Namespace) -> int:
         parent_id = getattr(args, "parent", None)
         model = getattr(args, "model", None)
 
+        # ------------------------------------------------------------------
+        # Stopgap (#1633): refuse NEW parent-attached session creation.
+        # The granite PTY container owns the PM/Dev split; parent-linked
+        # child sessions double-consume bounded pool slots. Fires before
+        # any filesystem or Redis work (slug derivation, worktree
+        # provisioning, enqueue) so the refused path has zero side effects.
+        # ------------------------------------------------------------------
+        if parent_id:
+            from models.child_session_gate import (
+                BYPASS_WARNING,
+                CHILD_SESSIONS_DISABLED_MESSAGE,
+                child_sessions_allowed,
+                child_sessions_disabled_json,
+            )
+
+            if not child_sessions_allowed():
+                if getattr(args, "json", False):
+                    print(json.dumps(child_sessions_disabled_json(), indent=2))
+                else:
+                    print(f"Error: {CHILD_SESSIONS_DISABLED_MESSAGE}", file=sys.stderr)
+                return 2
+            print(BYPASS_WARNING, file=sys.stderr)
+
         # Derive a session_id from timestamp + role
         ts_suffix = str(int(utc_now().timestamp() * 1000))
         session_id = f"{chat_id}_{ts_suffix}"

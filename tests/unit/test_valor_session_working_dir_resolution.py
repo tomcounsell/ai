@@ -219,7 +219,11 @@ class TestParentInheritance:
         """--parent <id> without --project-key inherits ``project_key`` from the
         parent. ``working_dir`` is re-derived from the (inherited) key's
         project entry — it is NOT copied from ``parent.working_dir``.
+
+        Inheritance is only reachable under the #1633 escape hatch (child
+        creation is otherwise refused), so set the bypass env here.
         """
+        monkeypatch.setenv("VALOR_ALLOW_CHILD_SESSIONS", "1")
         parent_project_root = tmp_path / "parent_proj"
         parent_project_root.mkdir()
 
@@ -281,7 +285,11 @@ class TestParentInheritance:
     def test_parent_not_found_falls_through_to_cwd_resolution(self, tmp_path, monkeypatch):
         """A typo in --parent (session not found) must not hard-fail creation
         if cwd can still resolve to a project. Parent inheritance is advisory.
+
+        Only reachable under the #1633 escape hatch (child creation is
+        otherwise refused), so set the bypass env here.
         """
+        monkeypatch.setenv("VALOR_ALLOW_CHILD_SESSIONS", "1")
         proj_root = tmp_path / "proj"
         proj_root.mkdir()
         monkeypatch.chdir(proj_root)  # cwd matches the project
@@ -568,6 +576,9 @@ class TestThreeLevelPMChain:
     """
 
     def test_pm_pm_dev_chain_all_rooted_in_project(self, tmp_path, monkeypatch):
+        # Levels 2 and 3 are --parent creates, only reachable under the
+        # #1633 escape hatch (child creation is otherwise refused).
+        monkeypatch.setenv("VALOR_ALLOW_CHILD_SESSIONS", "1")
         demo_root = tmp_path / "demo"
         demo_root.mkdir()
         unrelated_cwd = tmp_path / "unrelated"
