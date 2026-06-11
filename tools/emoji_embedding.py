@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,6 +93,13 @@ CUSTOM_EMOJI_PLACEHOLDER = "\u2753"  # ❓ (replaced by entity rendering)
 
 # Minimum delta by which custom emoji score must exceed standard to win
 CUSTOM_EMOJI_DELTA = 0.05
+
+# Softmax temperature for emoji selection: higher = more random (flatter distribution).
+# At 1.0 the distribution tracks score differences closely; at 5.0+ it's nearly uniform.
+REACTION_TEMPERATURE = 4.0
+
+# Number of top candidates to sample from (emoji variety window).
+REACTION_TOP_K = 3
 
 
 @dataclass
@@ -283,6 +292,32 @@ def _load_or_compute_embeddings() -> dict[str, list[float]]:
     return _embedding_cache
 
 
+def _softmax_sample(candidates: list[tuple[str, float]], temperature: float) -> tuple[str, float]:
+    """Sample an emoji from candidates using softmax-weighted probability.
+
+    A higher temperature flattens the distribution, giving lower-ranked
+    candidates a real chance. Returns (emoji, score) of the selected candidate.
+    """
+    if not candidates:
+        return DEFAULT_EMOJI, 0.0
+    if len(candidates) == 1:
+        return candidates[0]
+
+    raw = [score / temperature for _, score in candidates]
+    max_raw = max(raw)
+    weights = [math.exp(s - max_raw) for s in raw]
+    total = sum(weights)
+    weights = [w / total for w in weights]
+
+    r = random.random()
+    cumulative = 0.0
+    for (emoji, score), weight in zip(candidates, weights):
+        cumulative += weight
+        if r <= cumulative:
+            return emoji, score
+    return candidates[-1]
+
+
 def find_best_emoji(feeling: str) -> EmojiResult:
     """Find the best reaction emoji for a given feeling word.
 
@@ -318,17 +353,17 @@ def find_best_emoji(feeling: str) -> EmojiResult:
     if not query_embedding:
         return default_result
 
-    # Search standard emoji embeddings
-    best_standard_emoji = DEFAULT_EMOJI
-    best_standard_score = -1.0
-
+    # Score all standard emoji and collect top-K candidates for sampling
+    scored: list[tuple[str, float]] = []
     for emoji, emb in embeddings.items():
         if emoji in BLOCKED_REACTION_EMOJIS:
             continue
         score = _cosine_similarity(query_embedding, emb)
-        if score > best_standard_score:
-            best_standard_score = score
-            best_standard_emoji = emoji
+        scored.append((emoji, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top_standard = scored[: max(1, REACTION_TOP_K)]
+    best_standard_emoji, best_standard_score = _softmax_sample(top_standard, REACTION_TEMPERATURE)
 
     # Search custom emoji embeddings (if available)
     best_custom_id: int | None = None
@@ -336,15 +371,27 @@ def find_best_emoji(feeling: str) -> EmojiResult:
 
     custom_embeddings = _load_custom_embeddings()
     if custom_embeddings:
+        custom_scored: list[tuple[int, float]] = []
         for key, emb in custom_embeddings.items():
             score = _cosine_similarity(query_embedding, emb)
-            if score > best_custom_score:
-                best_custom_score = score
-                # Key format: "custom:{document_id}"
-                try:
-                    best_custom_id = int(key.split(":", 1)[1])
-                except (ValueError, IndexError):
-                    continue
+            try:
+                doc_id = int(key.split(":", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            custom_scored.append((doc_id, score))
+
+        if custom_scored:
+            custom_scored.sort(key=lambda x: x[1], reverse=True)
+            top_custom = custom_scored[: max(1, REACTION_TOP_K)]
+            # Reuse _softmax_sample with string keys for uniform interface
+            custom_str_candidates = [(str(doc_id), score) for doc_id, score in top_custom]
+            sampled_str, best_custom_score = _softmax_sample(
+                custom_str_candidates, REACTION_TEMPERATURE
+            )
+            try:
+                best_custom_id = int(sampled_str)
+            except ValueError:
+                best_custom_id = None
 
     # Custom emoji wins only if it exceeds standard by CUSTOM_EMOJI_DELTA
     use_custom = (
