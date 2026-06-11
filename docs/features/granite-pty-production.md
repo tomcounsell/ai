@@ -231,6 +231,65 @@ harness path on incident:
    granite payloads; the drafter is idempotent on retried `[/user]` payloads.
 4. No manual flag toggling, no env var changes.
 
+## `valor-granite-loop` CLI AgentSession lifecycle
+
+The standalone `valor-granite-loop` CLI creates and finalizes an `AgentSession`
+record so its runs are visible in the dashboard and `valor-session list`.
+
+### Session creation (before container starts)
+
+Before `Container.run()` is called, `main()` mints a session and persists it:
+
+```python
+session_id = "local-" + uuid.uuid4().hex[:12]   # e.g. "local-a3f9b21c8d04"
+session = AgentSession.create_local(
+    session_id=session_id,
+    session_type=SessionType.GRANITE,
+    project_key="valor",
+    working_dir=args.cwd or os.getcwd(),
+)
+```
+
+**Why the `local-` prefix is required**: worker startup recovery
+(`agent/session_health.py:538`) discriminates by
+`session_id.startswith("local")`. A bare-hex id falls through to the bridge
+recovery path and would re-execute the CLI run as a bridge session on the next
+worker restart.
+
+**Why `session_type=SessionType.GRANITE`**: `create_local` defaults to
+`SESSION_TYPE_DEV`, which would silently mislabel the session. Granite CLI
+sessions carry `session_type="granite"` so `valor-session list --role granite`
+returns only CLI-originated runs, not bridge-originated dev sessions.
+
+### Session finalization (on exit)
+
+| Exit condition | Finalize status | Reason passed |
+|---|---|---|
+| `exit_reason in ("pm_complete", "pm_user")` | `completed` | `result.exit_reason` |
+| All other exit reasons | `failed` | `result.exit_reason` |
+| Unexpected exception in `container.run()` | `failed` | `repr(e)` |
+
+The except-block finalizes with `reject_from_terminal=False` to prevent a
+double-finalize raise if the post-run path already set the status to `failed`.
+
+### Operational IDs
+
+The stdout summary JSON contains two ID fields that serve different purposes:
+
+| Field | Value | Use |
+|---|---|---|
+| `agent_session_id` | The `local-`-prefixed record ID | `valor-session steer/kill/status --id` |
+| `session_id` | Container's internal trace artifact | Correlating turn traces in the results JSON |
+
+Use `agent_session_id` for all `valor-session` operations. Use `session_id` to
+look up the corresponding `ContainerResult` in the results file.
+
+### Best-effort guard
+
+Session persistence failures never affect the CLI exit code or results JSON
+output. A single `granite session not recorded: <reason>` line is emitted to
+stderr and execution continues normally.
+
 ## See also
 
 - [Granite Operator: Interactive TUI](granite-interactive-tui.md) — the PoC
