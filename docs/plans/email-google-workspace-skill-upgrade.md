@@ -141,9 +141,9 @@ Agent in cuttlefish needs email → loads `/email` (resolves globally) → tries
   - Flip frontmatter `user-invocable: false` → `true`.
   - Prepend a tool-selection preamble enumerating, per service (Gmail, Calendar, Drive, Docs, Sheets, Slides, People, Chat, Forms, Keep), the priority order `gws <service>` → MCP (`mcp__claude_ai_*` where it exists) → BYOB.
   - **[RESOLVED: fold legacy cleanup in now]** Normalize the legacy MCP-shorthand references throughout the existing skill body (`gmail.search()`, `people.getMe()`, etc.) to the real `mcp__claude_ai_*` tool names, OR replace them with `gws <service>` invocations where that is now the preferred path. Do not relitigate the surrounding behavioral guidance (timezone, draft-first, previews) — only correct the tool-name references.
-  - `hardlinks.py`: remove `"google-workspace"` from `PROJECT_ONLY_SKILLS` (line 71) and remove the retired-skills tombstone `("skills", "google-workspace")` (line 58) so the sync hardlinks the new `skills-global/` copy instead of pruning it.
+  - `hardlinks.py`: remove `"google-workspace"` from `PROJECT_ONLY_SKILLS` (line 71) **and** remove the retired-skills tombstone `("skills", "google-workspace")` (line 58). **[Critique Concern 3 — both edits are load-bearing, not hygiene]** `_cleanup_renamed` (`hardlinks.py:306`) runs AFTER `_sync_skills` (call order line 129 then line 144), so if the tombstone is left in place the freshly-synced `~/.claude/skills/google-workspace` is deleted by name during the SAME `/update` pass — silently reverting the move on every run. Removing only ONE of the two leaves the skill either un-synced (PROJECT_ONLY_SKILLS left) or sync-then-deleted (tombstone left). Both must go.
 - **Part 4 (docs):**
-  - `CLAUDE.md`: correct the `gws` path note (`~/src/node_modules/.bin/gws` → "on PATH after `npm install -g @googleworkspace/cli`").
+  - `CLAUDE.md`: correct the `gws` note at `CLAUDE.md:9`. Fix the stale path (`~/src/node_modules/.bin/gws` → "on PATH after `npm install -g @googleworkspace/cli`") **and strike the false "Pre-authenticated" claim** [Critique Concern 4] — replace it with a note that first use requires a one-time human `gws auth setup` / `gws auth login` OAuth step (per Research finding 3). Leaving "Pre-authenticated" tells agents to expect a working tool that errors on every call.
   - `~/.claude/CLAUDE.md`: add a one-line `gws` entry to the tool list so it is visible globally. (This is a user-global file, edited directly — not synced by the repo.)
 
 ## Failure Path Test Strategy
@@ -164,7 +164,7 @@ Agent in cuttlefish needs email → loads `/email` (resolves globally) → tries
 
 - [ ] `tests/unit/` (update module tests, if any cover `npm_tools.MANAGED_PACKAGES` length/contents) — UPDATE: adjust the expected package count/contents to include `@googleworkspace/cli`. Builder must `grep -rn "MANAGED_PACKAGES\|excalidraw-export" tests/` first.
 - [ ] `tests/unit/` (update module tests covering `verify.check_system_tools`) — UPDATE: if a test asserts the exact tool list returned by `check_system_tools`, extend it to include `gws`. Builder must `grep -rn "check_system_tools" tests/` first.
-- [ ] Hardlink sync tests covering `PROJECT_ONLY_SKILLS` or the retired list — UPDATE: if a test asserts `google-workspace` is project-only or tombstoned, update it to expect global sync. Builder must `grep -rn "PROJECT_ONLY_SKILLS\|google-workspace" tests/` first.
+- [ ] `tests/unit/test_symlinks.py:45-50` (`EXPECTED_PROJECT_ONLY`) — UPDATE (unconditional, WILL fail otherwise): this is a hard exact-equality assertion (`PROJECT_ONLY_SKILLS == EXPECTED_PROJECT_ONLY`) that literally contains `"google-workspace"`. Drop `"google-workspace"` from `EXPECTED_PROJECT_ONLY`. The `RENAMED_REMOVALS` membership test at `:34-38` covers commands only and will NOT break. [Critique Concern 2]
 - [ ] Skill-validation tests (frontmatter schema, `user-invocable`) — UPDATE/ADD: ensure the new `/email` skill and the moved `google-workspace` skill pass whatever skill-frontmatter validator exists. Builder must `grep -rn "user-invocable\|skills-global\|SKILL.md" tests/` first.
 
 If the above greps find no existing coverage, ADD a minimal unit test asserting (a) `@googleworkspace/cli` is in `MANAGED_PACKAGES`, and (b) a missing-`gws` verify check returns `available=False` without raising. No existing test deletions anticipated.
@@ -288,8 +288,8 @@ The agent reaches new functionality via a CLI on PATH (Bash tool) or a globally-
 - **Agent Type**: builder
 - **Parallel**: true
 - Append `("@googleworkspace/cli", None)` to `MANAGED_PACKAGES` in `scripts/update/npm_tools.py` with an explanatory comment.
-- Add a non-fatal `gws` check to `scripts/update/verify.py::check_system_tools` (always-present `check_command("gws", "--version")`).
-- In `scripts/update/hardlinks.py`, remove `"google-workspace"` from `PROJECT_ONLY_SKILLS` and remove the `("skills", "google-workspace")` tombstone entry.
+- Add an **optional-style** `gws` check to `scripts/update/verify.py::check_system_tools` — gated, silent when absent: `if shutil.which("gws"): results.append(check_command("gws", "--version"))`, mirroring the `sentry-cli` block at `verify.py:194-198`. **[Critique Concern 1]** Do NOT use a bare always-on `check_command` — that surfaces a warning on every Workspace-less machine, contradicting resolved Q2.
+- In `scripts/update/hardlinks.py`, remove `"google-workspace"` from `PROJECT_ONLY_SKILLS` (line 71) **and** remove the `("skills", "google-workspace")` tombstone entry (line 58). Both are mandatory — see Technical Approach Part 3 / Critique Concern 3 (tombstone left in place → sync-then-delete on every run).
 
 ### 2. Skills: /email (new) + google-workspace (move + upgrade) + doc paths
 - **Task ID**: build-skills
@@ -311,7 +311,8 @@ The agent reaches new functionality via a CLI on PATH (Bash tool) or a globally-
 - **Parallel**: false
 - Confirm `@googleworkspace/cli` in `MANAGED_PACKAGES`; confirm the `gws` verify check returns non-fatally when `gws` absent.
 - Confirm both skills have `user-invocable: true` and live in `skills-global/`; confirm `hardlinks.py` no longer marks `google-workspace` project-only.
-- Run `/update --verify` (safe on skills machine) and confirm a non-fatal `gws` warning when absent / a green check when present.
+- **[Critique Concern 3]** After running `/update`, assert `~/.claude/skills/google-workspace/SKILL.md` **still exists** (survives the `_cleanup_renamed` pass that runs after `_sync_skills`) — not merely that the source moved. A surviving file proves both the `PROJECT_ONLY_SKILLS` and tombstone edits landed.
+- Run `/update --verify` (safe on skills machine) and confirm `gws` status surfaces when present / stays silent (no warning, exit 0) when absent.
 - Confirm doc edits. Report pass/fail.
 
 ### 4. Documentation
@@ -337,9 +338,14 @@ The agent reaches new functionality via a CLI on PATH (Bash tool) or a globally-
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) 2026-06-11. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Consistency, Skeptic | Task 1 step says "always-present `check_command`" but RESOLVED decision + Solution say optional-style (silent-when-absent). Builder follows the task verbatim → wrong behavior. | revision pass | Replace Task 1 (line 291) wording with the gated form: `if shutil.which("gws"): results.append(check_command("gws", "--version"))` inside `check_system_tools`, mirroring the `sentry-cli` block at verify.py:194-198. Do NOT use a bare always-on `check_command`. |
+| CONCERN | Skeptic, Adversary | Test Impact frames `test_symlinks.py` breakage as conditional ("if a test asserts..."), but `tests/unit/test_symlinks.py:45-55` is a guaranteed hard failure — `EXPECTED_PROJECT_ONLY` and `RENAMED_REMOVALS` both contain `google-workspace`. | revision pass | Two assertions break deterministically: (1) `EXPECTED_PROJECT_ONLY` set at test_symlinks.py:45-50 must drop `"google-workspace"`; (2) the `RENAMED_REMOVALS` membership test at :34-38 covers commands only, but the tombstone removal at hardlinks.py:58 must still be deleted. Make these UPDATE tasks, not conditional greps. |
+| CONCERN | Operator, Adversary | Tombstone removal is load-bearing, not hygiene. `_cleanup_renamed` (hardlinks.py:306) runs AFTER `_sync_skills` (line 144 vs 129) and deletes `~/.claude/skills/google-workspace` by name if the tombstone at line 58 remains — silently undoing the sync. | revision pass | Validator must assert post-`/update` that `~/.claude/skills/google-workspace/SKILL.md` still EXISTS (survives the cleanup pass), not merely that the source moved. Order of operations: sync(129) → cleanup_renamed(144). Removing both the tombstone (line 58) AND the PROJECT_ONLY entry (line 71) is mandatory; removing only one leaves a broken state. |
+| CONCERN | User, Skeptic | Repo `CLAUDE.md:9` says gws is "**Pre-authenticated**" — false per Research finding 3 (auth is a separate human OAuth step). The doc-fix task only corrects the path, not this misleading claim. | revision pass | Edit CLAUDE.md:9 to also remove/correct "Pre-authenticated" → note auth is a one-time `gws auth setup`/`login` human step. A builder leaving "Pre-authenticated" in place contradicts the plan's own auth-degradation design. |
+| NIT | Simplifier | Both `~/.claude/CLAUDE.md` edit items are [EXTERNAL] on the bridge machine but in-scope here; the plan correctly scopes this but the global file has no `gws` entry yet (verified absent). | revision pass | n/a |
 
 ---
 
