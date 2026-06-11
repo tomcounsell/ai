@@ -101,27 +101,85 @@ def _load_env() -> None:
         pass
 
 
-_WORKER_HEARTBEAT_FILE = _repo_root / "data" / "last_worker_connected"
+from agent.constants import WORKER_DOWN_THRESHOLD_S  # noqa: E402
 
-from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S  # noqa: E402
+
+def _resolve_heartbeat_path(repo_root: Path | None = None) -> Path:
+    """Resolve the worker heartbeat file path, worktree-aware.
+
+    The worker only ever writes ``data/last_worker_connected`` under the MAIN
+    checkout. When this CLI runs from a git worktree (``.worktrees/{slug}/``),
+    a ``__file__``-relative path points at the worktree's own ``data/`` dir,
+    which the worker never touches — producing a false "worker down" verdict.
+
+    Resolution: ``git -C <repo_root> rev-parse --path-format=absolute
+    --git-common-dir`` yields the main checkout's ``.git`` dir (flag order
+    matters — ``--path-format=absolute`` must precede ``--git-common-dir``).
+    The heartbeat lives at ``<common_dir>.parent / data / last_worker_connected``.
+
+    Relative git output is resolved against ``repo_root`` (never the process
+    cwd). Any subprocess failure — non-zero exit, missing git binary, timeout,
+    any exception — falls back to the ``__file__``-relative path. Never raises
+    (#980 never-raise contract).
+    """
+    anchor = repo_root if repo_root is not None else Path(__file__).parent.parent
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["git", "-C", str(anchor), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        output = proc.stdout.strip()
+        if proc.returncode == 0 and output:
+            common = Path(output)
+            abs_common = common if common.is_absolute() else (anchor / common).resolve()
+            return abs_common.parent / "data" / "last_worker_connected"
+    except Exception:
+        pass
+    return anchor / "data" / "last_worker_connected"
 
 
 def _check_worker_health() -> tuple[bool, int | None]:
     """Check worker health by reading the heartbeat file modification time.
 
-    Returns (healthy, age_s) where:
-      - healthy is True if the heartbeat was updated within the last 360 seconds
-      - age_s is the integer age in seconds, or None if the file is missing or unreadable
+    The heartbeat path comes from :func:`_resolve_heartbeat_path`, which uses
+    ``git rev-parse --path-format=absolute --git-common-dir`` so worktree
+    checkouts read the main checkout's ``data/last_worker_connected`` (the
+    only copy the worker writes).
 
-    Never raises — all OSError and unexpected exceptions are caught silently.
-    Missing file == unhealthy (worker has never run on this machine).
+    Threshold is ``WORKER_DOWN_THRESHOLD_S`` (600s) — 2x the worker's 300s
+    heartbeat write cadence (``agent/session_health.py`` health loop), giving
+    a full missed write cycle of margin before declaring the worker down.
+
+    Returns (healthy, age_s) where:
+      - healthy is True if heartbeat age < WORKER_DOWN_THRESHOLD_S
+      - age_s is the integer age in seconds, clamped to >= 0 (future-dated
+        mtimes from clock skew / iCloud report 0 == healthy), or None if the
+        file is missing or unreadable
+
+    Never raises — the #980 never-raise contract holds end to end; any
+    exception (including git failures inside the resolver) yields a fallback
+    path or (False, None). Missing file == down (worker has never run here).
     """
     try:
-        mtime = _WORKER_HEARTBEAT_FILE.stat().st_mtime
-        age_s = int(time.time() - mtime)
-        return (age_s < HEARTBEAT_STALENESS_THRESHOLD_S, age_s)
+        mtime = _resolve_heartbeat_path().stat().st_mtime
+        age_s = max(0, int(time.time() - mtime))
+        return (age_s < WORKER_DOWN_THRESHOLD_S, age_s)
     except Exception:
         return (False, None)
+
+
+def _worker_down_message(age_s: int | None) -> str:
+    """Shared warning template for the worker-down state (create + status)."""
+    age_str = f"{age_s}s" if age_s is not None else "no file"
+    return (
+        f"WARNING: no recent worker heartbeat on this machine ({age_str}) — "
+        "session will stay pending until a worker is started "
+        "(run: ./scripts/valor-service.sh worker-start)"
+    )
 
 
 class ProjectsConfigUnavailableError(RuntimeError):
@@ -462,8 +520,9 @@ def cmd_create(args: argparse.Namespace) -> int:
 
         result = asyncio.run(_create())
 
-        # Check worker health after enqueue — warn if no active worker
+        # Check worker health after enqueue — warn if no recent heartbeat
         worker_healthy, worker_age_s = _check_worker_health()
+        worker_state = "ok" if worker_healthy else "down"
 
         if args.json:
             print(
@@ -474,6 +533,8 @@ def cmd_create(args: argparse.Namespace) -> int:
                         "project_key": project_key,
                         "model": model,
                         "worker_healthy": worker_healthy,
+                        "worker_state": worker_state,
+                        "worker_heartbeat_age_s": worker_age_s,
                     },
                     indent=2,
                 )
@@ -486,12 +547,8 @@ def cmd_create(args: argparse.Namespace) -> int:
                 print(f"  Model:       {model}")
             print(f"  Message: {message[:80]}")
             print(f"  Chat ID: {chat_id}")
-            if not worker_healthy:
-                print(
-                    "WARNING: no active worker detected — session will stay pending until a "
-                    "worker is started (run: ./scripts/valor-service.sh worker-start)",
-                    file=sys.stderr,
-                )
+            if worker_state == "down":
+                print(_worker_down_message(worker_age_s), file=sys.stderr)
         return 0
 
     except Exception as e:
@@ -697,10 +754,14 @@ def cmd_status(args: argparse.Namespace) -> int:
             return 1
         full_message = getattr(args, "full_message", False)
 
-        # Check worker health when session is pending
+        # Check worker health when session is pending (compute gate avoids the
+        # git subprocess on every status call; non-pending emits null fields)
         worker_healthy: bool | None = None
+        worker_age_s: int | None = None
+        worker_state: str | None = None
         if session.status == "pending":
-            worker_healthy, _ = _check_worker_health()
+            worker_healthy, worker_age_s = _check_worker_health()
+            worker_state = "ok" if worker_healthy else "down"
 
         if args.json:
             data = {
@@ -725,13 +786,16 @@ def cmd_status(args: argparse.Namespace) -> int:
             }
             if worker_healthy is not None:
                 data["worker_healthy"] = worker_healthy
+            # Unconditionally present — null when the session is not pending
+            data["worker_state"] = worker_state
+            data["worker_heartbeat_age_s"] = worker_age_s
             print(json.dumps(data, indent=2, default=str))
             return 0
 
         print(f"Session: {session.session_id}")
         print(f"  Status:        {session.status}")
-        if worker_healthy is False:
-            print("  WARNING: No active worker — session may wait indefinitely.", file=sys.stderr)
+        if worker_state == "down":
+            print(f"  {_worker_down_message(worker_age_s)}", file=sys.stderr)
         stype = getattr(session, "session_type", "—")
         print(f"  Type:          {stype}")
         print(f"  Auto-continue: {session.auto_continue_count}")

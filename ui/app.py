@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S
+from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S, WORKER_DOWN_THRESHOLD_S
 from bridge.utc import utc_now
 
 logger = logging.getLogger(__name__)
@@ -329,7 +329,7 @@ def create_app() -> FastAPI:
                 # Bridge writes last_connected every ~5min in heartbeat loop
                 if age_s < HEARTBEAT_STALENESS_THRESHOLD_S:
                     return {"status": "ok", "age_s": age_s}
-                elif age_s < 600:
+                elif age_s < WORKER_DOWN_THRESHOLD_S:
                     return {"status": "running", "age_s": age_s}
                 else:
                     return {"status": "error", "age_s": age_s}
@@ -340,6 +340,7 @@ def create_app() -> FastAPI:
     def _get_worker_health() -> dict:
         """Check worker health from last_worker_connected file freshness."""
 
+        # TODO: migrate to _resolve_heartbeat_path if the UI ever runs from a worktree
         heartbeat_file = Path(__file__).parent.parent / "data" / "last_worker_connected"
         try:
             if heartbeat_file.exists():
@@ -347,7 +348,7 @@ def create_app() -> FastAPI:
                 age_s = round(time.time() - mtime)
                 if age_s < HEARTBEAT_STALENESS_THRESHOLD_S:
                     return {"status": "ok", "age_s": age_s}
-                elif age_s < 600:
+                elif age_s < WORKER_DOWN_THRESHOLD_S:
                     return {"status": "running", "age_s": age_s}
                 else:
                     return {"status": "error", "age_s": age_s}
