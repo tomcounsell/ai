@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -468,7 +468,7 @@ needed for the agent to "see" it.
 | CLI tests pass | `pytest tests/unit/granite_container/test_cli.py -q` | exit code 0 |
 | Granite executor tests pass | `pytest tests/unit/test_session_executor_granite.py -q` | exit code 0 |
 | granite enum member exists | `python -c "from config.enums import SessionType; assert SessionType.GRANITE == 'granite'"` | exit code 0 |
-| local- prefix minted in CLI | `grep -n '"local-"' tools/granite_interactive_tui_poc/cli.py` | output contains the prefixed mint |
+| local- prefix minted in CLI | `grep -n '"local-"' tools/granite_interactive_tui_poc/cli.py` | output contains local- |
 | Lint clean | `python -m ruff check tools/granite_interactive_tui_poc/ config/enums.py` | exit code 0 |
 
 ## Critique Results

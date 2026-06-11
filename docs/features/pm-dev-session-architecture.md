@@ -28,7 +28,7 @@ Session type derivation from resolved persona:
 - **Teammate persona** -> `session_type="teammate"` (Teammate session, conversational). Handles informational queries directly.
 - **PM, or unconfigured** -> `session_type="pm"` (PM session, PM persona). This includes SDLC work. The PM session decides whether to spawn a Dev session.
 
-There are exactly three session types: `pm`, `teammate`, and `dev`. `session_type` is the **sole discriminator** for routing, permission injection, summarizer formatting, and nudge cap selection. The `session_mode` field on `AgentSession` remains as a no-op `Field(null=True)` purely to keep Redis deserialization safe for in-flight records during the 30-day TTL window; it has zero readers and zero writers in application code. See [Config-Driven Chat Mode](config-driven-chat-mode.md) for the config schema and resolution order.
+There are four session types: `pm`, `teammate`, `dev`, and `granite`. The first three are bridge-originated and worker-executed. `granite` is exclusively for standalone `valor-granite-loop` CLI runs — it is created and finalized by the CLI itself, never by the worker or bridge. `session_type` is the **sole discriminator** for routing, permission injection, summarizer formatting, and nudge cap selection. The `session_mode` field on `AgentSession` remains as a no-op `Field(null=True)` purely to keep Redis deserialization safe for in-flight records during the 30-day TTL window; it has zero readers and zero writers in application code. See [Config-Driven Chat Mode](config-driven-chat-mode.md) for the config schema and resolution order.
 
 ## Enforcement — PM Session Tool Restrictions
 
