@@ -437,11 +437,20 @@ class Container:
         Returns (saw_idle, buffer, idle_marker, elapsed_ms). If the
         timeout fires without an idle, the buffer is whatever the
         TUI has painted so far and saw_idle is False.
+
+        The buffer is the PTY's per-turn capture (everything painted
+        since the last write to that PTY), not just the bytes read
+        during this call: the routed output may have streamed during an
+        earlier read (e.g. PM's prime response streams during the
+        prime's post-write wait), and the steady-state read then sees a
+        quiescent PTY. The `or result.buffer` fallback covers drivers
+        that don't populate `turn_buffer` (unit-test mocks).
         """
         result = pty.read_until_idle(
             min_content_bytes=min_content_bytes, timeout_s=CYCLE_IDLE_TIMEOUT_S
         )
-        return (result.saw_idle, result.buffer, result.idle_marker, result.elapsed_ms)
+        buffer = result.turn_buffer or result.buffer
+        return (result.saw_idle, buffer, result.idle_marker, result.elapsed_ms)
 
     # -- Startup phase ----------------------------------------------------
 
@@ -510,11 +519,11 @@ class Container:
         # Send the slash command + the user message as $ARGUMENTS.
         pty.write(f"{slash_cmd} {self.user_message}")
         # Wait for the model to actually finish the prime. The
-        # LOADING_RE negative in read_until_idle blocks idle
-        # declaration while the spinner ("Sprouting…", "Honking…",
-        # "Synthesizing…", etc.) is on screen, so this read waits
-        # for the model's "Worked for Ns" response (or times out
-        # at PRIME_POST_WRITE_TIMEOUT_S).
+        # quiescence gate in read_until_idle blocks idle declaration
+        # while the TUI is still painting (spinner animation /
+        # streaming response repaint at >=1 Hz), so this read waits
+        # for the model's response to settle (or times out at
+        # PRIME_POST_WRITE_TIMEOUT_S).
         #
         # The content floor is critical: without it, the bypass-
         # permissions bar (a persistent footer) satisfies the C5

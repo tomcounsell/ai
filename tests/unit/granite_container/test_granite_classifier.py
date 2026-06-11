@@ -107,6 +107,72 @@ class TestClassifyPmPrefix(unittest.TestCase):
         self.assertTrue(result.compliance_miss)
 
 
+class TestAnchoredPaintedFrames(unittest.TestCase):
+    """Real painted TUI captures: the `⏺`-anchored token wins.
+
+    The per-turn capture the container classifies contains the echo of
+    whatever the container just wrote AHEAD of the model's reply
+    (prime command, granite summary, compliance nudge), so first-line /
+    first-200-chars parsing reads the echo. The transcript bullet `⏺`
+    anchors the model's actual output (PR #1612 smoke debugging).
+    """
+
+    def test_anchored_token_wins_over_echo(self) -> None:
+        capture = (
+            "❯ /granite-poc:prime-pm-role Send a one-line confirmation.\n"
+            "────────────────────────────\n"
+            "✻ Sprouting…\n"
+            "⏺ [/user] Online and ready.\n"
+            "────────────────────────────\n"
+            "⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+        )
+        result = classify_pm_prefix(capture)
+        self.assertEqual(result.destination, "user")
+        self.assertEqual(result.payload, "Online and ready.")
+        self.assertFalse(result.compliance_miss)
+
+    def test_anchored_token_collapsed_whitespace(self) -> None:
+        """The TUI may paint with whitespace collapsed: `⏺[/user]Online...`."""
+        capture = "❯ some echo\n⏺[/dev]Run the unit tests in tests/unit.\n────────\n"
+        result = classify_pm_prefix(capture)
+        self.assertEqual(result.destination, "dev")
+        self.assertIn("Run the unit tests", result.payload)
+
+    def test_anchored_beats_nudge_echo_poisoning(self) -> None:
+        """The compliance nudge names the literal tokens; its echo must
+        not be classified as the PM's routing decision."""
+        capture = (
+            "❯ Your last reply did not start with a routing prefix on its "
+            "own line. Re-send your reply starting with exactly one of "
+            "[/dev], [/user], or [/complete] on the first line.\n"
+            "✻ Thinking…\n"
+            "⏺ [/complete] Confirmation sent; nothing further needed.\n"
+        )
+        result = classify_pm_prefix(capture)
+        self.assertEqual(result.destination, "complete")
+        self.assertIn("Confirmation sent", result.payload)
+
+    def test_last_anchored_match_wins(self) -> None:
+        """Repaints duplicate the reply; the LAST anchored token is the
+        final frame."""
+        capture = "⏺ [/dev] partial repai\n...\n⏺ [/dev] partial repaint now complete\n"
+        result = classify_pm_prefix(capture)
+        self.assertEqual(result.destination, "dev")
+        self.assertEqual(result.payload, "partial repaint now complete")
+
+    def test_payload_cut_at_frame_artifacts(self) -> None:
+        capture = "⏺ [/user] All done here.\n⏵⏵ bypass permissions on\n❯ \n"
+        result = classify_pm_prefix(capture)
+        self.assertEqual(result.destination, "user")
+        self.assertEqual(result.payload, "All done here.")
+
+    def test_clean_synthetic_input_unaffected(self) -> None:
+        """Inputs without a bullet marker keep the strict first-line path."""
+        result = classify_pm_prefix("[/dev]\nadd a function `foo` to bar.py")
+        self.assertEqual(result.destination, "dev")
+        self.assertFalse(result.compliance_miss)
+
+
 # ---------------------------------------------------------------------------
 # ANSI stripping: defense-in-depth
 # ---------------------------------------------------------------------------

@@ -11,9 +11,17 @@ This module is the PoC's **substrate** — every other component in
 narrow: it models the Claude Code TUI's submit/idle/interject surface
 (per the v7 spike report's C1-C5 findings) and nothing more.
 
-C1 (submit key): every text write ends with `\\r` (CR), never `\\n` (LF).
-    The TUI is a readline-style input box; `\\n` is a literal newline
-    within the field, not a submit.
+C1 (submit key): the submit key is `\\r` (CR), never `\\n` (LF), and it
+    MUST be sent as a separate keystroke after a short delay
+    (`SUBMIT_KEY_DELAY_S`). The TUI's paste-burst heuristic treats a CR
+    arriving in the same input burst as the text as a literal newline
+    inside the pasted content, NOT as a submit — observed live on TUI
+    v2.1.173 (PR #1612 smoke failure): `text+\\r` in one `send()` left
+    the command sitting in the input box forever, the model never ran,
+    and the startup loop burned its full 600s ceiling with
+    `pm_idle=False dev_idle=False` on every cycle. Sending the body,
+    sleeping `SUBMIT_KEY_DELAY_S`, then sending `\\r` as its own
+    keystroke submits reliably.
 C2 (interjection): the regex `INTERRUPTED_RE` matches both the v2.1.160
     text ("Press Ctrl-C again to exit") and the older text
     ("Interrupted · What should Claude do instead?"). The first ctrl-c
@@ -25,10 +33,26 @@ C4 (`/help` overlay): idle detection must recognize the `esc to cancel`
     bottom-bar text. The `wait_for_idle` heuristic checks for the
     bypass-permissions bar; an overlay swaps that bar for `esc to cancel`.
     Callers should treat both as "not actively responding".
-C5 (idle signal): the bottom-bar text + prompt glyph + a content floor
-    (default 400 bytes for post-reply). The glyph alone is not enough;
-    the TUI briefly re-renders the bar while the model is still loading
-    a response.
+C5 (idle signal): byte-quiescence + the bottom-bar text + prompt glyph
+    + a content floor (default 400 stripped chars for post-reply). The
+    heuristic is evaluated against the driver's persistent per-turn
+    screen capture (`_turn_text`, reset on every `write()`), NOT only
+    against bytes read during the current `read_until_idle` call: a
+    fully settled TUI paints NOTHING, so an idle check that only runs
+    on fresh chunks can never observe idle on a quiescent PTY (the PR
+    #1612 `startup_unresolved` smoke failure — 99 startup cycles, zero
+    new bytes, `saw_idle=False` for 10 minutes). Idle is only declared
+    after `QUIESCENCE_S` of byte-silence: while a model turn is active
+    the TUI repaints the spinner animation at >=1 Hz, but those
+    repaints arrive as cursor-positioned cell FRAGMENTS (`✻i…`,
+    `✽hg`), not full `✻ Sprouting…` frames, so no regex over the
+    capture can reliably tell "running now" from "settled" — sustained
+    silence is the physical signal (live-observed on v2.1.173: a
+    mid-turn read with only fragments in its tail false-idled at 4.2s
+    while the model was still painting). Reads with a content floor
+    (> 0) additionally require spinner evidence somewhere in the turn
+    capture — proof the model actually ran a turn — so the post-write
+    wait cannot declare idle on the command-echo frame alone.
 
 Reuse policy: the regexes (`_UUID_RE`, `_RESUME_HINT_RE`,
 `INTERRUPTED_RE`) are imported from the spike / headless harness rather
@@ -70,30 +94,38 @@ INTERRUPTED_RE = re.compile(
 # (`>` or `❯`). Both must be present.
 IDLE_BAR = re.compile(r"bypass.{0,30}permissions", re.DOTALL)
 PROMPT_GLYPH = re.compile(r"[>❯]")
-# Loading-indicator negative pattern: when the model is still
-# processing, the TUI paints a "· <verb>…" status line above the
-# prompt glyph. The bypass bar is ALSO visible during this period
-# (it's a persistent footer), so a naive C5 heuristic falsely
-# declares idle mid-load. We require the absence of this pattern
-# to confirm idle. Observed verbs (sampled across multiple PR
-# #1612 live runs): Sprouting, Whirlpooling, Cookin, Sock-hopping,
-# Honking, Thinking, Brewing, Spinning, Streaming, Drafting, plus
-# a long tail. The verb is followed by an ellipsis. We match the
-# structural shape (`· <word>+ …`) rather than enumerate verbs.
-LOADING_RE = re.compile(
-    r"[·•]\s*[A-Za-z][A-Za-z\-']{2,30}\s*[…\.]{1,3}",
+# Spinner-evidence pattern for content-floor reads: proof that a model
+# turn actually RAN at some point this turn (the spinner painted, or
+# the "esc to interrupt" processing hint did). Floor reads mean "the
+# model responded"; without this, the echo frame of the submitted
+# command (bar + glyph + enough bytes) satisfies the heuristic before
+# the model has started (live-observed in the PR #1612 smoke runs).
+# Observed spinner verbs (sampled across multiple PR #1612 live runs):
+# Sprouting, Whirlpooling, Cookin, Sock-hopping, Honking, Thinking,
+# Brewing, Crunching, Spinning, Streaming, Drafting, plus a long tail.
+# We match the structural shape (`<glyph> <word>+ …`) rather than
+# enumerate verbs; the leading glyph CYCLES per frame (·, ✻, ✶, ✳, ✢,
+# ✽ on v2.1.173, plus • historically). The full shape paints at least
+# once when the spinner line first renders; subsequent animation
+# frames are cell-fragments and are deliberately NOT used as a
+# "running right now" negative — see QUIESCENCE_S.
+SPINNER_EVIDENCE_RE = re.compile(
+    r"[·•✻✶✳✢✽]\s*[A-Za-z][A-Za-z\-']{2,30}\s*[…\.]{1,3}|esc to interrupt",
     re.IGNORECASE,
 )
-# The loading-indicator negative is checked against only the TRAILING
-# window of the accumulated buffer, not the whole capture. The capture
-# is an append-only byte stream: every spinner frame the TUI ever
-# painted stays in it, so a whole-buffer search matches forever once a
-# single "· Thinking…" frame lands — `read_until_idle` then can never
-# declare idle for that call and times out (the PR #1612 live-run
-# "saw_idle=False at 120s" symptom). The spinner is always part of the
-# CURRENT frame near the bottom of the screen; a trailing window covers
-# it while letting historical frames age out of scope.
-LOADING_TAIL_WINDOW = 400
+# Quiescence gate (C5): idle is only declared after this many seconds
+# with zero new PTY bytes. While a model turn is active the TUI
+# repaints the spinner animation and the elapsed-seconds counter at
+# >=1 Hz, so an active turn can never be silent this long; a settled
+# TUI paints nothing. This is the only reliable "running right now"
+# negative: the animation repaints arrive as cursor-positioned cell
+# FRAGMENTS (`✻i…`, `✽hg`), not full `✻ Sprouting…` frames, so a
+# regex over the capture's tail misses an active turn (false idle
+# mid-load, live-observed) and a stale full spinner frame near the
+# end of a settled capture latches not-idle forever (false hang).
+# Must stay below STARTUP_CYCLE_TIMEOUT_S (3s) so the startup loop's
+# short polls can still observe idle. Module-level so tests can patch.
+QUIESCENCE_S = 2.0
 
 # C4: the `/help` overlay swaps the bottom bar to "esc to cancel".
 # Treat the overlay as "not actively responding" so the loop can hold.
@@ -101,8 +133,21 @@ LOADING_TAIL_WINDOW = 400
 # with spaces (`Esc to cancel`); \s* matches both forms.
 OVERLAY_BAR = re.compile(r"esc\s*to\s*cancel", re.IGNORECASE)
 
-# C1: the submit key. Every text write ends with this.
+# C1: the submit key. Sent as a SEPARATE keystroke after the text body.
 SUBMIT_KEY = b"\r"
+# C1: delay between sending the text body and the submit CR. The TUI's
+# paste-burst heuristic treats a CR arriving in the same burst as the
+# text as a literal newline inside the paste, not a submit (observed
+# live on v2.1.173 — the PR #1612 startup_unresolved failure). 0.5s is
+# the live-calibrated gap that reliably registers the CR as a
+# standalone Enter keystroke. Module-level so tests can patch it to 0.
+SUBMIT_KEY_DELAY_S = 0.5
+
+# Cap on the per-turn screen capture retained across read_until_idle
+# calls. A long Dev turn repaints spinner frames for minutes; trimming
+# from the front keeps memory bounded while preserving the trailing
+# frames the idle heuristic and the classifier care about.
+TURN_TEXT_MAX_CHARS = 256_000
 
 # ANSI CSI-stripping regex (basic). The TUI paints styled output; for
 # downstream classification we strip CSI sequences and the OSC sequences
@@ -136,12 +181,23 @@ class PTYDriverError(RuntimeError):
 
 @dataclass
 class IdleResult:
-    """Result of a `read_until_idle` call."""
+    """Result of a `read_until_idle` call.
+
+    `buffer` is the ANSI-stripped text read during THIS call only —
+    edge-triggered, suitable for startup-event parsing (an event must
+    not be re-detected and re-answered on every poll cycle).
+    `turn_buffer` is the ANSI-stripped screen capture since the last
+    `write()` — level-triggered, suitable for classification (the PM's
+    routed output may have streamed during an earlier read call, e.g.
+    the prime's post-write wait, while the classifying read sees a
+    quiescent PTY).
+    """
 
     saw_idle: bool
-    buffer: str  # ANSI-stripped accumulated text
+    buffer: str  # ANSI-stripped text read during this call
     idle_marker: str  # short slice of the trailing buffer at the moment of idle
     elapsed_ms: int
+    turn_buffer: str = ""  # ANSI-stripped capture since the last write()
 
 
 def _strip_ansi(text: str) -> str:
@@ -250,6 +306,13 @@ class PTYDriver:
         self._append_system_prompt = append_system_prompt
         self._child: pexpect.spawn | None = None
         self._spawned_at: float | None = None
+        # Per-turn screen capture (raw, ANSI-laden). Accumulates every
+        # chunk read by `read_until_idle` across calls; reset by
+        # `write()` (a new turn starts) and `close()`. The C5 idle
+        # heuristic is evaluated against this capture so a quiescent
+        # PTY whose idle frame painted during an EARLIER read call is
+        # still observable as idle (level-triggered).
+        self._turn_text: str = ""
 
     # -- Lifecycle --------------------------------------------------------
 
@@ -311,29 +374,49 @@ class PTYDriver:
             pass
         self._child = None
         self._spawned_at = None
+        self._turn_text = ""
 
     # -- I/O --------------------------------------------------------------
 
     def write(self, text: str) -> None:
-        """Write text + `\\r` to the PTY (C1 submit key).
+        """Write text to the PTY, then submit with a separate `\\r` (C1).
 
-        Empty input is rejected. If the caller already appended `\\r`
-        or `\\n`, the trailing newline is normalized to `\\r`. Literal
+        Empty input is rejected. A single trailing `\\r`/`\\n`/`\\r\\n`
+        on the input is stripped (it IS the submit intent); literal
         newlines WITHIN the input are preserved (the TUI input box
-        supports multi-line input via the bracketed paste or a literal
-        `\\n`; only the *final* newline is the submit key).
+        treats a rapid burst as a paste, so internal `\\n` become
+        newlines inside the field).
+
+        The submit CR is sent as its own keystroke after
+        `SUBMIT_KEY_DELAY_S`: the TUI's paste-burst heuristic treats a
+        CR arriving in the same burst as the text as a literal newline
+        inside the paste, not a submit (live-observed on v2.1.173 —
+        the PR #1612 startup_unresolved failure mode, where the prime
+        command sat unsubmitted in the input box for the full 600s
+        startup ceiling).
+
+        A write starts a new turn: the per-turn screen capture
+        (`_turn_text`) is reset BEFORE sending so the C5 idle heuristic
+        and content floor measure only frames painted after this
+        submit.
         """
         if not text:
             raise PTYDriverError("PTYDriver.write() rejected empty input")
         if self._child is None:
             raise PTYDriverError("PTYDriver.write() called before spawn()")
 
-        if text.endswith("\n") and not text.endswith("\r\n"):
-            text = text[:-1] + "\r"
-        elif not text.endswith("\r"):
-            text = text + "\r"
+        if text.endswith("\r\n"):
+            body = text[:-2]
+        elif text.endswith(("\r", "\n")):
+            body = text[:-1]
+        else:
+            body = text
 
-        self._child.send(text)
+        self._turn_text = ""
+        if body:
+            self._child.send(body)
+            time.sleep(SUBMIT_KEY_DELAY_S)
+        self._child.send("\r")
 
     def send_ctrl_c(self) -> None:
         """Send a single ctrl-c to the TUI (the first stage of C2 interject).
@@ -357,13 +440,38 @@ class PTYDriver:
         C5 heuristic: the idle state is the bottom-bar text + the prompt
         glyph. The C4 overlay (`/help` showing `esc to cancel`) is also
         treated as idle — the loop holds while the user dismisses the
-        overlay. The `min_content_bytes` floor (default 400) prevents
-        false-positives from the TUI briefly re-rendering the bar while
-        the model is still loading a response.
+        overlay.
+
+        The heuristic is **level-triggered**: it is evaluated against
+        the per-turn screen capture (`_turn_text`, everything painted
+        since the last `write()`), on every poll tick — including ticks
+        where no new bytes arrived. A settled TUI paints nothing, so an
+        edge-triggered check (only on fresh chunks) can never observe
+        idle on a quiescent PTY and times out forever (the PR #1612
+        startup_unresolved failure mode).
+
+        Idle additionally requires `QUIESCENCE_S` of byte-silence
+        observed within this call: an active model turn repaints the
+        spinner animation at >=1 Hz (as cell fragments no regex can
+        reliably match), so sustained silence is the signal that the
+        turn is over and the capture's bar/glyph reflect a settled
+        screen rather than a mid-load repaint.
+
+        The `min_content_bytes` floor (default 400) is measured against
+        the ANSI-stripped turn capture and prevents false-positives
+        from the TUI re-rendering the bar while the model is still
+        loading. Floor reads (> 0) additionally require spinner
+        evidence somewhere in the turn capture — the echo of the
+        submitted command paints the bypass bar and the prompt glyph
+        BEFORE the model starts, and ANSI-heavy echo frames can exceed
+        a byte floor on their own (live-observed: the prime post-write
+        wait returned `saw_idle=True` on the echo frame while the model
+        had not run).
 
         Returns an `IdleResult` with `saw_idle=False` if the timeout
-        fires before the idle signal stabilizes. The buffer is
-        ANSI-stripped and is whatever the TUI has painted so far.
+        fires before the idle signal stabilizes. `buffer` is the
+        ANSI-stripped text read during this call; `turn_buffer` is the
+        ANSI-stripped capture since the last write.
         """
         if self._child is None:
             raise PTYDriverError("PTYDriver.read_until_idle() called before spawn()")
@@ -373,41 +481,58 @@ class PTYDriver:
         saw_idle = False
         idle_marker = ""
         start = time.monotonic()
+        last_chunk_at = start
 
         while time.monotonic() < deadline:
             try:
                 chunk = self._child.read_nonblocking(size=8192, timeout=0.5)
             except pexpect.TIMEOUT:
-                continue
+                chunk = ""
             except pexpect.EOF:
                 break
             except pexpect.exceptions.ExceptionPexpect:
                 break
-            if not chunk:
+            if chunk:
+                accumulated += chunk
+                self._turn_text += chunk
+                if len(self._turn_text) > TURN_TEXT_MAX_CHARS:
+                    self._turn_text = self._turn_text[-TURN_TEXT_MAX_CHARS:]
+                # The TUI is actively painting — a model turn is in
+                # flight (spinner animation / streaming response).
+                # Re-read; idle can only be declared after silence.
+                last_chunk_at = time.monotonic()
                 continue
-            accumulated += chunk
-            stripped = _strip_ansi(accumulated)
-            # Loading-indicator negative: if the model is still
-            # processing, the bypass bar is up but the model hasn't
-            # actually responded yet. Don't declare idle while the
-            # loading verb is on screen. Check only the trailing
-            # window — the capture is append-only, so a whole-buffer
-            # search would latch on the first spinner frame and block
-            # idle for the rest of the call (see LOADING_TAIL_WINDOW).
-            if LOADING_RE.search(stripped[-LOADING_TAIL_WINDOW:]):
+            # Quiescence gate: require sustained byte-silence observed
+            # WITHIN this call before judging the capture. An active
+            # turn repaints at >=1 Hz, so it can never pass this gate;
+            # a settled PTY passes it QUIESCENCE_S after its last paint
+            # (or QUIESCENCE_S into the call if it was already silent).
+            if time.monotonic() - last_chunk_at < QUIESCENCE_S:
+                continue
+            stripped = _strip_ansi(self._turn_text)
+            if not stripped:
                 continue
             # C4 + C5: idle = (bypass bar OR overlay bar) AND prompt glyph.
             bar_match = IDLE_BAR.search(stripped) or OVERLAY_BAR.search(stripped)
             if bar_match and PROMPT_GLYPH.search(stripped):
-                if min_content_bytes == 0 or len(accumulated) >= min_content_bytes:
-                    saw_idle = True
-                    tail = stripped[-200:]
-                    m = IDLE_BAR.search(tail) or OVERLAY_BAR.search(tail)
-                    if m:
-                        s = max(0, m.start() - 20)
-                        e = m.end() + 20
-                        idle_marker = tail[s:e]
-                    break
+                if min_content_bytes > 0:
+                    if len(stripped) < min_content_bytes:
+                        continue
+                    # Spinner evidence: a content-floor read means "the
+                    # model responded"; require that a loading verb (or
+                    # the esc-to-interrupt hint) was painted at some
+                    # point this turn. The trailing window above
+                    # already proved the spinner is gone NOW.
+                    if not SPINNER_EVIDENCE_RE.search(stripped):
+                        continue
+                saw_idle = True
+                tail = stripped[-200:]
+                m = IDLE_BAR.search(tail) or OVERLAY_BAR.search(tail)
+                if m:
+                    s = max(0, m.start() - 20)
+                    e = m.end() + 20
+                    idle_marker = tail[s:e]
+                break
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return IdleResult(
@@ -415,6 +540,7 @@ class PTYDriver:
             buffer=_strip_ansi(accumulated),
             idle_marker=idle_marker,
             elapsed_ms=elapsed_ms,
+            turn_buffer=_strip_ansi(self._turn_text),
         )
 
     def isalive(self) -> bool:

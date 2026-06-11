@@ -65,6 +65,29 @@ DEFAULT_MODEL = "granite4.1:3b"
 PREFIX_TOKEN_RE = re.compile(r"^\[/(dev|user|complete)\]\s*$")
 PREFIX_TOKEN_FALLBACK_RE = re.compile(r"\[/(dev|user|complete)\]")
 
+# Anchored form for real painted TUI frames. The interactive TUI
+# renders the assistant's reply as a transcript bullet
+# (`⏺ [/user] Online and ready.` — whitespace may be collapsed:
+# `⏺[/user]Onlineandready.`), and the per-turn capture the container
+# classifies ALSO contains the echo of whatever the container just
+# wrote (the prime command, a granite summary, the compliance nudge —
+# which itself names the literal tokens). The bullet marker only ever
+# precedes the MODEL's output, never the echo, so a bullet-anchored
+# match is the reliable signal in a painted capture; the LAST such
+# match is the final repaint of the reply.
+PREFIX_TOKEN_ANCHORED_RE = re.compile(r"[⏺●]\s*\[/(dev|user|complete)\]")
+
+# Frame furniture that can follow the reply in a painted capture: box
+# borders, the bypass-permissions footer glyphs, the input prompt
+# line, and the spinner verb. Payload extraction cuts at the first of
+# these so routed payloads don't carry TUI chrome.
+_FRAME_ARTIFACT_RE = re.compile(
+    r"─{5,}"
+    r"|⏵⏵"
+    r"|\n\s*❯"
+    r"|[·✻✶✳✢✽]\s*[A-Za-z][A-Za-z\-']{2,30}\s*[…\.]{1,3}"
+)
+
 # Destination: which PTY the routed output goes to.
 Destination = Literal["dev", "user", "complete", "unknown"]
 
@@ -187,6 +210,28 @@ def classify_pm_prefix(pm_tail: str) -> ClassificationResult:
     from agent.granite_container.pty_driver import _strip_ansi
 
     pm_tail = _strip_ansi(pm_tail)
+
+    # Painted-frame path: a real TUI capture contains the echo of
+    # whatever the container just wrote ahead of the model's reply, so
+    # first-line / first-200-chars parsing reads the echo, not the
+    # reply. The transcript bullet (`⏺`) anchors the model's output;
+    # take the LAST anchored token (the final repaint of the reply)
+    # and cut the payload at the first piece of frame furniture.
+    anchored = None
+    for anchored in PREFIX_TOKEN_ANCHORED_RE.finditer(pm_tail):
+        pass
+    if anchored is not None:
+        rest = pm_tail[anchored.end() :]
+        artifact = _FRAME_ARTIFACT_RE.search(rest)
+        if artifact:
+            rest = rest[: artifact.start()]
+        return ClassificationResult(
+            destination=anchored.group(1),  # type: ignore[arg-type]
+            payload=rest.strip(),
+            compliance_miss=False,
+            raw_first_line=pm_tail[anchored.start() : anchored.end() + 80].splitlines()[0],
+        )
+
     # Find the first non-empty line.
     first_line = ""
     for line in pm_tail.splitlines():

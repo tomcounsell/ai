@@ -23,6 +23,9 @@ def _mock_pty(idle_buffer: str = "[/complete] done\nbypass permissions\n❯ ") -
     result = MagicMock()
     result.saw_idle = True
     result.buffer = idle_buffer
+    # Per-turn capture (level-triggered idle, PR #1612): the container
+    # classifies `turn_buffer or buffer`, so mirror the buffer here.
+    result.turn_buffer = idle_buffer
     result.idle_marker = "bypass permissions"
     result.elapsed_ms = 1
     pty.read_until_idle.return_value = result
