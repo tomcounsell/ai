@@ -38,7 +38,10 @@ Telegram inbound → bridge enqueue → AgentSession in Redis
                                             ▼
         BridgeAdapter.run(user_message, working_dir)
           ├─ resolve send_cb once (agent_session_queue._resolve_callbacks)
-          ├─ acquire (pm, dev) PTY pair from PTYPool (blocks if pool full)
+          ├─ acquire (pm, dev) PTY pair from PTYPool with a PairSpawnSpec
+          │     (session cwd, env, persona overlay, PM model — pool spawns a
+          │      fresh per-session pair at acquire when the spec differs from
+          │      its spawn-time defaults; bounded-slot invariant holds)
           ├─ run Container in asyncio.to_thread (sync pexpect off the loop)
           │     ├─ on each [/user] turn  → send_cb(chat_id, text, reply_to, session)
           │     ├─ on [/complete]        → send_cb(chat_id, summary, reply_to, session)
@@ -51,7 +54,7 @@ Telegram inbound → bridge enqueue → AgentSession in Redis
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| `PTYPool` | `agent/granite_container/pty_pool.py` | Bounded, singleton pool of PM+Dev PTY slot pairs. `acquire_pair()` blocks when all slots are locked; `release_pair()` schedules a background respawn so the next acquirer gets fresh PTYs. |
+| `PTYPool` | `agent/granite_container/pty_pool.py` | Bounded, singleton pool of PM+Dev PTY slot pairs. `acquire_pair(spawn_spec=...)` blocks when all slots are locked (waiting on a pool-level `asyncio.Condition` notified when a slot turns idle, not a sleep-poll) and spawns a per-session pair in the acquired slot when the `PairSpawnSpec` differs from the pool defaults; `release_pair()` schedules a background respawn so the next acquirer gets fresh PTYs. |
 | `BridgeAdapter` | `agent/granite_container/bridge_adapter.py` | Wraps `Container`: resolves `send_cb`, delivers `[/user]`/`[/complete]` payloads mid-loop, writes observability events to `session_events`, returns `""`. |
 | `Container` | `agent/granite_container/container.py` | The PoC kernel: drives the PM→granite→Dev→granite→PM loop over two PTYs, classifies PM output, returns a `ContainerResult`. |
 | Executor wiring | `agent/session_executor.py` | Replaces the `get_response_via_harness` call with `BridgeAdapter.run` via `asyncio.to_thread`. `send_result=False`. |
@@ -70,6 +73,40 @@ The pool size is intentionally **smaller** than `MAX_CONCURRENT_SESSIONS`
 overcommitting memory. Each `claude --permission-mode bypassPermissions` PTY
 consumes ~200 MB resident. See
 [deployment.md](deployment.md#granite-pty-pool) for the growth path to 6.
+
+## Per-session spawn (spawn-on-acquire)
+
+Environment variables and the `--append-system-prompt` overlay can only be
+injected at process spawn, so `BridgeAdapter.run` passes a `PairSpawnSpec` to
+`PTYPool.acquire_pair`. When the spec's cwd/env/persona/model differ from the
+pool's spawn-time defaults, the pool closes the slot's pre-warmed pair and
+spawns a fresh per-session pair in the **same slot** — the bounded-slot
+invariant and the normal release/respawn lifecycle are preserved, at the cost
+of spawn latency on acquire. The spec carries:
+
+- **`cwd`** — the session's `working_dir`. Dev sessions with tier-2 worktree
+  isolation run their TUIs inside `.worktrees/{slug}/`, and cross-project
+  sessions run in their own repo (the #887 worktree-contamination class is
+  closed on this path).
+- **`env`** — the per-session identity env merged on top of the driver's
+  `_build_env()`: `SESSION_TYPE` (drives the `pre_tool_use` PM Bash
+  restrictions, issue #1148), `AGENT_SESSION_ID` (hook attribution and the
+  liveness writers), `CLAUDE_CODE_TASK_LIST_ID` (task-list isolation),
+  `VALOR_PARENT_SESSION_ID` (child-session linking), and Telegram/Sentry auth
+  for PM/Teammate sessions.
+- **`pm_system_prompt`** — the composed persona overlay (PM SDLC orchestration
+  overlay, email persona, or teammate overlay), applied to the PM PTY via
+  `claude --append-system-prompt`. This is the SAME persona composition the
+  executor resolves for every session type.
+- **`pm_model`** — the D1 precedence cascade (`session.model` > settings >
+  codebase default), applied to the PM PTY. The Dev PTY has no per-session
+  model knob; it stays on `GRANITE__DEV_MODEL` (`PairSpawnSpec.dev_model`
+  exists at the pool layer but the adapter never sets it).
+
+In production every bridge-originated session carries a non-empty env, so
+**every production acquire takes the spawn-on-acquire path**; the pre-warmed
+pair only serves spec-less callers (the granite CLI, tests). A spec matching
+the pool defaults reuses the pre-warmed pair as-is.
 
 ## User-visible behavior
 
@@ -107,7 +144,34 @@ The adapter writes non-user-visible progress to `agent_session.session_events`
 
 > Note: `session_events` starts as `None` on a fresh `AgentSession`
 > (`ListField(null=True)`). The adapter initializes the list before its first
-> append (`_append_session_event`) so events are never silently dropped.
+> append (`_append_session_event`) **and persists each append** with
+> `save(update_fields=["session_events", "updated_at"])` — the executor's
+> post-run saves exclude `session_events` and finalization loads a fresh copy
+> by session_id, so an unsaved in-memory append would never reach Redis.
+
+### Liveness (two-tier no-progress detector)
+
+The harness path fed `last_turn_at` via the sdk_client `result` handler and
+the liveness hooks; the granite container has neither. `BridgeAdapter` passes
+its `_bump_last_turn_at` as the container's `on_turn` hook, which fires once
+per classified PM turn (every destination, including `unknown`) and persists
+`agent_session.last_turn_at` with `save(update_fields=["last_turn_at"])`. This
+keeps the two-tier no-progress detector's sub-check A live for granite
+sessions: a wedged session stops bumping `last_turn_at` and Tier-1/Tier-2 can
+detect it, instead of riding the sticky own-progress signal forever. The bump
+is fail-silent — a Redis failure logs a warning and never crashes the run.
+
+### Startup hard ceiling
+
+The startup loop polls both PTYs on short (`STARTUP_CYCLE_TIMEOUT_S` = 3s)
+reads until both reach idle, dismissing transient startup events
+(trust-folder, update notice) along the way. A slow cold persona load simply
+keeps the loop cycling cheaply. If the PTYs never settle within
+`STARTUP_HARD_CEILING_S` (600s), the run exits `startup_unresolved` — the
+distinct failure signature for a broken `--permission-mode` flag (a TUI
+upgrade renaming the flag means the bypass bar never paints, so the idle
+heuristic can never fire). Without the ceiling that failure would burn the
+steady-state budget and report a misleading `pm_hang`.
 
 ## Failure handling
 
@@ -125,37 +189,18 @@ The adapter writes non-user-visible progress to `agent_session.session_events`
 
 ## Known limitations (deep-dive audit, PR #1612)
 
-The cutover preserves the queue/steering/observability surface but **silently
-drops several per-session knobs** the harness path honored. These are
-architectural gaps, not bugs in the wrapper CLIs that set the knobs:
-
-1. **`working_dir` is ignored.** `BridgeAdapter.run(user_message, working_dir)`
-   passes `cwd` to `Container`, but a pool-prewarmed pair was already spawned
-   in the pool's `initialize(cwd=...)` directory (the worker's cwd today), and
-   `Container._spawn_pair` returns early for prewarmed pairs. Slug-based
-   worktree isolation (#887, #1272) is therefore bypassed on the granite path:
-   the PTYs run wherever the pool spawned them. Fixing this requires either
-   per-acquire respawn-with-cwd (forfeits prewarm latency) or `cd` injection
-   into the TUI before priming.
-2. **Per-session `model` is ignored.** The executor resolves
-   `_resolve_session_model(agent_session)` but never applies it; PTY models
-   are fixed at pool-spawn time from `GRANITE__PM_MODEL`/`GRANITE__DEV_MODEL`.
-3. **Persona overlays and harness env are not applied.** The executor still
-   computes `_pm_system_prompt` and `_harness_env` (`SESSION_TYPE`,
-   `CLAUDE_CODE_TASK_LIST_ID`, `VALOR_PARENT_SESSION_ID`, Telegram/Sentry
-   auth) for the harness path, but the granite container primes personas via
-   the `/granite-poc:prime-{pm,dev}-role` slash commands instead and the pool
-   PTYs inherit only the worker's env. PM Bash restrictions
-   (`pre_tool_use.py` keyed on `SESSION_TYPE`) and task-list isolation are
-   inactive inside granite PTYs.
-4. **Resume is a fresh session.** The container has no `claude --resume`
-   wiring; a `valor-session resume` re-enqueues and the granite path sends the
-   minimal message into a brand-new TUI without the prior transcript.
-5. **`[/dev]` turns hard-depend on local ollama.** `extract_dev_prompt` /
+1. **Resume is a fresh TUI session.** The container has no `claude --resume`
+   wiring; a reply-to thread continuation or `valor-session resume`
+   re-enqueues into a brand-new TUI without the prior Claude Code transcript.
+   The executor always sends the **full-context turn input** (the same
+   context-prefixed message a first turn gets), so threaded conversations
+   keep their conversation context — what is lost is the TUI-internal
+   transcript (tool-call history), not the conversational context.
+2. **`[/dev]` turns hard-depend on local ollama.** `extract_dev_prompt` /
    `summarize_for_pm` call `ollama.chat` (`granite4.1:3b`); if ollama is down
    the container exits `exception` on the first dev-routed turn. Worker
    startup does not health-check ollama.
-6. **Multi-turn conversations end at the first `[/user]`.** The container
+3. **Multi-turn conversations end at the first `[/user]`.** The container
    exits on `pm_user`; a user reply spawns a new container run (fresh PTYs,
    fresh context apart from the steering message).
 

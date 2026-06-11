@@ -269,5 +269,187 @@ class TestEventClearFirstLine(unittest.TestCase):
             self.assertEqual(first_state, "respawning")
 
 
+class _SessionSpecDriver:
+    """Fake PTYDriver accepting the per-session spawn kwargs."""
+
+    instances: list = []
+
+    def __init__(
+        self,
+        role: str = "pm",
+        cwd: str | None = None,
+        model: str | None = None,
+        env: dict | None = None,
+        append_system_prompt: str | None = None,
+    ) -> None:
+        self.role = role
+        self.cwd = cwd
+        self.model = model
+        self.env = env
+        self.append_system_prompt = append_system_prompt
+        self._child = None  # _pair_is_live treats None-child as live
+        self.closed = False
+        _SessionSpecDriver.instances.append(self)
+
+    def spawn(self) -> None:
+        pass
+
+    def isalive(self) -> bool:
+        return True
+
+    def close(self, force: bool = True) -> None:
+        self.closed = True
+
+
+class TestSpawnOnAcquire(unittest.TestCase):
+    """Spawn-on-acquire (PR #1612 review B1+B2): a spec carrying
+    per-session requirements replaces the pre-warmed pair in the
+    SAME slot; the bounded-slot invariant and the normal release/
+    respawn lifecycle are preserved."""
+
+    def setUp(self) -> None:
+        _SessionSpecDriver.instances = []
+        from agent.granite_container.pty_pool import PairSpawnSpec
+
+        self.PairSpawnSpec = PairSpawnSpec
+
+    def _patched_pool(self, size: int = 1) -> PTYPool:
+        return _make_pool(size=size)
+
+    def test_env_spec_replaces_prewarmed_pair_in_same_slot(self) -> None:
+        async def _run():
+            pool = self._patched_pool()
+            await pool.initialize(cwd="/x")
+            prewarmed = pool._slots[0].pty_pair
+            spec = self.PairSpawnSpec(cwd="/x", env={"SESSION_TYPE": "pm"})
+            async with pool.acquire_pair(spawn_spec=spec) as (pm, dev):
+                # Fresh pair, not the prewarmed one.
+                self.assertIsNot(pm, prewarmed[0])
+                self.assertIsNot(dev, prewarmed[1])
+                self.assertEqual(pm.env, {"SESSION_TYPE": "pm"})
+                # Same slot holds the fresh pair (bounded-slot invariant).
+                self.assertIs(pool._slots[0].pty_pair[0], pm)
+            # Prewarmed pair was closed at replacement.
+            self.assertTrue(prewarmed[0].closed)
+            self.assertTrue(prewarmed[1].closed)
+            await pool.drain_respawns()
+
+        with patch("agent.granite_container.pty_pool.PTYDriver", _SessionSpecDriver):
+            asyncio.run(_run())
+
+    def test_cwd_mismatch_triggers_session_spawn(self) -> None:
+        async def _run():
+            pool = self._patched_pool()
+            await pool.initialize(cwd="/pool-cwd")
+            spec = self.PairSpawnSpec(cwd="/worktree")
+            async with pool.acquire_pair(spawn_spec=spec) as (pm, dev):
+                self.assertEqual(pm.cwd, "/worktree")
+                self.assertEqual(dev.cwd, "/worktree")
+            await pool.drain_respawns()
+
+        with patch("agent.granite_container.pty_pool.PTYDriver", _SessionSpecDriver):
+            asyncio.run(_run())
+
+    def test_model_spec_reaches_role_drivers(self) -> None:
+        """`pm_model`/`dev_model` land on the matching role's driver
+        (pm_model carries the D1-resolved session model; dev_model has
+        no production producer today but is pool-layer API)."""
+
+        async def _run():
+            pool = self._patched_pool()
+            await pool.initialize(cwd="/x")
+            spec = self.PairSpawnSpec(cwd="/x", pm_model="opus", dev_model="sonnet")
+            async with pool.acquire_pair(spawn_spec=spec) as (pm, dev):
+                self.assertEqual(pm.model, "opus")
+                self.assertEqual(dev.model, "sonnet")
+            await pool.drain_respawns()
+
+        with patch("agent.granite_container.pty_pool.PTYDriver", _SessionSpecDriver):
+            asyncio.run(_run())
+
+    def test_matching_spec_uses_prewarmed_pair(self) -> None:
+        async def _run():
+            pool = self._patched_pool()
+            await pool.initialize(cwd="/x")
+            prewarmed = pool._slots[0].pty_pair
+            spec = self.PairSpawnSpec(cwd="/x")  # no env/persona/model
+            async with pool.acquire_pair(spawn_spec=spec) as (pm, dev):
+                self.assertIs(pm, prewarmed[0])
+                self.assertIs(dev, prewarmed[1])
+            await pool.drain_respawns()
+
+        with patch("agent.granite_container.pty_pool.PTYDriver", _SessionSpecDriver):
+            asyncio.run(_run())
+
+    def test_failed_session_spawn_releases_slot_and_semaphore(self) -> None:
+        """A failing per-session spawn must not leak the semaphore:
+        the acquire raises, the slot goes through the normal
+        release/respawn path, and a later acquire succeeds."""
+
+        fail_next = {"on": False}
+
+        class _FlakyDriver(_SessionSpecDriver):
+            def spawn(self) -> None:
+                if fail_next["on"]:
+                    raise RuntimeError("simulated session spawn failure")
+
+        async def _run():
+            pool = self._patched_pool()
+            await pool.initialize(cwd="/x")
+            spec = self.PairSpawnSpec(cwd="/x", env={"A": "1"})
+            fail_next["on"] = True
+            with self.assertRaises(RuntimeError):
+                async with pool.acquire_pair(spawn_spec=spec):
+                    pass  # pragma: no cover - never reached
+            fail_next["on"] = False
+            await pool.drain_respawns()
+            # The slot recovered: a plain acquire succeeds.
+            async with pool.acquire_pair() as (pm, dev):
+                self.assertIsNotNone(pm)
+                self.assertIsNotNone(dev)
+            await pool.drain_respawns()
+
+        with patch("agent.granite_container.pty_pool.PTYDriver", _FlakyDriver):
+            asyncio.run(_run())
+
+
+class TestNoSleepPollWait(unittest.TestCase):
+    """PR #1612 review nit: `_wait_for_idle_slot` must not busy-poll
+    with `asyncio.sleep` while all slots are locked — it waits on the
+    pool-level condition notified when a slot turns idle."""
+
+    def test_all_locked_waiter_wakes_via_condition_not_sleep(self) -> None:
+        import agent.granite_container.pty_pool as pty_pool_mod
+
+        real_sleep = asyncio.sleep
+
+        async def _forbidden_sleep(*a, **kw):
+            raise AssertionError("_wait_for_idle_slot busy-polled via asyncio.sleep")
+
+        async def _run():
+            pool = _make_pool(size=1)
+            await pool.initialize()
+            slot = pool._slots[0]
+            # Force the all-locked / no-respawning state the old code
+            # sleep-polled on.
+            slot.state = "locked"
+            slot.event.clear()
+            with patch.object(pty_pool_mod.asyncio, "sleep", _forbidden_sleep):
+                waiter = asyncio.create_task(pool._wait_for_idle_slot())
+                # Let the waiter park on the condition (cooperative
+                # yields only — asyncio.sleep is forbidden).
+                for _ in range(10):
+                    await real_sleep(0)
+                self.assertFalse(waiter.done())
+                # The slot turns idle via the normal spawn path; its
+                # condition notify must wake the parked waiter.
+                await pool._spawn_slot(0)
+                got = await asyncio.wait_for(waiter, timeout=2)
+            self.assertIs(got, slot)
+
+        with _patch_spawn_to_succeed():
+            asyncio.run(_run())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

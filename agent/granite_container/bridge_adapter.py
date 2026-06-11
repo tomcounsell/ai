@@ -63,7 +63,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from agent.granite_container.container import Container, ContainerResult
-from agent.granite_container.pty_pool import PTYPool
+from agent.granite_container.pty_pool import PairSpawnSpec, PTYPool
 
 logger = logging.getLogger(__name__)
 
@@ -79,14 +79,25 @@ def _now_iso() -> str:
 
 
 def _append_session_event(agent_session, event: dict) -> None:
-    """Append an observability event to ``agent_session.session_events``.
+    """Append an observability event to ``agent_session.session_events``
+    and persist it.
 
     ``AgentSession.session_events`` is a ``ListField(null=True)``, so a
     freshly created session has ``session_events is None`` rather than an
     empty list. Earlier code early-returned on ``None`` and silently
     dropped every granite event in production. This helper initializes the
-    list when it is ``None`` so the entry is never lost. All writes fail
-    silently — observability must never crash the run.
+    list when it is ``None`` so the entry is never lost.
+
+    The append alone only mutates the in-memory ORM object — the
+    executor's post-run saves use ``update_fields`` sets that exclude
+    ``session_events``, and finalization loads a fresh copy by
+    session_id, so an unsaved append never reaches Redis. Persist
+    explicitly with the model's documented partial-save pattern
+    (``models/agent_session.py`` ``_append_event_dict``; cf.
+    ``agent/agent_session_queue.py`` checkpoint save):
+    ``save(update_fields=["session_events", "updated_at"])``.
+
+    All writes fail silently — observability must never crash the run.
     """
     if agent_session is None:
         return
@@ -96,6 +107,10 @@ def _append_session_event(agent_session, event: dict) -> None:
             events = []
             agent_session.session_events = events
         events.append(event)
+        save = getattr(agent_session, "save", None)
+        if callable(save):
+            agent_session.updated_at = datetime.now(UTC)
+            save(update_fields=["session_events", "updated_at"])
     except Exception as e:  # pragma: no cover - defensive
         logger.warning(
             "[bridge-adapter] could not write session_event %s: %s",
@@ -121,12 +136,27 @@ class BridgeAdapter:
         pool: PTYPool,
         resolve_callbacks: Callable[[str, str], tuple[Callable | None, Any]] | None = None,
         delivery_timeout_s: float = DEFAULT_DELIVERY_TIMEOUT_S,
+        session_env: dict[str, str] | None = None,
+        pm_system_prompt: str | None = None,
+        pm_model: str | None = None,
     ) -> None:
         self._agent_session = agent_session
         self._project_key = project_key
         self._transport = transport
         self._pool = pool
         self._delivery_timeout_s = delivery_timeout_s
+        # Per-session spawn requirements (PR #1612 review B1+B2). Env
+        # vars (SESSION_TYPE, AGENT_SESSION_ID, CLAUDE_CODE_TASK_LIST_ID,
+        # VALOR_PARENT_SESSION_ID, ...) and the composed persona overlay
+        # can only be injected at process spawn, so `run()` passes these
+        # to the pool as a `PairSpawnSpec`; the pool spawns a fresh pair
+        # at acquire time when they differ from its spawn-time defaults.
+        self._session_env = dict(session_env) if session_env else None
+        self._pm_system_prompt = pm_system_prompt
+        # D1-resolved PM model (session.model > settings > codebase
+        # default). The Dev PTY intentionally has no per-session model
+        # knob — it stays on GRANITE__DEV_MODEL via the spec default.
+        self._pm_model = pm_model
         # The worker's event loop, captured by `run()` on the asyncio
         # thread before the container is handed to `asyncio.to_thread`.
         # The container's callbacks fire on the to_thread worker thread,
@@ -177,8 +207,18 @@ class BridgeAdapter:
         # Use the pool's async context manager to acquire a
         # (pm, dev) PTY pair. The pool's semaphore is bounded
         # by GRANITE_PTY_POOL_SIZE; over-cap sessions wait in
-        # Redis.
-        async with self._pool.acquire_pair() as (pm, dev):
+        # Redis. The spawn spec carries the session's cwd, env,
+        # persona overlay, and model override — when any of them
+        # differ from the pool's spawn-time defaults, the pool
+        # replaces the pre-warmed pair with a per-session spawn
+        # (spawn-on-acquire; the bounded-slot invariant holds).
+        spawn_spec = PairSpawnSpec(
+            cwd=working_dir,
+            env=self._session_env,
+            pm_model=self._pm_model,
+            pm_system_prompt=self._pm_system_prompt,
+        )
+        async with self._pool.acquire_pair(spawn_spec=spawn_spec) as (pm, dev):
             # Hand the pool's pre-warmed pair to Container so it
             # reuses them instead of spawning a fresh pair. The
             # pre-warm is the pool's whole point — discarding it
@@ -194,6 +234,7 @@ class BridgeAdapter:
                 cwd=working_dir,
                 on_user_payload=self._on_user_payload,
                 on_complete_payload=self._on_complete_payload,
+                on_turn=self._bump_last_turn_at,
                 pm_pty=pm,
                 dev_pty=dev,
             )
@@ -249,6 +290,32 @@ class BridgeAdapter:
                 "ts": _now_iso(),
             },
         )
+
+    # -- Liveness (two-tier no-progress detector, TD1) ---------------------
+
+    def _bump_last_turn_at(self) -> None:
+        """Bump ``agent_session.last_turn_at`` for the in-flight session.
+
+        The harness path wrote this via the sdk_client ``result``
+        handler and the liveness hooks (both keyed on
+        ``AGENT_SESSION_ID``); the granite container has no SDK result
+        events, so without this bump ``sdk_ever_output`` stays False
+        forever and the two-tier no-progress detector's sub-check A is
+        neutralized for granite sessions. The container calls this once
+        per classified PM turn (the ``on_turn`` hook). Fail-silent:
+        liveness signaling must never crash the run. Called from the
+        ``asyncio.to_thread`` worker thread — the save is a plain
+        blocking Redis write, which is fine off the event loop.
+        """
+        if self._agent_session is None:
+            return
+        try:
+            self._agent_session.last_turn_at = datetime.now(UTC)
+            save = getattr(self._agent_session, "save", None)
+            if callable(save):
+                save(update_fields=["last_turn_at"])
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("[bridge-adapter] last_turn_at bump failed: %s", e)
 
     # -- Bridge callbacks (sync wrappers around async send_cb) -----------
 

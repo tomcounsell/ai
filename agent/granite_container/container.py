@@ -13,8 +13,8 @@ runs the loop described in the plan's *Data Flow* section:
      PTY -> wait for Dev idle -> call granite to summarize_for_pm
      (ollama) -> write summary to PM PTY -> repeat
   5. exit on PM [/complete] prefix, max_turns safety cap, dev
-     hang (await_idle timeout), startup_unresolved (parser
-     UNKNOWN past the startup window), or any exception
+     hang (await_idle timeout), startup_unresolved (neither PTY
+     settles within STARTUP_HARD_CEILING_S), or any exception
 
 Two-PTY coordination is the early risk (per the plan's *Technical
 Approach*). The container's loop is single-threaded; reads from
@@ -69,11 +69,20 @@ TRUST_FOLDER_DISMISSAL = "1"
 # safety net; the steady-state exit is the PM [/complete] prefix.
 DEFAULT_MAX_TURNS = 10
 
-# Startup window: how many idle cycles to spend watching for
-# startup events before declaring startup_unresolved. The trust-
-# folder prompt and update notice typically appear within the
-# first 1-2 cycles; 10 is a comfortable safety margin.
-STARTUP_WINDOW_CYCLES = 10
+# Hard wall-clock ceiling for the startup phase. The startup loop
+# keeps polling (short 3s reads) until both PTYs are idle; if they
+# never settle within this ceiling, the container exits
+# `startup_unresolved`. This is plan Risk 6's detection mode for a
+# broken `--permission-mode` flag: when the flag is renamed or
+# removed by a TUI upgrade, the bypass-permissions bar never paints,
+# the C5 idle heuristic never fires, and the run exits with the
+# distinct `startup_unresolved` signature instead of burning the
+# steady-state budget and reporting a misleading `pm_hang`. The
+# ceiling is deliberately long — persona load on a cold Opus
+# high-effort PTY can run minutes past the prime post-write budget
+# (PR #1612 live run, June 2026), and the short per-cycle reads
+# make the extended wait cheap.
+STARTUP_HARD_CEILING_S = 600.0
 
 # Per-cycle idle timeout. If a PTY doesn't reach idle within this
 # many seconds, the container treats it as a hang (pm_hang /
@@ -83,15 +92,13 @@ CYCLE_IDLE_TIMEOUT_S = 120.0
 # Per-cycle idle budget for the startup-phase poll loop. Short by
 # design: the loop's job is to detect transient startup events
 # (trust-folder, update notice), not to wait for a long model
-# turn. The persona load completes inside `_prime_session`'s
-# post-write wait; by the time the startup loop runs, the slash
-# command has already returned and the TUI is at the prompt.
-# A short budget means we cycle fast through the no-event case
-# (10 × STARTUP_CYCLE_TIMEOUT_S total = 30s ceiling) and only
-# burn the long steady-state budget (CYCLE_IDLE_TIMEOUT_S) once
-# we enter the actual turn loop. Without this, the startup
-# loop can consume 10 × 120s = 1200s of idle waits on a slow
-# persona load (PR #1612 live run, June 2026).
+# turn. A short per-read budget means the startup loop polls
+# cheaply and frequently while waiting for the PTYs to settle
+# under STARTUP_HARD_CEILING_S, and only burns the long
+# steady-state budget (CYCLE_IDLE_TIMEOUT_S) once it enters the
+# actual turn loop. Without this, the startup loop consumed
+# 120s idle waits per cycle on a slow persona load (PR #1612
+# live run, June 2026).
 STARTUP_CYCLE_TIMEOUT_S = 3.0
 
 # Trust-folder prompt pattern matched against the raw TUI buffer
@@ -258,6 +265,7 @@ class Container:
         dev_model: str | None = None,
         on_user_payload: Callable[[str], None] | None = None,
         on_complete_payload: Callable[[str], None] | None = None,
+        on_turn: Callable[[], None] | None = None,
         pm_pty: PTYDriver | None = None,
         dev_pty: PTYDriver | None = None,
     ) -> None:
@@ -270,6 +278,13 @@ class Container:
         self._dev_model = dev_model
         self._on_user_payload = on_user_payload
         self._on_complete_payload = on_complete_payload
+        # Per-turn progress hook: called once per classified PM turn
+        # (every destination, including unknown). BridgeAdapter uses it
+        # to bump `agent_session.last_turn_at` so the two-tier
+        # no-progress detector's sub-check A stays live for granite
+        # sessions (PR #1612 review TD1). Exceptions are swallowed —
+        # progress signaling must never crash the loop.
+        self._on_turn = on_turn
         # Optional pre-warmed PTY pair from the PTYPool. When both
         # are provided, Container skips _spawn_pair() and reuses
         # the pool's prewarmed pair (BridgeAdapter is the caller in
@@ -553,17 +568,21 @@ class Container:
             logger.info("container: Dev prime done; entering startup loop")
 
             # Startup-phase loop. Watch both PTYs for known startup
-            # events. Trust-folder is the most likely; the parser
-            # dismisses it with "1\r".
-            for cycle in range(STARTUP_WINDOW_CYCLES):
-                # Short per-cycle budget: the persona load is done
-                # by `_prime_session`'s post-write wait, so by the
-                # time we reach the startup loop, the TUI is at the
-                # prompt and any startup event is already painted.
-                # 3s/cycle × 10 cycles = 30s ceiling for the no-
-                # event case (vs. 10 × 120s = 1200s with the
-                # steady-state budget, which silently burned the
-                # harness watchdog in PR #1612 live run, June 2026).
+            # events (trust-folder, update notice — the parser
+            # dismisses them) and keep cycling on short 3s reads
+            # until BOTH PTYs reach idle. The persona load on Opus
+            # high-effort can run minutes past the prime post-write
+            # budget, so a slow cold start simply keeps polling here
+            # cheaply until the TUIs settle. If they never settle
+            # within STARTUP_HARD_CEILING_S, the run exits
+            # `startup_unresolved` — the distinct failure signature
+            # plan Risk 6 relies on for a broken `--permission-mode`
+            # flag (the bypass bar never paints, so idle never
+            # fires).
+            startup_settled = False
+            startup_deadline = time.monotonic() + STARTUP_HARD_CEILING_S
+            cycle = 0
+            while time.monotonic() < startup_deadline:
                 pm_idle = self._startup_cycle_idle(self._pm_pty)
                 dev_idle = self._startup_cycle_idle(self._dev_pty)
                 response = self._handle_startup(pm_idle[1], dev_idle[1])
@@ -579,7 +598,9 @@ class Container:
                     # both PTYs are idle, otherwise keep watching.
                     if pm_idle[0] and dev_idle[0]:
                         logger.info("container: startup both idle, breaking")
+                        startup_settled = True
                         break
+                    cycle += 1
                     continue
                 # The parser chose a startup event; respond. For
                 # trust-folder, "1" is the dismissal. For update
@@ -592,24 +613,14 @@ class Container:
                     # track which PTY the parser saw the event on.
                     self._pm_pty.write(response)
                 result.startup_events.append({"cycle": cycle, "response": response})
-            else:
-                # All STARTUP_WINDOW_CYCLES exhausted without a known
-                # startup event AND without both PTYs going idle. The
-                # startup phase did not settle. The persona load on
-                # Opus 4.8 high-effort can take longer than 30s after
-                # the prime post-write budget returns, so this is
-                # expected on a cold start. Fall through to the
-                # steady-state loop rather than declaring
-                # `startup_unresolved`: the steady-state's per-cycle
-                # 120s budget will wait out the remaining persona
-                # load. If the model has truly hung, the steady-state
-                # loop will eventually exit with `pm_hang` and the
-                # container will report a real failure mode.
-                logger.info(
-                    "container: startup did not settle after %d cycles; "
-                    "falling through to steady state",
-                    STARTUP_WINDOW_CYCLES,
+                cycle += 1
+            if not startup_settled:
+                result.exit_reason = "startup_unresolved"
+                result.exit_message = (
+                    f"startup did not settle within {STARTUP_HARD_CEILING_S:.0f}s "
+                    f"hard ceiling ({cycle} cycles)"
                 )
+                return result
 
             # Steady state.
             for turn in range(self.max_turns):
@@ -628,6 +639,17 @@ class Container:
                 # whether we route to Dev, route to user (results
                 # log), or exit on complete.
                 classification = classify_pm_prefix(pm_buf)
+                # Per-turn progress hook (TD1): every classified PM
+                # turn counts as progress for the two-tier no-progress
+                # detector, regardless of destination.
+                if self._on_turn is not None:
+                    try:
+                        self._on_turn()
+                    except Exception as e:
+                        logger.warning(
+                            "[granite-container] on_turn callback raised: %s",
+                            e,
+                        )
                 if classification.compliance_miss:
                     result.classification_compliance_misses += 1
                 if classification.destination == "unknown":

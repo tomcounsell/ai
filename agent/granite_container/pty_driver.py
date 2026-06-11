@@ -230,11 +230,24 @@ class PTYDriver:
         cwd: str | None = None,
         model: str | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
+        env: dict[str, str] | None = None,
+        append_system_prompt: str | None = None,
     ) -> None:
         self.role = role
         self.cwd = cwd
         self._explicit_model = model
         self.timeout_s = timeout_s
+        # Per-session env overlay merged ON TOP of `_build_env()` at spawn
+        # time (session identity: AGENT_SESSION_ID, SESSION_TYPE,
+        # CLAUDE_CODE_TASK_LIST_ID, VALOR_PARENT_SESSION_ID, ...). The
+        # ANTHROPIC_* blanking in `_build_env` is applied first and is not
+        # expected to be overridden by callers.
+        self._extra_env = dict(env) if env else None
+        # Composed persona overlay passed to `claude --append-system-prompt`
+        # at spawn time (spawn-on-acquire path, PR #1612 review B2). The
+        # interactive TUI supports the flag, so the persona is a real
+        # system-prompt append rather than user-visible prime text.
+        self._append_system_prompt = append_system_prompt
         self._child: pexpect.spawn | None = None
         self._spawned_at: float | None = None
 
@@ -262,10 +275,18 @@ class PTYDriver:
 
         model = self._explicit_model or _default_substrate_model(self.role)
 
+        args = ["--model", model, "--permission-mode", "bypassPermissions"]
+        if self._append_system_prompt:
+            args += ["--append-system-prompt", self._append_system_prompt]
+
+        env = _build_env()
+        if self._extra_env:
+            env.update(self._extra_env)
+
         self._child = pexpect.spawn(
             "claude",
-            ["--model", model, "--permission-mode", "bypassPermissions"],
-            env=_build_env(),
+            args,
+            env=env,
             echo=False,
             encoding="utf-8",
             preexec_fn=lambda: None,

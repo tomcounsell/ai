@@ -48,6 +48,24 @@ def _make_pool(size: int = 1) -> PTYPool:
     return PTYPool(pool_size=size, pid_registry_path=tmp.name)
 
 
+def _patch_spawn():
+    """No-op PTYDriver.spawn so no real `claude` process is created.
+
+    Must wrap BOTH `pool.initialize()` AND `adapter.run()`: the
+    spawn-on-acquire path (`PTYPool._spawn_session_pair`) spawns a fresh
+    per-session pair at acquire time whenever the adapter's spawn spec
+    differs from the pool defaults — an unpatched acquire would exec the
+    real binary (issue #1632 mode 3). The pool is also initialized with
+    the SAME cwd the tests pass to `adapter.run` ("/tmp") so a spec with
+    no per-session env/persona/model matches the pool defaults and the
+    prewarmed (mock-spawned) pair is reused.
+    """
+    return patch(
+        "agent.granite_container.pty_pool.PTYDriver.spawn",
+        lambda self: None,
+    )
+
+
 def _make_session(session_id: str = "granite-wiring-001") -> AgentSession:
     return AgentSession.create(
         session_id=session_id,
@@ -90,12 +108,11 @@ class TestGraniteProductionWiring:
         session = _make_session()
 
         # Build a pool with mocked spawn so no real PTY is created.
+        # cwd matches the working_dir passed to adapter.run below so the
+        # prewarmed pair is reused (no spawn-on-acquire).
         pool = _make_pool(size=1)
-        with patch(
-            "agent.granite_container.pty_pool.PTYDriver.spawn",
-            lambda self: None,
-        ):
-            await pool.initialize()
+        with _patch_spawn():
+            await pool.initialize(cwd="/tmp")
 
         # Drive a deterministic Container.run that emits two
         # `[/user]` payloads through the callbacks, then returns
@@ -131,6 +148,7 @@ class TestGraniteProductionWiring:
             return (_fake_send_cb, None)
 
         with (
+            _patch_spawn(),
             patch.object(Container, "run", _fake_container_run),
             patch(
                 "agent.granite_container.bridge_adapter._default_resolve_callbacks",
@@ -176,11 +194,8 @@ class TestGraniteProductionWiring:
         (no user-visible delivery, no crash)."""
         session = _make_session(session_id="granite-bridge-none-001")
         pool = _make_pool(size=1)
-        with patch(
-            "agent.granite_container.pty_pool.PTYDriver.spawn",
-            lambda self: None,
-        ):
-            await pool.initialize()
+        with _patch_spawn():
+            await pool.initialize(cwd="/tmp")
 
         def _fake_container_run(self):
             return _make_container_result(
@@ -192,6 +207,7 @@ class TestGraniteProductionWiring:
             return (None, None)  # No callback registered.
 
         with (
+            _patch_spawn(),
             patch.object(Container, "run", _fake_container_run),
             patch(
                 "agent.granite_container.bridge_adapter._default_resolve_callbacks",
@@ -223,11 +239,8 @@ class TestGraniteProductionWiring:
         session_events entry of type 'exit_anomaly'."""
         session = _make_session(session_id="granite-anomaly-001")
         pool = _make_pool(size=1)
-        with patch(
-            "agent.granite_container.pty_pool.PTYDriver.spawn",
-            lambda self: None,
-        ):
-            await pool.initialize()
+        with _patch_spawn():
+            await pool.initialize(cwd="/tmp")
 
         def _fake_container_run(self):
             return _make_container_result(
@@ -239,6 +252,7 @@ class TestGraniteProductionWiring:
             return (None, None)
 
         with (
+            _patch_spawn(),
             patch.object(Container, "run", _fake_container_run),
             patch(
                 "agent.granite_container.bridge_adapter._default_resolve_callbacks",

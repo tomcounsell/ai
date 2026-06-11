@@ -19,6 +19,7 @@ driver's behavior matches the spike's observed_state on the real TUI.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import unittest
@@ -41,13 +42,18 @@ from agent.granite_container.pty_driver import (
 
 
 def _model_reachable() -> bool:
-    """Check if the model-reachable prerequisite is satisfied.
+    """Check if the live spike-regression tests may run.
 
-    Mirrors the PoC's prerequisite check at the plan's *Prerequisites*
-    table: `claude --print "ping"` with the substrate's model-pick
-    policy (prefer gemma*, fall back to non-granite*) must complete a
-    round-trip. If the check fails (returncode != 0, timeout, or
-    `claude` not on PATH), the spike-regression test is skipped.
+    Gated on GRANITE_LIVE_SMOKE=1 (explicit operator opt-in) BEFORE any
+    process is spawned: this function runs at module import time (it is
+    a ``@skipUnless`` decorator argument), so without the gate merely
+    collecting this module spawned a real ``claude --print`` round-trip
+    that orphaned ~250MB processes (issue #1632 mode 3). The conftest
+    spawn guard cannot intercept import-time spawns, hence the env gate.
+
+    With the opt-in set, mirrors the PoC's prerequisite check:
+    `claude --print "ping"` with the driver's default substrate model
+    must complete a round-trip; otherwise the tests are skipped.
 
     The result is cached for the module's lifetime so all four
     env-gated tests see the same value (avoiding per-test races when
@@ -60,6 +66,8 @@ def _model_reachable() -> bool:
 
 
 def _model_reachable_check() -> bool:
+    if os.environ.get("GRANITE_LIVE_SMOKE") != "1":
+        return False
     if not shutil.which("claude"):
         return False
     try:
@@ -367,7 +375,7 @@ class TestSpikeRegressionEnvGated(unittest.TestCase):
 
     @unittest.skipUnless(
         _model_reachable(),
-        "RESUME_SKIP model_unreachable: spike-regression gated on `claude --print ping`",
+        "RESUME_SKIP model_unreachable: spike-regression gated on GRANITE_LIVE_SMOKE=1",
     )
     def test_scenario_1_idle_paint(self) -> None:
         """Scenario 1: spawn -> wait for idle -> assert bar+glyph present."""

@@ -93,6 +93,30 @@ class PTYPoolError(RuntimeError):
     """Raised for caller-facing pool errors (bad config, no slot available)."""
 
 
+@dataclass
+class PairSpawnSpec:
+    """Per-session spawn requirements for an acquired (pm, dev) pair.
+
+    Environment variables and the system-prompt overlay can only be
+    injected at process spawn, so a session whose cwd/env/persona/model
+    differs from the pool's spawn-time defaults requires a fresh pair
+    spawned at acquire time (spawn-on-acquire, PR #1612 review B1+B2).
+    The freshly spawned pair occupies the SAME slot as the pre-warmed
+    pair it replaces — the bounded-slot invariant is preserved, and the
+    pair is released/respawned through the normal lifecycle.
+
+    A spec that carries no per-session requirements (all fields None and
+    cwd equal to the pool's spawn cwd) lets the pre-warmed pair be used
+    as-is.
+    """
+
+    cwd: str | None = None
+    env: dict[str, str] | None = None
+    pm_model: str | None = None
+    dev_model: str | None = None
+    pm_system_prompt: str | None = None
+
+
 class PTYPool:
     """Bounded PM+Dev PTY slot pool.
 
@@ -120,6 +144,10 @@ class PTYPool:
         self._pid_registry_path = pid_registry_path
         self._respawn_tasks: list[asyncio.Task] = []
         self._initialized = False
+        # Notified whenever a slot transitions to `idle` (after a spawn
+        # or respawn completes). `_wait_for_idle_slot` waits on this
+        # instead of sleep-polling when every slot is locked.
+        self._slot_available = asyncio.Condition()
         # cwd used for every spawn (pre-warm AND respawn). Captured by
         # `initialize()`; without it, respawned pairs silently fell back
         # to the worker process's cwd instead of the configured one.
@@ -227,13 +255,23 @@ class PTYPool:
     # -- Acquire / release ------------------------------------------------
 
     @contextlib.asynccontextmanager
-    async def acquire_pair(self):
+    async def acquire_pair(self, spawn_spec: PairSpawnSpec | None = None):
         """Acquire a (pm_pty, dev_pty) pair. Blocks if all slots are
         locked or respawning.
 
         On entry: the slot is idle with a live pair. The slot's
         `pty_pair` is set; the respawn task on `release_pair` will
         create a fresh pair under the per-slot lock.
+
+        `spawn_spec` (spawn-on-acquire, PR #1612 review B1+B2): when the
+        session needs a different cwd or per-session env/persona/model
+        than the pool's spawn-time defaults, the pre-warmed pair is
+        closed and a fresh pair is spawned with the spec — env vars and
+        the system-prompt overlay can only be injected at process spawn.
+        The fresh pair occupies the same slot (bounded-slot invariant
+        preserved) and is released/respawned normally on exit. The
+        latency hit is accepted; a spec matching the pool defaults uses
+        the pre-warmed pair as-is.
 
         On exit: the slot is released, old PTYs are closed, and a
         background respawn is scheduled.
@@ -272,6 +310,8 @@ class PTYPool:
                     continue
                 slot.state = "locked"
                 break
+            if self._needs_session_spawn(spawn_spec):
+                await self._spawn_session_pair(slot, spawn_spec)
             pm, dev = slot.pty_pair
             yield (pm, dev)
         finally:
@@ -296,9 +336,16 @@ class PTYPool:
             # next index to avoid starvation.
             respawning = [s for s in self._slots if s.state == "respawning"]
             if not respawning:
-                # All locked, no respawning slots. Yield to let
-                # releases run, then loop.
-                await asyncio.sleep(0.01)
+                # All locked, no respawning slots. Granite sessions can
+                # hold slots for hours, so a sleep-poll here would spin
+                # for the duration (PR #1612 review nit). Wait on the
+                # pool-level condition instead; `_spawn_slot` notifies
+                # it whenever a slot transitions to `idle`. Re-check
+                # under the condition lock to close the scan→wait race.
+                async with self._slot_available:
+                    if any(s.state == "idle" and s.event.is_set() for s in self._slots):
+                        continue
+                    await self._slot_available.wait()
                 continue
             # Wait on the first respawning slot we see.
             slot = respawning[0]
@@ -328,6 +375,80 @@ class PTYPool:
             except Exception:
                 return False
         return True
+
+    def _needs_session_spawn(self, spec: PairSpawnSpec | None) -> bool:
+        """Whether `spec` requires a fresh per-session spawn.
+
+        Env vars and the system-prompt overlay can only be injected at
+        process spawn, and a cwd differing from the pool's spawn cwd
+        means the pre-warmed pair is running in the wrong directory
+        (the #887 worktree-contamination class). Conservative: any
+        per-session requirement triggers spawn-on-acquire.
+        """
+        if spec is None:
+            return False
+        return bool(
+            spec.env
+            or spec.pm_system_prompt
+            or spec.pm_model
+            or spec.dev_model
+            or (spec.cwd is not None and spec.cwd != self._cwd)
+        )
+
+    async def _spawn_session_pair(self, slot: _Slot, spec: PairSpawnSpec) -> None:
+        """Replace the slot's pre-warmed pair with a per-session pair.
+
+        Runs at acquire time, with the slot already `locked` and the
+        semaphore held — the bounded-slot invariant holds throughout.
+        The old pair is closed best-effort and its pids are dropped
+        from the orphan registry; the new pair's pids are recorded.
+        On spawn failure the exception propagates to `acquire_pair`,
+        whose `finally` releases the slot (scheduling a normal pool
+        respawn) and the semaphore.
+        """
+        async with slot.lock:
+            old_pair = slot.pty_pair
+            if old_pair is not None:
+                for pty in old_pair:
+                    old_pid = getattr(getattr(pty, "_child", None), "pid", None)
+                    try:
+                        pty.close(force=True)
+                    except Exception:
+                        pass
+                    if old_pid is not None:
+                        self._spawned_pids.discard(old_pid)
+                slot.pty_pair = None
+            cwd = spec.cwd if spec.cwd is not None else self._cwd
+            pm = PTYDriver(
+                role="pm",
+                cwd=cwd,
+                model=spec.pm_model,
+                env=spec.env,
+                append_system_prompt=spec.pm_system_prompt,
+            )
+            dev = PTYDriver(
+                role="dev",
+                cwd=cwd,
+                model=spec.dev_model,
+                env=spec.env,
+            )
+            pm.spawn()
+            dev.spawn()
+            slot.pty_pair = (pm, dev)
+            for pty in (pm, dev):
+                pid = getattr(getattr(pty, "_child", None), "pid", None)
+                if pid is not None:
+                    self._spawned_pids.add(pid)
+            self._persist_pids()
+        logger.info(
+            "[pty-pool] slot %d: spawned per-session pair (cwd=%s, env_keys=%d, "
+            "persona=%s, pm_model=%s)",
+            slot.idx,
+            cwd,
+            len(spec.env or {}),
+            "set" if spec.pm_system_prompt else "none",
+            spec.pm_model or "<granite-default>",
+        )
 
     async def _release_pair(self, slot: _Slot) -> None:
         """Close old PTYs, transition slot to `respawning`, schedule
@@ -393,6 +514,10 @@ class PTYPool:
                 self._persist_pids()
             slot.state = "idle"
             slot.event.set()
+            # Wake any acquirer parked in `_wait_for_idle_slot`'s
+            # all-locked condition wait (replaces the old sleep-poll).
+            async with self._slot_available:
+                self._slot_available.notify_all()
         except Exception as e:
             logger.error("[pty-pool] slot %d spawn failed: %s", idx, e)
             # Re-raise so initialize can surface it; for respawn
@@ -440,15 +565,14 @@ _pty_pool: PTYPool | None = None
 def initialize_pty_pool() -> PTYPool:
     """Return (or build) the worker's singleton PTYPool.
 
-    Reads `GRANITE__PTY_POOL_SIZE` from `config.settings` (env-overridable
-    as GRANITE__PTY_POOL_SIZE). Pre-warms all slots. Idempotent: a second
-    call returns the existing pool.
+    Reads the pool size from `config.settings` (env-overridable as
+    GRANITE__PTY_POOL_SIZE). Idempotent: a second call returns the
+    existing pool.
 
-    This is the worker startup hook. The caller does not need to
-    pre-warm: `initialize_pty_pool()` is a sync helper that schedules
-    the pre-warm via `asyncio.run` only if no event loop is running.
-    The worker startup is async; it uses
-    `await _pty_pool.initialize()` instead.
+    This helper only CONSTRUCTS the pool — it does not pre-warm any
+    slots. The caller owns the pre-warm: the worker's async startup
+    hook calls `await pool.initialize()` after building the singleton
+    (`worker/__main__.py` Step 4c).
     """
     global _pty_pool
     if _pty_pool is not None:

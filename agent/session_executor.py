@@ -1519,7 +1519,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
         from agent.granite_container.bridge_adapter import BridgeAdapter
         from agent.granite_container.pty_pool import get_pty_pool
         from agent.sdk_client import (
-            _get_prior_session_uuid,
             _load_persona_overlay_with_log,
             _resolve_compose_args,
             _resolve_sentry_auth_token,
@@ -1532,9 +1531,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
         _classification = (
             getattr(agent_session, "classification_type", None) if agent_session else None
         )
-
-        # Look up prior Claude Code session UUID for --resume (#976, extends PR #909 pattern)
-        _prior_uuid = _get_prior_session_uuid(session.session_id)
 
         _harness_input = await build_harness_turn_input(
             message=_turn_input,
@@ -1549,26 +1545,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
             is_cross_repo=(project_key != "valor"),
         )
 
-        # On resumed turns, also build the minimal message (no context prefix)
-        _minimal_input = None
-        if _prior_uuid:
-            _minimal_input = await build_harness_turn_input(
-                message=_turn_input,
-                session_id=session.session_id,
-                sender_name=session.sender_name,
-                chat_title=session.chat_title,
-                project=project_config,
-                task_list_id=task_list_id,
-                session_type=_session_type,
-                sender_id=session.sender_id,
-                classification=_classification,
-                is_cross_repo=(project_key != "valor"),
-                skip_prefix=True,
-            )
-
         logger.info(
-            f"{log_prefix} Routing {_session_type or 'unknown'} session to CLI harness"
-            + (f" (--resume {_prior_uuid[:8]}...)" if _prior_uuid else " (first turn)")
+            f"{log_prefix} Routing {_session_type or 'unknown'} session to the "
+            "granite PTY container"
         )
 
         # Streaming chunks from the CLI harness are suppressed for all session types
@@ -1599,12 +1578,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
             if _sentry_token:
                 _harness_env["SENTRY_AUTH_TOKEN"] = _sentry_token
 
-        _harness_requeued = False
-
         # D1 precedence cascade: session.model > settings > codebase default.
+        # Applied to the PM TUI PTY via the spawn-on-acquire spec below; the
+        # Dev PTY stays on GRANITE__DEV_MODEL.
         _effective_model = _resolve_session_model(agent_session)
 
-        # Persona overlay resolution for the harness path.
+        # Persona overlay resolution for the granite container path. The
+        # composed overlay is passed to the PM PTY spawn as
+        # `--append-system-prompt` via the BridgeAdapter's spawn spec.
         #
         # PM sessions get the SDLC orchestration overlay (issue #1148). Email-
         # spawned sessions get the persona named in `project.email.persona`
@@ -1715,17 +1696,31 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # and BackgroundTask has `send_result=False` so the harness layer
         # does NOT double-deliver (plan #1572, "Drop standalone
         # format_short_result" / SIMP-1).
+        # The adapter receives the per-session env (SESSION_TYPE for the
+        # pre_tool_use PM Bash restrictions, AGENT_SESSION_ID for hook
+        # attribution, CLAUDE_CODE_TASK_LIST_ID for task-list isolation,
+        # VALOR_PARENT_SESSION_ID for child-session linking), the composed
+        # persona overlay, and the D1-resolved model. It forwards them to
+        # the PTYPool as a spawn spec; the pool spawns a fresh pair with
+        # them at acquire time (env and system prompt can only be injected
+        # at process spawn — PR #1612 review B1+B2).
         _bridge_adapter = BridgeAdapter(
             agent_session=agent_session,
             project_key=project_key,
             transport=_transport or "telegram",
             pool=get_pty_pool(),
+            session_env=_harness_env,
+            pm_system_prompt=_pm_system_prompt,
+            pm_model=_effective_model,
         )
 
-        # The message the container receives. For resumed turns, the
-        # container does NOT have a `--resume` path; we send the
-        # minimal-context message just like the harness path used to.
-        _container_message = _minimal_input if _prior_uuid else _harness_input
+        # The message the container receives. The container has no
+        # `claude --resume` wiring, so EVERY container run is a brand-new
+        # TUI session — the minimal-context message the harness paired
+        # with `--resume {prior_uuid}` would arrive as a context-free
+        # fragment. Always send the full-context turn input so resumed
+        # (reply-to) threads keep their conversation context.
+        _container_message = _harness_input
 
         async def do_work() -> str:
             return await _bridge_adapter.run(
@@ -1823,14 +1818,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
         finally:
             heartbeat.cancel()
 
-        # Post-completion SDLC handling for dev sessions (Phase 3)
-        # Skip if the session was silently re-queued for harness retry — the re-queued
-        # session hasn't run yet, so calling _handle_dev_session_completion with an empty
-        # result would emit a spurious "fail" outcome to the PM pipeline before the retry
-        # has a chance to succeed.
-        if _harness_requeued:
-            return
-
         # Update session status in Redis via AgentSession
         # When auto-continue deferred, session is still active (not completed)
         if agent_session:
@@ -1918,11 +1905,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # is skipped above, but _finalize_parent_sync still runs via the nudge path's
         # own finalize_session call. This call is guarded by `_session_type == "dev"`,
         # not by `defer_reaction`, so it executes on both the nudge and non-nudge paths.
-        #
-        # Skip if the session was silently re-queued for harness retry — the re-queued
-        # session hasn't run yet, so calling _handle_dev_session_completion with an empty
-        # result would emit a spurious "fail" outcome to the PM pipeline before the retry
-        # has a chance to succeed. (The _harness_requeued early-return above handles this.)
         #
         # Granite note (plan #1572): in granite mode, the container is the
         # PM/Dev handoff — the user message goes through `BridgeAdapter.run`,

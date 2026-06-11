@@ -38,13 +38,18 @@ def _patch_spawn():
     return patch("agent.granite_container.pty_pool.PTYDriver.spawn", lambda self: None)
 
 
-def _make_initialized_pool(size: int = 1) -> PTYPool:
+def _make_initialized_pool(size: int = 1, cwd: str | None = "/tmp") -> PTYPool:
     """Build a pool, initialize it with mocked spawn, and return it.
     The pool's pid registry is a temp file so the test never touches
-    `data/granite_pty_pids.json` on disk."""
+    `data/granite_pty_pids.json` on disk.
+
+    The default cwd matches the `/tmp` working_dir the tests pass to
+    `adapter.run`, so a spec with no per-session env/persona matches
+    the pool defaults and the prewarmed (mock-spawned) pair is reused
+    — without this, spawn-on-acquire would spawn a REAL `claude`."""
     pool = _make_pool(size=size)
     with _patch_spawn():
-        asyncio.run(pool.initialize())
+        asyncio.run(pool.initialize(cwd=cwd))
     return pool
 
 
@@ -323,10 +328,13 @@ class TestBridgeAdapterPrewarmedPair(unittest.TestCase):
     def test_run_passes_pool_pair_to_container(self) -> None:
         """BridgeAdapter.run forwards the acquired (pm, dev) pair
         to Container as pm_pty/dev_pty kwargs, and Container does
-        NOT call PTYDriver.spawn."""
-        from unittest.mock import patch as _patch
+        NOT call PTYDriver.spawn.
 
-        from agent.granite_container.pty_driver import PTYDriver
+        The pool is initialized with the SAME cwd the session runs
+        in and the adapter carries no per-session env/persona, so
+        the spawn spec matches the pool defaults and the pre-warmed
+        pair is used as-is (no spawn-on-acquire)."""
+        from unittest.mock import patch as _patch
 
         pool = _make_pool(size=1)
         session = _FakeSession()
@@ -335,19 +343,20 @@ class TestBridgeAdapterPrewarmedPair(unittest.TestCase):
         # prewarm is the only spawn that should happen. We patch
         # the spawn AT the module level (the path pty_driver.spawn
         # looks up at call time) and init the pool inside the
-        # patch so prewarm is captured.
+        # patch so prewarm is captured. The fake is a FULL fake —
+        # never call through to the original spawn body, which
+        # execs the real `claude` binary (issue #1632 mode 3:
+        # orphaned ~250MB claude processes memory-crash the box).
         spawned: list[tuple[str, int]] = []
-        original_spawn = PTYDriver.spawn
 
         def _tracking_spawn(self):  # type: ignore[no-untyped-def]
             spawned.append((self.role, id(self)))
-            return original_spawn(self)
 
         with (
             _patch("agent.granite_container.pty_driver.PTYDriver.spawn", _tracking_spawn),
             _patch_container_run_with_result(lambda: _make_container_result()),
         ):
-            asyncio.run(pool.initialize())
+            asyncio.run(pool.initialize(cwd="/tmp"))
             adapter = BridgeAdapter(
                 agent_session=session,
                 project_key="t",
@@ -372,8 +381,11 @@ class TestBridgeAdapterPrewarmedPair(unittest.TestCase):
 
     def test_run_marks_pool_pair_as_released(self) -> None:
         """The pool's (pm, dev) PTYs are marked _released_to_pool=True
-        so Container._close_pair does not double-close them."""
-        pool = _make_initialized_pool(size=1)
+        so Container._close_pair does not double-close them. The pool
+        cwd matches the session cwd so the prewarmed pair is reused."""
+        pool = _make_pool(size=1)
+        with _patch_spawn():
+            asyncio.run(pool.initialize(cwd="/tmp"))
         session = _FakeSession()
 
         # Find the prewarmed pair.
@@ -396,6 +408,274 @@ class TestBridgeAdapterPrewarmedPair(unittest.TestCase):
         # Both prewarmed PTYs are marked as pool-owned.
         self.assertTrue(getattr(prewarmed_pm, "_released_to_pool", False))
         self.assertTrue(getattr(prewarmed_dev, "_released_to_pool", False))
+
+
+@dataclass
+class _SavingFakeSession(_FakeSession):
+    """A _FakeSession with a recording `save(update_fields=...)`."""
+
+    saved_calls: list = field(default_factory=list)
+    updated_at: Any = None
+    last_turn_at: Any = None
+
+    def save(self, update_fields=None) -> None:
+        self.saved_calls.append(list(update_fields or []))
+
+
+class TestBridgeAdapterSessionEventPersistence(unittest.TestCase):
+    """PR #1612 review B3: `_append_session_event` must PERSIST the
+    append. The in-memory mutation alone never reaches Redis — the
+    executor's post-run saves exclude `session_events` and
+    finalization loads a fresh copy by session_id."""
+
+    def test_exit_summary_append_saves_with_update_fields(self) -> None:
+        session = _SavingFakeSession()
+        pool = _make_initialized_pool()
+        result = _make_container_result(exit_reason="pm_complete")
+
+        adapter = BridgeAdapter(
+            agent_session=session,
+            project_key="test-project",
+            transport="telegram",
+            pool=pool,
+            resolve_callbacks=lambda p, t: (None, None),
+        )
+        with _patch_container_run_with_result(lambda: result):
+
+            async def _runner() -> str:
+                return await adapter.run("test", "/tmp")
+
+            asyncio.run(_runner())
+
+        # The exit_summary append was persisted with the model's
+        # documented partial-save pattern.
+        self.assertEqual(len(session.session_events), 1)
+        self.assertIn(["session_events", "updated_at"], session.saved_calls)
+        self.assertIsNotNone(session.updated_at)
+
+    def test_anomaly_append_saves_too(self) -> None:
+        session = _SavingFakeSession()
+        pool = _make_initialized_pool()
+        result = _make_container_result(exit_reason="pm_hang")
+
+        adapter = BridgeAdapter(
+            agent_session=session,
+            project_key="test-project",
+            transport="telegram",
+            pool=pool,
+            resolve_callbacks=lambda p, t: (None, None),
+        )
+        with _patch_container_run_with_result(lambda: result):
+
+            async def _runner() -> str:
+                return await adapter.run("test", "/tmp")
+
+            asyncio.run(_runner())
+
+        # exit_summary + exit_anomaly — one persisting save each.
+        saves = [c for c in session.saved_calls if c == ["session_events", "updated_at"]]
+        self.assertEqual(len(saves), 2)
+
+    def test_save_failure_is_silent(self) -> None:
+        """A failing save must not crash the run (fail-silent
+        observability contract)."""
+
+        class _ExplodingSession(_SavingFakeSession):
+            def save(self, update_fields=None) -> None:
+                raise RuntimeError("redis down")
+
+        session = _ExplodingSession()
+        pool = _make_initialized_pool()
+        result = _make_container_result(exit_reason="pm_complete")
+
+        adapter = BridgeAdapter(
+            agent_session=session,
+            project_key="test-project",
+            transport="telegram",
+            pool=pool,
+            resolve_callbacks=lambda p, t: (None, None),
+        )
+        with _patch_container_run_with_result(lambda: result):
+
+            async def _runner() -> str:
+                return await adapter.run("test", "/tmp")
+
+            # Must not raise.
+            ret = asyncio.run(_runner())
+        self.assertEqual(ret, "")
+
+
+class TestBridgeAdapterLastTurnAt(unittest.TestCase):
+    """PR #1612 review TD1: the adapter restores the two-tier
+    no-progress detector's sub-check A by bumping `last_turn_at`
+    on each classified turn via the container's `on_turn` hook."""
+
+    def test_bump_sets_field_and_saves(self) -> None:
+        session = _SavingFakeSession()
+        adapter = BridgeAdapter(
+            agent_session=session,
+            project_key="test-project",
+            transport="telegram",
+            pool=_make_pool(),
+            resolve_callbacks=lambda p, t: (None, None),
+        )
+        adapter._bump_last_turn_at()
+        self.assertIsNotNone(session.last_turn_at)
+        self.assertIn(["last_turn_at"], session.saved_calls)
+
+    def test_bump_survives_save_failure(self) -> None:
+        class _ExplodingSession(_SavingFakeSession):
+            def save(self, update_fields=None) -> None:
+                raise RuntimeError("redis down")
+
+        adapter = BridgeAdapter(
+            agent_session=_ExplodingSession(),
+            project_key="test-project",
+            transport="telegram",
+            pool=_make_pool(),
+            resolve_callbacks=lambda p, t: (None, None),
+        )
+        adapter._bump_last_turn_at()  # must not raise
+
+    def test_run_passes_bump_as_on_turn(self) -> None:
+        """The container receives the adapter's bump as `on_turn`."""
+        session = _SavingFakeSession()
+        pool = _make_initialized_pool()
+        seen: dict = {}
+
+        fake_result = _make_container_result(exit_reason="pm_complete")
+
+        def _fake_container(**kwargs):
+            seen.update(kwargs)
+            container = MagicMock()
+            container.run = lambda: fake_result
+            return container
+
+        adapter = BridgeAdapter(
+            agent_session=session,
+            project_key="test-project",
+            transport="telegram",
+            pool=pool,
+            resolve_callbacks=lambda p, t: (None, None),
+        )
+        with patch(
+            "agent.granite_container.bridge_adapter.Container",
+            side_effect=_fake_container,
+        ):
+            asyncio.run(adapter.run("test", "/tmp"))
+
+        self.assertEqual(seen.get("on_turn"), adapter._bump_last_turn_at)
+
+
+class _SpecFakeDriver:
+    """Fake PTYDriver recording per-session spawn kwargs."""
+
+    instances: list = []
+
+    def __init__(
+        self,
+        role: str = "pm",
+        cwd: str | None = None,
+        model: str | None = None,
+        env: dict | None = None,
+        append_system_prompt: str | None = None,
+    ) -> None:
+        self.role = role
+        self.cwd = cwd
+        self.model = model
+        self.env = env
+        self.append_system_prompt = append_system_prompt
+        self._child = None  # treated as live by _pair_is_live
+        self.closed = False
+        _SpecFakeDriver.instances.append(self)
+
+    def spawn(self) -> None:
+        pass
+
+    def isalive(self) -> bool:
+        return True
+
+    def close(self, force: bool = True) -> None:
+        self.closed = True
+
+
+class TestBridgeAdapterSpawnOnAcquire(unittest.TestCase):
+    """PR #1612 review B1+B2: per-session env / persona / model can
+    only be injected at process spawn, so the adapter's spawn spec
+    must trigger a fresh per-session pair at acquire time — and the
+    spec must carry the session's cwd, env, persona overlay, and
+    model override."""
+
+    def setUp(self) -> None:
+        _SpecFakeDriver.instances = []
+
+    def test_session_env_and_persona_reach_the_spawn(self) -> None:
+        session = _FakeSession()
+        session_env = {
+            "SESSION_TYPE": "pm",
+            "AGENT_SESSION_ID": "as-123",
+            "CLAUDE_CODE_TASK_LIST_ID": "tl-1",
+        }
+
+        with patch("agent.granite_container.pty_pool.PTYDriver", _SpecFakeDriver):
+            pool = _make_pool(size=1)
+            asyncio.run(pool.initialize(cwd="/tmp"))
+            adapter = BridgeAdapter(
+                agent_session=session,
+                project_key="t",
+                transport="telegram",
+                pool=pool,
+                resolve_callbacks=lambda p, t: (None, None),
+                session_env=session_env,
+                pm_system_prompt="You are the PM persona.",
+                pm_model="haiku",
+            )
+            with _patch_container_run_with_result(lambda: _make_container_result()):
+                asyncio.run(adapter.run("hello", "/worktrees/slug"))
+
+        # 2 prewarm + 2 per-session spawns.
+        self.assertEqual(len(_SpecFakeDriver.instances), 4)
+        session_pm = next(
+            d for d in _SpecFakeDriver.instances if d.role == "pm" and d.env is not None
+        )
+        session_dev = next(
+            d for d in _SpecFakeDriver.instances if d.role == "dev" and d.env is not None
+        )
+        # The session pair carries the per-session cwd + env; the PM
+        # PTY additionally carries the persona overlay and the
+        # D1-resolved model.
+        self.assertEqual(session_pm.cwd, "/worktrees/slug")
+        self.assertEqual(session_dev.cwd, "/worktrees/slug")
+        self.assertEqual(session_pm.env, session_env)
+        self.assertEqual(session_pm.append_system_prompt, "You are the PM persona.")
+        self.assertEqual(session_pm.model, "haiku")
+        self.assertIsNone(session_dev.append_system_prompt)
+        # The prewarmed pair was closed when it was replaced.
+        prewarmed = [d for d in _SpecFakeDriver.instances if d.env is None]
+        self.assertEqual(len(prewarmed), 2)
+        for d in prewarmed:
+            self.assertTrue(d.closed, f"prewarmed {d.role} PTY was not closed")
+
+    def test_no_session_requirements_reuses_prewarmed_pair(self) -> None:
+        """A spec matching the pool defaults (same cwd, no env, no
+        persona, no model) uses the pre-warmed pair as-is."""
+        session = _FakeSession()
+
+        with patch("agent.granite_container.pty_pool.PTYDriver", _SpecFakeDriver):
+            pool = _make_pool(size=1)
+            asyncio.run(pool.initialize(cwd="/tmp"))
+            adapter = BridgeAdapter(
+                agent_session=session,
+                project_key="t",
+                transport="telegram",
+                pool=pool,
+                resolve_callbacks=lambda p, t: (None, None),
+            )
+            with _patch_container_run_with_result(lambda: _make_container_result()):
+                asyncio.run(adapter.run("hello", "/tmp"))
+
+        # Only the 2 prewarm spawns — no per-session pair.
+        self.assertEqual(len(_SpecFakeDriver.instances), 2)
 
 
 if __name__ == "__main__":

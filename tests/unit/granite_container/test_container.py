@@ -304,30 +304,63 @@ class TestContainerMaxTurns(unittest.TestCase):
         self.assertEqual(len(dev_turns), 2)
 
 
-class TestContainerStartupUnresolved(unittest.TestCase):
-    """Startup phase exhausts all cycles without settling.
+class TestContainerStartupHardCeiling(unittest.TestCase):
+    """Startup phase: hard wall-clock ceiling (PR #1612 review TD2).
 
-    After the fix for the post-prime cold-start case (PR #1612
-    live run, June 2026), the container falls through to the
-    steady-state loop rather than declaring `startup_unresolved`
-    on the first cycle exhaustion. The steady-state loop's
-    per-cycle 120s budget is the right place to wait out the
-    remaining persona load on Opus 4.8 high-effort. The startup
-    phase is purely a transient-event watcher (trust-folder,
-    update notice) and should not gate the actual run.
+    The startup loop keeps polling on short reads until BOTH PTYs
+    reach idle — a slow Opus high-effort persona load simply keeps
+    the loop cycling cheaply. If the PTYs never settle within
+    `STARTUP_HARD_CEILING_S`, the run exits `startup_unresolved`.
+    That distinct exit reason is plan Risk 6's detection mode for a
+    broken `--permission-mode` flag (the bypass bar never paints, so
+    the C5 idle heuristic can never fire).
     """
 
-    def test_startup_unresolved_falls_through_to_steady_state(self) -> None:
-        # Neither PTY ever reaches idle during the startup window
-        # AND no startup event is found. The startup phase exhausts
-        # its cycles; rather than exit early with
-        # `startup_unresolved`, the container falls through to the
-        # steady-state loop. The mock returns saw_idle=False on the
-        # steady-state read, so the loop exits with `pm_hang`.
-        from agent.granite_container.container import STARTUP_WINDOW_CYCLES
-
+    def test_never_idle_exits_startup_unresolved_at_ceiling(self) -> None:
+        # Neither PTY ever reaches idle AND no startup event is
+        # found. With the (patched, tiny) hard ceiling exhausted,
+        # the container exits `startup_unresolved` — NOT `pm_hang`.
         c = Container(user_message="hello", max_turns=5)
         pm_mock, dev_mock = _mock_driver("", saw_idle=False), _mock_driver("", saw_idle=False)
+
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+            patch("agent.granite_container.container.STARTUP_HARD_CEILING_S", 0.05),
+        ):
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            result = c.run()
+
+        self.assertEqual(
+            result.exit_reason,
+            "startup_unresolved",
+            f"got {result.exit_reason!r}: {result.exit_message!r}",
+        )
+        self.assertIn("hard ceiling", result.exit_message)
+        # The steady-state loop never ran — no classified turns.
+        self.assertEqual(len(result.turns), 0)
+
+    def test_late_settle_proceeds_to_steady_state(self) -> None:
+        # A slow cold start: the PTYs are NOT idle on the first
+        # startup cycles (persona still loading) but settle later.
+        # The loop must keep polling past the early cycles and then
+        # proceed to the steady state, not exit early.
+        c = Container(user_message="hello", max_turns=3)
+        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+
+        pm_buffers = iter(
+            [
+                _idle_result("", saw_idle=False),  # startup cycle 0: still loading
+                _idle_result("", saw_idle=False),  # startup cycle 1: still loading
+                _idle_result("", saw_idle=True),  # startup cycle 2: settled
+                _idle_result("[/complete]\nDone.", saw_idle=True),  # steady-state
+            ]
+        )
+        pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_buffers)
+        dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
         with (
             patch.object(c, "_spawn_pair"),
@@ -341,19 +374,20 @@ class TestContainerStartupUnresolved(unittest.TestCase):
 
         self.assertEqual(
             result.exit_reason,
-            "pm_hang",
-            f"expected fall-through to steady state, then pm_hang; "
+            "pm_complete",
             f"got {result.exit_reason!r}: {result.exit_message!r}",
         )
-        # The startup phase ran STARTUP_WINDOW_CYCLES times before
-        # falling through (the fall-through is the new behavior, not
-        # the early exit). Steady state then ran one cycle and hit
-        # pm_hang. No classified turns happened.
-        self.assertEqual(len(result.turns), 0)
-        # Sanity: STARTUP_WINDOW_CYCLES is referenced in the docstring
-        # of the new behavior; pinning the value guards against a
-        # silent constant change.
-        self.assertEqual(STARTUP_WINDOW_CYCLES, 10)
+
+    def test_ceiling_is_long_enough_for_cold_persona_load(self) -> None:
+        # The ceiling must comfortably exceed the prime post-write
+        # budget (360s) — a cold Opus high-effort persona load can
+        # run minutes past it (PR #1612 live run).
+        from agent.granite_container.container import (
+            PRIME_POST_WRITE_TIMEOUT_S,
+            STARTUP_HARD_CEILING_S,
+        )
+
+        self.assertGreater(STARTUP_HARD_CEILING_S, PRIME_POST_WRITE_TIMEOUT_S)
 
 
 class TestContainerPrimeHandlesTrustFolder(unittest.TestCase):
@@ -512,6 +546,49 @@ class TestContainerSpawnPairReusesPrewarmed(unittest.TestCase):
 
         pool_pm.close.assert_not_called()
         pool_dev.close.assert_not_called()
+
+
+class TestContainerOnTurnHook(unittest.TestCase):
+    """PR #1612 review TD1: the optional `on_turn` hook fires once per
+    classified PM turn (every destination), and a raising hook never
+    crashes the loop."""
+
+    def _run_with_hook(self, on_turn) -> ContainerResult:
+        c = Container(user_message="hello", max_turns=3, on_turn=on_turn)
+        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_buffers = iter(
+            [
+                _idle_result("", saw_idle=True),  # startup
+                _idle_result("no prefix here", saw_idle=True),  # turn 0: unknown
+                _idle_result("[/complete]\nDone.", saw_idle=True),  # turn 1: complete
+            ]
+        )
+        pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_buffers)
+        dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
+
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+        ):
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            return c.run()
+
+    def test_on_turn_called_once_per_classified_turn(self) -> None:
+        calls: list[int] = []
+        result = self._run_with_hook(lambda: calls.append(1))
+        self.assertEqual(result.exit_reason, "pm_complete")
+        # One unknown turn + one complete turn = two classifications.
+        self.assertEqual(len(calls), 2)
+
+    def test_raising_on_turn_does_not_crash_loop(self) -> None:
+        def _boom() -> None:
+            raise RuntimeError("liveness write failed")
+
+        result = self._run_with_hook(_boom)
+        self.assertEqual(result.exit_reason, "pm_complete")
 
 
 class TestContainerHang(unittest.TestCase):
