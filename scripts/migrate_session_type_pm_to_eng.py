@@ -303,9 +303,10 @@ def migrate(dry_run: bool = True) -> dict:
     if not dry_run and stats["renamed_to_eng"] > 0:
         logger.info("Rebuilding Popoto indexes...")
         try:
-            from models.agent_session import AgentSession
+            # Import here to avoid circular import at module load time
+            from models.agent_session import AgentSession as _AgentSession
 
-            AgentSession.rebuild_indexes()
+            _AgentSession.rebuild_indexes()
             logger.info("Index rebuild complete.")
         except Exception as e:
             logger.error(f"Failed to rebuild indexes: {e}")

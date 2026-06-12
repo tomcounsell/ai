@@ -45,6 +45,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# Lazy module-level imports — imported here so tests can patch the names on
+# this module (e.g. `patch("scripts.merge_dev_chat_into_eng.TelegramMessage")`).
+# The try/except prevents import failures when popoto is not yet connected
+# (e.g., during static analysis or collection before the test DB fixture runs).
+try:
+    from models.chat import Chat
+    from models.telegram import TelegramMessage
+except Exception:  # pragma: no cover
+    Chat = None  # type: ignore[assignment]
+    TelegramMessage = None  # type: ignore[assignment]
+
 # Keys to skip (index/sorted-set infrastructure keys)
 SKIP_PATTERNS = (b":_sorted_set:", b":_field_index:")
 
@@ -198,8 +209,10 @@ def migrate(
         Dict with migration stats.
     """
     import popoto
-    from models.chat import Chat
-    from models.telegram import TelegramMessage
+
+    # Use module-level imports (may have been patched by tests)
+    _Chat = Chat
+    _TelegramMessage = TelegramMessage
 
     redis_client = popoto.redis_db.get_REDIS_DB()
 
@@ -212,8 +225,8 @@ def migrate(
     }
 
     # --- Phase 0: Pre-flight counts via ORM query path ---
-    pre_dev_count = TelegramMessage.query.filter(chat_id=dev_chat_id).count()
-    pre_eng_count = TelegramMessage.query.filter(chat_id=eng_chat_id).count()
+    pre_dev_count = _TelegramMessage.query.filter(chat_id=dev_chat_id).count()
+    pre_eng_count = _TelegramMessage.query.filter(chat_id=eng_chat_id).count()
     logger.info(
         f"Pre-migration counts: dev_chat_id={dev_chat_id!r}: {pre_dev_count} records, "
         f"eng_chat_id={eng_chat_id!r}: {pre_eng_count} records"
@@ -280,8 +293,8 @@ def migrate(
                 logger.error(f"Error migrating {key_str}: {e}")
 
     # --- Phase 3: Chat record rename — create-then-delete order ---
-    dev_chat = Chat.query.filter(chat_id=dev_chat_id).first()
-    eng_chat_existing = Chat.query.filter(chat_id=eng_chat_id).first()
+    dev_chat = _Chat.query.filter(chat_id=dev_chat_id).first()
+    eng_chat_existing = _Chat.query.filter(chat_id=eng_chat_id).first()
 
     if dry_run:
         if dev_chat and not eng_chat_existing:
@@ -302,7 +315,7 @@ def migrate(
     else:
         if dev_chat and not eng_chat_existing:
             # Create Eng Chat FIRST (before deleting Dev Chat)
-            eng_chat = Chat(
+            eng_chat = _Chat(
                 chat_id=eng_chat_id,
                 chat_name=getattr(dev_chat, "chat_name", "Eng"),
                 chat_type=getattr(dev_chat, "chat_type", None),
@@ -312,7 +325,7 @@ def migrate(
             eng_chat.save()
 
             # Verify Eng Chat exists before deleting Dev Chat
-            eng_chat_verify = Chat.query.filter(chat_id=eng_chat_id).first()
+            eng_chat_verify = _Chat.query.filter(chat_id=eng_chat_id).first()
             if not eng_chat_verify:
                 logger.error(
                     f"Failed to verify Eng Chat creation (chat_id={eng_chat_id!r}). "
@@ -336,7 +349,7 @@ def migrate(
     if not dry_run and (stats["renamed"] > 0):
         logger.info("Rebuilding TelegramMessage Popoto indexes...")
         try:
-            TelegramMessage.rebuild_indexes()
+            _TelegramMessage.rebuild_indexes()
             logger.info("TelegramMessage index rebuild complete.")
         except Exception as e:
             logger.error(f"Failed to rebuild TelegramMessage indexes: {e}")
@@ -344,8 +357,8 @@ def migrate(
 
     # --- Phase 5: Post-migration count assertion via ORM query path ---
     if not dry_run:
-        post_dev_count = TelegramMessage.query.filter(chat_id=dev_chat_id).count()
-        post_eng_count = TelegramMessage.query.filter(chat_id=eng_chat_id).count()
+        post_dev_count = _TelegramMessage.query.filter(chat_id=dev_chat_id).count()
+        post_eng_count = _TelegramMessage.query.filter(chat_id=eng_chat_id).count()
         expected_eng_count = pre_eng_count + stats["renamed"] - 0  # collisions already not renamed
         logger.info(
             f"Post-migration counts: dev_chat_id={dev_chat_id!r}: {post_dev_count} records, "
