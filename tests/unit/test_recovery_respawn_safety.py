@@ -312,8 +312,8 @@ class TestStartupRecoverySkipsTerminal:
         # Verify it only queried "running" status
         mock_as.query.filter.assert_called_once_with(status="running")
 
-    def test_startup_recovery_does_not_requeue_local_pm_session(self):
-        """Startup recovery does not call update_session('pending') for local PM sessions."""
+    def test_startup_recovery_does_not_requeue_local_teammate_session(self):
+        """Startup recovery does not call update_session('pending') for local teammate sessions."""
         import time
 
         from agent.agent_session_queue import (
@@ -321,11 +321,11 @@ class TestStartupRecoverySkipsTerminal:
             _recover_interrupted_agent_sessions_startup,
         )
 
-        # Build a stale local PM session (started_at well before the cutoff)
+        # Build a stale local teammate session (started_at well before the cutoff)
         local_session = _mock_agent_session(
             session_id="local-abc123",
             agent_session_id="agent-local-001",
-            session_type=SessionType.PM,
+            session_type=SessionType.TEAMMATE,
             started_at=time.time() - AGENT_SESSION_HEALTH_MIN_RUNNING - 600,
         )
 
@@ -340,13 +340,13 @@ class TestStartupRecoverySkipsTerminal:
 
             count = _recover_interrupted_agent_sessions_startup()
 
-        # Local PM sessions do not increment the count
+        # Local teammate sessions do not increment the count
         assert count == 0
-        # update_session (re-queue to pending) must NOT be called for local PM sessions
+        # update_session (re-queue to pending) must NOT be called for local teammate sessions
         mock_update.assert_not_called()
 
-    def test_startup_recovery_requeues_local_dev_session(self):
-        """Startup recovery calls update_session('pending') for local dev sessions (#1092)."""
+    def test_startup_recovery_requeues_local_eng_session(self):
+        """Startup recovery calls update_session('pending') for local eng sessions (#1092)."""
         import time
 
         from agent.agent_session_queue import (
@@ -354,11 +354,11 @@ class TestStartupRecoverySkipsTerminal:
             _recover_interrupted_agent_sessions_startup,
         )
 
-        # Build a stale local dev session (started_at well before the cutoff)
+        # Build a stale local eng session (started_at well before the cutoff)
         local_dev_session = _mock_agent_session(
             session_id="local-dev-xyz",
             agent_session_id="agent-local-dev-001",
-            session_type=SessionType.DEV,
+            session_type=SessionType.ENG,
             started_at=time.time() - AGENT_SESSION_HEALTH_MIN_RUNNING - 600,
         )
 
@@ -403,8 +403,8 @@ class TestStartupRecoveryLocalSessionGuard:
         defaults.update(kwargs)
         return _mock_agent_session(**defaults)
 
-    def test_startup_recovery_abandons_local_pm_sessions(self):
-        """Local PM session (session_id starts with 'local') is finalized as 'abandoned'."""
+    def test_startup_recovery_abandons_local_non_eng_sessions(self):
+        """Local non-ENG session (session_id starts with 'local') is finalized as 'abandoned'."""
         import time
 
         from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
@@ -412,7 +412,7 @@ class TestStartupRecoveryLocalSessionGuard:
         local_session = self._stale_session(
             session_id="local-abc123",
             agent_session_id="agent-local-001",
-            session_type=SessionType.PM,
+            session_type=SessionType.TEAMMATE,
         )
 
         with (
@@ -425,7 +425,7 @@ class TestStartupRecoveryLocalSessionGuard:
 
             count = _recover_interrupted_agent_sessions_startup()
 
-        # Count must be 0 — local PM sessions are not "recovered" (they are abandoned)
+        # Count must be 0 — local non-ENG sessions are not "recovered" (they are abandoned)
         assert count == 0
         # finalize_session must have been called with "abandoned"
         mock_finalize.assert_called_once()
@@ -469,12 +469,12 @@ class TestStartupRecoveryLocalSessionGuard:
         # update_session must NOT be called for teammate sessions
         mock_update.assert_not_called()
 
-    def test_startup_recovery_recovers_local_dev_sessions(self):
-        """Local dev session is re-queued to pending via update_session (#1092).
+    def test_startup_recovery_recovers_local_eng_sessions(self):
+        """Local eng session is re-queued to pending via update_session (#1092).
 
-        Dev sessions are worker-owned (spawned by the PM via
-        `valor-session create --role dev`), so there is no human CLI competing for
-        the claude_session_uuid. Re-queue on worker restart instead of abandoning.
+        Eng sessions are worker-owned (spawned by the worker), so there is no
+        human CLI competing for the claude_session_uuid. Re-queue on worker
+        restart instead of abandoning.
         """
         import time
 
@@ -483,7 +483,7 @@ class TestStartupRecoveryLocalSessionGuard:
         local_session = self._stale_session(
             session_id="local-dev-abc",
             agent_session_id="agent-local-dev-001",
-            session_type=SessionType.DEV,
+            session_type=SessionType.ENG,
         )
 
         with (
@@ -497,22 +497,22 @@ class TestStartupRecoveryLocalSessionGuard:
 
             count = _recover_interrupted_agent_sessions_startup()
 
-        # Local dev sessions are counted as recovered
+        # Local eng sessions are counted as recovered
         assert count == 1
         # update_session must be called with new_status="pending" and CAS on running
         mock_update.assert_called_once()
         call_kwargs = mock_update.call_args[1]
         assert call_kwargs.get("new_status") == "pending"
         assert call_kwargs.get("expected_status") == "running"
-        # finalize_session must NOT be called for local dev sessions
+        # finalize_session must NOT be called for local eng sessions
         mock_finalize.assert_not_called()
 
-    def test_startup_recovery_local_dev_session_type_none_defaults_to_abandon(self):
+    def test_startup_recovery_local_eng_session_type_none_defaults_to_abandon(self):
         """Legacy record (session_type=None) on a local session routes to abandon (#1092).
 
-        session_type is gated on explicit equality with SessionType.DEV, so legacy
+        session_type is gated on explicit equality with SessionType.ENG, so legacy
         pre-migration records with session_type=None fall through to the safer
-        abandon path — same as PM/teammate. This locks in the conservative default.
+        abandon path — same as teammate. This locks in the conservative default.
         """
         import time
 
@@ -571,10 +571,10 @@ class TestStartupRecoveryLocalSessionGuard:
         assert call_kwargs.get("new_status") == "pending"
 
     def test_startup_recovery_mixed_local_and_bridge(self):
-        """Mixed stale sessions: local PM → abandoned, local dev → pending, bridge → pending.
+        """Mixed stale sessions: local teammate → abandoned, local eng → pending, bridge → pending.
 
-        Per #1092, local dev sessions are re-queued like bridge sessions. Only local
-        PM/teammate (and legacy session_type=None) sessions are abandoned.
+        Per #1092, local eng sessions are re-queued like bridge sessions. Only local
+        teammate (and legacy session_type=None) sessions are abandoned.
         """
         import time
 
@@ -583,12 +583,12 @@ class TestStartupRecoveryLocalSessionGuard:
         local_pm_session = self._stale_session(
             session_id="local-pm-abc",
             agent_session_id="agent-local-pm-002",
-            session_type=SessionType.PM,
+            session_type=SessionType.TEAMMATE,
         )
         local_dev_session = self._stale_session(
             session_id="local-dev-def",
             agent_session_id="agent-local-dev-002",
-            session_type=SessionType.DEV,
+            session_type=SessionType.ENG,
         )
         bridge_session = self._stale_session(
             session_id="tg-xyz",

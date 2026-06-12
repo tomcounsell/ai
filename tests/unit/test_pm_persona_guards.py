@@ -134,9 +134,12 @@ class TestExistingRulesPreserved:
         assert "Single-Issue Scoping" in pm_persona_text
 
     def test_rule_4_wait_for_dev_session(self, pm_persona_text):
-        """Rule 4 -- Wait for Dev Session After Dispatch must still exist."""
+        """Rule 4 -- Wait for Session After Dispatch must still exist."""
         assert "Rule 4" in pm_persona_text
-        assert "Wait for Dev Session" in pm_persona_text
+        # Accepts both old "Wait for Dev Session" and new "Wait for Child Session" phrasing
+        assert (
+            "Wait for Dev Session" in pm_persona_text or "Wait for Child Session" in pm_persona_text
+        )
 
 
 class TestGateRecoveryBehavior:
@@ -146,7 +149,11 @@ class TestGateRecoveryBehavior:
         assert "Gate-Recovery Behavior" in pm_persona_text
 
     def test_rule_5_text_unchanged(self, pm_persona_text):
-        assert "MERGE is Mandatory Before Dev-Session Sign-Off" in pm_persona_text
+        # Accepts both old "Before Dev-Session Sign-Off" and new shorter "Before Sign-Off" phrasing
+        assert (
+            "MERGE is Mandatory Before Dev-Session Sign-Off" in pm_persona_text
+            or "MERGE is Mandatory Before Sign-Off" in pm_persona_text
+        )
         assert (
             "If an open PR exists for the current issue, you must dispatch `/do-merge`"
             in pm_persona_text

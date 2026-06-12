@@ -32,7 +32,7 @@ def session():
     s = AgentSession.create(
         project_key="test-executor-pid",
         chat_id="x",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         session_id=f"executor-pid-{time.time_ns()}",

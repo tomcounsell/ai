@@ -71,7 +71,7 @@ class TestTeammateReactionClearing:
         from config.enums import SessionType
 
         agent_session = MagicMock()
-        agent_session.session_type = SessionType.PM
+        agent_session.session_type = SessionType.ENG
 
         task_error = False
         if (

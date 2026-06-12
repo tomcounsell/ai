@@ -47,7 +47,7 @@ def test_exit_returncode_field_defaults_to_zero():
     s = AgentSession(
         project_key="test-resilience-mode-4-fielddefault",
         chat_id="x",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         agent_session_id="x-default-test",
@@ -133,7 +133,7 @@ def test_pending_scan_skips_deferred(clean_sessions):
     deferred = AgentSession(
         project_key=clean_sessions,
         chat_id="x",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         agent_session_id="sid-defer-future",
@@ -146,7 +146,7 @@ def test_pending_scan_skips_deferred(clean_sessions):
     not_deferred = AgentSession(
         project_key=clean_sessions,
         chat_id="x",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         agent_session_id="sid-eligible",
@@ -215,7 +215,7 @@ def test_store_exit_returncode_persists_value(clean_sessions, monkeypatch):
     s = AgentSession(
         project_key=clean_sessions,
         chat_id="x",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         agent_session_id="sid-exit-rc",

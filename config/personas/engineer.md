@@ -357,6 +357,24 @@ mapped remediation skill, then re-dispatch `/do-merge` on your next turn.
 | MERGE_CONFLICT | `mergeable: CONFLICTING` | Rebase session branch onto `origin/main` and re-push, then re-dispatch. |
 | LINT_DRIFT | Pre-existing ruff/formatting errors unrelated to PR changes | File a cleanup issue (`gh issue create --title "chore: fix pre-existing lint/formatting drift" ...`), note it in the PR description, then re-dispatch `/do-merge`. Do NOT ask the human which path to take. |
 
+For the exact `gh`/`git`/`python` commands per category, see
+[`docs/sdlc/merge-troubleshooting.md`](../../docs/sdlc/merge-troubleshooting.md).
+
+### Re-dispatch Rule
+
+After any remediation, your next action on this issue MUST be to re-dispatch
+`/do-merge {pr}`. Do not declare the pipeline done, do not summarise, do not
+exit — the pipeline is not complete until the gate passes.
+
+### G4 Convergence Rule
+
+The SDLC router's G4 oscillation guard caps same-skill dispatches at 3 without
+state change (`.claude/skills/sdlc/SKILL.md`). If the same blocker category
+recurs 3 times in a row, escalate to the human with the specific blocker text
+from the gate output. Do not loop further. G4 is load-bearing and must not be
+bypassed — it is the only backstop between a recoverable gate failure and an
+infinite remediation loop.
+
 ---
 
 ## Stage Artifact Verification
@@ -446,6 +464,56 @@ When handling collaboration tasks directly (without spawning a child session), y
 - **Office CLI**: `officecli` at `~/.local/bin/officecli` -- create/read/edit .docx, .xlsx, .pptx files
 - **GitHub CLI**: `gh` -- issues, PRs, repos, releases, API calls
 - **Telegram**: `python tools/send_telegram.py` -- send messages and files to stakeholders
+
+---
+
+## Child Session Monitoring
+
+After dispatching a child session (Rule 4), actively monitor its status rather than
+waiting indefinitely. Stuck children waste pipeline time and block progress.
+
+### Monitoring Protocol
+
+After calling `wait-for-children`, check the child session's status as needed:
+
+```bash
+python -m tools.valor_session status --id {child_session_id}
+```
+
+### Timeout Thresholds
+
+| Child Status | Threshold | Action |
+|-------------|-----------|--------|
+| `pending` | 5 minutes | Fallback or escalate (see below) |
+| `running` (no output for 15 min) | 15 minutes | Escalate to human |
+| `failed` or `killed` | Immediate | Assess failure, re-dispatch or escalate |
+
+### Fallback for Read-Only Stages
+
+If a child session remains `pending` for more than 5 minutes AND the stage does not require
+dev permissions, run the stage directly instead of waiting:
+
+**Stages you CAN run directly (read-only):**
+- PLAN (`/do-plan`) — plan document creation
+- CRITIQUE (`/do-plan-critique`) — plan review
+- DOCS (`/do-docs`) — documentation updates
+
+**Stages you CANNOT run directly (require dev permissions):**
+- BUILD (`/do-build`) — writes code, creates PRs
+- TEST (`/do-test`) — runs test suite
+- PATCH (`/do-patch`) — modifies code
+- REVIEW (`/do-pr-review`) — code review judgment
+
+### Escalation for Dev-Permission Stages
+
+If a child session for a dev-permission stage (BUILD, TEST, PATCH) remains `pending` for
+more than 5 minutes, escalate to the human with a specific message:
+
+> "Child session {id} has been pending for {N} minutes. The worker may be unavailable or
+> at capacity. Options: (1) wait longer, (2) attempt the stage directly if you grant
+> permission, (3) kill the session and retry later."
+
+Do NOT silently wait for more than 5 minutes without reporting status.
 
 ---
 

@@ -44,7 +44,7 @@ from tools.valor_session import cmd_create  # noqa: E402
 def _make_args(**overrides) -> argparse.Namespace:
     defaults = dict(
         command="create",
-        role="pm",
+        role="eng",
         message="Run SDLC on issue #290",
         chat_id=None,
         parent=None,
@@ -161,7 +161,7 @@ class TestWorkingDirDerivesFromProjectKey:
         ):
             rc = cmd_create(
                 _make_args(
-                    role="dev",
+                    role="eng",
                     project_key="demo",
                     message="fix typo",
                     slug="fix-typo",
@@ -193,7 +193,7 @@ class TestWorkingDirFlagRemoved:
             "valor-session",
             "create",
             "--role",
-            "pm",
+            "eng",
             "--slug",
             "some-slug",
             "--message",
@@ -321,7 +321,7 @@ class TestParentInheritance:
             # test stays focused on the parent-inheritance fall-through path.
             rc = cmd_create(
                 _make_args(
-                    role="dev",
+                    role="eng",
                     slug="x",
                     parent="nonexistent-uuid",
                     project_key=None,
@@ -362,7 +362,7 @@ class TestErrorSurfaces:
             # #1272: dev sessions require --slug. Provide one so the test
             # exercises the project-key/cwd resolution error path, not the
             # slug-required guard.
-            rc = cmd_create(_make_args(role="dev", slug="x", project_key=None, message="hi"))
+            rc = cmd_create(_make_args(role="eng", slug="x", project_key=None, message="hi"))
 
         assert rc != 0
         err = capsys.readouterr().err
@@ -388,7 +388,7 @@ class TestErrorSurfaces:
             patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
         ):
             rc = cmd_create(
-                _make_args(role="dev", slug="x", project_key="nonexistent", message="hi")
+                _make_args(role="eng", slug="x", project_key="nonexistent", message="hi")
             )
 
         assert rc != 0
@@ -408,7 +408,7 @@ class TestErrorSurfaces:
             patch("agent.agent_session_queue._push_agent_session"),
             patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
         ):
-            rc = cmd_create(_make_args(role="dev", slug="x", project_key="anything", message="hi"))
+            rc = cmd_create(_make_args(role="eng", slug="x", project_key="anything", message="hi"))
 
         assert rc != 0
         err = capsys.readouterr().err
@@ -506,7 +506,7 @@ class TestErrorPathWritesToStderrOnly:
             patch("agent.agent_session_queue._push_agent_session"),
             patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
         ):
-            rc = cmd_create(_make_args(role="dev", slug="x", project_key=None, message="hi"))
+            rc = cmd_create(_make_args(role="eng", slug="x", project_key=None, message="hi"))
 
         assert rc != 0
         cap = capsys.readouterr()
@@ -530,7 +530,7 @@ class TestErrorPathWritesToStderrOnly:
             patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
         ):
             rc = cmd_create(
-                _make_args(role="dev", slug="x", project_key="nonexistent", message="hi")
+                _make_args(role="eng", slug="x", project_key="nonexistent", message="hi")
             )
 
         assert rc != 0
@@ -548,7 +548,7 @@ class TestErrorPathWritesToStderrOnly:
             patch("agent.agent_session_queue._push_agent_session"),
             patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
         ):
-            rc = cmd_create(_make_args(role="dev", project_key="anything", message="hi"))
+            rc = cmd_create(_make_args(role="eng", project_key="anything", message="hi"))
 
         assert rc != 0
         cap = capsys.readouterr()
@@ -626,7 +626,7 @@ class TestThreeLevelPMChain:
         ):
             rc1 = cmd_create(
                 _make_args(
-                    role="pm",
+                    role="eng",
                     project_key="demo",
                     message="Run SDLC on issue #100",
                 )
@@ -656,7 +656,7 @@ class TestThreeLevelPMChain:
         ):
             rc2 = cmd_create(
                 _make_args(
-                    role="pm",
+                    role="eng",
                     parent=level1_uuid,
                     project_key=None,
                     message="Run SDLC on issue #101",
@@ -690,7 +690,7 @@ class TestThreeLevelPMChain:
         ):
             rc3 = cmd_create(
                 _make_args(
-                    role="dev",
+                    role="eng",
                     slug="impl-feat",
                     parent=level2_uuid,
                     project_key=None,
