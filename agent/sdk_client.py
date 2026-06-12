@@ -1138,12 +1138,12 @@ def _resolve_compose_args(
 
     Mapping (input → output):
 
-    - ``SessionType.PM`` → ``(PROJECT_MANAGER, PM_READONLY, None)``
+    - ``SessionType.ENG`` → ``(PROJECT_MANAGER, PM_READONLY, None)``
     - ``SessionType.TEAMMATE`` + ``transport=="email"`` + ``project.email.persona``
       set → ``(<email persona>, <access level matching persona>, "email")``
     - ``SessionType.TEAMMATE`` (default) →
       ``(TEAMMATE, TEAMMATE, None)``
-    - ``SessionType.DEV`` (or unknown) → resolved via
+    - ``SessionType.ENG`` (or unknown) → resolved via
       ``_resolve_persona(project, chat_title, is_dm)`` →
       ``(<persona>, <access level matching persona>, None)``
 
@@ -1165,7 +1165,7 @@ def _resolve_compose_args(
             except ValueError:
                 pass  # Unknown persona value — fall through to default teammate handling.
 
-    if session_type == SessionType.PM:
+    if session_type == SessionType.ENG:
         return PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, None
 
     # project_mode == "pm" forces PM rails even for non-PM session types
@@ -1176,7 +1176,7 @@ def _resolve_compose_args(
     if session_type == SessionType.TEAMMATE:
         return PersonaType.TEAMMATE, AccessLevel.TEAMMATE, None
 
-    # SessionType.DEV (or unknown): resolve from project config.
+    # SessionType.ENG (or unknown): resolve from project config.
     persona = _resolve_persona(project, chat_title, is_dm=is_dm)
     return persona, _access_level_for_persona(persona), None
 
@@ -1595,7 +1595,7 @@ class ValorAgent:
         # Only PM/Teammate sessions spawn tracked children — dev sessions are excluded.
         # The env var carries the agent_session_id UUID (agt_xxx), which is the canonical
         # FK stored in parent_agent_session_id on the child's AgentSession record.
-        if self.agent_session_id and self.session_type in (SessionType.PM, SessionType.TEAMMATE):
+        if self.agent_session_id and self.session_type in (SessionType.ENG, SessionType.TEAMMATE):
             env["VALOR_PARENT_SESSION_ID"] = self.agent_session_id
 
         # Customer ID: inject for customer-service sessions so target-repo tools
@@ -1617,14 +1617,14 @@ class ValorAgent:
         # own messages via tools/send_telegram.py (issue #497).
         # chat_id comes from the project config; reply_to is resolved from
         # the AgentSession's telegram_message_id in _extract_sdlc_env_vars below.
-        if self.session_type in (SessionType.PM, SessionType.TEAMMATE) and self.chat_id:
+        if self.session_type in (SessionType.ENG, SessionType.TEAMMATE) and self.chat_id:
             env["TELEGRAM_CHAT_ID"] = str(self.chat_id)
 
         # PM sessions: inject Sentry auth token so sentry-cli works without
         # manual export. Token resolution is delegated to _resolve_sentry_auth_token,
         # which encapsulates the env-var-then-file cascade and the VALOR_LAUNCHD
         # short-circuit (macOS TCC blocks open() on ~/Desktop files under launchd).
-        if self.session_type in (SessionType.PM, SessionType.TEAMMATE):
+        if self.session_type in (SessionType.ENG, SessionType.TEAMMATE):
             sentry_token = _resolve_sentry_auth_token()
             if sentry_token:
                 env["SENTRY_AUTH_TOKEN"] = sentry_token
@@ -1643,7 +1643,7 @@ class ValorAgent:
         # gh credential. SDLC_AGENT_GH_TOKEN is read from the vault .env at startup;
         # see .env.example and docs/features/do-pr-review-bot-identity.md for
         # provisioning instructions.
-        if self.session_type in (SessionType.PM, SessionType.TEAMMATE):
+        if self.session_type in (SessionType.ENG, SessionType.TEAMMATE):
             env["CLAUDE_AGENT_REVIEW"] = "1"
             sdlc_agent_gh_token = os.environ.get("SDLC_AGENT_GH_TOKEN", "")
             if sdlc_agent_gh_token:
@@ -3289,7 +3289,7 @@ async def get_agent_response_sdk(
     _teammate_mode = False
     _collaboration_mode = False
     _classification_context = ""  # Advisory routing context for the agent
-    if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+    if _session_type in (SessionType.ENG, SessionType.TEAMMATE):
         # Config-driven persona bypass: skip classifier when persona is already known
         from bridge.routing import resolve_persona as _resolve_persona_mode
 
@@ -3314,7 +3314,7 @@ async def get_agent_response_sdk(
             except Exception:
                 pass  # Best-effort metrics
             # Update session type to Teammate (skip PM sessions — they must stay PM)
-            if session_id and _session_type != SessionType.PM:
+            if session_id and _session_type != SessionType.ENG:
                 try:
                     from models.agent_session import AgentSession as _TMSession
 
@@ -3372,7 +3372,7 @@ async def get_agent_response_sdk(
                     )
                     # Update session type to Teammate so nudge loop uses reduced cap
                     # (skip PM sessions — they must stay PM)
-                    if session_id and _session_type != SessionType.PM:
+                    if session_id and _session_type != SessionType.ENG:
                         try:
                             from models.agent_session import AgentSession as _TMSession
 
@@ -3390,7 +3390,7 @@ async def get_agent_response_sdk(
 
         # PM sessions must never be forced into Teammate mode by DM origin signal.
         # session_type is the authoritative permission signal, not chat_title.
-        if _session_type == SessionType.PM:
+        if _session_type == SessionType.ENG:
             _teammate_mode = False
 
         # Inject classification context as advisory information
@@ -3575,7 +3575,7 @@ async def get_agent_response_sdk(
     # --- Single-issue scoping (Fix 3) ---
     # Prevent PM from cross-contaminating pipelines by dispatching work for
     # issues other than the one it was assigned. Only relevant for PM sessions.
-    if _session_type == SessionType.PM and not _teammate_mode:
+    if _session_type == SessionType.ENG and not _teammate_mode:
         enriched_message += (
             "\n\nSINGLE-ISSUE SCOPING: If the message references a specific issue number "
             "(e.g., 'issue 934', '#934', 'issues/934'), you MUST only assess and advance "
@@ -3586,7 +3586,7 @@ async def get_agent_response_sdk(
     # --- Wait-for-children after dev dispatch (Fix 2) ---
     # Ensure PM stays alive while dev session runs, so steering messages
     # are received directly rather than requiring a continuation PM.
-    if _session_type == SessionType.PM and not _teammate_mode:
+    if _session_type == SessionType.ENG and not _teammate_mode:
         enriched_message += (
             "\nDEV SESSION WAIT RULE: After dispatching ANY dev session via "
             "`python -m tools.valor_session create --role dev`, you MUST:\n"
@@ -3660,7 +3660,7 @@ async def get_agent_response_sdk(
                 f"prompt_chars={len(custom_system_prompt) if custom_system_prompt else 0} "
                 f"session_id={session_id}"
             )
-            if _session_type == SessionType.PM:
+            if _session_type == SessionType.ENG:
                 logger.info(f"[{request_id}] PM session mode: PM persona, bypassPermissions")
         elif _access_level == AccessLevel.CUSTOMER_SERVICE:
             # Customer-service persona: action-oriented, no code writes. Use
@@ -3727,7 +3727,7 @@ async def get_agent_response_sdk(
         logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
 
         # Record response time metric for Teammate observability
-        if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+        if _session_type in (SessionType.ENG, SessionType.TEAMMATE):
             try:
                 from agent.teammate_metrics import record_response_time
 

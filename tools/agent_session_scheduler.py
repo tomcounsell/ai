@@ -331,7 +331,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     priority = args.priority or "normal"
 
     # Session type: explicit flag > default (pm for issue-based work)
-    session_type = getattr(args, "session_type", None) or SessionType.PM
+    session_type = getattr(args, "session_type", None) or SessionType.ENG
 
     # Parent session inheritance
     parent_id = getattr(args, "parent_session", None)
@@ -1232,10 +1232,9 @@ def main():
     sched.add_argument("--after", help="Defer execution until this ISO 8601 datetime")
     sched.add_argument(
         "--session-type",
-        choices=[SessionType.PM, SessionType.TEAMMATE, SessionType.DEV],
-        help="Session type: pm (PM orchestrates), teammate "
-        "(conversational), or dev (direct execution). "
-        "Default: pm for issue/PR work, dev for hotfixes.",
+        choices=[SessionType.ENG, SessionType.TEAMMATE],
+        help="Session type: eng (engineer, full permissions) or teammate "
+        "(conversational). Default: eng.",
     )
     sched.add_argument(
         "--parent-session",

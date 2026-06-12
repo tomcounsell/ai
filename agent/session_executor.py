@@ -1588,12 +1588,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # are silently disabled in the harness subprocess (issue #1148).
         if _session_type:
             _harness_env["SESSION_TYPE"] = _session_type
-        if _session_type in (SessionType.PM, SessionType.TEAMMATE) and session.agent_session_id:
+        if _session_type in (SessionType.ENG, SessionType.TEAMMATE) and session.agent_session_id:
             _harness_env["VALOR_PARENT_SESSION_ID"] = session.agent_session_id
         # PM/Teammate need Telegram + Sentry auth so tools/send_telegram.py and
         # sentry-cli work without manual export. Mirrors ValorAgent.env
         # (sdk_client.py:1264, 1272). chat_id comes from the project config.
-        if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+        if _session_type in (SessionType.ENG, SessionType.TEAMMATE):
             if session.chat_id:
                 _harness_env["TELEGRAM_CHAT_ID"] = str(session.chat_id)
             _sentry_token = _resolve_sentry_auth_token()
@@ -1635,7 +1635,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Determine persona via the single source of truth in sdk_client.
         # _persona_source is local-only (for log line below); the actual
         # persona/access-level mapping comes from _resolve_compose_args.
-        if _session_type == SessionType.PM:
+        if _session_type == SessionType.ENG:
             _persona_source = "session_type=pm"
         elif _transport == "email" or _email_persona_requested:
             if _email_persona_requested:
@@ -1659,7 +1659,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # the bare email-default case is handled by leaving the resolver's
         # default (TEAMMATE) intact for SessionType.TEAMMATE.
         if (
-            _session_type != SessionType.PM
+            _session_type != SessionType.ENG
             and _transport == "email"
             and not _email_persona_requested
         ):

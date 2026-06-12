@@ -84,7 +84,7 @@ async def dispatch_telegram_session(
     scheduled_at: float | None = None,
     parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.PM,
+    session_type: str = SessionType.ENG,
     scheduling_depth: int = 0,
     project_config: dict | None = None,
     extra_context_overrides: dict | None = None,

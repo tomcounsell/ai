@@ -690,9 +690,9 @@ def _resolve_persona_display(session) -> str | None:
         return None
     if raw == SessionType.TEAMMATE:
         return "Teammate"
-    if raw == SessionType.PM:
+    if raw == SessionType.ENG:
         return "Project Manager"
-    if raw == SessionType.DEV:
+    if raw == SessionType.ENG:
         return "Developer"
     if raw == "chat":
         return "Project Manager"  # Legacy fallback for pre-migration sessions

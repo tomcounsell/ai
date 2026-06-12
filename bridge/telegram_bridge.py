@@ -1862,7 +1862,7 @@ async def main():
                             telegram_message_key=stored_msg_id,
                             project_config=project,
                             extra_context_overrides=_completed_extra_overrides,
-                            session_type=getattr(completed, "session_type", None) or SessionType.PM,
+                            session_type=getattr(completed, "session_type", None) or SessionType.ENG,
                             message_ts=message.date,
                         )
                         _steering_session_enqueued = True
@@ -2200,7 +2200,7 @@ async def main():
         _classification = classification_result.get("type")
         _persona = resolve_persona(project, chat_title, is_dm=is_dm)
         if _persona == PersonaType.DEVELOPER:
-            _session_type = SessionType.DEV  # Dev session — Dev persona, full permissions
+            _session_type = SessionType.ENG  # Dev session — Dev persona, full permissions
             logger.info(
                 f"[{project_name}] Dev mode (config-driven): {chat_title!r} → session_type=dev"
             )
@@ -2210,7 +2210,7 @@ async def main():
                     SessionType.TEAMMATE
                 )  # Teammate session — read-only, no orchestration
             else:
-                _session_type = SessionType.PM  # PM session — orchestrates work, spawns children
+                _session_type = SessionType.ENG  # PM session — orchestrates work, spawns children
 
         # Refresh the coalescing guard timestamp right before enqueue.
         # The initial guard was set early (before awaits) to close the race window;

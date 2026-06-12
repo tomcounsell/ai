@@ -381,11 +381,12 @@ def cmd_create(args: argparse.Namespace) -> int:
         from config.enums import SessionType
 
         _role_to_session_type = {
-            "pm": SessionType.PM,
-            "dev": SessionType.DEV,
+            "eng": SessionType.ENG,
+            "pm": SessionType.ENG,  # backward-compat alias
+            "dev": SessionType.ENG,  # backward-compat alias
             "teammate": SessionType.TEAMMATE,
         }
-        role = args.role or "pm"
+        role = args.role or "eng"
         if role not in _role_to_session_type:
             raise ValueError(
                 f"Unknown --role value: {role!r}. Allowed values: {sorted(_role_to_session_type)}"

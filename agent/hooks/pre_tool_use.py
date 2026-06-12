@@ -115,7 +115,7 @@ SENSITIVE_FRAGMENTS = (
 
 def _is_pm_session() -> bool:
     """Check if the current session is a PM session."""
-    return os.environ.get("SESSION_TYPE") == SessionType.PM
+    return os.environ.get("SESSION_TYPE") == SessionType.ENG
 
 
 def _is_pm_allowed_write(file_path: str) -> bool:
