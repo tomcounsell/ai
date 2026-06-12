@@ -394,7 +394,7 @@ Single-dev refactor; team structure stays lean.
 - **Agent Type**: builder
 - **Parallel**: true (with 3-5)
 - Wrap (thin shim, source stays put): `agent.agent_session_queue._agent_session_health_check` → `reflections/agents/session_liveness_check.py`; `cleanup_corrupted_agent_sessions` → `reflections/agents/agent_session_cleanup.py`
-- Move from `agent/sustainability.py`: `circuit_health_gate`, `session_recovery_drip`, `session_count_throttle`, `failure_loop_detector` → per-file `reflections/agents/*.py`. Carry internal helpers (`_compute_fingerprint`, `_file_github_issue`, `_send_telegram`) with whichever reflection uses them; duplicate if shared by ≥2.
+- Move from `agent/sustainability.py`: `circuit_health_gate`, `session_recovery_drip`, `session_count_throttle`, `failure_loop_detector` → per-file `reflections/agents/*.py`. Carry internal helpers (`_compute_fingerprint`, `_file_github_issue`, `_latest_failure_reason`, `_send_telegram`) with whichever reflection uses them; duplicate if shared by ≥2.
 - Move: `reflections/session_intelligence.py` → `reflections/agents/session_intelligence.py`
 - Placeholder file (agent-type, no Python callable): `reflections/agents/system_health_digest.py` — module docstring documents purpose/cadence/failure modes and points at YAML `command:` as executable source-of-truth
 - Placeholder file (agent-type, if applicable): `reflections/agents/pm_audio_briefing.py` — same pattern; verify `execution_type` during build before treating as placeholder
