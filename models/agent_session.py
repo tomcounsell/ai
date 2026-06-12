@@ -1,18 +1,17 @@
 """AgentSession model - unified lifecycle tracking for agent work.
 
-Single Popoto model with session_type discriminator ("pm", "teammate", or "dev").
+Single Popoto model with session_type discriminator ("eng", "teammate", or "granite").
 
-Popoto does not support model inheritance, so PM and Dev sessions are
+Popoto does not support model inheritance, so session types are
 distinguished by the session_type field with factory methods and derived
 properties providing type-specific behavior.
 
 Session types (permission model):
-  PM session (session_type="pm"): Read-only Agent SDK session, PM persona.
-    Owns the Telegram conversation, orchestrates work, spawns child sessions.
+  Eng session (session_type="eng"): Full-permission Agent SDK session, Engineer persona.
+    Owns the Telegram conversation, orchestrates work, runs SDLC pipeline stages,
+    and spawns child sessions — unified PM+Dev role.
   Teammate session (session_type="teammate"): Read-only session, Teammate persona.
     Participates in group conversations without orchestration authority.
-  Dev session (session_type="dev"): Full-permission Agent SDK session, Dev persona.
-    Does the actual coding work, runs SDLC pipeline stages.
 
 Parent-child relationship:
   parent_agent_session_id is the canonical parent link.
@@ -78,37 +77,33 @@ TASK_TYPE_VOCABULARY = {
 }
 
 # Backward-compatible aliases (import from config.enums for new code)
-SESSION_TYPE_PM = SessionType.PM
+SESSION_TYPE_ENG = SessionType.ENG
 SESSION_TYPE_TEAMMATE = SessionType.TEAMMATE
-SESSION_TYPE_DEV = SessionType.DEV
 
 
 class AgentSession(Model):
     """Unified model for all Agent SDK sessions, discriminated by session_type.
 
-    Single Popoto model with a session_type discriminator ("pm", "teammate",
-    or "dev").
+    Single Popoto model with a session_type discriminator ("eng", "teammate",
+    or "granite").
 
     Session types (permission model):
-        PM session (session_type="pm"):
-            Read-only Agent SDK session, PM persona. Owns the Telegram
-            conversation, orchestrates work, spawns child sessions.
+        Eng session (session_type="eng"):
+            Full-permission Agent SDK session, Engineer persona. Owns the
+            Telegram conversation, orchestrates work, runs SDLC pipeline
+            stages, and spawns child sessions — unified PM+Dev role.
         Teammate session (session_type="teammate"):
             Read-only session, Teammate persona. Participates in group
             conversations without orchestration authority.
-        Dev session (session_type="dev"):
-            Full-permission Agent SDK session, Dev persona. Does the actual
-            coding work, runs SDLC pipeline stages.
 
     Parent-child hierarchy:
         parent_agent_session_id: Canonical parent link. Set
-            by all session creators (create_child, create_dev, enqueue_session).
+            by all session creators (create_child, enqueue_session).
 
     Factory methods:
-        create_pm(): Create a PM session (PM persona, read-only).
+        create_eng(): Create an Eng session (Engineer persona, full permissions).
         create_teammate(): Create a Teammate session (read-only).
-        create_child(): Create a child Dev session.
-        create_dev(): Backward-compat wrapper for create_child().
+        create_child(): Create a child Eng session.
         create_local(): Create a local CLI session.
 
     Status values (13 total):
@@ -141,7 +136,7 @@ class AgentSession(Model):
     # === Identity ===
     id = AutoKeyField()
     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
-    session_type = KeyField(null=True)  # "pm", "teammate", or "dev" — discriminator
+    session_type = KeyField(null=True)  # "eng", "teammate", or "granite" — discriminator
     project_key = KeyField()
     status = IndexedField(default="pending")  # Non-key field with secondary index for .filter()
 
@@ -496,11 +491,11 @@ class AgentSession(Model):
 
     # === Worker routing key ===
 
-    # Stages where slugged PM sessions operate in an isolated worktree.
+    # Stages where slugged Eng sessions operate in an isolated worktree.
     # Uses an allowlist (not denylist) so unknown/future stages fail closed —
     # they serialize on project_key rather than accidentally parallelizing.
     # Matches the worktree-using stages in resolve_branch_for_stage().
-    _PM_WORKTREE_STAGES: frozenset[str] = frozenset({"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"})
+    _ENG_WORKTREE_STAGES: frozenset[str] = frozenset({"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"})
 
     @property
     def worker_key(self) -> str:
@@ -508,16 +503,12 @@ class AgentSession(Model):
 
         Teammate sessions run in parallel across chats, keyed by chat_id.
 
-        PM sessions:
-        - Slugless PMs always serialize per project_key (PR #828 invariant).
-        - Slugged PMs at worktree-compatible stages (BUILD/TEST/PATCH/REVIEW/DOCS)
-          route by slug — two sibling PMs with distinct slugs run concurrently.
-        - Slugged PMs at main-checkout stages (PLAN/ISSUE/CRITIQUE/MERGE/None)
+        Eng sessions:
+        - Slugless Eng sessions always serialize per project_key (PR #828 invariant).
+        - Slugged Eng sessions at worktree-compatible stages (BUILD/TEST/PATCH/REVIEW/DOCS)
+          route by slug — two sibling Eng sessions with distinct slugs run concurrently.
+        - Slugged Eng sessions at main-checkout stages (PLAN/ISSUE/CRITIQUE/MERGE/None)
           fall back to project_key to prevent git conflicts on main.
-
-        Dev sessions:
-        - Slugged devs route by slug (isolated worktree).
-        - Slugless devs serialize by project_key.
 
         Slugs are assumed unique across the active session keyspace.  If two
         sessions in different projects share a slug, they will share a worker
@@ -525,25 +516,25 @@ class AgentSession(Model):
         """
         if self.session_type == SessionType.TEAMMATE:
             return self.chat_id or self.project_key
-        if self.session_type == SessionType.PM:
-            # Slugged PMs at worktree stages route by slug (parallel-safe).
-            # Slugless PMs and PMs at main-checkout stages serialize by project_key.
-            if self.slug and self._pm_stage_is_worktree_compatible():
+        if self.session_type == SessionType.ENG:
+            # Slugged Eng sessions at worktree stages route by slug (parallel-safe).
+            # Slugless Eng sessions and sessions at main-checkout stages serialize by project_key.
+            if self.slug and self._eng_stage_is_worktree_compatible():
                 return self.slug
             return self.project_key
-        # dev: isolated by slug (worktree) if present, serialized by project otherwise
+        # Fallback: isolated by slug (worktree) if present, serialized by project otherwise
         if self.slug:
             return self.slug
         return self.project_key
 
-    def _pm_stage_is_worktree_compatible(self) -> bool:
-        """Return True only for stages where a slugged PM uses an isolated worktree.
+    def _eng_stage_is_worktree_compatible(self) -> bool:
+        """Return True only for stages where a slugged Eng session uses an isolated worktree.
 
         Uses an allowlist so unknown or future stages fail closed (serialize)
         rather than accidentally parallelizing on an unaudited stage.
         """
         stage = getattr(self, "current_stage", None)
-        return stage in self._PM_WORKTREE_STAGES
+        return stage in self._ENG_WORKTREE_STAGES
 
     @property
     def is_project_keyed(self) -> bool:
@@ -1327,19 +1318,14 @@ class AgentSession(Model):
     # === Session type helpers ===
 
     @property
-    def is_pm(self) -> bool:
-        """Whether this is a PM session (PM persona, read-only orchestrator)."""
-        return self.session_type == SESSION_TYPE_PM
+    def is_eng(self) -> bool:
+        """Whether this is an Eng session (Engineer persona, full permissions)."""
+        return self.session_type == SESSION_TYPE_ENG
 
     @property
     def is_teammate(self) -> bool:
         """Whether this is a Teammate session (read-only, no orchestration)."""
         return self.session_type == SESSION_TYPE_TEAMMATE
-
-    @property
-    def is_dev(self) -> bool:
-        """Whether this is a Dev session (Dev persona, full permissions)."""
-        return self.session_type == SESSION_TYPE_DEV
 
     @property
     def current_stage(self) -> str | None:
@@ -1425,7 +1411,7 @@ class AgentSession(Model):
         return session
 
     @classmethod
-    def create_pm(
+    def create_eng(
         cls,
         *,
         session_id: str,
@@ -1440,9 +1426,9 @@ class AgentSession(Model):
         telegram_message_key: str | None = None,
         **kwargs,
     ) -> "AgentSession":
-        """Create a PM session (PM persona, read-only orchestrator)."""
+        """Create an Eng session (Engineer persona, full permissions, orchestrates work)."""
         return cls._create_session_with_telegram(
-            session_type=SESSION_TYPE_PM,
+            session_type=SESSION_TYPE_ENG,
             session_id=session_id,
             project_key=project_key,
             working_dir=working_dir,
@@ -1495,7 +1481,7 @@ class AgentSession(Model):
         session_id: str,
         project_key: str,
         working_dir: str,
-        session_type: str = SESSION_TYPE_DEV,
+        session_type: str = SESSION_TYPE_ENG,
         **kwargs,
     ) -> "AgentSession":
         """Create an AgentSession for a local Claude Code CLI session."""
@@ -1550,7 +1536,7 @@ class AgentSession(Model):
 
         session = cls(
             session_id=session_id,
-            session_type=SESSION_TYPE_DEV,
+            session_type=SESSION_TYPE_ENG,
             project_key=project_key,
             working_dir=working_dir,
             parent_agent_session_id=parent_agent_session_id,
