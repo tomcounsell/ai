@@ -182,6 +182,30 @@ class TestFindSessionByIssue:
 
         assert result is None
 
+    def test_read_converges_with_write_under_divergent_env(self, monkeypatch):
+        """#1671/#1672: the read path resolves the same issue-scoped session a
+        writer (with a divergent VALOR_SESSION_ID) targeted. The read path is
+        env-independent — it goes straight through find_session_by_issue — so a
+        divergent env var set on the reader has no effect."""
+        from tools.sdlc_stage_query import _find_session_by_issue
+
+        # A divergent env var must NOT affect the read resolution.
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-pm-divergent")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        issue_session = MagicMock()
+        issue_session.issue_url = "https://github.com/tomcounsell/ai/issues/1672"
+        issue_session.session_type = "pm"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [issue_session]
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = _find_session_by_issue(1672)
+
+        # The read resolves the issue session regardless of the env var.
+        assert result is issue_session
+
     def test_handles_redis_exception_gracefully(self):
         from tools.sdlc_stage_query import _find_session_by_issue
 

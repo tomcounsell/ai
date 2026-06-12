@@ -205,6 +205,47 @@ class TestCliRecordEnsure:
         assert "ensure" not in kwargs or kwargs.get("ensure") is False
 
 
+class TestConvergenceUnderDivergentEnv:
+    """#1671/#1672: a verdict recorded with --issue-number N under a divergent
+    VALOR_SESSION_ID lands on the issue-scoped session and is readable via the
+    issue-number read path. This is the direct regression for the skew."""
+
+    def _args(self, **kw):
+        from types import SimpleNamespace
+
+        base = dict(
+            session_id=None,
+            issue_number=1672,
+            stage="CRITIQUE",
+            verdict="NEEDS REVISION",
+            blockers=None,
+            tech_debt=None,
+            judges_json=None,
+            consensus_json=None,
+        )
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_verdict_lands_on_issue_session_not_env(self, fake_session_reload_patched, monkeypatch):
+        from tools.sdlc_verdict import _cli_get, _cli_record
+
+        # Env var points at a DIFFERENT session (the #1671 forked-subagent case).
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-pm-divergent")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        issue_session = fake_session_reload_patched  # the sdlc-local-1672 session
+
+        # The REAL _find_session runs (not mocked). Its issue-first pass resolves
+        # find_session_by_issue, which returns the issue session — NOT the env one.
+        with patch("tools._sdlc_utils.find_session_by_issue", return_value=issue_session):
+            recorded = _cli_record(self._args())
+            # Read-after-write through the same issue-number path converges.
+            got = _cli_get(self._args())
+
+        assert recorded["verdict"] == "NEEDS REVISION"
+        assert got["verdict"] == "NEEDS REVISION"
+
+
 class TestNormalizeVerdict:
     """Unit tests for normalize_verdict helper (#1638)."""
 

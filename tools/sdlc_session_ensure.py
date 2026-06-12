@@ -41,20 +41,35 @@ ORPHAN_AGE_SECONDS = 600
 def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
     """Ensure a local AgentSession exists for the given issue number.
 
-    Resolution order:
-    1. **Env-var short-circuit**: If VALOR_SESSION_ID or AGENT_SESSION_ID is set
-       in the environment and resolves to a live PM session with non-terminal
-       status, return it without creating anything. Bridge-initiated sessions
-       hit this path and the call is a true no-op.
+    Resolution order (env-vs-issue reconciliation — concern C1, #1671/#1672):
+    1. **Env-var short-circuit WITH issue-ownership check**: If VALOR_SESSION_ID
+       or AGENT_SESSION_ID is set and resolves to a live (non-terminal) PM
+       session, reconcile it against the requested issue number:
+         - If that env session already **owns the issue** (its ``issue_url``
+           endswith ``/issues/{issue_number}``), return it without creating
+           anything — this is the legitimate bridge case (#1147 dedup), a true
+           no-op, no ``find_session_by_issue`` detour.
+         - If the env session exists but does **not** own the issue, consult
+           :func:`find_session_by_issue` and prefer an existing issue-scoped
+           session (e.g. ``sdlc-local-{N}``) over the divergent env session.
+           This is the #1671 case: a forked subagent inherited a parent's
+           ``VALOR_SESSION_ID`` that points at a different issue's session.
     2. **Issue-based lookup**: Scan PM sessions for a matching issue_url or
        message_text (case-insensitive word-boundary regex).
     3. **Create**: Fall through to creating a new sdlc-local-{N} session.
 
-    The short-circuit falls through to the legacy path when:
+    The env short-circuit is *not* a blind reorder: it is kept only when the env
+    session owns the issue, so the bridge dedup contract (#1147) holds and no
+    duplicate is ever created for the bridge case. When no env session exists,
+    the fall-through (issue lookup → create) is unchanged.
+
+    The short-circuit falls through to the legacy/issue path when:
     - The env var is unset or empty
     - The env-resolved session does not exist in Redis (stale env)
     - The env-resolved session is not a PM session (e.g., a Dev session)
     - The env-resolved session is in a terminal status (completed, killed, etc.)
+    - The env-resolved session is live but does NOT own the requested issue
+      (reconciliation prefers the issue-scoped session)
 
     Args:
         issue_number: GitHub issue number.
@@ -88,7 +103,28 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
 
                         status = getattr(resolved, "status", None)
                         if status not in TERMINAL_STATUSES:
-                            return {"session_id": env_session_id, "created": False}
+                            # Reconciliation (C1, #1671): keep the env session
+                            # only when it OWNS the requested issue. Guard
+                            # issue_url against non-string values (a MagicMock
+                            # default or None would otherwise truthily match).
+                            env_issue_url = getattr(resolved, "issue_url", None) or ""
+                            if env_issue_url.endswith(f"/issues/{issue_number}"):
+                                # Legitimate bridge case — true no-op, no detour.
+                                return {"session_id": env_session_id, "created": False}
+                            # Env session is live but does NOT own this issue.
+                            # Prefer an existing issue-scoped session if one
+                            # exists; otherwise fall through to the issue
+                            # lookup / create path below.
+                            from tools._sdlc_utils import find_session_by_issue
+
+                            owned = find_session_by_issue(issue_number)
+                            if owned is not None:
+                                owned_id = getattr(owned, "session_id", None)
+                                if owned_id:
+                                    return {"session_id": owned_id, "created": False}
+                            # No issue-scoped session yet — fall through to the
+                            # legacy issue lookup + create path. (Do NOT return
+                            # the divergent env session.)
             except Exception as e:
                 logger.debug(f"sdlc_session_ensure: env short-circuit failed: {e}")
                 # Fall through to the legacy path on any error.

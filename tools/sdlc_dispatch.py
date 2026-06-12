@@ -121,7 +121,14 @@ def get_dispatch_history(session) -> list:
 
 
 def _cli_record(args) -> dict:
-    session = _find_session(session_id=args.session_id, issue_number=args.issue_number)
+    # ensure=True (B1, #1671): the dispatch record path joins the other three
+    # write subcommands so a cold-start `dispatch record --issue-number N`
+    # creates/uses the issue-scoped sdlc-local-N session rather than env-
+    # resolving to an inherited session or silently no-opping. The dispatch
+    # trail then has the same issue-scoped home the router reads. `get`/`reset`
+    # stay non-ensuring — `get` is read-only and `reset` must not fabricate a
+    # session.
+    session = _find_session(session_id=args.session_id, issue_number=args.issue_number, ensure=True)
     if session is None:
         logger.debug("sdlc_dispatch record: no session resolved — no-op")
         return {}

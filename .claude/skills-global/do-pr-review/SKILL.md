@@ -726,7 +726,7 @@ sdlc-tool verdict record --stage REVIEW \
   --judges-json "$JUDGES_JSON" --consensus-json "$CONSENSUS_JSON"
 ```
 
-The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state. If `$ISSUE_NUMBER` is unknown, omit the `--issue-number` flag and the recorder will resolve via `VALOR_SESSION_ID` / `AGENT_SESSION_ID`.
+The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state. **Always pass `--issue-number $ISSUE_NUMBER` when the issue number is known** — it is the authoritative session selector, guaranteeing the verdict lands on the session the router reads for that issue. Only if `$ISSUE_NUMBER` is genuinely unknown, omit the flag; the recorder then resolves via the `VALOR_SESSION_ID` / `AGENT_SESSION_ID` env-var session as a *last resort* (subordinate to `--issue-number`). A forked review subagent that inherited a parent's env-var session must still pass `--issue-number` so its verdict is not diverted to the parent's session (#1671/#1672).
 
 ## Hard Rules
 

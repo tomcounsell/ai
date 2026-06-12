@@ -123,12 +123,31 @@ def find_session_by_issue(issue_number: int):
        sessions from message text, not URLs) so operators running SDLC over
        the bridge are still findable by issue number.
 
+    Resolution order (tightened for #1671/#1672 — concern C2):
+
+    1. **issue_url ownership pass**: scan PM sessions for one whose
+       ``issue_url`` endswith ``/issues/{issue_number}``. A live bridge PM
+       session that owns the issue via its URL wins over a stale deterministic
+       ``sdlc-local-{N}`` record. This pass runs FIRST so a leftover
+       ``sdlc-local-{N}`` from an earlier local run can never shadow the
+       authoritative bridge session that owns the issue.
+    2. **Deterministic-id pass**: a session auto-ensured by
+       ``find_session(ensure=True)`` (or by ``sdlc_session_ensure``) is keyed
+       ``sdlc-local-{N}`` and may carry no ``issue_url`` / ``message_text``.
+       Match it by its deterministic id so the READ path (verdict get,
+       stage-query, next-skill) finds the same record a prior WRITE created.
+       This is the fallback for the sessionless-local case it was built for
+       (#1558) — only reached when no PM session owns the issue via
+       ``issue_url``.
+    3. **message_text fallback pass**: match by message_text for bridge-
+       originated sessions that have no ``issue_url``.
+
     The ``issue_url`` pass takes priority: if any session matches there, it
-    is returned without running the ``message_text`` scan. When multiple
-    sessions could match via ``message_text`` alone (e.g., a conversation
-    mentioning two issue numbers), the first iterated session wins — this is
-    an acceptable limitation because bridge sessions today carry a single
-    originating message and multi-issue mentions are rare.
+    is returned without running the deterministic-id or ``message_text``
+    scans. When multiple sessions could match via ``message_text`` alone (e.g.,
+    a conversation mentioning two issue numbers), the first iterated session
+    wins — this is an acceptable limitation because bridge sessions today carry
+    a single originating message and multi-issue mentions are rare.
 
     Args:
         issue_number: GitHub issue number to search for.
@@ -140,12 +159,24 @@ def find_session_by_issue(issue_number: int):
         return None
 
     try:
-        # Deterministic-id pass: a session auto-ensured by find_session(ensure=True)
-        # (or by sdlc_session_ensure) is keyed sdlc-local-{N} and may carry no
-        # issue_url / message_text. Match it by its deterministic id first so the
-        # READ path (verdict get, stage-query, next-skill) finds the same record a
-        # prior WRITE created. Without this, a sessionless write would persist but
-        # the subsequent read would miss it (#1558).
+        # issue_url ownership pass (C2): a live bridge PM session that owns the
+        # issue via its URL must win over a stale deterministic sdlc-local-{N}
+        # record. Compute this FIRST so the deterministic-id fallback never
+        # shadows the authoritative bridge session.
+        #
+        # NOTE: Linear scan of PM sessions — acceptable for current scale (typically
+        # <100 PM sessions). If PM session count grows significantly, consider adding
+        # an indexed lookup by issue_url or caching issue->session mappings.
+        pm_sessions = list(AgentSession.query.filter(session_type="pm"))
+        target_suffix = f"/issues/{issue_number}"
+        for s in pm_sessions:
+            issue_url = getattr(s, "issue_url", None) or ""
+            if issue_url.endswith(target_suffix):
+                return s
+
+        # Deterministic-id pass: only reached when no PM session owns the issue
+        # via issue_url. Matches the sdlc-local-{N} record a prior sessionless
+        # WRITE created so the subsequent READ finds it (#1558).
         local_id = f"sdlc-local-{issue_number}"
         try:
             local = list(AgentSession.query.filter(session_id=local_id))
@@ -159,16 +190,6 @@ def find_session_by_issue(issue_number: int):
                 return local[0]
         except Exception as e:
             logger.debug(f"find_session_by_issue deterministic-id pass failed: {e}")
-
-        # NOTE: Linear scan of PM sessions — acceptable for current scale (typically
-        # <100 PM sessions). If PM session count grows significantly, consider adding
-        # an indexed lookup by issue_url or caching issue->session mappings.
-        pm_sessions = list(AgentSession.query.filter(session_type="pm"))
-        target_suffix = f"/issues/{issue_number}"
-        for s in pm_sessions:
-            issue_url = getattr(s, "issue_url", None) or ""
-            if issue_url.endswith(target_suffix):
-                return s
 
         # Fallback: match by message_text for bridge-originated sessions that
         # have no issue_url. Word boundaries prevent matches like
@@ -192,23 +213,47 @@ def find_session(
 ):
     """Resolve a PM AgentSession by session_id or issue_number.
 
-    Checks (in order): explicit session_id arg → VALOR_SESSION_ID env →
-    AGENT_SESSION_ID env → issue_number lookup via find_session_by_issue.
-    Returns the session object or None.
+    Resolution order (precedence — corrected for #1671/#1672):
+
+    1. **Explicit ``session_id`` argument** — highest precedence. A caller that
+       passes a concrete id means it; this is unchanged and overrides everything
+       below, including issue-based resolution.
+    2. **Issue-based lookup** via :func:`find_session_by_issue`, attempted when
+       ``issue_number is not None and issue_number >= 1``. This now runs *before*
+       env-var resolution so that an explicit ``--issue-number N`` write lands on
+       the same session the router reads for that issue (the deterministic
+       ``sdlc-local-{N}`` or the bridge PM session that owns the issue via
+       ``issue_url``). A forked subagent that inherited a parent's
+       ``VALOR_SESSION_ID`` no longer diverts the write to the parent's session.
+    3. **Env-var session** (``VALOR_SESSION_ID`` / ``AGENT_SESSION_ID``) — a
+       *fallback*, consulted only when there is no explicit ``session_id`` and no
+       issue-based match. This preserves the bridge case: a write with no
+       ``--issue-number`` resolves the env-var session exactly as before.
+    4. **Auto-ensure** (writes only) — unchanged, gated on
+       ``issue_number >= 1`` or env-var presence.
+
+    *Why issue-number beats env-var (steps 2 vs 3):* the #1671/#1672 skew — reads
+    resolved by issue number while writes resolved by an inherited env-var session
+    — silently fragmented SDLC state. Both paths now consult
+    ``find_session_by_issue`` first for an explicit issue number, so reads and
+    writes converge on one session.
 
     Args:
         session_id: Optional explicit session ID.
         issue_number: Optional GitHub issue number for issue-based lookup.
         ensure: Opt-in auto-create flag. When ``False`` (the default) this is a
-            pure, side-effect-free lookup and is byte-for-byte the legacy
-            behavior — no session is ever created. **Only the three SDLC
-            *write* subcommands** (``sdlc_meta_set.write_meta``,
-            ``sdlc_stage_marker.write_marker``, ``sdlc_verdict._cli_record``)
-            pass ``ensure=True``, so a write always has a home regardless of how
-            the pipeline is driven. When ``True`` and no existing PM session is
-            found, this calls :func:`tools.sdlc_session_ensure.ensure_session`
-            to create (or dedup onto a live bridge session) a PM session, then
-            re-resolves and returns it. Creation is gated: it only happens when
+            pure, side-effect-free lookup — no session is ever created. **Four
+            SDLC *write* subcommands** pass ``ensure=True``:
+            ``sdlc_meta_set.write_meta``, ``sdlc_stage_marker.write_marker``,
+            ``sdlc_verdict._cli_record``, and ``sdlc_dispatch._cli_record``
+            (the dispatch ``record`` path joined the other three so a cold-start
+            ``dispatch record --issue-number N`` has an issue-scoped home — see
+            #1671). The ``dispatch`` ``get``/``reset`` paths stay non-ensuring.
+            So a write always has a home regardless of how the pipeline is
+            driven. When ``True`` and no existing PM session is found, this calls
+            :func:`tools.sdlc_session_ensure.ensure_session` to create (or dedup
+            onto a live bridge session) a PM session, then re-resolves and
+            returns it. Creation is gated: it only happens when
             ``issue_number >= 1`` OR a session-id env var is present — a bare
             sessionless write with no issue context still returns ``None`` (no
             fabricated session). The ensure path reuses ``ensure_session``'s
@@ -220,27 +265,42 @@ def find_session(
     Returns:
         The PM AgentSession or None.
     """
-    resolved_id = (
-        session_id or os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")
-    )
-    if resolved_id:
+    # Step 1: explicit session_id argument wins over everything below.
+    if session_id:
         try:
-            sessions = list(AgentSession.query.filter(session_id=resolved_id))
+            sessions = list(AgentSession.query.filter(session_id=session_id))
             if sessions:
                 for s in sessions:
                     if getattr(s, "session_type", None) == "pm":
                         return s
                 return sessions[0]
         except Exception as e:
-            logger.debug(f"find_session by id failed: {e}")
+            logger.debug(f"find_session by explicit id failed: {e}")
 
-    if issue_number is not None:
+    # Step 2: issue-based resolution BEFORE env-var resolution. An explicit
+    # --issue-number N must override an inherited env-var session so the write
+    # converges with the issue-number read path (#1671/#1672).
+    if issue_number is not None and issue_number >= 1:
         try:
             found = find_session_by_issue(issue_number)
             if found is not None:
                 return found
         except Exception as e:
             logger.debug(f"find_session_by_issue failed: {e}")
+
+    # Step 3: env-var session is now a FALLBACK — only when no explicit id and
+    # no issue match. Preserves the bridge no-issue-number case byte-for-byte.
+    env_id = os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")
+    if env_id:
+        try:
+            sessions = list(AgentSession.query.filter(session_id=env_id))
+            if sessions:
+                for s in sessions:
+                    if getattr(s, "session_type", None) == "pm":
+                        return s
+                return sessions[0]
+        except Exception as e:
+            logger.debug(f"find_session by env id failed: {e}")
 
     # Opt-in auto-ensure (writes only). Create a session so the write has a home.
     # Gated: only when there is an issue context (issue_number >= 1) or a
