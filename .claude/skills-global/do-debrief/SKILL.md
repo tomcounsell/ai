@@ -140,9 +140,9 @@ The relay owns the audio file from the moment the payload is pushed — it delet
 - **`valor-telegram send` exits non-zero** → the payload was not enqueued. The temp file is still on disk; remove it manually so it doesn't leak.
 - **Bridge relay not running** → the payload sits in Redis until the relay starts. If you need synchronous confirmation, run `./scripts/valor-service.sh status` first.
 
-## Why no `/tts` skill
+## Relationship to `/tts`
 
-`tools/transcribe/` has no `/transcribe` skill — its CLI + README is the stable agent-facing surface. `tools/tts/` mirrors that. Agents invoke `valor-tts` via Bash directly for raw synthesis. `/do-debrief` is the one user-invocable composite, and the construction phases above are why it earns its own skill instead of "pipe text to valor-tts."
+`/tts` is the raw synthesis surface — "speak this text → audio file" — and it exists so the capability is **discoverable and invocable from any project on any machine**, since `valor-tts` is only on `PATH` inside the `~/src/ai` venv. `/do-debrief` is the composite: it *constructs* a 30-second executive brief (the categorize → gap-check → draft → review-gate phases above) and delivers it as a Telegram voice note. Those construction phases are the value `/do-debrief` adds over "pipe text to `/tts`." When you just need audio from text, use `/tts`; when you need a decision-shaped spoken brief delivered to a chat, use this skill.
 
 ## Related references
 
