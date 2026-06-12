@@ -60,8 +60,8 @@ Decisions) — i.e. the *bridge-originated work* discriminator becomes two value
 
 **File:line references re-verified (all against baseline):**
 - `bridge/routing.py:339-396` `resolve_persona()` — **holds.** `Dev:`/`PM:` prefix fallback at
-  lines 390-393 maps to `PersonaType.DEVELOPER`/`PROJECT_MANAGER`. `_is_team_chat` at line 331
-  also checks `("Dev:", "PM:")` prefixes.
+  lines 390-393 maps to `PersonaType.DEVELOPER`/`PROJECT_MANAGER`. `is_team_chat` at line 327
+  (public name, no leading underscore) also checks `("Dev:", "PM:")` prefixes.
 - `agent/session_completion.py:1454` `_handle_dev_session_completion` — **holds** (def at 1454).
   Woven into `agent/session_executor.py` (imported L17; called L1915), `agent/session_health.py`,
   and referenced by `agent/output_router.py` — wider blast radius than a single function.
@@ -131,7 +131,7 @@ End-to-end trace of a bridge work message under the new model:
 
 1. **Entry point:** Human sends a message to `Eng: {Project}` Telegram group.
 2. **`bridge/routing.py:resolve_persona()`:** Config match resolves `engineer` persona; the title
-   prefix fallback now matches `Eng:` only (`Dev:`/`PM:` branches deleted). `_is_team_chat` updates
+   prefix fallback now matches `Eng:` only (`Dev:`/`PM:` branches deleted). `is_team_chat` updates
    its prefix tuple to `("Eng:",)`.
 3. **`bridge/telegram_bridge.py`:** Maps resolved engineer persona → `SessionType.ENG`. Creates an
    AgentSession with `session_type="eng"`.
@@ -238,7 +238,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/merge_pm_dev_i
 - **Persona merge:** `config/personas/project-manager.md` + `developer.md` → one
   `config/personas/engineer.md`. Update `manifest.json` / segment references.
 - **Bridge routing:** `bridge/routing.py` resolves `engineer`; `Eng:` prefix fallback only;
-  `Dev:`/`PM:` branches and `_is_team_chat` prefix tuple deleted. `bridge/telegram_bridge.py` and
+  `Dev:`/`PM:` branches and `is_team_chat` prefix tuple deleted. `bridge/telegram_bridge.py` and
   `bridge/email_bridge.py` map to `SessionType.ENG`.
 - **SDK client:** `agent/sdk_client.py` `(persona, access_level, channel)` resolution and
   `compose_system_prompt` updated for `(ENGINEER, AccessLevel.WORKER)`. `VALOR_PARENT_SESSION_ID`
@@ -657,7 +657,7 @@ The lead agent orchestrates; it never builds directly.
 - **Agent Type**: builder
 - **Parallel**: false
 - `bridge/routing.py`: resolve `engineer`; `Eng:` prefix fallback only; delete `Dev:`/`PM:` branches +
-  `_is_team_chat` prefix tuple.
+  `is_team_chat` prefix tuple.
 - `bridge/telegram_bridge.py` + `bridge/email_bridge.py`: map to `SessionType.ENG`.
 - `agent/sdk_client.py`: `(ENGINEER, AccessLevel.WORKER)` resolution in `compose_system_prompt`
   + `_resolve_*` (~1168); re-gate `VALOR_PARENT_SESSION_ID` (~1595) on ENG/Teammate.
@@ -893,6 +893,24 @@ trip a cap here; the new blockers were concrete, verified, and each carried a re
 Implementation Note, so a targeted revision pass was the correct next step (not MAJOR REWORK — the
 architecture and approach are sound; these were migration-correctness and rollout-completeness gaps).
 **All 4 blockers + 1 concern + 2 nits are now resolved in the body; plan status → Ready.**
+
+### Cycle 3 — revision pass 2026-06-12
+
+**Verdict carried:** the recorded `NEEDS REVISION` (2026-06-12T07:28:31Z, artifact
+`sha256:77055ced…`) is the **cycle-2** critique verdict; it was substantively addressed in commit
+8c52d591 (the cycle-2 table above). This cycle-3 pass re-verified every load-bearing file:line
+claim against live `main` and fixed the **one residual factual error** the cycle-2 revision left in
+place — the rest of the plan's claims verified accurate.
+
+| Severity | Finding | Fix |
+|----------|---------|-----|
+| NIT (accuracy) | The plan named the bridge prefix-check helper `_is_team_chat` (4 sites) at "line 331". The live function is **`is_team_chat`** (public, no leading underscore) at **`bridge/routing.py:327`** — the critique source bundle flagged the name explicitly (`NOTE: public name is is_team_chat, NOT _is_team_chat`). | **FIXED** — all four references corrected to `is_team_chat`; the Freshness Check line:number corrected to 327. |
+
+**Re-verified accurate against live `main` (no change needed):** `project_mode == "pm"` guards at
+1173/2119/3164 and `!= "pm"` complements at 3082/3277/3605/3693 with 3647 a comment (Task 3/Risk 6);
+`agent/agent_session_queue.py` re-export block (B1); `bridge/email_bridge.py:879` PM write (C2-B3);
+`config/enums.py` `SessionType` `{PM,TEAMMATE,DEV,GRANITE}` + `PersonaType`
+`{DEVELOPER,PROJECT_MANAGER,…}` pre-rename shape. No blockers or concerns remain; plan stays Ready.
 
 ---
 
