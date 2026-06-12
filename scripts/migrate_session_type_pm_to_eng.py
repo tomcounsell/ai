@@ -168,14 +168,16 @@ def _check_email_bridge_not_running() -> None:
                 # Email bridge polls every 30s (IMAP_POLL_INTERVAL); fresh = < 120s
                 if age < 120:
                     logger.error(
-                        f"email:last_poll_ts is fresh ({age:.0f}s ago). Email bridge appears running. "
+                        f"email:last_poll_ts is fresh ({age:.0f}s ago). "
+                        "Email bridge appears running. "
                         "Stop the email bridge before running this migration.\n"
                         "  Stop command: ./scripts/valor-service.sh email-stop"
                     )
                     sys.exit(1)
                 else:
                     logger.info(
-                        f"email:last_poll_ts is stale ({age:.0f}s ago). Email bridge appears stopped."
+                        f"email:last_poll_ts is stale ({age:.0f}s ago). "
+                        "Email bridge appears stopped."
                     )
             except (ValueError, TypeError):
                 logger.warning(
@@ -281,7 +283,8 @@ def migrate(dry_run: bool = True) -> dict:
             pm_indices = [i for i, s in enumerate(segments) if s == "pm"]
             if len(pm_indices) != 1:
                 logger.error(
-                    f"Expected exactly one :pm: segment in key, found {len(pm_indices)}: {key_str}. "
+                    f"Expected exactly one :pm: segment in key, "
+                    f"found {len(pm_indices)}: {key_str}. "
                     "Cannot safely rewrite. Aborting."
                 )
                 sys.exit(1)
@@ -351,7 +354,8 @@ def main():
 
     if not args.dry_run and stats["renamed_to_eng"] > 0:
         logger.info(
-            f"Successfully renamed {stats['renamed_to_eng']} keys across {stats['total_records']} records."
+            f"Successfully renamed {stats['renamed_to_eng']} keys "
+            f"across {stats['total_records']} records."
         )
     elif args.dry_run and stats["renamed_to_eng"] > 0:
         logger.info(
