@@ -104,17 +104,13 @@ class TestMainRejectsEmpty(unittest.TestCase):
     """
 
     def test_whitespace_only(self) -> None:
-        with patch(
-            "tools.granite_loop.cli.AgentSession.create_local"
-        ) as mock_create:
+        with patch("tools.granite_loop.cli.AgentSession.create_local") as mock_create:
             rc = main(["--user-message", "  "])
         self.assertEqual(rc, 5)
         mock_create.assert_not_called()
 
     def test_empty_string(self) -> None:
-        with patch(
-            "tools.granite_loop.cli.AgentSession.create_local"
-        ) as mock_create:
+        with patch("tools.granite_loop.cli.AgentSession.create_local") as mock_create:
             rc = main(["--user-message", ""])
         self.assertEqual(rc, 5)
         mock_create.assert_not_called()

@@ -1,7 +1,7 @@
 # Substrate Driver (PTY Driver)
 
-**Status:** Shipped in the granite operator interactive TUI PoC (issue
-#1546). Module: `agent/granite_container/pty_driver.py`.
+**Status:** Production. The substrate driver for the granite
+interactive-TUI session runner. Module: `agent/granite_container/pty_driver.py`.
 
 ## What it is
 
@@ -11,7 +11,7 @@ attached to a pseudo-terminal and exposes a small surface
 (`spawn`, `write`, `read_until_idle`, `send_ctrl_c`, `close`) the
 container layer can use without reaching into pexpect directly.
 
-This is the PoC's **substrate** — every other component in
+This is the **substrate** — every other component in
 `agent/granite_container/` sits on top of it.
 
 ## C1-C5 substrate facts (the load-bearing invariants)
@@ -39,7 +39,7 @@ input via a literal `\n`; only the separately-sent final CR submits).
 
 In TUI v2.1.160, the first ctrl-c surfaces the hint "Press Ctrl-C
 again to exit". Older TUI versions used "Interrupted · What should
-Claude do instead?" (the prior PoC's docs at
+Claude do instead?" (the earlier granite-agent-loop docs at
 `docs/features/granite-agent-loop.md:294-296` referenced the older
 text and are now historical).
 
@@ -62,7 +62,7 @@ opened, no hint is printed.
 The driver exposes `last_resume_uuid()` as a passive scrape from the
 child buffer; it does not actively drive an exit. Resume acceptance
 tests run in a model-reachable env; in a non-reachable env they are
-skipped (per the PoC's Q5 disposition).
+skipped.
 
 **As of issue #1648**, the driver also accepts a `session_id: str | None`
 constructor argument. When set, `spawn()` appends `--session-id <uuid>` to
@@ -117,7 +117,7 @@ idle; the floor is documented at both constants.
 The v7 spike report compared pexpect with the stdlib `pty` module and
 found pexpect's API to be a cleaner surface for the loop's
 `read_nonblocking` / `before` / `after` semantics. The stdlib path is
-competitive (the spike validated both); the PoC ships pexpect because
+competitive (the spike validated both); the driver ships pexpect because
 the v7 spike's reference implementation is pexpect-backed, and reusing
 the spike's `wait_for_idle` and `_send` helpers is cheaper than
 re-deriving the same logic on top of `pty`.
@@ -164,4 +164,4 @@ and is what the production cutover fixed.
 - Spike report: `docs/research/spikes/granite-tui-pty-spike.md` (v7).
 - Container: `agent/granite_container/container.py` (uses the driver).
 - Architecture doc: [`granite-interactive-tui.md`](granite-interactive-tui.md).
-- Plan: `docs/plans/granite_interactive_tui_poc.md`.
+- Originating results doc: `docs/plans/completed/granite-interactive-tui-poc-results.md`.

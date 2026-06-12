@@ -85,7 +85,7 @@ Decisions) — i.e. the *bridge-originated work* discriminator becomes two value
 - #1612 (granite PTY cutover) — **MERGED 2026-06-11.** Hard prerequisite now satisfied.
 - #1635 (granite CLI session visibility) — **MERGED 2026-06-11T17:14:58Z**, *after* this issue was
   filed. Added `SessionType.GRANITE = "granite"` to `config/enums.py`, used exclusively by
-  `valor-granite-loop` (`tools/granite_interactive_tui_poc/cli.py`). The issue author posted a
+  `valor-granite-loop` (`tools/granite_loop/cli.py`). The issue author posted a
   comment (2026-06-11) flagging that this issue's "exactly ENG and TEAMMATE" AC now needs to
   decide GRANITE's fate. **This plan's disposition:** retain GRANITE as a CLI-only type, distinct
   from bridge-originated work; narrow the AC to "no `pm`/`dev` value remains" rather than

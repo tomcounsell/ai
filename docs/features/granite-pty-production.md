@@ -10,8 +10,8 @@ drives two persistent interactive `claude` TUI sessions (a PM and a Dev) over
 PTYs, with a local `granite4.1:3b` model routing between them. A bounded
 `PTYPool` caps the number of concurrent interactive pairs the worker holds open.
 
-This is the production cutover of the PoC kernel landed in PR #1570 (issue
-#1546, see [`granite-interactive-tui.md`](granite-interactive-tui.md)). The
+This is the production cutover of the container first landed in PR #1570
+(see [`granite-interactive-tui.md`](granite-interactive-tui.md)). The
 cutover is **all-or-nothing**: there is no runtime fallback flag. If a
 regression lands on `main`, the change is reverted (see
 [Reverting the granite cutover](#reverting-the-granite-cutover)).
@@ -56,7 +56,7 @@ Telegram inbound → bridge enqueue → AgentSession in Redis
 |-----------|------|----------------|
 | `PTYPool` | `agent/granite_container/pty_pool.py` | Bounded, singleton pool of PM+Dev PTY slot pairs. `acquire_pair(spawn_spec=...)` blocks when all slots are locked (waiting on a pool-level `asyncio.Condition` notified when a slot turns idle, not a sleep-poll) and spawns a per-session pair in the acquired slot when the `PairSpawnSpec` differs from the pool defaults; `release_pair()` schedules a background respawn so the next acquirer gets fresh PTYs. |
 | `BridgeAdapter` | `agent/granite_container/bridge_adapter.py` | Wraps `Container`: resolves `send_cb`, delivers `[/user]`/`[/complete]` payloads mid-loop, writes observability events to `session_events`, returns `""`. |
-| `Container` | `agent/granite_container/container.py` | The PoC kernel: drives the PM→granite→Dev→granite→PM loop over two PTYs, classifies PM output, returns a `ContainerResult`. |
+| `Container` | `agent/granite_container/container.py` | The session runner: drives the PM→granite→Dev→granite→PM loop over two PTYs, classifies PM output, returns a `ContainerResult`. |
 | Executor wiring | `agent/session_executor.py` | Replaces the `get_response_via_harness` call with `BridgeAdapter.run` via `asyncio.to_thread`. `send_result=False`. |
 | Worker startup hook | `worker/__main__.py` | Verifies granite is reachable (hard gate, Step 4b.5); initializes the pool singleton; kills orphan PTY children recorded in `data/granite_pty_pids.json` from a prior worker run (PID-targeted, not `pkill -f`). |
 
@@ -148,8 +148,8 @@ production bugs that stem from blurring them.
 
 ### Phase 1 — Persona priming
 
-Each PTY receives a persona-priming slash command (`/granite-poc:prime-pm-role`
-and `/granite-poc:prime-dev-role`). The key asymmetry (issue #1644 fix):
+Each PTY receives a persona-priming slash command (`/granite:prime-pm-role`
+and `/granite:prime-dev-role`). The key asymmetry (issue #1644 fix):
 
 - **PM prime** carries `$ARGUMENTS = user_message`. PM gets full task context
   immediately so it can start planning before the Dev prime even completes.
@@ -248,7 +248,7 @@ The adapter writes non-user-visible progress to `agent_session.session_events`
 | `type` | When | Key fields |
 |--------|------|------------|
 | `exit_summary` | every run, on completion | `exit_reason`, `turns`, `compliance_misses`, `ts` |
-| `exit_anomaly` | `exit_reason in {pm_hang, dev_hang, startup_unresolved, pm_no_user_message, exception (soft→WARNING, hard→ERROR)}` | `exit_reason`, `ts` — logged at ERROR for hard exits (Sentry log-capture picks it up; on-call path for kernel regressions); WARNING for soft exception exits (had turns → likely network blip, no Sentry alert) |
+| `exit_anomaly` | `exit_reason in {pm_hang, dev_hang, startup_unresolved, pm_no_user_message, exception (soft→WARNING, hard→ERROR)}` | `exit_reason`, `ts` — logged at ERROR for hard exits (Sentry log-capture picks it up; on-call path for session-runner regressions); WARNING for soft exception exits (had turns → likely network blip, no Sentry alert) |
 | `granite_user_routed` | on each `[/user]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
 | `granite_complete_routed` | on each `[/complete]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
 | `granite_delivery_failure` | a mid-loop `send_cb` raised | `event_type`, `text`, `payload_chars`, `reason`, `ts` |
@@ -522,8 +522,8 @@ proven-landed check. All other deletion uses `git branch -d` (fails-closed).
 
 ## See also
 
-- [Granite Operator: Interactive TUI](granite-interactive-tui.md) — the PoC
-  kernel this path builds on.
+- [Granite Operator: Interactive TUI](granite-interactive-tui.md) — the
+  session-runner container this path builds on.
 - [PTY Driver](pty-driver.md) — the substrate driver (submit key, idle signal,
   resume-UUID capture).
 - [deployment.md](deployment.md#granite-pty-pool) — env var and the

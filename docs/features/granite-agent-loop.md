@@ -1,12 +1,12 @@
-# Granite Agent Loop (PoC)
+# Granite Agent Loop (historical)
 
 **Status:** Superseded by the
-[interactive TUI PoC](granite-interactive-tui.md) (issue #1546). This
-doc is historical; the new PoC is the source of truth. See the
-interactive-TUI doc for the 3-layer architecture, the 10 invariants,
+[interactive TUI session runner](granite-interactive-tui.md). This
+doc is historical; the interactive-TUI runner is the source of truth. See
+that doc for the 3-layer architecture, the 10 invariants,
 the persona-priming flow, the granite classification + translation
 taxonomy, and the steady-state loop. The interjection text on line
-294-296 of this doc is out of date (older TUI text); the new PoC's
+294-296 of this doc is out of date (older TUI text); the live runner's
 `INTERRUPTED_RE` regex accepts both forms.
 
 See
