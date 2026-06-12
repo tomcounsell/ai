@@ -736,6 +736,98 @@ class TestCritiqueVerdictStaleness:
         assert result.skill == SKILL_DO_PLAN_CRITIQUE
 
 
+class TestCritiqueInProgressNoVerdictDeadEnd:
+    """CRITIQUE in_progress with NO recorded verdict must re-dispatch /do-plan-critique (#1668).
+
+    Reconstructed from the real issue-1643 run (PR #1664). The
+    ``/do-plan-critique`` skill ran but never persisted a verdict to
+    ``_verdicts.CRITIQUE`` — the war-room cycles happened in-skill and the
+    verdict-record step never fired, leaving CRITIQUE stuck at ``in_progress``.
+    With no verdict text and no ``recorded_at``:
+
+    - row 2 (``_rule_plan_not_critiqued``) excludes ``in_progress`` → no match
+    - row 2b (``_rule_critique_verdict_stale``) needs ``recorded_at`` → no match
+    - rows 3/4a/4b/4c need a recorded verdict → no match
+    - G1 needs NEEDS REVISION / MAJOR REWORK verdict text → no match
+
+    Result before the fix: ``Blocked('no matching dispatch rule')`` — the exact
+    dead-end the supervisor navigated manually by re-running /do-plan-critique.
+    This is a distinct variant from the row-2b NEEDS-REVISION staleness case.
+    """
+
+    def _dead_end_states(self) -> dict:
+        """The exact reconstructed issue-1643 state at the dead-end moment."""
+        return {
+            "ISSUE": "ready",
+            "PLAN": "completed",
+            "CRITIQUE": "in_progress",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "PATCH": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+            "MERGE": "pending",
+            "_verdicts": {},  # critique ran but never recorded a verdict
+            "_sdlc_dispatches": [
+                {"skill": "/do-plan", "at": "2026-06-12T19:25:35.011316+00:00"},
+                {"skill": "/do-plan-critique", "at": "2026-06-12T19:32:07.722784+00:00"},
+            ],
+        }
+
+    def test_in_progress_no_verdict_no_pr_redispatches_critique(self):
+        """CRITIQUE in_progress + empty verdict + no PR → re-dispatch /do-plan-critique."""
+        states = self._dead_end_states()
+        meta = {
+            "issue_number": 1643,
+            "plan_exists": True,
+            "revision_applied": False,
+            "latest_critique_verdict": None,
+            "pr_number": None,
+            "last_dispatched_skill": SKILL_DO_PLAN_CRITIQUE,
+        }
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch), f"expected Dispatch, got {result!r}"
+        assert result.skill == SKILL_DO_PLAN_CRITIQUE
+
+    def test_in_progress_no_verdict_with_pr_defers_to_pr_stage(self):
+        """Once a PR exists, the stalled-critique fast-path must NOT fire.
+
+        The real 1643 run progressed to a PR via PR-stage rows while CRITIQUE
+        stayed in_progress. A PR open means plan/critique are behind us — the
+        re-dispatch must defer to G3/PR-stage routing, never bounce back to
+        /do-plan-critique.
+        """
+        states = self._dead_end_states()
+        states["REVIEW"] = "pending"
+        meta = {
+            "issue_number": 1643,
+            "plan_exists": True,
+            "pr_number": 1664,
+            "last_dispatched_skill": SKILL_DO_PLAN_CRITIQUE,
+        }
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill != SKILL_DO_PLAN_CRITIQUE
+
+    def test_in_progress_with_recorded_verdict_unaffected(self):
+        """A recorded verdict must still route via rows 2b/3/4a — fast-path is verdict-gated."""
+        states = self._dead_end_states()
+        states["_verdicts"] = {
+            "CRITIQUE": {"verdict": "READY TO BUILD", "recorded_at": "2026-06-12T19:40:00+00:00"}
+        }
+        meta = {
+            "issue_number": 1643,
+            "plan_exists": True,
+            "latest_critique_verdict": "READY TO BUILD",
+            "pr_number": None,
+            "last_dispatched_skill": SKILL_DO_PLAN_CRITIQUE,
+        }
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        # READY TO BUILD, no concerns → row 4a → /do-build (NOT a re-critique)
+        assert result.skill == SKILL_DO_BUILD
+
+
 class TestCritiqueStaleG5LoopBound:
     """Row 2b re-critique is bounded by G5 on an unchanged plan hash (Concern 1)."""
 
