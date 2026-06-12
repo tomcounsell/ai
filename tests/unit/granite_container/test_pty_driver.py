@@ -398,7 +398,7 @@ class TestLevelTriggeredIdle(unittest.TestCase):
     def test_floor_read_requires_spinner_evidence(self) -> None:
         """A floor read means 'the model responded'; bar+glyph+content
         without any spinner frame is the command echo, not a response."""
-        echo_frame = ("❯ /granite-poc:prime-pm-role do the thing\n" * 20) + self.IDLE_FRAME
+        echo_frame = ("❯ /granite:prime-pm-role do the thing\n" * 20) + self.IDLE_FRAME
         driver = self._driver([[echo_frame]])
         result = driver.read_until_idle(min_content_bytes=400, timeout_s=0.5)
         self.assertFalse(

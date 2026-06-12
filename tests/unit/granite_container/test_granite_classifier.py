@@ -120,7 +120,7 @@ class TestAnchoredPaintedFrames(unittest.TestCase):
 
     def test_anchored_token_wins_over_echo(self) -> None:
         capture = (
-            "❯ /granite-poc:prime-pm-role Send a one-line confirmation.\n"
+            "❯ /granite:prime-pm-role Send a one-line confirmation.\n"
             "────────────────────────────\n"
             "✻ Sprouting…\n"
             "⏺ [/user] Online and ready.\n"
@@ -276,7 +276,7 @@ class TestCursorPositionedSpacingSurvives(unittest.TestCase):
         artifact from issue #1634 — `Onlineandrouting—PM...`) must
         reconstruct to spaced text in the routed payload, not collapse."""
         capture = (
-            "❯ /granite-poc:prime-pm-role Send a one-line confirmation.\n"
+            "❯ /granite:prime-pm-role Send a one-line confirmation.\n"
             "\x1b[2K────────────────────────────\n"
             "✻ Sprouting…\n"
             "⏺ [/user]\x1b[2COnline\x1b[1Cand\x1b[1Crouting\x1b[1C—"

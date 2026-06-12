@@ -1,11 +1,12 @@
-"""Container: the steady-state loop for the granite operator PoC (issue #1546).
+"""Container: the steady-state loop for the granite interactive-TUI session runner.
 
-The container owns two PTYs (PM + Dev), the persona-priming slash
-commands, the startup-phase parser, and the granite classifier. It
-runs the loop described in the plan's *Data Flow* section:
+The container is the production execution path for bridge-originated
+sessions under the standalone worker. It owns two PTYs (PM + Dev), the
+persona-priming slash commands, the startup-phase parser, and the granite
+classifier. It runs the loop:
 
   1. spawn both PTYs
-  2. prime both personas via /granite-poc:prime-{pm,dev}-role
+  2. prime both personas via /granite:prime-{pm,dev}-role
   3. startup-phase parser watches both PTYs; on trust-folder
      prompt, dismiss with "1\\r"
   4. steady state: wait for PM idle -> call granite to classify
@@ -16,10 +17,10 @@ runs the loop described in the plan's *Data Flow* section:
      hang (await_idle timeout), startup_unresolved (neither PTY
      settles within STARTUP_HARD_CEILING_S), or any exception
 
-Two-PTY coordination is the early risk (per the plan's *Technical
-Approach*). The container's loop is single-threaded; reads from
-both PTYs are not interleaved within a single tick. The loop
-processes one PM->granite->Dev->granite->PM cycle per tick.
+Two-PTY coordination is the core synchronization concern. The
+container's loop is single-threaded; reads from both PTYs are not
+interleaved within a single tick. The loop processes one
+PM->granite->Dev->granite->PM cycle per tick.
 """
 
 from __future__ import annotations
@@ -54,11 +55,11 @@ from agent.granite_container.startup_parser import (
 logger = logging.getLogger(__name__)
 
 # Path to the persona-priming slash commands. Both files are shipped
-# in the repo under .claude/commands/granite-poc/. The container
+# in the repo under .claude/commands/granite/. The container
 # looks them up by name; the slash-command mechanism is part of the
 # TUI's parser, not the container's.
-PM_PRIME_SLASH_CMD = "/granite-poc:prime-pm-role"
-DEV_PRIME_SLASH_CMD = "/granite-poc:prime-dev-role"
+PM_PRIME_SLASH_CMD = "/granite:prime-pm-role"
+DEV_PRIME_SLASH_CMD = "/granite:prime-dev-role"
 
 # The trust-folder prompt dismissal (per the F-probe at
 # scripts/probe_slash_arguments.py:243-247).
@@ -220,7 +221,7 @@ class ContainerResult:
 
     `exit_reason` is one of: pm_complete, pm_user, pm_max_turns,
     dev_hang, pm_hang, startup_unresolved, pm_no_user_message,
-    exception. The PoC's results doc renders this as the verdict.
+    exception. The worker renders this as the run's terminal verdict.
 
     `user_facing_routed` is True when at least one [/user] or
     non-empty [/complete] payload was delivered to the user channel
@@ -309,14 +310,14 @@ def _truncate_exit_message(text: str) -> str:
 
 
 def _make_sandbox_cwd() -> tuple[str, str]:
-    """Create a fresh sandbox tempdir for the PoC run.
+    """Create a fresh sandbox tempdir for the container run.
 
     Returns (cwd, label) where label is a short prefix used for
     logging. The container writes nothing into the sandbox; it
     only uses it as the subprocess cwd. The sandbox is cleaned up
     on `__exit__` via a `try/finally` in `Container.run`.
     """
-    sandbox_root = Path(tempfile.gettempdir()) / "granite-poc"
+    sandbox_root = Path(tempfile.gettempdir()) / "granite"
     sandbox_root.mkdir(parents=True, exist_ok=True)
     sandbox = sandbox_root / f"run-{uuid.uuid4().hex[:8]}"
     sandbox.mkdir(parents=True, exist_ok=False)
@@ -815,11 +816,13 @@ class Container:
                     if turn == 0 and self._prime_relayed and self._prime_pm_buf_hash is not None:
                         guard_idle, guard_buf, _, _ = self._cycle_idle(self._pm_pty)
                         if guard_idle and hash(guard_buf) == self._prime_pm_buf_hash:
-                            # PM has not produced anything new yet; nudge
-                            # it to continue so the loop sees fresh output.
+                            # PM output is unchanged from the already-processed
+                            # prime buffer; fall through to the fresh idle read
+                            # below so we classify genuinely new output on the
+                            # next cycle rather than re-processing stale content.
                             logger.info(
                                 "container: prime stale-buffer guard fired — "
-                                "nudging PM for fresh output"
+                                "PM buffer unchanged; falling through to fresh idle read"
                             )
 
                     # Wait for PM idle.

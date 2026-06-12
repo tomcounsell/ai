@@ -1,12 +1,12 @@
-"""CLI for the granite operator interactive TUI PoC (issue #1546).
+"""CLI for the granite interactive-TUI session runner.
 
 `valor-granite-loop --user-message "<text>" [--max-turns 10]
 [--output ./granite_poc_results.json]` runs the container end-to-
 end and writes the per-turn trace JSON to the output path.
 
-The CLI is the operator's standalone kernel-validation tool. It
+The CLI is the operator's standalone driver for the container. It
 does not wire to the bridge, does not dispatch child sessions, and
-does not invoke /sdlc. The PoC is local to the dev machine; the
+does not invoke /sdlc. It runs locally on the dev machine; the
 operator invokes it directly.
 
 AgentSession lifecycle
@@ -57,8 +57,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="valor-granite-loop",
         description=(
-            "Granite operator PoC: drive a real interactive Claude "
-            "Code session via PTY, end-to-end, with zero `claude -p`."
+            "Granite interactive-TUI session runner: drive a real "
+            "interactive Claude Code session via PTY, end-to-end, with "
+            "zero `claude -p`."
         ),
     )
     p.add_argument(

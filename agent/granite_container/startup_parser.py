@@ -1,4 +1,4 @@
-"""Startup-phase parser for the granite operator PoC (issue #1546).
+"""Startup-phase parser for the granite interactive-TUI session runner.
 
 Watches the PTY buffer for known startup shapes that the operator
 needs to handle before the steady-state loop can take over:

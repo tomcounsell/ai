@@ -1,4 +1,4 @@
-"""Substrate driver for the granite operator PoC (issue #1546).
+"""Substrate driver for the granite interactive-TUI session runner.
 
 A thin pexpect-backed wrapper around the interactive `claude` TUI. The
 driver does NOT use `claude -p`; it spawns an interactive session attached
@@ -6,7 +6,7 @@ to a pseudo-terminal and exposes a small surface (`spawn`, `write`,
 `read_until_idle`, `send_ctrl_c`, `close`) the container layer can use
 without reaching into pexpect directly.
 
-This module is the PoC's **substrate** — every other component in
+This module is the **substrate** — every other component in
 `agent/granite_container/` sits on top of it. The class is intentionally
 narrow: it models the Claude Code TUI's submit/idle/interject surface
 (per the v7 spike report's C1-C5 findings) and nothing more.
@@ -28,7 +28,7 @@ C2 (interjection): the regex `INTERRUPTED_RE` matches both the v2.1.160
     surfaces the interjection; the second ctrl-c exits.
 C3 (resume-UUID): the on-exit hint is environment-gated. Resume acceptance
     tests are run in a model-reachable env; in a non-reachable env they
-    are skipped (per the PoC's Q5 disposition).
+    are skipped.
 C4 (`/help` overlay): idle detection must recognize the `esc to cancel`
     bottom-bar text. The `wait_for_idle` heuristic checks for the
     bypass-permissions bar; an overlay swaps that bar for `esc to cancel`.
@@ -55,9 +55,9 @@ C5 (idle signal): byte-quiescence + the bottom-bar text + prompt glyph
     wait cannot declare idle on the command-echo frame alone.
 
 Reuse policy: the regexes (`_UUID_RE`, `_RESUME_HINT_RE`,
-`INTERRUPTED_RE`) are imported from the spike / headless harness rather
-than duplicated. Modifying `agent/claude_session.py` to add PTY support
-would couple the PoC to the headless harness and break the "existing
+`INTERRUPTED_RE`) are imported from the headless harness rather than
+duplicated. Modifying `agent/claude_session.py` to add PTY support
+would couple this driver to the headless harness and break the "existing
 headless harness is untouched" invariant.
 """
 
@@ -75,7 +75,7 @@ import pexpect.exceptions
 # prints in its on-exit hint line: `claude --resume <uuid>`. Capturing it
 # lets a crashed/interrupted session be resumed with full context instead
 # of respawned fresh. Inlined from agent.claude_session (deleted in
-# plan #1572, Task 5 — PoC deletion).
+# plan #1572, Task 5).
 _UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
@@ -178,7 +178,7 @@ _ANSI_CURSOR_ABS_COL_RE = re.compile(r"\x1b\[[0-9]*G")
 # re-renders the bar while the model is still loading a response; that
 # false-positive doesn't have response content behind it, so we require
 # the buffer to accumulate at least this many bytes before we declare
-# idle. The spike calibrated this at 400 bytes; the PoC inherits.
+# idle. The spike calibrated this at 400 bytes; the driver inherits it.
 DEFAULT_MIN_CONTENT_BYTES = 400
 
 # Default per-read timeout. Long enough for the model to produce a turn

@@ -1,11 +1,11 @@
-"""Tests for the startup-phase parser (PoC #1546).
+"""Tests for the startup-phase parser.
 
 The parser's pattern set is enumerated in
 `agent.granite_container.startup_parser.py` as a list of
 `(regex, label, response)` tuples. The self-test feeds each known
 pattern into the parser and asserts the right `StartupEvent` enum
 value. The trust-folder prompt dismissal is exercised as part of
-the live PoC run; the self-test verifies the parser returns the
+a live container run; the self-test verifies the parser returns the
 correct response ("1") for the trust-folder prompt.
 """
 

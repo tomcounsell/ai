@@ -1,11 +1,10 @@
-"""Granite classifier for the granite operator PoC (issue #1546).
+"""Granite classifier for the granite interactive-TUI session runner.
 
-The new `granite_classifier` is the PoC's reduced-3-tool
-classifier. It replaces the prior PoC's 5-tool `agent.granite_router`
-with a narrower surface that separates *classification* (a
-deterministic regex parse on PM's prefix token) from *translation*
-(two ollama calls: extract a Dev prompt, summarize Dev output for
-PM).
+`granite_classifier` is the reduced-3-tool classifier. It replaces the
+earlier 5-tool `agent.granite_router` with a narrower surface that
+separates *classification* (a deterministic regex parse on PM's prefix
+token) from *translation* (two ollama calls: extract a Dev prompt,
+summarize Dev output for PM).
 
 Why split classification from translation:
   - The classification decision is a regex parse of the first line
@@ -17,21 +16,18 @@ Why split classification from translation:
     adds; the classification decision is bookkeeping the operator
     can do deterministically.
 
-This is the Q4/Q6 resolution from the plan's *Open Questions*:
-  - Q4 (event-bridge shape): the container maps PTY output to
+Event-bridge and prefix-token design:
+  - Event-bridge shape: the container maps PTY output to
     `list[dict]` events at the boundary (`[{"type": "pm_output",
     "text": <tail>}]`). Granite consumes this list, same shape
     `agent/granite_router.py:276` consumes today.
-  - Q6 (PM prefix-token compliance): the classifier is a
+  - PM prefix-token compliance: the classifier is a
     deterministic regex parse (`classify_pm_prefix`), not an LLM
-    call. The results doc reports compliance rate (a parse metric)
-    on a synthetic distribution plus live measurements.
+    call.
 
 The classifier is stateless: each ollama.chat() call sees only the
 system prompt + the current turn's content. There is no cross-turn
-history (invariant #5). The 2-line SYSTEM_PROMPT is the same
-shape as the prior PoC's; the production cutover can adopt the
-new substrate without rewriting granite's prompt.
+history (invariant #5).
 """
 
 from __future__ import annotations
@@ -119,7 +115,7 @@ def ensure_granite_model(
 
 
 # The prefix-token convention. The PM persona body (in
-# .claude/commands/granite-poc/prime-pm-role.md) primes PM to begin
+# .claude/commands/granite/prime-pm-role.md) primes PM to begin
 # every output with one of these three literal tokens on a line of
 # its own. The classifier's `classify_pm_prefix` parses the first
 # line; if no token is present, the result is `unknown` and the
