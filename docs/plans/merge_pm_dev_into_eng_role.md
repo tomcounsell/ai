@@ -344,6 +344,13 @@ Migration: stop bridge → Telegram rename PM→Eng / archive-or-rename Dev → 
       on that session (steered at the turn boundary), NOT spawn a fresh `eng` session. Asserts the bridge's
       reply-to session-continuation is keyed on Telegram thread ID and survives the `PM:`→`Eng:` rename;
       pairs with the Cowboy-pilot Success Criterion.
+- [ ] **#887 contamination guards still fire for ENG after the `== "dev"`→`== "eng"` rename (BLOCKER
+      C6-B2).** The `session_executor.py` setup-path guards renamed in Task 3 must keep their protective
+      behavior under the Eng role: (a) a **slugged** ENG session still gets worktree isolation — worktree
+      provisioning runs and the main-checkout guard (line 885) raises if it resolves to the repo root; and
+      (b) a **slugless** ENG session with a null `agent_session_id` (and null slug) is still **rejected at
+      setup** — the line-652 executor-guard finalizes it `failed` rather than synthesizing a slug from a
+      `None` aid (the #1272 crash this guard prevents). Test asserts both paths fire for `session_type="eng"`.
 
 ### Error State Rendering
 - [ ] An eng session that errors must still deliver a PM-persona-safe Telegram message (no raw
@@ -389,6 +396,30 @@ Migration: stop bridge → Telegram rename PM→Eng / archive-or-rename Dev → 
 - [ ] Migration scripts — ADD: new unit/integration tests for `migrate_session_type_pm_to_eng.py` and
       `merge_dev_chat_into_eng.py` (dry-run, idempotency, error path), project-scoped to a `test-`
       prefix, ORM-only cleanup.
+- [ ] **`models/agent_session.py` alias/property/worker_key tests (BLOCKER C6-B1)** — each verified
+      against live `main`:
+      - `tests/unit/test_enums.py` — UPDATE: lines 12-60 assert `SessionType.PM`/`SessionType.DEV` values,
+        membership, and `from models.agent_session import SESSION_TYPE_DEV, SESSION_TYPE_PM` alias equality
+        (54-60). Switch every `PM`/`DEV` to `ENG`; assert `PM`/`DEV` no longer exist; rewrite the alias
+        import/equality block to `SESSION_TYPE_ENG` (drop `SESSION_TYPE_DEV`).
+      - `tests/integration/test_agent_session_queue_session_type.py` — UPDATE/REPLACE: imports
+        `SESSION_TYPE_DEV, SESSION_TYPE_PM` (line 16) and asserts them at 53/79/197-198. Switch to
+        `SESSION_TYPE_ENG`; `create_pm`→`create_eng` / `create_child`-default assertions follow the factory
+        rename.
+      - `tests/e2e/test_context_propagation.py` — UPDATE: imports both aliases (14-15), asserts
+        `is_pm`/`is_dev` (235-236) and `filter(session_type=SESSION_TYPE_PM/DEV)` (256-257). Rewrite to
+        `SESSION_TYPE_ENG` / `is_eng`; collapse the PM-vs-dev discriminator assertions to the single Eng type.
+      - `tests/unit/test_agent_session.py` — UPDATE: `worker_key` tests (def L180+) cover PM-project_key
+        (182), slugged-dev (231/239), PM-at-PLAN/ISSUE/CRITIQUE-stage→project_key (296/304/314), and
+        `_PM_WORKTREE_STAGES` membership (277). Rename to `_ENG_WORKTREE_STAGES`; re-key the PM/dev cases to
+        the single ENG branch; **the dev fall-through cases (slugged-dev-by-slug) now exercise the ENG
+        worktree-stage path, NOT an always-slug path** — assert a slugless ENG at a PLAN-type stage returns
+        `project_key` (the new Success Criterion below).
+      - `tests/unit/test_steer_child.py` — UPDATE: stubs `parent.session_type="pm"` + `parent.is_dev=False`
+        (17-19), `child.session_type="dev"` + `child.is_dev=True` (29-31), and `chat.is_dev=False` (175).
+        Rewrite to the ENG vocabulary / `is_eng`, matching the `steer_child.py:94` guard rewrite.
+      - `tests/integration/test_steering.py` — UPDATE: creates `session_type="dev"` (1476) and
+        `session_type="pm"` (1494) fixtures. Switch both to `"eng"`.
 
 ## Rabbit Holes
 
@@ -625,6 +656,16 @@ work through the same Telegram path, now via one `Eng: {Project}` group instead 
       rejected with a clear error.
 - [ ] `SessionType.ENG` resolves `AccessLevel.WORKER` in `agent/sdk_client.py` (test asserts the
       resolved access level).
+- [ ] **`AgentSession.worker_key` preserves per-project serialization for ENG (BLOCKER C6-B1):** a
+      slugless ENG session, and a slugged ENG session at a main-checkout stage (PLAN/ISSUE/CRITIQUE/MERGE),
+      both return `project_key` from `worker_key` (not the slug) — proving ENG inherited the PM
+      stage-aware branch and the dead slug-always dev fall-through is gone. A slugged ENG at a
+      worktree-compatible stage (BUILD/TEST/PATCH/REVIEW/DOCS) returns the slug. Asserted via
+      `tests/unit/test_agent_session.py` against the renamed `_ENG_WORKTREE_STAGES`.
+- [ ] **`import models.agent_session` succeeds with `config/enums.py` collapsed (BLOCKER C6-B1):** the
+      module-level `SESSION_TYPE_*` aliases (lines 81/83) no longer reference a deleted enum member, so
+      `python -c "import models.agent_session"` exits 0 — worker, bridge, email bridge, and test collection
+      all import cleanly.
 - [ ] `scripts/migrate_session_type_pm_to_eng.py` renames existing `session_type=pm` AgentSession Redis
       records to `eng` and rebuilds indexes; `--dry-run`, idempotent, runnable per machine.
 - [ ] `scripts/merge_dev_chat_into_eng.py` **exists and is correct** (EXISTS-checked rename, create-then-delete
@@ -647,6 +688,12 @@ work through the same Telegram path, now via one `Eng: {Project}` group instead 
       a plain factual question (e.g., "what branch is this repo on?") sent to `Eng: Valor` receives a
       conversational reply **without opening a GitHub issue or creating a PR** — confirming the single
       Eng surface answers questions as well as doing work.
+- [ ] **Work-request behavior verified on `Eng:` — the inverse paired AC (CONCERN C6, User):** during the
+      Cowboy pilot, a concrete work request (e.g., "fix the login bug") sent to `Eng: Valor` **spawns a
+      granite container execution** — verify via `python -m tools.valor_session list` that an `eng` session
+      was created and left `pending`/`running`, and a Telegram reply arrives in the `Eng:` group. This
+      guards against the conversational-first path swallowing real work requests, the inverse of the
+      question-does-not-spawn-work criterion above.
 - [ ] **`pm_briefing` delivery verified post-rename if the pilot project uses it (CONCERN C4-C1):** if
       `valor`/`popoto` has `pm_briefing.enabled`, confirm the daily briefing still lands in the renamed
       `Eng: {Project}` group after `target_groups` is updated.
@@ -705,12 +752,47 @@ The lead agent orchestrates; it never builds directly.
 ### 1. Collapse enums and merge personas
 - **Task ID**: build-enums-persona
 - **Depends On**: none
-- **Validates**: `tests/unit/` enum/persona tests; `tests/unit/granite_container/test_cli.py` (GRANITE unchanged)
+- **Validates**: `tests/unit/` enum/persona tests; `tests/unit/granite_container/test_cli.py` (GRANITE unchanged);
+  **`tests/unit/test_enums.py` (alias-equality), `tests/unit/test_agent_session.py` (`worker_key`/`_ENG_WORKTREE_STAGES`),
+  and the `import models.agent_session` smoke (BLOCKER C6-B1) — the ENG alias/worker_key surgery must keep these green**
 - **Assigned To**: core-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - `config/enums.py`: `SessionType` → `{ENG, TEAMMATE, GRANITE}` (`pm`→`eng`, remove `DEV`, keep
   `GRANITE`); `PersonaType.DEVELOPER`+`PROJECT_MANAGER` → `ENGINEER`; update docstrings.
+- **`models/agent_session.py` — the core ORM model; absent from prior cycles' file list and from every
+  Verification grep scope (BLOCKER C6-B1, flagged by all 7 critics). Its module-level aliases evaluate at
+  import, so leaving them un-renamed crashes `import models.agent_session` — and therefore worker, bridge,
+  email bridge, and test collection — the instant `config/enums.py` drops `PM`/`DEV` (`AttributeError`, no
+  graceful degradation). Per-site dispositions (line numbers verified against live `main`):**
+  - **Module-level aliases (lines 81, 83):** `SESSION_TYPE_PM = SessionType.PM` → `SESSION_TYPE_ENG =
+    SessionType.ENG`; **delete** `SESSION_TYPE_DEV = SessionType.DEV` (the `DEV` member is gone). Keep
+    `SESSION_TYPE_TEAMMATE` (line 82). Update every in-file reference to the renamed/removed aliases below.
+  - **`worker_key` property (def line 472) — the #828 main-checkout race guard (BLOCKER C6-B1 item 2):**
+    the `if self.session_type == SessionType.PM:` branch (line 494) does stage-aware serialization
+    (slug only at worktree-compatible stages via `_pm_stage_is_worktree_compatible()`, line 505; else
+    `project_key`), while the dev fall-through (lines 500-503) is **slug-keyed always**. Post-rename ENG
+    sessions must NOT fall into the dev path — that would drop per-project serialization at main-checkout
+    stages (PLAN/ISSUE/CRITIQUE/MERGE/None), letting two ENG sessions with the same slug at different
+    stages run concurrently on the main checkout (the exact race the PM branch prevents). **ENG inherits
+    the PM branch logic verbatim:** rename the branch to `if self.session_type == SessionType.ENG:`, keep
+    the slug-at-worktree-stages-else-project_key logic, and **delete the dead dev fall-through** (lines
+    500-503). Rename the helper `_pm_stage_is_worktree_compatible` → `_eng_stage_is_worktree_compatible`
+    (def line 505) and the allowlist `_PM_WORKTREE_STAGES` → `_ENG_WORKTREE_STAGES` (line 469); update the
+    docstring (lines 477-486) from "PM sessions" / "Dev sessions" to the single Eng path.
+  - **Properties (lines 1207-1219):** `is_pm` (def 1207) → `is_eng` (`self.session_type ==
+    SESSION_TYPE_ENG`); **delete** `is_dev` (def 1217) — the `DEV` member is gone and `scripts/steer_child.py`
+    is the only external consumer (handled in Task 3). Keep `is_teammate` (1211). Update any in-repo
+    callers of `is_pm`/`is_dev`.
+  - **Factory methods (def lines, verified — the cycle-6 critique's 1322/1375/1430 were approximate):**
+    `create_pm` (def 1305) → `create_eng` (body `session_type=SESSION_TYPE_ENG`, line 1322);
+    `create_local` (def 1369) default `session_type: str = SESSION_TYPE_DEV` (line 1375) → default
+    `SESSION_TYPE_ENG`; `create_child` (def 1396) body `session_type=SESSION_TYPE_DEV` (line 1430) →
+    `SESSION_TYPE_ENG`; `create_dev` (def 1444, a backward-compat wrapper for `create_child`) — fold/rename
+    to `create_eng` semantics or delete if no surviving caller (audit alongside Task 3).
+  - **Docstrings/comments:** class docstring (lines 87-112: "pm/teammate/or dev" prose, the
+    `PM session`/`Dev session` permission-model blocks, the `create_pm`/`create_dev` factory list) and the
+    field comment at line 144 (`# "pm", "teammate", or "dev" — discriminator`) → describe `eng`/`teammate`.
 - Merge `config/personas/project-manager.md` + `developer.md` → `config/personas/engineer.md`; update
   `config/personas/segments/manifest.json` (correct path — manifest lives under `segments/`, not directly
   under `config/personas/`) / segment references.
@@ -778,8 +860,11 @@ The lead agent orchestrates; it never builds directly.
   either form works). No other grep in the existing Verification table catches this — the `"pm"` grep
   scanned only `config/enums.py`.
 - Delete `_handle_dev_session_completion()` + its dev-only callers/parent-steering in
-  `session_executor.py` (import L17, call L1915), `session_health.py`, `output_router.py`, **and the
-  re-export in `agent/agent_session_queue.py`** — surgically, per the audit above. In
+  `session_executor.py` (import L17, the `if _session_type == "dev"` gate at L1914 + its call at L1915),
+  `session_health.py`, `output_router.py`, **and the re-export in `agent/agent_session_queue.py`** —
+  surgically, per the audit above. (The L1914 gate is the **only** `== "dev"` site that dies with this
+  deletion; the other six setup-path `== "dev"` guards are RENAMED — see the executor `== "dev"`
+  enumeration below, BLOCKER C6-B2.) In
   `agent/output_router.py`, additionally change the `session_type == "pm"` delivery literal at **line 159**
   to `"eng"` (BLOCKER C4-B1, above). **Must-not-break callers of the re-export block:**
   `session_health.py:1955,2015` (`_transition_parent`) and **`tools/agent_session_scheduler.py:417-419`**
@@ -825,9 +910,40 @@ The lead agent orchestrates; it never builds directly.
       stay internally consistent):** `agent/session_pickup.py:119` (`session_type != "pm"` resume-hydration
       gate), `tools/sdlc_stage_query.py:66` (`== "pm"` PM-session preference), and
       `tools/stage_states_helpers.py:99` (`== "pm"` canonical stage_states owner). All verified live; rename
-      every `"pm"` to `"eng"`. (The `agent/session_executor.py:781,1914` `== "dev"` gates the spot-check
-      also surfaces live **inside the dev-completion path Task 3 deletes** — they go away with that
-      deletion, not via rename; the `:1906,1912` hits are comments.)
+      every `"pm"` to `"eng"`.
+  - **`agent/session_executor.py` `== "dev"` gates — seven sites, per-site disposition (BLOCKER C6-B2):**
+    the prior cycles' claim that "`781,1914` vanish with the dev-completion deletion" was **wrong** — only
+    one of the seven gates lives in the dev-completion path. Each comparison reaches `"dev"` via an alias
+    variable (`_stype_pre` line 649, `_stype_early` line 826, `_stype` line 883, `_session_type` for the
+    completion gate — all `getattr(session, "session_type", None)`), so they are invisible to the enum
+    greps AND the `session_type=` assignment grep, and need the comparison spot-check extended to this file.
+    Sites verified against live `main`:
+    - **Line 652** (`if _stype_pre == "dev" and _slug_pre is None and _aid_pre is None:`) — the
+      slugless-session rejection guard (#887/#1272 contamination protection; finalizes the session
+      `failed`). **RENAME `== "dev"` → `== "eng"`** so the #887 guard still fires for eng sessions.
+    - **Line 781** (`if not slug and getattr(session, "session_type", None) == "dev":`) — synthetic-slug
+      synthesis for slugless work sessions (#1272), funnels them through worktree provisioning.
+      **RENAME → `== "eng"`.**
+    - **Line 828** (`_stype_early == "dev"` in the stageless-worktree branch-trust block) — #887 worktree
+      branch-resolution guard. **RENAME → `== "eng"`.**
+    - **Line 855** (`if _stype == "dev":` inside the worktree-creation `except`) — #887 FATAL guard that
+      refuses to fall back to the main checkout on worktree-provisioning failure. **RENAME → `== "eng"`.**
+    - **Line 885** (`_stype == "dev"` in the main-checkout protection guard) — #887 guard that raises if a
+      slugged session resolves to the repo root. **RENAME → `== "eng"`.**
+    - **Line 910** (`if _stype == "dev" and slug and WORKTREES_DIR in str(working_dir):`) — #1377
+      branch-mismatch guard (`verify_worktree_branch`). **RENAME → `== "eng"`.**
+    - **Line 1914** (`if _session_type == "dev" and not task.error:`) — the **only** gate inside the
+      dev-completion path; it guards the `_handle_dev_session_completion(...)` call. **DELETED with the
+      function** (per the deletion bullet below) — not renamed.
+    The `:770, 1906, 1912` hits are **comments**, not code (the comparison spot-check `grep -v` drops them).
+  - **Pre-removal `== "dev"` audit step (BLOCKER C6-B2):** before writing any executor diff, run
+    `grep -n '_stype\b\|_stype_pre\b\|_stype_early\b\|_session_type\b\|"dev"' agent/session_executor.py`
+    and map every hit to RENAME (the six setup-path guards: 652/781/828/855/885/910) or DELETED-WITH-FUNCTION
+    (the single completion gate: 1914) before editing. Re-verify any new gate that appears in context.
+  - **`scripts/steer_child.py:94` (BLOCKER C6-B1 item 5):** `if not child.is_dev:` — `is_dev` is **deleted**
+    from `agent_session.py` (Task 1), so this guard must follow. Replace with the eng equivalent
+    (`if not child.is_eng:`) or remove the guard if it no longer makes sense under the single Eng role.
+    `scripts/` was outside every prior grep scope; it is added to the Verification rows below.
 - **Parent-sync machinery disposition (CONCERN, Consistency):** `_finalize_parent_sync` /
   `waiting_for_children` are general child-session machinery, **not** dev-specific — they survive the
   removal. `_handle_dev_session_completion` was only one *trigger* of the parent-sync path; the
@@ -978,9 +1094,10 @@ critical path* changes.
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| No `pm` session value | `grep -rn 'SessionType.PM\b' config/ agent/ bridge/ tools/ ui/ tests/ --include="*.py"` | exit code 1 (CONCERN C4-C2: scope widened from `config/enums.py` to match the `dev` row and the "no value remains anywhere" criterion) |
-| No bare `session_type` pm/dev literal (codebase-wide, BLOCKER C5-B1) | `grep -rnE 'session_type\s*=\s*["'"'"']?(pm\|dev)["'"'"']' agent/ bridge/ tools/ scripts/ --include="*.py" \| grep -vE '#\|::\|→\|"session_type='` | no matches (exit 1). This is the mechanical enforcement of "no pm/dev value remains anywhere" for the bare-string sites the `SessionType.PM`/`SessionType.DEV` rows can't see. The pattern is keyed on `session_type` (so a chance `"pm"` elsewhere is ignored) and catches assignment + filter-kwarg sites (`reflection_scheduler.py:571`, `sustainability.py:610`, `sdk_client.py:2408`, `sdlc_stage_marker.py:99`, `sdlc_session_ensure.py:139,188`, `_sdlc_utils.py:97`); the `grep -v` strips comment (`#`), docstring (`::`), arrow-prose (`→`), and log-f-string (`"session_type=`) false positives surfaced during verification. **The `== "pm"`/`!= "pm"` comparison gates (`sdlc_session_ensure.py:83`, `_sdlc_utils.py:87,162`) are not caught by this `=`-anchored pattern** — they are covered by their own Task-3 rename bullet, and a `grep -rnE 'session_type[^=]*== *"(pm\|dev)"'` over the same dirs is the complementary spot-check (also exit 1). |
-| No `dev` session value | `grep -rn 'SessionType.DEV\b' config/ agent/ bridge/ tools/ ui/ tests/` | exit code 1 |
+| No `pm` session value | `grep -rn 'SessionType.PM\b' config/ agent/ bridge/ tools/ ui/ models/ scripts/ tests/ --include="*.py"` | exit code 1 (CONCERN C4-C2: scope widened from `config/enums.py` to match the `dev` row and the "no value remains anywhere" criterion; **`models/` + `scripts/` added in cycle 6 — BLOCKER C6-B1**) |
+| No bare `session_type` pm/dev literal (codebase-wide, BLOCKER C5-B1) | `grep -rnE 'session_type\s*=\s*["'"'"']?(pm\|dev)["'"'"']' agent/ bridge/ tools/ scripts/ models/ --include="*.py" \| grep -vE '#\|::\|→\|"session_type='` | no matches (exit 1). This is the mechanical enforcement of "no pm/dev value remains anywhere" for the bare-string sites the `SessionType.PM`/`SessionType.DEV` rows can't see. The pattern is keyed on `session_type` (so a chance `"pm"` elsewhere is ignored) and catches assignment + filter-kwarg sites (`reflection_scheduler.py:571`, `sustainability.py:610`, `sdk_client.py:2408`, `sdlc_stage_marker.py:99`, `sdlc_session_ensure.py:139,188`, `_sdlc_utils.py:97`); the `grep -v` strips comment (`#`), docstring (`::`), arrow-prose (`→`), and log-f-string (`"session_type=`) false positives surfaced during verification. **`models/` added in cycle 6 (BLOCKER C6-B1)** — `agent_session.py` carries `session_type=SESSION_TYPE_*` alias references (caught by the `SESSION_TYPE_PM`/`SESSION_TYPE_DEV` model row above), not bare `"pm"/"dev"` literals, but the scope is widened so a future literal cannot slip in. **The `== "pm"`/`!= "pm"`/`== "dev"` comparison gates (`sdlc_session_ensure.py:83`, `_sdlc_utils.py:87,162`, `session_executor.py:652/781/828/855/885/910`) are not caught by this `=`-anchored pattern** — they are covered by their own Task-3 rename bullets, and the `grep -rnE 'session_type[^=]*(==\|!=) *"(pm\|dev)"'` comparison row below is the complementary spot-check (also exit 1). |
+| No `dev` session value | `grep -rn 'SessionType.DEV\b' config/ agent/ bridge/ tools/ ui/ models/ scripts/ tests/` | exit code 1 (**`models/` + `scripts/` added in cycle 6 — BLOCKER C6-B1**) |
+| No `SESSION_TYPE_PM`/`SESSION_TYPE_DEV`/`is_pm`/`is_dev` in model + scripts (BLOCKER C6-B1) | `grep -rnE 'SESSION_TYPE_PM\b\|SESSION_TYPE_DEV\b\|\bis_pm\b\|\bis_dev\b' models/agent_session.py scripts/steer_child.py` | exit code 1 (the renamed/removed `agent_session.py` aliases + properties and the `steer_child.py` `is_dev` consumer leave no trace) |
 | No `Dev:`/`PM:` fallback | `grep -rn 'startswith("Dev:")\|startswith("PM:")' bridge/routing.py` | exit code 1 |
 | sdlc-decompose removed | `grep -n 'sdlc-decompose\|sdlc_decompose' pyproject.toml` | exit code 1 |
 | GRANITE retained | `grep -n 'GRANITE' config/enums.py` | output contains GRANITE |
@@ -988,7 +1105,7 @@ critical path* changes.
 | No `project_mode == "pm"` guard | `grep -n 'project_mode == "pm"\|project_mode != "pm"' agent/sdk_client.py` | exit code 1 |
 | Migration refuses live worker | (manual) start worker, run migration | `sys.exit(1)` with fresh-heartbeat error |
 | Merge dry-run reports collisions | `python scripts/merge_dev_chat_into_eng.py --dry-run --project test-x` | exit 0; collisions enumerated, no rename performed |
-| No `== "pm"`/`!= "pm"` session_type comparison (C5-B1 complement) | `grep -rnE 'session_type[^=]*(==\|!=) *"(pm\|dev)"' agent/ bridge/ tools/ scripts/ --include="*.py" \| grep -vE '#\|::'` | no matches (exit 1). Catches the comparison gates the `=`-anchored gate misses: `sdlc_session_ensure.py:83`, `_sdlc_utils.py:87,162`, **plus the three additional live readers `session_pickup.py:119`, `sdlc_stage_query.py:66`, `stage_states_helpers.py:99`** (all renamed in Task 3). The `output_router.py:159` `== "pm"` is flipped by C4-B1; `session_executor.py:781,1914` `== "dev"` gates vanish with the dev-completion deletion (Task 3). The `grep -v` drops the comment/docstring hits (`session_executor.py:1906,1912`, `sdlc_session_ensure.py:170`). |
+| No `== "pm"`/`!= "pm"`/`== "dev"` session_type comparison (C5-B1 / C6-B2 complement) | `grep -rnE 'session_type[^=]*(==\|!=) *"(pm\|dev)"' agent/ bridge/ tools/ scripts/ models/ --include="*.py" \| grep -vE '#\|::'` | no matches (exit 1). Catches the comparison gates the `=`-anchored gate misses: `sdlc_session_ensure.py:83`, `_sdlc_utils.py:87,162`, **the three additional live readers `session_pickup.py:119`, `sdlc_stage_query.py:66`, `stage_states_helpers.py:99`**, **and the six `agent/session_executor.py` setup-path `== "dev"` guards (652/781/828/855/885/910) renamed to `"eng"` in Task 3 (BLOCKER C6-B2)** — all renamed in Task 3. The `output_router.py:159` `== "pm"` is flipped by C4-B1; the single `session_executor.py:1914` `== "dev"` gate vanishes with the `_handle_dev_session_completion` deletion (Task 3), so it is correctly absent here. Scope now includes **`models/`** (`agent_session.py` carries no `== "pm"/"dev"` comparison — its checks use the `SESSION_TYPE_*` aliases / `SessionType.PM` enum refs, caught by the enum-name rows — but `models/` is added for completeness so a future literal cannot slip in). The `grep -v` drops the comment/docstring hits (`session_executor.py:770,1906,1912`, `sdlc_session_ensure.py:170`). |
 | Reply-to steering routes to existing session (C5-C4) | (Cowboy pilot, manual) reply-to a running `Eng:` session; `python -m tools.valor_session status --id <ID>` | pending steering message present on the existing session; no new `eng` session created |
 | agent_session_queue imports load | `python -c "import agent.agent_session_queue"` | exit code 0 (re-export block fixed) |
 
@@ -1109,6 +1226,26 @@ were found** (see notes). All fixes folded into the body.
 | NIT | User | Runbook had no "heads-up to other group members" step. | **FIXED — Update System runbook step 0 (new)**: post a brief notice before renaming if other humans are in the `PM:`/`Dev:` groups. | — |
 
 **All 1 blocker + 4 concerns + 1 nit resolved in the body; plan status → Ready.**
+
+### Cycle 6 — war room re-run 2026-06-12
+
+**Verdict:** NEEDS REVISION (2 blockers, 1 concern) → **REVISION APPLIED 2026-06-12.**
+This revision addresses the cycle-6 blockers and the concern.
+
+Both blockers are the same bug class the prior cycles chased (sites invisible to the enum greps), now in
+two files no prior cycle had added to any task or grep scope: **`models/agent_session.py`** (the core ORM
+model, flagged by all 7 critics) and the **`agent/session_executor.py` `== "dev"` setup-path guards**
+(prior cycles wrongly claimed they "vanish with the dev-completion deletion"). Every cited site was
+re-verified against live `main`; **line-number/disposition corrections were found** (see notes). All fixes
+folded into the body.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | all 7 | `models/agent_session.py` is in no task list and `models/` in no Verification grep scope. Module-level aliases `SESSION_TYPE_PM = SessionType.PM` (81) / `SESSION_TYPE_DEV = SessionType.DEV` (83) evaluate at import → `import models.agent_session` raises `AttributeError` the moment `config/enums.py` drops `PM`/`DEV` (worker/bridge/email-bridge/test-collection all crash). `worker_key` (def 472) PM branch (494) does stage-aware serialization while the dev fall-through (500-503) is slug-always → ENG falling to the dev path loses per-project serialization at main-checkout stages (#828 race). `is_pm` (1207)/`is_dev` (1217), factories (`create_pm` 1305, `create_local` default 1375, `create_child` 1430), docstrings (87-112, field comment 144), and `scripts/steer_child.py:94` (`child.is_dev`) all carry pm/dev. | **FIXED — Task 1 (new `models/agent_session.py` block with per-site dispositions: alias rename/delete, `worker_key` ENG branch inherits PM logic + dead dev fall-through deleted + `_PM_WORKTREE_STAGES`→`_ENG_WORKTREE_STAGES`, `is_pm`→`is_eng`/`is_dev` deleted, factory renames, docstrings); Task 3 (`scripts/steer_child.py:94`); Verification (`models/`+`scripts/` added to enum-name + bare-literal + comparison rows, new `SESSION_TYPE_PM/DEV/is_pm/is_dev` model+scripts row); Test Impact (6 test files: test_enums/test_agent_session_queue_session_type/test_context_propagation/test_agent_session/test_steer_child/test_steering, each UPDATE/REPLACE); Success Criteria (slugless-ENG-at-PLAN→project_key worker_key; `import models.agent_session` exits 0).** | **Factory line drift corrected:** cycle-6 critique cited 1322/1375/1430 as the factory `def` lines; verified the bodies carry those, but the `def`s are `create_pm`:1305, `create_local`:1369, `create_child`:1396, `create_dev`:1444. ENG inherits the PM `worker_key` branch verbatim (slug only at worktree-compatible stages, else project_key); the dev fall-through is deleted, not retained. |
+| BLOCKER | — | `session_executor.py` `== "dev"` gates: prior cycles claimed `781,1914` "vanish with the dev-completion deletion" — **wrong.** Seven gates exist (652, 781, 828, 855, 885, 910, 1914), reached via alias vars (`_stype_pre` 649, `_stype_early` 826, `_stype` 883, `_session_type` for the completion gate) so invisible to the enum + `session_type=` greps. Only 1914 is in `_handle_dev_session_completion` (dies with deletion); 652 is the #887 slugless-rejection guard; 781/828/855/885/910 are #887/#1272/#1377 worktree-provisioning/contamination guards — all must become `== "eng"`. | **FIXED — Task 3 (replaced the "vanish" claim with an explicit seven-site enumeration + per-site disposition: six RENAME, one DELETED-WITH-FUNCTION; added a pre-removal `== "dev"` audit grep step); Verification (comparison spot-check row now explicitly lists the six renamed executor gates + `models/` scope, and notes 1914 is correctly absent); Failure Path Test Strategy (slugged ENG still gets worktree isolation; slugless ENG with null agent_session_id still rejected at setup — the #887 guard fires for "eng").** | Each gate verified in context against live `main`: 652=slugless-rejection (#1272), 781=synthetic-slug synthesis, 828=branch-trust, 855=worktree-create FATAL, 885=main-checkout guard, 910=#1377 branch-mismatch, 1914=dev-completion call. The `:770,1906,1912` hits are comments (dropped by the spot-check `grep -v`). |
+| CONCERN | User | The Cowboy pilot tests that a question does NOT spawn work, but not the inverse (a real work request DOES spawn a container). | **FIXED — Success Criteria (new paired AC)**: a concrete work request ("fix the login bug") to `Eng: Valor` spawns a granite container — verify via `python -m tools.valor_session list` that an `eng` session was created and left pending/running, and a Telegram reply arrives. Guards against the conversational-first path swallowing real work requests. | — |
+
+**All 2 blockers + 1 concern resolved in the body; plan status → Ready.**
 
 ---
 
