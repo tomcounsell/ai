@@ -27,6 +27,7 @@ behavior stays in one place.
 from __future__ import annotations
 
 import argparse
+import functools
 import sys
 from pathlib import Path
 
@@ -35,25 +36,8 @@ _repo_root = Path(__file__).parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-# Subcommand names recognized by `_build_parser`. The positional
-# shortcut in `main()` rewrites `valor "prompt"` to
-# `valor agent-session "prompt"` only when the first token is NOT in
-# this set. Adding a subparser without updating this set silently
-# mangles the new subcommand into a prompt —
-# tests/unit/test_valor_cli.py asserts the two stay in sync.
-KNOWN_SUBCOMMANDS = {
-    "agent-session",
-    "list",
-    "status",
-    "steer",
-    "kill",
-    "resume",
-    "inspect",
-    "children",
-    "release",
-}
 
-
+@functools.cache
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="valor",
@@ -154,6 +138,30 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _derive_known_subcommands() -> set[str]:
+    """Read the registered subparser names directly off the parser.
+
+    Single source of truth: the subcommand allowlist is derived from the
+    `_SubParsersAction.choices` keys rather than hand-maintained, so adding
+    a subparser to `_build_parser` automatically extends the allowlist.
+    `_build_parser` is `lru_cache`d, so this shares the one parser build
+    with import-time derivation and every runtime `main()` call.
+    """
+    parser = _build_parser()
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return set(action.choices.keys())
+    raise AssertionError("no subparsers found on the valor parser")
+
+
+# Subcommand names recognized by `_build_parser`, DERIVED from the
+# registered subparsers (not a hand-maintained literal). The positional
+# shortcut in `main()` rewrites `valor "prompt"` to
+# `valor agent-session "prompt"` only when the first token is NOT in this
+# set. Defined AFTER `_build_parser` so the derivation can introspect it.
+KNOWN_SUBCOMMANDS = _derive_known_subcommands()
+
+
 def _run(args: argparse.Namespace) -> int:
     """Dispatch to the underlying `valor-session` subcommand."""
     # Lazy import so `valor --help` doesn't pay the bootstrap cost.
@@ -247,6 +255,33 @@ def main(argv: list[str] | None = None) -> int:
     """
     if argv is None:
         argv = sys.argv[1:]
+
+    # Help short-circuit on the PRE-REWRITE argv. When the first token is a
+    # bare prompt (not a flag, not a known subcommand) AND a standalone
+    # `-h`/`--help` token appears anywhere in argv, print top-level help and
+    # exit. Without this, the shortcut rewrite below would prepend
+    # `agent-session` and argparse would emit the create sub-help instead of
+    # the top-level help the user almost certainly wanted.
+    #
+    # "Standalone token" means an exact argv element equal to `-h` or
+    # `--help` — NOT a substring. `valor "document the --help flag"` is a
+    # single argv element containing the substring, so it does NOT fire (the
+    # prompt is delivered verbatim); `valor "prompt" --help` has `--help` as
+    # its own element and DOES fire.
+    #
+    # `valor list --help` is excluded here because `list` IS a known
+    # subcommand — it falls through to argparse, which prints the `list`
+    # sub-help. SystemExit(0) (not `return 0`) keeps semantics uniform with
+    # argparse's own `--help` exit.
+    if (
+        argv
+        and not argv[0].startswith("-")
+        and argv[0] not in KNOWN_SUBCOMMANDS
+        and any(token in ("-h", "--help") for token in argv)
+    ):
+        parser = _build_parser()
+        parser.print_help()
+        raise SystemExit(0)
 
     # If the first token doesn't match a known subcommand and isn't a flag,
     # inject the `agent-session` subcommand so the user can omit it.
