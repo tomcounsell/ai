@@ -10,8 +10,7 @@ PM final-delivery protocol (issue #1058):
     The router no longer inspects message content for any marker. The
     previous `[PIPELINE_COMPLETE]` protocol was removed because content-
     marker routing failed under context overflow, stale UUIDs, and persona
-    drift. Final delivery is driven by `_handle_dev_session_completion`
-    detecting pipeline completion and invoking `_deliver_pipeline_completion`
+    drift. Final delivery is driven by `_deliver_pipeline_completion`
     — see `docs/features/pm-final-delivery.md`. PM+SDLC paths here resolve
     to `nudge_continue` (except for the `waiting_for_children` → `deliver`
     and terminal-status guards, which are preserved).
@@ -115,9 +114,9 @@ def determine_delivery_action(
             preserves pre-1127 behavior (no guard).
 
     Note (issue #1058): no content-string inspection happens here. Pipeline
-    completion is detected separately in `_handle_dev_session_completion` via
-    the `is_pipeline_complete` predicate, which invokes a dedicated
-    completion-turn runner that delivers the final message directly.
+    completion is detected via the `is_pipeline_complete` predicate, which
+    invokes a dedicated completion-turn runner that delivers the final message
+    directly.
     """
     from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 

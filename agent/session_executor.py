@@ -13,7 +13,6 @@ from agent.output_router import NUDGE_MESSAGE, SendToChatResult
 from agent.session_completion import (
     _complete_agent_session,  # noqa: F401
     _diagnose_missing_session,
-    _handle_dev_session_completion,
 )
 from agent.session_health import HEARTBEAT_WRITE_INTERVAL
 from agent.session_logs import save_session_snapshot
@@ -167,9 +166,9 @@ def _schedule_post_session_extraction(session_id: str, response_text: str) -> No
     """Fire-and-forget post-session memory extraction (hotfix #1055).
 
     Synchronous — creates and registers an ``asyncio.create_task``; does NOT
-    await it. Preserves the #987 ordering invariant:
-    ``_handle_dev_session_completion`` must run before this extraction task
-    completes, so the PM nudge fires promptly while extraction is still pending.
+    await it. Preserves the #987 ordering invariant: extraction runs in the
+    background so the eng nudge fires promptly while extraction is still
+    pending.
 
     **CRITICAL**: this function is declared ``def`` (not ``async def``) and
     returns ``None``. Any ``await`` or ``asyncio.gather(...)`` on its result
@@ -1904,40 +1903,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # stall observed in #1055 and the #987 ordering invariant.
         #
         # Runs AFTER both complete_transcript paths above (happy path at ~L1320
-        # and the #917 fallback at ~L1346), and BEFORE _handle_dev_session_completion
-        # below. Extraction runs in the background; its completion or failure does
-        # not delay the PM nudge. See drain_pending_extractions() for shutdown wiring.
+        # and the #917 fallback at ~L1346). Extraction runs in the background;
+        # its completion or failure does not delay the eng nudge. See
+        # drain_pending_extractions() for shutdown wiring.
         _schedule_post_session_extraction(session.session_id, task._result or "")
-
-        # Post-completion SDLC handling for dev sessions (Phase 3)
-        # IMPORTANT ORDERING INVARIANT: This call is placed AFTER the entire
-        # `if agent_session / else` block above. That block calls complete_transcript(),
-        # which calls finalize_session() → _finalize_parent_sync() synchronously
-        # (bridge/session_transcript.py:252, line 292). By the time
-        # _handle_dev_session_completion runs here, _finalize_parent_sync has already
-        # completed on BOTH the `if agent_session:` and `else:` paths. The re-check
-        # guard inside _handle_dev_session_completion will therefore correctly observe
-        # the PM's post-finalization (terminal) status and create a continuation PM.
-        # Moving this call earlier (before complete_transcript) causes the race
-        # described in issue #987: steer is accepted, then _finalize_parent_sync runs
-        # and the PM goes terminal, orphaning the steering message.
-        #
-        # Nudge path note: on the nudge path (defer_reaction=True), complete_transcript
-        # is skipped above, but _finalize_parent_sync still runs via the nudge path's
-        # own finalize_session call. This call is guarded by `_session_type == "dev"`,
-        # not by `defer_reaction`, so it executes on both the nudge and non-nudge paths.
-        #
-        # Granite note (plan #1572): in granite mode, the container is the
-        # PM/Dev handoff — the user message goes through `BridgeAdapter.run`,
-        # not through a PM→Dev spawn. A bridge-originated session with
-        # `_session_type == "dev"` is not the granite path. The granite cutover
-        # is all-or-nothing: this guard is preserved as-is.
-        if _session_type == "dev" and not task.error:
-            await _handle_dev_session_completion(
-                session=session,
-                agent_session=agent_session,
-                result=task._result or "",
-            )
 
         # Save session snapshot for error cases
         if task.error:
@@ -1990,7 +1959,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         chat_title=session.chat_title,
                         priority=session.priority or "normal",
                         sender_id=session.sender_id,
-                        session_type=session.session_type or "pm",
+                        session_type=session.session_type or "eng",
                         project_config=getattr(session, "project_config", None),
                     )
                     logger.info(

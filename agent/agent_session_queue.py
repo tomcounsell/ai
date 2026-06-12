@@ -46,10 +46,8 @@ from agent.output_router import (
 from agent.session_completion import (  # noqa: F401
     _CONTINUATION_PM_MAX_DEPTH,
     _complete_agent_session,
-    _create_continuation_pm,
     _diagnose_missing_session,
     _extract_issue_number,
-    _handle_dev_session_completion,
     _transition_parent,
 )
 
