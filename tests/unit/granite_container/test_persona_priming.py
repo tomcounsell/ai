@@ -1,6 +1,6 @@
-"""Tests for the persona-priming slash commands (PoC #1546).
+"""Tests for the persona-priming slash commands.
 
-The slash commands are markdown files under `.claude/commands/granite-poc/`
+The slash commands are markdown files under `.claude/commands/granite/`
 that the TUI's slash-command mechanism parses at the TUI layer (F1 from
 the F-probe). The body is invisible to the user/operator (F4); the only
 substrate signal is "did the model respond correctly to a follow-up?"
@@ -15,7 +15,7 @@ the substrate driver:
   - The `$ARGUMENTS` placeholder is present in both bodies (F2:
     model-side substitution).
   - A live smoke test (env-gated): spawn a single PTY, send
-    `/granite-poc:prime-pm-role hello`, confirm idle + a follow-up
+    `/granite:prime-pm-role hello`, confirm idle + a follow-up
     response.
 """
 
@@ -33,11 +33,10 @@ from agent.granite_container.pty_driver import PTYDriver, _default_substrate_mod
 # A worktree-aware root would be `Path(__file__).resolve().parents[3]` (this
 # file lives at <root>/tests/unit/granite_container/test_persona_priming.py).
 # Using a hardcoded worktree path made the tests fail when the worktree
-# was collapsed back into the main checkout (see session/granite_interactive_tui_poc
-# review).
+# was collapsed back into the main checkout (see the original PoC review).
 REPO_ROOT = Path(__file__).resolve().parents[3]
-PM_PRIME = REPO_ROOT / ".claude" / "commands" / "granite-poc" / "prime-pm-role.md"
-DEV_PRIME = REPO_ROOT / ".claude" / "commands" / "granite-poc" / "prime-dev-role.md"
+PM_PRIME = REPO_ROOT / ".claude" / "commands" / "granite" / "prime-pm-role.md"
+DEV_PRIME = REPO_ROOT / ".claude" / "commands" / "granite" / "prime-dev-role.md"
 
 
 class TestSlashCommandFiles(unittest.TestCase):
@@ -165,7 +164,7 @@ class TestPersonaPrimingSmokeEnvGated(unittest.TestCase):
     """Env-gated: spawn a single PTY, prime PM, confirm model responds.
 
     The PoC's persona-priming self-test sends
-    `/granite-poc:prime-pm-role hello` to a fresh TUI and waits for
+    `/granite:prime-pm-role hello` to a fresh TUI and waits for
     the model to reach idle. If the model responds, the priming
     worked; if the TUI rejects the slash command, the body is broken
     at the substrate layer (F1 violated). If the model doesn't
@@ -182,7 +181,7 @@ class TestPersonaPrimingSmokeEnvGated(unittest.TestCase):
             driver.spawn()
             initial = driver.read_until_idle(min_content_bytes=0, timeout_s=30.0)
             self.assertTrue(initial.saw_idle, f"initial idle failed: {initial.buffer[-200:]!r}")
-            driver.write("/granite-poc:prime-pm-role hello")
+            driver.write("/granite:prime-pm-role hello")
             primed = driver.read_until_idle(min_content_bytes=100, timeout_s=60.0)
             self.assertTrue(
                 primed.saw_idle,

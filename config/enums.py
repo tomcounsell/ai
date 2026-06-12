@@ -18,7 +18,7 @@ class SessionType(StrEnum):
     """Discriminator for AgentSession: pm, teammate, dev, or granite.
 
     ``GRANITE`` is used exclusively by the standalone ``valor-granite-loop``
-    CLI (``tools/granite_interactive_tui_poc/cli.py``). Bridge-originated
+    CLI (``tools/granite_loop/cli.py``). Bridge-originated
     sessions that run through the granite PTY container are still typed as
     ``PM`` or ``DEV`` — ``GRANITE`` labels only direct CLI invocations so
     they appear in the dashboard and ``valor-session list`` without being

@@ -1,9 +1,13 @@
-# Granite Operator: Interactive TUI PoC (issue #1546)
+# Granite Operator: Interactive TUI Session Runner
 
-**Status:** Kernel validation PoC. Replaces the prior PoC's `-p`-driven substrate
-with a PTY-driven interactive TUI. The headless harness baseline
-(`agent/claude_session.py`, `agent/sdk_client.py`) is untouched; the PoC is
-additive (new module path `agent/granite_container/`).
+**Status:** Production. The granite interactive-TUI container is the
+execution path for bridge-originated sessions under the standalone worker.
+It drives a PTY-backed interactive TUI rather than the headless `-p`
+substrate. The headless harness (`agent/claude_session.py`,
+`agent/sdk_client.py`) remains in place alongside it; this container lives
+at module path `agent/granite_container/`. (Historical origin: the
+container began as the #1546 PoC and was cut over to production in
+#1572 / #1612.)
 
 ## Architecture (3 layers)
 
@@ -11,11 +15,11 @@ additive (new module path `agent/granite_container/`).
 Bridge → Container → Granite + PM/Dev
 ```
 
-- **Bridge** is *out of scope* for this PoC. User-address output is written
-  to a results log; the production wiring is a follow-on issue.
+- **Bridge** originates the sessions this container runs. The worker drives
+  the container; user-address output is routed back to the bridge.
 - **Container** (`agent/granite_container/container.py`) owns two PTYs and the
   steady-state loop. Per-turn trace + exit reason are serialized to a
-  results JSON the results doc renders.
+  results JSON callers can render.
 - **Granite + PM/Dev**: the operator is `granite4.1:3b` (local, via
   ollama). PM and Dev are real `claude` sessions under PTY, with the user
   message passed as `$ARGUMENTS` to a persona-priming slash command.
@@ -28,7 +32,7 @@ Bridge → Container → Granite + PM/Dev
    (mirroring `agent/claude_session.py:90-101`).
 3. **Resume UUID** — the on-exit hint is environment-gated (C3). Resume
    acceptance tests run only in a model-reachable env.
-4. **Persona priming** — `.claude/commands/granite-poc/prime-{pm,dev}-role.md`
+4. **Persona priming** — `.claude/commands/granite/prime-{pm,dev}-role.md`
    prime the two roles via the TUI's slash-command mechanism (F1).
 5. **Fresh context per turn** — granite's classifier is stateless; no
    `HISTORY_KEEP_LAST_N` knob.
@@ -51,7 +55,7 @@ Bridge → Container → Granite + PM/Dev
 ## Persona-priming flow (F1-F4)
 
 The PM and Dev personas are primed at TUI layer (F1) by the slash
-commands under `.claude/commands/granite-poc/`. The body of each slash
+commands under `.claude/commands/granite/`. The body of each slash
 command is invisible to the operator (F4); the only substrate signal is
 "did the model respond?" (F2 substitution). Multi-word args are preserved
 as a single `$ARGUMENTS` string (F3).
@@ -68,8 +72,8 @@ naturally; Dev's output is summarized by granite, not classified.
 
 ## Granite classification + translation taxonomy
 
-The new `agent/granite_container/granite_classifier.py` ships 3 tools (down
-from 5 in the prior PoC):
+`agent/granite_container/granite_classifier.py` ships 3 tools (down
+from 5 in the earlier granite-agent-loop):
 
 | Tool | Caller | Type | Purpose |
 |------|--------|------|---------|
@@ -77,12 +81,12 @@ from 5 in the prior PoC):
 | `extract_dev_prompt` | container | ollama | Translate PM's tail into a developer instruction. |
 | `summarize_for_pm` | container | ollama | Summarize Dev's output for PM's next turn. |
 
-The classification is a parse, not an LLM call (per Q6 disposition). The
-two translation calls remain LLM calls because the translation quality
-is what granite adds.
+The classification is a parse, not an LLM call. The two translation
+calls remain LLM calls because the translation quality is what granite
+adds.
 
-The 3 judgment tools from the prior PoC (`handle_choice`,
-`probe_session`, `signal_done`) are dropped. The prior PoC's results
+The 3 judgment tools from the earlier granite-agent-loop (`handle_choice`,
+`probe_session`, `signal_done`) are dropped. That earlier results
 doc at `docs/plans/completed/granite-agent-loop-poc-results.md` shows
 those tools were validated by synthetic smoke tests only, not in a
 live 4-turn run. Routing judgment calls to PM (a real Claude
@@ -151,26 +155,22 @@ consume a `max_turns` slot. `PM_WRAPUP_PROMPT` fires post-loop, is capped at
 - Probe: `scripts/probe_slash_arguments.py`. F1-F4 persona-priming
   findings (model-side `$ARGUMENTS` substitution, slash-command layer
   parsing, multi-line message support).
-- Plan: `docs/plans/granite_interactive_tui_poc.md`.
-- Results doc: `docs/plans/granite_interactive_tui_poc-results.md` (the
-  PoC's verdict).
-- Prior PoC: `docs/features/granite-agent-loop.md` (now historical; the
-  new PoC is the source of truth).
+- Originating plan + verdict: `docs/plans/completed/granite-interactive-tui-poc-results.md`
+  (the historical results doc from the originating effort).
+- Earlier granite-agent-loop: `docs/features/granite-agent-loop.md` (now
+  historical; this doc is the source of truth for the live runner).
+- Production cutover + bounded slot pool: [`granite-pty-production.md`](granite-pty-production.md)
+  — the production wiring this container runs under (PRs #1572 / #1612).
 
 ## Out of scope (No-Gos)
 
-- Production cutover (replacing `agent/sdk_client.py` as the unbypassable
-  root session runner). The cancelled issue #1542 was replaced by this
-  PoC; the production cutover is a follow-on.
-- Bridge integration (Telegram wiring, dashboard, dual-resume UI). The
-  PoC writes user-address output to a results log.
 - `AgentSession` schema change to store two `claude_session_uuid` fields
   (PM UUID + Dev UUID).
-- Resume-UUID capture spike (#1552). The PoC exercises resume inside
+- Resume-UUID capture spike (#1552). The container exercises resume inside
   itself in a model-reachable env; #1552's findings are a corroborating
   reference, not a prerequisite.
 - Cross-turn history accumulation in granite. Fresh context per turn is
-  the PoC's default; a 1-line structured handoff field is a follow-on
+  the default; a 1-line structured handoff field is a follow-on
   optimization.
-- Model-per-role config at the runner level. The PoC hardcodes
+- Model-per-role config at the runner level. The container hardcodes
   `claude --model <auto-pick> --permission-mode bypassPermissions`.

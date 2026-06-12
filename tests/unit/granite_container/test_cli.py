@@ -31,7 +31,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agent.granite_container.container import ContainerResult
-from tools.granite_interactive_tui_poc.cli import _build_arg_parser, main
+from tools.granite_loop.cli import _build_arg_parser, main
 
 
 def _fake_result(exit_reason: str = "pm_complete") -> ContainerResult:
@@ -104,17 +104,13 @@ class TestMainRejectsEmpty(unittest.TestCase):
     """
 
     def test_whitespace_only(self) -> None:
-        with patch(
-            "tools.granite_interactive_tui_poc.cli.AgentSession.create_local"
-        ) as mock_create:
+        with patch("tools.granite_loop.cli.AgentSession.create_local") as mock_create:
             rc = main(["--user-message", "  "])
         self.assertEqual(rc, 5)
         mock_create.assert_not_called()
 
     def test_empty_string(self) -> None:
-        with patch(
-            "tools.granite_interactive_tui_poc.cli.AgentSession.create_local"
-        ) as mock_create:
+        with patch("tools.granite_loop.cli.AgentSession.create_local") as mock_create:
             rc = main(["--user-message", ""])
         self.assertEqual(rc, 5)
         mock_create.assert_not_called()
@@ -129,10 +125,10 @@ class TestMainRunPath(unittest.TestCase):
             fake_session = _make_fake_session()
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     return_value=fake_session,
                 ),
-                patch("tools.granite_interactive_tui_poc.cli.finalize_session"),
+                patch("tools.granite_loop.cli.finalize_session"),
                 patch("agent.granite_container.container.Container.run") as mock_run,
             ):
                 mock_run.return_value = _fake_result("pm_complete")
@@ -159,10 +155,10 @@ class TestMainRunPath(unittest.TestCase):
             fake_session = _make_fake_session()
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     return_value=fake_session,
                 ),
-                patch("tools.granite_interactive_tui_poc.cli.finalize_session"),
+                patch("tools.granite_loop.cli.finalize_session"),
                 patch("agent.granite_container.container.Container.run") as mock_run,
             ):
                 mock_run.return_value = _fake_result("pm_user")
@@ -184,10 +180,10 @@ class TestMainRunPath(unittest.TestCase):
             fake_session = _make_fake_session()
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     return_value=fake_session,
                 ),
-                patch("tools.granite_interactive_tui_poc.cli.finalize_session"),
+                patch("tools.granite_loop.cli.finalize_session"),
                 patch("agent.granite_container.container.Container.run") as mock_run,
             ):
                 mock_run.return_value = _fake_result("pm_max_turns")
@@ -207,10 +203,10 @@ class TestMainRunPath(unittest.TestCase):
             fake_session = _make_fake_session()
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     return_value=fake_session,
                 ),
-                patch("tools.granite_interactive_tui_poc.cli.finalize_session"),
+                patch("tools.granite_loop.cli.finalize_session"),
                 patch("agent.granite_container.container.Container.run") as mock_run,
             ):
                 mock_run.return_value = _fake_result("dev_hang")
@@ -230,10 +226,10 @@ class TestMainRunPath(unittest.TestCase):
             fake_session = _make_fake_session()
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     return_value=fake_session,
                 ),
-                patch("tools.granite_interactive_tui_poc.cli.finalize_session"),
+                patch("tools.granite_loop.cli.finalize_session"),
                 patch("agent.granite_container.container.Container.run") as mock_run,
             ):
                 mock_run.return_value = _fake_result("pm_hang")
@@ -253,10 +249,10 @@ class TestMainRunPath(unittest.TestCase):
             fake_session = _make_fake_session()
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     return_value=fake_session,
                 ),
-                patch("tools.granite_interactive_tui_poc.cli.finalize_session"),
+                patch("tools.granite_loop.cli.finalize_session"),
                 patch("agent.granite_container.container.Container.run") as mock_run,
             ):
                 mock_run.return_value = _fake_result("startup_unresolved")
@@ -276,10 +272,10 @@ class TestMainRunPath(unittest.TestCase):
             fake_session = _make_fake_session()
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     return_value=fake_session,
                 ),
-                patch("tools.granite_interactive_tui_poc.cli.finalize_session"),
+                patch("tools.granite_loop.cli.finalize_session"),
                 patch("agent.granite_container.container.Container.run") as mock_run,
             ):
                 mock_run.return_value = _fake_result("exception")
@@ -303,10 +299,10 @@ class TestMainStdoutSummary(unittest.TestCase):
             fake_session = _make_fake_session("test-agent-session-xyz")
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     return_value=fake_session,
                 ),
-                patch("tools.granite_interactive_tui_poc.cli.finalize_session"),
+                patch("tools.granite_loop.cli.finalize_session"),
                 patch("agent.granite_container.container.Container.run") as mock_run,
             ):
                 mock_run.return_value = _fake_result("pm_complete")
@@ -356,10 +352,10 @@ class TestMainAgentSessionLifecycle(unittest.TestCase):
             out_path = Path(tmp) / "results.json"
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     side_effect=_capture_create,
                 ),
-                patch("tools.granite_interactive_tui_poc.cli.finalize_session"),
+                patch("tools.granite_loop.cli.finalize_session"),
                 patch(
                     "agent.granite_container.container.Container.run",
                     _track_run,
@@ -398,11 +394,11 @@ class TestMainAgentSessionLifecycle(unittest.TestCase):
             out_path = Path(tmp) / "results.json"
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     return_value=fake_session,
                 ),
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.finalize_session",
+                    "tools.granite_loop.cli.finalize_session",
                     side_effect=_capture_finalize,
                 ),
                 patch("agent.granite_container.container.Container.run") as mock_run,
@@ -427,11 +423,11 @@ class TestMainAgentSessionLifecycle(unittest.TestCase):
             out_path = Path(tmp) / "results.json"
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     return_value=fake_session,
                 ),
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.finalize_session",
+                    "tools.granite_loop.cli.finalize_session",
                     side_effect=_capture_finalize,
                 ),
                 patch("agent.granite_container.container.Container.run") as mock_run,
@@ -458,11 +454,11 @@ class TestMainAgentSessionLifecycle(unittest.TestCase):
                     out_path = Path(tmp) / "results.json"
                     with (
                         patch(
-                            "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                            "tools.granite_loop.cli.AgentSession.create_local",
                             return_value=fake_session,
                         ),
                         patch(
-                            "tools.granite_interactive_tui_poc.cli.finalize_session",
+                            "tools.granite_loop.cli.finalize_session",
                             side_effect=_capture_finalize,
                         ),
                         patch("agent.granite_container.container.Container.run") as mock_run,
@@ -490,10 +486,10 @@ class TestMainAgentSessionLifecycle(unittest.TestCase):
             stderr_buf = io.StringIO()
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     side_effect=ConnectionError("Redis down"),
                 ),
-                patch("tools.granite_interactive_tui_poc.cli.finalize_session"),
+                patch("tools.granite_loop.cli.finalize_session"),
                 patch("agent.granite_container.container.Container.run") as mock_run,
             ):
                 mock_run.return_value = _fake_result("pm_complete")
@@ -527,10 +523,10 @@ class TestMainAgentSessionLifecycle(unittest.TestCase):
             out_path = Path(tmp) / "results.json"
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     side_effect=RuntimeError("no redis"),
                 ),
-                patch("tools.granite_interactive_tui_poc.cli.finalize_session"),
+                patch("tools.granite_loop.cli.finalize_session"),
                 patch("agent.granite_container.container.Container.run") as mock_run,
             ):
                 mock_run.return_value = _fake_result("pm_complete")
@@ -581,11 +577,11 @@ class TestMainAgentSessionLifecycle(unittest.TestCase):
             out_path = Path(tmp) / "results.json"
             with (
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.AgentSession.create_local",
+                    "tools.granite_loop.cli.AgentSession.create_local",
                     return_value=fake_session,
                 ),
                 patch(
-                    "tools.granite_interactive_tui_poc.cli.finalize_session",
+                    "tools.granite_loop.cli.finalize_session",
                     side_effect=_finalize_raises_on_second,
                 ),
                 patch(

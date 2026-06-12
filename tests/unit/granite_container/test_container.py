@@ -42,7 +42,7 @@ def _mock_driver(buffer_text: str = "fake", saw_idle: bool = True) -> MagicMock:
 
 
 class TestMakeSandboxCwd(unittest.TestCase):
-    """The sandbox tempdir is created under /tmp/granite-poc/."""
+    """The sandbox tempdir is created under /tmp/granite/."""
 
     def test_sandbox_under_tmp(self) -> None:
         # Use the platform's actual tempdir, not a hardcoded /tmp prefix.
@@ -54,7 +54,7 @@ class TestMakeSandboxCwd(unittest.TestCase):
             cwd.startswith(tempfile.gettempdir()),
             f"expected cwd under {tempfile.gettempdir()!r}, got {cwd!r}",
         )
-        self.assertIn("granite-poc", cwd)
+        self.assertIn("granite/run-", cwd)
         self.assertTrue(label.startswith("run-"))
 
 
@@ -526,17 +526,17 @@ class TestContainerPrimeHandlesTrustFolder(unittest.TestCase):
         with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
-            c._prime_session(pm_mock, "/granite-poc:prime-pm-role")
+            c._prime_session(pm_mock, "/granite:prime-pm-role")
 
         # Both writes happened on the same PTY, in order:
         # trust dismissal first, then the prime slash command.
         # We assert by index in the call_args_list (not by string
-        # lex-order — "1" sorts after "/granite-poc..." in ASCII).
+        # lex-order — "1" sorts after "/granite..." in ASCII).
         self.assertEqual(pm_mock.write.call_count, 2)
         first_call, second_call = pm_mock.write.call_args_list
         self.assertEqual(first_call.args[0], "1")
         self.assertTrue(
-            second_call.args[0].startswith("/granite-poc:prime-pm-role "),
+            second_call.args[0].startswith("/granite:prime-pm-role "),
             f"expected prime slash command, got {second_call.args[0]!r}",
         )
 
@@ -553,11 +553,11 @@ class TestContainerPrimeHandlesTrustFolder(unittest.TestCase):
         with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
             c._pm_pty = pm_mock
             c._dev_pty = _mock_driver("")
-            c._prime_session(pm_mock, "/granite-poc:prime-pm-role")
+            c._prime_session(pm_mock, "/granite:prime-pm-role")
 
         # Only the prime slash command was written — no "1".
         self.assertEqual(pm_mock.write.call_count, 1)
-        self.assertTrue(pm_mock.write.call_args.args[0].startswith("/granite-poc:prime-pm-role "))
+        self.assertTrue(pm_mock.write.call_args.args[0].startswith("/granite:prime-pm-role "))
 
     def test_prime_uses_post_dismissal_c5_budget(self) -> None:
         """Post-write C5 budget is PRIME_POST_WRITE_TIMEOUT_S, raised

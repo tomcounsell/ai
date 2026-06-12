@@ -1,12 +1,12 @@
-# Granite Agent Loop (PoC)
+# Granite Agent Loop (historical)
 
 **Status:** Superseded by the
-[interactive TUI PoC](granite-interactive-tui.md) (issue #1546). This
-doc is historical; the new PoC is the source of truth. See the
-interactive-TUI doc for the 3-layer architecture, the 10 invariants,
+[interactive TUI session runner](granite-interactive-tui.md). This
+doc is historical; the interactive-TUI runner is the source of truth. See
+that doc for the 3-layer architecture, the 10 invariants,
 the persona-priming flow, the granite classification + translation
 taxonomy, and the steady-state loop. The interjection text on line
-294-296 of this doc is out of date (older TUI text); the new PoC's
+294-296 of this doc is out of date (older TUI text); the live runner's
 `INTERRUPTED_RE` regex accepts both forms.
 
 See
@@ -132,11 +132,13 @@ per-request API key cost.
 
 ## Session isolation
 
-Each `ClaudeSession` gets a unique `CLAUDE_CODE_TASK_LIST_ID` of the
-form `granite-poc-{pm|dev}-<8 hex chars>`. This prevents the PoC's
+In this superseded loop, each `ClaudeSession` got a unique
+`CLAUDE_CODE_TASK_LIST_ID` per PM/Dev role. This prevented its
 task list from polluting any concurrent dev session running under
-`session/<slug>` worktrees. The variable is set at subprocess spawn
-time, before any Claude logic runs.
+`session/<slug>` worktrees. The variable was set at subprocess spawn
+time, before any Claude logic ran. (The live interactive-TUI runner
+inherits its task-list isolation from the bridge-originated session;
+see [`granite-interactive-tui.md`](granite-interactive-tui.md).)
 
 ## Failure modes
 

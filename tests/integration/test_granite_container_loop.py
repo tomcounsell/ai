@@ -17,8 +17,8 @@ The test exercises:
     won't loop forever) writes a well-formed results JSON
   - The stdout summary JSON and the written results JSON shapes
 
-It is **not** the full PoC verdict (that lives in
-docs/plans/granite_interactive_tui_poc-results.md). It is a
+It is **not** the full historical verdict (that lives in
+docs/plans/completed/granite-interactive-tui-poc-results.md). It is a
 regression guard that the container's loop runs to completion in a
 model-reachable env, invoked the way the operator invokes it.
 """
