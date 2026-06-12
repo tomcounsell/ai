@@ -92,6 +92,8 @@ python scripts/download_kokoro_models.py       # ~330MB into ~/.cache/kokoro-onn
 
 Override the models directory by setting `KOKORO_MODELS_DIR` in the environment. The cache path is shared across all worktrees on a machine — not committed and not per-worktree.
 
+On managed machines this is automated: the `/update` run downloads the Kokoro models (`scripts/update/kokoro.py::ensure_models`) **and** ensures `ffmpeg` is on PATH (`ensure_ffmpeg` — `brew install ffmpeg` on macOS). Both steps are idempotent and non-fatal; a missing ffmpeg only downgrades TTS to the cloud backend, so it surfaces as an update warning rather than a hard error.
+
 ## Usage
 
 ### Python

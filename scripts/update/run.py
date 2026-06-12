@@ -139,6 +139,7 @@ class UpdateResult:
     npm_tools_result: npm_tools.NpmToolsResult | None = None
     sentry_cli_result: sentry_cli.InstallResult | None = None
     kokoro_result: kokoro.DownloadResult | None = None
+    ffmpeg_result: kokoro.FfmpegResult | None = None
     readme_check_result: readme_check.ReadmeCheckResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -784,6 +785,22 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     else:
         log(f"WARN: Kokoro download: {kr.error}", v)
         result.warnings.append(f"Kokoro: {kr.error}")
+
+    # Step 3.12: ffmpeg — Kokoro encodes WAV -> OGG/Opus via ffmpeg. Without
+    # it on PATH the local TTS backend reports unavailable and voice synthesis
+    # silently falls back to the paid OpenAI tts-1 path. Non-fatal: a warning,
+    # since cloud TTS still works.
+    log("Checking ffmpeg (Kokoro encode dependency)...", v)
+    result.ffmpeg_result = kokoro.ensure_ffmpeg()
+    fr = result.ffmpeg_result
+    if fr.success:
+        if fr.action == "present":
+            log(f"ffmpeg OK ({fr.path})", v)
+        else:
+            log(f"ffmpeg installed ({fr.path})", v, always=True)
+    else:
+        log(f"WARN: ffmpeg: {fr.error}", v)
+        result.warnings.append(f"ffmpeg: {fr.error}")
 
     # Step 4: Ollama model (full mode only)
     if config.do_ollama:

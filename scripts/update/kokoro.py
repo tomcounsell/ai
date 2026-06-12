@@ -13,6 +13,8 @@ that already exist.
 from __future__ import annotations
 
 import os
+import platform
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -27,6 +29,75 @@ class DownloadResult:
     action: str  # "downloaded", "skipped", "failed"
     models_dir: str | None = None
     error: str | None = None
+
+
+@dataclass
+class FfmpegResult:
+    """Result of the ffmpeg availability check / install."""
+
+    success: bool
+    action: str  # "present", "installed", "skipped", "failed"
+    path: str | None = None
+    error: str | None = None
+
+
+def ensure_ffmpeg() -> FfmpegResult:
+    """Ensure ffmpeg is on PATH so Kokoro can encode WAV -> OGG/Opus.
+
+    Kokoro's static availability check gates on ``ffmpeg on PATH`` (see
+    ``tools/tts/__init__.py``); without ffmpeg the local backend reports
+    unavailable and TTS silently falls back to the paid OpenAI tts-1 path.
+
+    Idempotent: returns ``present`` when ffmpeg is already resolvable. On
+    macOS, installs via Homebrew when missing. On other platforms (or when
+    ``brew`` is absent) it returns ``failed`` with guidance — non-fatal, the
+    caller treats it as a warning since cloud TTS still works.
+    """
+    existing = shutil.which("ffmpeg")
+    if existing:
+        return FfmpegResult(success=True, action="present", path=existing)
+
+    if platform.system().lower() != "darwin":
+        return FfmpegResult(
+            success=False,
+            action="failed",
+            error="ffmpeg not on PATH; install it via your platform package manager",
+        )
+
+    brew = shutil.which("brew")
+    if not brew:
+        return FfmpegResult(
+            success=False,
+            action="failed",
+            error="ffmpeg missing and Homebrew not found; install ffmpeg manually",
+        )
+
+    try:
+        proc = subprocess.run(
+            [brew, "install", "ffmpeg"],
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+    except subprocess.TimeoutExpired:
+        return FfmpegResult(
+            success=False, action="failed", error="brew install ffmpeg timed out after 900s"
+        )
+    except OSError as e:
+        return FfmpegResult(
+            success=False, action="failed", error=f"Could not run brew install ffmpeg: {e}"
+        )
+
+    resolved = shutil.which("ffmpeg")
+    if proc.returncode == 0 and resolved:
+        return FfmpegResult(success=True, action="installed", path=resolved)
+
+    error_msg = proc.stderr.strip() or proc.stdout.strip() or "Unknown error"
+    return FfmpegResult(
+        success=False,
+        action="failed",
+        error=f"brew install ffmpeg failed: {error_msg}",
+    )
 
 
 # Mirrors constants in scripts/download_kokoro_models.py + tools/tts/__init__.py.
