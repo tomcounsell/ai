@@ -84,6 +84,71 @@ class TestFindSessionByIssue:
         assert result is None
 
 
+class TestDeterministicIdVsIssueUrl:
+    """C2 (#1671): issue_url ownership must beat a stale sdlc-local-{N}."""
+
+    def test_live_bridge_session_wins_over_stale_local(self):
+        """When both a stale sdlc-local-N record and a live bridge PM session
+        owning the issue via issue_url exist, the bridge session wins."""
+        from tools._sdlc_utils import find_session_by_issue
+
+        stale_local = MagicMock(name="stale_local")
+        stale_local.session_id = "sdlc-local-1147"
+        stale_local.session_type = "pm"
+        stale_local.issue_url = None
+        stale_local.message_text = None
+
+        live_bridge = MagicMock(name="live_bridge")
+        live_bridge.session_id = "tg_valor_-100_42"
+        live_bridge.session_type = "pm"
+        live_bridge.issue_url = "https://github.com/tomcounsell/ai/issues/1147"
+        live_bridge.message_text = None
+
+        def _filter(**kwargs):
+            # session_type="pm" pass returns both; session_id pass returns the local.
+            if kwargs.get("session_type") == "pm":
+                return [stale_local, live_bridge]
+            if kwargs.get("session_id") == "sdlc-local-1147":
+                return [stale_local]
+            return []
+
+        mock_as = MagicMock()
+        mock_as.query.filter.side_effect = _filter
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = find_session_by_issue(1147)
+
+        # The issue_url pass runs FIRST, so the bridge session that owns the
+        # issue wins over the stale deterministic-id record.
+        assert result is live_bridge
+
+    def test_deterministic_local_used_when_no_issue_url_owner(self):
+        """When no PM session owns the issue via issue_url, the deterministic
+        sdlc-local-N record is the fallback (preserves #1558)."""
+        from tools._sdlc_utils import find_session_by_issue
+
+        local = MagicMock(name="local")
+        local.session_id = "sdlc-local-1148"
+        local.session_type = "pm"
+        local.issue_url = None
+        local.message_text = None
+
+        def _filter(**kwargs):
+            if kwargs.get("session_type") == "pm":
+                return [local]
+            if kwargs.get("session_id") == "sdlc-local-1148":
+                return [local]
+            return []
+
+        mock_as = MagicMock()
+        mock_as.query.filter.side_effect = _filter
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = find_session_by_issue(1148)
+
+        assert result is local
+
+
 class TestMessageTextFallback:
     """Tests for the message_text fallback pass in find_session_by_issue."""
 
@@ -379,9 +444,31 @@ class TestFindSessionEnsure:
         assert result is None
         ensure_mock.assert_not_called()
 
-    def test_ensure_true_env_session_returns_without_ensure(self, monkeypatch):
-        """An env-resolved live PM session is returned before the ensure branch —
-        ensure_session is never called (dedup preserved)."""
+    def test_issue_number_beats_env_session_on_write_path(self, monkeypatch):
+        """#1671/#1672: with an explicit issue_number, the issue-scoped session
+        wins over a divergent env-var session — even on the ensure=True write
+        path. ensure_session is never reached because the issue lookup hits."""
+        from tools import _sdlc_utils
+
+        # Env var points at a DIFFERENT session (e.g. a parent's inherited id).
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-pm-divergent")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        issue_session = MagicMock(name="issue_session")
+        issue_session.session_type = "pm"
+
+        ensure_mock = MagicMock()
+        with patch.object(_sdlc_utils, "find_session_by_issue", return_value=issue_session):
+            with patch("tools.sdlc_session_ensure.ensure_session", ensure_mock):
+                result = _sdlc_utils.find_session(None, 1558, ensure=True)
+
+        # Issue-scoped session wins; the divergent env session is NOT returned.
+        assert result is issue_session
+        ensure_mock.assert_not_called()
+
+    def test_env_session_resolves_when_no_issue_number(self, monkeypatch):
+        """Bridge case preserved: a write WITHOUT an issue number resolves the
+        env-var session exactly as before (env is the fallback, not gone)."""
         from tools import _sdlc_utils
 
         monkeypatch.setenv("VALOR_SESSION_ID", "bridge-pm-1")
@@ -395,10 +482,97 @@ class TestFindSessionEnsure:
         ensure_mock = MagicMock()
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             with patch("tools.sdlc_session_ensure.ensure_session", ensure_mock):
-                result = _sdlc_utils.find_session(None, 1558, ensure=True)
+                # No issue_number → env fallback resolves the bridge session.
+                result = _sdlc_utils.find_session(None, None, ensure=True)
 
         assert result is env_session
         ensure_mock.assert_not_called()
+
+    def test_explicit_session_id_arg_beats_issue_number(self, monkeypatch):
+        """The explicit session_id ARGUMENT still overrides issue-based
+        resolution (step 1 before step 2). Only the env-var session loses to
+        an issue number, not an explicitly-passed id."""
+        from tools import _sdlc_utils
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        explicit_session = MagicMock(name="explicit_session")
+        explicit_session.session_type = "pm"
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [explicit_session]
+
+        # find_session_by_issue would return a DIFFERENT session — must not win.
+        issue_session = MagicMock(name="issue_session")
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            with patch.object(_sdlc_utils, "find_session_by_issue", return_value=issue_session):
+                result = _sdlc_utils.find_session("explicit-id-123", 1558)
+
+        assert result is explicit_session
+
+    def test_issue_number_zero_skips_issue_pass_uses_env(self, monkeypatch):
+        """issue_number=0 must NOT trigger the issue-first pass (gated on >= 1);
+        resolution falls straight to the env-var session."""
+        from tools import _sdlc_utils
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "env-pm")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        env_session = MagicMock(name="env_session")
+        env_session.session_type = "pm"
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [env_session]
+
+        fsbi = MagicMock()
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            with patch.object(_sdlc_utils, "find_session_by_issue", fsbi):
+                result = _sdlc_utils.find_session(None, 0)
+
+        assert result is env_session
+        fsbi.assert_not_called()
+
+    def test_issue_number_none_skips_issue_pass_uses_env(self, monkeypatch):
+        """issue_number=None must NOT trigger the issue-first pass; falls to env."""
+        from tools import _sdlc_utils
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "env-pm")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        env_session = MagicMock(name="env_session")
+        env_session.session_type = "pm"
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [env_session]
+
+        fsbi = MagicMock()
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            with patch.object(_sdlc_utils, "find_session_by_issue", fsbi):
+                result = _sdlc_utils.find_session(None, None)
+
+        assert result is env_session
+        fsbi.assert_not_called()
+
+    def test_issue_first_pass_raises_falls_through_to_env(self, monkeypatch):
+        """If find_session_by_issue raises, resolution falls through to the
+        env-var pass (observable: env session returned, not an exception)."""
+        from tools import _sdlc_utils
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "env-pm")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        env_session = MagicMock(name="env_session")
+        env_session.session_type = "pm"
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [env_session]
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            with patch.object(
+                _sdlc_utils,
+                "find_session_by_issue",
+                side_effect=ConnectionError("Redis down"),
+            ):
+                result = _sdlc_utils.find_session(None, 1558)
+
+        assert result is env_session
 
     def test_ensure_raises_yields_none(self, monkeypatch):
         """If ensure_session raises, find_session swallows it and returns None."""

@@ -146,6 +146,39 @@ class TestWriteMarker:
         # #1558: write path resolves through the shared resolver with ensure=True.
         find_mock.assert_called_once_with(None, issue_number=941, ensure=True)
 
+    def test_marker_lands_on_issue_session_under_divergent_env(self):
+        """#1671/#1672: with VALOR_SESSION_ID pointing at a DIFFERENT session, a
+        stage-marker write with --issue-number N lands on the issue-scoped
+        session (resolved via the real find_session issue-first pass), not the
+        divergent env session."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        issue_session = MagicMock(name="issue_session")
+        captured = {}
+
+        def _psm_factory(session):
+            captured["session"] = session
+            sm = MagicMock()
+            sm.states = {"PLAN": "in_progress"}
+            return sm
+
+        env = {**os.environ, "VALOR_SESSION_ID": "parent-pm-divergent"}
+        env.pop("AGENT_SESSION_ID", None)
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            # Real find_session runs; its issue-first pass resolves this.
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=issue_session),
+            patch("agent.pipeline_state.PipelineStateMachine", side_effect=_psm_factory),
+        ):
+            result, code = write_marker(stage="PLAN", status="completed", issue_number=1672)
+
+        assert code == 0
+        assert result == {"stage": "PLAN", "status": "completed"}
+        # The marker write targeted the issue session, not the env one.
+        assert captured["session"] is issue_session
+
     def test_sessionless_issue_numbered_write_auto_ensures(self):
         """A sessionless-but-issue-numbered write resolves through find_session
         with ensure=True, which auto-creates a PM session so the marker persists

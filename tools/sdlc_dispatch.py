@@ -128,9 +128,7 @@ def _cli_record(args) -> dict:
     # trail then has the same issue-scoped home the router reads. `get`/`reset`
     # stay non-ensuring — `get` is read-only and `reset` must not fabricate a
     # session.
-    session = _find_session(
-        session_id=args.session_id, issue_number=args.issue_number, ensure=True
-    )
+    session = _find_session(session_id=args.session_id, issue_number=args.issue_number, ensure=True)
     if session is None:
         logger.debug("sdlc_dispatch record: no session resolved — no-op")
         return {}

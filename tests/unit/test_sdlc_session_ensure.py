@@ -202,7 +202,15 @@ class TestBridgeShortCircuit:
     """Tests for the VALOR_SESSION_ID / AGENT_SESSION_ID env short-circuit."""
 
     def test_short_circuit_returns_env_session_when_live_pm(self, monkeypatch):
-        """Env var set + live PM session returns it without creating anything."""
+        """Env var set + live PM session that OWNS the issue returns it without
+        creating anything and without an issue lookup (C1, #1671).
+
+        The mock bridge session is given a REAL str issue_url ending
+        /issues/1140 — the reconciliation now reads issue_url, so a MagicMock
+        default would truthily match and mask the assertion. With an owning
+        issue_url, the short-circuit keeps the env session and never calls
+        find_session_by_issue.
+        """
         from tools.sdlc_session_ensure import ensure_session
 
         monkeypatch.setenv("VALOR_SESSION_ID", "tg_valor_-1003449100931_691")
@@ -212,8 +220,10 @@ class TestBridgeShortCircuit:
         bridge_session.session_id = "tg_valor_-1003449100931_691"
         bridge_session.session_type = "pm"
         bridge_session.status = "running"
+        # REAL str issue_url — the env session OWNS issue 1140.
+        bridge_session.issue_url = "https://github.com/tomcounsell/ai/issues/1140"
 
-        # find_session_by_issue must NOT be called on the happy short-circuit path.
+        # find_session_by_issue must NOT be called on the owning short-circuit path.
         fsbi = MagicMock()
 
         with (
@@ -227,6 +237,74 @@ class TestBridgeShortCircuit:
             "created": False,
         }
         fsbi.assert_not_called()
+
+    def test_non_owning_env_session_prefers_existing_issue_session(self, monkeypatch):
+        """C1 (#1671): env var points at a live PM session that does NOT own the
+        issue, AND an sdlc-local-N session exists → ensure_session returns the
+        issue-scoped session, not the divergent env session. No duplicate."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-pm-other-issue")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        # Env session is a live PM but owns a DIFFERENT issue.
+        env_session = MagicMock()
+        env_session.session_id = "parent-pm-other-issue"
+        env_session.session_type = "pm"
+        env_session.status = "running"
+        env_session.issue_url = "https://github.com/tomcounsell/ai/issues/9999"
+
+        # The issue-scoped session that actually owns issue 1171.
+        issue_session = MagicMock()
+        issue_session.session_id = "sdlc-local-1171"
+
+        mock_as = MagicMock()  # create_local must NOT be called (no duplicate).
+
+        with (
+            patch("tools._sdlc_utils.find_session", return_value=env_session),
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=issue_session),
+            patch("models.agent_session.AgentSession", mock_as),
+        ):
+            result = ensure_session(issue_number=1171)
+
+        assert result == {"session_id": "sdlc-local-1171", "created": False}
+        # No new session fabricated when an issue-scoped one already exists.
+        mock_as.create_local.assert_not_called()
+
+    def test_non_owning_env_session_creates_when_no_issue_session(self, monkeypatch):
+        """C1 (#1671): env session does NOT own the issue and NO issue-scoped
+        session exists yet → fall through to create sdlc-local-N (never return
+        the divergent env session)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-pm-other-issue")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        env_session = MagicMock()
+        env_session.session_id = "parent-pm-other-issue"
+        env_session.session_type = "pm"
+        env_session.status = "running"
+        env_session.issue_url = "https://github.com/tomcounsell/ai/issues/9999"
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-1172"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch("tools._sdlc_utils.find_session", return_value=env_session),
+            # find_session_by_issue returns None in BOTH the reconciliation
+            # call and the legacy existing-session lookup.
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            result = ensure_session(issue_number=1172)
+
+        # Created the issue-scoped session; did NOT return the env session.
+        assert result == {"session_id": "sdlc-local-1172", "created": True}
 
     def test_short_circuit_falls_through_when_env_session_missing(self, monkeypatch):
         """Env var set but no live session — fall through to legacy create path."""
