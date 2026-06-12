@@ -341,8 +341,8 @@ class TestHasProgressDualHeartbeat:
         assert _has_progress(entry) is True
 
     def test_per_turn_fields_none_turn_count_set_returns_true(self):
-        """No per-turn fields + turn_count=5 → True (own-progress, sdk_ever_output=False, #944)."""
-        entry = self._make_entry(turn_count=5)
+        """turn_count=5 + fresh heartbeat → True (own-progress, heartbeat-gated by #1614)."""
+        entry = self._make_entry(turn_count=5, last_heartbeat_at=_ago(30))
         from agent.agent_session_queue import _has_progress
 
         assert _has_progress(entry) is True

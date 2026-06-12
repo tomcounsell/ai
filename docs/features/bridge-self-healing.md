@@ -201,7 +201,9 @@ Both the delivery stamp and the health-check guard are wrapped in `try/except` s
 - `log_path` — set once the session writes its first log entry (first tool call)
 - `turn_count` — incremented on each full agent turn completion
 
-A legitimately slow-starting BUILD session that takes 600s before its first turn will still have `claude_session_uuid` populated within seconds of auth, so the no-progress branch does not fire. The recovered session routes through the existing delivery guard, then the `is_local` split: local sessions become `abandoned`, project-keyed sessions become `pending` (re-queued with `priority=high` and a fresh `_ensure_worker` call). The PM-associated project-keyed worker will pop and execute the re-queued dev session because `_pop_agent_session` filters only by `project_key`/`status`, not by `session_type`.
+**Note (#1614):** these own-progress fields are now **gated on heartbeat freshness** — they are only evaluated when `last_heartbeat_at` is within `NO_OUTPUT_BUDGET_SECONDS` (1800s). A session whose `_heartbeat_loop` has exited (heartbeat frozen) will no longer pass this check via a sticky `claude_session_uuid` alone.
+
+A legitimately slow-starting BUILD session that takes 600s before its first turn will still have `claude_session_uuid` populated within seconds of auth, so the no-progress branch does not fire (the heartbeat is fresh during legitimate long-running turns). The recovered session routes through the existing delivery guard, then the `is_local` split: local sessions become `abandoned`, project-keyed sessions become `pending` (re-queued with `priority=high` and a fresh `_ensure_worker` call). The PM-associated project-keyed worker will pop and execute the re-queued dev session because `_pop_agent_session` filters only by `project_key`/`status`, not by `session_type`.
 
 **Observability**: Each recovery increments a project-scoped Redis counter keyed `{project_key}:session-health:recoveries:{reason_kind}` where `reason_kind` is one of `worker_dead`, `no_progress`, or `tool_timeout` (the previous `timeout` reason was retired by #1172; `tool_timeout` was added by #1270 for the per-tool timeout sub-loop, routed through the shared `_apply_recovery_transition` helper). The counter write is wrapped in `try/except` — failure cannot block recovery.
 
@@ -568,7 +570,7 @@ cannot silently re-enter the original fast-path:
 | both `started_at` and `created_at` are None (phantom record from older format) | fresh heartbeat passes |
 | `running_seconds < STARTUP_GRACE_SECONDS` (300s, aliased to `AGENT_SESSION_HEALTH_MIN_RUNNING`, env-tunable) | fresh heartbeat passes |
 | `STARTUP_GRACE_SECONDS <= running_seconds <= NO_OUTPUT_BUDGET_SECONDS` (= `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW` = 1800s, 30 min) | fresh heartbeat passes (in-band) |
-| `running_seconds > 1800s` AND `sdk_ever_output is False` | **fall through** — INCRs `tier1_falloff:no_output_budget_exceeded`, sub-check B does NOT pass; combined with absent per-turn signals and own-progress fields, `_has_progress` returns False; Tier 2 reprieve cap then escalates to recovery within `MAX_NO_OUTPUT_REPRIEVES` ticks |
+| `running_seconds > 1800s` AND `sdk_ever_output is False` | **fall through** — INCRs `tier1_falloff:no_output_budget_exceeded`, sub-check B does NOT pass; the heartbeat is now stale, so own-progress fields (`turn_count`, `log_path`, `claude_session_uuid`) are also gated out (#1614); combined with absent per-turn signals, `_has_progress` returns False; Tier 2 reprieve cap then escalates to recovery within `MAX_NO_OUTPUT_REPRIEVES` ticks |
 
 This bounds the previously-unbounded fresh-heartbeat fast-path that allowed
 cwd-disappearance and similar wedges (parent investigation #1246) to hold
@@ -576,11 +578,15 @@ Tier 1 open indefinitely. Sessions that have produced any SDK output
 (`sdk_ever_output=True`) are not subject to sub-check B at all — sub-check A
 is authoritative for them.
 
-**Own-progress fields and child-activity check** are evaluated as a final
-fall-through: `turn_count > 0`, non-empty `log_path`, non-empty
-`claude_session_uuid` (sticky once set, evaluated only when
-`sdk_ever_output` is False), and the #963 child-activity check (a PM
-session with any non-terminal child is not stuck).
+**Own-progress fields and child-activity check (#1614):** `turn_count > 0`, non-empty `log_path`, and non-empty
+`claude_session_uuid` are evaluated only when `sdk_ever_output` is False
+AND `last_heartbeat_at` is within the last `NO_OUTPUT_BUDGET_SECONDS`
+(1800s). These fields are sticky once set, but are now **gated on
+heartbeat freshness** — a stale or absent heartbeat means the executor
+loop has likely exited, so own-progress fields must not keep the session
+alive indefinitely (#1614 Branch 2 fix). The #963 child-activity check
+(a PM session with any non-terminal child is not stuck) is unconditional
+and evaluated regardless of heartbeat freshness.
 
 > **Retired by issue #1172:** the stdout-stale Tier 1 extension from #1046
 > (`STDOUT_FRESHNESS_WINDOW`, `FIRST_STDOUT_DEADLINE`) has been removed
@@ -676,6 +682,11 @@ Redis counters keyed by `<project_key>:session-health:`:
   kind. The previous `timeout` reason was retired by #1172. `tool_timeout`
   was added by #1270 for the per-tool timeout sub-loop and is recorded by
   the shared `_apply_recovery_transition` helper.
+* `recoveries:zombie_uuid_no_output` — subset of `recoveries:no_progress`:
+  emitted when the recovered session matches the zombie profile
+  (`claude_session_uuid` set but `sdk_ever_output=False`, heartbeat stale
+  past `NO_OUTPUT_BUDGET_SECONDS`). Distinguishes stale-zombie recoveries
+  from normal startup-window recoveries (#1614).
 * `tool_timeouts:{internal|mcp|default}` — per-tier hits from the per-tool
   timeout sub-loop (#1270, parallel 30s loop). Internal tier: lightweight
   built-ins (`Read`/`Glob`/`Grep`/`Edit`/`Write`/`NotebookEdit`/`ToolSearch`,

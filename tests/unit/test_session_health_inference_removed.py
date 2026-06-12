@@ -192,3 +192,106 @@ def test_tier2_reprieve_no_longer_returns_stdout_gate():
     # All gates fail → returns None. The previous behavior would have
     # returned "stdout".
     assert session_health._tier2_reprieve_signal(handle=None, entry=_S()) is None
+
+
+def test_zombie_profile_is_not_progress():
+    """
+    AC2: A session matching the observed zombie profile should return False from
+    _has_progress so branch-2 recovery can fire.
+
+    Profile: running, sdk_ever_output=False (last_tool_use_at=None, last_turn_at=None),
+    claude_session_uuid set, last_heartbeat_at stale by hours, past startup grace.
+    """
+    now = datetime.now(tz=UTC)
+
+    class _S:
+        last_tool_use_at = None
+        last_turn_at = None
+        last_heartbeat_at = now - timedelta(hours=4)  # stale by hours
+        last_sdk_heartbeat_at = None
+        last_stdout_at = None
+        started_at = now - timedelta(hours=4)  # well past NO_OUTPUT_BUDGET_SECONDS (1800s)
+        created_at = now - timedelta(hours=4)
+        turn_count = 0
+        log_path = None
+        claude_session_uuid = "abc-zombie-test"  # set but heartbeat is stale
+        project_key = "test"
+
+        def get_children(self):
+            return []
+
+    result = session_health._has_progress(_S())
+    assert result is False, (
+        "Zombie profile (stale heartbeat, sdk_ever_output=False, uuid set) "
+        "must not return True from _has_progress — this blocks recovery"
+    )
+
+
+def test_own_progress_gate_fresh_heartbeat_is_progress():
+    """
+    AC3 FRESH sibling: A legitimately-running session with claude_session_uuid set AND
+    a fresh queue-layer heartbeat MUST NOT be recovered. The gate must preserve this.
+
+    Verifies that the fix on L847-853 does NOT kill sessions with a fresh heartbeat.
+
+    Both pre-fix and post-fix: fresh heartbeat + uuid set → True (sub-check B fires
+    before reaching the own-progress block).
+    """
+    now = datetime.now(tz=UTC)
+
+    class _S:
+        last_tool_use_at = None
+        last_turn_at = None
+        last_heartbeat_at = now  # FRESH — sub-check B returns True here
+        last_sdk_heartbeat_at = None
+        last_stdout_at = None
+        started_at = now - timedelta(seconds=3600)  # past 1800s NO_OUTPUT_BUDGET
+        created_at = now - timedelta(seconds=3600)
+        turn_count = 0
+        log_path = None
+        claude_session_uuid = "abc"  # set
+        project_key = "test"
+
+        def get_children(self):
+            return []
+
+    result = session_health._has_progress(_S())
+    assert result is True, (
+        "A session with fresh heartbeat + claude_session_uuid set must return True "
+        "(live long-thinker must not be recovered)"
+    )
+
+
+def test_own_progress_gate_stale_heartbeat_is_zombie():
+    """
+    AC3 STALE sibling: The exact zombie profile. claude_session_uuid set but heartbeat
+    stale by 3 hours. Currently returns True (the bug); the gate must flip it to False.
+
+    This is the authoritative AC3 boundary guard for the L847-853 own-progress gate.
+
+    Pre-fix: this test FAILS (ungated claude_session_uuid returns True).
+    Post-fix: this test PASSES (stale heartbeat + uuid → False).
+    """
+    now = datetime.now(tz=UTC)
+
+    class _S:
+        last_tool_use_at = None
+        last_turn_at = None
+        last_heartbeat_at = now - timedelta(hours=3)  # STALE — sub-check B does not return True
+        last_sdk_heartbeat_at = None
+        last_stdout_at = None
+        started_at = now - timedelta(seconds=3600)  # past 1800s NO_OUTPUT_BUDGET
+        created_at = now - timedelta(seconds=3600)
+        turn_count = 0
+        log_path = None
+        claude_session_uuid = "abc"  # set but heartbeat is stale
+        project_key = "test"
+
+        def get_children(self):
+            return []
+
+    result = session_health._has_progress(_S())
+    assert result is False, (
+        "Zombie profile (stale heartbeat + claude_session_uuid set, sdk_ever_output=False) "
+        "must return False — this is the bug the gate fixes"
+    )
