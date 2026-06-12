@@ -281,12 +281,14 @@ class _SessionSpecDriver:
         model: str | None = None,
         env: dict | None = None,
         append_system_prompt: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         self.role = role
         self.cwd = cwd
         self.model = model
         self.env = env
         self.append_system_prompt = append_system_prompt
+        self._session_id = session_id
         self._child = None  # _pair_is_live treats None-child as live
         self.closed = False
         _SessionSpecDriver.instances.append(self)
