@@ -366,6 +366,8 @@ See `docs/features/bridge-worker-architecture.md` for the full bridge/worker sep
 - **Memory consolidation** (`memory-dedup` nightly reflection): Haiku-based semantic dedup merges near-duplicate records, sets `superseded_by` on originals (never deleted), filters superseded records from recall. Dry-run default — see `docs/features/subconscious-memory.md#memory-consolidation`
 
 **Key Directories:**
+- `.claude/skills-global/` - **Global skills** — synced to every machine (see below)
+- `.claude/skills/` - **Project-only skills** — work only in this repo's context, NOT synced
 - `.claude/commands/` - Slash command skills
 - `.claude/agents/` - Subagent definitions (builder, validator, code-reviewer; dev-session removed — dev sessions created via valor_session CLI)
 - `bridge/` - Telegram integration, nudge loop
@@ -373,6 +375,24 @@ See `docs/features/bridge-worker-architecture.md` for the full bridge/worker sep
 - `agent/` - Session queue, SDK client, output router (`output_router.py`), output handler protocol, constants
 - `tools/` - Local Python tools
 - `config/` - Configuration files
+
+## Global vs. Project-Only Skills
+
+This repo is the canonical source for skills that ship to **every machine**. There are two skill directories, and the distinction matters:
+
+| Directory | Scope | Synced? |
+|-----------|-------|---------|
+| `.claude/skills-global/` | **Global / general-purpose skills** | ✅ Hardlinked to `~/.claude/skills/` on every machine by `/update` |
+| `.claude/skills/` | **Project-only skills** — tightly coupled to this repo's infra (Telegram bridge, macOS Messages, system logs) | ❌ Never synced; only work in this repo's context |
+
+**Terminology:** When someone says "make this a **global skill**" or "**general-purpose skill**," they mean: *put it in `.claude/skills-global/` so the `/update` wiring propagates it to `~/.claude/skills/` on every machine.* It does NOT mean editing a `CLAUDE.md` note. A skill is "known to every machine" precisely when it lives in `skills-global/`.
+
+**The sync wiring** lives in `scripts/update/hardlinks.py`:
+- `sync_claude_dirs()` hardlinks every skill dir under `.claude/skills-global/` into `~/.claude/skills/`. Adding a directory with a `SKILL.md` there is all that's required — no registration step.
+- `PROJECT_ONLY_SKILLS` and the project-only `.claude/skills/` set are explicitly excluded from the sync.
+- `RENAMED_REMOVALS` removes stale user-level copies when a skill is renamed or moved between the two dirs. **When you move a skill between `skills/` and `skills-global/`, add a `RENAMED_REMOVALS` entry** so the old hardlink is cleaned up on every machine.
+
+Example: `/do-debrief` (the TTS composite that wraps `valor-tts`) lives in `.claude/skills-global/do-debrief/` — that's why every machine already knows it. A skill that only ever runs against the local bridge (e.g. `telegram`, `checking-system-logs`) stays in `.claude/skills/`.
 
 ## Testing Philosophy
 
