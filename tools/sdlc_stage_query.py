@@ -157,20 +157,10 @@ def _fetch_pr_merge_state(
             "pr",
             "view",
             str(pr_number),
+            *(["--repo", repo] if repo else []),
             "--json",
             "mergeStateStatus,statusCheckRollup",
         ]
-        if repo:
-            cmd = [
-                "gh",
-                "pr",
-                "view",
-                str(pr_number),
-                "--repo",
-                repo,
-                "--json",
-                "mergeStateStatus,statusCheckRollup",
-            ]
         proc = subprocess.run(
             cmd,
             capture_output=True,

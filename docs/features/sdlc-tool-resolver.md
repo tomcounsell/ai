@@ -187,4 +187,4 @@ This replaces the generic `"no matching dispatch rule"` message and tells the op
 
 - [SDLC Router Oscillation Guard](sdlc-router-oscillation-guard.md) — the original Guard G1-G5 single-writer verdict design. This wrapper is the missing piece that made the verdict-write path work from any cwd.
 - `docs/plans/sdlc-1175-tool-resolver.md` — original plan with critique findings applied.
-- `docs/plans/sdlc-1642-cross-repo-pr-resolution.md` — plan for the PR-state repo resolution ladder (issue #1642).
+- `docs/plans/sdlc-1642.md` — plan for the PR-state repo resolution ladder (issue #1642).
