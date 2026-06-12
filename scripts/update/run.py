@@ -936,6 +936,91 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             )
             config = replace(config, do_service_restart=False)
 
+    # Step 4.75: Verify granite4.1:3b is present and responsive — green-light gate.
+    # The granite classifier is the routing brain of the PTY container; every
+    # AgentSession dispatch goes through it. If the model is absent or
+    # unresponsive, the worker's PTY pool initialises but every session
+    # silently mis-routes. Pull the model automatically if Ollama is running
+    # but the model is missing; fail the update (suppress restart) if the
+    # smoke test can't get a response within 30s.
+    if config.do_service_restart:
+        granite_model = "granite4.1:3b"
+        log("Checking granite classifier model...", v)
+        granite_check = verify.check_ollama(granite_model)
+        if not granite_check.available:
+            if granite_check.error and "Not installed" not in granite_check.error:
+                # Ollama is running but model is missing — pull it.
+                log(
+                    f"  Pulling {granite_model} (required for PTY routing)...",
+                    v,
+                    always=True,
+                )
+                if verify.pull_ollama_model(granite_model):
+                    log(f"  {granite_model} pulled", v, always=True)
+                    granite_check = verify.check_ollama(granite_model)
+                else:
+                    log(
+                        f"FAIL: Could not pull {granite_model} — skipping service restart\n"
+                        f"  Run: ollama pull {granite_model}",
+                        v,
+                        always=True,
+                    )
+                    result.warnings.append(
+                        f"granite classifier missing; service restart skipped: "
+                        f"run 'ollama pull {granite_model}'"
+                    )
+                    config = replace(config, do_service_restart=False)
+            else:
+                log(
+                    f"FAIL: Ollama not installed — {granite_model} unavailable,"
+                    " skipping service restart",
+                    v,
+                    always=True,
+                )
+                result.warnings.append(
+                    "granite classifier unavailable (Ollama not installed); service restart skipped"
+                )
+                config = replace(config, do_service_restart=False)
+
+        if granite_check.available:
+            log(f"  Smoke testing {granite_model}...", v)
+            try:
+                import subprocess as _sp
+
+                _smoke = _sp.run(
+                    ["ollama", "run", granite_model, "respond with the single word: ready"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if _smoke.returncode == 0 and _smoke.stdout.strip():
+                    log(f"  {granite_model} smoke test passed", v)
+                else:
+                    log(
+                        f"FAIL: {granite_model} smoke test returned no output"
+                        " — skipping service restart",
+                        v,
+                        always=True,
+                    )
+                    result.warnings.append(
+                        f"granite classifier smoke test failed; service restart skipped: "
+                        f"{_smoke.stderr.strip() or 'empty response'}"
+                    )
+                    config = replace(config, do_service_restart=False)
+            except _sp.TimeoutExpired:
+                log(
+                    f"FAIL: {granite_model} smoke test timed out — skipping service restart",
+                    v,
+                    always=True,
+                )
+                result.warnings.append(
+                    "granite classifier smoke test timed out; service restart skipped"
+                )
+                config = replace(config, do_service_restart=False)
+            except Exception as _e:
+                result.warnings.append(f"granite classifier smoke test error: {_e}")
+                config = replace(config, do_service_restart=False)
+
     # Step 4.8: Verify memory MCP registration in ~/.claude.json (idempotent).
     # Self-heals drift, fresh-machine setup, and manual edits. Runs in all
     # modes; --verify is read-only (LOCK_SH, no write), --full/--cron repair
