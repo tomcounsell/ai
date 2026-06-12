@@ -5,7 +5,6 @@ import asyncio
 import logging
 import os  # noqa: F401
 import re
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,7 +22,10 @@ from agent.session_state import (
     SessionHandle,
     _active_sessions,
 )
-from agent.worktree_manager import WORKTREES_DIR, validate_workspace
+from agent.worktree_manager import (
+    WORKTREES_DIR,
+    validate_workspace,
+)
 from config.enums import SessionType
 from config.settings import settings
 from models.agent_session import AgentSession
@@ -2011,19 +2013,41 @@ async def _execute_agent_session(session: AgentSession) -> None:
         if not task.error and not chat_state.defer_reaction:
             try:
                 from agent.branch_manager import mark_work_done
+                from agent.worktree_manager import (  # noqa: PLC0415
+                    merged_via_ancestor,
+                    safe_delete_branch,
+                )
 
                 mark_work_done(working_dir, branch_name)
-                # Also delete the session branch to keep git clean
-                subprocess.run(
-                    ["git", "branch", "-D", branch_name],
-                    cwd=working_dir,
-                    capture_output=True,
-                    timeout=10,
+                # Also delete the session branch to keep git clean — guarded by
+                # the unmerged-branch guard (issue #1646): use merged_via_ancestor
+                # since this path runs at session completion before any PR merge.
+                branch_del = safe_delete_branch(
+                    str(working_dir),
+                    branch_name,
+                    predicate=merged_via_ancestor,
+                    force=False,
                 )
-                logger.info(
-                    f"[{session.project_key}] Auto-marked session done "
-                    f"and cleaned up branch {branch_name}"
-                )
+                if branch_del["deleted"]:
+                    logger.info(
+                        f"[{session.project_key}] Auto-marked session done "
+                        f"and cleaned up branch {branch_name}"
+                    )
+                elif branch_del["skipped_unmerged"]:
+                    logger.warning(
+                        "[unmerged-branch-guard] branch '%s' preserved"
+                        " — work not yet merged to main",
+                        branch_name,
+                    )
+                    logger.info(
+                        f"[{session.project_key}] Auto-marked session done "
+                        f"(branch {branch_name} preserved — unmerged)"
+                    )
+                else:
+                    logger.info(
+                        f"[{session.project_key}] Auto-marked session done "
+                        f"(branch {branch_name} cleanup error: {branch_del.get('error')})"
+                    )
             except Exception as e:
                 logger.warning(f"[{session.project_key}] Failed to auto-mark session done: {e}")
 

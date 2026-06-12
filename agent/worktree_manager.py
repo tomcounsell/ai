@@ -17,6 +17,203 @@ logger = logging.getLogger(__name__)
 WORKTREES_DIR = ".worktrees"
 VALID_SLUG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
+# ---------------------------------------------------------------------------
+# Unmerged-branch guard (issue #1646)
+# ---------------------------------------------------------------------------
+
+_preserved_branch_count = 0  # restart-fragile counter; supplemented by live git branch --list
+
+
+def merged_via_ancestor(repo_root: str, branch: str, base: str = "main") -> bool:
+    """Return True iff branch tip is a git ancestor of base (non-squash merges only)."""
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", branch, base],
+        cwd=repo_root,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def merged_via_tree(repo_root: str, branch: str, base: str = "main") -> bool:
+    """Return True iff merging branch into base is a no-op (squash-safe oracle).
+
+    Uses git merge-tree --write-tree: landed iff exit 0 AND result tree == base^{tree}.
+    Robust to main advancing past the squash commit. Requires git >= 2.38.
+    """
+    try:
+        # Get base tree oid
+        base_tree = subprocess.run(
+            ["git", "rev-parse", f"{base}^{{tree}}"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if base_tree.returncode != 0:
+            return False
+        base_tree_oid = base_tree.stdout.strip()
+
+        # Run merge-tree
+        merge_result = subprocess.run(
+            ["git", "merge-tree", "--write-tree", base, branch],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if merge_result.returncode != 0:
+            # Conflict or other error — not landed
+            return False
+
+        result_tree_oid = merge_result.stdout.strip()
+        return result_tree_oid == base_tree_oid
+    except Exception:
+        return False
+
+
+def _resolve_base(repo_root: str, base: str = "main") -> str | None:
+    """Resolve base branch name; fall back to origin/HEAD default branch."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", base],
+        cwd=repo_root,
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        return base
+    # Try origin/HEAD
+    result2 = subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result2.returncode == 0:
+        ref = result2.stdout.strip()
+        return ref.split("/")[-1] if "/" in ref else None
+    return None
+
+
+def safe_delete_branch(
+    repo_root: str,
+    branch_name: str,
+    *,
+    base: str = "main",
+    predicate,
+    force: bool = False,
+) -> dict:
+    """Delete branch only if merged per predicate; preserve and log if not.
+
+    Args:
+        repo_root: Path to git repo root.
+        branch_name: Branch to delete.
+        base: Base branch to check against (default "main").
+        predicate: Callable(repo_root, branch, base) -> bool; True = landed, safe to delete.
+        force: If True, use git branch -D (needed for squash-merged branches); else -d.
+
+    Returns:
+        dict with keys:
+          - deleted: bool
+          - skipped_unmerged: bool
+          - branch: str (the branch name)
+          - error: str | None
+    """
+    global _preserved_branch_count
+
+    resolved_base = _resolve_base(repo_root, base)
+    if resolved_base is None:
+        logger.warning(
+            "[unmerged-branch-guard] cannot resolve base '%s' for branch '%s'"
+            " — refusing deletion (fail-safe)",
+            base,
+            branch_name,
+        )
+        _preserved_branch_count += 1
+        _log_preserved_count(repo_root)
+        return {
+            "deleted": False,
+            "skipped_unmerged": True,
+            "branch": branch_name,
+            "error": f"cannot resolve base '{base}'",
+        }
+
+    try:
+        landed = predicate(repo_root, branch_name, resolved_base)
+    except Exception as e:
+        logger.warning(
+            "[unmerged-branch-guard] predicate error for branch '%s': %s"
+            " — refusing deletion (fail-safe)",
+            branch_name,
+            e,
+        )
+        _preserved_branch_count += 1
+        _log_preserved_count(repo_root)
+        return {
+            "deleted": False,
+            "skipped_unmerged": True,
+            "branch": branch_name,
+            "error": str(e),
+        }
+
+    if not landed:
+        _preserved_branch_count += 1
+        live_count = _count_live_session_branches(repo_root)
+        logger.warning(
+            "[unmerged-branch-guard] branch '%s' has unmerged commits"
+            " — preserving (preserved=%d, live session/* branches=%s)",
+            branch_name,
+            _preserved_branch_count,
+            live_count,
+        )
+        _log_preserved_count(repo_root)
+        return {
+            "deleted": False,
+            "skipped_unmerged": True,
+            "branch": branch_name,
+            "error": None,
+        }
+
+    # Branch is landed — delete it
+    flag = "-D" if force else "-d"
+    result = subprocess.run(
+        ["git", "branch", flag, branch_name],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return {"deleted": True, "skipped_unmerged": False, "branch": branch_name, "error": None}
+    else:
+        err = result.stderr.strip()
+        logger.warning(
+            "[unmerged-branch-guard] git branch %s '%s' failed: %s", flag, branch_name, err
+        )
+        return {"deleted": False, "skipped_unmerged": False, "branch": branch_name, "error": err}
+
+
+def _count_live_session_branches(repo_root: str) -> str:
+    """Count live session/* branches via git for the observability line."""
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--list", "session/*"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            return str(len(lines))
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _log_preserved_count(repo_root: str) -> None:
+    """Emit a greppable preserved=N summary with live branch count."""
+    live_count = _count_live_session_branches(repo_root)
+    logger.warning(
+        "[unmerged-branch-guard] preserved=%d (live session/* branches=%s)",
+        _preserved_branch_count,
+        live_count,
+    )
+
 
 class WorktreeBranchMismatchError(RuntimeError):
     """Raised when a reused worktree's HEAD does not match the expected branch
@@ -878,13 +1075,23 @@ def remove_worktree(
         return False
 
     if delete_branch:
-        subprocess.run(
-            ["git", "branch", "-D", branch_name],
-            cwd=repo_root,
-            capture_output=True,
-            timeout=10,
+        branch_result = safe_delete_branch(
+            str(repo_root),
+            branch_name,
+            predicate=merged_via_tree,
+            force=True,
         )
-        logger.info(f"Deleted branch: {branch_name}")
+        if branch_result["deleted"]:
+            logger.info(f"Deleted branch: {branch_name}")
+        elif branch_result["skipped_unmerged"]:
+            logger.warning(
+                "[unmerged-branch-guard] branch '%s' preserved — work not yet merged to main",
+                branch_name,
+            )
+        else:
+            logger.warning(
+                "Failed to delete branch %s: %s", branch_name, branch_result.get("error")
+            )
 
     return True
 
@@ -1155,9 +1362,14 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
     this function removes the local worktree and branch that would
     otherwise block deletion.
 
+    The branch deletion is guarded by the unmerged-branch guard (issue #1646):
+    safe_delete_branch verifies the merged precondition (via merged_via_tree) before
+    deleting. If the branch has unmerged commits, it is preserved and
+    skipped_unmerged=True is set in the result.
+
     Safe to call in any state:
-    - Worktree exists + branch exists: removes both
-    - Worktree already removed + branch exists: deletes branch
+    - Worktree exists + branch exists: removes both (if merged)
+    - Worktree already removed + branch exists: deletes branch (if merged)
     - Everything already cleaned up: no-op
 
     Args:
@@ -1171,6 +1383,7 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
         - slug: The slug that was cleaned up
         - worktree_removed: True if a worktree was removed
         - branch_deleted: True if a local branch was deleted
+        - skipped_unmerged: True if branch was preserved due to unmerged commits
         - already_clean: True if nothing needed cleanup
         - errors: List of error messages for any failed steps
 
@@ -1185,6 +1398,7 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
         "slug": slug,
         "worktree_removed": False,
         "branch_deleted": False,
+        "skipped_unmerged": False,
         "already_clean": False,
         "errors": [],
     }
@@ -1221,19 +1435,27 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
 
     # Step 3: Delete local branch if it still exists
     # Re-check after prune -- pruning may unblock branch deletion
+    # Branch deletion is guarded: safe_delete_branch verifies merged precondition (issue #1646)
     if had_branch or _branch_exists(repo_root, branch_name):
-        branch_result = subprocess.run(
-            ["git", "branch", "-D", branch_name],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            timeout=10,
+        branch_del = safe_delete_branch(
+            str(repo_root),
+            branch_name,
+            predicate=merged_via_tree,
+            force=True,
         )
-        if branch_result.returncode == 0:
+        if branch_del["deleted"]:
             result["branch_deleted"] = True
             logger.info(f"Post-merge: deleted local branch {branch_name}")
+        elif branch_del["skipped_unmerged"]:
+            result["skipped_unmerged"] = True
+            msg = (
+                f"[unmerged-branch-guard] branch '{branch_name}'"
+                " preserved — work not yet merged to main"
+            )
+            result["errors"].append(msg)
+            logger.warning(f"Post-merge: {msg}")
         else:
-            msg = f"Failed to delete branch {branch_name}: {branch_result.stderr.strip()}"
+            msg = f"Failed to delete branch {branch_name}: {branch_del.get('error', 'unknown')}"
             result["errors"].append(msg)
             logger.warning(f"Post-merge: {msg}")
     else:

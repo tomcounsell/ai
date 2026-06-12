@@ -32,6 +32,7 @@ def test_blocked_session_exits_2(monkeypatch, capsys, script_module):
         "slug": "sdlc-1218",
         "worktree_removed": False,
         "branch_deleted": False,
+        "skipped_unmerged": False,
         "already_clean": False,
         "errors": ["blocked: worktree in use by session_id=0_LIVE"],
         "blocked_by_session": "0_LIVE",
@@ -55,6 +56,7 @@ def test_clean_exits_0(monkeypatch, capsys, script_module):
         "slug": "fresh",
         "worktree_removed": False,
         "branch_deleted": False,
+        "skipped_unmerged": False,
         "already_clean": True,
         "errors": [],
     }
@@ -73,6 +75,7 @@ def test_generic_error_exits_1(monkeypatch, script_module):
         "slug": "broken",
         "worktree_removed": False,
         "branch_deleted": False,
+        "skipped_unmerged": False,
         "already_clean": False,
         "errors": ["Failed to remove worktree .worktrees/broken"],
     }
@@ -89,6 +92,7 @@ def test_success_exits_0(monkeypatch, capsys, script_module):
         "slug": "win",
         "worktree_removed": True,
         "branch_deleted": True,
+        "skipped_unmerged": False,
         "already_clean": False,
         "errors": [],
     }
@@ -100,3 +104,26 @@ def test_success_exits_0(monkeypatch, capsys, script_module):
     captured = capsys.readouterr()
     assert "Removed worktree" in captured.out
     assert "Deleted branch" in captured.out
+
+
+def test_skipped_unmerged_exits_1(monkeypatch, capsys, script_module):
+    """When cleanup_after_merge skips an unmerged branch, script exits 1 with guard message."""
+    branch_name = "session/unmerged-work"
+    fake_result = {
+        "slug": "unmerged-work",
+        "worktree_removed": False,
+        "branch_deleted": False,
+        "skipped_unmerged": True,
+        "already_clean": False,
+        "errors": [
+            f"[unmerged-branch-guard] branch '{branch_name}' preserved"
+            " — work not yet merged to main"
+        ],
+    }
+    monkeypatch.setattr(script_module, "cleanup_after_merge", lambda _r, _s: fake_result)
+    monkeypatch.setattr(sys, "argv", ["post_merge_cleanup.py", "unmerged-work"])
+
+    rc = script_module.main()
+    assert rc == 1  # error path — has errors in result
+    captured = capsys.readouterr()
+    assert "unmerged-branch-guard" in captured.err
