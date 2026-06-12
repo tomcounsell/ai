@@ -52,9 +52,9 @@ class TranscriptTelemetry:
     total_output_tokens: int = 0
     total_cache_read_tokens: int = 0
     current_tool_name: str | None = None
-    last_tool_use_at: datetime | None = None
+    last_tool_use_at: str | None = None  # ISO timestamp string from the JSONL entry
     recent_thinking_excerpt: str | None = None
-    tailer_last_read_at: datetime | None = None
+    tailer_last_read_at: str | None = None  # ISO timestamp string, set on ≥1 parsed event
     byte_offset: int = 0
 
 
@@ -140,14 +140,12 @@ def fold_events(events: list[dict], totals: TranscriptTelemetry) -> TranscriptTe
                 except Exception:
                     continue
 
-            # Record timestamp of the assistant message if it contained tool use
+            # Record timestamp of the assistant message if it contained tool use.
+            # Store as raw ISO string from the JSONL (not parsed to datetime).
             if event_had_tool_use:
                 ts_raw = event.get("timestamp")
                 if ts_raw:
-                    try:
-                        result.last_tool_use_at = datetime.fromisoformat(ts_raw)
-                    except (ValueError, TypeError):
-                        pass
+                    result.last_tool_use_at = str(ts_raw)
 
         except Exception:
             continue
@@ -275,10 +273,10 @@ def read_transcript_telemetry(
         result.byte_offset = end_offset
 
         # Only stamp tailer_last_read_at when at least one telemetry event
-        # (user or assistant type) was successfully parsed.
+        # (user or assistant type) was successfully parsed.  Store as ISO string.
         has_telemetry = any(e.get("type") in _TELEMETRY_TYPES for e in events)
         if has_telemetry:
-            result.tailer_last_read_at = datetime.now(UTC)
+            result.tailer_last_read_at = datetime.now(UTC).isoformat()
 
         return result
 
