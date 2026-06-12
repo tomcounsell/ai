@@ -841,16 +841,35 @@ def _has_progress(entry: AgentSession) -> bool:
                         _m_err,
                     )
 
-    # Own-progress fields (#944 / #963, narrowed by #1226).
+    # Own-progress fields (#944 / #963, narrowed by #1226, gated by #1614).
     # Only evaluated when sdk_ever_output is False — once the SDK has produced
     # a tool or turn event, per-turn freshness (sub-check A) is authoritative.
+    #
+    # Issue #1614 — confirmed verdict (Branch 2): ungated claude_session_uuid
+    # returned True unconditionally when sdk_ever_output=False, blocking
+    # recovery of zombie sessions whose heartbeat loop had silently exited.
+    # Fix: gate the own-progress fields on heartbeat freshness — only honour
+    # them if the session's last_heartbeat_at is within NO_OUTPUT_BUDGET_SECONDS
+    # (1800s). A stale or absent heartbeat means the executor is likely dead;
+    # own-progress fields must not keep the session alive indefinitely.
+    # AC3 constraint: gate window MUST be >= NO_OUTPUT_BUDGET_SECONDS (1800s);
+    # do NOT use the tighter HEARTBEAT_FRESHNESS_WINDOW (90s) here.
     if not sdk_ever_output:
-        if (entry.turn_count or 0) > 0:
-            return True
-        if bool((entry.log_path or "").strip()):
-            return True
-        if bool(entry.claude_session_uuid):
-            return True
+        _hb_own = getattr(entry, "last_heartbeat_at", None)
+        _own_progress_fresh = False
+        if _hb_own is not None:
+            _hb_own_aware = _hb_own if _hb_own.tzinfo else _hb_own.replace(tzinfo=UTC)
+            _hb_age = (now_utc - _hb_own_aware).total_seconds()
+            if _hb_age < NO_OUTPUT_BUDGET_SECONDS:
+                _own_progress_fresh = True
+        # If heartbeat is stale or absent, fall through — do NOT return True.
+        if _own_progress_fresh:
+            if (entry.turn_count or 0) > 0:
+                return True
+            if bool((entry.log_path or "").strip()):
+                return True
+            if bool(entry.claude_session_uuid):
+                return True
 
     # Child-progress check: a PM session with active children is not stuck.
     # get_children() queries via Popoto parent_agent_session_id index and
@@ -1156,6 +1175,30 @@ async def _apply_recovery_transition(
             "[session-health] recovery counter increment failed (non-fatal): %s",
             _counter_err,
         )
+
+    # AC4 narrow telemetry counter (issue #1614): track recoveries that match
+    # the zombie-uuid-no-output profile specifically (has claude_session_uuid,
+    # but sdk_ever_output=False — the confirmed Branch 2 failure mode).
+    # NOTE: sdk_ever_output is NOT a field on AgentSession; derive it from the
+    # real fields last_tool_use_at and last_turn_at (same derivation as
+    # _has_progress). Do NOT use getattr(entry, 'sdk_ever_output', ...).
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R2
+
+        _sdk_ever_output = bool(
+            getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
+        )
+        if bool(getattr(entry, "claude_session_uuid", None)) and not _sdk_ever_output:
+            project_key = getattr(entry, "project_key", "unknown")
+            counter_key = f"{project_key}:session-health:recoveries:zombie_uuid_no_output"
+            _R2.incr(counter_key)
+            logger.info(
+                "[session-health] zombie_uuid_no_output recovery: %s "
+                "(claude_session_uuid set, sdk_ever_output=False)",
+                getattr(entry, "agent_session_id", "?"),
+            )
+    except Exception:
+        pass
 
     # Guard: if response was already delivered, finalize instead of recovering
     # to pending (prevents duplicate delivery, #918).
