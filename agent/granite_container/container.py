@@ -264,8 +264,8 @@ def _transcript_path(cwd: str, session_id: str | None) -> str | None:
         ~/.claude/projects/{cwd-slug}/{session_id}.jsonl
     where {cwd-slug} = cwd.replace("/", "-").
 
-    Returns None when session_id is not known (legacy path without
-    --session-id; the caller falls back to last_resume_uuid scraping).
+    Returns None when session_id is not known; callers that receive None
+    should skip transcript tailing for that session.
     """
     if not session_id:
         return None

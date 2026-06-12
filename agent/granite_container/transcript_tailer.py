@@ -6,8 +6,10 @@ without re-reading the entire file on every poll.
 
 JSONL format consumed
 ---------------------
-Each line is a JSON object with a ``"type"`` field.  Only ``"type": "assistant"``
-entries are processed for telemetry:
+Each line is a JSON object with a ``"type"`` field.  Both ``"type": "assistant"``
+and ``"type": "user"`` entries are folded for telemetry:
+
+``"assistant"`` entries contribute:
 
 * ``message.usage.input_tokens``          → ``total_input_tokens``
 * ``message.usage.output_tokens``         → ``total_output_tokens``
@@ -15,6 +17,10 @@ entries are processed for telemetry:
 * ``message.content[].type == "tool_use"``  → ``tool_call_count`` / ``current_tool_name``
 * ``message.content[].type == "thinking"``  → ``recent_thinking_excerpt``
 * ``timestamp`` (ISO-8601 on the outer event)  → ``last_tool_use_at``
+
+``"user"`` entries contribute:
+
+* (presence of entry)  → increments ``turn_count``
 
 Fail-silent contract
 --------------------
