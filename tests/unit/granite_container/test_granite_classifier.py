@@ -223,6 +223,76 @@ class TestAnsiStripping(unittest.TestCase):
         self.assertIn("add a function", result.payload)
 
 
+class TestCursorPositionedSpacingSurvives(unittest.TestCase):
+    """Issue #1634: inter-word spacing painted as cursor-advance CSI
+    sequences must survive the screen-capture -> payload reconstruction.
+
+    The Ink/React TUI renderer paints `word1 word2` as
+    `word1<cursor-forward>word2` — the gap lives entirely in the escape
+    sequence, never as a literal space. The original `_strip_ansi` deleted
+    those CSI sequences outright, collapsing the words (`word1word2`) and
+    delivering space-stripped text to CEO-facing chats. The fix translates
+    cursor-advance sequences (CUF `\\x1b[NC`, CHA `\\x1b[NG`) to spaces
+    before the blanket CSI strip. These tests pin that invariant at the
+    classifier boundary — the same boundary that feeds the outbox.
+    """
+
+    def test_cursor_forward_preserves_interior_spaces(self) -> None:
+        """CUF (`\\x1b[1C`) between words must reconstruct as a space, not vanish."""
+        from agent.granite_container.pty_driver import _strip_ansi
+
+        painted = "Online\x1b[1Cand\x1b[1Cready."
+        self.assertEqual(_strip_ansi(painted), "Online and ready.")
+
+    def test_cursor_forward_count_maps_to_n_spaces(self) -> None:
+        """A CUF with an explicit count (`\\x1b[3C`) advances N columns -> N spaces."""
+        from agent.granite_container.pty_driver import _strip_ansi
+
+        self.assertEqual(_strip_ansi("a\x1b[3Cb"), "a   b")
+
+    def test_bare_cursor_forward_maps_to_one_space(self) -> None:
+        """A countless CUF (`\\x1b[C`) advances one column -> one space."""
+        from agent.granite_container.pty_driver import _strip_ansi
+
+        self.assertEqual(_strip_ansi("a\x1b[Cb"), "a b")
+
+    def test_cursor_horizontal_absolute_preserves_word_boundary(self) -> None:
+        """CHA (`\\x1b[NG`) jumps to an absolute column; reconstruction keeps
+        the word boundary as a space rather than collapsing the words."""
+        from agent.granite_container.pty_driver import _strip_ansi
+
+        self.assertEqual(_strip_ansi("Online\x1b[7Gand\x1b[11Gready."), "Online and ready.")
+
+    def test_strip_is_idempotent_after_cursor_expansion(self) -> None:
+        """Re-stripping already-reconstructed text is a no-op (the helper is
+        called at several points in the read path)."""
+        from agent.granite_container.pty_driver import _strip_ansi
+
+        once = _strip_ansi("Online\x1b[1Cand\x1b[1Cready.")
+        self.assertEqual(_strip_ansi(once), once)
+
+    def test_realistic_multiline_capture_payload_keeps_spaces(self) -> None:
+        """End-to-end: a realistic multi-line painted capture (the exact
+        artifact from issue #1634 — `Onlineandrouting—PM...`) must
+        reconstruct to spaced text in the routed payload, not collapse."""
+        capture = (
+            "❯ /granite-poc:prime-pm-role Send a one-line confirmation.\n"
+            "\x1b[2K────────────────────────────\n"
+            "✻ Sprouting…\n"
+            "⏺ [/user]\x1b[2COnline\x1b[1Cand\x1b[1Crouting\x1b[1C—"
+            "\x1b[1CPM\x1b[1Csession\x1b[1Cfor\x1b[1CPR\x1b[1C#1612\x1b[1Cis\x1b[1Clive.\n"
+            "────────────────────────────\n"
+            "⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+        )
+        result = classify_pm_prefix(capture)
+        self.assertEqual(result.destination, "user")
+        self.assertEqual(result.payload, "Online and routing — PM session for PR #1612 is live.")
+        self.assertFalse(result.compliance_miss)
+        # The space-stripped artifact must NOT appear in the payload.
+        self.assertNotIn("Onlineand", result.payload)
+        self.assertNotIn("PMsession", result.payload)
+
+
 # ---------------------------------------------------------------------------
 # extract_dev_prompt / summarize_for_pm: mocked ollama path
 # ---------------------------------------------------------------------------
