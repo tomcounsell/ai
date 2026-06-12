@@ -24,6 +24,12 @@ A PR must not merge with:
 
 These are hard gates. No exceptions.
 
+## Mandatory Finalize — Verdict + Marker Co-Write (#1642)
+
+On the approval path, the REVIEW verdict record AND the REVIEW completion marker are a **single, self-contained, mandatory block**: `sdlc-tool verdict record --stage REVIEW --verdict "APPROVED" ...` is immediately followed by `sdlc-tool stage-marker --stage REVIEW --status completed ...` in the same block. Never record an APPROVED verdict without immediately writing the completion marker.
+
+This closes the #1642 desync: if the marker write is a separable later step and the skill exits before reaching it, the REVIEW marker stays non-`completed` while the verdict says APPROVED. Router **row 9** (`_rule_review_approved_docs_not_done`) requires `REVIEW == completed`, so a desynced state stalls `/do-docs` — the skill-layer completion-marker write is what advances REVIEW. On any non-APPROVED verdict, leave the marker at `in_progress`.
+
 ## Multi-Machine Compatibility
 
 If the PR adds new environment variables, verify they are in `.env.example` and `config/settings.py`. If the PR adds new migrations, verify they are registered in `MIGRATIONS` in `scripts/update/migrations.py`.

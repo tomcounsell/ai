@@ -612,6 +612,139 @@ class TestFailureLoopDetector(unittest.TestCase):
 
         mock_subprocess.assert_not_called()
 
+    # ------------------------------------------------------------------
+    # Helpers and tests for session_events lifecycle-reason fallback
+    # ------------------------------------------------------------------
+
+    def _make_reason_only_session(self, reason: str, session_id: str):
+        """Return a session with NO extra_context error fields, NO failed_reason,
+        but WITH a session_events lifecycle entry carrying the given reason.
+
+        This mirrors the real production path: finalize_session() writes
+        ``{old}→{new}: {reason}`` into session_events, but nothing into
+        extra_context or failed_reason.
+        """
+        import time as _time
+
+        s = MagicMock()
+        s.status = "abandoned"
+        s.agent_session_id = session_id
+        s.extra_context = {}  # empty dict — NOT a MagicMock auto-attr
+        s.failed_reason = ""  # explicit empty string — defeats MagicMock auto-attr
+        s.completed_at = _time.time() - 60  # recent, within the 4h window
+        s.session_events = [{"event_type": "lifecycle", "text": f"running→abandoned: {reason}"}]
+        return s
+
+    def test_reason_only_session_produces_real_fingerprint(self):
+        """Abandoned session with lifecycle reason → non-degenerate fingerprint AND reason in body.
+
+        Also verifies that the full reason (including embedded colons) survives the split.
+        """
+        import json as _json
+
+        from agent.sustainability import _compute_fingerprint, _file_github_issue
+
+        reason = "health check: 3 recovery attempts, never progressed (kind=foo)"
+        session = self._make_reason_only_session(reason, "local-abc")
+
+        fingerprint = _compute_fingerprint(session)
+
+        # Must not be the degenerate unknown hash (SHA256("unknown:")[:16])
+        assert fingerprint != "06f5940a02173ba1", (
+            f"Fingerprint should not be the degenerate unknown hash, got {fingerprint}"
+        )
+
+        # Verify the full reason (including the embedded colon after "check")
+        # survives the split intact — test by checking the issue body.
+        sessions = [self._make_reason_only_session(reason, f"local-{i}") for i in range(3)]
+        session_ids = [s.agent_session_id for s in sessions]
+
+        with patch("agent.sustainability.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = _json.dumps(
+                {"number": 9999, "url": "https://example.com"}
+            )
+            _file_github_issue(fingerprint, sessions, session_ids)
+
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        body_idx = call_args.index("--body") + 1
+        body = call_args[body_idx]
+        assert "Unknown error" not in body, "Issue body must not contain 'Unknown error'"
+        assert "health check" in body, f"Issue body must contain 'health check'; got: {body[:200]}"
+
+    def test_distinct_reasons_produce_distinct_fingerprints(self):
+        """Two sessions with different lifecycle reasons → two distinct fingerprints.
+
+        Neither fingerprint should be the degenerate unknown hash.
+        """
+        from agent.sustainability import _compute_fingerprint
+
+        s1 = self._make_reason_only_session("health check: no progress", "local-1")
+        s2 = self._make_reason_only_session("granite CLI timeout", "local-2")
+        fp1 = _compute_fingerprint(s1)
+        fp2 = _compute_fingerprint(s2)
+
+        assert fp1 != fp2, "Different failure reasons must produce different fingerprints"
+        assert fp1 != "06f5940a02173ba1", f"fp1 must not be degenerate hash, got {fp1}"
+        assert fp2 != "06f5940a02173ba1", f"fp2 must not be degenerate hash, got {fp2}"
+
+    def test_empty_session_degrades_to_unknown_hash(self):
+        """Session with empty reason AND empty session_events → degenerate hash preserved."""
+        from agent.sustainability import _compute_fingerprint
+
+        session = self._make_reason_only_session("", "local-empty")
+        session.session_events = []  # explicitly empty
+        fp = _compute_fingerprint(session)
+        assert fp == "06f5940a02173ba1", (
+            f"Session with no error info must degrade to the known unknown hash, got {fp}"
+        )
+
+    def test_latest_failure_reason_exception_safe(self):
+        """_latest_failure_reason() handles all malformed inputs by returning ''."""
+        from agent.sustainability import _latest_failure_reason
+
+        session = MagicMock()
+
+        # None session_events
+        session.session_events = None
+        assert _latest_failure_reason(session) == ""
+
+        # Empty list
+        session.session_events = []
+        assert _latest_failure_reason(session) == ""
+
+        # Non-lifecycle event type
+        session.session_events = [{"event_type": "summary", "text": "x"}]
+        assert _latest_failure_reason(session) == ""
+
+        # Lifecycle event with no ": " separator
+        session.session_events = [{"event_type": "lifecycle", "text": "running→failed"}]
+        assert _latest_failure_reason(session) == ""
+
+        # Non-dict entry in list
+        session.session_events = ["not-a-dict"]
+        assert _latest_failure_reason(session) == ""
+
+        # session_events entirely absent — use a spec'd mock with no attributes
+        session2 = MagicMock(spec=[])
+        assert _latest_failure_reason(session2) == ""
+
+    def test_same_reason_sessions_cluster_to_one_fingerprint(self):
+        """Multiple sessions with the same lifecycle reason → same fingerprint, not degenerate."""
+        from agent.sustainability import _compute_fingerprint
+
+        reason = "health check: no progress"
+        sessions = [self._make_reason_only_session(reason, f"local-{i}") for i in range(3)]
+        fps = [_compute_fingerprint(s) for s in sessions]
+
+        assert len(set(fps)) == 1, (
+            f"Same reason must produce identical fingerprints, got {set(fps)}"
+        )
+        assert fps[0] != "06f5940a02173ba1", (
+            f"Fingerprint must not be the degenerate unknown hash, got {fps[0]}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestDigestAnomalyPromptPlainLanguage

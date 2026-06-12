@@ -126,7 +126,65 @@ The bridge sets `cwd = target project's worktree` when spawning a PM session. Th
 - **`uv` itself is a hard dependency.** If `uv` is missing on a remote, `sdlc-tool` fails. Same impact as the prior `python -m tools.X` call. The update system's verify step already gates on `uv`.
 - **Loud verdict failures show up as session-log noise.** This is the intended design — failures must be visible. If transient Redis blips become a real annoyance, add a single-retry policy inside `tools.sdlc_verdict.record()` itself, not in the wrapper.
 
+## PR-state repo resolution (`_resolve_target_repo`)
+
+### Problem
+
+`stage-query` fetches PR merge state from GitHub via `gh pr view`. When the PM session runs from a target-repo worktree (e.g. `popoto`, `cuttlefish`), `gh` without a `--repo` flag interrogates that repo's PR list — not the `ai` repo where the SDLC plan and session live. The PR number derived from the plan doc is meaningless against the wrong repo, so `mergeStateStatus` comes back wrong (or `gh` exits non-zero).
+
+### Solution: `_resolve_target_repo()` in `tools/_sdlc_utils.py`
+
+`_resolve_target_repo()` returns an `owner/name` slug (e.g. `tomcounsell/ai`) or `None`. It is called **exactly once per `_compute_meta` invocation** in `tools/sdlc_stage_query.py`; the resolved slug is threaded as the `repo=` keyword argument into both `_fetch_pr_merge_state` and `_gh_pr_list` (via `_lookup_pr_number`). Neither callee calls `_resolve_target_repo` itself — resolution happens once at the top of `_compute_meta`.
+
+### Resolution ladder
+
+| Rung | Source | Type | How it is used |
+|------|--------|------|----------------|
+| 0 | `GH_REPO` env var | `owner/name` slug | Returned directly — zero subprocess cost. Injected by the bridge for bridge-spawned sessions. Passed as `gh --repo GH_REPO ...`. |
+| 1 | `SDLC_TARGET_REPO` env var | **Filesystem path** | Used as the `cwd` for `gh repo view --json nameWithOwner -q .nameWithOwner`. The slug comes from `gh` stdout. **Never passed to `gh --repo`.** |
+| 2 | `_git_toplevel()` | Filesystem path | Used as `cwd` for the same `gh repo view` command. Resolves to the git root of whatever directory `sdlc_stage_query` was invoked from. |
+| 3 | — | — | Returns `None`. Graceful degradation — callers omit `--repo` entirely and `gh` uses its own cwd resolution. |
+
+**Critical distinction:** `SDLC_TARGET_REPO` is a **filesystem path** pointing to the target repo's checkout, not an `owner/name` slug. It is used as the working directory for `gh repo view` so that `gh` interrogates the correct repo. It is **never** passed to `gh --repo`. Only `GH_REPO` (a slug) is passed to `--repo`.
+
+### Meta propagation
+
+The resolved slug is stored in `_compute_meta`'s return dict under the `_resolved_target_repo` key:
+
+```python
+"_resolved_target_repo": resolved_repo,   # owner/name or None
+```
+
+This value flows into `sdlc_router.decide_next_dispatch()` via the `meta` dict it receives. The router uses it in the distinguishable Blocked message described below.
+
+### Blocked reason when merge state is unresolvable
+
+When the router cannot find a dispatch rule and a PR is known (`pr_number` is set) but its merge state is `None` or `"UNKNOWN"`, the router emits a **distinguishable Blocked reason** that names the PR number, its state, and the resolved repo:
+
+```
+Blocked: PR #42 merge state 'UNKNOWN' — could not resolve mergeability
+         (target repo: tomcounsell/ai; check GH_REPO / SDLC_TARGET_REPO env)
+```
+
+This replaces the generic `"no matching dispatch rule"` message and tells the operator exactly which env var to check. The check is in `agent/sdlc_router.py` at the end of the `decide_next_dispatch()` function — it fires only when `pr_merge_state` is `None` or `"UNKNOWN"`, not for real GitHub states like `DIRTY` or `BLOCKED` (those route normally).
+
+### Environment variable reference
+
+| Variable | Value type | Purpose |
+|----------|-----------|---------|
+| `GH_REPO` | `owner/name` slug | Directly identifies the GitHub repo. Injected automatically by the bridge for all bridge-spawned sessions. Takes precedence over everything else. |
+| `SDLC_TARGET_REPO` | Filesystem path | Points to a local checkout of the target repo. Used as `cwd` for `gh repo view` to derive the slug. Useful when running `sdlc-tool` locally in a cross-repo context without a bridge. |
+
+### Failure modes
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| `Blocked: PR #N merge state 'UNKNOWN'` | `GH_REPO` not set; `SDLC_TARGET_REPO` points at a non-git dir; `gh` not authenticated | Set `GH_REPO=owner/name` for the target repo, or ensure `SDLC_TARGET_REPO` points at a valid git checkout with `gh` auth |
+| `Blocked: PR #N merge state 'UNKNOWN' (target repo: <none — using cwd>)` | No env var set and `_git_toplevel()` returned `None` (invoked outside a git repo) | Run from inside a git repo, or set `GH_REPO` / `SDLC_TARGET_REPO` |
+| `_resolve_target_repo: gh repo view failed` (in logs) | `gh` exited non-zero in the given cwd — either not a git repo or not authenticated | Check `gh auth status`; verify cwd is a valid git repo |
+
 ## See also
 
 - [SDLC Router Oscillation Guard](sdlc-router-oscillation-guard.md) — the original Guard G1-G5 single-writer verdict design. This wrapper is the missing piece that made the verdict-write path work from any cwd.
 - `docs/plans/sdlc-1175-tool-resolver.md` — original plan with critique findings applied.
+- `docs/plans/sdlc-1642.md` — plan for the PR-state repo resolution ladder (issue #1642).

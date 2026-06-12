@@ -12,6 +12,12 @@
             {% if pipeline.status %}
             <span class="badge badge-{{ pipeline.status }}{% if pipeline.is_stale %} stale{% endif %}">{{ pipeline.status }}</span>
             {% endif %}
+            {% if pipeline.exit_reason and pipeline.exit_reason not in ("pm_complete", "pm_user") %}
+            <span class="badge bg-warning text-dark" title="Granite PTY exit reason">exit: {{ pipeline.exit_reason }}</span>
+            {% endif %}
+            {% if pipeline.status in ("completed", "failed") and not pipeline.user_facing_routed %}
+            <span class="badge bg-secondary" title="No user-facing message was sent for this session">no user msg</span>
+            {% endif %}
             <button class="btn-copy"
                     data-session-id="{{ pipeline.agent_session_id }}"
                     data-thread="{{ pipeline.session_id or '-' }}"

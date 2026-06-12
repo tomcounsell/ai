@@ -183,15 +183,16 @@ Parse the JSON output:
 - `{"status": "degraded", ...}` — **announce at the top of your run**: "running in degraded mode (state not persisted)". The review itself depends only on `gh` and the diff, not the substrate, so proceed.
 - Non-zero exit — substrate present but the write genuinely failed; report the stderr diagnostic and proceed (do not silently swallow it).
 
-After posting the review (Step 6), on approval (no blockers):
+After posting the review (Step 6), on approval (no blockers), the REVIEW completion marker is written in the **"Record the verdict (mandatory)"** section, **co-located in the same block as the APPROVED verdict record** (#1642). Do NOT write the completion marker as a separate, earlier step — verdict-record and completion-marker are a single unit on the approval path so the REVIEW marker can never desync from an APPROVED verdict:
 
 ```bash
+# Written immediately after `sdlc-tool verdict record ... --verdict "APPROVED"`:
 sdlc-tool stage-marker --stage REVIEW --status completed --issue-number {issue_number}
 ```
 
 Apply the same degraded-vs-loud interpretation to the completion marker.
 
-Note: If blockers found, leave as in_progress — the SDLC dispatcher will invoke /do-patch and then re-run review, which will complete the stage after fixes.
+Note: If blockers/findings exist, record `CHANGES REQUESTED` and leave the marker as in_progress — the SDLC dispatcher will invoke /do-patch and then re-run review, which will complete the stage after fixes. The completion marker is written ONLY on the APPROVED path, and ONLY co-located with the APPROVED verdict record.
 
 ## Goal Alignment
 
@@ -693,8 +694,13 @@ After emitting the OUTCOME block, record the review verdict on the PM session so
 ```bash
 # Single-judge (legacy / SDLC_REVIEW_JUDGES=none / docs-only / preflight):
 # For APPROVED reviews (OUTCOME status=success):
+# #1642: the verdict record AND the REVIEW completion marker are ONE mandatory,
+# self-contained unit on the approval path — never record APPROVED without
+# immediately writing the completion marker, or the marker desyncs from the
+# verdict and router row 9 (/do-docs) stalls on REVIEW != completed.
 sdlc-tool verdict record --stage REVIEW \
   --verdict "APPROVED" --blockers 0 --tech-debt 0 --issue-number $ISSUE_NUMBER
+sdlc-tool stage-marker --stage REVIEW --status completed --issue-number $ISSUE_NUMBER
 
 # For reviews with findings (OUTCOME status=partial or fail):
 sdlc-tool verdict record --stage REVIEW \

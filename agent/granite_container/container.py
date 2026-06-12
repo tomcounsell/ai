@@ -242,11 +242,56 @@ class ContainerResult:
     startup_events: list[dict[str, Any]] = field(default_factory=list)
     coord_test_pass: bool | None = None
     user_facing_routed: bool = False
+    # PTY identity fields: PID and deterministic transcript path for each role.
+    # Populated by Container.run() after the PTY pair is acquired. Transcript
+    # paths follow Claude Code's naming convention:
+    #   ~/.claude/projects/{cwd.replace("/", "-")}/{session_id}.jsonl
+    pm_pid: int | None = None
+    pm_transcript_path: str | None = None
+    dev_pid: int | None = None
+    dev_transcript_path: str | None = None
 
 
 # ---------------------------------------------------------------------------
 # Sandbox
 # ---------------------------------------------------------------------------
+
+
+def _transcript_path(cwd: str, session_id: str | None) -> str | None:
+    """Compute the Claude Code transcript path for a PTY session.
+
+    Claude Code names transcripts:
+        ~/.claude/projects/{cwd-slug}/{session_id}.jsonl
+    where {cwd-slug} = cwd.replace("/", "-").
+
+    Returns None when session_id is not known; callers that receive None
+    should skip transcript tailing for that session.
+    """
+    if not session_id:
+        return None
+    cwd_slug = cwd.replace("/", "-")
+    return str(Path.home() / ".claude" / "projects" / cwd_slug / f"{session_id}.jsonl")
+
+
+def _capture_pty_identity(
+    result: ContainerResult,
+    pm_pty: PTYDriver | None,
+    dev_pty: PTYDriver | None,
+    cwd: str,
+) -> None:
+    """Populate ContainerResult PTY identity fields from live PTY drivers.
+
+    Captures PIDs via PTYDriver.pid (None when not alive or not spawned)
+    and computes deterministic transcript paths from the session_id stored
+    on each driver. All operations are best-effort — a missing PID or
+    unknown session_id leaves the field as None; callers must tolerate None.
+    """
+    if pm_pty is not None:
+        result.pm_pid = getattr(pm_pty, "pid", None)
+        result.pm_transcript_path = _transcript_path(cwd, getattr(pm_pty, "_session_id", None))
+    if dev_pty is not None:
+        result.dev_pid = getattr(dev_pty, "pid", None)
+        result.dev_transcript_path = _transcript_path(cwd, getattr(dev_pty, "_session_id", None))
 
 
 def _truncate_exit_message(text: str) -> str:
@@ -649,6 +694,11 @@ class Container:
             "container: spawned pair (cwd=%s)",
             self.cwd or "<sandbox>",
         )
+
+        # Capture PTY identity (PIDs + deterministic transcript paths).
+        # The effective cwd is the container's cwd or the sandbox tempdir.
+        effective_cwd = self.cwd or (self._sandbox[0] if self._sandbox else "")
+        _capture_pty_identity(result, self._pm_pty, self._dev_pty, effective_cwd)
 
         try:
             # Persona priming.

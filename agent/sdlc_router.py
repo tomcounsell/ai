@@ -38,6 +38,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from agent.pipeline_graph import MAX_CRITIQUE_CYCLES
+from tools._sdlc_utils import normalize_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,11 @@ STATUS_FAILED = "failed"
 CRITIQUE_READY_TO_BUILD = "READY TO BUILD"
 CRITIQUE_NEEDS_REVISION = "NEEDS REVISION"
 CRITIQUE_MAJOR_REWORK = "MAJOR REWORK"
+
+# Review verdict canonical strings. Matched via normalize_verdict() so
+# underscore forms and mixed-case inputs still resolve correctly (#1638).
+REVIEW_APPROVED = "APPROVED"
+REVIEW_CHANGES_REQUESTED = "CHANGES REQUESTED"
 
 # Skill command strings. Keep in sync with ``agent/pipeline_graph.STAGE_TO_SKILL``
 # and the ``DISPATCH_RULES`` list below. The SKILL.md hand-authored dispatch table
@@ -277,7 +283,7 @@ def guard_g1_critique_loop(
     AND the last dispatched skill was ``/do-plan-critique``, the router MUST
     route to ``/do-plan`` instead of re-critiquing the unchanged plan.
     """
-    verdict = _latest_critique_verdict(stage_states, meta).upper()
+    verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_NEEDS_REVISION not in verdict and CRITIQUE_MAJOR_REWORK not in verdict:
         return None
 
@@ -355,12 +361,12 @@ def guard_g3_pr_lock(stage_states: dict, meta: dict, context: dict) -> Dispatch 
     else:
         verdicts = stage_states.get("_verdicts") or {}
         review_verdict = _verdict_text(verdicts.get("REVIEW"))
-    review_verdict_upper = review_verdict.upper()
+    review_verdict_norm = normalize_verdict(review_verdict)
 
     if review_status == STATUS_COMPLETED and docs_status == STATUS_COMPLETED:
         target = SKILL_DO_MERGE
         suffix = "review clean and docs complete"
-    elif "CHANGES REQUESTED" in review_verdict_upper or review_status == STATUS_FAILED:
+    elif REVIEW_CHANGES_REQUESTED in review_verdict_norm or review_status == STATUS_FAILED:
         target = SKILL_DO_PATCH
         suffix = "review requested changes"
     else:
@@ -432,7 +438,7 @@ def guard_g5_artifact_hash_cache(
     if cached_hash != current_hash:
         return None
 
-    verdict_text = _verdict_text(record).upper()
+    verdict_text = normalize_verdict(_verdict_text(record))
     if CRITIQUE_NEEDS_REVISION in verdict_text or CRITIQUE_MAJOR_REWORK in verdict_text:
         return Dispatch(
             skill=SKILL_DO_PLAN,
@@ -572,7 +578,7 @@ def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict)
     else:
         verdicts = stage_states.get("_verdicts") or {}
         review_verdict = _verdict_text(verdicts.get("REVIEW"))
-    if "APPROVED" not in review_verdict.upper():
+    if REVIEW_APPROVED not in normalize_verdict(review_verdict):
         return None
     return Dispatch(
         skill=SKILL_DO_MERGE,
@@ -616,29 +622,55 @@ def _rule_no_plan(stage_states: dict, meta: dict, context: dict) -> bool:
         return False
     plan_status = stage_states.get("PLAN")
     # "No plan exists" is the absence of a plan file OR a pending PLAN stage.
-    return plan_status in (None, "pending")
+    if plan_status in (None, "pending"):
+        return True
+    # Bootstrap case (#1640): PLAN="ready" but no plan doc on disk — the
+    # state-machine pre-advanced the stage without a real plan existing yet.
+    # Only treat this as "no plan" when an issue_number is available (so we
+    # can verify) AND the plan file is actually absent.
+    if plan_status == "ready" and meta.get("issue_number") and not meta.get("plan_exists"):
+        return True
+    return False
 
 
 def _rule_plan_not_critiqued(stage_states: dict, meta: dict, context: dict) -> bool:
-    """Plan exists, not yet critiqued."""
+    """Plan exists and is ready to critique.
+
+    Requires real evidence that a plan doc exists (#1640):
+    - ``PLAN == "completed"`` → implies a plan doc was written (unchanged from #1275)
+    - ``PLAN == "ready"``     → only counts if ``meta["plan_exists"]`` is True;
+      without evidence, the state machine may have pre-advanced to "ready" before
+      the plan doc was written (bootstrap race).
+    """
     plan_status = stage_states.get("PLAN")
     critique_status = stage_states.get("CRITIQUE")
-    return plan_status in (STATUS_COMPLETED, "ready") and critique_status in (
-        None,
-        "pending",
-        "ready",
-    )
+    if critique_status not in (None, "pending", "ready"):
+        return False
+    if plan_status == STATUS_COMPLETED:
+        return True  # completed implies a plan doc exists (#1275 case intact)
+    if plan_status == "ready":
+        return bool(meta.get("plan_exists"))  # "ready" needs real evidence (#1640)
+    return False
 
 
 def _rule_critique_needs_revision(stage_states: dict, meta: dict, context: dict) -> bool:
-    """Plan critiqued (NEEDS REVISION)."""
-    verdict = _latest_critique_verdict(stage_states, meta).upper()
+    """Plan critiqued (NEEDS REVISION).
+
+    Staleness step-aside (#1639): if the critique verdict predates the latest
+    ``/do-plan`` dispatch, the plan was already revised, so this row steps aside
+    (returns False) and lets row 2b re-dispatch ``/do-plan-critique`` for a
+    fresh critique. Mirrors the ``_review_verdict_is_stale`` step-aside in
+    ``_rule_review_has_findings``.
+    """
+    if _critique_verdict_is_stale(stage_states):
+        return False
+    verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     return CRITIQUE_NEEDS_REVISION in verdict
 
 
 def _rule_critique_ready_no_concerns(stage_states: dict, meta: dict, context: dict) -> bool:
     """Plan critiqued (READY TO BUILD, zero concerns), no branch/PR."""
-    verdict = _latest_critique_verdict(stage_states, meta).upper()
+    verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_READY_TO_BUILD not in verdict:
         return False
     if "WITH CONCERNS" in verdict:
@@ -659,7 +691,7 @@ def _rule_critique_ready_with_concerns_no_revision(
     """
     if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:
         return False
-    verdict = _latest_critique_verdict(stage_states, meta).upper()
+    verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_READY_TO_BUILD not in verdict or "WITH CONCERNS" not in verdict:
         return False
     if bool(meta.get("revision_applied")):
@@ -684,7 +716,7 @@ def _rule_critique_ready_with_concerns_revision_applied(
     """
     if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:
         return False
-    verdict = _latest_critique_verdict(stage_states, meta).upper()
+    verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_READY_TO_BUILD not in verdict or "WITH CONCERNS" not in verdict:
         return False
     if not bool(meta.get("revision_applied")):
@@ -712,6 +744,97 @@ def _rule_tests_failing(stage_states: dict, meta: dict, context: dict) -> bool:
     return stage_states.get("TEST") == STATUS_FAILED
 
 
+def _latest_dispatch_at(stage_states: dict, skill: str) -> str | None:
+    """Return the 'at' timestamp of the most recent dispatch of the given skill, or None."""
+    dispatches = stage_states.get("_sdlc_dispatches", [])
+    result = None
+    for entry in dispatches:
+        if entry.get("skill") == skill:
+            result = entry.get("at")
+    return result
+
+
+def _review_verdict_is_stale(stage_states: dict) -> bool:
+    """Return True if the REVIEW verdict predates the latest /do-patch dispatch (stale).
+
+    Fails safe to False (not stale) on any missing data or parse error.
+
+    Edge cases:
+    - missing ``recorded_at`` → False (not stale)
+    - no prior ``/do-patch`` dispatch → False (not stale)
+    - equal timestamps → False (not stale, strict ``<``)
+    - parse failure → False (not stale)
+    """
+    try:
+        verdict_dict = stage_states.get("_verdicts", {}).get("REVIEW", {})
+        if not isinstance(verdict_dict, dict):
+            return False
+        recorded_at = verdict_dict.get("recorded_at")
+        if not recorded_at:
+            return False
+        latest_patch_at = _latest_dispatch_at(stage_states, SKILL_DO_PATCH)
+        if not latest_patch_at:
+            return False
+        verdict_dt = datetime.fromisoformat(recorded_at)
+        patch_dt = datetime.fromisoformat(latest_patch_at)
+        return verdict_dt < patch_dt
+    except Exception:
+        return False
+
+
+def _critique_verdict_is_stale(stage_states: dict) -> bool:
+    """Return True if the CRITIQUE verdict predates the latest /do-plan dispatch (stale).
+
+    Structural twin of :func:`_review_verdict_is_stale` (mirrors PR #1657's
+    REVIEW pattern for the CRITIQUE path, #1639). A critique verdict is stale
+    once the plan it judged has been revised — i.e. a ``/do-plan`` dispatch is
+    recorded *after* the verdict's ``recorded_at``. A stale NEEDS REVISION
+    verdict must route back to ``/do-plan-critique`` (row 2b) rather than
+    dead-ending on ``/do-plan`` (row 3).
+
+    Fails safe to False (not stale) on any missing data or parse error.
+
+    Edge cases:
+    - ``_verdicts.CRITIQUE`` absent / not a dict → False (not stale)
+    - missing ``recorded_at`` → False (not stale)
+    - no prior ``/do-plan`` dispatch → False (not stale)
+    - equal timestamps → False (not stale, strict ``<``)
+    - parse failure (non-iso timestamp) → False (not stale)
+    """
+    try:
+        verdict_dict = stage_states.get("_verdicts", {}).get("CRITIQUE", {})
+        if not isinstance(verdict_dict, dict):
+            return False
+        recorded_at = verdict_dict.get("recorded_at")
+        if not recorded_at:
+            return False
+        latest_plan_at = _latest_dispatch_at(stage_states, SKILL_DO_PLAN)
+        if not latest_plan_at:
+            return False
+        verdict_dt = datetime.fromisoformat(recorded_at)
+        plan_dt = datetime.fromisoformat(latest_plan_at)
+        return verdict_dt < plan_dt
+    except Exception:
+        return False
+
+
+def _rule_critique_verdict_stale(stage_states: dict, meta: dict, context: dict) -> bool:
+    """Critique verdict is stale (plan revised since the verdict was recorded).
+
+    Fires row 2b (``/do-plan-critique``) when the CRITIQUE verdict predates the
+    latest ``/do-plan`` dispatch AND a non-empty critique verdict text exists.
+    Marker-agnostic by design: the #1639 dead-end leaves CRITIQUE at
+    ``in_progress``, so this rule must NOT require any particular marker value.
+
+    Loop-bound: G5 (``guard_g5_artifact_hash_cache``) runs before this row and
+    short-circuits re-critique when the plan hash is unchanged, so this rule can
+    only progress on a genuinely revised plan. See the docstring on row 2b.
+    """
+    if not _critique_verdict_is_stale(stage_states):
+        return False
+    return bool(_latest_critique_verdict(stage_states, meta).strip())
+
+
 def _rule_pr_exists_no_review(stage_states: dict, meta: dict, context: dict) -> bool:
     """PR exists, no review."""
     if not meta.get("pr_number"):
@@ -727,7 +850,17 @@ def _rule_pr_exists_no_review(stage_states: dict, meta: dict, context: dict) -> 
 
 
 def _rule_review_has_findings(stage_states: dict, meta: dict, context: dict) -> bool:
-    """PR review has findings (blockers, nits, or tech debt)."""
+    """PR review has findings (blockers, nits, or tech debt).
+
+    Returns True when the review verdict signals changes are needed.
+    Underscore-form verdicts (``CHANGES_REQUESTED``) are handled transparently
+    via ``normalize_verdict`` (#1638).
+
+    Timestamp-staleness supersession (#1641): if the stored verdict predates the
+    latest ``/do-patch`` dispatch, it is stale and this rule returns False so that
+    row 8b (``_rule_patch_applied_after_review``) can re-dispatch ``/do-pr-review``
+    for a fresh look.
+    """
     if not meta.get("pr_number"):
         return False
     review_verdict = ""
@@ -736,12 +869,16 @@ def _rule_review_has_findings(stage_states: dict, meta: dict, context: dict) -> 
     else:
         verdicts = stage_states.get("_verdicts") or {}
         review_verdict = _verdict_text(verdicts.get("REVIEW"))
-    review_verdict_upper = review_verdict.upper()
+    review_verdict_norm = normalize_verdict(review_verdict)
     if not review_verdict:
         return False
-    if "CHANGES REQUESTED" in review_verdict_upper:
+    # Timestamp-staleness supersession (#1641): if this verdict predates the
+    # latest /do-patch dispatch, it is stale; step aside so row 8b runs.
+    if _review_verdict_is_stale(stage_states):
+        return False
+    if REVIEW_CHANGES_REQUESTED in review_verdict_norm:
         return True
-    if "PARTIAL" in review_verdict_upper:
+    if "PARTIAL" in review_verdict_norm:
         return True
     # REVIEW failed status implies blockers
     if stage_states.get("REVIEW") == STATUS_FAILED:
@@ -789,6 +926,7 @@ def _rule_stage_states_unavailable_pr_open(stage_states: dict, meta: dict, conte
 # these to cross-check SKILL.md row state cells. Keep in sync with SKILL.md.
 _rule_no_plan.__doc__ = "No plan exists"
 _rule_plan_not_critiqued.__doc__ = "Plan exists, not yet critiqued"
+_rule_critique_verdict_stale.__doc__ = "Critique verdict is stale (plan revised since)"
 _rule_critique_needs_revision.__doc__ = "Plan critiqued (NEEDS REVISION)"
 _rule_critique_ready_no_concerns.__doc__ = (
     "Plan critiqued (READY TO BUILD, zero concerns), no branch/PR"
@@ -830,6 +968,19 @@ DISPATCH_RULES: list[DispatchRule] = [
         state_predicate=_rule_plan_not_critiqued,
         skill=SKILL_DO_PLAN_CRITIQUE,
         reason="Plan must pass critique before build",
+    ),
+    # Row 2b (#1639): a stale CRITIQUE verdict (recorded before the latest
+    # /do-plan dispatch) means the plan was revised since the verdict — re-run
+    # the critique rather than dead-ending on /do-plan. Placed BEFORE row 3 so
+    # stale → re-critique wins over row 3's stale-text → /do-plan match. Mirrors
+    # REVIEW row 8b. Disjoint from G1 (which fires only when the last dispatch
+    # was /do-plan-critique; the #1639 dead-end has last dispatch = /do-plan),
+    # and bounded by G5 (re-critique short-circuits on an unchanged plan hash).
+    DispatchRule(
+        row_id="2b",
+        state_predicate=_rule_critique_verdict_stale,
+        skill=SKILL_DO_PLAN_CRITIQUE,
+        reason="Critique verdict is stale (plan revised since) — re-critique",
     ),
     DispatchRule(
         row_id="3",
@@ -1034,6 +1185,21 @@ def decide_next_dispatch(
             logger.debug(f"DispatchRule {rule.row_id} predicate raised: {e}")
 
     if primary is None:
+        # Distinguishable UNKNOWN / unresolvable merge-state blocked reason.
+        # CRITICAL: Only fires when pr_merge_state is None or "UNKNOWN" —
+        # not for DIRTY/BLOCKED (those are real states that route normally).
+        # G6 still requires exactly "CLEAN"; this check does NOT change G6.
+        pr_num = meta.get("pr_number")
+        pr_state = meta.get("pr_merge_state")
+        if pr_num and pr_state in (None, "UNKNOWN"):
+            resolved_repo = meta.get("_resolved_target_repo") or "<none — using cwd>"
+            return Blocked(
+                reason=(
+                    f"PR #{pr_num} merge state {pr_state!r} — could not resolve mergeability "
+                    f"(target repo: {resolved_repo}; check GH_REPO / SDLC_TARGET_REPO env)"
+                ),
+                guard_id=None,
+            )
         return Blocked(
             reason="no matching dispatch rule",
             guard_id=None,

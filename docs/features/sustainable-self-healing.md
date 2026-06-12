@@ -46,6 +46,13 @@ Scans failed/abandoned sessions from the last 4 hours. Groups them by error fing
 - **Redis key:** `{project_key}:sustainability:seen_fingerprints` (TTL 7 days)
 - **Skips:** during active API outage (`queue_paused` set)
 
+**Error fingerprint derivation (`_compute_fingerprint`):** The fingerprint message component is resolved from three sources in priority order:
+1. `extra_context` error keys (`error_message`, `http_status`, `status_code`, `exception_type`, `error_type`, `failed_reason`)
+2. Top-level `session.failed_reason` attribute
+3. Latest `session_events` lifecycle reason — the substring after the first `": "` in the most recent `event_type == "lifecycle"` entry's `text` field (formatted `"{old}→{new}: {reason}"` by `finalize_session`)
+
+This ensures that sessions finalized via `finalize_session(..., reason=...)` (the primary failure path) produce distinct fingerprints per distinct reason, rather than collapsing into the degenerate `"unknown:"` cluster (`06f5940a02173ba1`) when `extra_context` error keys are absent. The `"unknown:"` hash is preserved as a final fallback for sessions with no error context anywhere.
+
 ### 5. Daily Health Digest (`sustainability_digest` / `system-health-digest`)
 
 Enqueues a dev-role AgentSession that generates and sends a daily Telegram health summary to the `Dev: Valor` chat. The digest includes circuit state, throttle level, session counts, and active failure cluster count.

@@ -15,12 +15,14 @@ At the very start of this skill, write an in_progress marker:
 sdlc-tool stage-marker --stage CRITIQUE --status in_progress --issue-number {issue_number} 2>/dev/null || true
 ```
 
-After posting the verdict (Step 5), write the completion marker if READY TO BUILD, leave in_progress otherwise:
+The completion marker is written in **Step 5.5**, co-located with the verdict record so the two can never desync. On a READY TO BUILD verdict, write the completion marker; on any other verdict, leave it `in_progress`. Step 5.5 is mandatory and reached on every exit path — see that step for the self-contained verdict-record + marker block:
 
 ```bash
-# On READY TO BUILD verdict:
+# On READY TO BUILD verdict (written in Step 5.5, immediately after `verdict record`):
 sdlc-tool stage-marker --stage CRITIQUE --status completed --issue-number {issue_number} 2>/dev/null || true
 ```
+
+Do NOT write the completion marker before the verdict is recorded, and do NOT record an APPROVED/READY verdict without the matching completion marker. They are a single unit.
 
 
 ## What this skill does
@@ -166,9 +168,19 @@ IMPLEMENTATION NOTE: [Required for CONCERN and BLOCKER severity. Exempt for NIT.
 
 NITs are exempt from the Implementation Note field. For CONCERN and BLOCKER findings, the note must be concrete: a specific guard condition (e.g., `if event: event.set()`), a call signature, or a "why" explanation that prevents naive application of the fix.
 
+### Step 3.5: Wait and Collect (mandatory)
+
+The six critics from Step 3 were spawned with `run_in_background: true`. Before doing ANY aggregation, you MUST **wait and collect**: block on every one of the six background critic agents and retrieve each critic's complete findings.
+
+- Poll/await all six background agents until each has returned (use the Agent tool's blocking retrieval, e.g. `TaskOutput(block: true)` per critic, or await every background task). Do not proceed while any critic is still running.
+- Collect the full findings text from all six. A critic that returned zero findings still counts as collected — record it as "0 findings", do not skip it.
+- If a critic failed or returned nothing retrievable, re-spawn it and wait again. Never aggregate a partial set.
+
+**This skill owns finalization end to end.** It does NOT yield to a supervisor for aggregation or verdict recording. The wait-and-collect barrier here is precisely the synchronization that the old "After all critics complete" wording assumed but never enforced — without it, Steps 4, 5, 5.5 silently never run and the critique stalls at `in_progress`. Only after all six are collected do you proceed to Step 4.
+
 ### Step 4: Aggregate and Deduplicate
 
-After all critics complete:
+You have now collected all six critics' findings (Step 3.5). Aggregate:
 
 1. Collect all findings (structural + critic)
 2. **Deduplicate**: If two critics flagged the same issue, keep the higher-severity version and note which critics agreed
@@ -238,18 +250,31 @@ Output the final report in this format:
 - **MAJOR REWORK** — Fundamental issues identified. Recommend re-planning.
 ```
 
-### Step 5.5: Record the verdict (mandatory)
+### Step 5.5: Finalize — record verdict AND write completion marker (mandatory, self-contained)
 
-After printing the verdict, record it on the PM session so the SDLC router's Legal Dispatch Guards (G1, G5) can consume it:
+This step is **mandatory and reached on EVERY exit path** — every verdict (READY TO BUILD, NEEDS REVISION, MAJOR REWORK) must pass through it. There is no path out of this skill that skips Step 5.5. Do not return control to a supervisor before completing it.
+
+After printing the verdict (Step 5), record it on the PM session so the SDLC router's Legal Dispatch Guards (G1, G5) can consume it. On a READY TO BUILD verdict, **co-locate** the completion stage-marker write with the verdict record so the verdict and the marker can never desync:
 
 ```bash
+# 1. Record the verdict (ALL verdicts) — mandatory.
 sdlc-tool verdict record --stage CRITIQUE \
   --verdict "$VERDICT_STRING" --issue-number $ISSUE_NUMBER
+
+# 2. On a READY TO BUILD verdict ONLY, write the completion marker in the
+#    SAME block, immediately after the verdict record. Verdict + marker are a
+#    single unit: never record one without the other on the READY path.
+case "$VERDICT_STRING" in
+  *"READY TO BUILD"*)
+    sdlc-tool stage-marker --stage CRITIQUE --status completed \
+      --issue-number $ISSUE_NUMBER 2>/dev/null || true
+    ;;
+esac
 ```
 
 Where `$VERDICT_STRING` is the exact verdict string emitted in Step 5 (e.g. `"NEEDS REVISION"`, `"READY TO BUILD (with concerns)"`). If `$ISSUE_NUMBER` is unknown, omit the `--issue-number` flag — the recorder falls back to `VALOR_SESSION_ID` / `AGENT_SESSION_ID` env vars and the artifact_hash will be None.
 
-The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state.
+The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state. On a non-READY verdict, leave the CRITIQUE marker at `in_progress` (the router's row 3 / row 2b handle re-routing).
 
 ### Step 5.6: Set plan-revising lock (mandatory when revision is needed)
 
@@ -294,6 +319,7 @@ Use **"READY TO BUILD (no concerns)"** when there are zero CONCERN or BLOCKER fi
 
 ## Version history
 
+- v1.3.0 (2026-06-13): Add explicit Step 3.5 "Wait and Collect" barrier (block on all six background critics before aggregating); make Step 5.5 a mandatory, self-contained verdict-record + completion-marker block reached on every exit path; reinforce the Stage Marker note so the verdict and marker cannot desync (#1654)
 - v1.2.0 (2026-04-07): Fix Step 5 Verdict template to show both READY TO BUILD variants so critics output the correct form for SDLC routing
 - v1.1.0 (2026-03-23): Add SOURCE_FILES inline context to prevent critic hallucination (Step 1.5)
 - v1.0.0 (2026-03-21): Initial — war room critique with six parallel critics + structural checks

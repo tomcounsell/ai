@@ -33,6 +33,26 @@ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
+_CLEAN_GRANITE_EXIT_REASONS = frozenset({"pm_complete", "pm_user"})
+
+
+def _is_non_clean_granite_exit(agent_session) -> bool:
+    """Return True when the session has a granite exit_reason that signals a real failure.
+
+    None exit_reason = non-granite session or not yet set = clean (default behavior).
+    Clean granite exits: pm_complete (normal end), pm_user (user message sent).
+    Everything else (exception, pm_hang, dev_hang, startup_unresolved, pm_no_user_message,
+    pm_max_turns) is non-clean → REACTION_ERROR.
+
+    This does NOT suppress the success reaction for clean+communicated=False completions
+    (those still get REACTION_SUCCESS or REACTION_COMPLETE via the normal branch).
+    The communicated=False chip handles that signal non-destructively.
+    """
+    exit_reason = getattr(agent_session, "exit_reason", None)
+    if exit_reason is None:
+        return False
+    return exit_reason not in _CLEAN_GRANITE_EXIT_REASONS
+
 
 def _resolve_session_model(session: AgentSession | None) -> str | None:
     """D1 precedence cascade for session model.
@@ -1998,6 +2018,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
             ):
                 emoji = None  # Clear reaction
             elif task.error:
+                emoji = REACTION_ERROR
+            elif _is_non_clean_granite_exit(agent_session):
+                # Non-clean granite exit_reason (exception, hang, etc.) → ERROR reaction
+                # regardless of whether the session communicated. Only applies when
+                # exit_reason is explicitly set to a non-clean value (granite path only).
                 emoji = REACTION_ERROR
             elif messenger.has_communicated() or getattr(
                 agent_session, "user_facing_routed", False

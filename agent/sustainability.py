@@ -420,11 +420,61 @@ def failure_loop_detector() -> None:
         logger.exception("[failure-loop-detector] Unhandled exception — skipping tick")
 
 
+def _latest_failure_reason(session) -> str:
+    """Extract the latest failure reason from session_events lifecycle entries.
+
+    Production code writes failure reasons via ``log_lifecycle_transition()``
+    as ``{"event_type": "lifecycle", "text": "{old}→{new}: {reason}"}`` entries
+    in ``session.session_events``.  This helper reads that path as a fallback
+    when ``extra_context`` and ``failed_reason`` are both empty.
+
+    Parse contract:
+    - Split on ``": "`` (two-char separator) with ``maxsplit=1`` to handle
+      embedded colons in the reason text (e.g. ``"health check: no progress"``).
+    - Return ``parts[1]`` when the split yields exactly 2 parts; return ``""``
+      otherwise (no separator → no reason recorded).
+
+    Guard contract:
+    - Uses ``isinstance(events, list)`` — NOT ``is None`` — because a bare
+      ``MagicMock`` auto-creates a truthy attribute that would pass a None check
+      but is not iterable as expected.
+
+    Empty-reason contract:
+    - Returns ``""`` for all malformed inputs so callers can treat a falsy return
+      as "no reason available" without special-casing.
+    """
+    events = getattr(session, "session_events", None)
+    if not isinstance(events, list):
+        return ""
+    for item in reversed(events):
+        if not isinstance(item, dict):
+            continue
+        if item.get("event_type") == "lifecycle":
+            text = item.get("text", "")
+            parts = text.split(": ", 1)
+            return parts[1] if len(parts) == 2 else ""
+    return ""
+
+
 def _compute_fingerprint(session) -> str:
     """Compute a short error fingerprint for a session.
 
-    Uses HTTP status code if available, otherwise exception class name.
-    Falls back to 'unknown' if no error info.
+    Resolution order for the error message component:
+    1. ``extra_context["error_message"]`` / ``extra_context["failed_reason"]``
+    2. Top-level ``session.failed_reason``
+    3. Latest lifecycle reason from ``session.session_events`` (``"{old}→{new}: {reason}"``)
+    4. Falls back to ``""`` → raw becomes ``"unknown:"`` → degenerate hash
+       ``06f5940a02173ba1`` (SHA256("unknown:")[:16]).
+
+    The session_events fallback (step 3) means that sessions whose failure
+    reason is stored only as a lifecycle transition event — the standard
+    production path via ``finalize_session()`` → ``log_lifecycle_transition()``
+    — now produce distinct fingerprints per distinct reason rather than all
+    collapsing into the same degenerate hash.  The 7-day per-fingerprint Redis
+    dedup key ensures one GitHub issue per novel cluster.
+
+    Uses HTTP status code or exception type for the non-message component when
+    available; otherwise ``"unknown"``.
     """
     ec = getattr(session, "extra_context", None) or {}
     http_status = ec.get("http_status") or ec.get("status_code")
@@ -434,6 +484,10 @@ def _compute_fingerprint(session) -> str:
     # Also try top-level failed_reason on the model
     if not error_message:
         error_message = getattr(session, "failed_reason", "") or ""
+
+    # Fallback: read the latest lifecycle reason from session_events
+    if not error_message:
+        error_message = _latest_failure_reason(session)
 
     if http_status is not None:
         http_component = str(http_status)
@@ -456,6 +510,7 @@ def _file_github_issue(fingerprint: str, sessions: list, session_ids: list) -> N
             ec.get("error_message")
             or ec.get("failed_reason")
             or getattr(sample_session, "failed_reason", "")
+            or _latest_failure_reason(sample_session)
             or "Unknown error"
         )[:200]
 
