@@ -156,7 +156,7 @@ All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)`:
 |-------|------|-------|
 | `created_at` | SortedField(type=datetime) | Partitioned by project_key |
 | `started_at` | DatetimeField(null=True) | Set when worker picks up session |
-| `updated_at` | DatetimeField(auto_now=True) | Renamed from `last_activity` |
+| `updated_at` | DatetimeField(null=True) | Renamed from `last_activity`; stamped explicitly via `utc_now()` in `AgentSession.save()` override (see #1645 — `auto_now=True` minted naive-local time) |
 | `completed_at` | DatetimeField(null=True) | Set on terminal status |
 | `scheduled_at` | DatetimeField(null=True) | Renamed from `scheduled_after` |
 
