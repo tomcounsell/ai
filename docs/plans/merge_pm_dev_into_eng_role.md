@@ -5,7 +5,7 @@ appetite: Large
 owner: Valor Engels
 created: 2026-06-12
 tracking: https://github.com/tomcounsell/ai/issues/1633
-last_comment_id: 
+last_comment_id: 4682868787
 ---
 
 # Merge PM/Dev bridge roles into a single Eng role; collapse SessionType to {eng, teammate}
