@@ -124,22 +124,20 @@ scan of `~/.zshrc` for any non-comment line matching `^\s*alias\s+valor\s*=`,
 and emits a copy-paste fix in the warning message when found. No machine
 should encounter the stale alias going forward.
 
-### 2. The positional-shortcut disambiguation is a literal allowlist
+### 2. The positional-shortcut disambiguation is a literal allowlist — resolved (#1620)
 
-The first argv token is compared against the module-level set:
+`KNOWN_SUBCOMMANDS` is no longer a hand-maintained literal set. It is now
+DERIVED at import time from the registered subparsers via
+`_derive_known_subcommands()`, which reads `_SubParsersAction.choices.keys()`.
+`_build_parser()` is decorated with `@functools.lru_cache` so the import-time
+derivation and every runtime `main()` call share a single parser build.
 
-```python
-KNOWN_SUBCOMMANDS = {"agent-session", "list", "status", "steer", "kill",
-                     "resume", "inspect", "children", "release"}
-```
+Adding a new subparser to `_build_parser` now automatically extends the
+allowlist — there is no parallel literal to keep in sync.
 
-If a future subcommand is added to the wrapper, it must be appended here or
-the new name will be silently rewritten to `agent-session` (`valor foo bar`
-becomes `valor agent-session foo bar`). The set duplicates the subparser
-declarations by design (it must be consulted before argparse runs);
-`tests/unit/test_valor_cli.py::test_known_subcommands_matches_parser`
-asserts the two stay in sync, so drift now fails CI instead of failing a
-user.
+`tests/unit/test_valor_cli.py::TestKnownSubcommandsParity` was updated to
+verify the derivation (the public constant equals the subparser registry and
+equals `_derive_known_subcommands()`), not a literal-vs-registry parity check.
 
 ### 3. Worker pre-flight false negatives — fixed
 
@@ -168,42 +166,69 @@ alongside `worker_healthy`: `worker_state` ("ok" or "down") and
 [Session Steering](session-steering.md) for the full worker pre-flight check
 semantics.
 
-### 4. No help text on the positional shortcut
+### 4. No help text on the positional shortcut — resolved (#1620)
 
-`valor --help` and `valor agent-session --help` work fine. But
-`valor "fix the bug" --help` does not — argparse sees the prompt as a
-positional and the help flag is consumed. The shortcut only fires when no
-flag is present. Users who expect `valor` to always show help for an unknown
-flag will be surprised. A `--help` short-circuit before positional injection
-would fix it but at the cost of a special case.
+`main()` now has a help short-circuit that runs on the PRE-REWRITE argv —
+before the positional injection that would turn `valor "fix the bug"` into
+`valor agent-session "fix the bug"`. The guard fires when all three
+conditions hold:
 
-### 5. The wrapper does not bundle the granite-pty path as a default
+1. `argv` is non-empty.
+2. `argv[0]` does not start with `-` (it is a bare prompt, not a flag).
+3. `argv[0]` is not in `KNOWN_SUBCOMMANDS`.
+4. A standalone `-h` or `--help` token appears anywhere in `argv` (exact
+   element match, not substring — see below).
 
-The wrapper is execution-agnostic: it creates a session, the worker decides
-how to run it. The new granite PTY substrate (`agent/granite_container/`)
-is selected by the worker's session executor based on environment, not by
-the CLI. This is the right separation of concerns, but it means calling
-`valor` does not guarantee a PTY-backed session — only that a session is
-enqueued. If a future env flag is needed to force the new path, the wrapper
-should expose it; right now the PTY path is implicit.
+When it fires the top-level `valor --help` text is printed and
+`SystemExit(0)` is raised.
 
-### 6. Pre-commit hook guard #1288 still requires worktree-local commits
+Concretely: `valor "fix the bug" --help` now prints top-level help instead
+of the `agent-session` create sub-help that argparse would have shown after
+positional injection. `valor list --help` is unaffected — `list` is a known
+subcommand and the guard does not fire.
 
-The pre-commit hook blocks `git commit` on `session/*` branches from outside
-`.worktrees/{slug}/`. So even with the wrapper, the development loop is:
+**One accepted edge case.** "Standalone token" means an exact `argv` element
+equal to `-h` or `--help`, not a substring. `valor "document the --help
+flag"` is a single `argv` element and does NOT trigger the guard — the
+prompt is delivered verbatim. The rare collision (`valor "some prompt"
+--help` when the user genuinely wanted to create a session) is an accepted
+tradeoff consistent with argparse's greedy-help convention.
 
-```bash
-# in main checkout
-git checkout session/granite-pty-production-cutover   # bound to main checkout
-# ...make changes...
-git worktree add .worktrees/granite-pty-production-cutover session/granite-pty-production-cutover
-# copy changes in, commit from worktree
-```
+### 5. PTY substrate selection is a worker concern (design boundary)
 
-The wrapper does not change this. The workflow is documented in the #1288
-guard, but a future improvement could let `valor` itself do the
-worktree-attach dance before delegating to `valor-session create` for
-sub-session work.
+The CLI's job is to enqueue a session. The worker selects the execution
+substrate (granite PTY container, `agent/granite_container/`) based on
+environment — not the CLI. This is the correct separation: the CLI
+knows nothing about how sessions are executed, and the worker knows nothing
+about how sessions are created.
+
+Post-cutover (#1572 / PR #1612) there is no legacy execution substrate left.
+All sessions route through the granite PTY container. A "force-legacy" env
+knob is therefore not applicable — there is nothing to switch to. This is not
+a reserved future idea; it is a closed question.
+
+`valor "do the thing"` guarantees a session is enqueued and will be run on
+the granite PTY substrate. It does not need to name the substrate to deliver
+that guarantee.
+
+### 6. Pre-commit hook guard #1288 — resolved (#1620)
+
+The `.githooks/pre-commit` Phase 0.5 guard now implements option (a),
+**allow-when-no-worktree**. On a `session/{slug}` branch committed from
+outside the owning worktree, the guard checks whether `.worktrees/{slug}/`
+exists on disk:
+
+- **Worktree does NOT exist** → the main checkout is the only workspace for
+  this slug; there is nothing to contaminate. The commit is ALLOWED with an
+  informational note on stderr referencing #1620.
+- **Worktree DOES exist** → the commit is BLOCKED exactly as before. The
+  operator must commit from inside the worktree (cd `.worktrees/{slug}/` and
+  commit there).
+
+This is zero operator friction: the guard self-detects — no environment
+variable to remember, no manual `git worktree add` dance needed when no
+worktree exists. It never bypasses an existing worktree, so the
+agent-contamination case that #887 and #1288 guard against stays blocked.
 
 ### 7. The slug requirement contradicts the "no boilerplate" pitch
 
