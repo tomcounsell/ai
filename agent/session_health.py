@@ -1181,7 +1181,8 @@ async def _apply_recovery_transition(
     # but sdk_ever_output=False — the confirmed Branch 2 failure mode).
     # NOTE: sdk_ever_output is NOT a field on AgentSession; derive it from the
     # real fields last_tool_use_at and last_turn_at (same derivation as
-    # _has_progress). Do NOT use getattr(entry, 'sdk_ever_output', ...).
+    # _has_progress). Do NOT read the attribute directly from entry — use the
+    # derived expression below instead.
     try:
         from popoto.redis_db import POPOTO_REDIS_DB as _R2
 
