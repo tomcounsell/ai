@@ -1,20 +1,18 @@
 ---
-name: tts
-description: "Synthesize text into a spoken-audio file (OGG/Opus) from any project or directory. Kokoro local voice with OpenAI tts-1 cloud fallback. Use when asked to 'speak this', 'read this aloud', 'say this', 'make an audio file', 'turn this into a voice clip', or 'text to speech'. This is the raw synthesis surface; for a constructed executive voice-brief delivered to Telegram, use /do-debrief instead."
+name: do-voice-recording
+description: "Turn text into a spoken-audio file (OGG/Opus) from any project or directory. Kokoro local voice with OpenAI tts-1 cloud fallback. The canonical text-to-speech step — other skills (/do-presentation, /do-debrief) defer to this for synthesis. Use when asked to 'record a voiceover', 'narrate this', 'speak this', 'read this aloud', 'say this', 'make an audio/voice clip', or 'text to speech', e.g. recording narration after building a presentation."
 argument-hint: "<text> [--output <path.ogg>] [--voice <name>] [--force-cloud]"
 allowed-tools: Bash, Read
 user-invocable: true
 ---
 
-# /tts — Text → Spoken Audio
+# /do-voice-recording — Text → Spoken Audio
 
-Synthesize arbitrary text to an OGG/Opus audio file. Works from **any** directory on **any** machine — the underlying `valor-tts` binary lives only inside the `~/src/ai` project venv, so this skill resolves it portably rather than assuming it's on `PATH`.
+The single, simple text-to-speech surface for the whole system. Hand it text, get back an OGG/Opus file. Works from **any** directory on **any** machine, and every other skill that needs synthesis (`/do-presentation` voiceovers, `/do-debrief` voice notes) defers to this rather than reimplementing it.
 
 ## Why this skill exists
 
-`valor-tts` is registered in `~/src/ai/pyproject.toml [project.scripts]` and is only on `PATH` when that venv is active. From any other project, the capability is invisible. This globally-synced skill makes TTS **discoverable and invocable regardless of cwd** — it is listed in every machine's skill registry once `/update` hardlinks `.claude/skills-global/` into `~/.claude/skills/`.
-
-This is the raw "speak this text" surface. The constructed 30-second executive voice-brief-to-Telegram flow is a separate composite — `/do-debrief`.
+`valor-tts` is registered in `~/src/ai/pyproject.toml [project.scripts]` and is only on `PATH` when that venv is active. From any other project the capability is invisible — which is the whole reason this skill exists: it makes TTS **discoverable and invocable regardless of cwd**, and it is the one place the synthesis mechanics (binary resolution, flags, prosody) are documented. It is listed in every machine's skill registry once `/update` hardlinks `.claude/skills-global/` into `~/.claude/skills/`.
 
 ## Resolve the binary (portable)
 
@@ -31,7 +29,7 @@ TTS="$(command -v valor-tts || true)"
 ## Synthesize
 
 ```bash
-OUT="${OUTPUT:-$(mktemp -t tts).ogg}"
+OUT="${OUTPUT:-$(mktemp -t voice).ogg}"
 "$TTS" --text "$TEXT" --output "$OUT" ${VOICE:+--voice "$VOICE"} ${FORCE_CLOUD:+--force-cloud} || {
     echo "Synthesis failed" >&2
     rm -f "$OUT"
@@ -49,11 +47,11 @@ echo "$OUT"
 | `--voice` / `-v` | Voice name (e.g. `af_bella`, `am_michael`, `nova`). `default` uses the backend's canonical voice. Cross-backend names remap automatically. Catalog: `~/src/ai/tools/tts/README.md`. |
 | `--force-cloud` | Skip Kokoro and use OpenAI tts-1 even if Kokoro is available. |
 
-## TTS prosody (when the audio is for a listener, not a test)
+## Prosody (when the audio is for a listener, not a test)
 
-If the text will actually be heard, apply the same read-aloud rules `/do-debrief` uses:
+If the text will actually be heard, apply these read-aloud rules:
 
-- **Never recite multi-digit identifiers** (issue/PR/port numbers). TTS reads "1195" as "one thousand one hundred ninety-five" — wasted attention. Refer to work by substance.
+- **Never recite multi-digit identifiers** (issue/PR/port numbers). TTS reads "1195" as "one thousand one hundred ninety-five" — wasted attention. Refer to things by substance.
 - **Contractions** read more naturally than expanded forms.
 - **Proper-noun respelling** for prosody (e.g. spell "Yudame" as `You-duh-may`). Dictionary-style hints only — never IPA in slashes; the phonemizer reads `/.../` literally and doubles the clip length.
 
@@ -65,10 +63,10 @@ This skill only produces a file. To send it as a Telegram voice note:
 valor-telegram send --chat "<chat>" --voice-note --cleanup-after-send --audio "$OUT"
 ```
 
-For a *constructed* brief (categorize → draft → review-gate → speak → send), use `/do-debrief` — don't reimplement its construction phases here.
+For a *constructed* executive brief (categorize → draft → review-gate → speak → send), use `/do-debrief`, which calls this skill for its synthesis step.
 
 ## Related references
 
 - `~/src/ai/tools/tts/README.md` — full API, voice catalog, troubleshooting
 - `~/src/ai/docs/features/tts.md` — dual-backend (Kokoro/OpenAI) design rationale
-- `/do-debrief` — the Telegram executive-voice-brief composite built on this same `valor-tts`
+- `/do-debrief` — Telegram executive-voice-brief composite that defers here for synthesis

@@ -313,6 +313,10 @@ Tell the user:
 2. Slide count and estimated talk time (~30 seconds per slide)
 3. How to edit (it's just markdown) and re-export
 
+## Narration / voiceover
+
+If the user wants a spoken voiceover or narration track for the deck, **defer to `/do-voice-recording`** — it's the canonical text-to-speech step (portable `valor-tts` resolution, voice catalog, prosody rules). Feed it the per-slide speaker notes; don't shell out to `valor-tts` here.
+
 ## Version history
 - v1.3.0 (2026-05-31): Anti-slop hardening + audience-first title slide. Removed `border-left` accent-bar styling from the `.stat`/`.warn`/`blockquote` templates (THEME_DETECTION + SKILL) — the single biggest "AI-generated" tell — and added the "Avoid AI-Slop Tells" section to THEME_DETECTION.md. Added "The title slide: audience first" convention to CONTENT_GUIDE.md (client attribution on top, real name+photo at the bottom, deck title in the middle, via a full-height space-between flex column). Driven by a real client deck session.
 - v1.2.0 (2026-05-07): Added client-facing Why→How→What structure guidance (Step 3), self-review critique pass via subagent (Step 8), utility CSS classes in theme defaults (Step 7), "Client-Facing Decks" section in CONTENT_GUIDE.md. Driven by real session: first-pass deck opened with V0.5 scope before establishing client context; dense slides caught only after user review — both preventable with the review pass.

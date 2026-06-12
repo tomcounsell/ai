@@ -101,14 +101,12 @@ Show the final transcript and preface to the user with one line: `Final transcri
 
 ## Delivery (only after confirmation)
 
-```bash
-OUT=$(mktemp -t debrief).ogg
+Synthesize the transcript with **`/do-voice-recording`** — that skill is the canonical TTS step and owns the portable `valor-tts` resolution. Pass the confirmed `$TRANSCRIPT` and the chosen `--voice`; it returns the path to the OGG file. Do not reimplement synthesis here.
 
-valor-tts --text "$TRANSCRIPT" --output "$OUT" || {
-    echo "Synthesis failed"
-    rm -f "$OUT"
-    exit 1
-}
+```bash
+# OUT = the file path /do-voice-recording prints (text → OGG/Opus).
+OUT=$(mktemp -t debrief).ogg
+# (Inside /do-voice-recording: resolve valor-tts portably, then synthesize to $OUT.)
 
 # Preface (skippable). Send before the voice note so it lands first in the chat.
 if [ -z "$NO_PREFACE" ]; then
@@ -136,16 +134,17 @@ The relay owns the audio file from the moment the payload is pushed — it delet
 
 ## Error handling
 
-- **`valor-tts` exits non-zero** → STDERR carries `Error: <message>`. Surface it verbatim. Delete the partial file. Do not push to the outbox.
+- **Synthesis (`/do-voice-recording`) fails** → STDERR carries `Error: <message>`. Surface it verbatim. The partial file is already deleted by that skill. Do not push to the outbox.
 - **`valor-telegram send` exits non-zero** → the payload was not enqueued. The temp file is still on disk; remove it manually so it doesn't leak.
 - **Bridge relay not running** → the payload sits in Redis until the relay starts. If you need synchronous confirmation, run `./scripts/valor-service.sh status` first.
 
-## Relationship to `/tts`
+## Relationship to `/do-voice-recording`
 
-`/tts` is the raw synthesis surface — "speak this text → audio file" — and it exists so the capability is **discoverable and invocable from any project on any machine**, since `valor-tts` is only on `PATH` inside the `~/src/ai` venv. `/do-debrief` is the composite: it *constructs* a 30-second executive brief (the categorize → gap-check → draft → review-gate phases above) and delivers it as a Telegram voice note. Those construction phases are the value `/do-debrief` adds over "pipe text to `/tts`." When you just need audio from text, use `/tts`; when you need a decision-shaped spoken brief delivered to a chat, use this skill.
+`/do-voice-recording` is the canonical raw-synthesis surface — "speak this text → audio file" — and owns the portable `valor-tts` resolution so TTS works from any cwd on any machine. `/do-debrief` is the composite: it *constructs* a 30-second executive brief (the categorize → gap-check → draft → review-gate phases above), defers to `/do-voice-recording` for the actual synthesis, and delivers the result as a Telegram voice note. Those construction phases are the value `/do-debrief` adds. When you just need audio from text, use `/do-voice-recording` directly; when you need a decision-shaped spoken brief delivered to a chat, use this skill.
 
 ## Related references
 
+- `/do-voice-recording` — canonical TTS step (binary resolution, flags, voice catalog, prosody rules)
 - `tools/tts/README.md` — full TTS API, voice catalog, troubleshooting
 - `bridge/telegram_relay.py` — `_send_queued_message` voice-note branch + `cleanup_file` honoring
 - `docs/features/tts.md` — feature design + dual-backend rationale

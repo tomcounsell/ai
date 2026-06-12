@@ -57,6 +57,8 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "checking-system-logs"),
     ("skills", "reading-sms-messages"),
     ("skills", "telegram"),
+    # Renamed: tts -> do-voice-recording (canonical TTS step the other skills defer to)
+    ("skills", "tts"),
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,
