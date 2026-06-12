@@ -4,8 +4,9 @@ The wrapper is a pure delegation layer over `tools.valor_session`. These
 tests cover the three things the feature doc calls out as uncovered risk:
 
 1. The positional-shortcut rewrite (`valor "prompt"` → `valor agent-session
-   "prompt"`), including the KNOWN_SUBCOMMANDS allowlist staying in sync
-   with the subparser declarations.
+   "prompt"`), including the KNOWN_SUBCOMMANDS allowlist being DERIVED from
+   the subparser declarations (single source of truth, no hand-maintained
+   literal to drift).
 2. The per-subcommand argparse-namespace translation — every attribute the
    underlying `cmd_*` function reads must be present on the namespace the
    wrapper builds (a missing attribute is a runtime AttributeError).
@@ -23,7 +24,12 @@ from unittest.mock import patch
 import pytest
 
 from tools import valor_cli
-from tools.valor_cli import KNOWN_SUBCOMMANDS, _build_parser, main
+from tools.valor_cli import (
+    KNOWN_SUBCOMMANDS,
+    _build_parser,
+    _derive_known_subcommands,
+    main,
+)
 
 
 def _parser_subcommands() -> set[str]:
@@ -36,11 +42,46 @@ def _parser_subcommands() -> set[str]:
 
 
 class TestKnownSubcommandsParity:
-    def test_known_subcommands_matches_parser(self):
-        """A new subparser without an allowlist entry gets silently
-        rewritten into a prompt; an allowlist entry without a subparser is
-        an unreachable name. Both are drift — fail loudly here."""
+    """`KNOWN_SUBCOMMANDS` is DERIVED from the parser, not hand-maintained.
+    These tests lock in the single-source-of-truth property: the derivation
+    reads the subparser registry directly, so a new subparser is allowlisted
+    automatically (no drift possible). They also confirm the derived set is
+    the exact input the rewrite guard consults — a name absent from the
+    derived set gets rewritten to `agent-session`."""
+
+    def test_known_subcommands_is_the_derivation_of_the_registry(self):
+        """The public constant IS the derivation output, and that output is
+        exactly the parser's subparser registry. Asserting against both the
+        registry view and a fresh `_derive_known_subcommands()` call proves
+        the constant was produced by the derivation (not a literal that
+        happens to match)."""
         assert KNOWN_SUBCOMMANDS == _parser_subcommands()
+        assert KNOWN_SUBCOMMANDS == _derive_known_subcommands()
+
+    def test_name_absent_from_derived_set_is_rewritten(self):
+        """The derivation feeds the rewrite guard: a first token NOT in the
+        derived set is rewritten to `agent-session` (routes to cmd_create),
+        while a token that IS in the derived set is left alone (routes to its
+        own cmd_*). This locks the derivation→rewrite linkage."""
+        unknown = "some-unknown-prompt-token"
+        assert unknown not in KNOWN_SUBCOMMANDS
+        assert "list" in KNOWN_SUBCOMMANDS
+
+        with (
+            patch("tools.valor_session.cmd_create", return_value=0) as cmd_create,
+            patch("tools.valor_session.cmd_list", return_value=0) as cmd_list,
+        ):
+            assert main([unknown]) == 0
+            cmd_create.assert_called_once()
+            cmd_list.assert_not_called()
+
+        with (
+            patch("tools.valor_session.cmd_create", return_value=0) as cmd_create,
+            patch("tools.valor_session.cmd_list", return_value=0) as cmd_list,
+        ):
+            assert main(["list"]) == 0
+            cmd_list.assert_called_once()
+            cmd_create.assert_not_called()
 
 
 class TestPositionalShortcut:
