@@ -207,7 +207,7 @@ def _send_alert(message: str) -> None:
     """Best-effort Telegram alert. All failures swallowed and logged."""
     try:
         subprocess.run(
-            ["valor-telegram", "send", "--chat", "Dev: Valor", message],
+            ["valor-telegram", "send", "--chat", "Eng: Valor", message],
             capture_output=True,
             text=True,
             timeout=10,

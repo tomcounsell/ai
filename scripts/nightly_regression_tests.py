@@ -22,7 +22,7 @@ PROJECT_DIR = Path(__file__).parent.parent
 DATA_DIR = PROJECT_DIR / "data"
 LAST_RUN_FILE = DATA_DIR / "nightly_tests_last_run.json"
 LOG_FILE = PROJECT_DIR / "logs" / "nightly_tests.log"
-TELEGRAM_CHAT = "Dev: Valor"
+TELEGRAM_CHAT = "Eng: Valor"
 TELEGRAM_BIN = PROJECT_DIR / ".venv" / "bin" / "valor-telegram"
 PYTEST_JSON_TMP = "/tmp/nightly_pytest_report.json"
 

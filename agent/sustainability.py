@@ -236,7 +236,7 @@ def send_hibernation_notification(event: str, project_key: str | None = None) ->
             except Exception:
                 count = 0
             command = (
-                f"Send a Telegram message to the 'Dev: Valor' chat with this exact text:\n"
+                f"Send a Telegram message to the 'Eng: Valor' chat with this exact text:\n"
                 f"Worker hibernating: Anthropic circuit open. "
                 f"{count} session(s) paused. Will resume automatically when circuit closes."
             )
@@ -247,7 +247,7 @@ def send_hibernation_notification(event: str, project_key: str | None = None) ->
             except Exception:
                 count = 0
             command = (
-                f"Send a Telegram message to the 'Dev: Valor' chat with this exact text:\n"
+                f"Send a Telegram message to the 'Eng: Valor' chat with this exact text:\n"
                 f"Worker waking: Anthropic circuit closed. "
                 f"Beginning drip resume — {count} session(s) queued to restore."
             )
@@ -655,7 +655,7 @@ def sustainability_digest() -> None:
                 "- 'open' or 'OPEN' → DOWN\n"
                 "- 'half_open' or 'HALF_OPEN' → RECOVERING\n\n"
                 "Format as a concise Telegram message highlighting what's wrong. "
-                "Send via valor-telegram to the 'Dev: Valor' chat. "
+                "Send via valor-telegram to the 'Eng: Valor' chat. "
                 "Subject line: ⚠️ Daily Health Digest — anomalies detected."
             )
 

@@ -915,8 +915,8 @@ def load_persona_prompt(persona: str = "developer", substitutions: dict | None =
     falling back to config/personas/{persona}.md (in-repo, for development).
 
     Args:
-        persona: Persona name — one of "developer", "project-manager", "teammate",
-            "customer-service". Defaults to "developer".
+        persona: Persona name — one of "engineer", "teammate",
+            "customer-service". Defaults to "engineer".
         substitutions: Optional dict of {placeholder: value} pairs applied to the
             assembled prompt via _SafeFormatDict.format_map. Missing keys are
             preserved as literal {key} placeholders (never raise KeyError).
@@ -938,12 +938,12 @@ def load_persona_prompt(persona: str = "developer", substitutions: dict | None =
 
     if overlay_path.exists():
         overlay_content = overlay_path.read_text()
-        if persona == "project-manager" and "CRITIQUE" not in overlay_content:
+        if persona == "engineer" and "CRITIQUE" not in overlay_content:
             logger.warning(
-                f"PM persona overlay '{overlay_path}' is missing CRITIQUE gate rules "
+                f"Engineer persona overlay '{overlay_path}' is missing CRITIQUE gate rules "
                 "— pipeline integrity may be compromised"
             )
-        # Workflow-announcement guard: the PM overlay MUST contain the bucket-#3
+        # Workflow-announcement guard: the engineer overlay MUST contain the bucket-#3
         # announce-and-pause rule so coding/automation/config requests don't get
         # silently implemented. The substring is the unique opening clause of the
         # required announcement phrase. This guards against overlay drift on
@@ -951,44 +951,41 @@ def load_persona_prompt(persona: str = "developer", substitutions: dict | None =
         # fall out of sync with the in-repo template. Mirrors the CRITIQUE check
         # above and PR #802's loader-warning pattern. See issue #1189.
         if (
-            persona == "project-manager"
+            persona == "engineer"
             and "Unless you directly instruct me to skip" not in overlay_content
         ):
             logger.warning(
-                f"PM persona overlay '{overlay_path}' is missing the "
-                "workflow-announcement rule — PM may silently implement "
+                f"Engineer persona overlay '{overlay_path}' is missing the "
+                "workflow-announcement rule — engineer may silently implement "
                 "code/config changes without surfacing the SDLC contract."
             )
-        if persona == "project-manager" and 'subagent_type="dev-session"' in overlay_content:
+        if persona == "engineer" and 'subagent_type="dev-session"' in overlay_content:
             logger.warning(
-                f"PM persona overlay '{overlay_path}' still contains Agent tool dispatch "
+                f"Engineer persona overlay '{overlay_path}' still contains Agent tool dispatch "
                 'instructions (subagent_type="dev-session"). '
                 "Dev sessions are now created via "
                 "`python -m tools.valor_session create --role dev`. "
-                "Update ~/Desktop/Valor/personas/project-manager.md to remove the Agent tool "
+                "Update ~/Desktop/Valor/personas/engineer.md to remove the Agent tool "
                 "dispatch pattern."
             )
-        # Developer overlay drift guards: the dev persona was promoted in 2026-05-09
-        # to own full SDLC pipelines via parallel subagent fan-out. The "Mode 3"
-        # multi-issue orchestrator and the stale-baseline `merge_authorized` bypass
-        # are the load-bearing pieces — if either is missing, the overlay has
-        # rolled back to the pre-promotion 34-line single-stage executor and dev
-        # sessions will halt at the first multi-issue or merge-gate friction point.
+        # Engineer overlay drift guards: the engineer persona owns full SDLC pipelines
+        # via parallel subagent fan-out. The "Mode 3" multi-issue orchestrator and the
+        # stale-baseline `merge_authorized` bypass are the load-bearing pieces.
         # Substrings chosen for their stability: "Mode 3" anchors the parallel
         # orchestrator playbook; "merge_authorized" anchors the bypass section.
-        if persona == "developer" and "Mode 3" not in overlay_content:
+        if persona == "engineer" and "Mode 3" not in overlay_content:
             logger.warning(
-                f"Developer persona overlay '{overlay_path}' is missing the "
-                "Mode 3 parallel orchestrator playbook — dev sessions will not "
+                f"Engineer persona overlay '{overlay_path}' is missing the "
+                "Mode 3 parallel orchestrator playbook — eng sessions will not "
                 "fan out across multiple issues. Sync from "
-                "config/personas/developer.md."
+                "config/personas/engineer.md."
             )
-        if persona == "developer" and "merge_authorized" not in overlay_content:
+        if persona == "engineer" and "merge_authorized" not in overlay_content:
             logger.warning(
-                f"Developer persona overlay '{overlay_path}' is missing the "
-                "stale-baseline `merge_authorized` bypass section — dev "
+                f"Engineer persona overlay '{overlay_path}' is missing the "
+                "stale-baseline `merge_authorized` bypass section — eng "
                 "sessions will halt on Full Suite Gate false positives. "
-                "Sync from config/personas/developer.md."
+                "Sync from config/personas/engineer.md."
             )
         logger.info(f"Loaded persona '{persona}' from {overlay_path}")
         result = f"{base_content}\n\n---\n\n{overlay_content}"
@@ -997,12 +994,12 @@ def load_persona_prompt(persona: str = "developer", substitutions: dict | None =
             result = result.format_map(_SafeFormatDict(substitutions))
         return result
 
-    # Invalid persona name — fall back to developer with warning
-    if persona not in ("developer", "project-manager", "teammate", "customer-service"):
-        logger.warning(f"Unknown persona '{persona}', falling back to developer persona")
-        developer_path = _resolve_overlay_path("developer")
-        if developer_path.exists():
-            result = f"{base_content}\n\n---\n\n{developer_path.read_text()}"
+    # Invalid persona name — fall back to engineer with warning
+    if persona not in ("engineer", "teammate", "customer-service"):
+        logger.warning(f"Unknown persona '{persona}', falling back to engineer persona")
+        engineer_path = _resolve_overlay_path("engineer")
+        if engineer_path.exists():
+            result = f"{base_content}\n\n---\n\n{engineer_path.read_text()}"
             if substitutions:
                 result = result.format_map(_SafeFormatDict(substitutions))
             return result
@@ -1165,8 +1162,8 @@ def _resolve_compose_args(
     if session_type == SessionType.ENG:
         return PersonaType.ENGINEER, AccessLevel.WORKER, None
 
-    # project_mode == "eng" forces engineer rails even for non-ENG session types.
-    if project_mode == "eng":
+    # project_mode in ("eng", "pm") forces engineer rails even for non-ENG session types.
+    if project_mode in ("eng", "pm"):
         return PersonaType.ENGINEER, AccessLevel.WORKER, None
 
     if session_type == SessionType.TEAMMATE:
@@ -3688,9 +3685,7 @@ async def get_agent_response_sdk(
         # set GH_REPO so all gh commands automatically target the correct repo.
         _gh_repo = None
         is_cross_repo_sdlc = (
-            project_mode != "eng"
-            and classification == ClassificationType.SDLC
-            and is_cross_repo
+            project_mode != "eng" and classification == ClassificationType.SDLC and is_cross_repo
         )
         if is_cross_repo_sdlc:
             _github_config = project.get("github", {}) if project else {}

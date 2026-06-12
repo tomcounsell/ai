@@ -88,8 +88,7 @@ valor-youtube-transcribe = "tools.link_analysis.cli:main"
 valor-ingest = "tools.valor_ingest:main"
 valor-tts = "tools.tts.cli:main"
 valor-computer = "tools.computer.cli:main"
-sdlc-decompose = "tools.sdlc_decompose:main"
-valor-granite-loop = "tools.granite_loop.cli:main"
+valor-granite-loop = "tools.granite_interactive_tui_poc.cli:main"
 valor = "tools.valor_cli:main"
 
 [tool.hatch.metadata]

@@ -59,39 +59,6 @@ MAX_PLAN_REVISING_DISPATCHES = 2
 # memory growth on long-running sessions.
 MAX_DISPATCH_HISTORY = 10
 
-# Phase 1 (multi-dev fan-out): maximum number of concurrent Dev sub-sessions
-# the PM may spawn for a single issue via ``sdlc-decompose``. Exceeding this cap
-# causes ``sdlc-decompose`` to exit non-zero (fail closed; multi-wave queueing
-# is explicitly out of scope -- see docs/plans/sdlc-1393.md "Rabbit Holes").
-MAX_PARALLEL_DEVS = 3
-
-# Phase 2 (DAG stage dispatch): set of stage-name pairs that may dispatch
-# concurrently when BOTH are simultaneously ``ready`` AND both match a row in
-# ``DISPATCH_RULES``. This is intentionally separate from ``PIPELINE_EDGES``
-# (which is a state-machine transition table keyed by ``(stage, outcome)``);
-# parallel-safety is a dispatch-time decision, not a graph topology fact.
-#
-# Seeded with {DOCS, PATCH} -- after REVIEW completes with findings, DOCS
-# (write/refresh user-facing docs) and PATCH (fix review nits) have no data
-# dependency on each other and can proceed in parallel. The PM session
-# orchestrates the two skills via the existing ``pthread`` skill.
-PARALLEL_SAFE_PAIRS: set[frozenset[str]] = {frozenset({"DOCS", "PATCH"})}
-
-# Mapping from skill command to the stage that skill advances. Used by the
-# router to identify the stage backing a chosen ``Dispatch`` so we can look it
-# up in ``PARALLEL_SAFE_PAIRS``. Kept local to ``sdlc_router`` to avoid an
-# import cycle with ``pipeline_graph``.
-_SKILL_TO_STAGE: dict[str, str] = {
-    "/do-issue": "ISSUE",
-    "/do-plan": "PLAN",
-    "/do-plan-critique": "CRITIQUE",
-    "/do-build": "BUILD",
-    "/do-test": "TEST",
-    "/do-patch": "PATCH",
-    "/do-pr-review": "REVIEW",
-    "/do-docs": "DOCS",
-    "/do-merge": "MERGE",
-}
 
 # Stages whose statuses are considered "complete" markers. A stage with any
 # other value is still pending from the router's perspective.
@@ -146,25 +113,6 @@ class Blocked:
     reason: str
     guard_id: str | None = None
 
-
-@dataclass(frozen=True)
-class MultiDispatch:
-    """Two or more Dispatch decisions that may run concurrently.
-
-    Returned by :func:`decide_next_dispatch` when (a) the first matching
-    ``DISPATCH_RULES`` row produces a Dispatch, AND (b) another ``ready``
-    stage forms a :data:`PARALLEL_SAFE_PAIRS` pair with the first dispatch's
-    stage AND that other stage also matches a dispatch row.
-
-    Callers (notably ``tools/sdlc_next_skill.py`` and the SDLC skill) are
-    expected to honour all guards on the *first* dispatch -- if a guard
-    redirects or blocks, the entire ``MultiDispatch`` is replaced by the
-    guard's decision. Guards are evaluated BEFORE the parallel-pair scan, so
-    a single guard fire short-circuits the multi-dispatch path.
-    """
-
-    dispatches: list[Dispatch]
-    reason: str
 
 
 # Type alias for the predicate functions in DISPATCH_RULES. Each takes the
@@ -1126,73 +1074,19 @@ def _stage_is_ready(stage_states: dict, stage: str) -> bool:
     return status in ("ready", "pending", "failed")
 
 
-def _find_parallel_dispatch(
-    primary: Dispatch,
-    stage_states: dict,
-    meta: dict,
-    context: dict,
-) -> Dispatch | None:
-    """Find a second Dispatch that may run concurrently with ``primary``.
-
-    Walks ``PARALLEL_SAFE_PAIRS`` looking for a pair containing the primary
-    dispatch's stage. For the *other* stage in the pair, scans ``DISPATCH_RULES``
-    in row order for a matching rule whose chosen skill resolves to that stage.
-
-    Returns the second Dispatch, or ``None`` if no parallel-safe peer is ready.
-    """
-    primary_stage = _SKILL_TO_STAGE.get(primary.skill)
-    if not primary_stage:
-        return None
-
-    for pair in PARALLEL_SAFE_PAIRS:
-        if primary_stage not in pair:
-            continue
-        # The OTHER stage in the pair.
-        peer_stages = pair - {primary_stage}
-        if not peer_stages:
-            continue
-        peer_stage = next(iter(peer_stages))
-
-        # The peer stage must be in a dispatchable state. We don't require
-        # status == "ready" exactly because PATCH frequently sits at "failed"
-        # before patching, and DOCS frequently sits at "pending".
-        if not _stage_is_ready(stage_states, peer_stage):
-            continue
-
-        # Find a dispatch rule that picks the peer stage's skill.
-        for rule in DISPATCH_RULES:
-            if rule.row_id == primary.row_id:
-                continue
-            rule_stage = _SKILL_TO_STAGE.get(rule.skill)
-            if rule_stage != peer_stage:
-                continue
-            try:
-                if rule.state_predicate(stage_states, meta, context):
-                    return Dispatch(
-                        skill=rule.skill,
-                        reason=rule.reason,
-                        row_id=rule.row_id,
-                    )
-            except Exception as e:
-                logger.debug(f"Parallel DispatchRule {rule.row_id} predicate raised: {e}")
-    return None
-
 
 def decide_next_dispatch(
     stage_states: dict,
     meta: dict | None = None,
     context: dict | None = None,
-) -> Dispatch | MultiDispatch | Blocked:
-    """Decide which sub-skill(s) the SDLC router should dispatch next.
+) -> Dispatch | Blocked:
+    """Decide which sub-skill the SDLC router should dispatch next.
 
     Algorithm:
       1. Evaluate guards G1–G7. If any guard trips, return its decision.
       2. Otherwise, walk ``DISPATCH_RULES`` in row order. Take the first
-         rule whose ``state_predicate`` returns True as the *primary* dispatch.
-      3. Scan ``PARALLEL_SAFE_PAIRS`` for a parallel-safe peer dispatch. If a
-         second eligible Dispatch exists, wrap both into a ``MultiDispatch``;
-         otherwise return the primary Dispatch alone.
-      4. If no rule matches at all, return ``Blocked(reason="no matching rule")``.
+         rule whose ``state_predicate`` returns True as the primary dispatch.
+      3. If no rule matches at all, return ``Blocked(reason="no matching rule")``.
 
     Args:
         stage_states: The stage-status dict from ``AgentSession.stage_states``.
@@ -1207,8 +1101,7 @@ def decide_next_dispatch(
             ``current_plan_hash`` for G5 and ``proposed_skill`` for G3.
 
     Returns:
-        ``Dispatch`` with a single chosen skill, ``MultiDispatch`` when two
-        parallel-safe stages are both ready, or ``Blocked`` if the router
+        ``Dispatch`` with the chosen skill, or ``Blocked`` if the router
         escalates to human.
     """
     meta = meta or {}
@@ -1252,17 +1145,6 @@ def decide_next_dispatch(
         return Blocked(
             reason="no matching dispatch rule",
             guard_id=None,
-        )
-
-    # Phase 2: look for a parallel-safe peer dispatch.
-    peer = _find_parallel_dispatch(primary, stage_states, meta, context)
-    if peer is not None:
-        return MultiDispatch(
-            dispatches=[primary, peer],
-            reason=(
-                f"parallel-safe pair: {primary.skill} ({primary.row_id}) + "
-                f"{peer.skill} ({peer.row_id})"
-            ),
         )
 
     return primary

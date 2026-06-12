@@ -225,7 +225,7 @@ When BUILD is the dispatched stage and the plan decomposes cleanly into independ
 2. If the array has only one unit: dispatch `/do-build` normally (single-dev path).
 3. If the array has 2+ units: for each unit `u_i`, **sequentially** call
    ```bash
-   valor-session create --role dev --parent $AGENT_SESSION_ID \
+   valor-session create --role eng --parent $AGENT_SESSION_ID \
      --slug {slug}-u{i} --message "Implement unit {u_i}: {description}. Tasks: ..."
    ```
    Sub-slug worker_keys are distinct, so the worker runs the children concurrently. (Sequential creation only -- timestamp-based ID collision risk for parallel creation.)
