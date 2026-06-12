@@ -155,6 +155,25 @@ TURN_TEXT_MAX_CHARS = 256_000
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
+# Cursor-advance CSI sequences the TUI uses to position the next glyph
+# INSTEAD of emitting literal spaces. The Ink/React renderer paints
+# `word1 word2` as `word1<cursor-forward>word2`, so the inter-word gap
+# lives entirely in the escape sequence — never as a space character.
+# A naive `_ANSI_CSI_RE.sub("", ...)` deletes the gap and collapses the
+# words (`word1word2`), which is the issue-#1634 space-stripping bug.
+# We translate these to literal spaces BEFORE the blanket CSI strip so
+# the visible spacing survives into the classifier payload.
+#   - `\x1b[<N>C` (Cursor Forward, CUF): advance N columns -> N spaces.
+#     A bare `\x1b[C` (no count) advances 1 column -> 1 space.
+#   - `\x1b[<N>G` / `\x1b[G` (Cursor Horizontal Absolute, CHA): jump to
+#     an absolute column. We can't reconstruct the absolute target
+#     without full terminal emulation, but the only thing downstream
+#     matching needs is that the word boundary is preserved, so we emit
+#     a single space. (Adjacent runs collapse via the final whitespace
+#     normalization the classifier already does with `.strip()`.)
+_ANSI_CURSOR_FORWARD_RE = re.compile(r"\x1b\[([0-9]*)C")
+_ANSI_CURSOR_ABS_COL_RE = re.compile(r"\x1b\[[0-9]*G")
+
 # The default content floor for post-reply idle. The TUI briefly
 # re-renders the bar while the model is still loading a response; that
 # false-positive doesn't have response content behind it, so we require
@@ -207,7 +226,16 @@ def _strip_ansi(text: str) -> str:
     out of scope. The classifier layer only needs the visible text.
     Whitespace is preserved so that downstream matching (bypass bar,
     overlay bar, content checks) can use readable substrings.
+
+    Cursor-advance sequences (CUF `\x1b[NC`, CHA `\x1b[NG`) are the
+    TUI's way of painting inter-word spacing without literal spaces; we
+    translate them to spaces BEFORE the blanket CSI strip so the gaps
+    survive into the classifier payload (issue #1634). Order matters:
+    the CUF/CHA substitutions MUST run before `_ANSI_CSI_RE`, which
+    would otherwise delete the spacing outright.
     """
+    text = _ANSI_CURSOR_FORWARD_RE.sub(lambda m: " " * max(1, int(m.group(1) or "1")), text)
+    text = _ANSI_CURSOR_ABS_COL_RE.sub(" ", text)
     text = _ANSI_CSI_RE.sub("", text)
     text = _ANSI_OSC_RE.sub("", text)
     # TUI cursor-positioning and similar non-CSI controls. We keep the
