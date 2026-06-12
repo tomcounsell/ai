@@ -325,6 +325,17 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Class-set orphan cleanup failed (non-fatal): {e}")
 
+    # Step 2c: Heal future-dated updated_at values written before fix #1645.
+    # Clamps any session whose updated_at is in the future (caused by popoto
+    # auto_now minting naive local time on non-UTC hosts). Idempotent.
+    try:
+        from models.agent_session import AgentSession as _AgentSession
+
+        count = _AgentSession._heal_future_updated_at()
+        logger.info(f"_heal_future_updated_at: healed {count} records")
+    except Exception as e:
+        logger.warning(f"_heal_future_updated_at non-fatal: {e}")
+
     # Step 3: Recover any sessions that were running when the previous process died
     try:
         recovered = _recover_interrupted_agent_sessions_startup()

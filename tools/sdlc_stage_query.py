@@ -45,6 +45,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tools._sdlc_utils import _resolve_target_repo
 from tools._sdlc_utils import find_plan_path as _find_plan_path
 
 logger = logging.getLogger(__name__)
@@ -125,7 +126,9 @@ def _get_stage_states(session) -> dict[str, str]:
         return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
-def _fetch_pr_merge_state(pr_number: int | None) -> tuple[str | None, bool | None]:
+def _fetch_pr_merge_state(
+    pr_number: int | None, repo: str | None = None
+) -> tuple[str | None, bool | None]:
     """Fetch live PR merge state and CI status from GitHub.
 
     Returns a tuple of (pr_merge_state, ci_all_passing):
@@ -137,20 +140,29 @@ def _fetch_pr_merge_state(pr_number: int | None) -> tuple[str | None, bool | Non
 
     On any ``gh`` CLI failure (network error, unknown PR, timeout), both fields
     default to ``None``. Guard G6 will not fire if either is ``None``.
+
+    Args:
+        pr_number: The PR number to query.
+        repo: Optional owner/name slug for cross-repo PRs (e.g. "tomcounsell/popoto").
+            When provided, ``--repo`` is passed to ``gh pr view``. The function
+            never calls ``_resolve_target_repo`` internally; callers are responsible
+            for resolving the repo and threading it in.
     """
     if not pr_number:
         return None, None
 
     try:
+        cmd = [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            *(["--repo", repo] if repo else []),
+            "--json",
+            "mergeStateStatus,statusCheckRollup",
+        ]
         proc = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "view",
-                str(pr_number),
-                "--json",
-                "mergeStateStatus,statusCheckRollup",
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=10,
@@ -177,16 +189,27 @@ def _fetch_pr_merge_state(pr_number: int | None) -> tuple[str | None, bool | Non
         return None, None
 
 
-def _gh_pr_list(args: list[str]) -> int | None:
+def _gh_pr_list(args: list[str], repo: str | None = None) -> int | None:
     """Run ``gh pr list`` with the given args and return the first PR number.
 
     Returns the PR number or None on any failure. Never raises.
+
+    Args:
+        args: Extra arguments to pass to ``gh pr list``.
+        repo: Optional owner/name slug for cross-repo lookup. When provided,
+            ``--repo`` is added to the command. The function never calls
+            ``_resolve_target_repo`` internally; callers resolve and thread it in.
     """
-    # GH_REPO is automatically respected by the ``gh`` CLI; no --repo flag
-    # needed for cross-repo work.
+    # Resolution ladder: _resolve_target_repo() is called exactly once per
+    # _compute_meta invocation and threaded into _gh_pr_list via the ``repo``
+    # param. This ensures cross-repo SDLC sessions (cwd=~/src/ai, target
+    # repo=tomcounsell/popoto) resolve PR state against the correct repo.
     try:
+        cmd = ["gh", "pr", "list", *args, "--json", "number"]
+        if repo:
+            cmd = ["gh", "pr", "list", "--repo", repo, *args, "--json", "number"]
         proc = subprocess.run(
-            ["gh", "pr", "list", *args, "--json", "number"],
+            cmd,
             capture_output=True,
             text=True,
             timeout=5,
@@ -204,7 +227,9 @@ def _gh_pr_list(args: list[str]) -> int | None:
     return None
 
 
-def _lookup_pr_number(issue_number: int | None, slug: str | None = None) -> int | None:
+def _lookup_pr_number(
+    issue_number: int | None, slug: str | None = None, repo: str | None = None
+) -> int | None:
     """Attempt to find the open PR number for this issue via ``gh``.
 
     Resolution order (D4):
@@ -219,12 +244,12 @@ def _lookup_pr_number(issue_number: int | None, slug: str | None = None) -> int 
     Returns the PR number or None. Never raises.
     """
     if issue_number:
-        pr = _gh_pr_list(["--search", f"#{issue_number}", "--state", "open"])
+        pr = _gh_pr_list(["--search", f"#{issue_number}", "--state", "open"], repo=repo)
         if pr is not None:
             return pr
 
     if slug:
-        pr = _gh_pr_list(["--head", f"session/{slug}", "--state", "open"])
+        pr = _gh_pr_list(["--head", f"session/{slug}", "--state", "open"], repo=repo)
         if pr is not None:
             return pr
 
@@ -273,6 +298,16 @@ def _compute_meta(
     issue_number: int | None,
 ) -> dict:
     """Build the ``_meta`` payload for the enriched query response."""
+    # Resolve the target repo exactly once per _compute_meta invocation.
+    # Resolution ladder (in _resolve_target_repo):
+    #   GH_REPO env (already an owner/name slug) →
+    #   SDLC_TARGET_REPO env (filesystem path used as cwd for gh repo view) →
+    #   git working-tree root (also used as cwd for gh repo view) →
+    #   None (degrades to current-repo behavior).
+    # The resolved slug is threaded into _fetch_pr_merge_state and _gh_pr_list
+    # via their ``repo=`` param; neither function calls _resolve_target_repo itself.
+    resolved_repo = _resolve_target_repo()
+
     verdicts = raw_states.get("_verdicts") or {}
     if not isinstance(verdicts, dict):
         verdicts = {}
@@ -292,10 +327,10 @@ def _compute_meta(
     elif isinstance(meta_pr, int) and meta_pr > 0:
         pr_number = meta_pr
     else:
-        pr_number = _lookup_pr_number(issue_number, slug=slug)
+        pr_number = _lookup_pr_number(issue_number, slug=slug, repo=resolved_repo)
 
     # Fetch live PR merge state and CI status for G6 guard
-    pr_merge_state, ci_all_passing = _fetch_pr_merge_state(pr_number)
+    pr_merge_state, ci_all_passing = _fetch_pr_merge_state(pr_number, repo=resolved_repo)
 
     # Compute dispatch-history derived fields.
     # D5: pass the LIVE stage snapshot so the count resets when state has
@@ -347,6 +382,7 @@ def _compute_meta(
         "plan_hash_at_build_start": plan_hash_at_build_start,
         "plan_exists": plan_exists,
         "issue_number": issue_number,
+        "_resolved_target_repo": resolved_repo,
     }
 
 
@@ -367,6 +403,7 @@ def _default_meta() -> dict:
         "plan_hash_at_build_start": None,
         "plan_exists": False,
         "issue_number": None,
+        "_resolved_target_repo": None,
     }
 
 

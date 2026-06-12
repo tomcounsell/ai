@@ -150,7 +150,9 @@ class AgentSession(Model):
     scheduled_at = DatetimeField(null=True)  # UTC datetime; _pop_job() skips if > now()
     created_at = SortedField(type=datetime, partition_by="project_key")
     started_at = DatetimeField(null=True)  # Cannot be SortedField because it starts as None
-    updated_at = DatetimeField(auto_now=True, null=True)  # Renamed from last_activity
+    updated_at = DatetimeField(null=True)
+    # auto_now removed deliberately (see #1645) — do not re-add;
+    # popoto auto_now mints naive-local time. UTC stamp is in save() override.
     completed_at = DatetimeField(null=True)
     response_delivered_at = DatetimeField(null=True)
     working_dir = Field()
@@ -826,6 +828,95 @@ class AgentSession(Model):
         """Create an AgentSession asynchronously with backward-compatible field name support."""
         kwargs = cls._normalize_kwargs(kwargs)
         return await super().async_create(**kwargs)
+
+    def save(self, *args, update_fields=None, **kwargs):
+        """Override to stamp updated_at with UTC wall-clock time.
+
+        Popoto auto_now mints naive local time (bug #1645); instead we stamp
+        explicitly so the stored value is always UTC wall-clock, consistent
+        with how created_at/started_at are handled (see bridge/utc.py::utc_now).
+
+        update_fields guard: if update_fields omits 'updated_at', skip the stamp
+        entirely (no in-memory mutation without a matching persist, to avoid
+        memory/Redis desync).
+        """
+        from bridge.utc import utc_now
+
+        if update_fields is not None and "updated_at" not in update_fields:
+            logger.warning(
+                "save() called with update_fields missing 'updated_at'; "
+                "timestamp not persisted to avoid memory/Redis desync"
+            )
+            return super().save(*args, update_fields=update_fields, **kwargs)
+        self.updated_at = utc_now()
+        return super().save(*args, update_fields=update_fields, **kwargs)
+
+    @classmethod
+    def _heal_future_updated_at(cls) -> int:
+        """One-shot heal for future-dated updated_at values written before fix #1645.
+
+        Clamps any session whose updated_at is in the future down to
+        max(created_at, now). Idempotent: a re-run clamps only still-future
+        records (partial mid-heal restart is safe because the per-record guard
+        is a strict `if record.updated_at > utc_now()` check, not a bulk update).
+
+        Returns the number of records healed.
+        """
+        from bridge.utc import utc_now
+
+        now = utc_now()
+        count = 0
+        try:
+            all_sessions = cls.query.all()
+        except Exception as e:
+            logger.warning(f"_heal_future_updated_at: could not fetch sessions: {e}")
+            return 0
+
+        for record in all_sessions:
+            try:
+                if record.updated_at is None:
+                    continue  # None is safe — save() will stamp on next write
+
+                # Popoto strips tzinfo on load — treat naive datetimes as UTC
+                # (consistent with bridge/utc.py::to_unix_ts).
+                updated_at_utc = record.updated_at
+                if updated_at_utc.tzinfo is None:
+                    updated_at_utc = updated_at_utc.replace(tzinfo=UTC)
+
+                if updated_at_utc <= now:
+                    continue  # already sane, skip
+
+                # Clamp created_at first (dual-future-dated case, CONCERN — Adversary):
+                # ensures updated_at floor uses the already-clamped value so the
+                # invariant created_at <= updated_at <= now holds.
+                if record.created_at:
+                    created_at_utc = record.created_at
+                    if created_at_utc.tzinfo is None:
+                        created_at_utc = created_at_utc.replace(tzinfo=UTC)
+                    if created_at_utc > now:
+                        record.created_at = now
+                        logger.warning(
+                            f"_heal_future_updated_at: clamped future created_at on {record.id}"
+                        )
+
+                floor = record.created_at if record.created_at else now
+                # Normalize floor to tz-aware for max() comparison
+                if hasattr(floor, "tzinfo") and floor.tzinfo is None:
+                    floor = floor.replace(tzinfo=UTC)
+                record.updated_at = max(floor, now)
+                # Full save (no update_fields) so all changed fields are persisted
+                # and all popoto indexes (including SortedField created_at) are
+                # kept in sync. The save() override will re-stamp utc_now() for
+                # updated_at (idempotent — it will equal now).
+                record.save()
+                count += 1
+                logger.info(f"_heal_future_updated_at: healed session {record.id}")
+            except Exception as e:
+                logger.warning(
+                    f"_heal_future_updated_at: skipped {getattr(record, 'id', '?')}: {e}"
+                )
+
+        return count
 
     @classmethod
     def get_by_id(cls, agent_session_id: str | None) -> "AgentSession | None":

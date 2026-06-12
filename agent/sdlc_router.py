@@ -1109,6 +1109,21 @@ def decide_next_dispatch(
             logger.debug(f"DispatchRule {rule.row_id} predicate raised: {e}")
 
     if primary is None:
+        # Distinguishable UNKNOWN / unresolvable merge-state blocked reason.
+        # CRITICAL: Only fires when pr_merge_state is None or "UNKNOWN" —
+        # not for DIRTY/BLOCKED (those are real states that route normally).
+        # G6 still requires exactly "CLEAN"; this check does NOT change G6.
+        pr_num = meta.get("pr_number")
+        pr_state = meta.get("pr_merge_state")
+        if pr_num and pr_state in (None, "UNKNOWN"):
+            resolved_repo = meta.get("_resolved_target_repo") or "<none — using cwd>"
+            return Blocked(
+                reason=(
+                    f"PR #{pr_num} merge state {pr_state!r} — could not resolve mergeability "
+                    f"(target repo: {resolved_repo}; check GH_REPO / SDLC_TARGET_REPO env)"
+                ),
+                guard_id=None,
+            )
         return Blocked(
             reason="no matching dispatch rule",
             guard_id=None,

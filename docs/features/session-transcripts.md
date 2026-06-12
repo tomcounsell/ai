@@ -57,7 +57,7 @@ This runs unconditionally — the legacy `--chat` flag is accepted but ignored s
 | `chat_id` | KeyField | Telegram chat ID |
 | `sender` | Field | Who triggered the session |
 | `started_at` | SortedField | Unix timestamp, partitioned by project_key |
-| `updated_at` | DatetimeField | Last activity timestamp (auto_now=True) |
+| `updated_at` | DatetimeField | Last activity timestamp; stamped with UTC wall-clock via `AgentSession.save()` override |
 | `completed_at` | Field | Completion timestamp |
 | `turn_count` | IntField | Number of conversation turns |
 | `tool_call_count` | IntField | Number of tool calls |
