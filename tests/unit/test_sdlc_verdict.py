@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tools._sdlc_utils import normalize_verdict
 from tools.sdlc_verdict import (
     compute_plan_hash,
     get_verdict,
@@ -89,7 +90,8 @@ class TestRecordVerdict:
         session = fake_session_reload_patched
         record_verdict(session, "CRITIQUE", "READY TO BUILD (no concerns)")
         got = get_verdict(session, "CRITIQUE")
-        assert got["verdict"] == "READY TO BUILD (no concerns)"
+        # normalize_verdict uppercases the stored verdict (#1638 write-boundary).
+        assert got["verdict"] == "READY TO BUILD (NO CONCERNS)"
 
     def test_get_verdict_returns_empty_for_unknown_stage(self):
         session = _FakeSession()
@@ -201,3 +203,39 @@ class TestCliRecordEnsure:
         # get must NOT pass ensure (reads stay pure).
         _, kwargs = get_find_mock.call_args
         assert "ensure" not in kwargs or kwargs.get("ensure") is False
+
+
+class TestNormalizeVerdict:
+    """Unit tests for normalize_verdict helper (#1638)."""
+
+    def test_none_returns_empty(self):
+        assert normalize_verdict(None) == ""
+
+    def test_empty_returns_empty(self):
+        assert normalize_verdict("") == ""
+
+    def test_whitespace_only_returns_empty(self):
+        assert normalize_verdict("  ") == ""
+
+    def test_underscore_form_converted(self):
+        assert normalize_verdict("changes_requested") == "CHANGES REQUESTED"
+
+    def test_idempotent_space_form(self):
+        assert normalize_verdict("CHANGES REQUESTED") == "CHANGES REQUESTED"
+
+    def test_mixed_case_uppercased(self):
+        assert normalize_verdict("Changes Requested") == "CHANGES REQUESTED"
+
+    def test_extra_whitespace_collapsed(self):
+        assert normalize_verdict("  Changes  Requested  ") == "CHANGES REQUESTED"
+
+    def test_non_str_returns_empty(self):
+        assert normalize_verdict(42) == ""  # type: ignore[arg-type]
+
+    def test_record_verdict_normalizes_underscore_form(self, fake_session_reload_patched):
+        """Recording 'changes_requested' must store 'CHANGES REQUESTED' (#1638)."""
+        session = fake_session_reload_patched
+        record = record_verdict(session, "REVIEW", "changes_requested")
+        assert record["verdict"] == "CHANGES REQUESTED"
+        data = json.loads(session.stage_states)
+        assert data["_verdicts"]["REVIEW"]["verdict"] == "CHANGES REQUESTED"

@@ -369,3 +369,230 @@ class TestNoMatchingRule:
         }
         result = decide_next_dispatch(states, {})  # no pr_number => Row 10 fails
         assert isinstance(result, Blocked)
+
+
+# ---------------------------------------------------------------------------
+# #1638 — verdict normalization: underscore forms match space-canonical rules
+# ---------------------------------------------------------------------------
+
+
+class TestVerdictNormalizationUnderscore:
+    """Underscore-form verdicts must route identically to space-form (#1638)."""
+
+    def _review_states_with_findings(self) -> dict:
+        return {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "failed",
+        }
+
+    def test_review_changes_requested_underscore_dispatches_patch(self):
+        states = self._review_states_with_findings()
+        meta = {"pr_number": 99, "latest_review_verdict": "CHANGES_REQUESTED"}
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PATCH
+        assert result.row_id == "8"
+
+    def test_review_changes_requested_space_dispatches_patch(self):
+        states = self._review_states_with_findings()
+        meta = {"pr_number": 99, "latest_review_verdict": "CHANGES REQUESTED"}
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PATCH
+        assert result.row_id == "8"
+
+
+# ---------------------------------------------------------------------------
+# #1640 — plan-existence evidence gate: PLAN="ready" needs a real plan doc
+# ---------------------------------------------------------------------------
+
+
+class TestPlanExistenceGate:
+    """PLAN='ready' without a plan doc must route to /do-plan, not /do-plan-critique."""
+
+    def test_fresh_session_plan_ready_no_doc_dispatches_do_plan(self):
+        """Bootstrap: PLAN='ready', no plan doc → dispatch /do-plan (Row 1)."""
+        states = {"PLAN": "ready", "CRITIQUE": None}
+        meta = {"plan_exists": False, "issue_number": 1234}
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN
+
+    def test_plan_ready_plan_exists_dispatches_critique(self):
+        """PLAN='ready' WITH a plan doc → dispatch /do-plan-critique (Row 2)."""
+        states = {"PLAN": "ready", "CRITIQUE": None}
+        meta = {"plan_exists": True, "issue_number": 1234}
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN_CRITIQUE
+
+    def test_plan_ready_no_issue_number_does_not_reroute_to_plan(self):
+        """PLAN='ready', plan_exists=False, issue_number=None → falls through to Row 2.
+
+        Without an issue_number we cannot verify the plan file, so we treat
+        the 'ready' state as an implicit plan exists and let Row 2 run critique.
+        The guard only fires when issue_number is available for a lookup.
+        """
+        states = {"PLAN": "ready", "CRITIQUE": None}
+        meta = {"plan_exists": False, "issue_number": None}
+        result = decide_next_dispatch(states, meta)
+        # Without issue_number, _rule_no_plan does NOT fire for PLAN="ready";
+        # the state should fall through to Row 2 (critique) or Blocked.
+        assert isinstance(result, (Dispatch, Blocked))
+        if isinstance(result, Dispatch):
+            assert result.skill != SKILL_DO_PLAN
+
+    def test_plan_completed_always_dispatches_critique_regardless_of_plan_exists(self):
+        """PLAN='completed' → always critique, regardless of plan_exists (#1275 intact)."""
+        states = {"PLAN": "completed", "CRITIQUE": None}
+        meta = {"plan_exists": False, "issue_number": 9999}
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN_CRITIQUE
+
+
+# ---------------------------------------------------------------------------
+# #1641 — patch-supersedes-stale-verdict timestamp early-exit
+# ---------------------------------------------------------------------------
+
+
+def _iso(ts: str) -> str:
+    """Return an ISO-8601 timestamp string (thin wrapper for readability)."""
+    return ts
+
+
+class TestReviewVerdictStaleness:
+    """Stale REVIEW verdict (older than latest /do-patch dispatch) must be superseded."""
+
+    def _base_states(self, verdict_at: str, patch_at: str) -> dict:
+        return {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "failed",
+            "PATCH": "completed",
+            "_verdicts": {
+                "REVIEW": {
+                    "verdict": "CHANGES REQUESTED",
+                    "recorded_at": verdict_at,
+                }
+            },
+            "_sdlc_dispatches": [
+                {"skill": "/do-patch", "at": patch_at},
+            ],
+        }
+
+    def test_stale_review_verdict_after_patch_dispatches_review(self):
+        """verdict T0 < patch T1 → stale → /do-pr-review (row 8b)."""
+        states = self._base_states(
+            verdict_at="2026-01-01T10:00:00",
+            patch_at="2026-01-01T11:00:00",
+        )
+        meta = {"pr_number": 99, "last_dispatched_skill": SKILL_DO_PATCH}
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PR_REVIEW
+
+    def test_fresh_review_verdict_after_patch_dispatches_patch(self):
+        """verdict T2 > patch T1 → fresh → /do-patch (row 8)."""
+        states = self._base_states(
+            verdict_at="2026-01-01T12:00:00",
+            patch_at="2026-01-01T11:00:00",
+        )
+        meta = {"pr_number": 99, "latest_review_verdict": "CHANGES REQUESTED"}
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PATCH
+
+    def test_review_verdict_stale_missing_recorded_at_not_suppressed(self):
+        """Missing recorded_at → not stale → row 8 fires normally."""
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "failed",
+            "PATCH": "completed",
+            "_verdicts": {
+                "REVIEW": {
+                    "verdict": "CHANGES REQUESTED",
+                    # no recorded_at
+                }
+            },
+            "_sdlc_dispatches": [{"skill": "/do-patch", "at": "2026-01-01T11:00:00"}],
+        }
+        meta = {"pr_number": 99, "latest_review_verdict": "CHANGES REQUESTED"}
+        result = decide_next_dispatch(states, meta)
+        # Not stale (missing recorded_at) → row 8 fires → /do-patch
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PATCH
+
+    def test_review_verdict_stale_no_prior_patch_not_suppressed(self):
+        """No /do-patch in dispatch history → not stale → row 8 fires."""
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "failed",
+            "_verdicts": {
+                "REVIEW": {
+                    "verdict": "CHANGES REQUESTED",
+                    "recorded_at": "2026-01-01T10:00:00",
+                }
+            },
+            "_sdlc_dispatches": [],  # no /do-patch entries
+        }
+        meta = {"pr_number": 99, "latest_review_verdict": "CHANGES REQUESTED"}
+        result = decide_next_dispatch(states, meta)
+        # No prior /do-patch → not stale → row 8 fires → /do-patch
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PATCH
+
+    def test_review_verdict_stale_equal_timestamps_fresh(self):
+        """Equal timestamps → not stale (strict <) → row 8 fires."""
+        ts = "2026-01-01T10:00:00"
+        states = self._base_states(verdict_at=ts, patch_at=ts)
+        meta = {"pr_number": 99, "latest_review_verdict": "CHANGES REQUESTED"}
+        result = decide_next_dispatch(states, meta)
+        # Equal timestamps → not stale → row 8 → /do-patch
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PATCH
+
+    def test_review_verdict_stale_non_iso_timestamp_not_suppressed(self):
+        """Malformed recorded_at → parse failure → not stale → row 8 fires."""
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "failed",
+            "_verdicts": {
+                "REVIEW": {
+                    "verdict": "CHANGES REQUESTED",
+                    "recorded_at": "not-a-date",
+                }
+            },
+            "_sdlc_dispatches": [{"skill": "/do-patch", "at": "2026-01-01T11:00:00"}],
+        }
+        meta = {"pr_number": 99, "latest_review_verdict": "CHANGES REQUESTED"}
+        result = decide_next_dispatch(states, meta)
+        # Parse failure → not stale → row 8 → /do-patch
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PATCH
+
+    def test_fresh_review_verdict_after_patch_still_dispatches_patch(self):
+        """patch T1 < verdict T2 → fresh verdict → row 8 wins → /do-patch."""
+        states = self._base_states(
+            verdict_at="2026-01-01T12:00:00",
+            patch_at="2026-01-01T11:00:00",
+        )
+        # Override latest_review_verdict directly so meta takes precedence.
+        meta = {"pr_number": 99, "latest_review_verdict": "CHANGES REQUESTED"}
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PATCH

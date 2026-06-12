@@ -210,6 +210,60 @@ class TestNextSkillParity:
 
 
 # ---------------------------------------------------------------------------
+# #1638 / #1641 — end-to-end normalization + stale-verdict supersession
+# ---------------------------------------------------------------------------
+
+
+class TestRecordChangesThenPatchThenReview:
+    """Integration leg: underscore-form verdict + patch + stale-verdict supersession.
+
+    Simulates the full CHANGES_REQUESTED → /do-patch → re-review cycle that
+    was broken by issues #1638 (normalization) and #1641 (stale verdict).
+    """
+
+    def test_changes_requested_underscore_dispatches_patch(self):
+        """Step 1: CHANGES_REQUESTED (underscore) → /do-patch (row 8)."""
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "failed",
+        }
+        meta = {"pr_number": 99, "latest_review_verdict": "CHANGES_REQUESTED"}
+        result = _decide_with_fixture(states, meta)
+        assert result.get("skill") == "/do-patch", f"Expected /do-patch, got: {result}"
+        assert result.get("dispatched") is True
+
+    def test_patch_applied_stale_verdict_dispatches_review(self):
+        """Step 2: after patch, stale verdict (recorded before patch) → /do-pr-review (row 8b)."""
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "failed",
+            "PATCH": "completed",
+            "_verdicts": {
+                "REVIEW": {
+                    "verdict": "CHANGES REQUESTED",
+                    "recorded_at": "2026-01-01T10:00:00",
+                }
+            },
+            "_sdlc_dispatches": [
+                {"skill": "/do-patch", "at": "2026-01-01T11:00:00"},
+            ],
+        }
+        meta = {
+            "pr_number": 99,
+            "last_dispatched_skill": "/do-patch",
+        }
+        result = _decide_with_fixture(states, meta)
+        assert result.get("skill") == "/do-pr-review", f"Expected /do-pr-review, got: {result}"
+        assert result.get("dispatched") is True
+
+
+# ---------------------------------------------------------------------------
 # Output schema tests
 # ---------------------------------------------------------------------------
 
