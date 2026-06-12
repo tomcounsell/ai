@@ -820,6 +820,14 @@ The lead agent orchestrates; it never builds directly.
     - `tools/_sdlc_utils.py:97` (`AgentSession.query.filter(session_type="pm")`) — **plus the `:87` and
       `:162` `getattr(s, "session_type", None) == "pm"` gates the critique cited only `:97` for.** All
       three verified; rename to `"eng"`.
+    - **Three additional live reader gates the comparison spot-check surfaced (not in the critique's six,
+      but caught by the new `== "pm"`/`!= "pm"` Verification row, so they must be renamed for the plan to
+      stay internally consistent):** `agent/session_pickup.py:119` (`session_type != "pm"` resume-hydration
+      gate), `tools/sdlc_stage_query.py:66` (`== "pm"` PM-session preference), and
+      `tools/stage_states_helpers.py:99` (`== "pm"` canonical stage_states owner). All verified live; rename
+      every `"pm"` to `"eng"`. (The `agent/session_executor.py:781,1914` `== "dev"` gates the spot-check
+      also surfaces live **inside the dev-completion path Task 3 deletes** — they go away with that
+      deletion, not via rename; the `:1906,1912` hits are comments.)
 - **Parent-sync machinery disposition (CONCERN, Consistency):** `_finalize_parent_sync` /
   `waiting_for_children` are general child-session machinery, **not** dev-specific — they survive the
   removal. `_handle_dev_session_completion` was only one *trigger* of the parent-sync path; the
@@ -980,7 +988,7 @@ critical path* changes.
 | No `project_mode == "pm"` guard | `grep -n 'project_mode == "pm"\|project_mode != "pm"' agent/sdk_client.py` | exit code 1 |
 | Migration refuses live worker | (manual) start worker, run migration | `sys.exit(1)` with fresh-heartbeat error |
 | Merge dry-run reports collisions | `python scripts/merge_dev_chat_into_eng.py --dry-run --project test-x` | exit 0; collisions enumerated, no rename performed |
-| No `== "pm"`/`!= "pm"` session_type comparison (C5-B1 complement) | `grep -rnE 'session_type[^=]*(==\|!=) *"(pm\|dev)"' agent/ bridge/ tools/ scripts/ --include="*.py"` | no matches (exit 1); catches the `sdlc_session_ensure.py:83`, `_sdlc_utils.py:87,162` gates the `=`-anchored gate misses |
+| No `== "pm"`/`!= "pm"` session_type comparison (C5-B1 complement) | `grep -rnE 'session_type[^=]*(==\|!=) *"(pm\|dev)"' agent/ bridge/ tools/ scripts/ --include="*.py" \| grep -vE '#\|::'` | no matches (exit 1). Catches the comparison gates the `=`-anchored gate misses: `sdlc_session_ensure.py:83`, `_sdlc_utils.py:87,162`, **plus the three additional live readers `session_pickup.py:119`, `sdlc_stage_query.py:66`, `stage_states_helpers.py:99`** (all renamed in Task 3). The `output_router.py:159` `== "pm"` is flipped by C4-B1; `session_executor.py:781,1914` `== "dev"` gates vanish with the dev-completion deletion (Task 3). The `grep -v` drops the comment/docstring hits (`session_executor.py:1906,1912`, `sdlc_session_ensure.py:170`). |
 | Reply-to steering routes to existing session (C5-C4) | (Cowboy pilot, manual) reply-to a running `Eng:` session; `python -m tools.valor_session status --id <ID>` | pending steering message present on the existing session; no new `eng` session created |
 | agent_session_queue imports load | `python -c "import agent.agent_session_queue"` | exit code 0 (re-export block fixed) |
 
