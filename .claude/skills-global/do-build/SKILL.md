@@ -242,6 +242,8 @@ sub-skill must announce degraded mode rather than silently lagging state:
 sdlc-tool stage-marker --stage BUILD --status in_progress --issue-number {issue_number}
 ```
 
+**Always pass `--issue-number {issue_number}`** on every `sdlc-tool` write (stage markers, meta-set, etc.). `--issue-number` is the authoritative session selector: it guarantees the write lands on the same session the router reads for that issue (`sdlc-local-{N}` or the bridge PM session that owns the issue). The `VALOR_SESSION_ID` / `AGENT_SESSION_ID` env-var session is only a *last-resort* fallback, subordinate to `--issue-number`, used when the issue number is genuinely unknown. A forked build subagent that inherited a parent's env-var session must still pass `--issue-number` so its writes are not diverted to the parent's session (#1671/#1672).
+
 Parse the JSON output:
 - `{"stage": "BUILD", "status": "in_progress"}` — substrate present, state persisted; proceed normally.
 - `{"status": "degraded", ...}` — **announce at the top of your run**: "running in degraded mode (state not persisted)". Continue the build; stage markers will not be recorded, but the build itself (worktree, agents, tests, PR) does not depend on the substrate.

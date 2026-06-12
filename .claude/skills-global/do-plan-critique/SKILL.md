@@ -272,7 +272,7 @@ case "$VERDICT_STRING" in
 esac
 ```
 
-Where `$VERDICT_STRING` is the exact verdict string emitted in Step 5 (e.g. `"NEEDS REVISION"`, `"READY TO BUILD (with concerns)"`). If `$ISSUE_NUMBER` is unknown, omit the `--issue-number` flag — the recorder falls back to `VALOR_SESSION_ID` / `AGENT_SESSION_ID` env vars and the artifact_hash will be None.
+Where `$VERDICT_STRING` is the exact verdict string emitted in Step 5 (e.g. `"NEEDS REVISION"`, `"READY TO BUILD (with concerns)"`). **Always pass `--issue-number $ISSUE_NUMBER` when the issue number is known** — it is the authoritative session selector and guarantees the verdict lands on the same session the router reads for that issue (`sdlc-local-{N}` or the bridge PM session that owns the issue). Only if `$ISSUE_NUMBER` is genuinely unknown, omit the flag; the recorder then falls back to the `VALOR_SESSION_ID` / `AGENT_SESSION_ID` env-var session as a *last resort* (subordinate to `--issue-number`), and the artifact_hash will be None. A forked subagent that inherited a parent's env-var session must still pass `--issue-number` so its verdict is not diverted to the parent's session (#1671/#1672).
 
 The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state. On a non-READY verdict, leave the CRITIQUE marker at `in_progress` (the router's row 3 / row 2b handle re-routing).
 
