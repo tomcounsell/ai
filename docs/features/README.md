@@ -6,7 +6,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 
 | Feature | Description | Status |
 |---------|-------------|--------|
-| [`valor` CLI Wrapper](valor-cli-wrapper.md) | Thin positional-prompt wrapper around `valor-session` (delegation-only, no new state). 5 strengths, 7 documented shortcomings (stale shell alias, literal-allowlist shortcut rewrite, stale worker pre-flight cache, help on positional, PTY path implicit, #1288 worktree-bound commits, zero wrapper unit tests) | Shipped |
+| [`valor` CLI Wrapper](valor-cli-wrapper.md) | Thin positional-prompt wrapper around `valor-session` (delegation-only, no new state). 5 strengths; shortcomings §1/§2/§3/§4/§6 resolved; §5 reframed as a design boundary (CLI enqueues, worker picks substrate); §7 slug requirement, §8 per-session model silently ignored by granite substrate remain. Full wrapper unit test suite added. | Shipped |
 | [Adding Reflection Tasks](adding-reflection-tasks.md) | Developer guide with copy-paste template for adding new reflection steps | Shipped |
 | [Agent Definition Fallback](agent-definition-fallback.md) | Graceful degradation when agent definition markdown files are missing, malformed, or unreadable — logs warning and continues with fallback prompt instead of crashing | Shipped |
 | [Agent Reply Terminus](agent-reply-terminus.md) | Conversation terminus detection (RESPOND/REACT/SILENT) in reply-to-Valor path to break infinite bot reply loops | Shipped |
