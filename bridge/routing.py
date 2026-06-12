@@ -1202,7 +1202,7 @@ async def should_respond_async(
         logger.debug(f"Teammate-persona group: silent storage for {chat_title!r}")
         return False, False
 
-    # Team chats (no Dev:/PM: prefix) are mention-only
+    # Team chats (no Eng: prefix) are mention-only
     if is_team_chat(chat_title):
         mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
         text_lower = text.lower()
@@ -1210,7 +1210,7 @@ async def should_respond_async(
             return True, is_reply_to_non_valor_thread
         return False, False
 
-    # Dev:/PM: groups: reply-to-non-Valor triggers session continuation (#996).
+    # Eng: groups: reply-to-non-Valor triggers session continuation (#996).
     # Must run AFTER team-chat/Teammate gates so mention-only policy wins there.
     if is_reply_to_non_valor_thread:
         logger.info("Reply to non-Valor thread message - treating as session continuation")

@@ -142,7 +142,7 @@ class TestRouteSessionOutput:
             msg="Stage complete",
             stop_reason="end_turn",
             auto_continue_count=0,
-            session_type="pm",
+            session_type="eng",
             classification_type="sdlc",
         )
         assert action == "nudge_continue"
@@ -177,7 +177,7 @@ class TestNoMarkerRouting:
             msg="All stages done. [PIPELINE_COMPLETE]",
             stop_reason="end_turn",
             auto_continue_count=5,
-            session_type="pm",
+            session_type="eng",
             classification_type="sdlc",
         )
         assert action == "nudge_continue"
@@ -189,7 +189,7 @@ class TestNoMarkerRouting:
             msg="DOCS stage complete, moving to next stage.",
             stop_reason="end_turn",
             auto_continue_count=5,
-            session_type="pm",
+            session_type="eng",
             classification_type="sdlc",
         )
         assert action == "nudge_continue"
@@ -233,7 +233,7 @@ class TestPMPersonaMergeRule:
         """
         import pathlib
 
-        persona_path = pathlib.Path("config/personas/project-manager.md")
+        persona_path = pathlib.Path("config/personas/engineer.md")
         content = persona_path.read_text()
         assert "Rule 5" in content
         assert "MERGE" in content
@@ -244,7 +244,7 @@ class TestPMPersonaMergeRule:
         """Rule 5 must instruct PM to check for open PRs before completing."""
         import pathlib
 
-        persona_path = pathlib.Path("config/personas/project-manager.md")
+        persona_path = pathlib.Path("config/personas/engineer.md")
         content = persona_path.read_text()
         assert "open PR" in content
 

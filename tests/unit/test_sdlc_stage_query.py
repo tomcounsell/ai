@@ -221,35 +221,35 @@ class TestFindSessionByIssue:
 class TestFindSessionById:
     """Tests for _find_session_by_id."""
 
-    def test_prefers_pm_session(self):
+    def test_prefers_eng_session(self):
         from tools.sdlc_stage_query import _find_session_by_id
 
-        pm_session = MagicMock()
-        pm_session.session_type = "pm"
-        dev_session = MagicMock()
-        dev_session.session_type = "dev"
+        eng_session = MagicMock()
+        eng_session.session_type = "eng"
+        teammate_session = MagicMock()
+        teammate_session.session_type = "teammate"
 
         mock_as = MagicMock()
-        mock_as.query.filter.return_value = [dev_session, pm_session]
+        mock_as.query.filter.return_value = [teammate_session, eng_session]
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _find_session_by_id("test-session")
 
-        assert result == pm_session
+        assert result == eng_session
 
-    def test_returns_first_session_when_no_pm(self):
+    def test_returns_first_session_when_no_eng(self):
         from tools.sdlc_stage_query import _find_session_by_id
 
-        dev_session = MagicMock()
-        dev_session.session_type = "dev"
+        teammate_session = MagicMock()
+        teammate_session.session_type = "teammate"
 
         mock_as = MagicMock()
-        mock_as.query.filter.return_value = [dev_session]
+        mock_as.query.filter.return_value = [teammate_session]
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _find_session_by_id("test-session")
 
-        assert result == dev_session
+        assert result == teammate_session
 
     def test_returns_none_for_empty_results(self):
         from tools.sdlc_stage_query import _find_session_by_id

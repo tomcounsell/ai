@@ -2111,8 +2111,8 @@ def _resolve_persona(
     if is_dm:
         return telegram_config.get("dm_persona", PersonaType.TEAMMATE)
 
-    # Eng mode projects always use engineer persona
-    project_mode = project.get("mode", "eng")
+    # Eng mode projects always use engineer persona (only if explicitly configured)
+    project_mode = project.get("mode")
     if project_mode == "eng":
         return PersonaType.ENGINEER
 
@@ -3075,8 +3075,7 @@ async def build_harness_turn_input(
     )
 
     # Cross-repo SDLC: inject target repo context
-    project_mode = project.get("mode", "eng") if project else "eng"
-    if project_mode != "eng" and classification == ClassificationType.SDLC and is_cross_repo:
+    if classification == ClassificationType.SDLC and is_cross_repo:
         project_name = project.get("name", "Unknown") if project else "Unknown"
         project_working_dir = project.get("working_directory", "") if project else ""
         github_config = project.get("github", {}) if project else {}
@@ -3151,12 +3150,15 @@ async def get_agent_response_sdk(
         project_working_dir = AI_REPO_ROOT
     is_cross_repo = project_key != "valor"
 
-    # Check project mode: "eng" channels bypass SDLC classification entirely
-    project_mode = project.get("mode", "eng") if project else "eng"
-    # Treat any unrecognized mode as "eng" (safe default)
-    if project_mode != "eng":
-        logger.warning(f"[{request_id}] Unknown project mode '{project_mode}', treating as 'eng'")
-        project_mode = "eng"
+    # Check project mode: "eng" channels bypass SDLC classification entirely.
+    # Only projects that explicitly set mode="eng" (the main ai repo) skip SDLC.
+    # Cross-repo projects (popoto, psyoptimal, etc.) have no mode field and
+    # fall through to SDLC classification.
+    project_mode = project.get("mode") if project else None
+    # Treat any unrecognized mode as None (run SDLC classification)
+    if project_mode not in (None, "eng"):
+        logger.warning(f"[{request_id}] Unknown project mode '{project_mode}', treating as None")
+        project_mode = None
 
     if project_mode == "eng":
         # Eng mode: skip classification, always use "question", work in project dir
@@ -3271,7 +3273,7 @@ async def get_agent_response_sdk(
     )
 
     # Cross-repo SDLC: inject target repo context
-    if project_mode != "eng" and classification == ClassificationType.SDLC and is_cross_repo:
+    if classification == ClassificationType.SDLC and is_cross_repo:
         github_config = project.get("github", {}) if project else {}
         github_org = github_config.get("org", "")
         github_repo = github_config.get("repo", "")
@@ -3684,9 +3686,7 @@ async def get_agent_response_sdk(
         # When classification is "sdlc" and the project targets a non-ai repo,
         # set GH_REPO so all gh commands automatically target the correct repo.
         _gh_repo = None
-        is_cross_repo_sdlc = (
-            project_mode != "eng" and classification == ClassificationType.SDLC and is_cross_repo
-        )
+        is_cross_repo_sdlc = classification == ClassificationType.SDLC and is_cross_repo
         if is_cross_repo_sdlc:
             _github_config = project.get("github", {}) if project else {}
             _gh_org = _github_config.get("org", "")

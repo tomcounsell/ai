@@ -213,9 +213,7 @@ class TestPMSystemPromptWorktreeInstruction:
 
     def test_pm_prompt_contains_worktree_instruction(self):
         """The PM persona prompt must contain worktree isolation instructions."""
-        pm_prompt_path = (
-            Path(__file__).parent.parent.parent / "config" / "personas" / "project-manager.md"
-        )
+        pm_prompt_path = Path(__file__).parent.parent.parent / "config" / "personas" / "engineer.md"
         assert pm_prompt_path.exists(), f"PM prompt not found at {pm_prompt_path}"
 
         content = pm_prompt_path.read_text()
@@ -225,14 +223,15 @@ class TestPMSystemPromptWorktreeInstruction:
         assert "Issue #887" in content or "issue #887" in content, (
             "PM prompt must reference issue #887"
         )
-        assert "dev-session" in content, "PM prompt must mention dev-session"
+        # Engineer persona uses "child session" terminology (merged from dev-session)
+        assert "dev-session" in content or "child session" in content, (
+            "Engineer prompt must mention dev-session or child session"
+        )
         assert "worktree" in content.lower(), "PM prompt must mention worktree isolation"
 
     def test_pm_prompt_contains_cwd_guidance(self):
         """The PM prompt must instruct about CWD for Agent tool calls."""
-        pm_prompt_path = (
-            Path(__file__).parent.parent.parent / "config" / "personas" / "project-manager.md"
-        )
+        pm_prompt_path = Path(__file__).parent.parent.parent / "config" / "personas" / "engineer.md"
         content = pm_prompt_path.read_text()
 
         # The prompt should tell the PM to use the worktree path as working directory

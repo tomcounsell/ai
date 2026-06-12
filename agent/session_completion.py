@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from models.agent_session import AgentSession
-from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 

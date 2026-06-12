@@ -39,7 +39,7 @@ def _setup(
     if template_text is not None:
         template_path.parent.mkdir(parents=True, exist_ok=True)
         template_path.write_text(template_text)
-    overlay_path = tmp_path / "overlay-project-manager.md"
+    overlay_path = tmp_path / "overlay-engineer.md"
     if overlay_text is not None:
         overlay_path.write_text(overlay_text)
     return project_dir, overlay_path
@@ -145,7 +145,7 @@ def test_warning_contains_diff_command(tmp_path):
 def test_default_template_path_points_at_real_file():
     """Regression test for the path bug in the original PR: the default repo
     template path must resolve to an existing file at the repo root, not a
-    nonexistent `segments/project-manager.md`.
+    nonexistent `segments/engineer.md`.
     """
     repo_root = Path(__file__).resolve().parents[2]
     template_path = repo_root / DEFAULT_TEMPLATE_REL

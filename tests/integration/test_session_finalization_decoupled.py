@@ -217,6 +217,5 @@ class TestSessionFinalizationDecoupled:
             await task
 
 
-
 # TestPMSteeringPopotoIntegration removed: _handle_dev_session_completion was deleted
 # when PM and Dev roles were merged into a single Eng role.

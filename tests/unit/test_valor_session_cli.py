@@ -23,7 +23,7 @@ def _make_args(message: str, **overrides) -> argparse.Namespace:
     which tests below monkeypatch to a ``tmp_path``-friendly stub.
     """
     base = {
-        "role": "pm",
+        "role": "eng",
         "message": message,
         "chat_id": "999",
         "parent": None,
@@ -166,7 +166,7 @@ class TestCreateDevRoleRequiresSlug:
         """``--role dev`` with no slug and no 'issue #N' must exit 1 with stderr error."""
         args = _make_args(
             "no slug here, no issue reference either",
-            role="dev",
+            role="eng",
             slug=None,
         )
         rc = valor_session.cmd_create(args)
@@ -176,7 +176,7 @@ class TestCreateDevRoleRequiresSlug:
         # Per the plan's "CLI rejection message must be grep-able" criterion:
         # the substring ``dev sessions must be created with --slug`` (case-
         # sensitive in our message) must appear in stderr.
-        assert "PM and dev sessions must be created with --slug" in captured.err, (
+        assert "Eng sessions must be created with --slug" in captured.err, (
             f"Expected slug-required error message in stderr, got: {captured.err!r}"
         )
         # Issue references for grep / reflections
@@ -207,7 +207,7 @@ class TestCreateDevRoleRequiresSlug:
             lambda key: (tmp_path, {"working_directory": str(tmp_path)}),
         )
 
-        args = _make_args("Fix issue #42 broken thing", role="dev", slug=None)
+        args = _make_args("Fix issue #42 broken thing", role="eng", slug=None)
         rc = None
         try:
             rc = valor_session.cmd_create(args)
@@ -217,7 +217,7 @@ class TestCreateDevRoleRequiresSlug:
             pass
         captured = capsys.readouterr()
 
-        assert "PM and dev sessions must be created with --slug" not in captured.err, (
+        assert "Eng sessions must be created with --slug" not in captured.err, (
             f"Auto-derive should have produced a slug, but rejection fired: {captured.err!r}"
         )
         # If the guard didn't fire, rc is either None (downstream raised)
@@ -239,14 +239,14 @@ class TestCreateDevRoleRequiresSlug:
             lambda key: (tmp_path, {"working_directory": str(tmp_path)}),
         )
 
-        args = _make_args("test message", role="dev", slug="my-feat")
+        args = _make_args("test message", role="eng", slug="my-feat")
         try:
             valor_session.cmd_create(args)
         except Exception:
             pass
         captured = capsys.readouterr()
 
-        assert "PM and dev sessions must be created with --slug" not in captured.err, (
+        assert "Eng sessions must be created with --slug" not in captured.err, (
             f"Guard fired with explicit --slug present: {captured.err!r}"
         )
 

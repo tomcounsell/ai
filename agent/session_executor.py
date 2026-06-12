@@ -1544,6 +1544,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             _resolve_compose_args,
             _resolve_sentry_auth_token,
             build_harness_turn_input,
+            load_eng_system_prompt,
         )
         from config.enums import AccessLevel, PersonaType
 

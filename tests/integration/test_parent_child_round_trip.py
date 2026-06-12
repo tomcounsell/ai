@@ -14,7 +14,6 @@ See docs/features/harness-abstraction.md for the architecture this test validate
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
@@ -147,7 +146,6 @@ class TestDevSessionParentLinkage:
         principle: project_key → repo (via projects.json) is the only pairing.
         """
         import argparse
-        from unittest.mock import MagicMock, patch
 
         from tools.valor_session import cmd_create
 
@@ -219,10 +217,10 @@ class TestDevSessionParentLinkage:
         assert captured["project_config"] == projects_json["test"]
 
 
-
 # TestHandleDevSessionCompletion and TestPipelineStateMachineTransitions removed:
 # _handle_dev_session_completion was deleted when PM and Dev roles were merged
 # into a single Eng role. Steering now happens via direct session-steering APIs.
+
 
 class TestTranscriptBoundarySkipWaitingForChildren:
     """Issue #1156: PM in waiting_for_children must not be prematurely finalized.

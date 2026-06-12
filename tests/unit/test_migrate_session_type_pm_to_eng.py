@@ -70,6 +70,7 @@ class TestDryRunEmptyRedis:
     def test_empty_redis_dry_run_is_noop(self, redis_test_db):
         """With no AgentSession:*:pm:* keys, migrate() returns zero renamed."""
         import popoto
+
         from scripts.migrate_session_type_pm_to_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
@@ -105,6 +106,7 @@ class TestIdempotency:
     def test_second_run_skips_already_migrated_keys(self, redis_test_db):
         """After live migration, a second run finds only :eng: keys and skips them."""
         import popoto
+
         from scripts.migrate_session_type_pm_to_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
@@ -129,6 +131,7 @@ class TestIdempotency:
     def test_dev_keys_are_always_skipped(self, redis_test_db):
         """Keys with :dev: segment must be skipped (not renamed), counted as skipped_dev_record."""
         import popoto
+
         from scripts.migrate_session_type_pm_to_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
@@ -154,6 +157,7 @@ class TestErrorPath:
     def test_rename_exception_increments_errors(self, redis_test_db):
         """If redis RENAME raises, stats['errors'] increments (no sys.exit on single error)."""
         import popoto
+
         from scripts.migrate_session_type_pm_to_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
@@ -179,6 +183,7 @@ class TestErrorPath:
     def test_main_exits_nonzero_on_errors(self, redis_test_db):
         """main() returns 1 when stats contain errors."""
         import popoto
+
         from scripts.migrate_session_type_pm_to_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
@@ -218,7 +223,6 @@ class TestWorkerHeartbeatGuard:
     def test_fresh_heartbeat_causes_sysexit(self, tmp_path):
         """A heartbeat file written less than WORKER_HEARTBEAT_THRESHOLD ago exits 1."""
         from scripts.migrate_session_type_pm_to_eng import (
-            WORKER_HEARTBEAT_THRESHOLD,
             _check_worker_not_running,
         )
 
@@ -246,12 +250,11 @@ class TestWorkerHeartbeatGuard:
 
     def test_stale_heartbeat_does_not_exit(self, tmp_path):
         """A heartbeat file older than threshold should NOT cause exit."""
+        import scripts.migrate_session_type_pm_to_eng as m
         from scripts.migrate_session_type_pm_to_eng import (
             WORKER_HEARTBEAT_THRESHOLD,
             _check_worker_not_running,
         )
-
-        import scripts.migrate_session_type_pm_to_eng as m
 
         stale_time = time.time() - (WORKER_HEARTBEAT_THRESHOLD + 100)
 
@@ -279,6 +282,7 @@ class TestPositionalKeyRewrite:
     def test_rewrite_replaces_only_session_type_segment(self, redis_test_db):
         """Key AgentSession:{id}:pm:{project}:... should become AgentSession:{id}:eng:{project}:..."""
         import popoto
+
         from scripts.migrate_session_type_pm_to_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
@@ -307,6 +311,7 @@ class TestPositionalKeyRewrite:
     def test_multiple_pm_in_key_causes_sysexit(self, redis_test_db):
         """A key with multiple :pm: segments should cause sys.exit(1)."""
         import popoto
+
         from scripts.migrate_session_type_pm_to_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
@@ -334,7 +339,6 @@ class TestVersionOrderingGuard:
         Simulates code that has already had PM removed (i.e., /update ran first).
         The guard prevents re-running the migration against stale code.
         """
-        from scripts.migrate_session_type_pm_to_eng import _check_code_version_ordering
 
         import types
 
@@ -357,6 +361,7 @@ class TestVersionOrderingGuard:
         sys.modules.pop("scripts.migrate_session_type_pm_to_eng", None)
         try:
             from scripts.migrate_session_type_pm_to_eng import _check_code_version_ordering as _fn
+
             with pytest.raises(SystemExit) as exc_info:
                 _fn()
             assert exc_info.value.code == 1
@@ -370,9 +375,9 @@ class TestVersionOrderingGuard:
 
     def test_present_session_type_pm_does_not_exit(self):
         """If SessionType.PM is present, _check_code_version_ordering should not exit."""
-        from scripts.migrate_session_type_pm_to_eng import _check_code_version_ordering
-
         import types
+
+        from scripts.migrate_session_type_pm_to_eng import _check_code_version_ordering
 
         fake_enums = types.ModuleType("config.enums")
 

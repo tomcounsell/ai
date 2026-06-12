@@ -114,7 +114,6 @@ class Blocked:
     guard_id: str | None = None
 
 
-
 # Type alias for the predicate functions in DISPATCH_RULES. Each takes the
 # stage_states dict, the _meta dict, and an optional context dict, and returns
 # True if the rule applies.
@@ -1072,7 +1071,6 @@ def _stage_is_ready(stage_states: dict, stage: str) -> bool:
     """
     status = stage_states.get(stage)
     return status in ("ready", "pending", "failed")
-
 
 
 def decide_next_dispatch(

@@ -72,7 +72,8 @@ def _check_worker_not_running() -> None:
         age = now - mtime
         if age < WORKER_HEARTBEAT_THRESHOLD:
             logger.error(
-                f"Worker heartbeat is fresh ({age:.0f}s ago, threshold={WORKER_HEARTBEAT_THRESHOLD}s). "
+                f"Worker heartbeat is fresh ({age:.0f}s ago, "
+                f"threshold={WORKER_HEARTBEAT_THRESHOLD}s). "
                 "Stop the worker before running this migration.\n"
                 f"  Heartbeat file: {heartbeat_file}\n"
                 "  Stop command: ./scripts/valor-service.sh worker-stop"
@@ -81,7 +82,9 @@ def _check_worker_not_running() -> None:
         else:
             logger.info(f"Worker heartbeat is stale ({age:.0f}s ago). Worker appears stopped.")
     else:
-        logger.info("No worker heartbeat file found. Worker appears never started or already stopped.")
+        logger.info(
+            "No worker heartbeat file found. Worker appears never started or already stopped."
+        )
 
     # Secondary check via pgrep
     try:
@@ -171,11 +174,17 @@ def _check_email_bridge_not_running() -> None:
                     )
                     sys.exit(1)
                 else:
-                    logger.info(f"email:last_poll_ts is stale ({age:.0f}s ago). Email bridge appears stopped.")
+                    logger.info(
+                        f"email:last_poll_ts is stale ({age:.0f}s ago). Email bridge appears stopped."
+                    )
             except (ValueError, TypeError):
-                logger.warning("Could not parse email:last_poll_ts value; skipping Redis freshness check.")
+                logger.warning(
+                    "Could not parse email:last_poll_ts value; skipping Redis freshness check."
+                )
         else:
-            logger.info("email:last_poll_ts not found in Redis. Email bridge appears never started.")
+            logger.info(
+                "email:last_poll_ts not found in Redis. Email bridge appears never started."
+            )
     except Exception as e:
         logger.warning(f"Could not check email:last_poll_ts in Redis: {e}")
 

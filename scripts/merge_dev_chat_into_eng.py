@@ -84,7 +84,8 @@ def _check_worker_not_running() -> None:
         age = now - mtime
         if age < WORKER_HEARTBEAT_THRESHOLD:
             logger.error(
-                f"Worker heartbeat is fresh ({age:.0f}s ago, threshold={WORKER_HEARTBEAT_THRESHOLD}s). "
+                f"Worker heartbeat is fresh ({age:.0f}s ago, "
+                f"threshold={WORKER_HEARTBEAT_THRESHOLD}s). "
                 "Stop the worker before running this migration.\n"
                 f"  Heartbeat file: {heartbeat_file}\n"
                 "  Stop command: ./scripts/valor-service.sh worker-stop"
@@ -93,7 +94,9 @@ def _check_worker_not_running() -> None:
         else:
             logger.info(f"Worker heartbeat is stale ({age:.0f}s ago). Worker appears stopped.")
     else:
-        logger.info("No worker heartbeat file found. Worker appears never started or already stopped.")
+        logger.info(
+            "No worker heartbeat file found. Worker appears never started or already stopped."
+        )
 
     # Secondary check via pgrep
     try:
@@ -176,17 +179,25 @@ def _check_email_bridge_not_running() -> None:
                 # Email bridge polls every 30s (IMAP_POLL_INTERVAL); fresh = < 120s
                 if age < 120:
                     logger.error(
-                        f"email:last_poll_ts is fresh ({age:.0f}s ago). Email bridge appears running. "
+                        f"email:last_poll_ts is fresh ({age:.0f}s ago). "
+                        "Email bridge appears running. "
                         "Stop the email bridge before running this migration.\n"
                         "  Stop command: ./scripts/valor-service.sh email-stop"
                     )
                     sys.exit(1)
                 else:
-                    logger.info(f"email:last_poll_ts is stale ({age:.0f}s ago). Email bridge appears stopped.")
+                    logger.info(
+                        f"email:last_poll_ts is stale ({age:.0f}s ago). "
+                        "Email bridge appears stopped."
+                    )
             except (ValueError, TypeError):
-                logger.warning("Could not parse email:last_poll_ts value; skipping Redis freshness check.")
+                logger.warning(
+                    "Could not parse email:last_poll_ts value; skipping Redis freshness check."
+                )
         else:
-            logger.info("email:last_poll_ts not found in Redis. Email bridge appears never started.")
+            logger.info(
+                "email:last_poll_ts not found in Redis. Email bridge appears never started."
+            )
     except Exception as e:
         logger.warning(f"Could not check email:last_poll_ts in Redis: {e}")
 
@@ -211,8 +222,8 @@ def migrate(
     import popoto
 
     # Use module-level imports (may have been patched by tests)
-    _Chat = Chat
-    _TelegramMessage = TelegramMessage
+    chat_cls = Chat
+    telegram_message_cls = TelegramMessage
 
     redis_client = popoto.redis_db.get_REDIS_DB()
 
@@ -225,8 +236,8 @@ def migrate(
     }
 
     # --- Phase 0: Pre-flight counts via ORM query path ---
-    pre_dev_count = _TelegramMessage.query.filter(chat_id=dev_chat_id).count()
-    pre_eng_count = _TelegramMessage.query.filter(chat_id=eng_chat_id).count()
+    pre_dev_count = telegram_message_cls.query.filter(chat_id=dev_chat_id).count()
+    pre_eng_count = telegram_message_cls.query.filter(chat_id=eng_chat_id).count()
     logger.info(
         f"Pre-migration counts: dev_chat_id={dev_chat_id!r}: {pre_dev_count} records, "
         f"eng_chat_id={eng_chat_id!r}: {pre_eng_count} records"
@@ -252,7 +263,10 @@ def migrate(
             dev_keys.append(k)
 
     stats["total_dev_records"] = len(dev_keys)
-    logger.info(f"Found {stats['total_dev_records']} TelegramMessage records for dev_chat_id={dev_chat_id!r}")
+    logger.info(
+        f"Found {stats['total_dev_records']} TelegramMessage records "
+        f"for dev_chat_id={dev_chat_id!r}"
+    )
 
     if not dev_keys:
         logger.info("No Dev TelegramMessage records to migrate.")
@@ -293,14 +307,15 @@ def migrate(
                 logger.error(f"Error migrating {key_str}: {e}")
 
     # --- Phase 3: Chat record rename — create-then-delete order ---
-    dev_chat = _Chat.query.filter(chat_id=dev_chat_id).first()
-    eng_chat_existing = _Chat.query.filter(chat_id=eng_chat_id).first()
+    dev_chat = chat_cls.query.filter(chat_id=dev_chat_id).first()
+    eng_chat_existing = chat_cls.query.filter(chat_id=eng_chat_id).first()
 
     if dry_run:
         if dev_chat and not eng_chat_existing:
             logger.info(
                 f"  DRY RUN: Would create Eng Chat(chat_id={eng_chat_id!r}) "
-                f"from Dev Chat(chat_id={dev_chat_id!r}, name={getattr(dev_chat, 'chat_name', None)!r})"
+                f"from Dev Chat(chat_id={dev_chat_id!r}, "
+                f"name={getattr(dev_chat, 'chat_name', None)!r})"
             )
             logger.info(f"  DRY RUN: Would delete Dev Chat(chat_id={dev_chat_id!r})")
         elif eng_chat_existing:
@@ -315,7 +330,7 @@ def migrate(
     else:
         if dev_chat and not eng_chat_existing:
             # Create Eng Chat FIRST (before deleting Dev Chat)
-            eng_chat = _Chat(
+            eng_chat = chat_cls(
                 chat_id=eng_chat_id,
                 chat_name=getattr(dev_chat, "chat_name", "Eng"),
                 chat_type=getattr(dev_chat, "chat_type", None),
@@ -325,7 +340,7 @@ def migrate(
             eng_chat.save()
 
             # Verify Eng Chat exists before deleting Dev Chat
-            eng_chat_verify = _Chat.query.filter(chat_id=eng_chat_id).first()
+            eng_chat_verify = chat_cls.query.filter(chat_id=eng_chat_id).first()
             if not eng_chat_verify:
                 logger.error(
                     f"Failed to verify Eng Chat creation (chat_id={eng_chat_id!r}). "
@@ -333,12 +348,16 @@ def migrate(
                 )
                 stats["errors"] += 1
             else:
-                logger.info(f"  Created Eng Chat(chat_id={eng_chat_id!r}). Verified. Deleting Dev Chat.")
+                logger.info(
+                    f"  Created Eng Chat(chat_id={eng_chat_id!r}). Verified. Deleting Dev Chat."
+                )
                 dev_chat.delete()
                 logger.info(f"  Deleted Dev Chat(chat_id={dev_chat_id!r}).")
 
         elif eng_chat_existing:
-            logger.info(f"  Eng Chat(chat_id={eng_chat_id!r}) already exists — skipping Chat creation.")
+            logger.info(
+                f"  Eng Chat(chat_id={eng_chat_id!r}) already exists — skipping Chat creation."
+            )
             if dev_chat:
                 dev_chat.delete()
                 logger.info(f"  Deleted Dev Chat(chat_id={dev_chat_id!r}).")
@@ -349,7 +368,7 @@ def migrate(
     if not dry_run and (stats["renamed"] > 0):
         logger.info("Rebuilding TelegramMessage Popoto indexes...")
         try:
-            _TelegramMessage.rebuild_indexes()
+            telegram_message_cls.rebuild_indexes()
             logger.info("TelegramMessage index rebuild complete.")
         except Exception as e:
             logger.error(f"Failed to rebuild TelegramMessage indexes: {e}")
@@ -357,8 +376,8 @@ def migrate(
 
     # --- Phase 5: Post-migration count assertion via ORM query path ---
     if not dry_run:
-        post_dev_count = _TelegramMessage.query.filter(chat_id=dev_chat_id).count()
-        post_eng_count = _TelegramMessage.query.filter(chat_id=eng_chat_id).count()
+        post_dev_count = telegram_message_cls.query.filter(chat_id=dev_chat_id).count()
+        post_eng_count = telegram_message_cls.query.filter(chat_id=eng_chat_id).count()
         expected_eng_count = pre_eng_count + stats["renamed"] - 0  # collisions already not renamed
         logger.info(
             f"Post-migration counts: dev_chat_id={dev_chat_id!r}: {post_dev_count} records, "
@@ -366,7 +385,8 @@ def migrate(
         )
         logger.info(
             f"Expected eng count: {expected_eng_count} "
-            f"({pre_eng_count} existing + {stats['renamed']} migrated - {stats['skipped_collision']} collisions)"
+            f"({pre_eng_count} existing + {stats['renamed']} migrated"
+            f" - {stats['skipped_collision']} collisions)"
         )
         if post_eng_count != expected_eng_count:
             logger.error(

@@ -11,7 +11,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -63,6 +63,7 @@ class TestCollisionSkip:
     def test_collision_detected_skips_not_clobbers(self, redis_test_db):
         """If the target Eng key already exists, the source Dev key is skipped."""
         import popoto
+
         from scripts.merge_dev_chat_into_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
@@ -75,7 +76,11 @@ class TestCollisionSkip:
 
         # Pre-seed the collision: the Eng key already exists with different content
         eng_key = f"TelegramMessage:{msg_id}:{ENG_CHAT_ID}:in:sender:text"
-        eng_existing_value = {"chat_id": ENG_CHAT_ID, "content": "existing eng message", "direction": "in"}
+        eng_existing_value = {
+            "chat_id": ENG_CHAT_ID,
+            "content": "existing eng message",
+            "direction": "in",
+        }
         redis_client.hset(eng_key, mapping=eng_existing_value)
 
         stats = migrate(
@@ -99,6 +104,7 @@ class TestCollisionSkip:
     def test_dry_run_enumerates_all_collisions(self, redis_test_db):
         """dry-run must enumerate ALL prospective collisions without making changes."""
         import popoto
+
         from scripts.merge_dev_chat_into_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
@@ -135,7 +141,8 @@ class TestCollisionSkip:
             if cursor == 0:
                 break
         dev_keys_remaining = [
-            k for k in all_keys
+            k
+            for k in all_keys
             if (f":{DEV_CHAT_ID}:" in (k.decode() if isinstance(k, bytes) else k))
         ]
         assert len(dev_keys_remaining) == 3, "All Dev keys must remain untouched in dry-run"
@@ -155,7 +162,6 @@ class TestChatRenameOrder:
         Verifies the create-then-delete order by checking that an Eng Chat
         record exists after the migration and the Dev Chat is gone.
         """
-        import popoto
         from models.chat import Chat
         from scripts.merge_dev_chat_into_eng import migrate
 
@@ -197,7 +203,6 @@ class TestChatRenameOrder:
 
     def test_existing_eng_chat_not_recreated(self, redis_test_db):
         """If Eng Chat already exists, it must not be overwritten; Dev Chat still deleted."""
-        import popoto
         from models.chat import Chat
         from scripts.merge_dev_chat_into_eng import migrate
 
@@ -254,6 +259,7 @@ class TestPrePostCountAssertion:
     def test_count_assertion_passes_on_clean_migration(self, redis_test_db):
         """Clean migration: all Dev messages land in Eng, assertion passes."""
         import popoto
+
         from scripts.merge_dev_chat_into_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
@@ -309,6 +315,7 @@ class TestPrePostCountAssertion:
     def test_count_mismatch_causes_sysexit(self, redis_test_db):
         """If post_eng_count != expected, migrate() exits with code 1."""
         import popoto
+
         from scripts.merge_dev_chat_into_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
@@ -368,6 +375,7 @@ class TestRebuildIndexesCalled:
     def test_rebuild_indexes_called_when_records_renamed(self, redis_test_db):
         """After renaming records, rebuild_indexes() must be called exactly once."""
         import popoto
+
         from scripts.merge_dev_chat_into_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
@@ -413,6 +421,7 @@ class TestRebuildIndexesCalled:
     def test_rebuild_indexes_not_called_on_dry_run(self, redis_test_db):
         """dry-run must NOT call rebuild_indexes()."""
         import popoto
+
         from scripts.merge_dev_chat_into_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
@@ -441,7 +450,6 @@ class TestRebuildIndexesCalled:
 
     def test_rebuild_indexes_not_called_when_no_records_renamed(self, redis_test_db):
         """If no records were renamed (empty Dev chat), rebuild_indexes() must not be called."""
-        import popoto
         from scripts.merge_dev_chat_into_eng import migrate
 
         # No Dev records seeded
@@ -477,6 +485,7 @@ class TestIdempotency:
     def test_already_eng_keys_are_skipped(self, redis_test_db):
         """If a key already has :eng_chat_id: in it, it must be skipped."""
         import popoto
+
         from scripts.merge_dev_chat_into_eng import migrate
 
         redis_client = popoto.redis_db.get_REDIS_DB()
