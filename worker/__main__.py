@@ -355,6 +355,30 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Granite PTY orphan cleanup failed (non-fatal): {e}")
 
+    # Step 4b.5: Verify the granite classifier model is present and responsive.
+    # Granite is the routing brain of the PTY container — every PM/Dev turn is
+    # routed by an ollama call against it. Without granite the worker would come
+    # up and silently mis-route every session, so this is a HARD startup
+    # precondition (the granite PTY path is all-or-nothing; there is no runtime
+    # fallback). Every restart path funnels through here — /update's inline
+    # restart, the cron deferred restart-flag → SIGTERM → launchd respawn
+    # (agent_session_queue._trigger_restart), and manual worker-restart — so
+    # gating at startup covers them all, not just the interactive /update path.
+    # Pulls once on miss; exits non-zero if granite still can't be made
+    # available (launchd respawns after ThrottleInterval, self-healing once
+    # granite becomes reachable).
+    from agent.granite_container.granite_classifier import ensure_granite_model
+
+    granite_ok, granite_detail = await asyncio.to_thread(ensure_granite_model)
+    if not granite_ok:
+        logger.critical(
+            "Granite classifier unavailable: %s. The PTY container cannot route "
+            "sessions without it — exiting. Fix with 'ollama pull granite4.1:3b'.",
+            granite_detail,
+        )
+        sys.exit(1)
+    logger.info("Granite classifier ready: %s", granite_detail)
+
     # Step 4c: Initialize the granite PTY pool singleton (plan #1572).
     # The pool pre-warms GRANITE__PTY_POOL_SIZE (default 3) interactive
     # ``claude --permission-mode bypassPermissions`` pairs. Sessions

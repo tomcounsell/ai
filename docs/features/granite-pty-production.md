@@ -58,7 +58,39 @@ Telegram inbound → bridge enqueue → AgentSession in Redis
 | `BridgeAdapter` | `agent/granite_container/bridge_adapter.py` | Wraps `Container`: resolves `send_cb`, delivers `[/user]`/`[/complete]` payloads mid-loop, writes observability events to `session_events`, returns `""`. |
 | `Container` | `agent/granite_container/container.py` | The PoC kernel: drives the PM→granite→Dev→granite→PM loop over two PTYs, classifies PM output, returns a `ContainerResult`. |
 | Executor wiring | `agent/session_executor.py` | Replaces the `get_response_via_harness` call with `BridgeAdapter.run` via `asyncio.to_thread`. `send_result=False`. |
-| Worker startup hook | `worker/__main__.py` | Initializes the pool singleton; kills orphan PTY children recorded in `data/granite_pty_pids.json` from a prior worker run (PID-targeted, not `pkill -f`). |
+| Worker startup hook | `worker/__main__.py` | Verifies granite is reachable (hard gate, Step 4b.5); initializes the pool singleton; kills orphan PTY children recorded in `data/granite_pty_pids.json` from a prior worker run (PID-targeted, not `pkill -f`). |
+
+## Startup precondition: granite must be reachable
+
+Granite is the routing brain — every PM/Dev turn is classified and translated
+by an `ollama` call against `granite4.1:3b`. A worker that comes up without it
+would accept sessions and silently mis-route every one of them. Because the
+granite PTY path is **all-or-nothing** (no runtime fallback), worker startup
+treats granite as a **hard precondition**, not a best-effort init.
+
+`worker/__main__.py` Step 4b.5 calls
+`granite_classifier.ensure_granite_model()` (run off the event loop via
+`asyncio.to_thread`) *before* the PTY pool is built. The helper:
+
+1. confirms the `ollama` python client is importable (the classifier uses it),
+2. confirms the `ollama` CLI/daemon is on `PATH`,
+3. probes the model with a trivial prompt (`ollama run`, 60s cap),
+4. on a failed probe, runs `ollama pull granite4.1:3b` once (15min cap) and
+   re-probes.
+
+If granite still can't be made available the worker logs `CRITICAL` and exits
+non-zero. launchd's `KeepAlive` respawns it after `ThrottleInterval`, so the
+worker self-heals the moment granite becomes reachable instead of running
+broken.
+
+**Why startup is the universal chokepoint.** Every restart path funnels through
+`main()`: `/update`'s inline restart, the cron deferred restart-flag
+(`data/restart-requested` → `agent_session_queue._trigger_restart()` →
+`SIGTERM` → launchd respawn), and a manual `valor-service.sh worker-restart`.
+Gating here covers all of them. The complementary `/update` Step 4.75 gate
+(`scripts/update/run.py`) is a *fast, friendly* early warning that skips the
+service restart and tells the operator to pull granite — but the worker gate is
+the actual enforcement that no path can bypass.
 
 ## Configuration
 
@@ -197,9 +229,12 @@ steady-state budget and report a misleading `pm_hang`.
    keep their conversation context — what is lost is the TUI-internal
    transcript (tool-call history), not the conversational context.
 2. **`[/dev]` turns hard-depend on local ollama.** `extract_dev_prompt` /
-   `summarize_for_pm` call `ollama.chat` (`granite4.1:3b`); if ollama is down
-   the container exits `exception` on the first dev-routed turn. Worker
-   startup does not health-check ollama.
+   `summarize_for_pm` call `ollama.chat` (`granite4.1:3b`); if ollama goes down
+   *after* startup the container exits `exception` on the first dev-routed
+   turn. Worker startup now health-checks granite as a hard precondition (see
+   [Startup precondition](#startup-precondition-granite-must-be-reachable)), so
+   a worker can no longer come up with granite already absent — but it does not
+   re-check mid-run.
 3. **Multi-turn conversations end at the first `[/user]`.** The container
    exits on `pm_user`; a user reply spawns a new container run (fresh PTYs,
    fresh context apart from the steering message).

@@ -24,6 +24,7 @@ from agent.granite_container.granite_classifier import (
     SYSTEM_PROMPT,
     TRANSLATION_TOOLS,
     classify_pm_prefix,
+    ensure_granite_model,
     extract_dev_prompt,
     summarize_for_pm,
 )
@@ -321,6 +322,109 @@ class TestTranslationTools(unittest.TestCase):
     def test_system_prompt_documents_both_tools(self) -> None:
         self.assertIn("extract_dev_prompt", SYSTEM_PROMPT)
         self.assertIn("summarize_for_pm", SYSTEM_PROMPT)
+
+
+# ---------------------------------------------------------------------------
+# ensure_granite_model: startup precondition (mocked subprocess / ollama)
+# ---------------------------------------------------------------------------
+
+_CLS = "agent.granite_container.granite_classifier"
+
+
+def _ok_probe() -> MagicMock:
+    """A successful `ollama run` result (returncode 0, non-empty stdout)."""
+    return MagicMock(returncode=0, stdout="ready", stderr="")
+
+
+def _bad_probe() -> MagicMock:
+    """A failed `ollama run` result (model not found / empty output)."""
+    return MagicMock(returncode=1, stdout="", stderr="model not found")
+
+
+class TestEnsureGraniteModel(unittest.TestCase):
+    """The hard startup precondition: granite present + responsive."""
+
+    def test_returns_false_when_client_unimportable(self) -> None:
+        with patch(f"{_CLS}.ollama_chat", None):
+            ok, detail = ensure_granite_model()
+        self.assertFalse(ok)
+        self.assertIn("python client", detail)
+
+    def test_returns_false_when_cli_absent(self) -> None:
+        with (
+            patch(f"{_CLS}.ollama_chat", MagicMock()),
+            patch(f"{_CLS}.shutil.which", return_value=None),
+        ):
+            ok, detail = ensure_granite_model()
+        self.assertFalse(ok)
+        self.assertIn("CLI not found", detail)
+
+    def test_ok_when_first_probe_responsive(self) -> None:
+        with (
+            patch(f"{_CLS}.ollama_chat", MagicMock()),
+            patch(f"{_CLS}.shutil.which", return_value="/usr/local/bin/ollama"),
+            patch(f"{_CLS}.subprocess.run", return_value=_ok_probe()) as run,
+        ):
+            ok, detail = ensure_granite_model()
+        self.assertTrue(ok)
+        self.assertIn("responsive", detail)
+        # Only the probe ran — no pull when the model already answers.
+        self.assertEqual(run.call_count, 1)
+
+    def test_pulls_then_succeeds_when_model_missing(self) -> None:
+        # First probe fails, pull succeeds, second probe succeeds.
+        side_effects = [_bad_probe(), MagicMock(returncode=0, stdout="", stderr=""), _ok_probe()]
+        with (
+            patch(f"{_CLS}.ollama_chat", MagicMock()),
+            patch(f"{_CLS}.shutil.which", return_value="/usr/local/bin/ollama"),
+            patch(f"{_CLS}.subprocess.run", side_effect=side_effects) as run,
+        ):
+            ok, detail = ensure_granite_model()
+        self.assertTrue(ok)
+        self.assertIn("pulled", detail)
+        # probe → pull → probe
+        self.assertEqual(run.call_count, 3)
+
+    def test_fails_when_pull_fails(self) -> None:
+        import subprocess
+
+        def _runner(cmd, **kwargs):
+            if cmd[1] == "pull":
+                raise subprocess.CalledProcessError(1, cmd, stderr="pull boom")
+            return _bad_probe()
+
+        with (
+            patch(f"{_CLS}.ollama_chat", MagicMock()),
+            patch(f"{_CLS}.shutil.which", return_value="/usr/local/bin/ollama"),
+            patch(f"{_CLS}.subprocess.run", side_effect=_runner),
+        ):
+            ok, detail = ensure_granite_model()
+        self.assertFalse(ok)
+        self.assertIn("pull", detail)
+
+    def test_no_pull_when_disabled(self) -> None:
+        with (
+            patch(f"{_CLS}.ollama_chat", MagicMock()),
+            patch(f"{_CLS}.shutil.which", return_value="/usr/local/bin/ollama"),
+            patch(f"{_CLS}.subprocess.run", return_value=_bad_probe()) as run,
+        ):
+            ok, detail = ensure_granite_model(pull_if_missing=False)
+        self.assertFalse(ok)
+        self.assertEqual(run.call_count, 1)  # probe only, no pull attempt
+
+    def test_probe_timeout_treated_as_not_responsive(self) -> None:
+        import subprocess
+
+        with (
+            patch(f"{_CLS}.ollama_chat", MagicMock()),
+            patch(f"{_CLS}.shutil.which", return_value="/usr/local/bin/ollama"),
+            patch(
+                f"{_CLS}.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd="ollama", timeout=60),
+            ),
+        ):
+            ok, _ = ensure_granite_model(pull_if_missing=False)
+        self.assertFalse(ok)
 
 
 if __name__ == "__main__":

@@ -39,6 +39,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -50,6 +52,71 @@ except ImportError:  # pragma: no cover -- ollama is a hard runtime dep
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "granite4.1:3b"
+
+
+def ensure_granite_model(
+    model: str = DEFAULT_MODEL,
+    *,
+    pull_if_missing: bool = True,
+    probe_timeout: float = 60.0,
+    pull_timeout: float = 900.0,
+) -> tuple[bool, str]:
+    """Verify the granite classifier model is present and responsive.
+
+    The granite classifier is the routing brain of the PTY container: every
+    PM/Dev turn is routed by an ``ollama`` call against ``model``. If the model
+    is absent the worker would come up and silently mis-route every session, so
+    worker startup treats this as a hard precondition (the granite PTY path is
+    all-or-nothing; there is no runtime fallback).
+
+    Checks, in order: the ollama python client is importable (the classifier
+    calls it at runtime), the ``ollama`` CLI/daemon is reachable, and the model
+    answers a trivial prompt. When ``pull_if_missing`` and the probe fails,
+    attempts ``ollama pull <model>`` once before a final probe.
+
+    Returns ``(ok, detail)`` — ``detail`` is a human-readable reason suitable
+    for a log line.
+    """
+    if ollama_chat is None:
+        return False, "ollama python client is not importable"
+    if shutil.which("ollama") is None:
+        return False, "ollama CLI not found on PATH"
+
+    def _probe() -> bool:
+        try:
+            r = subprocess.run(
+                ["ollama", "run", model, "reply with the single word: ready"],
+                capture_output=True,
+                text=True,
+                timeout=probe_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return False
+        return r.returncode == 0 and bool(r.stdout.strip())
+
+    if _probe():
+        return True, f"{model} responsive"
+    if not pull_if_missing:
+        return False, f"{model} not responsive"
+
+    logger.warning("granite model %s not responsive — attempting pull...", model)
+    try:
+        subprocess.run(
+            ["ollama", "pull", model],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=pull_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"timed out pulling {model}"
+    except subprocess.CalledProcessError as e:
+        return False, f"failed to pull {model}: {(e.stderr or '').strip() or e}"
+
+    if _probe():
+        return True, f"{model} pulled and responsive"
+    return False, f"{model} still not responsive after pull"
+
 
 # The prefix-token convention. The PM persona body (in
 # .claude/commands/granite-poc/prime-pm-role.md) primes PM to begin
