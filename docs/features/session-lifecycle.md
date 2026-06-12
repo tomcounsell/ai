@@ -302,7 +302,7 @@ A stale caller can at worst append a spurious `session_events` entry. It cannot 
 
 **The fix (issue #1645):** `auto_now` was removed from the field declaration. The `save()` override stamps `self.updated_at = utc_now()` unconditionally unless `update_fields` is provided *without* `"updated_at"` — in which case the stamp is skipped entirely (no in-memory mutation without a matching persist, to avoid memory/Redis desync).
 
-**Rule for new fields:** Do not use `auto_now=True` on any `DatetimeField`. Always stamp explicitly with `utc_now()` at the appropriate call site. The `auto_now` ban is enforced by the comment on the field declaration at `models/agent_session.py` line 153–155 (#1645).
+**Rule for new fields:** `auto_now=True` must not be added to any `DatetimeField`. Always stamp explicitly with `utc_now()` at the appropriate call site. This constraint is documented on the field declaration at `models/agent_session.py` line 153–155 (#1645).
 
 ### First-deploy callout
 
