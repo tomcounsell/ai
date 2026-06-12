@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-06-12
 tracking: https://github.com/tomcounsell/ai/issues/1636
-last_comment_id:
+last_comment_id: 4687842710
 ---
 
 # Consolidate gemma4:e2b Ollama Usage onto Granite (classification) and Ollama Cloud (generation)
