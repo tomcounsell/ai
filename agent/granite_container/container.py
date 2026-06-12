@@ -287,11 +287,11 @@ def _capture_pty_identity(
     unknown session_id leaves the field as None; callers must tolerate None.
     """
     if pm_pty is not None:
-        result.pm_pid = pm_pty.pid
-        result.pm_transcript_path = _transcript_path(cwd, pm_pty._session_id)
+        result.pm_pid = getattr(pm_pty, "pid", None)
+        result.pm_transcript_path = _transcript_path(cwd, getattr(pm_pty, "_session_id", None))
     if dev_pty is not None:
-        result.dev_pid = dev_pty.pid
-        result.dev_transcript_path = _transcript_path(cwd, dev_pty._session_id)
+        result.dev_pid = getattr(dev_pty, "pid", None)
+        result.dev_transcript_path = _transcript_path(cwd, getattr(dev_pty, "_session_id", None))
 
 
 def _truncate_exit_message(text: str) -> str:
