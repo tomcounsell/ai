@@ -117,7 +117,9 @@ Redis) creates subtle bugs where equal-looking snapshots compare unequal.
     "pr_merge_state": null,
     "ci_all_passing": null,
     "same_stage_dispatch_count": 2,
-    "last_dispatched_skill": "/do-plan-critique"
+    "last_dispatched_skill": "/do-plan-critique",
+    "plan_exists": true,
+    "issue_number": 941
   }
 }
 ```
@@ -135,8 +137,50 @@ Both fields default to `null` when the `gh` CLI fails (network error, unknown
 PR, timeout). G6 will not fire if either field is `null`, safely falling back
 to the normal dispatch table.
 
+**New fields added by issue #1640:**
+
+- `plan_exists` — `True` if a plan file is present on disk for the tracked issue. Computed by `_compute_meta()` in `tools/sdlc_stage_query.py`. Used by `_rule_plan_not_critiqued` to require an actual plan file before routing to `/do-plan-critique` (prevents routing to CRITIQUE when PLAN status reads `"ready"` but no file was ever written). Also widened `_rule_no_plan` to catch the bootstrap edge case `PLAN=="ready" AND issue_number AND NOT plan_exists` → routes to `/do-plan`.
+- `issue_number` — the resolved issue number (`int | None`) stored in `_meta`. Enables `_rule_no_plan` to distinguish a genuine bootstrap from a stale status string.
+
 Pass `--format legacy` to get the old flat `{"ISSUE": "completed", ...}`
 shape for older callers.
+
+## Verdict Normalization
+
+All verdicts stored in `_verdicts` are in a canonical form: uppercase, underscores replaced by spaces, internal whitespace collapsed to a single space.
+
+- **Canonical form**: `"NEEDS REVISION"`, `"APPROVED"`, `"MAJOR REWORK"` (never `"needs_revision"`, `"approved "`, etc.)
+- **Helper**: `normalize_verdict(text: str | None) -> str` lives in `tools/_sdlc_utils.py`
+- **Write boundary**: `record_verdict()` in `tools/sdlc_verdict.py` calls `normalize_verdict()` before persisting — new records are always stored in canonical form
+- **Read side**: all verdict comparisons in `agent/sdlc_router.py` (G1, G3, G5, G6, and all rule predicates) also call `normalize_verdict()` as a belt-and-suspenders guard for legacy records that predate this normalization
+- **Observability**: when the normalized form differs from the raw input, a DEBUG log is emitted so desync incidents are traceable
+
+This prevents the guard/rule predicate comparisons from silently failing on casing or underscore variants written by older pipeline versions.
+
+## Stale-Verdict Supersession (Row 8 / Row 8b)
+
+A REVIEW verdict becomes stale when the pipeline has made forward progress after it was recorded. Specifically:
+
+- A REVIEW verdict is **stale** iff its `recorded_at` timestamp predates the latest `/do-patch` dispatch timestamp in `_sdlc_dispatches`
+- This is encoded as `_review_verdict_is_stale(stage_states)` in `agent/sdlc_router.py`
+- Helper `_latest_dispatch_at(stage_states, skill)` extracts the most recent dispatch timestamp for a given skill from the bounded FIFO dispatch log
+
+**Row 8 behavior with staleness check:**
+
+| Condition | `_rule_review_has_findings` returns | Next dispatch |
+|-----------|-------------------------------------|---------------|
+| REVIEW verdict is `APPROVED` | False | Not dispatched |
+| REVIEW verdict has findings, verdict is fresh | True | `/do-patch` (row 8) |
+| REVIEW verdict has findings, verdict is stale | False | Row 8b fires: `/do-pr-review` (re-review) |
+| No REVIEW verdict | False | Row 9 / later rows |
+
+All edge cases fail safe to "not stale":
+- `recorded_at` missing or unparseable
+- No prior `/do-patch` dispatch in the log
+- Timestamps equal (tie → not stale, avoids spurious re-review)
+- Any exception during parse → not stale
+
+This prevents the router from dispatching `/do-patch` against review findings that were already addressed by a prior patch cycle, which would create an oscillation between row 8 and row 8b.
 
 ## Single-Writer Invariant
 
@@ -194,4 +238,5 @@ deferred until optimistic retry proves insufficient in production.
 - Related issues: #704 (stage_states as source of truth), #729 (anti-skip),
   #941 (local session tracking), #1005 (PM-level pipeline completion guards),
   #1036 (the regression G1-G5 fix), #1043 (G6 terminal-state fast-path and
-  self-authored PR review loop fix).
+  self-authored PR review loop fix), #1638 (verdict normalization),
+  #1640 (plan existence evidence gate), #1641 (stale-verdict supersession).
