@@ -638,3 +638,130 @@ class TestFetchPrMergeState:
             result = _fetch_pr_merge_state(264)
 
         assert result == (None, None)
+
+    def test_fetch_pr_merge_state_threads_repo(self):
+        """When repo= is passed, gh pr view includes --repo <slug>."""
+        import json as _json
+
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        gh_output = _json.dumps({"mergeStateStatus": "CLEAN", "statusCheckRollup": []})
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = gh_output
+        with patch("tools.sdlc_stage_query.subprocess.run", return_value=mock_proc) as mock_run:
+            result = _fetch_pr_merge_state(42, repo="tomcounsell/popoto")
+        cmd = mock_run.call_args[0][0]
+        assert "--repo" in cmd
+        assert "tomcounsell/popoto" in cmd
+        assert result[0] == "CLEAN"
+
+
+class TestResolveTargetRepo:
+    """Tests for _resolve_target_repo in tools._sdlc_utils."""
+
+    def test_gh_repo_env_short_circuits(self, monkeypatch):
+        """GH_REPO set → return it directly, subprocess never called."""
+        monkeypatch.setenv("GH_REPO", "tomcounsell/popoto")
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        with patch("subprocess.run") as mock_run:
+            from tools._sdlc_utils import _resolve_target_repo
+
+            result = _resolve_target_repo()
+        assert result == "tomcounsell/popoto"
+        mock_run.assert_not_called()
+
+    def test_sdlc_target_repo_used_as_cwd_not_slug(self, monkeypatch):
+        """SDLC_TARGET_REPO is a filesystem PATH used as cwd, never as --repo slug."""
+        monkeypatch.delenv("GH_REPO", raising=False)
+        monkeypatch.setenv("SDLC_TARGET_REPO", "/some/path")
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "tomcounsell/popoto\n"
+        with patch("tools._sdlc_utils.subprocess.run", return_value=mock_proc) as mock_run:
+            from tools._sdlc_utils import _resolve_target_repo
+
+            result = _resolve_target_repo()
+        # Returned value is the slug from stdout
+        assert result == "tomcounsell/popoto"
+        # subprocess called with cwd="/some/path", NOT with "--repo /some/path"
+        call_kwargs = mock_run.call_args
+        cwd = call_kwargs.kwargs.get("cwd") or call_kwargs[1].get("cwd")
+        assert cwd == "/some/path"
+        # "/some/path" must NOT appear as a --repo value
+        cmd = call_kwargs[0][0]
+        assert "--repo" not in cmd or "/some/path" not in cmd
+
+    def test_neither_env_uses_git_toplevel_as_cwd(self, monkeypatch):
+        """Both envs unset → git toplevel used as cwd for gh repo view."""
+        monkeypatch.delenv("GH_REPO", raising=False)
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "tomcounsell/ai\n"
+        with patch("tools._sdlc_utils.subprocess.run", return_value=mock_proc) as mock_run:
+            with patch("tools._sdlc_utils._git_toplevel", return_value="/users/tom/src/ai"):
+                from tools._sdlc_utils import _resolve_target_repo
+
+                result = _resolve_target_repo()
+        assert result == "tomcounsell/ai"
+        call_kwargs = mock_run.call_args
+        cwd = call_kwargs.kwargs.get("cwd") or call_kwargs[1].get("cwd")
+        assert cwd == "/users/tom/src/ai"
+
+    def test_returns_none_on_gh_failure_with_warning(self, monkeypatch, caplog):
+        """gh repo view failure → returns None, emits logger.warning."""
+        import logging
+
+        monkeypatch.delenv("GH_REPO", raising=False)
+        monkeypatch.setenv("SDLC_TARGET_REPO", "/some/path")
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = ""
+        with patch("tools._sdlc_utils.subprocess.run", return_value=mock_proc):
+            with caplog.at_level(logging.WARNING):
+                from tools._sdlc_utils import _resolve_target_repo
+
+                result = _resolve_target_repo()
+        assert result is None
+        assert any(r.levelno >= logging.WARNING for r in caplog.records)
+
+    def test_empty_sdlc_target_falls_through_to_git_toplevel(self, monkeypatch):
+        """SDLC_TARGET_REPO='' (empty) falls through to _git_toplevel, never cwd=''."""
+        monkeypatch.delenv("GH_REPO", raising=False)
+        monkeypatch.setenv("SDLC_TARGET_REPO", "")
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "tomcounsell/ai\n"
+        with patch("tools._sdlc_utils.subprocess.run", return_value=mock_proc) as mock_run:
+            with patch("tools._sdlc_utils._git_toplevel", return_value="/users/tom/src/ai"):
+                from tools._sdlc_utils import _resolve_target_repo
+
+                result = _resolve_target_repo()
+        # subprocess called with cwd from git_toplevel, not cwd=""
+        call_kwargs = mock_run.call_args
+        cwd = call_kwargs.kwargs.get("cwd") or call_kwargs[1].get("cwd")
+        assert cwd != ""
+        assert result == "tomcounsell/ai"
+
+    def test_compute_meta_resolves_repo_once(self, monkeypatch):
+        """_resolve_target_repo called exactly once per _compute_meta invocation."""
+        call_count = []
+
+        def fake_resolve():
+            call_count.append(1)
+            return "tomcounsell/ai"
+
+        with patch("tools.sdlc_stage_query._resolve_target_repo", side_effect=fake_resolve):
+            with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+                with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+                    with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                        from tools.sdlc_stage_query import _compute_meta
+
+                        mock_session = MagicMock()
+                        mock_session.pr_number = None
+                        mock_session.slug = None
+                        _compute_meta({}, mock_session, None)
+        assert len(call_count) == 1, (
+            f"_resolve_target_repo called {len(call_count)} times, expected 1"
+        )

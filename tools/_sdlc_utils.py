@@ -19,6 +19,46 @@ from models.agent_session import AgentSession
 logger = logging.getLogger(__name__)
 
 
+def _resolve_target_repo() -> str | None:
+    """Resolve the owner/name GitHub slug for the target repo.
+
+    Resolution ladder:
+    1. GH_REPO env var — already an owner/name slug, return directly (zero subprocess).
+    2. SDLC_TARGET_REPO env var — a FILESYSTEM PATH (not a slug!), used as cwd for
+       ``gh repo view --json nameWithOwner -q .nameWithOwner``; slug is the command's stdout.
+    3. _git_toplevel() — also used as cwd for same gh repo view command.
+    4. None — every step falls through on failure; degrades to current behavior.
+
+    IMPORTANT: SDLC_TARGET_REPO is NEVER passed to gh --repo. It is a path, not a slug.
+    """
+    # Rung 0: GH_REPO is already an owner/name slug — return it directly.
+    if repo := os.environ.get("GH_REPO"):
+        return repo
+    # Rung 1: SDLC_TARGET_REPO is a FILESYSTEM PATH — use it as cwd, not as --repo.
+    # Rung 2: else the git working-tree root, also used as cwd.
+    cwd = os.environ.get("SDLC_TARGET_REPO") or _git_toplevel()
+    if not cwd:
+        return None
+    try:
+        proc = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                f"_resolve_target_repo: gh repo view failed (rc={proc.returncode}) in cwd={cwd}"
+            )
+            return None
+        slug = (proc.stdout or "").strip()
+        return slug or None
+    except Exception as e:
+        logger.warning(f"_resolve_target_repo: gh repo view raised in cwd={cwd}: {e}")
+        return None
+
+
 def _git_toplevel(cwd: Path | None = None) -> Path | None:
     """Return the git working-tree root for ``cwd`` (default: process cwd).
 
