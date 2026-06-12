@@ -157,8 +157,7 @@ consume a `max_turns` slot. `PM_WRAPUP_PROMPT` fires post-loop, is capped at
   parsing, multi-line message support).
 - Originating plan + verdict: `docs/plans/completed/granite-interactive-tui-poc-results.md`
   (the historical results doc from the originating effort).
-- Earlier granite-agent-loop: `docs/features/granite-agent-loop.md` (now
-  historical; this doc is the source of truth for the live runner).
+- Earlier granite-agent-loop PoC: deleted (superseded; source files removed in PR #1664). This doc is the source of truth for the live runner.
 - Production cutover + bounded slot pool: [`granite-pty-production.md`](granite-pty-production.md)
   — the production wiring this container runs under (PRs #1572 / #1612).
 

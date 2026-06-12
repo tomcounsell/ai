@@ -39,9 +39,8 @@ input via a literal `\n`; only the separately-sent final CR submits).
 
 In TUI v2.1.160, the first ctrl-c surfaces the hint "Press Ctrl-C
 again to exit". Older TUI versions used "Interrupted · What should
-Claude do instead?" (the earlier granite-agent-loop docs at
-`docs/features/granite-agent-loop.md:294-296` referenced the older
-text and are now historical).
+Claude do instead?" (the historical granite-agent-loop PoC docs
+referenced the older text; those docs were deleted in PR #1664).
 
 The driver's `INTERRUPTED_RE` regex matches both forms, so the driver
 is robust to TUI version drift:
