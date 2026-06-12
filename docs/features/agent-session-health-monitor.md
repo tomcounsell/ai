@@ -81,7 +81,7 @@ is the long-run backstop for genuinely runaway sessions. See
 When a stuck session is found:
 
 1. Log a warning with the session ID, project key, and reason (`worker_dead` or `no_progress`)
-2. Increment the project-scoped Redis counter `{project_key}:session-health:recoveries:{worker_dead|no_progress}` for observability (non-fatal on failure)
+2. Increment the project-scoped Redis counter `{project_key}:session-health:recoveries:{worker_dead|no_progress}` for observability (non-fatal on failure). For `no_progress` recoveries on sessions matching the zombie profile (`claude_session_uuid` set but `sdk_ever_output=False`), an additional `{project_key}:session-health:recoveries:zombie_uuid_no_output` counter is also incremented (#1614) — this distinguishes normal startup-window recoveries from the stale-zombie case.
 3. For `no_progress` recoveries: run Tier 2 reprieve gates — if any gate passes, skip recovery this cycle (reprieve)
 4. Cancel the session task via `_active_sessions` registry and wait up to `TASK_CANCEL_TIMEOUT` (0.25s)
 5. Increment `recovery_attempts`; if `recovery_attempts >= MAX_RECOVERY_ATTEMPTS` (2), finalize as `failed` (history preserved); otherwise transition to `pending` (local sessions finalize as `abandoned`)
