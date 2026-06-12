@@ -454,6 +454,15 @@ def create_app() -> FastAPI:
             "recovery_attempts": s.recovery_attempts,
             "reprieve_count": s.reprieve_count,
             "process_alive": s.process_alive,
+            # Granite PTY identity (issue #1648). Null for SDK-path and
+            # pre-deploy granite sessions; populated by the granite tailer.
+            "exit_reason": s.exit_reason,
+            "pm_pid": s.pm_pid,
+            "dev_pid": s.dev_pid,
+            "pm_transcript_path": s.pm_transcript_path,
+            "dev_transcript_path": s.dev_transcript_path,
+            # Output routing state (issue #1647).
+            "user_facing_routed": s.user_facing_routed,
             "children": [_session_to_json(c) for c in s.children],
             "events": [
                 {

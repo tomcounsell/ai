@@ -329,6 +329,19 @@ class PipelineProgress(BaseModel):
     reprieve_count: int = 0
     process_alive: bool | None = None
 
+    # === Granite container PTY identity (issue #1648) ===
+    # Populated for sessions running on the granite PTY path. Null for
+    # SDK-path sessions and pre-deploy granite sessions.
+    exit_reason: str | None = None
+    pm_pid: int | None = None
+    dev_pid: int | None = None
+    pm_transcript_path: str | None = None
+    dev_transcript_path: str | None = None
+
+    # Output routing state (issue #1647)
+    # True once a user-facing message has been routed for this session.
+    user_facing_routed: bool = False
+
     # SDLC state
     stages: list[StageState] = []
     current_stage: str | None = None
@@ -624,14 +637,26 @@ def _parse_history(history_list: list | None) -> list[PipelineEvent]:
                 # Trim long PM prompts to the first meaningful line
                 first_line = (raw_text or "").splitlines()[0] if raw_text else ""
                 text = first_line[:120] + ("…" if len(first_line) > 120 else "")
+            elif event_type in (
+                "granite_user_routed",
+                "granite_complete_routed",
+                "granite_delivery_failure",
+            ):
+                text = raw_text or event_type
+            elif entry.get("type") == "exit_anomaly":
+                reason = entry.get("exit_reason", "unknown")
+                text = f"exit anomaly: {reason}"
+                event_type = "exit_anomaly"
             else:
                 text = raw_text or str(entry)
 
+            # Granite events use "ts" key; standard events use "timestamp".
+            ts = entry.get("timestamp") or entry.get("ts")
             events.append(
                 PipelineEvent(
                     role=event_type,
                     text=text,
-                    timestamp=entry.get("timestamp"),
+                    timestamp=ts,
                     event_type=event_type,
                 )
             )
@@ -702,6 +727,22 @@ def _safe_float(val) -> float | None:
         except (ValueError, TypeError):
             return None
     return None
+
+
+def _safe_nullable_int(val) -> int | None:
+    """Return val as an int if it's a real integer value, else None.
+
+    Used for nullable int fields (pm_pid, dev_pid) where MagicMock or other
+    non-integer values should coerce to None rather than raise.
+    """
+    if val is None:
+        return None
+    if isinstance(val, int):
+        return val
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
 
 
 def _session_to_pipeline(session) -> PipelineProgress:
@@ -902,6 +943,12 @@ def _session_to_pipeline(session) -> PipelineProgress:
         recovery_attempts=recovery_attempts,
         reprieve_count=reprieve_count,
         process_alive=process_alive,
+        exit_reason=_safe_str(getattr(session, "exit_reason", None)),
+        pm_pid=_safe_nullable_int(getattr(session, "pm_pid", None)),
+        dev_pid=_safe_nullable_int(getattr(session, "dev_pid", None)),
+        pm_transcript_path=_safe_str(getattr(session, "pm_transcript_path", None)),
+        dev_transcript_path=_safe_str(getattr(session, "dev_transcript_path", None)),
+        user_facing_routed=bool(getattr(session, "user_facing_routed", False)),
     )
 
 

@@ -399,6 +399,36 @@ class TestExtractGithubLinks:
         assert p.turn_count is None
         assert p.tool_call_count is None
 
+    def test_granite_pty_identity_fields(self):
+        """Granite PTY identity fields (issue #1648) are settable and default None/False."""
+        from ui.data.sdlc import PipelineProgress
+
+        # Defaults
+        p = PipelineProgress(agent_session_id="x")
+        assert p.exit_reason is None
+        assert p.pm_pid is None
+        assert p.dev_pid is None
+        assert p.pm_transcript_path is None
+        assert p.dev_transcript_path is None
+        assert p.user_facing_routed is False
+
+        # Explicit values
+        p2 = PipelineProgress(
+            agent_session_id="x",
+            exit_reason="pm_complete",
+            pm_pid=1234,
+            dev_pid=5678,
+            pm_transcript_path="/tmp/pm.jsonl",
+            dev_transcript_path="/tmp/dev.jsonl",
+            user_facing_routed=True,
+        )
+        assert p2.exit_reason == "pm_complete"
+        assert p2.pm_pid == 1234
+        assert p2.dev_pid == 5678
+        assert p2.pm_transcript_path == "/tmp/pm.jsonl"
+        assert p2.dev_transcript_path == "/tmp/dev.jsonl"
+        assert p2.user_facing_routed is True
+
 
 class TestSessionToPipeline:
     """Tests for _session_to_pipeline conversion with new fields."""
@@ -676,6 +706,41 @@ class TestHistoryParsing:
         events = _parse_history([{"role": "stage", "text": "BUILD started", "timestamp": 123.0}])
         assert events[0].role == "stage"
         assert events[0].timestamp == 123.0
+
+    def test_granite_routing_events_render_readably(self):
+        """Granite routing events (event_type key) produce typed PipelineEvents."""
+        from ui.data.sdlc import _parse_history
+
+        history = [
+            {"event_type": "granite_user_routed", "text": "user message delivered", "ts": 111.0},
+            {"event_type": "granite_complete_routed", "text": "complete delivered", "ts": 222.0},
+            {"event_type": "granite_delivery_failure", "text": "failed", "ts": 333.0},
+        ]
+        events = _parse_history(history)
+        assert len(events) == 3
+        assert events[0].event_type == "granite_user_routed"
+        assert events[0].text == "user message delivered"
+        assert events[0].timestamp == 111.0
+        assert events[1].event_type == "granite_complete_routed"
+        assert events[2].event_type == "granite_delivery_failure"
+
+    def test_exit_anomaly_event_rendered_with_reason(self):
+        """exit_anomaly entries are rendered with their exit_reason."""
+        from ui.data.sdlc import _parse_history
+
+        history = [{"type": "exit_anomaly", "exit_reason": "crash", "ts": 555.0}]
+        events = _parse_history(history)
+        assert len(events) == 1
+        assert events[0].event_type == "exit_anomaly"
+        assert "crash" in events[0].text
+        assert events[0].timestamp == 555.0
+
+    def test_ts_key_used_for_timestamp_when_no_timestamp(self):
+        """Events with 'ts' key (granite format) populate the timestamp field."""
+        from ui.data.sdlc import _parse_history
+
+        events = _parse_history([{"event_type": "granite_user_routed", "text": "x", "ts": 999.0}])
+        assert events[0].timestamp == 999.0
 
 
 class TestSafeStr:

@@ -316,6 +316,7 @@ class PTYDriver:
         timeout_s: float = DEFAULT_TIMEOUT_S,
         env: dict[str, str] | None = None,
         append_system_prompt: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         self.role = role
         self.cwd = cwd
@@ -332,6 +333,11 @@ class PTYDriver:
         # interactive TUI supports the flag, so the persona is a real
         # system-prompt append rather than user-visible prime text.
         self._append_system_prompt = append_system_prompt
+        # UUID passed via `claude --session-id <uuid>` so Claude Code names
+        # its transcript `~/.claude/projects/{cwd-slug}/{session_id}.jsonl`.
+        # When set, the transcript path is deterministically known at spawn
+        # time — no post-hoc UUID scraping required.
+        self._session_id = session_id
         self._child: pexpect.spawn | None = None
         self._spawned_at: float | None = None
         # Per-turn screen capture (raw, ANSI-laden). Accumulates every
@@ -369,6 +375,8 @@ class PTYDriver:
         args = ["--model", model, "--permission-mode", "bypassPermissions"]
         if self._append_system_prompt:
             args += ["--append-system-prompt", self._append_system_prompt]
+        if self._session_id:
+            args += ["--session-id", self._session_id]
 
         env = _build_env()
         if self._extra_env:
@@ -578,6 +586,25 @@ class PTYDriver:
         return self._child.isalive()
 
     # -- Inspection -------------------------------------------------------
+
+    @property
+    def pid(self) -> int | None:
+        """OS PID of the pexpect child process (None if not spawned or dead).
+
+        Returns the live child's PID when the child exists and is alive.
+        Returns None when the driver has not been spawned yet, or when the
+        child process has already exited. The pool's PID registry and the
+        transcript-path computation both use this property to capture the
+        PID at spawn time without reaching into pexpect internals.
+        """
+        if self._child is None:
+            return None
+        try:
+            if not self._child.isalive():
+                return None
+        except Exception:
+            return None
+        return self._child.pid
 
     def alive_seconds(self) -> float | None:
         """Seconds since the child was spawned (None if not spawned)."""

@@ -58,12 +58,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
 from agent.granite_container.container import Container, ContainerResult
 from agent.granite_container.pty_pool import PairSpawnSpec, PTYPool
+from agent.granite_container.transcript_tailer import (
+    TranscriptTelemetry,
+    read_transcript_telemetry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +78,37 @@ logger = logging.getLogger(__name__)
 # future. 30s matches the Telegram relay's standard send timeout.
 DEFAULT_DELIVERY_TIMEOUT_S = 30.0
 
+# Transcript tailer tick interval (seconds). Each tick reads only new bytes
+# since last tick (O(Δbytes)). Bounded by PTY pool size — total save
+# volume is pool_size × 1 diff-gated save per tick. ~5s matches _bump_last_turn_at cadence.
+_TAILER_INTERVAL_S: float = 5.0
+
 
 def _now_iso() -> str:
     """ISO-8601 UTC timestamp for `session_events` entries."""
     return datetime.now(UTC).isoformat()
+
+
+def _transcript_path_from_spec(cwd: str, session_id: str) -> str:
+    """Compute the Claude Code JSONL transcript path from cwd + session UUID.
+
+    Claude Code names transcripts: ~/.claude/projects/{cwd.replace("/", "-")}/{uuid}.jsonl
+    This is deterministic because we set the UUID via `claude --session-id`.
+    """
+    slug = cwd.replace("/", "-")
+    home = os.path.expanduser("~")
+    return os.path.join(home, ".claude", "projects", slug, f"{session_id}.jsonl")
+
+
+def _exception_is_benign(result: ContainerResult) -> bool:
+    """Return True for soft exceptions that don't warrant an ERROR-level alert.
+
+    Soft: the session had at least one classified turn AND recent last_turn_at
+    activity (proxied by non-empty turns list). These are likely network blips or
+    clean SIGTERM during idle.
+    Hard: crashed before producing any output -> operator-actionable.
+    """
+    return bool(result.turns)
 
 
 def _append_session_event(agent_session, event: dict) -> None:
@@ -218,11 +251,19 @@ class BridgeAdapter:
         # differ from the pool's spawn-time defaults, the pool
         # replaces the pre-warmed pair with a per-session spawn
         # (spawn-on-acquire; the bounded-slot invariant holds).
+        # Generate deterministic UUIDs for each PTY's Claude Code session.
+        # These are passed via `claude --session-id <uuid>` so the transcript
+        # path is known at spawn time:
+        #   ~/.claude/projects/{cwd-slug}/{uuid}.jsonl
+        pm_session_id = str(uuid.uuid4())
+        dev_session_id = str(uuid.uuid4())
         spawn_spec = PairSpawnSpec(
             cwd=working_dir,
             env=self._session_env,
             pm_model=self._pm_model,
             pm_system_prompt=self._pm_system_prompt,
+            pm_session_id=pm_session_id,
+            dev_session_id=dev_session_id,
         )
         async with self._pool.acquire_pair(spawn_spec=spawn_spec) as (pm, dev):
             # Hand the pool's pre-warmed pair to Container so it
@@ -244,11 +285,31 @@ class BridgeAdapter:
                 pm_pty=pm,
                 dev_pty=dev,
             )
-            # The container's run is sync (pexpect-driven). Run
-            # it in a worker thread so the asyncio event loop
-            # stays responsive to heartbeats, steering
-            # injection, and watchdog ticks.
-            result: ContainerResult = await asyncio.to_thread(container.run)
+            # Compute transcript paths for tailer (known at spawn time since we set the UUIDs).
+            pm_path = _transcript_path_from_spec(working_dir, pm_session_id)
+            dev_path = _transcript_path_from_spec(working_dir, dev_session_id)
+            # Start the tailer task before handing the container to the worker thread.
+            # The tailer reads new bytes from both transcripts every ~5s, merges counters,
+            # and persists them to agent_session (diff-gated to avoid spurious saves).
+            tailer_task = asyncio.create_task(
+                self._run_tailer_task(pm_path, dev_path),
+                name=f"transcript-tailer-{pm_session_id[:8]}",
+            )
+            try:
+                # The container's run is sync (pexpect-driven). Run
+                # it in a worker thread so the asyncio event loop
+                # stays responsive to heartbeats, steering
+                # injection, and watchdog ticks.
+                result: ContainerResult = await asyncio.to_thread(container.run)
+            finally:
+                # Cancel the tailer; the container has exited so no more bytes
+                # will appear. Await the cancellation so the task is cleaned up
+                # before we write the exit summary.
+                tailer_task.cancel()
+                try:
+                    await tailer_task
+                except asyncio.CancelledError:
+                    pass
             self._publish_exit_summary(result)
             self._maybe_publish_exit_anomaly(result)
         return ""
@@ -285,34 +346,70 @@ class BridgeAdapter:
         # instead of the bare-emoji REACTION_SUCCESS.
         try:
             routed = self._user_facing_routed or result.user_facing_routed
-            if routed and self._agent_session is not None:
-                self._agent_session.user_facing_routed = routed
+            if self._agent_session is not None:
+                update_fields = ["updated_at"]
+                if routed:
+                    self._agent_session.user_facing_routed = routed
+                    update_fields.append("user_facing_routed")
+                # Persist exit_reason and PTY identity fields (issue #1648).
+                # Fail-silent: observability must never crash the run.
+                self._agent_session.exit_reason = result.exit_reason
+                update_fields.append("exit_reason")
+                if result.pm_pid is not None:
+                    self._agent_session.pm_pid = result.pm_pid
+                    update_fields.append("pm_pid")
+                if result.dev_pid is not None:
+                    self._agent_session.dev_pid = result.dev_pid
+                    update_fields.append("dev_pid")
+                if result.pm_transcript_path is not None:
+                    self._agent_session.pm_transcript_path = result.pm_transcript_path
+                    update_fields.append("pm_transcript_path")
+                if result.dev_transcript_path is not None:
+                    self._agent_session.dev_transcript_path = result.dev_transcript_path
+                    update_fields.append("dev_transcript_path")
                 save = getattr(self._agent_session, "save", None)
                 if callable(save):
-                    save(update_fields=["user_facing_routed", "updated_at"])
+                    save(update_fields=update_fields)
         except Exception as e:  # pragma: no cover - defensive
-            logger.warning("[bridge-adapter] user_facing_routed save failed: %s", e)
+            logger.warning("[bridge-adapter] exit summary field save failed: %s", e)
 
     def _maybe_publish_exit_anomaly(self, result: ContainerResult) -> None:
-        """When the run ended on a hang / startup-unresolved
-        exit_reason, log at ERROR and append a session_events
-        entry. This is the on-call path for kernel regressions
-        at 3am — Sentry's default log-capture wiring picks up
-        the logger.error, and the dashboard surfaces the
-        session_events entry (hardens OPS-1)."""
-        if result.exit_reason not in (
+        """When the run ended on a hang / startup-unresolved / exception
+        exit_reason, log (ERROR for hard exits, WARNING for soft exceptions)
+        and append a session_events entry. This is the on-call path for
+        kernel regressions at 3am — Sentry's default log-capture wiring picks
+        up the logger.error, and the dashboard surfaces the session_events
+        entry (hardens OPS-1).
+
+        exception severity gating: soft exits (had turns -> likely network
+        blip) log at WARNING (no Sentry alert). Hard exits (crashed before
+        producing output) log at ERROR (Sentry captures).
+        """
+        anomaly_reasons = {
             "pm_hang",
             "dev_hang",
             "startup_unresolved",
             "pm_no_user_message",
-        ):
+            "exception",
+        }
+        if result.exit_reason not in anomaly_reasons:
             return
-        logger.error(
-            "[granite-exit-anomaly] session=%s exit_reason=%s exit_message=%s",
-            getattr(self._agent_session, "session_id", "<no-id>"),
-            result.exit_reason,
-            result.exit_message,
-        )
+
+        # exception: classify before logging to avoid Sentry alert fatigue.
+        if result.exit_reason == "exception" and _exception_is_benign(result):
+            logger.warning(
+                "[granite-exit-anomaly] session=%s exit_reason=%s exit_message=%s",
+                getattr(self._agent_session, "session_id", "<no-id>"),
+                result.exit_reason,
+                result.exit_message,
+            )
+        else:
+            logger.error(
+                "[granite-exit-anomaly] session=%s exit_reason=%s exit_message=%s",
+                getattr(self._agent_session, "session_id", "<no-id>"),
+                result.exit_reason,
+                result.exit_message,
+            )
         _append_session_event(
             self._agent_session,
             {
@@ -372,6 +469,17 @@ class BridgeAdapter:
             )
             if delivered:
                 self._user_facing_routed = True
+            # Emit typed routing event for dashboard feed
+            _append_session_event(
+                agent_session,
+                {
+                    "type": "granite_user_routed",
+                    "event_type": "granite_user_routed",
+                    "text": f"[/user] routed ({len(payload)} chars)",
+                    "delivered": delivered,
+                    "ts": _now_iso(),
+                },
+            )
 
         return _on_user
 
@@ -392,6 +500,17 @@ class BridgeAdapter:
             )
             if delivered:
                 self._user_facing_routed = True
+            # Emit typed routing event for dashboard feed
+            _append_session_event(
+                agent_session,
+                {
+                    "type": "granite_complete_routed",
+                    "event_type": "granite_complete_routed",
+                    "text": f"[/complete] routed ({len(payload)} chars)",
+                    "delivered": delivered,
+                    "ts": _now_iso(),
+                },
+            )
 
         return _on_complete
 
@@ -459,7 +578,7 @@ class BridgeAdapter:
                 # on the same event loop. Count as False so the caller does
                 # not set user_facing_routed prematurely.
                 return False
-            # Production path: pexpect worker thread → schedule on the
+            # Production path: pexpect worker thread -> schedule on the
             # captured worker loop and block until delivered.
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             future.result(timeout=timeout_s)
@@ -491,12 +610,145 @@ class BridgeAdapter:
         _append_session_event(
             self._agent_session,
             {
+                "event_type": "granite_delivery_failure",
+                "text": f"delivery failed: {reason} ({len(payload)} chars)",
                 "type": "delivery_failure",
                 "payload_chars": len(payload),
                 "reason": reason,
                 "ts": _now_iso(),
             },
         )
+
+    # -- Transcript tailer (incremental telemetry, issue #1648) -----------
+
+    async def _run_tailer_task(
+        self,
+        pm_transcript_path: str | None,
+        dev_transcript_path: str | None,
+    ) -> None:
+        """Periodic transcript tailer: reads PM + Dev JSONL incrementally every ~5s.
+
+        Runs as an asyncio.Task (started in run(), cancelled before exit summary).
+        Persists via asyncio.to_thread so the blocking Redis save never stalls the loop.
+
+        update_fields is strictly disjoint from _publish_exit_summary's set
+        (excludes updated_at, last_turn_at) to avoid concurrent-write clobber.
+        """
+        pm_state = TranscriptTelemetry()
+        dev_state = TranscriptTelemetry()
+        tailer_fields = [
+            "turn_count",
+            "tool_call_count",
+            "total_input_tokens",
+            "total_output_tokens",
+            "total_cache_read_tokens",
+            "current_tool_name",
+            "last_tool_use_at",
+            "recent_thinking_excerpt",
+        ]
+        while True:
+            try:
+                await asyncio.sleep(_TAILER_INTERVAL_S)
+                await self._tailer_tick(
+                    pm_transcript_path,
+                    dev_transcript_path,
+                    pm_state,
+                    dev_state,
+                    tailer_fields,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("[bridge-adapter] tailer tick error: %s", e)
+
+    async def _tailer_tick(
+        self,
+        pm_transcript_path: str | None,
+        dev_transcript_path: str | None,
+        pm_state: TranscriptTelemetry,
+        dev_state: TranscriptTelemetry,
+        update_fields: list[str],
+    ) -> None:
+        """One tailer tick: read new transcript bytes, merge PM+Dev counters, persist if changed.
+
+        Diff-gated: skips the save when turn/tool/token counts are unchanged since last tick.
+        """
+        if self._agent_session is None:
+            return
+
+        new_pm = read_transcript_telemetry(pm_transcript_path, pm_state)
+        new_dev = read_transcript_telemetry(dev_transcript_path, dev_state)
+
+        # Merge: sum counters, pick most recent tool/thinking across both
+        merged_turns = new_pm.turn_count + new_dev.turn_count
+        merged_tools = new_pm.tool_call_count + new_dev.tool_call_count
+        merged_input = new_pm.total_input_tokens + new_dev.total_input_tokens
+        merged_output = new_pm.total_output_tokens + new_dev.total_output_tokens
+        merged_cache = new_pm.total_cache_read_tokens + new_dev.total_cache_read_tokens
+
+        # Pick most recent current_tool_name (prefer dev if tied, since dev does the actual work)
+        current_tool = new_dev.current_tool_name or new_pm.current_tool_name
+        last_use_at = None
+        if new_pm.last_tool_use_at and new_dev.last_tool_use_at:
+            last_use_at = max(new_pm.last_tool_use_at, new_dev.last_tool_use_at)
+        else:
+            last_use_at = new_dev.last_tool_use_at or new_pm.last_tool_use_at
+        thinking = new_dev.recent_thinking_excerpt or new_pm.recent_thinking_excerpt
+
+        # Check if anything changed (diff gate — avoid pointless saves)
+        prev_turns = getattr(self._agent_session, "turn_count", 0) or 0
+        prev_tools = getattr(self._agent_session, "tool_call_count", 0) or 0
+        prev_input = getattr(self._agent_session, "total_input_tokens", 0) or 0
+        if merged_turns == prev_turns and merged_tools == prev_tools and merged_input == prev_input:
+            # Update offsets even if no change, but don't save
+            pm_state.byte_offset = new_pm.byte_offset
+            dev_state.byte_offset = new_dev.byte_offset
+            return
+
+        # Update states with new offsets and telemetry
+        pm_state.byte_offset = new_pm.byte_offset
+        pm_state.turn_count = new_pm.turn_count
+        pm_state.tool_call_count = new_pm.tool_call_count
+        pm_state.total_input_tokens = new_pm.total_input_tokens
+        pm_state.total_output_tokens = new_pm.total_output_tokens
+        pm_state.total_cache_read_tokens = new_pm.total_cache_read_tokens
+        pm_state.current_tool_name = new_pm.current_tool_name
+        pm_state.last_tool_use_at = new_pm.last_tool_use_at
+
+        dev_state.byte_offset = new_dev.byte_offset
+        dev_state.turn_count = new_dev.turn_count
+        dev_state.tool_call_count = new_dev.tool_call_count
+        dev_state.total_input_tokens = new_dev.total_input_tokens
+        dev_state.total_output_tokens = new_dev.total_output_tokens
+        dev_state.total_cache_read_tokens = new_dev.total_cache_read_tokens
+        dev_state.current_tool_name = new_dev.current_tool_name
+        dev_state.last_tool_use_at = new_dev.last_tool_use_at
+
+        try:
+            self._agent_session.turn_count = merged_turns
+            self._agent_session.tool_call_count = merged_tools
+            self._agent_session.total_input_tokens = merged_input
+            self._agent_session.total_output_tokens = merged_output
+            self._agent_session.total_cache_read_tokens = merged_cache
+            if current_tool is not None:
+                self._agent_session.current_tool_name = current_tool
+            if last_use_at is not None:
+                # last_use_at is a raw ISO string from TranscriptTelemetry.last_tool_use_at.
+                # AgentSession.last_tool_use_at is a DatetimeField — it requires a tz-aware
+                # datetime object, not a string.  Parse here before assignment.
+                try:
+                    self._agent_session.last_tool_use_at = datetime.fromisoformat(
+                        last_use_at.replace("Z", "+00:00")
+                    )
+                except (ValueError, AttributeError):
+                    pass
+            if thinking is not None:
+                self._agent_session.recent_thinking_excerpt = thinking
+            save = getattr(self._agent_session, "save", None)
+            if callable(save):
+                await asyncio.to_thread(save, update_fields=list(update_fields))
+        except Exception as e:
+            logger.warning("[bridge-adapter] tailer persist failed: %s", e)
 
     # -- send_cb=None fallback (BRIDGE-1) ---------------------------------
 
