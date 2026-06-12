@@ -451,5 +451,154 @@ class TestNoSleepPollWait(unittest.TestCase):
             asyncio.run(_run())
 
 
+class TestPTYDriverSessionId(unittest.TestCase):
+    """PTYDriver(session_id=...) appends --session-id <uuid> to spawn args
+    and exposes a .pid property."""
+
+    def test_session_id_appended_to_spawn_args(self) -> None:
+        """When session_id is set, spawn() passes --session-id <uuid> to claude."""
+        from agent.granite_container.pty_driver import PTYDriver
+
+        captured: dict = {}
+
+        def _fake_spawn(
+            cmd: str,
+            args: list,
+            *,
+            env=None,
+            echo=False,
+            encoding=None,
+            preexec_fn=None,
+            cwd=None,
+            timeout=None,
+        ):
+            captured["args"] = args
+
+            class _FakeChild:
+                pid = 12345
+
+                def isalive(self):
+                    return True
+
+            return _FakeChild()
+
+        test_uuid = "aaaabbbb-cccc-dddd-eeee-ffffaaaabbbb"
+        driver = PTYDriver(role="pm", session_id=test_uuid)
+        with patch("agent.granite_container.pty_driver.pexpect.spawn", _fake_spawn):
+            driver.spawn()
+
+        self.assertIn("--session-id", captured["args"])
+        idx = captured["args"].index("--session-id")
+        self.assertEqual(captured["args"][idx + 1], test_uuid)
+
+    def test_no_session_id_does_not_append_flag(self) -> None:
+        """When session_id is None (default), --session-id is NOT passed."""
+        from agent.granite_container.pty_driver import PTYDriver
+
+        captured: dict = {}
+
+        def _fake_spawn(cmd, args, **kwargs):
+            captured["args"] = args
+
+            class _FakeChild:
+                pid = 12346
+
+                def isalive(self):
+                    return True
+
+            return _FakeChild()
+
+        driver = PTYDriver(role="dev")
+        with patch("agent.granite_container.pty_driver.pexpect.spawn", _fake_spawn):
+            driver.spawn()
+
+        self.assertNotIn("--session-id", captured.get("args", []))
+
+    def test_pid_property_returns_child_pid_when_alive(self) -> None:
+        """PTYDriver.pid returns the pexpect child's PID when alive."""
+        from agent.granite_container.pty_driver import PTYDriver
+
+        class _FakeChild:
+            pid = 99999
+
+            def isalive(self):
+                return True
+
+        driver = PTYDriver(role="pm")
+        driver._child = _FakeChild()
+        self.assertEqual(driver.pid, 99999)
+
+    def test_pid_property_returns_none_when_no_child(self) -> None:
+        """PTYDriver.pid returns None when _child is None."""
+        from agent.granite_container.pty_driver import PTYDriver
+
+        driver = PTYDriver(role="pm")
+        self.assertIsNone(driver.pid)
+
+    def test_pid_property_returns_none_when_dead(self) -> None:
+        """PTYDriver.pid returns None when child is not alive."""
+        from agent.granite_container.pty_driver import PTYDriver
+
+        class _DeadChild:
+            pid = 11111
+
+            def isalive(self):
+                return False
+
+        driver = PTYDriver(role="pm")
+        driver._child = _DeadChild()
+        self.assertIsNone(driver.pid)
+
+
+class TestPairSpawnSpecSessionIds(unittest.TestCase):
+    """PairSpawnSpec has pm_session_id and dev_session_id fields."""
+
+    def test_pair_spawn_spec_has_session_id_fields(self) -> None:
+        from agent.granite_container.pty_pool import PairSpawnSpec
+
+        spec = PairSpawnSpec(
+            pm_session_id="pm-uuid-1234",
+            dev_session_id="dev-uuid-5678",
+        )
+        self.assertEqual(spec.pm_session_id, "pm-uuid-1234")
+        self.assertEqual(spec.dev_session_id, "dev-uuid-5678")
+
+    def test_pair_spawn_spec_defaults_none(self) -> None:
+        from agent.granite_container.pty_pool import PairSpawnSpec
+
+        spec = PairSpawnSpec()
+        self.assertIsNone(spec.pm_session_id)
+        self.assertIsNone(spec.dev_session_id)
+
+
+class TestContainerResultPidAndTranscript(unittest.TestCase):
+    """ContainerResult has pm_pid, dev_pid, pm_transcript_path, dev_transcript_path."""
+
+    def test_container_result_has_pid_and_transcript_fields(self) -> None:
+        from agent.granite_container.container import ContainerResult
+
+        result = ContainerResult(
+            session_id="s1",
+            user_message="hello",
+            pm_pid=1001,
+            dev_pid=1002,
+            pm_transcript_path="/home/.claude/projects/-tmp/pm-uuid.jsonl",
+            dev_transcript_path="/home/.claude/projects/-tmp/dev-uuid.jsonl",
+        )
+        self.assertEqual(result.pm_pid, 1001)
+        self.assertEqual(result.dev_pid, 1002)
+        self.assertEqual(result.pm_transcript_path, "/home/.claude/projects/-tmp/pm-uuid.jsonl")
+        self.assertEqual(result.dev_transcript_path, "/home/.claude/projects/-tmp/dev-uuid.jsonl")
+
+    def test_container_result_defaults_none(self) -> None:
+        from agent.granite_container.container import ContainerResult
+
+        result = ContainerResult(session_id="s1", user_message="hello")
+        self.assertIsNone(result.pm_pid)
+        self.assertIsNone(result.dev_pid)
+        self.assertIsNone(result.pm_transcript_path)
+        self.assertIsNone(result.dev_transcript_path)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

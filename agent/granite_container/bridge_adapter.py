@@ -218,11 +218,19 @@ class BridgeAdapter:
         # differ from the pool's spawn-time defaults, the pool
         # replaces the pre-warmed pair with a per-session spawn
         # (spawn-on-acquire; the bounded-slot invariant holds).
+        # Generate deterministic UUIDs for each PTY's Claude Code session.
+        # These are passed via `claude --session-id <uuid>` so the transcript
+        # path is known at spawn time:
+        #   ~/.claude/projects/{cwd-slug}/{uuid}.jsonl
+        pm_session_id = str(uuid.uuid4())
+        dev_session_id = str(uuid.uuid4())
         spawn_spec = PairSpawnSpec(
             cwd=working_dir,
             env=self._session_env,
             pm_model=self._pm_model,
             pm_system_prompt=self._pm_system_prompt,
+            pm_session_id=pm_session_id,
+            dev_session_id=dev_session_id,
         )
         async with self._pool.acquire_pair(spawn_spec=spawn_spec) as (pm, dev):
             # Hand the pool's pre-warmed pair to Container so it
@@ -285,13 +293,32 @@ class BridgeAdapter:
         # instead of the bare-emoji REACTION_SUCCESS.
         try:
             routed = self._user_facing_routed or result.user_facing_routed
-            if routed and self._agent_session is not None:
-                self._agent_session.user_facing_routed = routed
+            if self._agent_session is not None:
+                update_fields = ["updated_at"]
+                if routed:
+                    self._agent_session.user_facing_routed = routed
+                    update_fields.append("user_facing_routed")
+                # Persist exit_reason and PTY identity fields (issue #1648).
+                # Fail-silent: observability must never crash the run.
+                self._agent_session.exit_reason = result.exit_reason
+                update_fields.append("exit_reason")
+                if result.pm_pid is not None:
+                    self._agent_session.pm_pid = result.pm_pid
+                    update_fields.append("pm_pid")
+                if result.dev_pid is not None:
+                    self._agent_session.dev_pid = result.dev_pid
+                    update_fields.append("dev_pid")
+                if result.pm_transcript_path is not None:
+                    self._agent_session.pm_transcript_path = result.pm_transcript_path
+                    update_fields.append("pm_transcript_path")
+                if result.dev_transcript_path is not None:
+                    self._agent_session.dev_transcript_path = result.dev_transcript_path
+                    update_fields.append("dev_transcript_path")
                 save = getattr(self._agent_session, "save", None)
                 if callable(save):
-                    save(update_fields=["user_facing_routed", "updated_at"])
+                    save(update_fields=update_fields)
         except Exception as e:  # pragma: no cover - defensive
-            logger.warning("[bridge-adapter] user_facing_routed save failed: %s", e)
+            logger.warning("[bridge-adapter] exit summary field save failed: %s", e)
 
     def _maybe_publish_exit_anomaly(self, result: ContainerResult) -> None:
         """When the run ended on a hang / startup-unresolved

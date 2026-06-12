@@ -294,6 +294,28 @@ class AgentSession(Model):
     # Default False keeps existing sessions unaffected (no migration needed).
     user_facing_routed = Field(default=False)
 
+    # Granite-path exit reason (pm_complete, pm_user, pm_max_turns, dev_hang,
+    # pm_hang, startup_unresolved, pm_no_user_message, exception).
+    # Status mapping untouched; dashboard renders warning chip for non-clean values.
+    exit_reason = Field(null=True, default=None)
+
+    # === Granite container PTY identity (issue #1648 dashboard telemetry) ===
+    # Populated by BridgeAdapter._publish_exit_summary from ContainerResult.
+    # Nullable: non-granite sessions and pre-deploy granite sessions leave these
+    # as None. The dashboard uses them to surface active PTY processes and
+    # link to transcript files.
+    #
+    # PM PTY OS process ID. Nullable; None when the session is not running on
+    # the granite path or when the PTY has already exited.
+    pm_pid = IntField(null=True)
+    # Dev PTY OS process ID.
+    dev_pid = IntField(null=True)
+    # Absolute path to the PM Claude Code JSONL transcript file.
+    # Follows Claude Code's naming: ~/.claude/projects/{cwd-slug}/{uuid}.jsonl
+    pm_transcript_path = Field(null=True)
+    # Absolute path to the Dev Claude Code JSONL transcript file.
+    dev_transcript_path = Field(null=True)
+
     # === Continuation PM depth tracking ===
     # Tracks how many continuation PMs have been chained from the original PM.
     # Stored directly on the session (O(1)) rather than walking the parent chain
