@@ -95,6 +95,59 @@ class TestPositionalShortcut:
         assert exc.value.code == 0
 
 
+class TestHelpShortCircuit:
+    """`valor "prompt" --help` should print TOP-LEVEL help (not the create
+    sub-help) and exit 0, without ever delegating to cmd_create. A known
+    subcommand with `--help` (e.g. `valor list --help`) must still reach its
+    own sub-help via argparse — the first-token guard must NOT fire."""
+
+    def test_prompt_then_help_prints_toplevel_and_exits_zero(self, capsys):
+        with patch("tools.valor_session.cmd_create", return_value=0) as cmd:
+            with pytest.raises(SystemExit) as exc:
+                main(["prompt", "--help"])
+        assert exc.value.code == 0
+        cmd.assert_not_called()
+        out = capsys.readouterr().out
+        # Top-level help: usage line `usage: valor ...` plus the subcommand
+        # metavar "agent-session", which only the top-level parser shows.
+        assert "usage: valor" in out
+        assert "agent-session" in out
+
+    def test_prompt_then_short_help_behaves_identically(self, capsys):
+        with patch("tools.valor_session.cmd_create", return_value=0) as cmd:
+            with pytest.raises(SystemExit) as exc:
+                main(["prompt", "-h"])
+        assert exc.value.code == 0
+        cmd.assert_not_called()
+        out = capsys.readouterr().out
+        assert "usage: valor" in out
+        assert "agent-session" in out
+
+    def test_empty_prompt_then_help_prints_toplevel(self, capsys):
+        with patch("tools.valor_session.cmd_create", return_value=0) as cmd:
+            with pytest.raises(SystemExit) as exc:
+                main(["", "--help"])
+        assert exc.value.code == 0
+        cmd.assert_not_called()
+        out = capsys.readouterr().out
+        assert "usage: valor" in out
+        assert "agent-session" in out
+
+    def test_known_subcommand_help_reaches_subhelp(self, capsys):
+        """`valor list --help` must NOT trigger the first-token guard:
+        `list` is a known subcommand, so argparse prints the `list`
+        sub-help (which lists list-specific flags like --status/--limit)."""
+        with patch("tools.valor_session.cmd_list", return_value=0) as cmd:
+            with pytest.raises(SystemExit) as exc:
+                main(["list", "--help"])
+        assert exc.value.code == 0
+        cmd.assert_not_called()
+        out = capsys.readouterr().out
+        # Distinguishing substring: --status/--limit appear only on the
+        # `list` sub-help, never on top-level help.
+        assert "--status" in out or "--limit" in out
+
+
 class TestErrorPaths:
     def test_no_args_prints_help_and_returns_1(self, capsys):
         rc = main([])
