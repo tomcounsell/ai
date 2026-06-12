@@ -284,6 +284,16 @@ class AgentSession(Model):
     # fields generically. Default False keeps existing sessions unaffected.
     requires_real_chrome = Field(default=False)
 
+    # === Granite container user-facing delivery tracking (issue #1647) ===
+    # Set to True by BridgeAdapter._publish_exit_summary when at least one
+    # [/user] or non-empty [/complete] payload was confirmed delivered to the
+    # user channel during the granite container run. The executor's emoji branch
+    # at session_executor.py reads this via getattr(..., False) to choose
+    # REACTION_COMPLETE instead of the bare-emoji REACTION_SUCCESS, because the
+    # granite path never calls messenger.send() so has_communicated() stays False.
+    # Default False keeps existing sessions unaffected (no migration needed).
+    user_facing_routed = Field(default=False)
+
     # === Continuation PM depth tracking ===
     # Tracks how many continuation PMs have been chained from the original PM.
     # Stored directly on the session (O(1)) rather than walking the parent chain

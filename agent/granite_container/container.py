@@ -35,7 +35,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from agent.granite_container.granite_classifier import (
     classify_pm_prefix,
@@ -171,6 +171,31 @@ PM_COMPLIANCE_NUDGE = (
     "content."
 )
 
+# Wrap-up prompt written to PM when the run ends with no user-facing
+# message delivered. Instructs PM to emit a [/user] or [/complete]
+# summary so the human always receives a real message.
+PM_WRAPUP_PROMPT = (
+    "The developer has finished. Here is their final report:\n\n{seed}\n\n"
+    "Send your [/user] or [/complete] summary to the human now. "
+    "Include the specific outcomes from the report above — which files changed "
+    "and what was done — not a generic acknowledgement."
+)
+
+# Maximum number of wrap-up attempts when PM still hasn't produced a
+# user-facing message on exit. Capped at 1 to bound the extra latency;
+# a PM that stays silent after the wrap-up prompt gets the canned
+# OPERATOR_TERMINAL_MESSAGE instead.
+MAX_WRAPUP_ATTEMPTS = 1
+
+# Fallback seed string for the wrap-up prompt when the developer did
+# not produce a captured report and the Dev PTY is no longer readable.
+DEV_REPORT_UNAVAILABLE = "The developer did not produce a captured report."
+
+# Fallback user-visible message delivered directly (bypassing PM) when
+# the wrap-up guard exhausts MAX_WRAPUP_ATTEMPTS without PM emitting a
+# user-facing prefix. Guarantees the human always gets some message.
+OPERATOR_TERMINAL_MESSAGE = "Your request was completed; a summary could not be generated."
+
 
 @dataclass
 class TurnRecord:
@@ -194,8 +219,14 @@ class ContainerResult:
     """Final output of a container run.
 
     `exit_reason` is one of: pm_complete, pm_user, pm_max_turns,
-    dev_hang, pm_hang, startup_unresolved, exception. The PoC's
-    results doc renders this as the verdict.
+    dev_hang, pm_hang, startup_unresolved, pm_no_user_message,
+    exception. The PoC's results doc renders this as the verdict.
+
+    `user_facing_routed` is True when at least one [/user] or
+    non-empty [/complete] payload was delivered to the user channel
+    during the run. BridgeAdapter propagates this flag to
+    agent_session.user_facing_routed so session_executor can choose
+    the correct post-run emoji.
     """
 
     session_id: str
@@ -210,6 +241,7 @@ class ContainerResult:
     resume_uuid: str | None = None
     startup_events: list[dict[str, Any]] = field(default_factory=list)
     coord_test_pass: bool | None = None
+    user_facing_routed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +276,24 @@ def _make_sandbox_cwd() -> tuple[str, str]:
     sandbox = sandbox_root / f"run-{uuid.uuid4().hex[:8]}"
     sandbox.mkdir(parents=True, exist_ok=False)
     return str(sandbox), sandbox.name
+
+
+# ---------------------------------------------------------------------------
+# Routing helpers
+# ---------------------------------------------------------------------------
+
+
+class RouteOutcome(NamedTuple):
+    """Return value of `_route_pm_classification`.
+
+    `should_break` True means the steady-state loop should exit after this
+    routing decision. `exit_reason` carries the ContainerResult.exit_reason
+    to set when `should_break` is True (None means the loop should continue
+    — dev routing does not break the loop).
+    """
+
+    should_break: bool
+    exit_reason: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +353,17 @@ class Container:
         self._pm_pty: PTYDriver | None = None
         self._dev_pty: PTYDriver | None = None
         self._sandbox: tuple[str, str] | None = None
+        # Last Dev report captured after each successful summarize_for_pm
+        # in the steady-state dev branch. Used as the seed for the
+        # wrap-up guard prompt so the PM can deliver a specific summary.
+        self._last_dev_report: str | None = None
+        # One-shot flags for prime-turn relay (issue #1644).
+        # _prime_relayed=True means the PM's prime-turn buffer was routed
+        # to user/complete (not dev) — the first steady-state iteration
+        # should force a fresh _cycle_idle before classifying so it reads
+        # genuinely new PM output, not the stale prime buffer.
+        self._prime_relayed: bool = False
+        self._prime_pm_buf_hash: int | None = None
 
     # -- Lifecycle --------------------------------------------------------
 
@@ -472,7 +533,9 @@ class Container:
         result = pty.read_until_idle(min_content_bytes=0, timeout_s=STARTUP_CYCLE_TIMEOUT_S)
         return (result.saw_idle, result.buffer, result.idle_marker, result.elapsed_ms)
 
-    def _prime_session(self, pty: PTYDriver, slash_cmd: str) -> None:
+    def _prime_session(
+        self, pty: PTYDriver, slash_cmd: str, *, include_user_message: bool = True
+    ) -> None:
         """Send the persona-priming slash command to a PTY.
 
         The slash command body is invisible to the operator (F4);
@@ -500,6 +563,13 @@ class Container:
         response — see `scripts/probe_slash_arguments.py:241-247`).
         This converts a 60s silent stall into a <2s dismiss + a
         normal C5 wait.
+
+        `include_user_message` controls whether `self.user_message` is
+        appended to the slash command as $ARGUMENTS. The PM prime
+        includes it (the PM needs the task context to plan the work);
+        the Dev prime does NOT — the Dev must wait for the operator to
+        relay the PM's first [/dev] instruction, not start work
+        immediately on its own from the raw user message (issue #1644).
         """
         for _ in range(5):
             result = pty.read_until_idle(
@@ -521,8 +591,16 @@ class Container:
         # Wait for the TUI's initial idle (no content floor — the
         # first paint is the welcome frame, not a response).
         pty.read_until_idle(min_content_bytes=0, timeout_s=PRIME_PRE_WRITE_TIMEOUT_S)
-        # Send the slash command + the user message as $ARGUMENTS.
-        pty.write(f"{slash_cmd} {self.user_message}")
+        # Send the slash command. The PM prime appends self.user_message
+        # so the PM immediately has the task context. The Dev prime
+        # sends the slash command alone — Dev must wait for the
+        # operator's first relay of the PM's [/dev] instruction
+        # (issue #1644: Dev self-starting on the raw user message
+        # raced ahead of the PM before any [/dev] routing decision).
+        if include_user_message:
+            pty.write(f"{slash_cmd} {self.user_message}")
+        else:
+            pty.write(slash_cmd)
         # Wait for the model to actually finish the prime. The
         # quiescence gate in read_until_idle blocks idle declaration
         # while the TUI is still painting (spinner animation /
@@ -574,11 +652,16 @@ class Container:
 
         try:
             # Persona priming.
+            # PM receives the user_message as $ARGUMENTS so it has full
+            # task context immediately. Dev does NOT — it must wait for
+            # the operator to relay the PM's first [/dev] instruction
+            # (issue #1644: Dev self-starting on the raw user message
+            # raced ahead of the PM before any routing decision).
             logger.info("container: priming PM")
-            self._prime_session(self._pm_pty, PM_PRIME_SLASH_CMD)
+            self._prime_session(self._pm_pty, PM_PRIME_SLASH_CMD, include_user_message=True)
             logger.info("container: PM prime done")
             logger.info("container: priming Dev")
-            self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD)
+            self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD, include_user_message=False)
             logger.info("container: Dev prime done; entering startup loop")
 
             # Startup-phase loop. Watch both PTYs for known startup
@@ -636,248 +719,110 @@ class Container:
                 )
                 return result
 
-            # Steady state.
-            for turn in range(self.max_turns):
-                # Wait for PM idle.
-                pm_idle, pm_buf, pm_marker, pm_ms = self._cycle_idle(self._pm_pty)
-                if not pm_idle:
-                    result.exit_reason = "pm_hang"
-                    result.exit_message = f"PM did not reach idle within {CYCLE_IDLE_TIMEOUT_S}s"
-                    break
-
-                result.total_pm_pty_bytes += len(pm_buf)
-
-                # Classify PM's output. The classifier is a regex
-                # parse on PM's first non-empty line; no ollama
-                # call. The classification is what determines
-                # whether we route to Dev, route to user (results
-                # log), or exit on complete.
-                classification = classify_pm_prefix(pm_buf)
-                # Per-turn progress hook (TD1): every classified PM
-                # turn counts as progress for the two-tier no-progress
-                # detector, regardless of destination.
+            # Prime-turn relay (issue #1644): after both primes complete,
+            # read PM's prime-turn buffer and route it through
+            # _route_pm_classification. PM may already have decided the
+            # destination (user/complete/dev) during its prime response
+            # rather than waiting for the first steady-state idle.
+            pm_prime_idle, pm_prime_buf, pm_prime_marker, pm_prime_ms = self._cycle_idle(
+                self._pm_pty
+            )
+            if not pm_prime_idle:
+                result.exit_reason = "pm_hang"
+                result.exit_message = (
+                    f"PM did not reach idle after prime within {CYCLE_IDLE_TIMEOUT_S}s"
+                )
+            else:
+                result.total_pm_pty_bytes += len(pm_prime_buf)
+                prime_classification = classify_pm_prefix(pm_prime_buf)
                 if self._on_turn is not None:
                     try:
                         self._on_turn()
                     except Exception as e:
-                        logger.warning(
-                            "[granite-container] on_turn callback raised: %s",
-                            e,
-                        )
-                if classification.compliance_miss:
-                    result.classification_compliance_misses += 1
-                if classification.destination == "unknown":
-                    result.parse_failures += 1
-                    # No usable routing; PM is the source of the
-                    # miss. Re-prompt PM with a corrective nudge so
-                    # the next read sees fresh output — without a
-                    # write PM stays idle on the same buffer and the
-                    # loop reclassifies the identical miss every tick
-                    # until max_turns.
-                    turn_record = TurnRecord(
-                        turn_index=turn,
-                        pm_idle_ms=pm_ms,
-                        dev_idle_ms=0,
-                        classification="unknown",
-                        compliance_miss=classification.compliance_miss,
-                        pm_first_line=classification.raw_first_line,
-                        routed_payload_chars=0,
-                        granite_extract_ms=0,
-                        granite_summarize_ms=0,
-                        pm_idle_marker=pm_marker,
-                        dev_idle_marker="",
-                    )
-                    result.turns.append(turn_record)
-                    self._pm_pty.write(PM_COMPLIANCE_NUDGE)
-                    continue
-
-                # Routing.
-                if classification.destination == "complete":
-                    turn_record = TurnRecord(
-                        turn_index=turn,
-                        pm_idle_ms=pm_ms,
-                        dev_idle_ms=0,
-                        classification="complete",
-                        compliance_miss=classification.compliance_miss,
-                        pm_first_line=classification.raw_first_line,
-                        routed_payload_chars=len(classification.payload),
-                        granite_extract_ms=0,
-                        granite_summarize_ms=0,
-                        pm_idle_marker=pm_marker,
-                        dev_idle_marker="",
-                    )
-                    result.turns.append(turn_record)
-                    result.exit_reason = "pm_complete"
-                    result.exit_message = classification.payload
-                    # BridgeAdapter hook: emit the trailing
-                    # summary to the user-visible channel
-                    # (Telegram relay) at the end of the run.
-                    if self._on_complete_payload is not None:
-                        try:
-                            self._on_complete_payload(classification.payload)
-                        except Exception as e:
-                            logger.warning(
-                                "[granite-container] on_complete_payload callback raised: %s",
-                                e,
-                            )
-                    break
-
-                if classification.destination == "user":
-                    # User-address text goes to the user-visible
-                    # channel (Telegram relay) mid-loop. With no
-                    # user reply to re-prompt PM, the PoC's
-                    # headless invocation is terminal — exit on
-                    # pm_user. A bridge-wired deployment also
-                    # exits on pm_user; the adapter has already
-                    # delivered the payload to the chat.
-                    turn_record = TurnRecord(
-                        turn_index=turn,
-                        pm_idle_ms=pm_ms,
-                        dev_idle_ms=0,
-                        classification="user",
-                        compliance_miss=classification.compliance_miss,
-                        pm_first_line=classification.raw_first_line,
-                        routed_payload_chars=len(classification.payload),
-                        granite_extract_ms=0,
-                        granite_summarize_ms=0,
-                        pm_idle_marker=pm_marker,
-                        dev_idle_marker="",
-                    )
-                    result.turns.append(turn_record)
-                    result.exit_reason = "pm_user"
-                    result.exit_message = classification.payload
-                    # BridgeAdapter hook: emit the user-address
-                    # payload to the user-visible channel
-                    # (Telegram relay) BEFORE exiting. The
-                    # callback is synchronous and blocks the
-                    # thread until delivery completes (per the
-                    # ADV-5 hardening); the thread holds for
-                    # the duration of the network call.
-                    if self._on_user_payload is not None:
-                        try:
-                            self._on_user_payload(classification.payload)
-                        except Exception as e:
-                            logger.warning(
-                                "[granite-container] on_user_payload callback raised: %s",
-                                e,
-                            )
-                    break
-
-                # destination == "dev" — extract a developer
-                # instruction and write to Dev's PTY.
-                if not classification.payload.strip():
-                    # PM emitted [/dev] but no payload; treat as a
-                    # compliance miss and re-prompt PM with the
-                    # corrective nudge so the next read sees fresh
-                    # output rather than spinning on the same empty
-                    # instruction until max_turns.
-                    result.parse_failures += 1
-                    turn_record = TurnRecord(
-                        turn_index=turn,
-                        pm_idle_ms=pm_ms,
-                        dev_idle_ms=0,
-                        classification="unknown",
-                        compliance_miss=True,
-                        pm_first_line=classification.raw_first_line,
-                        routed_payload_chars=0,
-                        granite_extract_ms=0,
-                        granite_summarize_ms=0,
-                        pm_idle_marker=pm_marker,
-                        dev_idle_marker="",
-                    )
-                    result.turns.append(turn_record)
-                    self._pm_pty.write(PM_COMPLIANCE_NUDGE)
-                    continue
-
-                extract_start = time.monotonic()
-                try:
-                    dev_prompt = extract_dev_prompt(pm_buf)
-                except Exception as e:
-                    result.exit_reason = "exception"
-                    result.exit_message = _truncate_exit_message(f"extract_dev_prompt failed: {e}")
-                    break
-                extract_ms = int((time.monotonic() - extract_start) * 1000)
-
-                if not dev_prompt.strip():
-                    # Granite produced an empty dev_prompt from a
-                    # well-formed [/dev] turn; re-prompt PM with the
-                    # corrective nudge so the next read yields fresh
-                    # output rather than re-extracting the same empty
-                    # result from the same buffer until max_turns.
-                    result.parse_failures += 1
-                    turn_record = TurnRecord(
-                        turn_index=turn,
-                        pm_idle_ms=pm_ms,
-                        dev_idle_ms=0,
-                        classification="dev",
-                        compliance_miss=classification.compliance_miss,
-                        pm_first_line=classification.raw_first_line,
-                        routed_payload_chars=0,
-                        granite_extract_ms=extract_ms,
-                        granite_summarize_ms=0,
-                        pm_idle_marker=pm_marker,
-                        dev_idle_marker="",
-                    )
-                    result.turns.append(turn_record)
-                    self._pm_pty.write(PM_COMPLIANCE_NUDGE)
-                    continue
-
-                # Write to Dev's PTY (await idle first to enforce
-                # the "write only to idle PTYs" invariant).
-                await_idle, _, _, _ = self._cycle_idle(self._dev_pty)
-                if not await_idle:
-                    result.exit_reason = "dev_hang"
-                    result.exit_message = "Dev did not reach idle before PM instruction"
-                    break
-                self._dev_pty.write(dev_prompt)
-
-                # Wait for Dev to respond and reach idle.
-                dev_idle, dev_buf, dev_marker, dev_ms = self._cycle_idle(self._dev_pty)
-                if not dev_idle:
-                    result.exit_reason = "dev_hang"
-                    result.exit_message = f"Dev did not reach idle within {CYCLE_IDLE_TIMEOUT_S}s"
-                    break
-
-                result.total_dev_pty_bytes += len(dev_buf)
-
-                # Summarize Dev's output for PM.
-                summarize_start = time.monotonic()
-                try:
-                    summary = summarize_for_pm(dev_buf)
-                except Exception as e:
-                    result.exit_reason = "exception"
-                    result.exit_message = _truncate_exit_message(f"summarize_for_pm failed: {e}")
-                    break
-                summarize_ms = int((time.monotonic() - summarize_start) * 1000)
-
-                # Write summary to PM's PTY.
-                await_pm, _, _, _ = self._cycle_idle(self._pm_pty)
-                if not await_pm:
-                    result.exit_reason = "pm_hang"
-                    result.exit_message = "PM did not reach idle before summary"
-                    break
-                self._pm_pty.write(summary)
-
-                turn_record = TurnRecord(
-                    turn_index=turn,
-                    pm_idle_ms=pm_ms,
-                    dev_idle_ms=dev_ms,
-                    classification="dev",
-                    compliance_miss=classification.compliance_miss,
-                    pm_first_line=classification.raw_first_line,
-                    routed_payload_chars=len(dev_prompt),
-                    granite_extract_ms=extract_ms,
-                    granite_summarize_ms=summarize_ms,
-                    pm_idle_marker=pm_marker,
-                    dev_idle_marker=dev_marker,
+                        logger.warning("[granite-container] on_turn callback raised: %s", e)
+                prime_outcome = self._route_pm_classification(
+                    prime_classification, pm_prime_buf, turn_index=-1, result=result
                 )
-                result.turns.append(turn_record)
+                if prime_outcome.should_break:
+                    result.exit_reason = prime_outcome.exit_reason or result.exit_reason
+                else:
+                    # PM's prime turn was routed to Dev (or was unknown/
+                    # empty-dev). Set the stale-buffer guard so the first
+                    # steady-state iteration forces a fresh _cycle_idle
+                    # before classifying (prevents re-reading the prime
+                    # buffer on the very first turn).
+                    self._prime_relayed = True
+                    self._prime_pm_buf_hash = hash(pm_prime_buf)
 
-            # If we ran out the for loop without breaking, max_turns
-            # is the exit reason.
+            # Steady state.
             if result.exit_reason == "in_progress":
-                result.exit_reason = "pm_max_turns"
-                result.exit_message = f"reached max_turns={self.max_turns} without a [/complete]"
+                for turn in range(self.max_turns):
+                    # Stale-buffer guard (issue #1644): on the first
+                    # iteration after the prime-turn relay, force a
+                    # fresh idle read so we classify genuinely new PM
+                    # output rather than the already-processed prime
+                    # buffer.
+                    if turn == 0 and self._prime_relayed and self._prime_pm_buf_hash is not None:
+                        guard_idle, guard_buf, _, _ = self._cycle_idle(self._pm_pty)
+                        if guard_idle and hash(guard_buf) == self._prime_pm_buf_hash:
+                            # PM has not produced anything new yet; nudge
+                            # it to continue so the loop sees fresh output.
+                            logger.info(
+                                "container: prime stale-buffer guard fired — "
+                                "nudging PM for fresh output"
+                            )
+
+                    # Wait for PM idle.
+                    pm_idle, pm_buf, pm_marker, pm_ms = self._cycle_idle(self._pm_pty)
+                    if not pm_idle:
+                        result.exit_reason = "pm_hang"
+                        result.exit_message = (
+                            f"PM did not reach idle within {CYCLE_IDLE_TIMEOUT_S}s"
+                        )
+                        break
+
+                    result.total_pm_pty_bytes += len(pm_buf)
+
+                    # Classify PM's output. The classifier is a regex
+                    # parse on PM's first non-empty line; no ollama
+                    # call. The classification is what determines
+                    # whether we route to Dev, route to user (results
+                    # log), or exit on complete.
+                    classification = classify_pm_prefix(pm_buf)
+                    # Per-turn progress hook (TD1): every classified PM
+                    # turn counts as progress for the two-tier no-progress
+                    # detector, regardless of destination.
+                    if self._on_turn is not None:
+                        try:
+                            self._on_turn()
+                        except Exception as e:
+                            logger.warning(
+                                "[granite-container] on_turn callback raised: %s",
+                                e,
+                            )
+
+                    outcome = self._route_pm_classification(
+                        classification, pm_buf, turn_index=turn, result=result
+                    )
+                    if outcome.should_break:
+                        result.exit_reason = outcome.exit_reason or result.exit_reason
+                        break
+
+                # If we ran out the for loop without breaking, max_turns
+                # is the exit reason.
+                if result.exit_reason == "in_progress":
+                    result.exit_reason = "pm_max_turns"
+                    result.exit_message = (
+                        f"reached max_turns={self.max_turns} without a [/complete]"
+                    )
+
+            # Wrap-up guard (issue #1647): when the run is in a
+            # successful-shaped terminal state but PM never delivered a
+            # user-facing message, drive PM to produce one. This
+            # guarantees the human always receives some output.
+            _successful_exits = {"pm_complete", "pm_user", "pm_max_turns"}
+            if result.exit_reason in _successful_exits and not result.user_facing_routed:
+                self._run_wrapup_guard(result)
 
         except Exception as e:
             result.exit_reason = "exception"
@@ -893,6 +838,293 @@ class Container:
             self._run_pkill_fallback()
 
         return result
+
+    # -- Routing helper ---------------------------------------------------
+
+    def _route_pm_classification(
+        self,
+        classification: Any,
+        pm_buf: str,
+        turn_index: int,
+        result: ContainerResult,
+    ) -> RouteOutcome:
+        """Route a single classified PM turn and update result in place.
+
+        Handles all four routing destinations:
+          - unknown / empty-dev: compliance miss — re-prompt PM with
+            PM_COMPLIANCE_NUDGE and return (should_break=False). The
+            COMPLIANCE_NUDGE is only for genuine mid-loop misses;
+            the wrap-up path does not call this with unknown turns.
+          - complete (non-empty): deliver via on_complete_payload,
+            set result.user_facing_routed=True, return should_break=True.
+          - complete (empty): NOT user-facing — falls through to wrap-up
+            guard instead of delivering. Returns should_break=True with
+            pm_complete so the loop exits; user_facing_routed stays False.
+          - user: deliver via on_user_payload, set
+            result.user_facing_routed=True, return should_break=True.
+          - dev: extract dev_prompt, write to Dev PTY, cycle Dev idle,
+            summarize_for_pm, write summary to PM PTY, capture
+            self._last_dev_report. Returns should_break=False.
+
+        All exits (complete/user) set result.exit_reason before
+        returning. The caller sets result.exit_reason from
+        outcome.exit_reason only when should_break=True.
+        """
+        if classification.compliance_miss:
+            result.classification_compliance_misses += 1
+
+        if classification.destination == "unknown":
+            result.parse_failures += 1
+            turn_record = TurnRecord(
+                turn_index=turn_index,
+                pm_idle_ms=0,
+                dev_idle_ms=0,
+                classification="unknown",
+                compliance_miss=classification.compliance_miss,
+                pm_first_line=classification.raw_first_line,
+                routed_payload_chars=0,
+                granite_extract_ms=0,
+                granite_summarize_ms=0,
+                pm_idle_marker="",
+                dev_idle_marker="",
+            )
+            result.turns.append(turn_record)
+            self._pm_pty.write(PM_COMPLIANCE_NUDGE)
+            return RouteOutcome(should_break=False, exit_reason=None)
+
+        if classification.destination == "complete":
+            payload = classification.payload
+            turn_record = TurnRecord(
+                turn_index=turn_index,
+                pm_idle_ms=0,
+                dev_idle_ms=0,
+                classification="complete",
+                compliance_miss=classification.compliance_miss,
+                pm_first_line=classification.raw_first_line,
+                routed_payload_chars=len(payload),
+                granite_extract_ms=0,
+                granite_summarize_ms=0,
+                pm_idle_marker="",
+                dev_idle_marker="",
+            )
+            result.turns.append(turn_record)
+            result.exit_message = payload
+            if payload.strip():
+                # Non-empty [/complete] — deliver to user and mark routed.
+                if self._on_complete_payload is not None:
+                    try:
+                        self._on_complete_payload(payload)
+                        result.user_facing_routed = True
+                    except Exception as e:
+                        logger.warning(
+                            "[granite-container] on_complete_payload callback raised: %s",
+                            e,
+                        )
+            # Empty [/complete] is NOT user-facing — user_facing_routed
+            # stays False and the wrap-up guard will drive PM to produce
+            # a real summary.
+            return RouteOutcome(should_break=True, exit_reason="pm_complete")
+
+        if classification.destination == "user":
+            payload = classification.payload
+            turn_record = TurnRecord(
+                turn_index=turn_index,
+                pm_idle_ms=0,
+                dev_idle_ms=0,
+                classification="user",
+                compliance_miss=classification.compliance_miss,
+                pm_first_line=classification.raw_first_line,
+                routed_payload_chars=len(payload),
+                granite_extract_ms=0,
+                granite_summarize_ms=0,
+                pm_idle_marker="",
+                dev_idle_marker="",
+            )
+            result.turns.append(turn_record)
+            result.exit_message = payload
+            if self._on_user_payload is not None:
+                try:
+                    self._on_user_payload(payload)
+                    result.user_facing_routed = True
+                except Exception as e:
+                    logger.warning(
+                        "[granite-container] on_user_payload callback raised: %s",
+                        e,
+                    )
+            return RouteOutcome(should_break=True, exit_reason="pm_user")
+
+        # destination == "dev" — extract a developer instruction.
+        if not classification.payload.strip():
+            # PM emitted [/dev] but no payload; compliance miss —
+            # re-prompt PM so the next read sees fresh output.
+            result.parse_failures += 1
+            turn_record = TurnRecord(
+                turn_index=turn_index,
+                pm_idle_ms=0,
+                dev_idle_ms=0,
+                classification="unknown",
+                compliance_miss=True,
+                pm_first_line=classification.raw_first_line,
+                routed_payload_chars=0,
+                granite_extract_ms=0,
+                granite_summarize_ms=0,
+                pm_idle_marker="",
+                dev_idle_marker="",
+            )
+            result.turns.append(turn_record)
+            self._pm_pty.write(PM_COMPLIANCE_NUDGE)
+            return RouteOutcome(should_break=False, exit_reason=None)
+
+        extract_start = time.monotonic()
+        try:
+            dev_prompt = extract_dev_prompt(pm_buf)
+        except Exception as e:
+            result.exit_message = _truncate_exit_message(f"extract_dev_prompt failed: {e}")
+            return RouteOutcome(should_break=True, exit_reason="exception")
+        extract_ms = int((time.monotonic() - extract_start) * 1000)
+
+        if not dev_prompt.strip():
+            result.parse_failures += 1
+            turn_record = TurnRecord(
+                turn_index=turn_index,
+                pm_idle_ms=0,
+                dev_idle_ms=0,
+                classification="dev",
+                compliance_miss=classification.compliance_miss,
+                pm_first_line=classification.raw_first_line,
+                routed_payload_chars=0,
+                granite_extract_ms=extract_ms,
+                granite_summarize_ms=0,
+                pm_idle_marker="",
+                dev_idle_marker="",
+            )
+            result.turns.append(turn_record)
+            self._pm_pty.write(PM_COMPLIANCE_NUDGE)
+            return RouteOutcome(should_break=False, exit_reason=None)
+
+        # Write to Dev's PTY (await idle first to enforce the
+        # "write only to idle PTYs" invariant).
+        await_idle, _, _, _ = self._cycle_idle(self._dev_pty)
+        if not await_idle:
+            result.exit_message = "Dev did not reach idle before PM instruction"
+            return RouteOutcome(should_break=True, exit_reason="dev_hang")
+        self._dev_pty.write(dev_prompt)
+
+        # Wait for Dev to respond and reach idle.
+        dev_idle, dev_buf, dev_marker, dev_ms = self._cycle_idle(self._dev_pty)
+        if not dev_idle:
+            result.exit_message = f"Dev did not reach idle within {CYCLE_IDLE_TIMEOUT_S}s"
+            return RouteOutcome(should_break=True, exit_reason="dev_hang")
+
+        result.total_dev_pty_bytes += len(dev_buf)
+
+        # Summarize Dev's output for PM.
+        summarize_start = time.monotonic()
+        try:
+            summary = summarize_for_pm(dev_buf)
+        except Exception as e:
+            result.exit_message = _truncate_exit_message(f"summarize_for_pm failed: {e}")
+            return RouteOutcome(should_break=True, exit_reason="exception")
+        summarize_ms = int((time.monotonic() - summarize_start) * 1000)
+
+        # Capture the summary as the last Dev report for the wrap-up
+        # guard (issue #1647).
+        self._last_dev_report = summary
+
+        # Write summary to PM's PTY.
+        await_pm, _, _, _ = self._cycle_idle(self._pm_pty)
+        if not await_pm:
+            result.exit_message = "PM did not reach idle before summary"
+            return RouteOutcome(should_break=True, exit_reason="pm_hang")
+        self._pm_pty.write(summary)
+
+        turn_record = TurnRecord(
+            turn_index=turn_index,
+            pm_idle_ms=0,
+            dev_idle_ms=dev_ms,
+            classification="dev",
+            compliance_miss=classification.compliance_miss,
+            pm_first_line=classification.raw_first_line,
+            routed_payload_chars=len(dev_prompt),
+            granite_extract_ms=extract_ms,
+            granite_summarize_ms=summarize_ms,
+            pm_idle_marker="",
+            dev_idle_marker=dev_marker,
+        )
+        result.turns.append(turn_record)
+        return RouteOutcome(should_break=False, exit_reason=None)
+
+    # -- Wrap-up guard (issue #1647) --------------------------------------
+
+    def _run_wrapup_guard(self, result: ContainerResult) -> None:
+        """Drive PM to produce a user-facing message when none was delivered.
+
+        Called when the run exits in a successful-shaped state
+        (pm_complete, pm_user, pm_max_turns) but result.user_facing_routed
+        is still False. The guard:
+          1. Builds a seed from self._last_dev_report (or a fresh Dev
+             idle read + summarize, or DEV_REPORT_UNAVAILABLE).
+          2. Writes PM_WRAPUP_PROMPT to PM's PTY.
+          3. Cycles PM idle and routes via _route_pm_classification
+             (capped at MAX_WRAPUP_ATTEMPTS=1).
+          4. If PM still hasn't delivered, sends OPERATOR_TERMINAL_MESSAGE
+             directly via on_user_payload so the human always gets something.
+
+        Mutates result in place. All errors are swallowed — the wrap-up
+        guard must never crash the run.
+        """
+        try:
+            # Build the seed report.
+            if self._last_dev_report:
+                seed = self._last_dev_report
+            elif self._dev_pty is not None:
+                try:
+                    _, dev_buf, _, _ = self._cycle_idle(self._dev_pty)
+                    seed = summarize_for_pm(dev_buf) if dev_buf.strip() else DEV_REPORT_UNAVAILABLE
+                except Exception:
+                    seed = DEV_REPORT_UNAVAILABLE
+            else:
+                seed = DEV_REPORT_UNAVAILABLE
+
+            for _attempt in range(MAX_WRAPUP_ATTEMPTS):
+                # Write the wrap-up prompt to PM.
+                await_pm, _, _, _ = self._cycle_idle(self._pm_pty)
+                if not await_pm:
+                    logger.warning("[granite-container] wrap-up guard: PM hang waiting for idle")
+                    break
+                self._pm_pty.write(PM_WRAPUP_PROMPT.format(seed=seed))
+
+                # Wait for PM to respond.
+                pm_idle, pm_buf, _, _ = self._cycle_idle(self._pm_pty)
+                if not pm_idle:
+                    logger.warning("[granite-container] wrap-up guard: PM hung after wrapup prompt")
+                    break
+
+                wrapup_classification = classify_pm_prefix(pm_buf)
+                outcome = self._route_pm_classification(
+                    wrapup_classification, pm_buf, turn_index=-2, result=result
+                )
+                if result.user_facing_routed:
+                    result.exit_reason = outcome.exit_reason or result.exit_reason
+                    return
+
+            # PM still silent after MAX_WRAPUP_ATTEMPTS — deliver canned
+            # terminal message directly so the human always gets something.
+            if not result.user_facing_routed and self._on_user_payload is not None:
+                try:
+                    self._on_user_payload(OPERATOR_TERMINAL_MESSAGE)
+                    result.user_facing_routed = True
+                    result.exit_reason = "pm_no_user_message"
+                    logger.info(
+                        "[granite-container] wrap-up guard delivered OPERATOR_TERMINAL_MESSAGE"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[granite-container] wrap-up guard: terminal message delivery failed: %s",
+                        e,
+                    )
+        except Exception as e:
+            logger.warning("[granite-container] wrap-up guard raised unexpectedly: %s", e)
 
     # -- Ping-pong (two-PTY coordination) test ---------------------------
 
@@ -912,8 +1144,8 @@ class Container:
             logger.warning("ping_pong spawn failed: %s", e)
             return False
         try:
-            self._prime_session(self._pm_pty, PM_PRIME_SLASH_CMD)
-            self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD)
+            self._prime_session(self._pm_pty, PM_PRIME_SLASH_CMD, include_user_message=True)
+            self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD, include_user_message=False)
             # Ping each in turn.
             self._pm_pty.write("ping")
             pm_result = self._pm_pty.read_until_idle(min_content_bytes=100, timeout_s=60.0)

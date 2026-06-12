@@ -68,6 +68,7 @@ def _make_container_result(
     exit_message: str = "Trailing summary.",
     turns: int = 1,
     compliance_misses: int = 0,
+    user_facing_routed: bool = False,
 ):
     """Build a ContainerResult-like object (MagicMock) with the
     attributes the BridgeAdapter reads."""
@@ -76,6 +77,7 @@ def _make_container_result(
     result.exit_message = exit_message
     result.turns = [MagicMock()] * turns
     result.classification_compliance_misses = compliance_misses
+    result.user_facing_routed = user_facing_routed
     return result
 
 
@@ -676,6 +678,194 @@ class TestBridgeAdapterSpawnOnAcquire(unittest.TestCase):
 
         # Only the 2 prewarm spawns — no per-session pair.
         self.assertEqual(len(_SpecFakeDriver.instances), 2)
+
+
+class TestDeliverSyncReturnsBool(unittest.TestCase):
+    """_deliver_sync returns True on confirmed delivery, False on failure (concern C1, #1647)."""
+
+    def _make_adapter_with_sync_cb(self, cb):
+        """Adapter with a sync send_cb (not a coroutine) for testing."""
+
+        @dataclass
+        class _Session:
+            session_id: str = "s1"
+            chat_id: int = 1
+            telegram_message_id: int = 2
+            session_events: list = field(default_factory=list)
+
+        pool = _make_pool()
+        adapter = BridgeAdapter(
+            agent_session=_Session(),
+            project_key="test",
+            transport="telegram",
+            pool=pool,
+            resolve_callbacks=lambda p, t: (cb, None),
+        )
+        return adapter
+
+    def test_sync_send_cb_success_returns_true(self) -> None:
+        """Sync send_cb that does not raise → True."""
+        calls: list = []
+
+        def _sync_cb(chat_id, payload, reply_to, session):
+            calls.append(payload)
+
+        adapter = self._make_adapter_with_sync_cb(_sync_cb)
+        result = adapter._deliver_sync(_sync_cb, 1, "hello", None, None, 5.0)
+        self.assertTrue(result)
+        self.assertEqual(calls, ["hello"])
+
+    def test_sync_send_cb_raises_returns_false(self) -> None:
+        """Sync send_cb that raises → False, no crash."""
+
+        def _failing_cb(chat_id, payload, reply_to, session):
+            raise RuntimeError("delivery failed")
+
+        adapter = self._make_adapter_with_sync_cb(_failing_cb)
+        result = adapter._deliver_sync(_failing_cb, 1, "hello", None, None, 5.0)
+        self.assertFalse(result)
+
+    def test_no_loop_returns_false(self) -> None:
+        """No captured event loop → False."""
+
+        async def _async_cb(chat_id, payload, reply_to, session):
+            pass
+
+        adapter = self._make_adapter_with_sync_cb(_async_cb)
+        adapter._loop = None  # No loop captured
+        result = adapter._deliver_sync(_async_cb, 1, "hello", None, None, 5.0)
+        self.assertFalse(result)
+
+
+class TestUserFacingRoutedPropagation(unittest.TestCase):
+    """S3 (issue #1647): user_facing_routed flows through adapter → agent_session → executor."""
+
+    def _run_adapter(self, exit_reason="pm_user", user_facing_routed=True):
+        """Run the adapter with a mocked container result and sync send_cb."""
+        # dataclass and field are imported at module level
+
+        @dataclass
+        class _Session:
+            session_id: str = "s1"
+            chat_id: int = 1
+            telegram_message_id: int = 2
+            session_events: list = field(default_factory=list)
+            user_facing_routed: bool = False
+
+        def _save(update_fields=None):
+            pass
+
+        session = _Session()
+        session.save = _save  # type: ignore
+
+        pool = _make_initialized_pool()
+        deliveries: list[str] = []
+
+        def _send_cb(chat_id, payload, reply_to, sess):
+            deliveries.append(payload)
+
+        adapter = BridgeAdapter(
+            agent_session=session,
+            project_key="test",
+            transport="telegram",
+            pool=pool,
+            resolve_callbacks=lambda p, t: (_send_cb, None),
+        )
+
+        result = _make_container_result(
+            exit_reason=exit_reason,
+            user_facing_routed=user_facing_routed,
+        )
+        adapter._publish_exit_summary(result)
+        return session, adapter
+
+    def test_successful_delivery_sets_agent_session_user_facing_routed(self) -> None:
+        """When result.user_facing_routed=True, _publish_exit_summary sets
+        agent_session.user_facing_routed=True (issue #1647)."""
+        session, adapter = self._run_adapter(user_facing_routed=True)
+        self.assertTrue(session.user_facing_routed)
+
+    def test_no_delivery_leaves_user_facing_routed_false(self) -> None:
+        """When result.user_facing_routed=False and adapter._user_facing_routed=False,
+        agent_session.user_facing_routed is NOT set to True."""
+        session, adapter = self._run_adapter(user_facing_routed=False)
+        self.assertFalse(session.user_facing_routed)
+
+    def test_adapter_flag_propagates_on_successful_sync_delivery(self) -> None:
+        """When a sync send_cb succeeds in _make_user_callback,
+        self._user_facing_routed is set to True (issue #1647, concern C1)."""
+        # dataclass and field are imported at module level
+
+        @dataclass
+        class _Session:
+            session_id: str = "s1"
+            chat_id: int = 1
+            telegram_message_id: int = 2
+            session_events: list = field(default_factory=list)
+
+        pool = _make_pool()
+        calls: list[str] = []
+
+        def _sync_cb(chat_id, payload, reply_to, sess):
+            calls.append(payload)
+
+        adapter = BridgeAdapter(
+            agent_session=_Session(),
+            project_key="test",
+            transport="telegram",
+            pool=pool,
+            resolve_callbacks=lambda p, t: (_sync_cb, None),
+        )
+        # Initially False.
+        self.assertFalse(adapter._user_facing_routed)
+        # Call the user callback directly.
+        adapter._on_user_payload("hello user")
+        # After successful sync delivery, flag is True.
+        self.assertTrue(adapter._user_facing_routed)
+        self.assertEqual(calls, ["hello user"])
+
+
+class TestExitAnomalyAllowlist(unittest.TestCase):
+    """C9: pm_no_user_message is in the anomaly allowlist; pm_max_turns is NOT (issue #1647)."""
+
+    def _run_with_exit_reason(self, exit_reason: str):
+        # dataclass and field are imported at module level
+
+        @dataclass
+        class _Session:
+            session_id: str = "s1"
+            session_events: list = field(default_factory=list)
+
+        session = _Session()
+        pool = _make_pool()
+        adapter = BridgeAdapter(
+            agent_session=session,
+            project_key="test",
+            transport="telegram",
+            pool=pool,
+            resolve_callbacks=lambda p, t: (None, None),
+        )
+        result = _make_container_result(exit_reason=exit_reason)
+        adapter._maybe_publish_exit_anomaly(result)
+        return session
+
+    def test_pm_no_user_message_writes_anomaly_event(self) -> None:
+        """pm_no_user_message is in the anomaly allowlist and publishes an event."""
+        session = self._run_with_exit_reason("pm_no_user_message")
+        types = [e["type"] for e in session.session_events]
+        self.assertIn("exit_anomaly", types)
+
+    def test_pm_max_turns_does_not_write_anomaly(self) -> None:
+        """pm_max_turns is NOT in the anomaly allowlist (concern C9)."""
+        session = self._run_with_exit_reason("pm_max_turns")
+        types = [e["type"] for e in session.session_events]
+        self.assertNotIn("exit_anomaly", types)
+
+    def test_pm_complete_does_not_write_anomaly(self) -> None:
+        """pm_complete is NOT in the anomaly allowlist."""
+        session = self._run_with_exit_reason("pm_complete")
+        types = [e["type"] for e in session.session_events]
+        self.assertNotIn("exit_anomaly", types)
 
 
 if __name__ == "__main__":

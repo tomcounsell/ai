@@ -163,6 +163,12 @@ class BridgeAdapter:
         # where `asyncio.get_running_loop()` raises — this captured ref
         # is the only way `_deliver_sync` can reach the loop.
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Set to True by the user/complete callbacks when _deliver_sync
+        # returns True (confirmed delivery). Propagated to
+        # agent_session.user_facing_routed in _publish_exit_summary so
+        # the executor's emoji branch can distinguish a real delivery
+        # from a session that was never routed to the user (issue #1647).
+        self._user_facing_routed: bool = False
 
         # Resolve the bridge callback. The default resolver looks
         # for a registered `agent_session_queue` callback; tests
@@ -255,6 +261,13 @@ class BridgeAdapter:
         The dashboard's reflection sweep and Sentry log capture
         surface this entry; it is NOT delivered to Telegram
         (per the plan's `## Solution`).
+
+        Also propagates the `user_facing_routed` flag (set by the
+        user/complete callbacks when _deliver_sync returns True, or by
+        the container's wrap-up guard via result.user_facing_routed) onto
+        agent_session so session_executor's emoji branch can see it
+        (issue #1647). The OR of adapter flag and result flag covers all
+        delivery paths.
         """
         _append_session_event(
             self._agent_session,
@@ -266,6 +279,19 @@ class BridgeAdapter:
                 "ts": _now_iso(),
             },
         )
+        # Propagate delivery confirmation to agent_session (issue #1647).
+        # The executor reads this via getattr(agent_session,
+        # "user_facing_routed", False) so it selects REACTION_COMPLETE
+        # instead of the bare-emoji REACTION_SUCCESS.
+        try:
+            routed = self._user_facing_routed or result.user_facing_routed
+            if routed and self._agent_session is not None:
+                self._agent_session.user_facing_routed = routed
+                save = getattr(self._agent_session, "save", None)
+                if callable(save):
+                    save(update_fields=["user_facing_routed", "updated_at"])
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("[bridge-adapter] user_facing_routed save failed: %s", e)
 
     def _maybe_publish_exit_anomaly(self, result: ContainerResult) -> None:
         """When the run ended on a hang / startup-unresolved
@@ -274,7 +300,12 @@ class BridgeAdapter:
         at 3am — Sentry's default log-capture wiring picks up
         the logger.error, and the dashboard surfaces the
         session_events entry (hardens OPS-1)."""
-        if result.exit_reason not in ("pm_hang", "dev_hang", "startup_unresolved"):
+        if result.exit_reason not in (
+            "pm_hang",
+            "dev_hang",
+            "startup_unresolved",
+            "pm_no_user_message",
+        ):
             return
         logger.error(
             "[granite-exit-anomaly] session=%s exit_reason=%s exit_message=%s",
@@ -336,7 +367,11 @@ class BridgeAdapter:
         timeout_s = self._delivery_timeout_s
 
         def _on_user(payload: str) -> None:
-            self._deliver_sync(send_cb, chat_id, payload, reply_to, agent_session, timeout_s)
+            delivered = self._deliver_sync(
+                send_cb, chat_id, payload, reply_to, agent_session, timeout_s
+            )
+            if delivered:
+                self._user_facing_routed = True
 
         return _on_user
 
@@ -352,7 +387,11 @@ class BridgeAdapter:
         timeout_s = self._delivery_timeout_s
 
         def _on_complete(payload: str) -> None:
-            self._deliver_sync(send_cb, chat_id, payload, reply_to, agent_session, timeout_s)
+            delivered = self._deliver_sync(
+                send_cb, chat_id, payload, reply_to, agent_session, timeout_s
+            )
+            if delivered:
+                self._user_facing_routed = True
 
         return _on_complete
 
@@ -364,7 +403,7 @@ class BridgeAdapter:
         reply_to: Any,
         agent_session: Any,
         timeout_s: float,
-    ) -> None:
+    ) -> bool:
         """Schedule the async send_cb on the worker's event loop
         (captured by `run()` into `self._loop`) and block the
         calling thread until delivery completes or the timeout
@@ -374,6 +413,10 @@ class BridgeAdapter:
         thread — `asyncio.get_running_loop()` raises there, so the
         captured loop ref is mandatory for async send_cbs. A sync
         send_cb is called directly on the calling thread.
+
+        Returns True on confirmed delivery, False on any failure or
+        timeout. The caller (_make_user_callback / _make_complete_callback)
+        uses the return value to set self._user_facing_routed (issue #1647).
 
         On a missing/closed loop or a delivery timeout, the error
         is logged and a session_events entry is appended. The
@@ -386,7 +429,7 @@ class BridgeAdapter:
                 # Sync send_cb (test doubles, legacy wrappers): call
                 # directly on this thread.
                 send_cb(chat_id, payload, reply_to, agent_session)
-                return
+                return True
 
             loop = self._loop
             if loop is None or loop.is_closed():
@@ -399,7 +442,7 @@ class BridgeAdapter:
                     loop,
                 )
                 self._record_delivery_failure(payload, "no_event_loop")
-                return
+                return False
 
             coro = send_cb(chat_id, payload, reply_to, agent_session)
             try:
@@ -412,11 +455,15 @@ class BridgeAdapter:
                 # here would deadlock the loop — schedule fire-and-
                 # forget instead.
                 loop.create_task(coro)
-                return
+                # Fire-and-forget: we cannot confirm delivery synchronously
+                # on the same event loop. Count as False so the caller does
+                # not set user_facing_routed prematurely.
+                return False
             # Production path: pexpect worker thread → schedule on the
             # captured worker loop and block until delivered.
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             future.result(timeout=timeout_s)
+            return True
         except RuntimeError as e:
             # Loop closed between the check and the schedule (worker
             # shutdown race).
@@ -433,6 +480,7 @@ class BridgeAdapter:
             )
             # Include the exception type: TimeoutError stringifies to "".
             self._record_delivery_failure(payload, f"{type(e).__name__}: {e}")
+        return False
 
     def _record_delivery_failure(self, payload: str, reason: str) -> None:
         """Append a `session_events` entry when a mid-loop

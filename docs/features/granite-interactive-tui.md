@@ -111,6 +111,37 @@ PM→granite→Dev→granite→PM cycle per tick:
 4. loop until destination == "complete" or max_turns reached
 ```
 
+## Exit reasons
+
+| `exit_reason` | Description | Anomaly? |
+|---|---|---|
+| `pm_complete` | PM emitted `[/complete]` | No |
+| `pm_user` | PM emitted `[/user]` | No |
+| `pm_max_turns` | Steady-state loop exhausted `max_turns` | No |
+| `pm_no_user_message` | Wrap-up guard exhausted; `OPERATOR_TERMINAL_MESSAGE` sent | Yes |
+| `pm_hang` | PM did not reach idle within `CYCLE_IDLE_TIMEOUT_S` | Yes |
+| `dev_hang` | Dev did not reach idle within `CYCLE_IDLE_TIMEOUT_S` | Yes |
+| `startup_unresolved` | Neither PTY settled within `STARTUP_HARD_CEILING_S` | Yes |
+| `exception` | Unhandled Python exception in the container loop | Yes |
+
+"Anomaly" means `BridgeAdapter._maybe_publish_exit_anomaly` writes an
+`exit_anomaly` event to `session_events` and logs at ERROR.
+
+## PM feedback strings — compliance vs. wrap-up
+
+The container writes two distinct feedback strings to the PM PTY; they serve
+different purposes and must not be confused:
+
+| Constant | Written when | Purpose |
+|---|---|---|
+| `PM_COMPLIANCE_NUDGE` | PM produces output with no recognized prefix token (`unknown` classification) | Re-prompt PM to follow the `[/dev]/[/user]/[/complete]` convention on its next turn |
+| `PM_WRAPUP_PROMPT` | Wrap-up guard fires — run exiting but no user-facing message delivered yet | Seed PM with the Dev's final report and instruct it to produce a `[/user]` or `[/complete]` summary for the human |
+
+`PM_COMPLIANCE_NUDGE` fires inside the steady-state loop and does not
+consume a `max_turns` slot. `PM_WRAPUP_PROMPT` fires post-loop, is capped at
+`MAX_WRAPUP_ATTEMPTS = 1`, and on continued silence is followed by the canned
+`OPERATOR_TERMINAL_MESSAGE` delivered directly.
+
 ## Cross-references
 
 - Substrate driver: [`pty-driver.md`](pty-driver.md). C1-C5 substrate facts

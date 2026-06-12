@@ -458,15 +458,75 @@ def mark_work_done(working_dir: Path, branch_name: str) -> bool:
         return False
 
 
+def _is_linked_worktree(working_dir: Path) -> bool | None:
+    """Return True if working_dir is a git linked worktree, False if it is
+    the main worktree, or None if working_dir is not inside any git repo
+    (non-git cwd).
+
+    Detection: compare os.path.realpath of `git rev-parse --git-common-dir`
+    vs `git rev-parse --git-dir`. In the main worktree both are the same
+    `.git` directory; in a linked worktree --git-dir points to the
+    worktree-specific `.git/worktrees/<name>/` subdirectory while
+    --git-common-dir still points at the main `.git`, so they differ after
+    realpath normalization (handles relative vs absolute paths).
+    """
+    import os
+
+    try:
+        common_dir_result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=working_dir,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        git_dir_result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=working_dir,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        common_dir = os.path.realpath(
+            os.path.join(str(working_dir), common_dir_result.stdout.strip())
+        )
+        git_dir = os.path.realpath(os.path.join(str(working_dir), git_dir_result.stdout.strip()))
+        return common_dir != git_dir
+    except subprocess.CalledProcessError:
+        # Non-zero exit: working_dir is not inside a git repo.
+        return None
+    except Exception:
+        return None
+
+
 def return_to_main(working_dir: Path) -> bool:
     """
     Switch back to main branch.
 
     Used when starting new work or when branch work is complete.
 
+    Worktree-aware (issue #1647): when working_dir is a git linked worktree,
+    `git checkout main` can never succeed — main is already checked out by the
+    primary working tree. In that case, skip the checkout, log at info (not
+    ERROR), and return True. Non-worktree behavior is unchanged.
+
     Returns:
-        True if successfully switched to main
+        True if successfully switched to main (or if already in a linked
+        worktree where the no-op is correct behavior)
     """
+    # Detect linked worktree before attempting checkout.
+    is_worktree = _is_linked_worktree(working_dir)
+    if is_worktree is True:
+        logger.info(
+            "return_to_main: working_dir is a linked worktree — "
+            "skipping 'git checkout main' (already checked out in primary worktree)"
+        )
+        return True
+    # is_worktree is None → non-git cwd; fall through to original behavior
+    # (the checkout will fail, which we handle below).
+
     try:
         subprocess.run(
             ["git", "checkout", "main"],

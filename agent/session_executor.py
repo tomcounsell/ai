@@ -1997,7 +1997,16 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 emoji = None  # Clear reaction
             elif task.error:
                 emoji = REACTION_ERROR
-            elif messenger.has_communicated():
+            elif messenger.has_communicated() or getattr(
+                agent_session, "user_facing_routed", False
+            ):
+                # The granite container delivers [/user]/[/complete] payloads
+                # through BridgeAdapter, never through messenger.send(), so
+                # has_communicated() stays False even on a real delivery.
+                # BridgeAdapter._publish_exit_summary sets
+                # agent_session.user_facing_routed=True when delivery succeeded;
+                # OR'ing it here makes the emoji branch mean what it should
+                # (issue #1647).
                 emoji = REACTION_COMPLETE
             else:
                 emoji = REACTION_SUCCESS
