@@ -457,14 +457,34 @@ class TestBridgeShortCircuit:
         assert result == {"session_id": "sdlc-local-1145", "created": True}
 
 
-def _make_orphan_session(session_id, age_seconds, heartbeat=None, session_type="pm"):
-    """Build a MagicMock AgentSession with orphan-relevant fields."""
+def _make_orphan_session(
+    session_id,
+    age_seconds,
+    heartbeat=None,
+    session_type="pm",
+    last_activity_seconds=None,
+):
+    """Build a MagicMock AgentSession with orphan-relevant fields.
+
+    ``age_seconds`` sets ``created_at`` (creation age). By default the session's
+    last-activity timestamps (``updated_at``/``started_at``) mirror
+    ``created_at`` — i.e. a session that was created and never advanced a stage,
+    which is the genuinely-dead-orphan shape.
+
+    Pass ``last_activity_seconds`` to model a LIVE pipeline that was created long
+    ago but recently refreshed ``updated_at`` via a stage_states write (#1676):
+    ``created_at`` stays at ``age_seconds`` while ``updated_at`` is set to the
+    fresher ``last_activity_seconds``.
+    """
     s = MagicMock()
     s.session_id = session_id
     s.session_type = session_type
     s.status = "running"
     s.last_heartbeat_at = heartbeat
     s.created_at = datetime.now(UTC) - timedelta(seconds=age_seconds)
+    activity_age = age_seconds if last_activity_seconds is None else last_activity_seconds
+    s.updated_at = datetime.now(UTC) - timedelta(seconds=activity_age)
+    s.started_at = s.updated_at
     s.issue_url = None
     return s
 
@@ -614,6 +634,121 @@ class TestKillOrphans:
             result = _kill_orphans(dry_run=True)
 
         assert result["count"] == 0
+
+    def test_live_local_pipeline_with_fresh_updated_at_not_listed(self):
+        """#1676: a worker-less sdlc-local-N PM session with last_heartbeat_at=None
+        but a FRESH updated_at (advanced a stage recently) must NOT be reaped.
+
+        This is the core defect: on a skills-only machine no worker writes a
+        heartbeat, so a live /do-sdlc pipeline matched the old zombie criteria
+        after 10 minutes and --kill-orphans destroyed its stage_states mid-run.
+        The fix exempts it because every stage_states write refreshes updated_at.
+        """
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
+
+        # Created 1 hour ago (well past threshold), but advanced a stage 30s ago.
+        live = _make_orphan_session(
+            "sdlc-local-1676",
+            age_seconds=ORPHAN_AGE_SECONDS + 3600,
+            heartbeat=None,
+            last_activity_seconds=30,
+        )
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [live]
+
+        with patch("models.agent_session.AgentSession", mock_as):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 0
+        assert result["orphans"] == []
+
+    def test_stale_local_pipeline_no_heartbeat_still_listed(self):
+        """#1676: a worker-less sdlc-local-N PM session with last_heartbeat_at=None
+        AND a stale updated_at (no stage advanced for the full window) is still a
+        genuine zombie and MUST be reaped — preserving original dead-orphan
+        behavior for sessions that truly stalled.
+        """
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
+
+        # Created AND last-active well past the threshold.
+        stale = _make_orphan_session(
+            "sdlc-local-1677",
+            age_seconds=ORPHAN_AGE_SECONDS + 3600,
+            heartbeat=None,
+            last_activity_seconds=ORPHAN_AGE_SECONDS + 600,
+        )
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [stale]
+
+        with patch("models.agent_session.AgentSession", mock_as):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 1
+        assert result["orphans"][0]["session_id"] == "sdlc-local-1677"
+
+    def test_fresh_updated_at_exempts_even_at_creation_boundary(self):
+        """#1676: updated_at just under the threshold exempts a session whose
+        created_at is exactly at the threshold — last activity, not creation, is
+        the liveness clock.
+        """
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
+
+        s = _make_orphan_session(
+            "sdlc-local-1678",
+            age_seconds=ORPHAN_AGE_SECONDS,
+            heartbeat=None,
+            last_activity_seconds=ORPHAN_AGE_SECONDS - 1,
+        )
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [s]
+
+        with patch("models.agent_session.AgentSession", mock_as):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 0
+
+    def test_falls_back_to_started_at_when_updated_at_missing(self):
+        """#1676: when updated_at is None, _last_activity_at falls back to
+        started_at. A fresh started_at exempts an old-created_at session.
+        """
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
+
+        s = _make_orphan_session(
+            "sdlc-local-1679",
+            age_seconds=ORPHAN_AGE_SECONDS + 3600,
+            heartbeat=None,
+        )
+        s.updated_at = None
+        s.started_at = datetime.now(UTC) - timedelta(seconds=30)
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [s]
+
+        with patch("models.agent_session.AgentSession", mock_as):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 0
+
+    def test_falls_back_to_created_at_when_no_activity_timestamps(self):
+        """#1676: when both updated_at and started_at are None, the reaper falls
+        back to created_at — an old, never-advanced session is still a zombie.
+        """
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
+
+        s = _make_orphan_session(
+            "sdlc-local-1680",
+            age_seconds=ORPHAN_AGE_SECONDS + 3600,
+            heartbeat=None,
+        )
+        s.updated_at = None
+        s.started_at = None
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [s]
+
+        with patch("models.agent_session.AgentSession", mock_as):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 1
+        assert result["orphans"][0]["session_id"] == "sdlc-local-1680"
 
     def test_cli_dry_run_exits_zero_with_valid_json(self):
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}

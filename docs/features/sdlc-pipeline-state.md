@@ -58,7 +58,7 @@ The message-text fallback inside `find_session_by_issue` is a secondary defense 
 
 ### Orphan cleanup
 
-Stale zombie `sdlc-local-{N}` sessions (running status, no heartbeats, older than 10 minutes) can be listed and finalized with:
+Stale zombie `sdlc-local-{N}` sessions (running status, no heartbeats, **and no activity for over 10 minutes**) can be listed and finalized with:
 
 ```bash
 # Preview without modifying (exits 0, prints JSON list)
@@ -69,6 +69,8 @@ python -m tools.sdlc_session_ensure --kill-orphans
 ```
 
 The CLI always exits 0. Per-session finalize failures are reported inside the JSON payload's `failures` count and per-session `result` list — they never raise. When non-zero zombies are detected, a single stderr line (`[sdlc_session_ensure] found N zombie sdlc-local session(s)`) surfaces the count to scheduled-cleanup operators while stdout stays machine-parseable.
+
+**Liveness is measured by last activity, not creation age (#1676).** On a skills-only (worker-less) machine, no worker writes `last_heartbeat_at`, so a *live* CLI-driven `/do-sdlc` pipeline used to match the zombie criteria by construction once its `created_at` aged past 10 minutes — and `--kill-orphans` would then `finalize(killed)` it mid-run, destroying its `stage_states` (the durable dispatch trail and verdicts the router depends on). The reaper now treats a session as a zombie only when it has BOTH no heartbeat AND no recent activity: last activity = `updated_at` (falling back to `started_at`, then `created_at`). Because every dispatch/verdict write goes through `tools.stage_states_helpers.update_stage_states` → `session.save()`, which stamps `updated_at`, a pipeline that advanced any stage within the last 10 minutes is exempt regardless of whether a worker heartbeat exists. Genuinely-dead orphans (created long ago, never advanced a stage) are still reaped on the `created_at` fallback.
 
 ## Verdict Storage and Normalization
 

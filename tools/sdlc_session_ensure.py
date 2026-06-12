@@ -32,9 +32,12 @@ from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
-# Minimum age (in seconds) before a sdlc-local session is considered a zombie
-# orphan. Sessions younger than this are not listed or killed — they may still be
-# executing their first turn or writing their first heartbeat.
+# Idle window (in seconds) before a sdlc-local session is considered a zombie
+# orphan. A session is only reaped when it has had no activity (no heartbeat AND
+# no stage_states write refreshing updated_at) for this long. Sessions active
+# within this window are exempt — including live worker-less CLI pipelines that
+# never write last_heartbeat_at but do refresh updated_at on every stage
+# advance (#1676).
 ORPHAN_AGE_SECONDS = 600
 
 
@@ -199,6 +202,30 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         return {}
 
 
+def _last_activity_at(session):
+    """Return the most recent liveness timestamp for a session, or None.
+
+    A CLI-driven (worker-less) ``sdlc-local-*`` pipeline never writes
+    ``last_heartbeat_at`` — that field is stamped only by the worker's session
+    executor. But every dispatch/verdict/meta write a live local pipeline makes
+    goes through ``tools.stage_states_helpers.update_stage_states``, which calls
+    ``session.save()`` and stamps ``updated_at`` (see
+    ``AgentSession.save`` → ``utc_now()``). So ``updated_at`` IS a liveness
+    signal the local pipeline produces naturally.
+
+    Precedence (most→least authoritative as a "last activity" proxy):
+    ``updated_at`` → ``started_at`` → ``created_at``. The fallbacks cover
+    sessions that were created but have not yet written stage_states (no
+    ``updated_at`` stamp) — they remain reapable on the ``created_at`` clock,
+    preserving the original genuinely-dead-orphan semantics.
+    """
+    for attr in ("updated_at", "started_at", "created_at"):
+        ts = getattr(session, attr, None)
+        if ts is not None:
+            return ts
+    return None
+
+
 def _iter_orphan_sessions():
     """Yield zombie sdlc-local PM sessions suitable for --kill-orphans.
 
@@ -207,7 +234,22 @@ def _iter_orphan_sessions():
     - ``status == "running"``
     - ``session_id`` starts with ``"sdlc-local-"``
     - ``last_heartbeat_at`` is None (never received a worker turn)
-    - ``created_at`` is older than ``ORPHAN_AGE_SECONDS`` (default 10 minutes)
+    - **last activity** is older than ``ORPHAN_AGE_SECONDS`` (default 10 min),
+      where last activity = ``updated_at`` (falling back to ``started_at``,
+      then ``created_at``).
+
+    The last-activity check (rather than a bare ``created_at`` check) is what
+    keeps a LIVE worker-less pipeline alive (#1676). On a skills-only machine
+    there is no worker to write ``last_heartbeat_at``, so a healthy CLI-driven
+    ``/do-sdlc`` run matched the old (heartbeat-None AND old-created_at) zombie
+    criteria by construction after 10 minutes — and ``--kill-orphans`` would
+    then ``finalize(killed)`` it mid-run, destroying its ``stage_states`` (the
+    durable dispatch trail and verdicts the router depends on). Because every
+    stage_states write refreshes ``updated_at`` via ``session.save()``, a
+    pipeline that advanced a stage within the last ``ORPHAN_AGE_SECONDS`` is now
+    exempt regardless of whether a worker heartbeat exists. Only a session that
+    is BOTH heartbeat-less AND has not advanced any stage for the full window is
+    treated as genuinely dead.
 
     Sessions whose ``session_id`` does not start with ``"sdlc-local-"`` are
     NEVER yielded — bridge sessions and other running PM sessions are out of
@@ -232,14 +274,14 @@ def _iter_orphan_sessions():
             continue
         if getattr(s, "last_heartbeat_at", None) is not None:
             continue
-        created = getattr(s, "created_at", None)
-        if created is None:
+        last_activity = _last_activity_at(s)
+        if last_activity is None:
             continue
         try:
-            age_seconds = (now - created).total_seconds()
+            idle_seconds = (now - last_activity).total_seconds()
         except Exception:
             continue
-        if age_seconds >= ORPHAN_AGE_SECONDS:
+        if idle_seconds >= ORPHAN_AGE_SECONDS:
             yield s
 
 
