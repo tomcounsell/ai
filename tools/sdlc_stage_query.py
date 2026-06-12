@@ -313,10 +313,16 @@ def _compute_meta(
     except Exception as e:
         logger.debug(f"_compute_meta: compute_same_stage_count failed: {e}")
 
+    plan_path = None
     revision_applied = False
     if issue_number:
         plan_path = _find_plan_path(issue_number)
         revision_applied = _parse_revision_applied(plan_path)
+
+    # plan_exists: True when a plan doc was found on disk (#1640).
+    # Used by the router to distinguish "PLAN=ready with a real doc" from
+    # "PLAN=ready because the state machine pre-advanced before /do-plan ran".
+    plan_exists = bool(plan_path)
 
     # Plan-revising lock (G7): set by critique skill, cleared by plan skill.
     plan_revising_raw = raw_states.get("_plan_revising")
@@ -339,6 +345,8 @@ def _compute_meta(
         "last_dispatched_skill": last_skill,
         "plan_revising": plan_revising,
         "plan_hash_at_build_start": plan_hash_at_build_start,
+        "plan_exists": plan_exists,
+        "issue_number": issue_number,
     }
 
 
@@ -357,6 +365,8 @@ def _default_meta() -> dict:
         "last_dispatched_skill": None,
         "plan_revising": False,
         "plan_hash_at_build_start": None,
+        "plan_exists": False,
+        "issue_number": None,
     }
 
 
