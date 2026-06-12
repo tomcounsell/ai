@@ -449,6 +449,25 @@ A session whose `session_id` starts with `local` was spawned from a local Claude
 | `running` (local `pm`/`teammate`/`granite`/pre-migration) | Finalized as `abandoned`; human CLI may reclaim |
 | `complete` / `failed` / `killed` | Terminal — no action taken |
 
+### Own-progress fields are heartbeat-gated (#1614)
+
+The no-progress detector in `_has_progress` (`agent/session_health.py`) includes a set of "own-progress" fields — `turn_count`, `log_path`, and `claude_session_uuid` — that serve as evidence that a session authenticated with the SDK and began work. These fields are sticky once set and are only evaluated when `sdk_ever_output` is False (the per-turn fields `last_tool_use_at` / `last_turn_at` have never been written).
+
+**Confirmed Branch 2 failure mode (#1614):** The worker process remained alive (`worker_alive=True` on every health tick). The harness subprocess had exited or hung without producing SDK output, and the executor's heartbeat loop had silently stopped. But `claude_session_uuid` — written at SDK authentication time — was set. Because the own-progress check was ungated, it returned `True` unconditionally, blocking the branch-2 recovery path indefinitely.
+
+**Fix:** the own-progress fields are now gated on `last_heartbeat_at` freshness using `NO_OUTPUT_BUDGET_SECONDS` (1800s). The gate logic:
+
+- If `last_heartbeat_at` is within the last 1800s, own-progress fields are honoured as before.
+- If `last_heartbeat_at` is absent or older than 1800s, the own-progress fields are skipped entirely and the session falls through to `_tier2_reprieve_signal` for Tier-2 evaluation.
+
+This preserves the intended behaviour for sessions that are actively running (the heartbeat loop keeps `last_heartbeat_at` fresh) while allowing recovery of zombie sessions whose executor loop exited without finalizing the session.
+
+**Gate window constraint:** the gate uses `NO_OUTPUT_BUDGET_SECONDS` (1800s), not the tighter `HEARTBEAT_FRESHNESS_WINDOW` (90s). This ensures the own-progress gate does not expire before sub-check B's no-output budget does — a session that is legitimately starting up and has `sdk_ever_output=False` must not be killed by the own-progress expiry before the normal startup budget would have triggered recovery.
+
+**Telemetry:** recoveries where `claude_session_uuid` is set but `sdk_ever_output` is False increment the `{project_key}:session-health:recoveries:zombie_uuid_no_output` Redis counter and emit a `[session-health] zombie_uuid_no_output recovery` log line.
+
+For the full no-progress detector design see [Agent Session Health Monitor](agent-session-health-monitor.md#detection).
+
 ## Redis Communication Contract
 
 The bridge and worker share a single contract: the `AgentSession` Popoto model in Redis.

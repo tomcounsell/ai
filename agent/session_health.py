@@ -1586,9 +1586,11 @@ async def _agent_session_health_check() -> None:
 
         # Delivery guard: if response was already delivered, finalize immediately
         # without going through worker_alive/_has_progress evaluation. turn_count
-        # and claude_session_uuid are sticky fields that permanently block the
-        # no_progress recovery path, so sessions that delivered but failed to
-        # finalize would otherwise stay stuck as "running" indefinitely.
+        # and claude_session_uuid are sticky fields that block the no_progress
+        # recovery path while the heartbeat is fresh (gated on
+        # NO_OUTPUT_BUDGET_SECONDS since #1614 — no longer permanent), so
+        # sessions that delivered but failed to finalize would otherwise stay
+        # stuck as "running" until the heartbeat goes stale.
         if getattr(entry, "response_delivered_at", None) is not None:
             try:
                 from models.session_lifecycle import StatusConflictError, finalize_session
