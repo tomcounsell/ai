@@ -36,15 +36,15 @@ class TestCheckTtftMain:
         _write_jsonl(
             log,
             [
-                {"session_type": "pm", "ttft_seconds": 30.0},
-                {"session_type": "pm", "ttft_seconds": 45.0},
-                {"session_type": "pm", "ttft_seconds": 60.0},
+                {"session_type": "eng", "ttft_seconds": 30.0},
+                {"session_type": "eng", "ttft_seconds": 45.0},
+                {"session_type": "eng", "ttft_seconds": 60.0},
             ],
         )
         rc = check_ttft.main(
             [
                 "--session-type",
-                "pm",
+                "eng",
                 "--last",
                 "10",
                 "--threshold",
@@ -67,15 +67,15 @@ class TestCheckTtftMain:
         _write_jsonl(
             log,
             [
-                {"session_type": "pm", "ttft_seconds": 100.0},
-                {"session_type": "pm", "ttft_seconds": 120.0},
-                {"session_type": "pm", "ttft_seconds": 140.0},
+                {"session_type": "eng", "ttft_seconds": 100.0},
+                {"session_type": "eng", "ttft_seconds": 120.0},
+                {"session_type": "eng", "ttft_seconds": 140.0},
             ],
         )
         rc = check_ttft.main(
             [
                 "--session-type",
-                "pm",
+                "eng",
                 "--last",
                 "10",
                 "--threshold",
@@ -97,16 +97,16 @@ class TestCheckTtftMain:
         _write_jsonl(
             log,
             [
-                {"session_type": "dev", "ttft_seconds": 10.0},  # ignored
-                {"session_type": "pm", "ttft_seconds": 50.0},
-                {"session_type": "pm", "ttft_seconds": 70.0},
+                {"session_type": "teammate", "ttft_seconds": 10.0},  # ignored
+                {"session_type": "eng", "ttft_seconds": 50.0},
+                {"session_type": "eng", "ttft_seconds": 70.0},
                 {"session_type": "teammate", "ttft_seconds": 9999.0},  # ignored
             ],
         )
         rc = check_ttft.main(
             [
                 "--session-type",
-                "pm",
+                "eng",
                 "--last",
                 "10",
                 "--threshold",
@@ -129,17 +129,17 @@ class TestCheckTtftMain:
         _write_jsonl(
             log,
             [
-                {"session_type": "pm", "ttft_seconds": 1000.0},
-                {"session_type": "pm", "ttft_seconds": 1000.0},
-                {"session_type": "pm", "ttft_seconds": 10.0},
-                {"session_type": "pm", "ttft_seconds": 20.0},
-                {"session_type": "pm", "ttft_seconds": 30.0},
+                {"session_type": "eng", "ttft_seconds": 1000.0},
+                {"session_type": "eng", "ttft_seconds": 1000.0},
+                {"session_type": "eng", "ttft_seconds": 10.0},
+                {"session_type": "eng", "ttft_seconds": 20.0},
+                {"session_type": "eng", "ttft_seconds": 30.0},
             ],
         )
         rc = check_ttft.main(
             [
                 "--session-type",
-                "pm",
+                "eng",
                 "--last",
                 "3",
                 "--threshold",
@@ -161,7 +161,7 @@ class TestCheckTtftMain:
         rc = check_ttft.main(
             [
                 "--session-type",
-                "pm",
+                "eng",
                 "--last",
                 "10",
                 "--threshold",
@@ -183,14 +183,14 @@ class TestCheckTtftMain:
         _write_jsonl(
             log,
             [
-                {"session_type": "dev", "ttft_seconds": 5.0},
+                {"session_type": "teammate", "ttft_seconds": 5.0},
                 {"session_type": "teammate", "ttft_seconds": 5.0},
             ],
         )
         rc = check_ttft.main(
             [
                 "--session-type",
-                "pm",
+                "eng",
                 "--last",
                 "10",
                 "--threshold",
@@ -212,11 +212,11 @@ class TestCheckTtftMain:
         log.write_text(
             "\n".join(
                 [
-                    '{"session_type": "pm", "ttft_seconds": 30.0}',
+                    '{"session_type": "eng", "ttft_seconds": 30.0}',
                     "this is not valid json",
-                    '{"session_type": "pm", "ttft_seconds": 50.0}',
+                    '{"session_type": "eng", "ttft_seconds": 50.0}',
                     "",  # blank line
-                    '{"session_type": "pm", "ttft_seconds": 70.0}',
+                    '{"session_type": "eng", "ttft_seconds": 70.0}',
                 ]
             )
             + "\n"
@@ -224,7 +224,7 @@ class TestCheckTtftMain:
         rc = check_ttft.main(
             [
                 "--session-type",
-                "pm",
+                "eng",
                 "--last",
                 "10",
                 "--threshold",
@@ -246,15 +246,15 @@ class TestCheckTtftMain:
         _write_jsonl(
             log,
             [
-                {"session_type": "pm", "ttft_seconds": 30.0},
-                {"session_type": "pm"},  # missing field — skipped
-                {"session_type": "pm", "ttft_seconds": 50.0},
+                {"session_type": "eng", "ttft_seconds": 30.0},
+                {"session_type": "eng"},  # missing field — skipped
+                {"session_type": "eng", "ttft_seconds": 50.0},
             ],
         )
         rc = check_ttft.main(
             [
                 "--session-type",
-                "pm",
+                "eng",
                 "--last",
                 "10",
                 "--threshold",
@@ -278,14 +278,14 @@ class TestCheckTtftMain:
         _write_jsonl(
             log,
             [
-                {"session_type": "pm", "ttft_seconds": 30.0},
-                {"session_type": "pm", "ttft_seconds": 50.0},
+                {"session_type": "eng", "ttft_seconds": 30.0},
+                {"session_type": "eng", "ttft_seconds": 50.0},
             ],
         )
         rc = check_ttft.main(
             [
                 "--session-type",
-                "pm",
+                "eng",
                 "--last",
                 "10",
                 "--threshold",
@@ -307,12 +307,12 @@ class TestCheckTtftHelpers:
         _write_jsonl(
             log,
             [
-                {"session_type": "pm", "ttft_seconds": 1.0},
-                {"session_type": "dev", "ttft_seconds": 2.0},
-                {"session_type": "pm", "ttft_seconds": 3.0},
+                {"session_type": "eng", "ttft_seconds": 1.0},
+                {"session_type": "teammate", "ttft_seconds": 2.0},
+                {"session_type": "eng", "ttft_seconds": 3.0},
             ],
         )
-        entries = check_ttft.load_entries(log, session_type="pm")
+        entries = check_ttft.load_entries(log, session_type="eng")
         assert [e["ttft_seconds"] for e in entries] == [1.0, 3.0]
 
     def test_compute_median_handles_even_and_odd_counts(self):

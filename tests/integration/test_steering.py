@@ -1460,7 +1460,7 @@ class TestSteerChildDelivery:
     """
 
     def _create_dev_session(self, parent_agent_id: str, session_id: str, status: str = "running"):
-        """Create a Dev AgentSession with a parent-child relationship.
+        """Create a child Eng AgentSession with a parent-child relationship.
 
         session_id: the Popoto session_id field (used by steer_session() for lookup).
         Returns the saved session — use session.agent_session_id as the ID for _steer_child().
@@ -1473,16 +1473,16 @@ class TestSteerChildDelivery:
             session_id=session_id,
             project_key="test-steer-child",
             status=status,
-            session_type="dev",
+            session_type="eng",
             parent_agent_session_id=parent_agent_id,
-            message_text="dev task",
+            message_text="eng task",
             created_at=datetime.now(tz=UTC),
         )
         session.save()
         return session
 
     def _create_pm_session(self, session_id: str):
-        """Create a PM AgentSession. Returns the saved session."""
+        """Create a parent Eng AgentSession. Returns the saved session."""
         from datetime import UTC, datetime
 
         from models.agent_session import AgentSession
@@ -1491,8 +1491,8 @@ class TestSteerChildDelivery:
             session_id=session_id,
             project_key="test-steer-child",
             status="running",
-            session_type="pm",
-            message_text="pm task",
+            session_type="eng",
+            message_text="eng task",
             created_at=datetime.now(tz=UTC),
         )
         session.save()
