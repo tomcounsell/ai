@@ -733,7 +733,15 @@ class BridgeAdapter:
             if current_tool is not None:
                 self._agent_session.current_tool_name = current_tool
             if last_use_at is not None:
-                self._agent_session.last_tool_use_at = last_use_at
+                # last_use_at is a raw ISO string from TranscriptTelemetry.last_tool_use_at.
+                # AgentSession.last_tool_use_at is a DatetimeField — it requires a tz-aware
+                # datetime object, not a string.  Parse here before assignment.
+                try:
+                    self._agent_session.last_tool_use_at = datetime.fromisoformat(
+                        last_use_at.replace("Z", "+00:00")
+                    )
+                except (ValueError, AttributeError):
+                    pass
             if thinking is not None:
                 self._agent_session.recent_thinking_excerpt = thinking
             save = getattr(self._agent_session, "save", None)

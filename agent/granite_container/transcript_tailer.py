@@ -252,13 +252,35 @@ def read_transcript_telemetry(
                 byte_offset=base.byte_offset,
             )
 
-        # Split on newlines; the last element may be a partial line — drop it
-        # only if it does NOT end with a newline (i.e., file is mid-write).
-        text = raw.decode("utf-8", errors="replace")
-        lines = text.split("\n")
-        if not text.endswith("\n"):
-            # Drop incomplete trailing line
-            lines = lines[:-1]
+        # Determine the safe commit offset.
+        # If the buffer ends with a newline, all bytes are complete — advance to EOF.
+        # If not, there is a partial trailing line — only advance to the last \n so
+        # the next tick re-reads those bytes once the write is complete.
+        if raw.endswith(b"\n"):
+            safe_offset = end_offset
+        else:
+            last_nl = raw.rfind(b"\n")
+            if last_nl == -1:
+                # Entire buffer is one partial line with no newline at all — nothing to process.
+                return TranscriptTelemetry(
+                    turn_count=base.turn_count,
+                    tool_call_count=base.tool_call_count,
+                    total_input_tokens=base.total_input_tokens,
+                    total_output_tokens=base.total_output_tokens,
+                    total_cache_read_tokens=base.total_cache_read_tokens,
+                    current_tool_name=base.current_tool_name,
+                    last_tool_use_at=base.last_tool_use_at,
+                    recent_thinking_excerpt=base.recent_thinking_excerpt,
+                    tailer_last_read_at=base.tailer_last_read_at,
+                    byte_offset=base.byte_offset,
+                )
+            # Advance only to the end of the last complete line (inclusive of its \n).
+            safe_offset = base.byte_offset + last_nl + 1
+
+        # Parse only the bytes up to safe_offset (all complete lines).
+        complete_bytes = raw[: safe_offset - base.byte_offset]
+        text = complete_bytes.decode("utf-8", errors="replace")
+        lines = [line for line in text.split("\n") if line.strip()]
 
         events: list[dict] = []
         for line in lines:
@@ -275,8 +297,8 @@ def read_transcript_telemetry(
         # fold_events returns a new TranscriptTelemetry (copy semantics)
         result = fold_events(events, base)
 
-        # Always advance the byte offset past what we read
-        result.byte_offset = end_offset
+        # Advance the byte offset to the end of the last complete line only.
+        result.byte_offset = safe_offset
 
         # Only stamp tailer_last_read_at when at least one telemetry event
         # (user or assistant type) was successfully parsed.  Store as ISO string.

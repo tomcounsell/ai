@@ -10,6 +10,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import UTC
 from pathlib import Path
 
 from agent.granite_container.transcript_tailer import (
@@ -521,6 +522,120 @@ class TestPathTypes(unittest.TestCase):
             self.assertEqual(result.turn_count, 1)
         finally:
             os.unlink(str(path))
+
+
+# ---------------------------------------------------------------------------
+# 13. Split-tick offset: partial line written across two ticks is counted once
+# ---------------------------------------------------------------------------
+
+
+class TestSplitTickOffset(unittest.TestCase):
+    def test_split_turn_across_two_ticks_is_counted(self) -> None:
+        """A user entry written in two halves across two ticks is counted exactly once.
+
+        Regression guard for the partial-line offset bug: previously, `byte_offset`
+        was advanced to EOF even when the last line was incomplete, causing the
+        now-complete line to be skipped on the next tick entirely.
+        """
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".jsonl", delete=False) as f:
+            path = f.name
+            # Tick 1: write one complete user entry.
+            complete = (json.dumps(_make_user_entry()) + "\n").encode()
+            f.write(complete)
+
+        try:
+            # First tick — read the complete line.
+            state1 = read_transcript_telemetry(path)
+            self.assertEqual(state1.turn_count, 1)
+            self.assertEqual(state1.byte_offset, len(complete))
+
+            # Simulate mid-write: append a partial (no trailing newline) user entry.
+            partial_json = json.dumps(_make_user_entry())
+            partial_bytes = partial_json.encode()  # no "\n"
+            with open(path, "ab") as f:
+                f.write(partial_bytes)
+
+            # Second tick — partial line must NOT be counted, and byte_offset must NOT
+            # advance past the partial bytes (so the third tick can re-read them).
+            state2 = read_transcript_telemetry(path, prev_state=state1)
+            self.assertEqual(state2.turn_count, 1, "partial line must not be counted yet")
+            # byte_offset must stay at end of last complete line (i.e. state1.byte_offset)
+            self.assertEqual(
+                state2.byte_offset,
+                state1.byte_offset,
+                "byte_offset must not advance into partial line",
+            )
+
+            # Complete the partial line by appending the closing newline.
+            with open(path, "ab") as f:
+                f.write(b"\n")
+
+            # Third tick — the previously-partial line is now complete and must be counted.
+            state3 = read_transcript_telemetry(path, prev_state=state2)
+            self.assertEqual(
+                state3.turn_count,
+                2,
+                "turn written across two ticks must be counted on the completing tick",
+            )
+        finally:
+            os.unlink(path)
+
+    def test_all_partial_no_newline_returns_same_offset(self) -> None:
+        """When the entire buffer has no newline, byte_offset must not advance."""
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".jsonl", delete=False) as f:
+            path = f.name
+            # Write bytes that have no newline at all.
+            f.write(b'{"type": "user", "timestamp": "2024')
+
+        try:
+            result = read_transcript_telemetry(path)
+            self.assertEqual(result.byte_offset, 0, "no complete line → offset stays at 0")
+            self.assertEqual(result.turn_count, 0)
+        finally:
+            os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# 14. last_tool_use_at contract: tailer returns str, adapter must parse to datetime
+# ---------------------------------------------------------------------------
+
+
+class TestLastToolUseAtIsDatetime(unittest.TestCase):
+    def test_last_tool_use_at_iso_string_parses_to_datetime(self) -> None:
+        """Verify that ISO strings from TranscriptTelemetry convert to tz-aware datetimes."""
+        from datetime import datetime
+
+        # Simulate what bridge_adapter must do before assigning to AgentSession.last_tool_use_at.
+        iso_str = "2024-01-01T00:01:00.000Z"
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        self.assertIsInstance(dt, datetime)
+        self.assertIsNotNone(dt.tzinfo)
+        self.assertEqual(dt.tzinfo, UTC)
+
+    def test_last_tool_use_at_none_handled_gracefully(self) -> None:
+        """Verify None ISO string doesn't cause a crash in parse."""
+        from datetime import datetime
+
+        iso_str = None
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00")) if iso_str else None
+        self.assertIsNone(dt)
+
+    def test_last_tool_use_at_is_str_from_tailer(self) -> None:
+        """The tailer returns last_tool_use_at as a raw ISO string.
+
+        Parsing to a datetime object is the bridge adapter's responsibility —
+        the tailer must not perform that conversion so it stays fail-silent and
+        agnostic to tz-handling policy.
+        """
+        events = [_make_assistant_entry(tool_names=["Bash"])]
+        totals = TranscriptTelemetry()
+        result = fold_events(events, totals)
+        self.assertIsNotNone(result.last_tool_use_at)
+        self.assertIsInstance(
+            result.last_tool_use_at,
+            str,
+            "tailer must return last_tool_use_at as a raw ISO string, not a datetime",
+        )
 
 
 if __name__ == "__main__":
