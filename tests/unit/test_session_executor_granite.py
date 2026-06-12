@@ -221,3 +221,153 @@ def async_mock_return(value):
         return value
 
     return _coro
+
+
+# ---------------------------------------------------------------------------
+# Reaction-gating tests (Task 6 of issue #1648)
+# ---------------------------------------------------------------------------
+
+
+class TestIsNonCleanGraniteExit:
+    """Unit tests for the _is_non_clean_granite_exit helper."""
+
+    @pytest.mark.parametrize(
+        "exit_reason,expected",
+        [
+            # Clean exits → False
+            ("pm_complete", False),
+            ("pm_user", False),
+            # Non-clean exits → True
+            ("exception", True),
+            ("pm_hang", True),
+            ("dev_hang", True),
+            ("startup_unresolved", True),
+            ("pm_no_user_message", True),
+            ("pm_max_turns", True),
+            # None (non-granite or not yet set) → False
+            (None, False),
+        ],
+    )
+    def test_exit_reason_classification(self, exit_reason, expected):
+        from agent.session_executor import _is_non_clean_granite_exit
+
+        session = MagicMock()
+        session.exit_reason = exit_reason
+        assert _is_non_clean_granite_exit(session) is expected
+
+    def test_missing_exit_reason_attribute(self):
+        """Sessions without exit_reason attr (e.g. no Task 2 migration) → False."""
+        from agent.session_executor import _is_non_clean_granite_exit
+
+        session = object()  # bare object with no attrs
+        assert _is_non_clean_granite_exit(session) is False
+
+
+class TestReactionGating:
+    """Table-driven tests for the executor reaction-selection branch.
+
+    We test _is_non_clean_granite_exit directly AND the emoji selection
+    via the full executor path using a mocked BridgeAdapter.run.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exit_reason,user_facing_routed,is_error",
+        [
+            # Clean exits → NOT REACTION_ERROR
+            ("pm_complete", False, False),
+            ("pm_complete", True, False),
+            ("pm_user", False, False),
+            # Non-clean exits → REACTION_ERROR (regardless of delivery)
+            ("exception", False, True),
+            ("exception", True, True),
+            ("pm_hang", False, True),
+            ("dev_hang", False, True),
+            ("startup_unresolved", False, True),
+            ("pm_max_turns", False, True),
+            # None exit_reason (non-granite) → NOT REACTION_ERROR
+            (None, False, False),
+            (None, True, False),
+        ],
+    )
+    async def test_reaction_selection(
+        self,
+        redis_test_db,
+        exit_reason,
+        user_facing_routed,
+        is_error,
+    ):
+        """The executor selects REACTION_ERROR for non-clean granite exits and
+        a non-error reaction for clean exits.
+
+        We use sentinel EmojiResult objects injected via patched constants so
+        the test is deterministic regardless of which real emoji is picked by
+        find_best_emoji().
+
+        Note: we only assert REACTION_ERROR vs non-REACTION_ERROR. The distinction
+        between REACTION_SUCCESS and REACTION_COMPLETE (the other non-error bucket)
+        depends on messenger.has_communicated() which varies with internal executor
+        flow and is not the target behavior being tested here.
+        """
+        from tools.emoji_embedding import EmojiResult
+
+        # Build unique sentinels so identity comparison is unambiguous.
+        sentinel_success = EmojiResult(emoji="TEST_SUCCESS_SENTINEL")
+        sentinel_complete = EmojiResult(emoji="TEST_COMPLETE_SENTINEL")
+        sentinel_error = EmojiResult(emoji="TEST_ERROR_SENTINEL")
+
+        import uuid
+
+        # Use a unique session_id per test to avoid Redis collisions when tests
+        # run in parallel (parametrize generates many sessions).
+        unique_sid = f"rg-{uuid.uuid4().hex[:12]}"
+        session = _make_session(working_dir="/tmp", session_id=unique_sid)
+
+        # Transition the session to "running" so the executor's
+        # AgentSession.query.filter(status="running") lookup finds it and
+        # agent_session is non-None for the reaction-gating branch.
+        session.status = "running"
+        session.save(update_fields=["status"])
+
+        # Track react_cb calls via a spy injected through _resolve_callbacks.
+        react_calls: list[tuple] = []
+
+        async def _spy_react(chat_id, message_id, emoji):
+            react_calls.append((chat_id, message_id, emoji))
+
+        async def _null_send(msg: str) -> None:
+            pass
+
+        # BridgeAdapter.run sets exit_reason and user_facing_routed directly on
+        # self._agent_session (the same Python object the executor holds as
+        # agent_session). We replicate that in _fake_run via self._agent_session
+        # so the executor's reaction-gating branch sees the updated values.
+        async def _fake_run(self, user_message, working_dir):
+            if self._agent_session is not None:
+                self._agent_session.exit_reason = exit_reason
+                if user_facing_routed:
+                    self._agent_session.user_facing_routed = True
+            return ""
+
+        pool = await _make_initialized_pool(size=1)
+        with (
+            patch("agent.granite_container.pty_pool._pty_pool", pool),
+            patch.object(BridgeAdapter, "run", _fake_run),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, _spy_react),
+            ),
+            # Inject sentinels so the emoji branch is deterministic.
+            patch("agent.session_executor.REACTION_SUCCESS", sentinel_success),
+            patch("agent.session_executor.REACTION_COMPLETE", sentinel_complete),
+            patch("agent.session_executor.REACTION_ERROR", sentinel_error),
+        ):
+            await _execute_agent_session(session)
+
+        assert react_calls, "react_cb (_spy_react) was never called"
+        _, _, actual_emoji = react_calls[-1]
+        actual_is_error = actual_emoji is sentinel_error
+        assert actual_is_error == is_error, (
+            f"exit_reason={exit_reason!r}, user_facing_routed={user_facing_routed} → "
+            f"expected is_error={is_error}, got emoji={actual_emoji!r}"
+        )
