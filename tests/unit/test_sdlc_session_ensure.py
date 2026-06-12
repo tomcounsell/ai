@@ -218,7 +218,7 @@ class TestBridgeShortCircuit:
 
         bridge_session = MagicMock()
         bridge_session.session_id = "tg_valor_-1003449100931_691"
-        bridge_session.session_type = "pm"
+        bridge_session.session_type = "eng"
         bridge_session.status = "running"
         # REAL str issue_url — the env session OWNS issue 1140.
         bridge_session.issue_url = "https://github.com/tomcounsell/ai/issues/1140"

@@ -92,10 +92,10 @@ class TestTelegramEnvInjection:
     """Tests for TELEGRAM_CHAT_ID and TELEGRAM_REPLY_TO env var injection (issue #497)."""
 
     def test_chat_session_injects_telegram_chat_id(self):
-        """PM session should inject TELEGRAM_CHAT_ID from chat_id."""
+        """Eng session should inject TELEGRAM_CHAT_ID from chat_id."""
         agent = ValorAgent(
             chat_id="12345",
-            session_type="pm",
+            session_type="eng",
         )
         options = agent._create_options(session_id=None)
         assert options.env.get("TELEGRAM_CHAT_ID") == "12345"
@@ -110,19 +110,19 @@ class TestTelegramEnvInjection:
         assert "TELEGRAM_CHAT_ID" not in options.env
 
     def test_chat_session_without_chat_id_no_injection(self):
-        """PM session without chat_id should not inject TELEGRAM_CHAT_ID."""
+        """Eng session without chat_id should not inject TELEGRAM_CHAT_ID."""
         agent = ValorAgent(
             chat_id=None,
-            session_type="pm",
+            session_type="eng",
         )
         options = agent._create_options(session_id=None)
         assert "TELEGRAM_CHAT_ID" not in options.env
 
     def test_session_type_injected(self):
         """SESSION_TYPE env var should be set for chat sessions."""
-        agent = ValorAgent(session_type="pm")
+        agent = ValorAgent(session_type="eng")
         options = agent._create_options(session_id=None)
-        assert options.env.get("SESSION_TYPE") == "pm"
+        assert options.env.get("SESSION_TYPE") == "eng"
 
 
 @pytest.mark.asyncio

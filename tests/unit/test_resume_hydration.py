@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 def _make_session(
     session_id="test-session-123",
-    session_type="pm",
+    session_type="eng",
     working_dir="/tmp/fake-worktree",
     message_text="original message",
 ):
