@@ -64,6 +64,12 @@ The decision is:
 - **BUILD completed, tests failed or review blocked, fix is isolated** → fresh PATCH (Sonnet)
 - **BUILD completed, tests failed or review blocked, fix needs builder context** → resume BUILD (Sonnet, original transcript)
 
+## Row 8 / Row 8b: Stale-Verdict Supersession
+
+A REVIEW verdict is stale (superseded) iff its `recorded_at` timestamp predates the latest `/do-patch` dispatch timestamp. When stale, row 8 (`_rule_review_has_findings`) returns False and row 8b (`_rule_patch_applied_after_review`) dispatches `/do-pr-review` for re-review instead of re-dispatching `/do-patch`.
+
+This prevents the PM from repeatedly patching against findings that were already addressed by a prior patch cycle. The staleness check is implemented as `_review_verdict_is_stale(stage_states)` in `agent/sdlc_router.py` (issue #1641). All edge cases (missing `recorded_at`, no prior `/do-patch`, parse failure) fail safe to "not stale."
+
 ## Key Principles
 
 1. **Findings are never silently ignored.** They are either fixed or annotated with inline code comments explaining why they were left as-is.

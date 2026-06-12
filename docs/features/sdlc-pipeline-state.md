@@ -70,14 +70,40 @@ python -m tools.sdlc_session_ensure --kill-orphans
 
 The CLI always exits 0. Per-session finalize failures are reported inside the JSON payload's `failures` count and per-session `result` list — they never raise. When non-zero zombies are detected, a single stderr line (`[sdlc_session_ensure] found N zombie sdlc-local session(s)`) surfaces the count to scheduled-cleanup operators while stdout stays machine-parseable.
 
+## Verdict Storage and Normalization
+
+Verdicts stored in `stage_states._verdicts[stage]["verdict"]` are always in canonical form (uppercase, underscores replaced by spaces, internal whitespace collapsed). `record_verdict()` in `tools/sdlc_verdict.py` normalizes at the write boundary, so records created before this fix may still have non-canonical forms in Redis — those are handled by read-side normalization in `agent/sdlc_router.py`. See [SDLC Router Oscillation Guard](sdlc-router-oscillation-guard.md) for the full normalization contract.
+
+## `_meta` Keys
+
+`python -m tools.sdlc_stage_query --issue-number N` returns an enriched `_meta` dict alongside the stage statuses. Current keys:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `patch_cycle_count` | `int` | Number of PATCH cycles run so far |
+| `critique_cycle_count` | `int` | Number of CRITIQUE cycles run so far |
+| `latest_critique_verdict` | `str \| null` | Normalized critique verdict, e.g. `"NEEDS REVISION"` |
+| `latest_review_verdict` | `str \| null` | Normalized review verdict, e.g. `"APPROVED"` |
+| `revision_applied` | `bool` | Whether `revision_applied` frontmatter flag is set on the plan |
+| `pr_number` | `int \| null` | Open PR number for this issue, if any |
+| `pr_merge_state` | `str \| null` | `mergeStateStatus` from `gh pr view` (e.g. `"CLEAN"`) |
+| `ci_all_passing` | `bool \| null` | `True` when all CI status checks are `SUCCESS` |
+| `same_stage_dispatch_count` | `int` | Consecutive dispatches to the same stage without state change |
+| `last_dispatched_skill` | `str \| null` | The most recently dispatched skill name |
+| `plan_exists` | `bool` | `True` if a plan file is present on disk for the issue (added #1640) |
+| `issue_number` | `int \| null` | Resolved issue number (added #1640) |
+
+`plan_exists` and `issue_number` are computed by `_compute_meta()` in `tools/sdlc_stage_query.py`. They allow the router's `_rule_no_plan` to distinguish a genuine bootstrap (`PLAN=="ready"` with no plan file) from a completed plan whose status string survived a Redis flush.
+
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `tools/sdlc_stage_marker.py` | Write stage markers (in_progress/completed) |
-| `tools/sdlc_stage_query.py` | Query current stage states |
+| `tools/sdlc_stage_query.py` | Query current stage states; computes enriched `_meta` |
 | `tools/sdlc_session_ensure.py` | Create/find local SDLC sessions |
-| `tools/_sdlc_utils.py` | Shared `find_session_by_issue()` helper |
+| `tools/_sdlc_utils.py` | Shared `find_session_by_issue()` and `normalize_verdict()` helpers |
+| `tools/sdlc_verdict.py` | Record/read verdicts; normalizes at write boundary |
 | `agent/pipeline_state.py` | `PipelineStateMachine` reads/writes `stage_states` |
 
 ## Bridge vs Local

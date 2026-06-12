@@ -83,6 +83,7 @@ from pathlib import Path
 
 from tools._sdlc_utils import find_plan_path as _find_plan_path
 from tools._sdlc_utils import find_session as _find_session
+from tools._sdlc_utils import normalize_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,13 @@ def record_verdict(
     if judges is not None and not _validate_judges_payload(judges):
         logger.debug("sdlc_verdict: malformed judges payload — refusing partial write")
         return {}
+
+    # Normalize the verdict to canonical space-separated uppercase form (#1638).
+    # This is the single write boundary — all stored verdicts are canonical.
+    raw_verdict = verdict
+    verdict = normalize_verdict(verdict)
+    if verdict != raw_verdict:
+        logger.debug(f"sdlc_verdict: normalized verdict {raw_verdict!r} -> {verdict!r}")
 
     recorded_at = (now or datetime.now(UTC)).isoformat()
     artifact_hash = _compute_artifact_hash(stage, issue_number)
