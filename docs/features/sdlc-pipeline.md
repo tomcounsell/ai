@@ -84,6 +84,8 @@ The enriched stage query output (`sdlc-tool stage-query`) includes a `_meta` dic
 | `last_dispatched_skill` | str\|None | `_sdlc_dispatches` | Most recent skill dispatched |
 | `plan_revising` | bool | `_plan_revising` | Plan-revising lock state (G7) |
 | `plan_hash_at_build_start` | str\|None | `_plan_hash_at_build_start` | Git commit hash of plan doc at build start |
+| `plan_exists` | bool | `_compute_meta()` / `find_plan_path()` | `True` if a plan file is present on disk for the issue. Used by `_rule_plan_not_critiqued` to require real evidence before routing to CRITIQUE (added #1640). |
+| `issue_number` | int\|None | `_compute_meta()` | Resolved issue number. Enables `_rule_no_plan` to distinguish a genuine bootstrap from a stale status string (added #1640). |
 
 ## CLI Tools
 
