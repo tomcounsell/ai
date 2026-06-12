@@ -1166,7 +1166,7 @@ def _resolve_compose_args(
         return PersonaType.ENGINEER, AccessLevel.WORKER, None
 
     # project_mode == "eng" forces engineer rails even for non-ENG session types.
-    if project_mode in ("pm", "eng"):
+    if project_mode == "eng":
         return PersonaType.ENGINEER, AccessLevel.WORKER, None
 
     if session_type == SessionType.TEAMMATE:
@@ -2114,9 +2114,9 @@ def _resolve_persona(
     if is_dm:
         return telegram_config.get("dm_persona", PersonaType.TEAMMATE)
 
-    # Eng/PM mode projects always use engineer persona
-    project_mode = project.get("mode", "dev")
-    if project_mode in ("pm", "eng"):
+    # Eng mode projects always use engineer persona
+    project_mode = project.get("mode", "eng")
+    if project_mode == "eng":
         return PersonaType.ENGINEER
 
     # Group chats: look up persona from the groups dict
@@ -2318,9 +2318,9 @@ async def get_response_via_harness(
         system_prompt: Optional persona/role text appended to Claude Code's
             default system prompt via ``--append-system-prompt`` (issue #1148).
             Use ``--append`` (not ``--system-prompt``) to preserve the default
-            tool-handling protocol — the persona is additive guidance. PM
-            sessions pass ``load_pm_system_prompt(working_dir)`` here; drafter
-            and dev sessions must keep this ``None``. Strings larger than
+            tool-handling protocol — the persona is additive guidance. Eng
+            sessions pass ``load_eng_system_prompt(working_dir)`` here; drafter
+            sessions must keep this ``None``. Strings larger than
             512KB are dropped with a warning to avoid ARG_MAX overflows.
     """
     # Validate prior_uuid format; treat empty or invalid as None
@@ -3078,8 +3078,8 @@ async def build_harness_turn_input(
     )
 
     # Cross-repo SDLC: inject target repo context
-    project_mode = project.get("mode", "dev") if project else "dev"
-    if project_mode != "pm" and classification == ClassificationType.SDLC and is_cross_repo:
+    project_mode = project.get("mode", "eng") if project else "eng"
+    if project_mode != "eng" and classification == ClassificationType.SDLC and is_cross_repo:
         project_name = project.get("name", "Unknown") if project else "Unknown"
         project_working_dir = project.get("working_directory", "") if project else ""
         github_config = project.get("github", {}) if project else {}
@@ -3154,20 +3154,20 @@ async def get_agent_response_sdk(
         project_working_dir = AI_REPO_ROOT
     is_cross_repo = project_key != "valor"
 
-    # Check project mode: "pm" channels bypass SDLC classification entirely
-    project_mode = project.get("mode", "dev") if project else "dev"
-    # Treat any unrecognized mode as "dev" (safe default)
-    if project_mode not in ("dev", "pm"):
-        logger.warning(f"[{request_id}] Unknown project mode '{project_mode}', treating as 'dev'")
-        project_mode = "dev"
+    # Check project mode: "eng" channels bypass SDLC classification entirely
+    project_mode = project.get("mode", "eng") if project else "eng"
+    # Treat any unrecognized mode as "eng" (safe default)
+    if project_mode != "eng":
+        logger.warning(f"[{request_id}] Unknown project mode '{project_mode}', treating as 'eng'")
+        project_mode = "eng"
 
-    if project_mode == "pm":
-        # PM mode: skip classification, always use "question", work in project dir
+    if project_mode == "eng":
+        # Eng mode: skip classification, always use "question", work in project dir
         classification = ClassificationType.QUESTION
         working_dir = project_working_dir
-        logger.info(f"[{request_id}] PM mode: cwd={working_dir}, skipping SDLC classification")
+        logger.info(f"[{request_id}] Eng mode: cwd={working_dir}, skipping SDLC classification")
     else:
-        # Dev mode: use classification from bridge (no re-classification).
+        # Non-eng mode: use classification from bridge (no re-classification).
         # The bridge handler already classified via routing.py and stored
         # classification_type on the AgentSession. Read it from session if
         # available, otherwise fall back to a simple heuristic.
@@ -3274,7 +3274,7 @@ async def get_agent_response_sdk(
     )
 
     # Cross-repo SDLC: inject target repo context
-    if project_mode != "pm" and classification == ClassificationType.SDLC and is_cross_repo:
+    if project_mode != "eng" and classification == ClassificationType.SDLC and is_cross_repo:
         github_config = project.get("github", {}) if project else {}
         github_org = github_config.get("org", "")
         github_repo = github_config.get("repo", "")
@@ -3602,13 +3602,13 @@ async def get_agent_response_sdk(
     enriched_message += f"\nMESSAGE: {message}"
 
     # Log prompt summary before sending to agent
-    has_worker_rules = project_mode != "pm"
+    has_worker_rules = project_mode != "eng"
     logger.info(
         f"[{request_id}] Sending to agent: {len(enriched_message)} chars, "
         f"classification={classification}, "
         f"task_list={task_list_id or 'none'}, mode={project_mode}"
     )
-    wr_label = "yes" if has_worker_rules else "no (pm mode)"
+    wr_label = "yes" if has_worker_rules else "no (eng mode)"
     is_dm = chat_title is None
     # Single source of truth for (persona, access_level, channel) resolution.
     # See _resolve_compose_args (~L1050) for the full input → output mapping.
@@ -3688,7 +3688,7 @@ async def get_agent_response_sdk(
         # set GH_REPO so all gh commands automatically target the correct repo.
         _gh_repo = None
         is_cross_repo_sdlc = (
-            project_mode not in ("pm", "eng")
+            project_mode != "eng"
             and classification == ClassificationType.SDLC
             and is_cross_repo
         )
