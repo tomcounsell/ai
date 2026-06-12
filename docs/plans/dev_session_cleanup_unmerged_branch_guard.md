@@ -6,7 +6,7 @@ owner: Valor Engels
 created: 2026-06-12
 tracking: https://github.com/tomcounsell/ai/issues/1646
 last_comment_id:
-revision_applied: false
+revision_applied: true
 ---
 
 # Dev-Session Completion Cleanup: Guard Against Destroying Unmerged Work
@@ -177,15 +177,22 @@ the work is safe to discard" — an invariant nothing establishes.
 
 - **New dependencies:** none. Pure git plumbing + existing subprocess patterns.
 - **Interface changes:**
-  - `cleanup_after_merge(repo_root, slug)` gains an internal precondition check and a new
-    result key (e.g. `skipped_unmerged: bool` + `unmerged_branch` in `errors`). Signature
-    unchanged; return dict grows additively (back-compatible per existing callers in
-    `post_merge_cleanup.py`).
-  - A new small helper `safe_delete_branch(repo_root, branch_name, *, base="main")` centralizes
-    the `is-ancestor`-then-`-d` logic so all three destruction sites share one implementation.
+  - `cleanup_after_merge(repo_root, slug)` gains an internal precondition check and a single new
+    result key `skipped_unmerged: bool` (carrying the preserved branch name in the same dict).
+    Signature unchanged; return dict grows additively (back-compatible per existing callers in
+    `post_merge_cleanup.py`). **Exactly two representations of "branch preserved," no more:**
+    (1) the structured result key `skipped_unmerged` (for callers/tooling), and (2) the greppable
+    `[unmerged-branch-guard]` log line naming the branch (for humans). There is no separate
+    `unmerged_branch` errors entry and no distinct "recovery marker" artifact — the log line *is*
+    the recovery marker; it does not persist state beyond the log.
+  - A new small helper `safe_delete_branch(repo_root, branch_name, *, base="main", predicate, force=False)`
+    centralizes the refuse-then-delete / log / structured-result logic so all four destruction sites
+    share one implementation, each supplying the merged-ness oracle correct for its context
+    (`merged_via_ancestor` for the no-prior-merge sites, `merged_via_cherry` for the post-squash-merge sites).
 - **Coupling:** *decreases* — four ad-hoc `git branch -D` call sites (executor auto-mark,
   `cleanup_after_merge`, `remove_worktree`, and the stale-branch reflection) collapse to one
-  guarded helper.
+  guarded helper. The only surviving `git branch -D` lives inside that helper, gated behind a
+  proven-landed check.
 - **Data ownership:** the executor stops owning "delete the branch on completion." Branch
   lifecycle ownership moves to the landing step (PM-authorized), matching Tom's policy.
 - **Reversibility:** trivial to revert (localized to two files plus tests). No data migration.
@@ -209,26 +216,54 @@ and runs against the local git toolchain already present.
 
 ### Key Elements
 
-- **`safe_delete_branch` helper** (`agent/worktree_manager.py`): the single primitive for
-  deleting a session branch. Runs `git merge-base --is-ancestor {branch} {base}`; deletes with
-  `git branch -d` only when the branch is an ancestor of base (i.e. fully merged). When not
-  merged, it refuses, logs a `[unmerged-branch-guard]` warning, and returns a structured
-  "skipped" result. Surfaces git failures instead of swallowing them.
+The central correction over the prior revision: **a single `is-ancestor` oracle is correct for
+two of the four sites and wrong for the other two.** Sites A (executor) and D (stale-branch
+reflection) run where no PR merge has occurred and the landing model is a true merge to `main`,
+so `git merge-base --is-ancestor` is the right merged-ness proof. Sites B/C run *inside*
+`cleanup_after_merge`, which by definition executes after `gh pr merge --squash --delete-branch`
+(this repo squash-merges — `do-merge/SKILL.md:100`). A squash-merge writes a brand-new commit to
+`main` whose ancestry does **not** include the branch tip, so `is-ancestor` exits 1 for a
+legitimately landed branch and `git branch -d` itself refuses it. The guard therefore needs a
+**squash-aware merged oracle** at Sites B/C. (Reproduced: branch+commit → `git checkout main &&
+git merge --squash branch && git commit` → `is-ancestor` exits 1 AND `git branch -d` refuses;
+`git cherry main branch` prints every commit `-`-prefixed = already upstream.)
+
+- **`safe_delete_branch` helper** (`agent/worktree_manager.py`): the single deletion primitive,
+  **parameterized by a pluggable merged predicate** so each call context supplies the correct
+  oracle. It resolves the base branch, runs the supplied predicate, deletes only when the
+  predicate reports "landed," logs `[unmerged-branch-guard]` and returns a structured `skipped_unmerged`
+  result otherwise, and surfaces git failures instead of swallowing them. Two predicates ship:
+  - `merged_via_ancestor(branch, base)` → `git merge-base --is-ancestor branch base` (exit 0 = landed).
+    Used by **Site A (executor)** and **Site D (revival)**, where a true merge to `main` is the model.
+    Deletion uses `git branch -d` (which independently fails-closed on unmerged/checked-out branches).
+  - `merged_via_cherry(branch, base)` → `git cherry base branch`; landed iff every output line is
+    `-`-prefixed (or output is empty) — i.e. every branch commit is patch-id-equivalent to a commit
+    already on `base`. This is squash-safe. Used by **Sites B/C (`cleanup_after_merge`,
+    `remove_worktree`)**. Because `git branch -d` *also* refuses a squash-merged branch, deletion in
+    this context uses a **guarded `git branch -D`** — reached only after `merged_via_cherry` proves
+    the branch is fully upstream. This is the *only* `-D` in `agent/`, and it is gated, not raw.
+  - NOTE: `git log base..branch` emptiness is the WRONG oracle — it stays non-empty after a squash-merge.
 - **`cleanup_after_merge` precondition** (`agent/worktree_manager.py:1150`): before deleting
-  the branch, verify the merged precondition via `safe_delete_branch`. If unmerged, remove
-  nothing destructive to the commit (skip branch deletion), set `skipped_unmerged: true`, and
-  record the branch name so callers/operators can find the work.
+  the branch, verify the merged precondition via `safe_delete_branch(..., predicate=merged_via_cherry)`.
+  If the branch is not fully upstream, skip branch deletion (preserving the work), set
+  `skipped_unmerged: true`, and record the branch name so callers/operators can find the work.
 - **Executor stops force-deleting** (`agent/session_executor.py`): replace the
-  `git branch -D` in the auto-mark block (Site A) with `safe_delete_branch`. The synthetic-slug
-  `finally` path (Site B) inherits the guard automatically via `cleanup_after_merge`.
+  `git branch -D` in the auto-mark block (Site A) with `safe_delete_branch(..., predicate=merged_via_ancestor)`.
+  The synthetic-slug `finally` path inherits the squash-aware guard via `cleanup_after_merge` (Site B).
 - **Stale-branch reflection stops force-deleting** (`agent/session_revival.py:230-238`, Site D):
-  replace its `git branch -D` with `safe_delete_branch`. The age threshold continues to select
-  *candidate* branches; `safe_delete_branch` then deletes only the merged ones and preserves
-  unmerged ones with the same `[unmerged-branch-guard]` warning. This closes the scheduler-driven
+  replace its `git branch -D` with `safe_delete_branch(..., predicate=merged_via_ancestor)`. The age
+  threshold continues to select *candidate* branches; the helper then deletes only the landed ones and
+  preserves unmerged ones with the `[unmerged-branch-guard]` warning. This closes the scheduler-driven
   vector — the autonomous reflection can no longer destroy unmerged work on a timer.
-- **Recovery marker:** when a branch is preserved because it is unmerged, the path logs a clear,
-  greppable warning and persists the branch name (and the worktree path, if still present) so a
-  human or follow-up automation can recover the work — never a silent skip.
+- **Preserved-state observability:** when a branch is preserved because it is unmerged, the path logs
+  one greppable `[unmerged-branch-guard]` warning naming the branch (and worktree path, if present).
+  This is the single recovery signal — there is no separate "recovery marker" artifact; the log line
+  *is* the marker. To bound accumulation before #1647 lands, `safe_delete_branch` also increments a
+  preserved-branch counter exposed via a one-line periodic `[unmerged-branch-guard] preserved=N`
+  summary in the worker log (greppable), so monotonic growth is visible before it bites. The existing
+  stale-worktree GC (`scripts/worktree-gc.sh`) reaps a preserved worktree once its branch later merges
+  via PR (it skips only open/recently-merged-PR branches), so preserved worktrees are not orphaned
+  forever — they are reaped by the normal GC after the eventual landing.
 - **No new automatic landing on this PR.** Per Tom's policy, *who* lands the work (auto-merge vs
   push+PR) and *when* cleanup is authorized is the PM's per-task decision and belongs to the
   PM-routing work (#1647) and persona primes (#1643). This plan guarantees the safety floor:
@@ -237,20 +272,39 @@ and runs against the local git toolchain already present.
 
 ### Flow
 
-Dev session completes → executor auto-mark runs → `safe_delete_branch(repo, "session/dev-{id}")`
-→ **branch is ancestor of main?**
+**Completion path (no PR merge — Site A):** Dev session completes → executor auto-mark runs →
+`safe_delete_branch(repo, "session/dev-{id}", predicate=merged_via_ancestor)` → **branch is ancestor
+of main?**
 - **Yes (merged):** `git branch -d` succeeds → branch removed cleanly.
 - **No (unmerged):** deletion skipped → `[unmerged-branch-guard]` warning logged with branch name
   → branch and (if synthetic) worktree preserved → work recoverable.
 
+**Post-PR-merge path (squash-merge already happened — Sites B/C, via `cleanup_after_merge`):**
+PR squash-merged → `cleanup_after_merge` → `safe_delete_branch(..., predicate=merged_via_cherry)` →
+**all branch commits patch-equivalent already on main (`git cherry` all `-`)?**
+- **Yes (landed):** guarded `git branch -D` succeeds → branch + worktree removed cleanly. (Plain `-d`
+  would *wrongly refuse* here — squash creates a new commit, so the branch is "not fully merged" to
+  `-d`'s ancestry test. The cherry check is what proves it is safe.)
+- **No (work not upstream):** deletion skipped → `[unmerged-branch-guard]` warning → branch preserved.
+
 ### Technical Approach
 
-- Centralize: extract `safe_delete_branch(repo_root, branch_name, *, base="main") -> dict` and
-  route Sites A, B, C, and D through it. No raw `git branch -D` remains in any cleanup path
-  (completion *or* scheduler-driven).
-- `is-ancestor` is the correctness oracle: `git merge-base --is-ancestor <branch> <base>` exits 0
-  iff `<branch>`'s tip is reachable from `<base>` — i.e. fully merged. Exit 1 = unmerged → refuse.
-  Treat any other exit (e.g. missing branch, 128) as "do not delete, surface the error."
+- Centralize: extract
+  `safe_delete_branch(repo_root, branch_name, *, base="main", predicate, force=False) -> dict`
+  and route Sites A, B, C, and D through it. The `predicate` argument is the merged-ness oracle
+  (one of the two shipped functions); `force` selects `git branch -D` (only set True at Sites B/C,
+  reached only after `predicate` passes). No **unguarded** `git branch -D` remains anywhere in
+  `agent/` — the single `-D` lives inside `safe_delete_branch`, behind the proven-landed check.
+- **Two oracles for two contexts:**
+  - `merged_via_ancestor` (Sites A/D, no prior PR merge): `git merge-base --is-ancestor <branch> <base>`
+    exits 0 iff `<branch>`'s tip is reachable from `<base>` — fully merged. Exit 1 = unmerged → refuse.
+    Deletion via `git branch -d` (fails-closed independently).
+  - `merged_via_cherry` (Sites B/C, post-squash-merge): `git cherry <base> <branch>` prints one line
+    per branch commit; `-` prefix = a patch-id-equivalent commit already exists on `<base>`, `+` =
+    not upstream. Landed iff **no `+` lines** (all `-`, or empty). This is squash-safe — it is true
+    immediately after `git merge --squash` + commit. Deletion via guarded `git branch -D` (because
+    `-d` wrongly refuses a squash-merged branch — verified).
+  - For both: treat any other git exit (missing branch, 128) as "do not delete, surface the error."
 - Determine `base` robustly: default `"main"`; if `main` is not present locally fall back to the
   repo's default branch (`git symbolic-ref refs/remotes/origin/HEAD`), and if even that is
   unavailable, refuse deletion (fail safe — never delete when we cannot prove merged).
@@ -260,6 +314,10 @@ Dev session completes → executor auto-mark runs → `safe_delete_branch(repo, 
   find and resume.
 - Stop swallowing failures: the executor's current `capture_output=True` with no return check is
   replaced by inspecting `safe_delete_branch`'s result and logging on the skip/error branches.
+- **Site C is free safety, not a risk:** `grep -rn 'delete_branch=True' agent/ tools/ worker/ bridge/`
+  returns **zero callers** — the only `remove_worktree` invocation (`worktree_manager.py:1197`) passes
+  `delete_branch=False`. So routing the `delete_branch=True` path through the guard changes no live
+  caller's behavior; it only hardens a primitive that is currently reachable but unused.
 
 ## Failure Path Test Strategy
 
@@ -294,15 +352,23 @@ Dev session completes → executor auto-mark runs → `safe_delete_branch(repo, 
   expectations for the new `is-ancestor` precondition (it should now assert the precondition is
   checked, and that an unmerged branch yields `skipped_unmerged`).
 - [ ] `tests/unit/test_worktree_manager.py` (cleanup_after_merge happy-path cases) — UPDATE:
-  add an `is-ancestor`-returns-0 setup so existing merged-branch deletion tests still pass under
-  the new guard.
+  set these up with a **real squash-merge** (`git checkout main && git merge --squash branch &&
+  git commit`) against a temp git repo, and assert the branch is **still deleted**. Do NOT use an
+  `is-ancestor`-returns-0 setup — that encodes the wrong production model (the repo squash-merges)
+  and would pass against an is-ancestor-only design while masking the squash-merge BLOCKER. Written
+  honestly with a squash-merge, this test is what proves `merged_via_cherry` (not `is-ancestor`) is
+  the correct oracle at Sites B/C.
 - [ ] `tests/unit/test_post_merge_cleanup.py::{test_clean_exits_0,test_success_exits_0,
   test_blocked_session_exits_2,test_generic_error_exits_1}` — UPDATE: extend the fake
   `cleanup_after_merge` result dicts with the new `skipped_unmerged` key (additive) and add a new
   case asserting the script's behavior when a branch is skipped as unmerged.
 - [ ] NEW `tests/unit/test_worktree_manager.py::test_safe_delete_branch_*` — REPLACE/ADD: a focused
-  set covering merged (deletes), unmerged (refuses + preserves), missing-branch, and
-  unresolvable-base cases against a real temp git repo.
+  set against a real temp git repo covering **both oracles**:
+  `merged_via_ancestor` — true-merged (deletes via `-d`), unmerged (refuses + preserves);
+  `merged_via_cherry` — **squash-merged** (`git merge --squash` + commit; deletes via guarded `-D`),
+  truly-unmerged (refuses + preserves); plus shared missing-branch and unresolvable-base cases.
+  Critically include a test asserting `merged_via_ancestor` *refuses* a squash-merged branch (proving
+  why Sites B/C cannot use it) and `merged_via_cherry` *accepts* it.
 - [ ] NEW `tests/unit/test_session_executor_cleanup.py` — ADD: regression test reproducing the
   incident — a dev session branch with an unmerged commit goes through the auto-mark cleanup and
   the commit remains reachable afterward (the canonical "this bug never recurs" test).
@@ -332,13 +398,23 @@ Dev session completes → executor auto-mark runs → `safe_delete_branch(repo, 
 
 ## Risks
 
-### Risk 1: Worktrees accumulate when work is unmerged
-**Impact:** Preserving the worktree for every unmerged completion could leak `.worktrees/dev-*`
-directories over time (the original #1272 concern resurfaces, inverted).
-**Mitigation:** Preserving the *worktree directory* is cheap and reversible (it holds no unique
-commit data once the branch is safe). The follow-up landing work (#1647) authorizes cleanup after
-landing, which reaps these. As a backstop, the existing stale-worktree GC can prune directories
-whose branch has since merged. Document the preserved-worktree state clearly so it is observable.
+### Risk 1: Worktrees accumulate when work is unmerged (until #1647 lands)
+**Impact:** Per the incident, *all* current granite dev sessions complete unmerged (Dev never opens a
+PR, PM has no merge step). The safety floor preserves a branch + worktree for every one until #1647
+lands the PM-authorized landing step — on the 24/7 worker this is monotonic `.worktrees/dev-*` +
+`session/dev-*` growth in the interim. This trades silent data loss for visible accumulation.
+**Mitigation (in this slug):**
+- **Observability hook:** `safe_delete_branch` increments a preserved-branch counter on every skip and
+  the worker emits a greppable `[unmerged-branch-guard] preserved=N` summary line, so growth is visible
+  in `logs/worker.log` before it bites. This is the bounded-accumulation mitigation the critique asked
+  for, scoped to a log line rather than a dashboard surface (keeping the slug narrow).
+- **Existing reaper confirmed:** `scripts/worktree-gc.sh` reaps a preserved worktree once its branch
+  later merges via PR — it skips only branches that are on an open PR or merged within the protect
+  window (`gh pr list --state merged`), and force-deletes the rest (line 208, in `scripts/`, outside
+  this slug's `agent/` boundary, gated by its own merged-PR check). So a preserved worktree is *not*
+  orphaned forever: after the eventual PR landing it is collected by the normal GC.
+- Preserving the *worktree directory* is itself cheap and reversible — it holds no unique commit data
+  once the branch is safe (commits live in `.git`).
 
 ### Risk 2: `is-ancestor` base resolution edge cases
 **Impact:** If `main` cannot be resolved (detached state, unusual checkout), a naive check could
@@ -414,23 +490,28 @@ No external docs site changes — this repo has no Sphinx/MkDocs site for these 
 
 ## Success Criteria
 
-- [ ] No `git branch -D` remains in **any** cleanup path — completion (`session_executor.py`
-  auto-mark block, `worktree_manager.py` `cleanup_after_merge` / `remove_worktree`) **and**
-  scheduler-driven (`session_revival.py` `cleanup_stale_branches`). All four sites route through
-  `safe_delete_branch`. (`grep -rn 'branch.*"-D"\|branch.*'"'"'-D'"'"'' agent/` returns no hits.)
+- [ ] No **unguarded** `git branch -D` remains in any cleanup path — completion
+  (`session_executor.py` auto-mark block, `worktree_manager.py` `cleanup_after_merge` /
+  `remove_worktree`) **and** scheduler-driven (`session_revival.py` `cleanup_stale_branches`). All
+  four sites route through `safe_delete_branch`. The **only** permitted `git branch -D` in `agent/`
+  is the single occurrence *inside* `safe_delete_branch`, reached only after the merged-ness oracle
+  passes (it exists because `git branch -d` wrongly refuses squash-merged branches).
 - [ ] A dev session that commits unmerged work and completes leaves its branch (and synthetic
   worktree) intact, with a `[unmerged-branch-guard]` warning — verified by the regression test
   reproducing incident `ec1e7c6e`.
-- [ ] A dev session whose branch *is* merged into main still has its branch cleaned up (no
-  regression in the happy path).
+- [ ] A dev session whose branch **was squash-merged** into main still has its branch cleaned up
+  (no regression in the SDLC happy path) — verified by a real-squash-merge test, NOT an
+  is-ancestor-returns-0 stub.
 - [ ] `cleanup_after_merge` returns `skipped_unmerged: true` + the branch name when it declines to
   delete an unmerged branch.
+- [ ] `safe_delete_branch` emits a greppable `[unmerged-branch-guard] preserved=N` summary so
+  unmerged-branch accumulation is observable in `logs/worker.log` before #1647 lands.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] No raw `git branch -D` anywhere in `agent/`: `grep -rn 'branch.*"-D"\|branch.*'"'"'-D'"'"'' agent/`
-  returns **no hits** (exit 1). All four sites — including `session_revival.py` — are routed
-  through `safe_delete_branch`, so this repo-wide gate and the scoped Verification-table grep now
-  agree.
+- [ ] No **unguarded** `git branch -D` in `agent/`: every `git branch -D` call site outside the
+  body of `safe_delete_branch` is eliminated. Verify the four original sites are gone and the sole
+  remaining `-D` is inside `safe_delete_branch`:
+  `grep -rn 'branch.*-D' agent/` returns **exactly one hit**, in `safe_delete_branch`.
 
 ## Team Orchestration
 
@@ -441,9 +522,10 @@ builds directly — they deploy team members and coordinate.
 
 - **Builder (cleanup-guard)**
   - Name: `cleanup-guard-builder`
-  - Role: Implement `safe_delete_branch`, route all cleanup-path deletions through it, add the
-    `is-ancestor` precondition to `cleanup_after_merge`, replace the executor `-D`, and route the
-    stale-branch reflection (`session_revival.py`) through the same helper.
+  - Role: Implement `safe_delete_branch` with the two merged predicates (`merged_via_ancestor`,
+    `merged_via_cherry`), route all cleanup-path deletions through it, wire the squash-aware
+    `merged_via_cherry` precondition into `cleanup_after_merge`, replace the executor `-D`, and route
+    the stale-branch reflection (`session_revival.py`) through the same helper with `merged_via_ancestor`.
   - Agent Type: builder
   - Resume: true
 
@@ -456,8 +538,9 @@ builds directly — they deploy team members and coordinate.
 
 - **Validator (cleanup-guard)**
   - Name: `cleanup-validator`
-  - Role: Verify no `git branch -D` remains in cleanup paths, the regression test fails on the
-    pre-fix code and passes after, and all affected suites are green.
+  - Role: Verify no **unguarded** `git branch -D` remains (exactly one hit, inside `safe_delete_branch`),
+    the unmerged-work regression test fails on the pre-fix code and passes after, the squash-merge
+    happy-path test confirms a landed branch is still deleted, and all affected suites are green.
   - Agent Type: validator
   - Resume: true
 
@@ -476,20 +559,29 @@ builds directly — they deploy team members and coordinate.
 - **Assigned To**: cleanup-guard-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `safe_delete_branch(repo_root, branch_name, *, base="main") -> dict` to
-  `agent/worktree_manager.py`: resolve base (main → origin default → refuse), run
-  `git merge-base --is-ancestor`, delete with `git branch -d` only when merged, return a
-  structured result (`deleted` / `skipped_unmerged` / `not_found` / `error`), log
-  `[unmerged-branch-guard]` on skip.
+- Add `safe_delete_branch(repo_root, branch_name, *, base="main", predicate, force=False) -> dict`
+  plus the two predicate functions `merged_via_ancestor` and `merged_via_cherry` to
+  `agent/worktree_manager.py`. The helper resolves base (main → origin default → refuse), runs the
+  supplied `predicate`, deletes when it reports landed (`git branch -d` when `force=False`,
+  guarded `git branch -D` when `force=True` — the only `-D` in `agent/`), returns a structured
+  result (`deleted` / `skipped_unmerged` / `not_found` / `error`), logs `[unmerged-branch-guard]`
+  on skip, and increments a preserved-branch counter feeding a greppable
+  `[unmerged-branch-guard] preserved=N` worker summary line.
+- `merged_via_ancestor`: `git merge-base --is-ancestor branch base` (exit 0 = landed). Used at the
+  no-prior-merge sites (A, D), paired with `force=False` (`-d`).
+- `merged_via_cherry`: `git cherry base branch`, landed iff no `+`-prefixed line. Squash-safe. Used
+  inside `cleanup_after_merge` (Sites B/C), paired with `force=True` (guarded `-D`, because `-d`
+  wrongly refuses a squash-merged branch).
 - Route `cleanup_after_merge`'s branch deletion (worktree_manager.py:1226) and
-  `remove_worktree(delete_branch=True)` (882) through `safe_delete_branch`; add
-  `skipped_unmerged` + branch name to the `cleanup_after_merge` result dict.
+  `remove_worktree(delete_branch=True)` (882) through `safe_delete_branch(..., predicate=merged_via_cherry,
+  force=True)`; add the single `skipped_unmerged` key (carrying branch name) to the
+  `cleanup_after_merge` result dict.
 - Replace `git branch -D {branch}` in `agent/session_executor.py` auto-mark block with
-  `safe_delete_branch`; inspect the result and log instead of swallowing.
+  `safe_delete_branch(..., predicate=merged_via_ancestor)`; inspect the result and log instead of swallowing.
 - Replace `git branch -D {branch}` in `agent/session_revival.py:231` (`cleanup_stale_branches`,
-  Site D) with `safe_delete_branch`; the age threshold still selects candidates, the helper
-  decides deletion. Only branches the helper reports `deleted` go into the `cleaned` list;
-  preserved (unmerged) branches are logged via the helper, not appended as "cleaned."
+  Site D) with `safe_delete_branch(..., predicate=merged_via_ancestor)`; the age threshold still selects
+  candidates, the helper decides deletion. Only branches the helper reports `deleted` go into the
+  `cleaned` list; preserved (unmerged) branches are logged via the helper, not appended as "cleaned."
 
 ### 2. Tests
 - **Task ID**: build-tests
@@ -498,8 +590,13 @@ builds directly — they deploy team members and coordinate.
 - **Assigned To**: cleanup-test-builder
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Add `test_safe_delete_branch_*` against a real temp git repo: merged→deletes,
-  unmerged→preserves+`skipped_unmerged`, missing branch, unresolvable base.
+- Add `test_safe_delete_branch_*` against a real temp git repo covering both oracles:
+  `merged_via_ancestor` true-merged→deletes / unmerged→preserves+`skipped_unmerged`;
+  `merged_via_cherry` **squash-merged→deletes** (guarded `-D`) / truly-unmerged→preserves; plus
+  missing branch, unresolvable base. Include the assertion that `merged_via_ancestor` *refuses* a
+  squash-merged branch and `merged_via_cherry` *accepts* it (locks in the cycle-2 BLOCKER fix).
+- The `cleanup_after_merge` happy-path test must use a **real squash-merge** (`git merge --squash`
+  + commit on main), NOT an is-ancestor-returns-0 stub, and assert the branch is still deleted.
 - Add `tests/unit/test_session_executor_cleanup.py` reproducing incident `ec1e7c6e`: unmerged
   commit survives the auto-mark cleanup.
 - Add `tests/unit/test_session_revival_cleanup.py`: a stale-but-unmerged `session/*` branch is
@@ -514,7 +611,11 @@ builds directly — they deploy team members and coordinate.
 - **Assigned To**: cleanup-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Confirm no `git branch -D` anywhere in `agent/` (repo-wide grep, includes `session_revival.py`).
+- Confirm no **unguarded** `git branch -D` in `agent/`: `grep -rn 'branch.*-D' agent/` returns
+  exactly one hit, inside `safe_delete_branch` (all four original sites — executor, cleanup_after_merge,
+  remove_worktree, session_revival — routed through the helper).
+- Confirm both predicates exist and a squash-merged branch is still deleted (squash-merge regression
+  test), proving `merged_via_cherry` is wired at Sites B/C.
 - Confirm the regression test reproduces the bug on pre-fix code (git stash the fix, run, expect
   fail) and passes with the fix.
 - Run `pytest tests/unit/test_worktree_manager.py tests/unit/test_post_merge_cleanup.py
@@ -546,23 +647,25 @@ builds directly — they deploy team members and coordinate.
 | Affected unit tests pass | `pytest tests/unit/test_worktree_manager.py tests/unit/test_post_merge_cleanup.py tests/unit/test_session_executor_cleanup.py tests/unit/test_session_revival_cleanup.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check agent/` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/` | exit code 0 |
-| No force-delete anywhere in agent/ | `grep -rn 'branch.*"-D"\|branch.*'"'"'-D'"'"'' agent/` | exit code 1 (no hits — includes session_revival.py) |
+| No unguarded force-delete in agent/ | `grep -rn 'branch.*-D' agent/` | exactly one hit, inside `safe_delete_branch` (the guarded squash-merge delete) — all four original sites gone |
 | Guard helper exists | `grep -n "def safe_delete_branch" agent/worktree_manager.py` | output contains safe_delete_branch |
+| Both oracles exist | `grep -n "def merged_via_ancestor\|def merged_via_cherry" agent/worktree_manager.py` | both predicate functions present |
+| Worker restarted onto new code (post-deploy) | `./scripts/valor-service.sh worker-status` | PID start time is after the merge commit — confirms the always-on worker is no longer running the vulnerable old code in memory (CLAUDE.md "ALWAYS RESTART RUNNING SERVICES") |
 
 ## Critique Results
 
-**Verdict: NEEDS REVISION** (cycle 2)
+**Verdict: NEEDS REVISION** (cycle 2) — **all findings ADDRESSED in revision cycle 3 (see Status column + notes below).**
 
 **Cycle-1 findings — verified resolved:** Both cycle-1 findings were genuinely addressed by the revision. Site D (`session_revival.py:231`) is now enumerated everywhere and routed through `safe_delete_branch`, and both acceptance gates were reconciled to a single repo-wide grep over `agent/`. These two are CLOSED. However, cycle 2 surfaces a deeper correctness defect in the very mechanism the cycle-1 fix leaned on.
 
 | Severity | Critic | Finding | Status | Implementation Note |
 |----------|--------|---------|--------|---------------------|
-| BLOCKER | Adversary + Archaeologist + Skeptic + Operator (4 independent critics) | **`is-ancestor` oracle is wrong for `cleanup_after_merge` — it would refuse to delete every squash-merged branch.** `cleanup_after_merge` (Sites B/C) runs after `gh pr merge --squash --delete-branch` (its own docstring, confirmed; the repo merges via `--squash` per `do-merge/SKILL.md:100`). A squash-merge creates a brand-new commit on `main` whose ancestry does NOT include the branch tip, so `git merge-base --is-ancestor session/{slug} main` exits **1 (unmerged)** for a legitimately landed branch. **Reproduced:** branch+commit → `git checkout main && git merge --squash branch && git commit` → `is-ancestor` exits 1, AND `git branch -d` itself refuses ("not fully merged"). Routing Site B/C through an is-ancestor-`-d`-only helper means every cleanly squash-merged SDLC branch is classified "unmerged," refused deletion, and preserved forever — local branches and `.worktrees/` accumulate without bound on the main pipeline. This directly violates the plan's own Success Criterion "A dev session whose branch *is* merged into main still has its branch cleaned up (no regression in the happy path)" (line 424). | OPEN — must fix | `safe_delete_branch` needs **two oracles for two call contexts**, not one uniform is-ancestor: (a) **executor Site A + revival Site D** — no PR merge has occurred, a true merge-to-`main` is the landing model, so `is-ancestor` is the correct guard; (b) **`cleanup_after_merge` Sites B/C** — the PR merge already proved landing, so use a **squash-aware** merged check (`git cherry main session/{slug}` showing all commits prefixed `-` = patch-id-equivalent, already upstream) or a caller-asserted "merge confirmed" fast path. NOTE: `git log main..branch` emptiness is the WRONG oracle (still non-empty after squash). Parameterize the merged predicate (Simplifier's suggestion): extract the shared "refuse-then-delete, log, structured result" primitive, let each call site supply its merged check. |
-| CONCERN | Skeptic | **The "zero `git branch -D` in `agent/`" acceptance gate is self-contradictory with the squash-merge reality.** Because `git branch -d` uses the same is-ancestor logic and *also* refuses squash-merged branches, a correct `safe_delete_branch` for Sites B/C almost certainly needs a **guarded `-D` fallback** after the cherry-check proves merged-ness. The current hard gate (Success Criteria lines 417/420/430, Verification line 549: `grep -rn 'branch.*"-D"' agent/` expects exit 1 / no hits) would then fail the build on correct code. | OPEN — must fix | Rescope the gate from "no `-D` anywhere in `agent/`" to "no **unguarded** `-D`" — the only permitted `git branch -D` is inside `safe_delete_branch`, reached only after the merged-ness oracle passes. Verify `git branch -d` vs. a squash-merged branch before committing to a `-d`-only helper (it refuses). |
-| CONCERN | Operator | **Unbounded branch/worktree accumulation between ship and #1647.** Per the incident, *all* current granite dev sessions complete unmerged (Dev never opens a PR, PM has no merge step). The safety floor preserves a branch + worktree for every one of them, with no TTL, cap, or operator alert, and reaping is explicitly out of scope (Rabbit Holes). On the 24/7 worker this trades silent data loss for monotonic `.worktrees/dev-*` + `session/dev-*` growth until #1647 lands. | OPEN — address | Add a bounded-accumulation mitigation in THIS slug: at minimum an observability hook (greppable count + dashboard line) for preserved-unmerged branches so growth is visible before it bites; OR confirm the existing stale-worktree GC actually reaps a preserved worktree once its branch later merges, and state what reaps these in the interim. |
-| NIT | Operator | No post-merge operational verification that the long-lived worker restarted onto the new code. For a silent-data-loss fix on an always-on process, shipping without confirming the worker restarted leaves the vulnerable old code running in memory. | OPEN — minor | Add one Verification line: after deploy, confirm `valor-service.sh worker-status` shows a PID started after the merge. Ties to CLAUDE.md "ALWAYS RESTART RUNNING SERVICES." |
-| NIT | Simplifier | Four representations of one fact (`skipped_unmerged` key, `[unmerged-branch-guard]` log, `unmerged_branch` in errors, "recovery marker"). | OPEN — minor | Consolidate to two: one structured result key + one greppable log line. Clarify whether "recovery marker" persists state beyond the log; if not, drop it as a distinct artifact. |
-| NIT | Simplifier | Site C (`remove_worktree(delete_branch=True)`) is off the incident path; routing it through the guard is a behavior change to a path the incident never touched. | OPEN — minor | One-line confirmation (grep `delete_branch=True` call sites) that no caller relies on force-deleting unmerged work; if confirmed, the unification is free safety — state it. |
+| BLOCKER | Adversary + Archaeologist + Skeptic + Operator (4 independent critics) | **`is-ancestor` oracle is wrong for `cleanup_after_merge` — it would refuse to delete every squash-merged branch.** `cleanup_after_merge` (Sites B/C) runs after `gh pr merge --squash --delete-branch` (its own docstring, confirmed; the repo merges via `--squash` per `do-merge/SKILL.md:100`). A squash-merge creates a brand-new commit on `main` whose ancestry does NOT include the branch tip, so `git merge-base --is-ancestor session/{slug} main` exits **1 (unmerged)** for a legitimately landed branch. **Reproduced:** branch+commit → `git checkout main && git merge --squash branch && git commit` → `is-ancestor` exits 1, AND `git branch -d` itself refuses ("not fully merged"). Routing Site B/C through an is-ancestor-`-d`-only helper means every cleanly squash-merged SDLC branch is classified "unmerged," refused deletion, and preserved forever — local branches and `.worktrees/` accumulate without bound on the main pipeline. This directly violates the plan's own Success Criterion "A dev session whose branch *is* merged into main still has its branch cleaned up (no regression in the happy path)" (line 424). | **ADDRESSED (cycle 3)** | `safe_delete_branch` is now **parameterized by a pluggable merged predicate** with two oracles for two contexts: **`merged_via_ancestor`** (`git merge-base --is-ancestor`) for executor Site A + revival Site D (true-merge model, deletes via `-d`); **`merged_via_cherry`** (`git cherry base branch`, landed iff no `+` lines) for `cleanup_after_merge` Sites B/C (squash-safe, deletes via guarded `-D`). Reproduction re-run during this revision confirmed: squash-merged branch → `is-ancestor` exit 1, `branch -d` refuses, `git cherry` shows `-` prefix; truly-unmerged branch → `git cherry` shows `+`. The `git log base..branch`-emptiness WRONG-oracle warning is recorded in Technical Approach. See Solution / Key Elements (two-oracle design), Flow (both paths), Technical Approach (predicate signature). |
+| CONCERN | Skeptic | **The "zero `git branch -D` in `agent/`" acceptance gate is self-contradictory with the squash-merge reality.** Because `git branch -d` uses the same is-ancestor logic and *also* refuses squash-merged branches, a correct `safe_delete_branch` for Sites B/C almost certainly needs a **guarded `-D` fallback** after the cherry-check proves merged-ness. The current hard gate (Success Criteria lines 417/420/430, Verification line 549: `grep -rn 'branch.*"-D"' agent/` expects exit 1 / no hits) would then fail the build on correct code. | **ADDRESSED (cycle 3)** | Gate rescoped from "no `-D` anywhere" to "no **unguarded** `-D`": the sole permitted `git branch -D` lives inside `safe_delete_branch`, reached only after the merged oracle passes. Success Criteria and the Verification table now assert `grep -rn 'branch.*-D' agent/` returns **exactly one hit, inside `safe_delete_branch`** (not zero). Squash-merge `-d`-refusal verified during this revision. |
+| CONCERN | Operator | **Unbounded branch/worktree accumulation between ship and #1647.** Per the incident, *all* current granite dev sessions complete unmerged (Dev never opens a PR, PM has no merge step). The safety floor preserves a branch + worktree for every one of them, with no TTL, cap, or operator alert, and reaping is explicitly out of scope (Rabbit Holes). On the 24/7 worker this trades silent data loss for monotonic `.worktrees/dev-*` + `session/dev-*` growth until #1647 lands. | **ADDRESSED (cycle 3)** | Two-part mitigation added in THIS slug (Risk 1, Key Elements, Success Criteria): (1) **observability hook** — `safe_delete_branch` increments a preserved-branch counter and the worker emits a greppable `[unmerged-branch-guard] preserved=N` summary in `logs/worker.log`, so growth is visible before it bites (scoped to a log line, not a dashboard surface, to keep the slug narrow); (2) **interim reaper confirmed** — `scripts/worktree-gc.sh` reaps a preserved worktree once its branch later merges via PR (skips only open/recently-merged-PR branches), so preserved worktrees are not orphaned forever. |
+| NIT | Operator | No post-merge operational verification that the long-lived worker restarted onto the new code. For a silent-data-loss fix on an always-on process, shipping without confirming the worker restarted leaves the vulnerable old code running in memory. | **ADDRESSED (cycle 3)** | Verification table gains a "Worker restarted onto new code (post-deploy)" row asserting `./scripts/valor-service.sh worker-status` shows a PID started after the merge commit (CLAUDE.md "ALWAYS RESTART RUNNING SERVICES"). |
+| NIT | Simplifier | Four representations of one fact (`skipped_unmerged` key, `[unmerged-branch-guard]` log, `unmerged_branch` in errors, "recovery marker"). | **ADDRESSED (cycle 3)** | Consolidated to exactly two: the structured result key `skipped_unmerged` (carrying the branch name) + the greppable `[unmerged-branch-guard]` log line. The `unmerged_branch`-in-errors entry and the distinct "recovery marker" artifact are dropped — the log line *is* the marker and persists no state beyond the log (stated in Architectural Impact / interface changes). |
+| NIT | Simplifier | Site C (`remove_worktree(delete_branch=True)`) is off the incident path; routing it through the guard is a behavior change to a path the incident never touched. | **ADDRESSED (cycle 3)** | Confirmed during this revision: `grep -rn 'delete_branch=True' agent/ tools/ worker/ bridge/` returns **zero callers** (the only `remove_worktree` call, `worktree_manager.py:1197`, passes `delete_branch=False`). Routing Site C through the guard changes no live caller's behavior — free safety. Stated in Technical Approach. |
 
 **Structural checks that PASSED:**
 - All four required sections present (Documentation, Update System, Agent Integration, Test Impact).
@@ -575,7 +678,11 @@ builds directly — they deploy team members and coordinate.
 
 **Why NEEDS REVISION rather than READY (with concerns):** The plan's central mechanism — a single is-ancestor `safe_delete_branch` routed through all four sites — is *correct for two of the four sites and broken for the other two*. `cleanup_after_merge` is by definition the post-squash-merge cleanup; an is-ancestor-`-d`-only guard there refuses to delete legitimately merged branches, breaking the SDLC happy path and violating the plan's own no-regression criterion. Four critics raised this independently and it is reproducible in three git commands. This is not stylistic: the fix as written would replace one resource-leak (preserve-when-it-should-delete) for the very leak the original #1272 hook existed to prevent, on the main pipeline. The remedy is well-scoped (two oracles for two contexts; rescope the `-D` gate; add the squash-merge happy-path test honestly so it would catch this), but it must be made before build.
 
-**Test-design correction (folded into the above):** Test Impact line 296 plans an "`is-ancestor`-returns-0 setup" to represent a merged branch. That encodes the wrong production model and would pass while masking the BLOCKER. The happy-path test for `cleanup_after_merge` must reproduce a **real squash-merge** (`git merge --squash` + commit on main) and assert the branch is still deleted — written honestly, that test fails against the current is-ancestor-only design, which is exactly the signal that should gate this plan.
+**Test-design correction (folded into the above):** Test Impact line 296 planned an "`is-ancestor`-returns-0 setup" to represent a merged branch. That encodes the wrong production model and would pass while masking the BLOCKER. **ADDRESSED in cycle 3:** the `cleanup_after_merge` happy-path Test Impact item now mandates a **real squash-merge** (`git merge --squash` + commit on main) and asserts the branch is still deleted; the new `test_safe_delete_branch_*` set explicitly asserts `merged_via_ancestor` *refuses* a squash-merged branch while `merged_via_cherry` *accepts* it — making the squash-merge BLOCKER a tested invariant rather than a masked assumption.
+
+---
+
+**Revision cycle 3 (revision_applied: true):** All one BLOCKER, two CONCERNs, and three NITs from cycle 2 are ADDRESSED above. The core change is the two-oracle `safe_delete_branch` (is-ancestor for the true-merge sites A/D; squash-aware `git cherry` for the post-PR-merge sites B/C), with a single guarded `-D` inside the helper, rescoped acceptance gates, an accumulation observability hook, confirmation that the worktree-GC reaps preserved worktrees, a worker-restart verification line, the two-representation consolidation, and the zero-`delete_branch=True`-callers confirmation. The squash-merge oracle behavior was re-reproduced with live git commands during this revision.
 
 ---
 
