@@ -86,7 +86,7 @@ See [Subconscious Memory — Project Key Partitioning](subconscious-memory.md#pr
 ## Adding a new machine
 
 1. On the new machine, set `ComputerName` (System Settings → Sharing) to a name like `Valor the {Animal}`.
-2. In `~/Desktop/Valor/projects.json`, set `projects.<key>.machine = "Valor the {Animal}"` for each project this machine should own. iCloud propagates the change to every other machine within minutes.
+2. In `<vault>/projects.json` (where `<vault>` is your configured vault directory — see `VALOR_VAULT_DIR`; default `~/Desktop/Valor/`), set `projects.<key>.machine = "Valor the {Animal}"` for each project this machine should own. Propagate the change to every other machine using whatever sync mechanism your vault uses (iCloud for Desktop/Documents vaults, manual copy for `~/.valor/`, etc.).
 3. Run `/update` (or wait for the launchd cron). The update script validates `projects.json` before bouncing the bridge. On the new machine, the bridge starts owning the moved projects; on the old machine, the next update cycle drops them from `ACTIVE_PROJECTS` and the bridge stops responding to those groups/contacts.
 4. There is nothing to edit in `dms.whitelist`, `telegram.groups`, `email.contacts`, or `email.domains` — they all inherit from `projects.<key>.machine`.
 
