@@ -132,11 +132,13 @@ per-request API key cost.
 
 ## Session isolation
 
-Each `ClaudeSession` gets a unique `CLAUDE_CODE_TASK_LIST_ID` of the
-form `granite-poc-{pm|dev}-<8 hex chars>`. This prevents the PoC's
+In this superseded loop, each `ClaudeSession` got a unique
+`CLAUDE_CODE_TASK_LIST_ID` per PM/Dev role. This prevented its
 task list from polluting any concurrent dev session running under
-`session/<slug>` worktrees. The variable is set at subprocess spawn
-time, before any Claude logic runs.
+`session/<slug>` worktrees. The variable was set at subprocess spawn
+time, before any Claude logic ran. (The live interactive-TUI runner
+inherits its task-list isolation from the bridge-originated session;
+see [`granite-interactive-tui.md`](granite-interactive-tui.md).)
 
 ## Failure modes
 
