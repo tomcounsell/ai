@@ -64,6 +64,14 @@ child buffer; it does not actively drive an exit. Resume acceptance
 tests run in a model-reachable env; in a non-reachable env they are
 skipped (per the PoC's Q5 disposition).
 
+**As of issue #1648**, the driver also accepts a `session_id: str | None`
+constructor argument. When set, `spawn()` appends `--session-id <uuid>` to
+the `claude` args so Claude Code names its transcript
+`~/.claude/projects/{cwd-slug}/{session_id}.jsonl`. This makes the transcript
+path deterministically known at spawn time — no post-hoc `last_resume_uuid()`
+scraping required. The `pid` property (`self._child.pid`, or `None` before
+spawn / after exit) exposes the OS PID for dashboard identity display.
+
 ### C4 — `/help` overlay
 
 The `/help` slash command renders as a non-dismissing overlay. The

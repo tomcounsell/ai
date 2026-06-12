@@ -292,6 +292,18 @@ uses `asyncio.to_thread` to keep blocking Redis saves off the event loop.
 avoid concurrent-write clobber. The tailer is diff-gated: it skips the save
 when turn/tool/token counts are unchanged since the last tick.
 
+**Partial-line handling:** because the JSONL file is appended live by the `claude`
+TUI, a tick may read a partially-written trailing line. The tailer advances its
+byte offset only to the last complete newline boundary — partial trailing bytes
+are re-read on the next tick once the write completes. This prevents partial JSON
+lines from being silently skipped.
+
+**ISO→datetime conversion:** `TranscriptTelemetry.last_tool_use_at` stores the
+raw ISO-8601 timestamp string from the JSONL entry. Before assigning it to
+`AgentSession.last_tool_use_at` (a Popoto `DatetimeField`), the tailer converts
+it with `datetime.fromisoformat()` to a tz-aware `datetime` object. A conversion
+failure is silently ignored (the field stays at its previous value).
+
 ### Granite identity fields
 
 `AgentSession` now carries four first-class granite identity fields (issue
