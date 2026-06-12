@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Large
 owner: Valor Engels
 created: 2026-06-12
 tracking: https://github.com/tomcounsell/ai/issues/1633
 last_comment_id: 4682868787
+revision_applied: true
 ---
 
 # Merge PM/Dev bridge roles into a single Eng role; collapse SessionType to {eng, teammate}
@@ -41,7 +42,7 @@ making the bridge-level split redundant — and, in the dev case, semantically b
 - One `Eng: {Project}` Telegram group per project replaces the `PM:`/`Dev:` pair.
 - `SessionType` for bridge-originated work collapses to `{eng, teammate}`: `pm` is renamed to
   `eng`, `dev` is deleted entirely. (`granite` — added post-issue by #1635 — is retained as a
-  CLI-only type; see Freshness Check and Open Question 1.)
+  CLI-only type; see Freshness Check. Confirmed by supervisor decision.)
 - The Dev group's Telegram chat history is merged into the Eng chat so nothing is lost;
   subconscious memories require no migration (project-scoped, not chat-scoped).
 - Rollout is staged by machine, piloted on **Valor the Cowboy** (projects `valor`, `popoto`)
@@ -84,7 +85,8 @@ making the bridge-level split redundant — and, in the dev case, semantically b
   comment (2026-06-11) flagging that this issue's "exactly ENG and TEAMMATE" AC now needs to
   decide GRANITE's fate. **This plan's disposition:** retain GRANITE as a CLI-only type, distinct
   from bridge-originated work; narrow the AC to "no `pm`/`dev` value remains" rather than
-  "exactly ENG and TEAMMATE". See Open Question 1 to confirm.
+  "exactly ENG and TEAMMATE". **Confirmed by supervisor decision** — GRANITE retained as a CLI-only
+  type; AC narrowed to "no `pm`/`dev` value remains anywhere".
 - #652 (CHAT→PM rename + TEAMMATE) — closed/merged; the direct precedent for this rename and the
   origin of `scripts/migrate_session_type_chat_to_pm.py`.
 - #1409 (multi-dev fan-out) — merged May 2026; recon found no production invocation / no e2e test,
@@ -92,7 +94,7 @@ making the bridge-level split redundant — and, in the dev case, semantically b
 
 **Commits on main since issue was filed (touching referenced files):**
 - `#1635` granite CLI visibility — touched `config/enums.py` (added GRANITE) — **changed the enum
-  this plan rewrites**; reconciled above and in Open Question 1.
+  this plan rewrites**; reconciled above and in Resolved Decisions #1 (GRANITE retained CLI-only).
 - `52740fbb` make granite a hard startup precondition — granite container path; irrelevant to the
   enum/persona rename surface.
 
@@ -130,9 +132,11 @@ End-to-end trace of a bridge work message under the new model:
 3. **`bridge/telegram_bridge.py`:** Maps resolved engineer persona → `SessionType.ENG`. Creates an
    AgentSession with `session_type="eng"`.
 4. **`agent/sdk_client.py` (`_resolve_*` at ~1168 + `compose_system_prompt` at ~1019):** Resolves
-   `(PersonaType.ENGINEER, AccessLevel.???, channel)` for `SessionType.ENG`. **Access level for eng
-   is the central open design decision** (Open Question 2). `VALOR_PARENT_SESSION_ID` injection
-   (~1595), currently gated on PM/Teammate, follows the rename to gate on ENG/Teammate.
+   `(PersonaType.ENGINEER, AccessLevel.WORKER, channel)` for `SessionType.ENG`. Eng is the builder
+   identity now; the old PM read-only rails are dead on the granite path (container PTYs run
+   `bypassPermissions`), so a non-container/CLI eng session resolves `WORKER` (full rails).
+   `VALOR_PARENT_SESSION_ID` injection (~1595), currently gated on PM/Teammate, follows the rename to
+   gate on ENG/Teammate.
 5. **Worker / granite container:** Executes the eng session through the granite PTY container, which
    internally primes its own PM-steering + Dev-builder TUIs (both `bypassPermissions`). The bridge
    no longer steers a separate dev child session; `_handle_dev_session_completion()` and its
@@ -176,7 +180,8 @@ End-to-end trace of a bridge work message under the new model:
 **Team:** Solo dev, PM (orchestration), code reviewer
 
 **Interactions:**
-- PM check-ins: 2-3 (GRANITE disposition, eng access-level decision, per-machine rollout gating)
+- PM check-ins: 1-2 (per-machine rollout gating; GRANITE disposition and eng access-level are now
+  decided — GRANITE retained CLI-only, eng resolves `AccessLevel.WORKER`)
 - Review rounds: 2+ (enum/hook surgery correctness; migration-script dry-run review before live run)
 
 This spans ~22 code files plus two data-migration scripts, two persona-file merges, a multi-doc
@@ -199,14 +204,14 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/merge_pm_dev_i
 
 - **Enum collapse (`config/enums.py`):** `SessionType` → `{ENG, TEAMMATE, GRANITE}` (`pm`→`eng`,
   `dev` removed, `granite` retained CLI-only). `PersonaType.DEVELOPER`+`PROJECT_MANAGER` → `ENGINEER`.
-  `AccessLevel`/`SessionMode` reconciled to the chosen eng access level.
+  `AccessLevel`/`SessionMode` reconciled so `SessionType.ENG` resolves `AccessLevel.WORKER`.
 - **Persona merge:** `config/personas/project-manager.md` + `developer.md` → one
   `config/personas/engineer.md`. Update `manifest.json` / segment references.
 - **Bridge routing:** `bridge/routing.py` resolves `engineer`; `Eng:` prefix fallback only;
   `Dev:`/`PM:` branches and `_is_team_chat` prefix tuple deleted. `bridge/telegram_bridge.py` and
   `bridge/email_bridge.py` map to `SessionType.ENG`.
 - **SDK client:** `agent/sdk_client.py` `(persona, access_level, channel)` resolution and
-  `compose_system_prompt` updated for `(ENGINEER, <eng access level>)`. `VALOR_PARENT_SESSION_ID`
+  `compose_system_prompt` updated for `(ENGINEER, AccessLevel.WORKER)`. `VALOR_PARENT_SESSION_ID`
   injection re-gated on ENG/Teammate and verified to propagate into the container's pooled PTYs.
 - **Dev machinery removal:** delete `_handle_dev_session_completion()` and its callers/parent-steering
   in `session_executor.py` / `session_health.py` / `output_router.py`; delete `tools/sdlc_decompose.py`
@@ -249,12 +254,12 @@ Migration: stop bridge → Telegram rename PM→Eng / archive-or-rename Dev → 
 - **Sequence the enum change carefully:** `config/enums.py` is imported nearly everywhere; land the
   enum rename, persona merge, routing, SDK-client, CLI, hook, and dashboard edits together so the tree
   is never half-migrated (the test suite must be green on the same commit).
-- **GRANITE retained:** narrow the "exactly ENG and TEAMMATE" criterion to "no `pm`/`dev` value
-  remains"; GRANITE stays for `valor-granite-loop`. Pending Open Question 1 confirmation.
-- **Eng access level:** define the harness-layer answer for `(ENGINEER, AccessLevel.?)` in
-  `agent/sdk_client.py:1168`. The old PM read-only rails are dead on the granite path (container PTYs
-  run `bypassPermissions`), but a non-container/CLI eng session still needs a defined access level.
-  See Open Question 2.
+- **GRANITE retained (decided):** narrow the "exactly ENG and TEAMMATE" criterion to "no `pm`/`dev`
+  value remains anywhere"; GRANITE stays for `valor-granite-loop`.
+- **Eng access level (decided):** `(ENGINEER, …)` resolves `AccessLevel.WORKER` in
+  `agent/sdk_client.py:1168`. Eng is the builder identity now; the old PM read-only rails are dead on
+  the granite path (container PTYs run `bypassPermissions`), and a non-container/CLI eng session gets
+  full `WORKER` rails.
 
 ## Failure Path Test Strategy
 
@@ -331,13 +336,13 @@ call `rebuild_indexes()`. Operator reviews dry-run output before the live run. C
 ### Risk 3: GRANITE disposition wrong → AC contradiction or broken CLI
 **Impact:** Deleting GRANITE breaks `valor-granite-loop`; keeping it silently violates a literal
 "exactly ENG and TEAMMATE" AC.
-**Mitigation:** Explicitly retain GRANITE as CLI-only, narrow the AC wording, confirm via Open
-Question 1.
+**Mitigation:** GRANITE explicitly retained as CLI-only (supervisor-confirmed); AC narrowed to
+"no `pm`/`dev` value remains anywhere". `valor-granite-loop` and its tests stay green.
 
 ### Risk 4: Eng access-level decision changes harness behavior subtly
-**Impact:** `(ENGINEER, AccessLevel.?)` resolution affects non-container/CLI eng sessions' rails.
-**Mitigation:** Decide explicitly (Open Question 2); add a test asserting the resolved access level
-for `SessionType.ENG`.
+**Impact:** `(ENGINEER, AccessLevel.WORKER)` resolution affects non-container/CLI eng sessions' rails.
+**Mitigation:** Access level decided as `WORKER` (supervisor-confirmed); add a test asserting
+`SessionType.ENG` resolves `AccessLevel.WORKER`.
 
 ### Risk 5: `VALOR_PARENT_SESSION_ID` silently drops in container PTYs
 **Impact:** Container-spawned children lose parent linkage → broken auto-resume.
@@ -400,8 +405,9 @@ work through the same Telegram path, now via one `Eng: {Project}` group instead 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Rewrite `docs/features/pm-dev-session-architecture.md` (or rename to `eng-session-architecture.md`)
-      to describe the single Eng role and `{eng, teammate}` (+ CLI-only granite) session types.
+- [ ] Rename `docs/features/pm-dev-session-architecture.md` → `docs/features/eng-session-architecture.md`
+      (NO LEGACY naming rule; supervisor-confirmed) and rewrite it to describe the single Eng role and
+      `{eng, teammate}` (+ CLI-only granite) session types. Update all inbound references to the old path.
 - [ ] Remove/replace `docs/features/sdlc-parallel-execution.md` (multi-dev fan-out deleted).
 - [ ] Update `docs/features/single-machine-ownership.md` examples to the `Eng:` group shape.
 - [ ] Update `docs/features/README.md` index table for any renamed/removed pages.
@@ -424,6 +430,8 @@ work through the same Telegram path, now via one `Eng: {Project}` group instead 
       `Dev:`/`PM:` fallbacks are gone.
 - [ ] `valor-session create` accepts roles `eng` and `teammate` only; `--role dev`/`--role pm` are
       rejected with a clear error.
+- [ ] `SessionType.ENG` resolves `AccessLevel.WORKER` in `agent/sdk_client.py` (test asserts the
+      resolved access level).
 - [ ] `scripts/migrate_session_type_pm_to_eng.py` renames existing `session_type=pm` AgentSession Redis
       records to `eng` and rebuilds indexes; `--dry-run`, idempotent, runnable per machine.
 - [ ] `scripts/merge_dev_chat_into_eng.py` re-keys a Dev group's `TelegramMessage` history onto the Eng
@@ -511,7 +519,7 @@ The lead agent orchestrates; it never builds directly.
 - `bridge/routing.py`: resolve `engineer`; `Eng:` prefix fallback only; delete `Dev:`/`PM:` branches +
   `_is_team_chat` prefix tuple.
 - `bridge/telegram_bridge.py` + `bridge/email_bridge.py`: map to `SessionType.ENG`.
-- `agent/sdk_client.py`: `(ENGINEER, <eng access level per OQ2>)` resolution in `compose_system_prompt`
+- `agent/sdk_client.py`: `(ENGINEER, AccessLevel.WORKER)` resolution in `compose_system_prompt`
   + `_resolve_*` (~1168); re-gate `VALOR_PARENT_SESSION_ID` (~1595) on ENG/Teammate.
 
 ### 3. Remove dev machinery
@@ -594,19 +602,21 @@ The lead agent orchestrates; it never builds directly.
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **GRANITE disposition.** PR #1635 added `SessionType.GRANITE` (CLI-only, used by
-   `valor-granite-loop`) after this issue was filed. This plan **retains** GRANITE and narrows the
-   "exactly ENG and TEAMMATE" acceptance criterion to "no `pm`/`dev` value remains". Confirm this is
-   correct (vs. deleting/re-typing granite as eng).
+All three open questions have been resolved by supervisor decision (2026-06-12); their resolutions are
+folded into the sections above.
 
-2. **Eng access level at the harness layer.** What `AccessLevel` should `(ENGINEER, …)` resolve to in
-   `agent/sdk_client.py:1168`? The old PM read-only rails are dead on the granite path (container PTYs
-   run `bypassPermissions`), but a non-container/CLI eng session still needs a defined answer. Options:
-   (a) `WORKER` (full rails, since eng is the builder identity now), (b) keep a PM-style read-only
-   default for any non-container eng session, (c) a new eng-specific level. The plan currently assumes
-   (a) unless directed otherwise — please confirm.
+1. **GRANITE disposition — CONFIRMED.** Retain `SessionType.GRANITE` as a CLI-only type (used by
+   `valor-granite-loop`); it is distinct from bridge-originated work. The acceptance criterion is
+   narrowed from "exactly ENG and TEAMMATE" to "no `pm`/`dev` value remains anywhere". Matches the
+   #1635 drift reconciliation in the Freshness Check.
 
-3. **Architecture doc fate.** Rename `pm-dev-session-architecture.md` → `eng-session-architecture.md`
-   (preferred, NO LEGACY naming), or update in place keeping the old filename? The plan assumes rename.
+2. **Eng access level — CONFIRMED option (a): `AccessLevel.WORKER`.** `(ENGINEER, …)` resolves
+   `AccessLevel.WORKER` in `agent/sdk_client.py:1168`. Eng is the builder identity now; the old PM
+   read-only rails are dead on the granite path (container PTYs run `bypassPermissions`), so a
+   non-container/CLI eng session gets full `WORKER` rails. A test asserts the resolved access level.
+
+3. **Architecture doc fate — CONFIRMED: rename.** `docs/features/pm-dev-session-architecture.md` →
+   `docs/features/eng-session-architecture.md` (NO LEGACY naming rule); rewrite content and update all
+   inbound references to the old path.
