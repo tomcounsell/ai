@@ -151,7 +151,8 @@ class AgentSession(Model):
     created_at = SortedField(type=datetime, partition_by="project_key")
     started_at = DatetimeField(null=True)  # Cannot be SortedField because it starts as None
     updated_at = DatetimeField(null=True)
-    # auto_now removed deliberately (see #1645) — do not re-add; popoto auto_now mints naive-local time. UTC stamp is set in save() override.
+    # auto_now removed deliberately (see #1645) — do not re-add;
+    # popoto auto_now mints naive-local time. UTC stamp is in save() override.
     completed_at = DatetimeField(null=True)
     response_delivered_at = DatetimeField(null=True)
     working_dir = Field()
@@ -865,19 +866,33 @@ class AgentSession(Model):
             try:
                 if record.updated_at is None:
                     continue  # None is safe — save() will stamp on next write
-                if record.updated_at <= now:
+
+                # Popoto strips tzinfo on load — treat naive datetimes as UTC
+                # (consistent with bridge/utc.py::to_unix_ts).
+                updated_at_utc = record.updated_at
+                if updated_at_utc.tzinfo is None:
+                    updated_at_utc = updated_at_utc.replace(tzinfo=UTC)
+
+                if updated_at_utc <= now:
                     continue  # already sane, skip
 
                 # Clamp created_at first (dual-future-dated case, CONCERN — Adversary):
                 # ensures updated_at floor uses the already-clamped value so the
                 # invariant created_at <= updated_at <= now holds.
-                if record.created_at and record.created_at > now:
-                    record.created_at = now
-                    logger.warning(
-                        f"_heal_future_updated_at: clamped future created_at on {record.id}"
-                    )
+                if record.created_at:
+                    created_at_utc = record.created_at
+                    if created_at_utc.tzinfo is None:
+                        created_at_utc = created_at_utc.replace(tzinfo=UTC)
+                    if created_at_utc > now:
+                        record.created_at = now
+                        logger.warning(
+                            f"_heal_future_updated_at: clamped future created_at on {record.id}"
+                        )
 
                 floor = record.created_at if record.created_at else now
+                # Normalize floor to tz-aware for max() comparison
+                if hasattr(floor, "tzinfo") and floor.tzinfo is None:
+                    floor = floor.replace(tzinfo=UTC)
                 record.updated_at = max(floor, now)
                 # Save via the override (which will re-stamp utc_now(), which == now — idempotent).
                 # Use update_fields to limit the write to only the fields we changed.
