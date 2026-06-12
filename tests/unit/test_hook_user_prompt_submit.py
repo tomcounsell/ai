@@ -56,8 +56,8 @@ class TestSessionTypeEnvVarPattern:
 class TestCreateLocalSessionTypeKwarg:
     """AgentSession.create_local() should store whatever session_type is passed."""
 
-    def test_no_session_type_kwarg_defaults_to_dev(self):
-        """When session_type kwarg is absent (env var was None), session_type is 'dev'."""
+    def test_no_session_type_kwarg_defaults_to_eng(self):
+        """When session_type kwarg is absent (env var was None), session_type is 'eng'."""
         with patch("models.agent_session.AgentSession.save"):
             from models.agent_session import AgentSession
 
@@ -69,7 +69,7 @@ class TestCreateLocalSessionTypeKwarg:
                 **({"session_type": session_type_override} if session_type_override else {}),
             )
 
-            assert session.session_type == "dev"
+            assert session.session_type == "eng"
 
     def test_session_type_teammate_stored(self):
         """When session_type='teammate' is passed (from SESSION_TYPE env var), session stores it."""

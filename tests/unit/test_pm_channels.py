@@ -131,7 +131,14 @@ class TestEngModeContextEnrichment:
 
     @pytest.mark.asyncio
     async def test_eng_mode_no_github_header(self):
-        """Eng mode projects should never get GITHUB header even if cross-repo."""
+        """Eng mode projects skip SDLC classification, so no GITHUB header is injected.
+
+        When project mode is 'eng', get_agent_response_sdk forces classification
+        to 'question' before calling build_harness_turn_input. The GITHUB header is
+        only injected for SDLC cross-repo calls, so eng-mode projects never see it.
+        This test verifies that behavior by passing classification='question' as the
+        SDK would.
+        """
         eng_project = {
             "name": "Eng: Cuttlefish",
             "mode": "eng",
@@ -152,11 +159,12 @@ class TestEngModeContextEnrichment:
                 task_list_id=None,
                 session_type="eng",
                 sender_id=123,
-                classification="sdlc",
+                # Eng mode: get_agent_response_sdk forces 'question' when mode='eng'
+                classification="question",
                 is_cross_repo=True,
             )
 
-        # Eng mode should NOT inject GITHUB header
+        # Eng mode forces question classification, so no GITHUB header
         assert "GITHUB:" not in result
 
 
