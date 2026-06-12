@@ -1862,7 +1862,8 @@ async def main():
                             telegram_message_key=stored_msg_id,
                             project_config=project,
                             extra_context_overrides=_completed_extra_overrides,
-                            session_type=getattr(completed, "session_type", None) or SessionType.ENG,
+                            session_type=getattr(completed, "session_type", None)
+                            or SessionType.ENG,
                             message_ts=message.date,
                         )
                         _steering_session_enqueued = True
@@ -2192,25 +2193,22 @@ async def main():
             except Exception as e:
                 logger.debug(f"Classification inheritance lookup failed (non-fatal): {e}")
 
-        # Determine session_type from config-driven mode, with title-prefix fallback.
-        # "dev" mode → Dev session (full permissions, dev persona)
-        # Everything else → PM session (PM persona, orchestrates Dev sessions + Teammate)
+        # Determine session_type from config-driven persona, with title-prefix fallback.
+        # ENGINEER persona → Eng session (full permissions, engineer persona)
+        # TEAMMATE persona → Teammate session (read-only, no orchestration)
+        # None/other → Eng session (default)
         from bridge.routing import resolve_persona
 
         _classification = classification_result.get("type")
         _persona = resolve_persona(project, chat_title, is_dm=is_dm)
-        if _persona == PersonaType.DEVELOPER:
-            _session_type = SessionType.ENG  # Dev session — Dev persona, full permissions
-            logger.info(
-                f"[{project_name}] Dev mode (config-driven): {chat_title!r} → session_type=dev"
-            )
+        if _persona == PersonaType.TEAMMATE:
+            _session_type = SessionType.TEAMMATE  # Teammate session — read-only, no orchestration
         else:
-            if _persona == PersonaType.TEAMMATE:
-                _session_type = (
-                    SessionType.TEAMMATE
-                )  # Teammate session — read-only, no orchestration
-            else:
-                _session_type = SessionType.ENG  # PM session — orchestrates work, spawns children
+            _session_type = SessionType.ENG  # Eng session — engineer persona, full permissions
+            if _persona == PersonaType.ENGINEER:
+                logger.info(
+                    f"[{project_name}] Eng mode (config-driven): {chat_title!r} → session_type=eng"
+                )
 
         # Refresh the coalescing guard timestamp right before enqueue.
         # The initial guard was set early (before awaits) to close the race window;

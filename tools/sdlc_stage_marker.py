@@ -96,7 +96,7 @@ def probe_substrate() -> str:
         # is evaluated eagerly (unlike the lazy ``filter`` QueryBuilder), so a
         # Redis connection error surfaces here rather than masquerading as
         # "no session".
-        AgentSession.query.count(session_type="pm")
+        AgentSession.query.count(session_type="eng")
     except Exception as e:
         logger.debug(f"sdlc_stage_marker: substrate query failed (Redis unreachable?): {e}")
         return SUBSTRATE_ABSENT

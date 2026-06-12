@@ -116,7 +116,7 @@ async def _maybe_inject_resume_hydration(chosen, worker_key: str) -> None:
     """
     try:
         # Gate: only PM sessions benefit from resume hydration
-        if getattr(chosen, "session_type", None) != "pm":
+        if getattr(chosen, "session_type", None) != "eng":
             return
 
         # Gate: working_dir must be set to avoid wrong-directory git summary

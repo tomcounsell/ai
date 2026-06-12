@@ -662,7 +662,7 @@ def sustainability_digest() -> None:
             AgentSession.create_and_enqueue(
                 project_key=project_key,
                 message_text=command,
-                session_type="dev",
+                session_type="eng",
                 priority="low",
                 extra_context={"digest_type": "sustainability_digest"},
             )

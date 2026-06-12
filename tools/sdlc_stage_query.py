@@ -64,7 +64,7 @@ def _find_session_by_id(session_id: str):
             return None
         # Prefer PM sessions (they own stage_states)
         for s in sessions:
-            if getattr(s, "session_type", None) == "pm":
+            if getattr(s, "session_type", None) == "eng":
                 return s
         return sessions[0]
     except Exception as e:

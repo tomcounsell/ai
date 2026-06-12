@@ -156,7 +156,7 @@ def determine_delivery_action(
     # PM sessions running SDLC work continue through pipeline stages via
     # nudge. Final delivery is handled out-of-band by the completion-turn
     # runner — see `_deliver_pipeline_completion` in `agent/session_completion.py`.
-    if session_type == "pm" and classification_type == "sdlc":
+    if session_type == "eng" and classification_type == "sdlc":
         return "nudge_continue"
     if stop_reason in ("end_turn", None) and len(msg.strip()) > 0:
         return "deliver"

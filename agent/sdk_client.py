@@ -1024,7 +1024,7 @@ def compose_system_prompt(
 ) -> str:
     """Single composer for agent system prompts — one path for every cell.
 
-    Replaces the hand-coded ``load_system_prompt`` / ``load_pm_system_prompt``
+    Replaces the hand-coded ``load_system_prompt`` / ``load_eng_system_prompt``
     pickers with a structural assembly keyed on ``(persona, access_level)``.
     Channel is reserved for forward-compat (Open Question 1 in
     ``docs/plans/composed-persona-system.md``) and is not consumed today by
@@ -1037,14 +1037,14 @@ def compose_system_prompt(
     2. Persona prompt = identity + segments per ``manifest.json`` + persona overlay.
     3. Principal context (only when ``access_level == AccessLevel.WORKER``).
     4. Completion criteria (only when ``access_level == AccessLevel.WORKER``).
-    5. Work-vault ``CLAUDE.md`` (only when ``access_level == AccessLevel.PM_READONLY``
-       and the file exists at ``Path(working_directory) / "CLAUDE.md"``).
+    5. Work-vault ``CLAUDE.md`` (only when ``access_level == AccessLevel.WORKER``
+       and ``working_directory`` is provided and the file exists at
+       ``Path(working_directory) / "CLAUDE.md"``).
 
     Byte-stability invariant (issue #1227): for the
-    ``(DEVELOPER, WORKER)`` and ``(PROJECT_MANAGER, PM_READONLY, work_dir)``
-    cells, the bytes returned here are identical to the bytes returned by the
-    legacy ``load_system_prompt()`` / ``load_pm_system_prompt(work_dir)`` on
-    the same machine — preserving Anthropic's prompt-cache prefix. Asserted by
+    ``(ENGINEER, WORKER)`` cell, the bytes returned here are stable across
+    consecutive sessions on the same machine in the same ``working_directory``,
+    preserving Anthropic's prompt-cache prefix. Asserted by
     ``tests/unit/test_compose_system_prompt.py`` against per-machine fixtures
     in ``tests/fixtures/{hostname}/``.
 
@@ -1055,8 +1055,9 @@ def compose_system_prompt(
             reads it (per Question 4). Kept for forward-compat.
         project: Project config dict (currently unused; reserved for future
             project-level overlays).
-        working_directory: Required when ``access_level == PM_READONLY`` —
-            path to the work-vault project folder containing ``CLAUDE.md``.
+        working_directory: Optional path to the work-vault project folder
+            containing ``CLAUDE.md``. When provided under ``WORKER`` access
+            and the file exists, it is appended to the composed prompt.
 
     Returns:
         Fully assembled system prompt string ready to pass to ``claude -p``
@@ -1065,8 +1066,6 @@ def compose_system_prompt(
     Raises:
         TypeError: If ``persona`` is not a ``PersonaType`` member or
             ``access_level`` is not an ``AccessLevel`` member.
-        ValueError: If ``access_level == PM_READONLY`` and
-            ``working_directory`` is ``None``.
         FileNotFoundError: If the persona overlay or required identity /
             segment files are missing (re-raised from ``load_persona_prompt``).
     """
@@ -1084,18 +1083,13 @@ def compose_system_prompt(
             f"member, got {type(access_level).__name__}={access_level!r}. "
             f"Valid: {valid}"
         )
-    if access_level == AccessLevel.PM_READONLY and working_directory is None:
-        raise ValueError(
-            "compose_system_prompt: AccessLevel.PM_READONLY requires "
-            "working_directory (work-vault project folder path)."
-        )
 
     # 2. Persona prompt (identity + segments + overlay).
     #    load_persona_prompt() preserves the loader-warning pattern from
     #    sdk_client.py:919–948 (CRITIQUE / workflow-announcement / dev-session).
     persona_prompt = load_persona_prompt(persona.value)
 
-    # 1 + 3 + 4: WORKER rails layer.
+    # 1 + 3 + 4 + 5: WORKER rails layer.
     if access_level == AccessLevel.WORKER:
         criteria = load_completion_criteria()
         criteria_section = f"\n\n---\n\n{criteria}" if criteria else ""
@@ -1104,17 +1098,21 @@ def compose_system_prompt(
         principal_section = f"\n\n---\n\n## Principal Context\n\n{principal}" if principal else ""
 
         # Worker rules FIRST — safety rails take precedence over persona.
-        return f"{WORKER_RULES}\n\n---\n\n{persona_prompt}{principal_section}{criteria_section}"
+        prompt = f"{WORKER_RULES}\n\n---\n\n{persona_prompt}{principal_section}{criteria_section}"
 
-    # 5. PM_READONLY rails layer: append work-vault CLAUDE.md when present.
-    if access_level == AccessLevel.PM_READONLY:
-        project_claude_path = Path(working_directory) / "CLAUDE.md"
-        if project_claude_path.exists():
-            project_instructions = project_claude_path.read_text()
-            logger.info(f"Loaded PM instructions from {project_claude_path}")
-            return f"{persona_prompt}\n\n---\n\n{project_instructions}"
-        logger.info(f"No CLAUDE.md found at {project_claude_path}, using persona only for PM mode")
-        return persona_prompt
+        # 5. Append work-vault CLAUDE.md when a working_directory is provided.
+        if working_directory is not None:
+            project_claude_path = Path(working_directory) / "CLAUDE.md"
+            if project_claude_path.exists():
+                project_instructions = project_claude_path.read_text()
+                logger.info(f"Loaded eng instructions from {project_claude_path}")
+                prompt = f"{prompt}\n\n---\n\n{project_instructions}"
+            else:
+                logger.info(
+                    f"No CLAUDE.md found at {project_claude_path}, using worker prompt only"
+                )
+
+        return prompt
 
     # TEAMMATE / CUSTOMER_SERVICE: no rails, no appendices — return persona as-is.
     return persona_prompt
@@ -1138,22 +1136,21 @@ def _resolve_compose_args(
 
     Mapping (input → output):
 
-    - ``SessionType.ENG`` → ``(PROJECT_MANAGER, PM_READONLY, None)``
+    - ``SessionType.ENG`` → ``(ENGINEER, WORKER, None)``
     - ``SessionType.TEAMMATE`` + ``transport=="email"`` + ``project.email.persona``
       set → ``(<email persona>, <access level matching persona>, "email")``
     - ``SessionType.TEAMMATE`` (default) →
       ``(TEAMMATE, TEAMMATE, None)``
-    - ``SessionType.ENG`` (or unknown) → resolved via
+    - Unknown session type → resolved via
       ``_resolve_persona(project, chat_title, is_dm)`` →
       ``(<persona>, <access level matching persona>, None)``
 
     Persona → access-level mapping (today's 1:1; orthogonality preserved for
     future per-project rails):
 
-    - ``PROJECT_MANAGER`` → ``PM_READONLY``
+    - ``ENGINEER`` → ``WORKER``
     - ``TEAMMATE`` → ``TEAMMATE``
     - ``CUSTOMER_SERVICE`` → ``CUSTOMER_SERVICE``
-    - ``DEVELOPER`` (and any other) → ``WORKER``
     """
     # Email override: per-project persona swap for email-spawned sessions.
     if session_type == SessionType.TEAMMATE and transport == "email" and project:
@@ -1166,25 +1163,22 @@ def _resolve_compose_args(
                 pass  # Unknown persona value — fall through to default teammate handling.
 
     if session_type == SessionType.ENG:
-        return PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, None
+        return PersonaType.ENGINEER, AccessLevel.WORKER, None
 
-    # project_mode == "pm" forces PM rails even for non-PM session types
-    # (e.g. a TEAMMATE session running against a PM-mode project).
-    if project_mode == "pm":
-        return PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, None
+    # project_mode == "eng" forces engineer rails even for non-ENG session types.
+    if project_mode in ("pm", "eng"):
+        return PersonaType.ENGINEER, AccessLevel.WORKER, None
 
     if session_type == SessionType.TEAMMATE:
         return PersonaType.TEAMMATE, AccessLevel.TEAMMATE, None
 
-    # SessionType.ENG (or unknown): resolve from project config.
+    # Unknown session type: resolve from project config.
     persona = _resolve_persona(project, chat_title, is_dm=is_dm)
     return persona, _access_level_for_persona(persona), None
 
 
 def _access_level_for_persona(persona: PersonaType) -> AccessLevel:
     """Default access-level for a persona (today's 1:1 mapping)."""
-    if persona == PersonaType.PROJECT_MANAGER:
-        return AccessLevel.PM_READONLY
     if persona == PersonaType.TEAMMATE:
         return AccessLevel.TEAMMATE
     if persona == PersonaType.CUSTOMER_SERVICE:
@@ -1193,26 +1187,32 @@ def _access_level_for_persona(persona: PersonaType) -> AccessLevel:
 
 
 def load_system_prompt() -> str:
-    """Load developer system prompt with worker rules and completion criteria.
+    """Load engineer system prompt with worker rules and completion criteria.
 
     Thin wrapper that delegates to ``compose_system_prompt``. Preserved for
     backward compatibility with existing call sites; new code should call
     ``compose_system_prompt`` directly.
     """
-    return compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER)
+    return compose_system_prompt(PersonaType.ENGINEER, AccessLevel.WORKER)
 
 
-def load_pm_system_prompt(working_directory: str) -> str:
-    """Load system prompt for PM (Project Manager) mode channels.
+def load_eng_system_prompt(working_directory: str) -> str:
+    """Load system prompt for engineer mode channels with work-vault context.
 
-    Uses the project-manager persona (base + PM overlay). PM mode skips
-    WORKER_RULES (no branch safety rails) and loads the project-specific
-    CLAUDE.md from the work vault directory if it exists.
+    Uses the engineer persona (base + engineer overlay) with WORKER_RULES and
+    optionally appends the project-specific CLAUDE.md from the work vault
+    directory if it exists.
 
     System prompt structure:
-        [Persona prompt — base + project-manager overlay]
+        [WORKER_RULES]
         ---
-        [Work-vault CLAUDE.md — PM-specific instructions for this project]
+        [Persona prompt — base + engineer overlay]
+        ---
+        [Principal context]
+        ---
+        [Completion criteria]
+        ---
+        [Work-vault CLAUDE.md — eng-specific instructions for this project]
 
     Caching strategy (issue #1227):
         The returned string is passed to ``get_response_via_harness()`` as
@@ -1221,26 +1221,26 @@ def load_pm_system_prompt(working_directory: str) -> str:
         ``claude -p`` argv.  The former flag removes per-machine dynamic
         sections (cwd, env info, memory paths, git status) from the system
         prompt into the first user message, leaving the prefix byte-for-byte
-        stable across consecutive PM sessions on the same machine in the same
+        stable across consecutive eng sessions on the same machine in the same
         ``working_directory``.  This enables Anthropic's server-side prompt
-        cache (5-minute TTL) to serve the ~74K-char prefix on cache hit,
+        cache (5-minute TTL) to serve the prefix on cache hit,
         reducing TTFT from 15–20 min (cold) to < 90 s (warm).
 
     Invariants:
-        - Must NOT include WORKER_RULES (PM mode has no branch safety rails).
-        - Must include the project-manager persona overlay (#1148).
+        - Must include WORKER_RULES (engineer mode has full branch safety rails).
+        - Must include the engineer persona overlay.
         - Must NOT silently swallow FileNotFoundError on persona load — caller
-          catches and logs ``[pm-persona-missing]`` so failures are visible.
+          catches and logs ``[eng-persona-missing]`` so failures are visible.
 
     Args:
         working_directory: Path to the work-vault project folder.
 
     Returns:
-        Combined system prompt for PM mode.
+        Combined system prompt for engineer mode.
     """
     return compose_system_prompt(
-        PersonaType.PROJECT_MANAGER,
-        AccessLevel.PM_READONLY,
+        PersonaType.ENGINEER,
+        AccessLevel.WORKER,
         working_directory=working_directory,
     )
 
@@ -2106,7 +2106,7 @@ def _resolve_persona(
         Persona name string (e.g., "developer", "project-manager", "teammate").
     """
     if not project:
-        return PersonaType.TEAMMATE if is_dm else PersonaType.DEVELOPER
+        return PersonaType.TEAMMATE if is_dm else PersonaType.ENGINEER
 
     telegram_config = project.get("telegram", {})
 
@@ -2114,10 +2114,10 @@ def _resolve_persona(
     if is_dm:
         return telegram_config.get("dm_persona", PersonaType.TEAMMATE)
 
-    # PM mode projects always use project-manager persona
+    # Eng/PM mode projects always use engineer persona
     project_mode = project.get("mode", "dev")
-    if project_mode == "pm":
-        return PersonaType.PROJECT_MANAGER
+    if project_mode in ("pm", "eng"):
+        return PersonaType.ENGINEER
 
     # Group chats: look up persona from the groups dict
     if chat_title:
@@ -2130,7 +2130,7 @@ def _resolve_persona(
                         if persona:
                             return persona
 
-    return PersonaType.DEVELOPER
+    return PersonaType.ENGINEER
 
 
 # === CLI Harness Streaming ===
@@ -2405,7 +2405,7 @@ async def get_response_via_harness(
     # a system_prompt was supplied (PM path) vs. not (dev/teammate path).
     _ttft_meta: dict | None = None
     if not prior_uuid:
-        _session_type_tag = "pm" if system_prompt else "other"
+        _session_type_tag = "eng" if system_prompt else "other"
         _ttft_meta = {
             "session_id": session_id or "",
             "session_type": _session_type_tag,
@@ -3325,8 +3325,8 @@ async def get_agent_response_sdk(
                             break
                 except Exception:
                     pass  # Best-effort
-        elif _config_persona in (PersonaType.PROJECT_MANAGER, PersonaType.DEVELOPER):
-            # PM/Dev persona groups: skip intent classifier, but check bridge-level
+        elif _config_persona == PersonaType.ENGINEER:
+            # Engineer persona: skip intent classifier, but check bridge-level
             # classification for collaboration/other to avoid unnecessary SDLC overhead
             if classification in (ClassificationType.COLLABORATION, ClassificationType.OTHER):
                 _collaboration_mode = True
@@ -3634,20 +3634,18 @@ async def get_agent_response_sdk(
         logger.info(f"[{request_id}] Resolved persona: {persona}")
 
         # Build system prompt based on persona and project mode.
-        # PM session (session_type="pm") uses PM persona with read-only permissions.
+        # ENG session (session_type="eng") uses engineer persona with full permissions.
         custom_system_prompt = None
         _permission_mode = "bypassPermissions"  # Default: full permissions
 
         # Compose the system prompt from the resolved (persona, access_level)
-        # tuple. Branches that previously called load_pm_system_prompt or
+        # tuple. Branches that previously called load_eng_system_prompt or
         # _load_persona_overlay_with_log now funnel through compose_system_prompt;
         # the canonical "Persona overlay loaded:" log line is preserved per branch
         # so test-cuttlefish-* and similar log greps continue to work.
-        if _access_level == AccessLevel.PM_READONLY:
-            # PM mode (PM session OR project_mode == "pm"): no WORKER_RULES,
-            # appends work-vault CLAUDE.md. agent/hooks/pre_tool_use.py enforces
-            # tool restrictions (Write/Edit blocked outside docs/, Bash on a
-            # read-only allowlist) for actual PM sessions.
+        if _access_level == AccessLevel.WORKER:
+            # Eng mode (ENG session OR project_mode == "eng"/"pm"): includes
+            # WORKER_RULES and optionally appends work-vault CLAUDE.md.
             custom_system_prompt = compose_system_prompt(
                 persona,
                 _access_level,
@@ -3661,7 +3659,7 @@ async def get_agent_response_sdk(
                 f"session_id={session_id}"
             )
             if _session_type == SessionType.ENG:
-                logger.info(f"[{request_id}] PM session mode: PM persona, bypassPermissions")
+                logger.info(f"[{request_id}] Eng session mode: engineer persona, bypassPermissions")
         elif _access_level == AccessLevel.CUSTOMER_SERVICE:
             # Customer-service persona: action-oriented, no code writes. Use
             # the logging adapter for fallback semantics (teammate fallback).
@@ -3690,7 +3688,9 @@ async def get_agent_response_sdk(
         # set GH_REPO so all gh commands automatically target the correct repo.
         _gh_repo = None
         is_cross_repo_sdlc = (
-            project_mode != "pm" and classification == ClassificationType.SDLC and is_cross_repo
+            project_mode not in ("pm", "eng")
+            and classification == ClassificationType.SDLC
+            and is_cross_repo
         )
         if is_cross_repo_sdlc:
             _github_config = project.get("github", {}) if project else {}

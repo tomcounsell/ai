@@ -568,7 +568,7 @@ async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
         sender_name=f"reflection ({entry.name})",
         chat_id="0",
         telegram_message_id=0,
-        session_type="pm",
+        session_type="eng",
     )
     logger.info(
         "[reflection] Enqueued agent reflection '%s' as session %s",

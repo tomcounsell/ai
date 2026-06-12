@@ -325,10 +325,10 @@ def find_project_for_email(sender_email: str | None) -> dict | None:
 
 
 def is_team_chat(chat_title: str | None) -> bool:
-    """Team chats (no Dev:/PM: prefix) are mention-only."""
+    """Team chats (no Eng: prefix) are mention-only."""
     if not chat_title:
         return False
-    return not chat_title.startswith(("Dev:", "PM:"))
+    return not chat_title.startswith(("Eng:",))
 
 
 # =============================================================================
@@ -346,7 +346,7 @@ def resolve_persona(
     Resolution order:
     1. DMs -> always PersonaType.TEAMMATE
     2. Group persona field in projects.json -> return PersonaType directly
-    3. Title prefix "Dev:" -> PersonaType.DEVELOPER, "PM:" -> PersonaType.PROJECT_MANAGER
+    3. Title prefix "Eng:" -> PersonaType.ENGINEER
     4. None (unconfigured -- fall through to existing classifier behavior)
 
     Args:
@@ -387,10 +387,8 @@ def resolve_persona(
 
     # Title prefix fallback
     if chat_title:
-        if chat_title.startswith("Dev:"):
-            return PersonaType.DEVELOPER
-        if chat_title.startswith("PM:"):
-            return PersonaType.PROJECT_MANAGER
+        if chat_title.startswith("Eng:"):
+            return PersonaType.ENGINEER
 
     # Unconfigured -- caller should fall through to existing behavior
     return None
