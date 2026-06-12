@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: completed
 type: chore
 appetite: Small
 owner: Valor
