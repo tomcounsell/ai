@@ -57,17 +57,17 @@ class TestGenerateImageFunction:
     """Test the generate_image function."""
 
     def test_missing_api_key(self, monkeypatch):
-        """Should return error when API key is missing."""
-        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        """Should return error when API key is missing (default provider is openai)."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
         result = generate_image("test prompt")
 
         assert "error" in result
-        assert "OPENROUTER_API_KEY" in result["error"]
+        assert "OPENAI_API_KEY" in result["error"]
 
     @pytest.mark.skipif(
-        not os.environ.get("OPENROUTER_API_KEY"),
-        reason="OPENROUTER_API_KEY not set",
+        not os.environ.get("OPENAI_API_KEY"),
+        reason="OPENAI_API_KEY not set",
     )
     def test_generate_image_real_api(self, tmp_path):
         """Should generate an image with real API (requires API key)."""

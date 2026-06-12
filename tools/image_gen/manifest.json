@@ -1,7 +1,7 @@
 {
   "name": "image_gen",
-  "version": "1.0.0",
-  "description": "AI image generation via OpenRouter API (Gemini, DALL-E, Flux, etc.)",
+  "version": "2.0.0",
+  "description": "AI image generation via gpt-image-1 (OpenAI) with Gemini fallback via OpenRouter",
   "type": "library",
   "status": "stable",
 
@@ -15,18 +15,19 @@
   ],
 
   "requires": {
-    "env": ["OPENROUTER_API_KEY"],
+    "env": ["OPENAI_API_KEY"],
+    "env_optional": ["OPENROUTER_API_KEY"],
     "python": ">=3.10"
   },
 
   "config": {
-    "default_model": "google/gemini-2.0-flash-exp:free",
+    "default_provider": "openai",
+    "default_model": "gpt-image-1",
     "models": [
-      "google/gemini-2.0-flash-exp:free",
-      "openai/dall-e-3",
-      "black-forest-labs/flux-schnell"
+      "gpt-image-1",
+      "google/gemini-3-pro-image-preview"
     ],
-    "aspect_ratios": ["1:1", "16:9", "9:16", "4:3", "3:4"]
+    "aspect_ratios": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9"]
   },
 
   "commands": {
@@ -41,7 +42,7 @@
       "steps": [
         "from tools.image_gen import generate_image",
         "result = generate_image('a cat in space')",
-        "# Returns: {'path': 'output.png', 'prompt': '...'}"
+        "# Returns: {'images': ['generated_images/image_20260612_1.png'], 'provider': 'openai', ...}"
       ]
     }
   ]

@@ -162,8 +162,8 @@ MODEL_VISION = OPENROUTER_SONNET
 # Vision analysis alternatives (for experimentation)
 MODEL_VISION_ALT = OPENROUTER_GEMINI_VISION  # Best overall vision model
 
-# Image generation (Nano Banana style)
-MODEL_IMAGE_GEN = OPENROUTER_GEMINI_IMAGE_GEN
+# Image generation (gpt-image-1 via OpenAI Images API)
+MODEL_IMAGE_GEN = OPENAI_IMAGE_GEN
 
 # Experiment hypothesis generation (ultra-cheap, ~$0.001/call)
 MODEL_EXPERIMENT = OPENROUTER_KIMI_K2_5

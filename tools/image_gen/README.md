@@ -6,17 +6,17 @@ AI text-to-image generation with a provider switch. Pick the best model per imag
 
 | Provider | Model | Transport | Key |
 |----------|-------|-----------|-----|
-| `gemini` (default) | `google/gemini-3-pro-image-preview` | OpenRouter | `OPENROUTER_API_KEY` |
-| `openai` | `gpt-image-1` | OpenAI Images API | `OPENAI_API_KEY` |
+| `openai` (default) | `gpt-image-1` | OpenAI Images API | `OPENAI_API_KEY` |
+| `gemini` | `google/gemini-3-pro-image-preview` | OpenRouter | `OPENROUTER_API_KEY` |
 
-Gemini is the default so existing callers are unchanged. Provider/model constants live in `config/models.py` (`IMAGE_GEN_PROVIDERS`, `OPENROUTER_GEMINI_IMAGE_GEN`, `OPENAI_IMAGE_GEN`).
+OpenAI gpt-image-1 is the default. Provider/model constants live in `config/models.py` (`IMAGE_GEN_PROVIDERS`, `OPENAI_IMAGE_GEN`, `OPENROUTER_GEMINI_IMAGE_GEN`).
 
 ## CLI
 
 ```bash
-valor-image-gen 'a cat in space'                       # default: gemini, 1:1
+valor-image-gen 'a cat in space'                       # default: openai gpt-image-1, 1:1
 valor-image-gen 'sunset over mountains' 16:9           # aspect ratio
-valor-image-gen 'a clean logo' --provider openai       # gpt-image-1
+valor-image-gen 'a clean logo' --provider gemini       # gemini via OpenRouter
 valor-image-gen 'a clean logo' --model gpt-image-1     # explicit model override
 valor-image-gen --help                                 # full usage + aspect ratios
 ```
@@ -29,12 +29,12 @@ from tools.image_gen import generate_image
 result = generate_image(
     prompt="a futuristic cityscape",
     aspect_ratio="16:9",
-    provider="openai",          # "gemini" (default) or "openai"
-    # model="gpt-image-1",      # optional explicit override of the provider default
-    output_dir="./images",      # default: ./generated_images
+    # provider="openai",   # default — gpt-image-1 at quality=high
+    # provider="gemini",   # alternate — google/gemini-3-pro-image-preview via OpenRouter
+    output_dir="./images",  # default: ./generated_images
 )
 # result -> {
-#   "images": ["./images/image_20260602_055518_1.png"],  # saved file paths
+#   "images": ["./images/image_20260612_055518_1.png"],  # saved file paths
 #   "text": None,                # any text the model returned (Gemini may include some)
 #   "provider": "openai",
 #   "model": "gpt-image-1",
@@ -55,8 +55,8 @@ Run `valor-image-gen --help` for the full ratio table with pixel dimensions and 
 
 | Issue | Solution |
 |-------|----------|
+| `OPENAI_API_KEY ... not set` | Set it (OpenAI provider, default) |
 | `OPENROUTER_API_KEY ... not set` | Set it (Gemini provider) |
-| `OPENAI_API_KEY ... not set` | Set it (OpenAI provider) |
 | Timeout | Simplify the prompt or retry |
 | Content filtered | Rephrase to avoid restricted content |
 | Rate limited | Wait and retry |

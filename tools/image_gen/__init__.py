@@ -4,11 +4,11 @@ Image Generation Tool
 Generate images from text prompts using AI models.
 
 Two providers are supported behind one interface:
-  - "gemini" (default): google/gemini-3-pro-image-preview via OpenRouter
-  - "openai": gpt-image-1 via the OpenAI Images API directly
+  - "openai" (default): gpt-image-1 via the OpenAI Images API directly
+  - "gemini": google/gemini-3-pro-image-preview via OpenRouter
 
 Pick the best model per image with the `provider` argument (or `--provider` on
-the CLI). Gemini remains the default so existing callers are unchanged.
+the CLI).
 """
 
 import base64
@@ -113,7 +113,7 @@ def _generate_via_openai(
 
     size = OPENAI_IMAGE_SIZES.get(aspect_ratio, "1024x1024")
     client = OpenAI(api_key=api_key)
-    result = client.images.generate(model=model, prompt=prompt, size=size, n=1)
+    result = client.images.generate(model=model, prompt=prompt, size=size, n=1, quality="high")
 
     image_bytes: list[bytes] = []
     for item in result.data or []:
@@ -130,7 +130,7 @@ def generate_image(
     prompt: str,
     aspect_ratio: AspectRatio = "1:1",
     output_dir: str | Path | None = None,
-    provider: Provider = "gemini",
+    provider: Provider = "openai",
     model: str | None = None,
 ) -> dict:
     """
@@ -261,9 +261,9 @@ def main():
     )
     parser.add_argument(
         "--provider",
-        default="gemini",
+        default="openai",
         choices=list(IMAGE_GEN_PROVIDERS.keys()),
-        help="Model family: gemini (default) or openai",
+        help="Model family: openai (default) or gemini",
     )
     parser.add_argument(
         "--model",
