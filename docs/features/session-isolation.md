@@ -89,6 +89,15 @@ Issue [#1272](https://github.com/tomcounsell/ai/issues/1272) closes that hole wi
 
 4. **Synthetic-slug cleanup hook**: Synthetic-slug worktrees may not have a corresponding PR (the dev session may complete without ever opening one), and `prune_worktrees()` only runs `git worktree prune` (removes references, not directories). The session-completion `finally` block in `_execute_agent_session` calls `cleanup_after_merge(repo_root, slug)` directly when the slug matches the regex `^dev-[0-9a-f]{8}$`. The regex is exact — it must NOT match a real human-chosen slug like `dev-improvements` or `dev-1272`. Cleanup failures are logged at WARNING and do NOT propagate as session failures.
 
+   **Unmerged-branch guard (issue #1646):** `cleanup_after_merge` now verifies the merged
+   precondition before deleting the branch, using the squash-safe `merged_via_tree` oracle
+   (`git merge-tree --write-tree`). If the branch has unmerged commits, it is preserved
+   (`skipped_unmerged=True`) and a `[unmerged-branch-guard]` warning is logged. The
+   worktree directory is also preserved so the work remains easy to find and resume. This
+   replaces the prior unconditional `git branch -D` that caused silent data loss. See
+   `docs/features/granite-pty-production.md#completion-cleanup-safety-floor-issue-1646` for
+   the full operator guide.
+
 The synthetic-slug regex `^dev-[0-9a-f]{8}$` is the safety guarantee: it matches only the synthesis output, never a real human slug.
 
 ### Git-Layer Enforcement for Manual Operations (Issue #1288)

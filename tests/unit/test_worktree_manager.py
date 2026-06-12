@@ -138,20 +138,26 @@ class TestCleanupAfterMerge:
         assert result["already_clean"] is False
         assert "Failed to remove worktree" in result["errors"][0]
 
+    @patch("agent.worktree_manager.safe_delete_branch")
     @patch("agent.worktree_manager.subprocess.run")
     @patch("agent.worktree_manager._branch_exists")
     @patch("agent.worktree_manager.remove_worktree")
-    def test_branch_deletion_fails(self, mock_remove_wt, mock_branch_exists, mock_run):
+    def test_branch_deletion_fails(
+        self, mock_remove_wt, mock_branch_exists, mock_run, mock_safe_del
+    ):
         """If branch deletion fails, result reflects failure (not already_clean)."""
         repo = Path("/fake/repo")
         slug = "protected-feature"
 
         mock_branch_exists.return_value = True
-        # First call is prune_worktrees, second is branch -D
-        mock_run.side_effect = [
-            MagicMock(returncode=0),  # prune
-            MagicMock(returncode=1, stderr="error: branch not found"),  # branch -D
-        ]
+        mock_run.return_value = MagicMock(returncode=0)  # prune
+        # safe_delete_branch returns a git error (not skipped_unmerged)
+        mock_safe_del.return_value = {
+            "deleted": False,
+            "skipped_unmerged": False,
+            "branch": f"session/{slug}",
+            "error": "error: branch not found",
+        }
 
         result = cleanup_after_merge(repo, slug)
 
@@ -162,6 +168,34 @@ class TestCleanupAfterMerge:
         assert result["already_clean"] is False
         assert len(result["errors"]) == 1
         assert "Failed to delete branch" in result["errors"][0]
+
+    @patch("agent.worktree_manager.safe_delete_branch")
+    @patch("agent.worktree_manager.subprocess.run")
+    @patch("agent.worktree_manager._branch_exists")
+    @patch("agent.worktree_manager.remove_worktree")
+    def test_branch_unmerged_skips_deletion(
+        self, mock_remove_wt, mock_branch_exists, mock_run, mock_safe_del
+    ):
+        """When safe_delete_branch detects an unmerged branch, skipped_unmerged is set."""
+        repo = Path("/fake/repo")
+        slug = "unmerged-feature"
+
+        mock_branch_exists.return_value = True
+        mock_run.return_value = MagicMock(returncode=0)  # prune
+        mock_safe_del.return_value = {
+            "deleted": False,
+            "skipped_unmerged": True,
+            "branch": f"session/{slug}",
+            "error": None,
+        }
+
+        result = cleanup_after_merge(repo, slug)
+
+        assert result["branch_deleted"] is False
+        assert result["skipped_unmerged"] is True
+        assert result["already_clean"] is False
+        # The unmerged warning should be in errors for operator visibility
+        assert any("unmerged-branch-guard" in e for e in result["errors"])
 
     @patch("agent.worktree_manager.subprocess.run")
     @patch("agent.worktree_manager._branch_exists")

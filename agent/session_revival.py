@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from agent.branch_manager import get_branch_state, get_plan_context, sanitize_branch_name
+from agent.worktree_manager import merged_via_tree, safe_delete_branch
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
@@ -228,14 +229,29 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
             age_hours = (time.time() - last_commit_ts) / 3600
 
             if age_hours > max_age_hours:
-                subprocess.run(
-                    ["git", "branch", "-D", branch],
-                    cwd=wd,
-                    capture_output=True,
-                    timeout=10,
+                # Guard deletion against unmerged commits (issue #1646)
+                branch_del = safe_delete_branch(
+                    str(wd),
+                    branch,
+                    predicate=merged_via_tree,
+                    force=True,
                 )
-                cleaned.append(branch)
-                logger.info(f"Cleaned stale branch: {branch} (age: {age_hours:.1f}h)")
+                if branch_del["deleted"]:
+                    cleaned.append(branch)
+                    logger.info(f"Cleaned stale branch: {branch} (age: {age_hours:.1f}h)")
+                elif branch_del["skipped_unmerged"]:
+                    logger.warning(
+                        "[unmerged-branch-guard] stale branch '%s' preserved"
+                        " — unmerged commits (age: %.1fh)",
+                        branch,
+                        age_hours,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to delete stale branch %s: %s",
+                        branch,
+                        branch_del.get("error"),
+                    )
 
     except Exception as e:
         logger.error(f"Branch cleanup error: {e}")

@@ -325,6 +325,37 @@ Session persistence failures never affect the CLI exit code or results JSON
 output. A single `granite session not recorded: <reason>` line is emitted to
 stderr and execution continues normally.
 
+## Completion-Cleanup Safety Floor (issue #1646)
+
+Dev sessions commit work to `session/dev-{id}` branches inside `.worktrees/dev-{id}`.
+The PM persona (via #1647) is responsible for the landing decision (auto-merge vs
+push+PR) and authorizes cleanup after the work lands. The executor never deletes
+branches unconditionally.
+
+**Guard:** All four branch-deletion sites in `agent/` route through `safe_delete_branch`
+(in `agent/worktree_manager.py`), which checks merged-ness before deleting:
+
+- **Site A (executor auto-mark):** uses `merged_via_ancestor` (no prior merge). If the
+  branch tip is not reachable from `main`, deletion is skipped.
+- **Sites B/C (`cleanup_after_merge`, `remove_worktree`):** uses `merged_via_tree` —
+  squash-safe via `git merge-tree --write-tree`. Correct for the production
+  `gh pr merge --squash` workflow.
+- **Site D (`cleanup_stale_branches` reflection):** also uses `merged_via_tree` (stale
+  refs are often squash-merged PRs whose local refs were never deleted).
+
+**When a branch is preserved:** A greppable `[unmerged-branch-guard]` warning is logged
+naming the branch. The branch and worktree remain on disk. Grep `logs/worker.log` for
+`[unmerged-branch-guard]` to find preserved branches.
+
+**Interim accumulation:** Until #1647 lands the PM-authorized landing step, unmerged
+dev-session branches accumulate. The `preserved=N` counter in `logs/worker.log` is the
+interim signal. Manual operator action is the only safe reaping path — do NOT use
+`scripts/worktree-gc.sh --apply` for no-PR branches (it has an unguarded `git branch -D`
+at line 208 that would re-destroy the preserved work).
+
+**The only `git branch -D` in `agent/`** lives inside `safe_delete_branch`, behind a
+proven-landed check. All other deletion uses `git branch -d` (fails-closed).
+
 ## See also
 
 - [Granite Operator: Interactive TUI](granite-interactive-tui.md) — the PoC
