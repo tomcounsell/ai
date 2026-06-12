@@ -248,13 +248,21 @@ The adapter writes non-user-visible progress to `agent_session.session_events`
 | `type` | When | Key fields |
 |--------|------|------------|
 | `exit_summary` | every run, on completion | `exit_reason`, `turns`, `compliance_misses`, `ts` |
-| `exit_anomaly` | `exit_reason in {pm_hang, dev_hang, startup_unresolved, pm_no_user_message}` | `exit_reason`, `ts` — also logged at ERROR (Sentry log-capture picks it up; this is the on-call path for kernel regressions) |
-| `delivery_failure` | a mid-loop `send_cb` raised | `payload_chars`, `reason`, `ts` |
+| `exit_anomaly` | `exit_reason in {pm_hang, dev_hang, startup_unresolved, pm_no_user_message, exception (soft→WARNING, hard→ERROR)}` | `exit_reason`, `ts` — logged at ERROR for hard exits (Sentry log-capture picks it up; on-call path for kernel regressions); WARNING for soft exception exits (had turns → likely network blip, no Sentry alert) |
+| `granite_user_routed` | on each `[/user]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
+| `granite_complete_routed` | on each `[/complete]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
+| `granite_delivery_failure` | a mid-loop `send_cb` raised | `event_type`, `text`, `payload_chars`, `reason`, `ts` |
+| `delivery_failure` | a mid-loop `send_cb` raised (legacy alias) | `payload_chars`, `reason`, `ts` |
 
 Normal completions (`pm_complete`, `pm_user`, `pm_max_turns`) do **not** emit
 `exit_anomaly`, because they are expected outcomes. `pm_no_user_message` emits
 an anomaly despite delivering `OPERATOR_TERMINAL_MESSAGE` (the guard fired as a
 last resort), so the operator knows the PM failed to self-summarize.
+
+`exception` exit_reason uses severity gating: if the session had at least one
+classified turn (soft exit, likely network blip), `exit_anomaly` is logged at
+WARNING with no Sentry alert. If the session crashed before producing any output
+(hard exit), it logs at ERROR so Sentry captures it for on-call triage.
 
 > Note: `session_events` starts as `None` on a fresh `AgentSession`
 > (`ListField(null=True)`). The adapter initializes the list before its first
@@ -262,6 +270,62 @@ last resort), so the operator knows the PM failed to self-summarize.
 > `save(update_fields=["session_events", "updated_at"])` — the executor's
 > post-run saves exclude `session_events` and finalization loads a fresh copy
 > by session_id, so an unsaved in-memory append would never reach Redis.
+
+### Transcript tailer (issue #1648)
+
+As of issue #1648, the full telemetry signal set (`turn_count`, `tool_call_count`,
+`total_input_tokens`, `total_output_tokens`, `total_cache_read_tokens`,
+`current_tool_name`, `last_tool_use_at`, `recent_thinking_excerpt`) is sourced
+from the **transcript tailer** rather than the SDK path or `_bump_last_turn_at`.
+
+The tailer (`agent/granite_container/transcript_tailer.py`) performs
+byte-offset-stateful incremental reads of the Claude Code JSONL transcript files
+at `~/.claude/projects/{cwd-slug}/{uuid}.jsonl`, polled every 5 seconds
+(`_TAILER_INTERVAL_S`). The `cwd-slug` is `cwd.replace("/", "-")` and the
+`uuid` is set deterministically at PTY spawn via `claude --session-id <uuid>`
+(so the transcript path is known before the session starts).
+
+`BridgeAdapter._run_tailer_task` runs as an `asyncio.Task` (started in `run()`
+before `asyncio.to_thread`, cancelled after the container exits). Persistence
+uses `asyncio.to_thread` to keep blocking Redis saves off the event loop.
+`update_fields` is strictly disjoint from `_publish_exit_summary`'s set to
+avoid concurrent-write clobber. The tailer is diff-gated: it skips the save
+when turn/tool/token counts are unchanged since the last tick.
+
+### Granite identity fields
+
+`AgentSession` now carries four first-class granite identity fields (issue
+#1648), populated by `BridgeAdapter._publish_exit_summary` from
+`ContainerResult`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `exit_reason` | `Field(null=True)` | Granite-path exit reason (granite-path-populated; see below for values) |
+| `pm_pid` | `IntField(null=True)` | PM PTY OS process ID |
+| `dev_pid` | `IntField(null=True)` | Dev PTY OS process ID |
+| `pm_transcript_path` | `Field(null=True)` | Absolute path to PM Claude Code JSONL transcript |
+| `dev_transcript_path` | `Field(null=True)` | Absolute path to Dev Claude Code JSONL transcript |
+
+All four are nullable: non-granite sessions and pre-deploy granite sessions
+leave them as `None`. The dashboard uses them to surface active PTY processes
+and link to transcript files.
+
+### `exit_reason` and reaction gating
+
+`AgentSession.exit_reason` is granite-path-populated. The dashboard renders a
+warning chip for non-clean values. Clean exit reasons: `pm_complete`, `pm_user`,
+`pm_max_turns`. Anomaly exit reasons: `pm_hang`, `dev_hang`,
+`startup_unresolved`, `pm_no_user_message`, `exception`.
+
+The executor's reaction logic consults `exit_reason` in addition to
+`user_facing_routed`:
+
+- `exit_reason` in anomaly set → `REACTION_ERROR` emoji regardless of
+  `user_facing_routed`.
+- Clean `exit_reason` + `user_facing_routed=False` (`communicated=False` chip
+  in dashboard) → normal reaction (the wrap-up guard fired but the session
+  technically completed without user-facing output).
+- Clean `exit_reason` + `user_facing_routed=True` → `REACTION_COMPLETE`.
 
 ### Liveness (two-tier no-progress detector)
 
@@ -274,6 +338,12 @@ keeps the two-tier no-progress detector's sub-check A live for granite
 sessions: a wedged session stops bumping `last_turn_at` and Tier-1/Tier-2 can
 detect it, instead of riding the sticky own-progress signal forever. The bump
 is fail-silent — a Redis failure logs a warning and never crashes the run.
+
+> Note: As of issue #1648, the full telemetry signal set (`turn_count`,
+> `tool_call_count`, `total_input_tokens`, etc.) is sourced from the transcript
+> tailer rather than `_bump_last_turn_at`. The `on_turn` hook remains in place
+> to keep `last_turn_at` current for the two-tier detector, but the richer
+> liveness fields are now transcript-driven.
 
 ### Startup hard ceiling
 
