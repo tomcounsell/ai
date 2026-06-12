@@ -38,6 +38,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from agent.pipeline_graph import MAX_CRITIQUE_CYCLES
+from tools._sdlc_utils import normalize_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,11 @@ STATUS_FAILED = "failed"
 CRITIQUE_READY_TO_BUILD = "READY TO BUILD"
 CRITIQUE_NEEDS_REVISION = "NEEDS REVISION"
 CRITIQUE_MAJOR_REWORK = "MAJOR REWORK"
+
+# Review verdict canonical strings. Matched via normalize_verdict() so
+# underscore forms and mixed-case inputs still resolve correctly (#1638).
+REVIEW_APPROVED = "APPROVED"
+REVIEW_CHANGES_REQUESTED = "CHANGES REQUESTED"
 
 # Skill command strings. Keep in sync with ``agent/pipeline_graph.STAGE_TO_SKILL``
 # and the ``DISPATCH_RULES`` list below. The SKILL.md hand-authored dispatch table
@@ -277,7 +283,7 @@ def guard_g1_critique_loop(
     AND the last dispatched skill was ``/do-plan-critique``, the router MUST
     route to ``/do-plan`` instead of re-critiquing the unchanged plan.
     """
-    verdict = _latest_critique_verdict(stage_states, meta).upper()
+    verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_NEEDS_REVISION not in verdict and CRITIQUE_MAJOR_REWORK not in verdict:
         return None
 
@@ -355,12 +361,12 @@ def guard_g3_pr_lock(stage_states: dict, meta: dict, context: dict) -> Dispatch 
     else:
         verdicts = stage_states.get("_verdicts") or {}
         review_verdict = _verdict_text(verdicts.get("REVIEW"))
-    review_verdict_upper = review_verdict.upper()
+    review_verdict_norm = normalize_verdict(review_verdict)
 
     if review_status == STATUS_COMPLETED and docs_status == STATUS_COMPLETED:
         target = SKILL_DO_MERGE
         suffix = "review clean and docs complete"
-    elif "CHANGES REQUESTED" in review_verdict_upper or review_status == STATUS_FAILED:
+    elif REVIEW_CHANGES_REQUESTED in review_verdict_norm or review_status == STATUS_FAILED:
         target = SKILL_DO_PATCH
         suffix = "review requested changes"
     else:
@@ -432,7 +438,7 @@ def guard_g5_artifact_hash_cache(
     if cached_hash != current_hash:
         return None
 
-    verdict_text = _verdict_text(record).upper()
+    verdict_text = normalize_verdict(_verdict_text(record))
     if CRITIQUE_NEEDS_REVISION in verdict_text or CRITIQUE_MAJOR_REWORK in verdict_text:
         return Dispatch(
             skill=SKILL_DO_PLAN,
@@ -572,7 +578,7 @@ def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict)
     else:
         verdicts = stage_states.get("_verdicts") or {}
         review_verdict = _verdict_text(verdicts.get("REVIEW"))
-    if "APPROVED" not in review_verdict.upper():
+    if REVIEW_APPROVED not in normalize_verdict(review_verdict):
         return None
     return Dispatch(
         skill=SKILL_DO_MERGE,
@@ -616,29 +622,46 @@ def _rule_no_plan(stage_states: dict, meta: dict, context: dict) -> bool:
         return False
     plan_status = stage_states.get("PLAN")
     # "No plan exists" is the absence of a plan file OR a pending PLAN stage.
-    return plan_status in (None, "pending")
+    if plan_status in (None, "pending"):
+        return True
+    # Bootstrap case (#1640): PLAN="ready" but no plan doc on disk — the
+    # state-machine pre-advanced the stage without a real plan existing yet.
+    # Only treat this as "no plan" when an issue_number is available (so we
+    # can verify) AND the plan file is actually absent.
+    if plan_status == "ready" and meta.get("issue_number") and not meta.get("plan_exists"):
+        return True
+    return False
 
 
 def _rule_plan_not_critiqued(stage_states: dict, meta: dict, context: dict) -> bool:
-    """Plan exists, not yet critiqued."""
+    """Plan exists and is ready to critique.
+
+    Requires real evidence that a plan doc exists (#1640):
+    - ``PLAN == "completed"`` → implies a plan doc was written (unchanged from #1275)
+    - ``PLAN == "ready"``     → only counts if ``meta["plan_exists"]`` is True;
+      without evidence, the state machine may have pre-advanced to "ready" before
+      the plan doc was written (bootstrap race).
+    """
     plan_status = stage_states.get("PLAN")
     critique_status = stage_states.get("CRITIQUE")
-    return plan_status in (STATUS_COMPLETED, "ready") and critique_status in (
-        None,
-        "pending",
-        "ready",
-    )
+    if critique_status not in (None, "pending", "ready"):
+        return False
+    if plan_status == STATUS_COMPLETED:
+        return True  # completed implies a plan doc exists (#1275 case intact)
+    if plan_status == "ready":
+        return bool(meta.get("plan_exists"))  # "ready" needs real evidence (#1640)
+    return False
 
 
 def _rule_critique_needs_revision(stage_states: dict, meta: dict, context: dict) -> bool:
     """Plan critiqued (NEEDS REVISION)."""
-    verdict = _latest_critique_verdict(stage_states, meta).upper()
+    verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     return CRITIQUE_NEEDS_REVISION in verdict
 
 
 def _rule_critique_ready_no_concerns(stage_states: dict, meta: dict, context: dict) -> bool:
     """Plan critiqued (READY TO BUILD, zero concerns), no branch/PR."""
-    verdict = _latest_critique_verdict(stage_states, meta).upper()
+    verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_READY_TO_BUILD not in verdict:
         return False
     if "WITH CONCERNS" in verdict:
@@ -659,7 +682,7 @@ def _rule_critique_ready_with_concerns_no_revision(
     """
     if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:
         return False
-    verdict = _latest_critique_verdict(stage_states, meta).upper()
+    verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_READY_TO_BUILD not in verdict or "WITH CONCERNS" not in verdict:
         return False
     if bool(meta.get("revision_applied")):
@@ -684,7 +707,7 @@ def _rule_critique_ready_with_concerns_revision_applied(
     """
     if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:
         return False
-    verdict = _latest_critique_verdict(stage_states, meta).upper()
+    verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_READY_TO_BUILD not in verdict or "WITH CONCERNS" not in verdict:
         return False
     if not bool(meta.get("revision_applied")):
@@ -712,6 +735,44 @@ def _rule_tests_failing(stage_states: dict, meta: dict, context: dict) -> bool:
     return stage_states.get("TEST") == STATUS_FAILED
 
 
+def _latest_dispatch_at(stage_states: dict, skill: str) -> str | None:
+    """Return the 'at' timestamp of the most recent dispatch of the given skill, or None."""
+    dispatches = stage_states.get("_sdlc_dispatches", [])
+    result = None
+    for entry in dispatches:
+        if entry.get("skill") == skill:
+            result = entry.get("at")
+    return result
+
+
+def _review_verdict_is_stale(stage_states: dict) -> bool:
+    """Return True if the REVIEW verdict predates the latest /do-patch dispatch (stale).
+
+    Fails safe to False (not stale) on any missing data or parse error.
+
+    Edge cases:
+    - missing ``recorded_at`` → False (not stale)
+    - no prior ``/do-patch`` dispatch → False (not stale)
+    - equal timestamps → False (not stale, strict ``<``)
+    - parse failure → False (not stale)
+    """
+    try:
+        verdict_dict = stage_states.get("_verdicts", {}).get("REVIEW", {})
+        if not isinstance(verdict_dict, dict):
+            return False
+        recorded_at = verdict_dict.get("recorded_at")
+        if not recorded_at:
+            return False
+        latest_patch_at = _latest_dispatch_at(stage_states, SKILL_DO_PATCH)
+        if not latest_patch_at:
+            return False
+        verdict_dt = datetime.fromisoformat(recorded_at)
+        patch_dt = datetime.fromisoformat(latest_patch_at)
+        return verdict_dt < patch_dt
+    except Exception:
+        return False
+
+
 def _rule_pr_exists_no_review(stage_states: dict, meta: dict, context: dict) -> bool:
     """PR exists, no review."""
     if not meta.get("pr_number"):
@@ -727,7 +788,17 @@ def _rule_pr_exists_no_review(stage_states: dict, meta: dict, context: dict) -> 
 
 
 def _rule_review_has_findings(stage_states: dict, meta: dict, context: dict) -> bool:
-    """PR review has findings (blockers, nits, or tech debt)."""
+    """PR review has findings (blockers, nits, or tech debt).
+
+    Returns True when the review verdict signals changes are needed.
+    Underscore-form verdicts (``CHANGES_REQUESTED``) are handled transparently
+    via ``normalize_verdict`` (#1638).
+
+    Timestamp-staleness supersession (#1641): if the stored verdict predates the
+    latest ``/do-patch`` dispatch, it is stale and this rule returns False so that
+    row 8b (``_rule_patch_applied_after_review``) can re-dispatch ``/do-pr-review``
+    for a fresh look.
+    """
     if not meta.get("pr_number"):
         return False
     review_verdict = ""
@@ -736,12 +807,16 @@ def _rule_review_has_findings(stage_states: dict, meta: dict, context: dict) -> 
     else:
         verdicts = stage_states.get("_verdicts") or {}
         review_verdict = _verdict_text(verdicts.get("REVIEW"))
-    review_verdict_upper = review_verdict.upper()
+    review_verdict_norm = normalize_verdict(review_verdict)
     if not review_verdict:
         return False
-    if "CHANGES REQUESTED" in review_verdict_upper:
+    # Timestamp-staleness supersession (#1641): if this verdict predates the
+    # latest /do-patch dispatch, it is stale; step aside so row 8b runs.
+    if _review_verdict_is_stale(stage_states):
+        return False
+    if REVIEW_CHANGES_REQUESTED in review_verdict_norm:
         return True
-    if "PARTIAL" in review_verdict_upper:
+    if "PARTIAL" in review_verdict_norm:
         return True
     # REVIEW failed status implies blockers
     if stage_states.get("REVIEW") == STATUS_FAILED:
