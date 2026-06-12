@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor
 created: 2026-06-12
 tracking: https://github.com/tomcounsell/ai/issues/1620
 last_comment_id: 4678777700
+revision_applied: true
 ---
 
 # valor CLI Follow-ups (Post-Cutover)
@@ -73,13 +74,13 @@ The change is isolated to argv pre-processing and a git hook — no multi-compon
 
 **Size:** Small
 
-**Team:** Solo dev, PM (one policy decision on item 3)
+**Team:** Solo dev
 
 **Interactions:**
-- PM check-ins: 1-2 (the #1288 guard policy is an operator decision, surfaced as an Open Question)
+- PM check-ins: 0-1 (the #1288 guard policy is now decided — option (a))
 - Review rounds: 1
 
-The coding is trivial (two small wrapper edits, one hook edit, one doc rewrite). The bottleneck is the single operator policy call on item 3.
+The coding is trivial (two small wrapper edits, one hook edit, one doc rewrite). All policy decisions are resolved.
 
 ## Prerequisites
 
@@ -91,20 +92,20 @@ No prerequisites — this work has no external dependencies. All four items touc
 
 - **Help short-circuit (item 1)**: In `main()`, before the positional shortcut rewrite, detect a standalone `-h`/`--help` token anywhere in `argv` and print top-level help, exiting cleanly. The shortcut rewrite currently only excludes a help flag when it is `argv[0]`; this extends the exclusion to a help flag appearing after a positional prompt.
 - **Doc reframe (item 2)**: Rewrite feature-doc §5 from "shortcoming" to a "Design Boundary" subsection stating the CLI enqueues, the worker chooses the substrate. Document that post-cutover there is no legacy substrate, so a force-legacy knob is N/A (not "future") — there is nothing to switch to.
-- **#1288 operator path (item 3)**: Decide the policy (Open Question), then encode it. Leading candidate: an explicit `VALOR_GUARD_OVERRIDE=1` escape that allows the commit and emits an audit line to stderr, keeping the guard absolute by default. Document the decision in the feature doc regardless of which option is chosen (even "no change" is a documented decision).
+- **#1288 operator path (item 3) — DECIDED: option (a), allow-when-no-worktree.** The guard self-detects: on a `session/{slug}` branch committed from the main checkout, if no `.worktrees/{slug}/` directory exists, the main checkout *is* the only workspace for that slug — there is nothing to contaminate, so the commit is allowed (with an informational stderr note). If the worktree *does* exist, the commit is still blocked exactly as before (the operator must commit from inside it). This is zero-friction (no env var to remember), low-abuse (an agent session cannot bypass an *existing* worktree), and adds no durable-bypass surface. Option (b) (`VALOR_GUARD_OVERRIDE` env escape) and option (c) (no code, document the dance) are rejected — see the Decisions section for the rationale.
 - **Derived allowlist (item 4)**: Replace the literal `KNOWN_SUBCOMMANDS` set with a value derived from the registered subparsers (introspect the `_SubParsersAction.choices` keys the test already reads via `_parser_subcommands()`). Convert `test_known_subcommands_matches_parser` from a parity assertion into a derivation check (the derived set must equal the registry, and the rewrite must still fire correctly).
 
 ### Flow
 
 `valor "fix the bug" --help` → `main()` detects help token before rewrite → prints top-level help → exit 0 (no session, no sub-help)
 
-`git commit` on `session/{slug}` from main checkout → Phase 0.5 guard → if `VALOR_GUARD_OVERRIDE=1` set → audit line to stderr + allow → else block with the existing message (assuming the override option is chosen)
+`git commit` on `session/{slug}` from main checkout → Phase 0.5 guard → if `.worktrees/{slug}/` does NOT exist → informational stderr note + allow → else block with the existing message (operator must commit from inside the worktree)
 
 ### Technical Approach
 
-- **Item 1**: Add a help-detection guard at the top of `main()` (after `argv` defaulting, before the rewrite). If any token equals `-h` or `--help` and no recognized subcommand precedes it, build the parser and call `parser.print_help()` then return 0. Keep it minimal — a single special-case is acceptable and is the documented tradeoff in feature-doc §4. Decision baked in: show **top-level** help for `valor "prompt" --help` (most useful default; the user clearly wants help, not to create the prompt).
+- **Item 1**: Add a help-detection guard at the top of `main()` (after `argv` defaulting, before the rewrite), running on the **pre-rewrite** argv. The guard fires iff **all** of: `argv` is non-empty AND `argv[0]` does not start with `-` AND `argv[0] not in KNOWN_SUBCOMMANDS` AND a standalone `-h`/`--help` token appears anywhere in argv. This fires for `valor "prompt" --help` (argv[0] is a prompt) but NOT for `valor list --help` (argv[0]=="list", which must reach its own sub-help). When it fires, build the parser and `parser.print_help(); raise SystemExit(0)` — **not** `return 0`. The existing `test_help_flag_exits_zero` requires `main(["--help"])` to raise `SystemExit(0)`; argparse's own `-h` handling raises it, so the new short-circuit must match that contract to keep `SystemExit` semantics uniform across all help paths. Keep it minimal — a single first-token special-case is the documented tradeoff in feature-doc §4. Decision baked in: show **top-level** help for `valor "prompt" --help` (the user clearly wants help, not to create the prompt).
 - **Item 2**: Pure prose edit in `docs/features/valor-cli-wrapper.md`. No code.
-- **Item 3**: Edit `.githooks/pre-commit` Phase 0.5 to honor `VALOR_GUARD_OVERRIDE=1` (pending Open Question confirmation). Emit a clearly-labeled audit line (e.g. `[#1288-guard-override]`) to stderr so the bypass is never silent. Guard stays absolute when the env var is unset.
+- **Item 3 (option a)**: Edit `.githooks/pre-commit` Phase 0.5. After computing `EXPECTED_SUFFIX=".worktrees/${SLUG}"` and detecting that `TOPLEVEL` does not end with it, add a check: if the worktree directory does not exist on disk (`[ ! -d "$(git rev-parse --show-toplevel)/${EXPECTED_SUFFIX}" ]`), print an informational note to stderr (the main checkout is the only workspace for this slug) and allow the commit; otherwise block as before. No env var, no bypass log — the allow path only triggers when there is provably nothing to contaminate. Update the Phase 0.5 comment block to describe this self-detecting allowance.
 - **Item 4**: Compute `KNOWN_SUBCOMMANDS` from the parser at import time. The parser is built in `_build_parser()`; extract the subparser choice names into a module-level derivation (a small helper that builds the parser once and reads `action.choices.keys()` for the `_SubParsersAction`). The existing test's `_parser_subcommands()` helper already demonstrates the introspection.
 
 ## Failure Path Test Strategy
@@ -115,17 +116,18 @@ No prerequisites — this work has no external dependencies. All four items touc
 ### Empty/Invalid Input Handling
 - [ ] `valor` with no args already prints help and returns 1 (`main()` lines 260-262) — add/confirm a test.
 - [ ] `valor --help` (help as `argv[0]`) must continue to work unchanged — regression test.
-- [ ] `valor "prompt" --help` and `valor "prompt" -h` — new tests asserting top-level help prints and `SystemExit`/return short-circuits before any `valor_session.cmd_create` call (mock/spy `cmd_create` is NOT invoked).
+- [ ] `valor "prompt" --help` and `valor "prompt" -h` — new tests asserting top-level help prints and the call raises `SystemExit(0)` (matching the existing `valor --help` contract) before any `valor_session.cmd_create` call (mock/spy `cmd_create` is NOT invoked). Also assert the printed help TEXT is top-level (contains the subcommand list / `agent-session` metavar), not the `agent-session` sub-help.
+- [ ] `valor list --help` — regression: must reach the `list` sub-help (the first-token guard must NOT fire), and still raise `SystemExit(0)` via argparse.
 - [ ] Empty prompt with help flag (`valor "" --help`) — assert help, no create.
 
 ### Error State Rendering
-- [ ] Item 3: when `VALOR_GUARD_OVERRIDE` is unset, the guard's block message must still render to stderr (regression). When set, the audit line must render. Both are user-visible.
+- [ ] Item 3 (option a): when a `.worktrees/{slug}/` worktree exists, the guard's block message must still render to stderr (regression). When no worktree exists, the informational allow-note must render and the commit must proceed. Both are user-visible.
 
 ## Test Impact
 
 - [ ] `tests/unit/test_valor_cli.py::test_known_subcommands_matches_parser` — UPDATE: convert from "literal == registry" parity assertion to "derived value == registry" derivation check. After item 4, the literal no longer exists; the test verifies the derivation produces the right set.
 - [ ] `tests/unit/test_valor_cli.py` (help cases) — UPDATE/ADD: add cases for `valor "prompt" --help` and `valor "prompt" -h` asserting top-level help short-circuits with no create. Existing `valor --help` / `valor agent-session --help` cases stay as regression coverage.
-- [ ] `.githooks/pre-commit` — no existing unit test (bash hook). Item 3 adds a new shell-level test or a documented manual verification; see Verification table. If a test is added it is net-new, not a modification.
+- [ ] `.githooks/pre-commit` — no existing unit test (bash hook). Item 3 (option a) is verified by the policy-neutral `#1288` grep and the `worktrees` grep in the Verification table, plus a documented manual check (commit on a `session/{slug}` branch from main with and without the worktree present). If a shell-level test is added it is net-new, not a modification.
 
 No other test files reference the wrapper or the guard (verified via prior-art grep).
 
@@ -142,9 +144,9 @@ No other test files reference the wrapper or the guard (verified via prior-art g
 **Impact:** A user who genuinely wanted a prompt containing the literal token `--help` (e.g. `valor "document the --help flag"`) would get help instead of a session.
 **Mitigation:** This is an acceptable, vanishingly-rare collision and matches argparse's own greedy-help convention. Document it in the feature doc. The short-circuit only fires on a *standalone* `-h`/`--help` token, not substrings.
 
-### Risk 2: Override env var weakens the #1288 isolation guarantee
-**Impact:** An agent session could set `VALOR_GUARD_OVERRIDE=1` and bypass worktree isolation, the exact contamination #887/#1288 prevent.
-**Mitigation:** Pending the Open Question. If the override ships, scope it to human-operator use, emit a loud non-silent audit line, and document that agent sessions must never set it (worker-side enforcement from #887 already covers agent spawns independently of this hook). The PM may instead choose option (a) — allow only when no worktree exists for the slug — which is harder to abuse.
+### Risk 2: Option (a) allows a commit that a later-created worktree could collide with
+**Impact:** With option (a), a `session/{slug}` commit lands in the main checkout because no `.worktrees/{slug}/` exists yet. If a worktree for that slug is created later, the two histories could diverge.
+**Mitigation:** This is a narrow, low-probability window and strictly better than the rejected env-var escape (which #887/#1288 warn against — it would let an agent session set a bypass var). Option (a) never bypasses an *existing* worktree, so the contamination #887/#1288 prevent (an agent session committing into a workspace that already has an isolated worktree) remains blocked. The informational stderr note makes the allowance visible. If the late-worktree-collision ever bites in practice, tighten later — but the Small appetite does not justify pre-building for it now.
 
 ## Race Conditions
 
@@ -168,7 +170,7 @@ No agent integration required — `valor` is already a registered CLI entry poin
 ### Feature Documentation
 - [ ] Update `docs/features/valor-cli-wrapper.md` §4 — mark the help gap resolved; document the top-level-help-on-positional behavior and the standalone-token caveat.
 - [ ] Rewrite `docs/features/valor-cli-wrapper.md` §5 — reframe "PTY path implicit" as a **Design Boundary** subsection: CLI enqueues, worker selects substrate; force-legacy is N/A post-cutover.
-- [ ] Update `docs/features/valor-cli-wrapper.md` §6 — document the decided #1288 operator path (the override mechanism or the chosen alternative).
+- [ ] Update `docs/features/valor-cli-wrapper.md` §6 — document the decided #1288 operator path: option (a), the guard allows a `session/{slug}` commit from the main checkout when no `.worktrees/{slug}/` exists, and still blocks when it does.
 - [ ] Update `docs/features/valor-cli-wrapper.md` §2 — note the allowlist is now derived, not hand-maintained; the test verifies the derivation.
 - [ ] No `docs/features/README.md` index change needed — the feature doc already exists and is indexed.
 
@@ -178,15 +180,18 @@ No agent integration required — `valor` is already a registered CLI entry poin
 ### Inline Documentation
 - [ ] Update the `KNOWN_SUBCOMMANDS` docstring comment (`tools/valor_cli.py:38-43`) to describe the derivation instead of the literal.
 - [ ] Add a comment on the help short-circuit explaining the standalone-token rule.
-- [ ] Update the `.githooks/pre-commit` Phase 0.5 comment block to describe the override path.
+- [ ] Update the `.githooks/pre-commit` Phase 0.5 comment block to describe the option-(a) allow-when-no-worktree path (cite #1288 + #1620).
 
 ## Success Criteria
 
-- [ ] `valor "anything" --help` prints **top-level** help and creates no session (spy confirms `cmd_create` not called)
+- [ ] **Behavioral delta:** `valor "anything" --help` prints **top-level** help TEXT (output contains the subcommand list / `agent-session` metavar), not the `agent-session` sub-help — this is the genuine fix
+- [ ] `valor "anything" --help` raises `SystemExit(0)` (matches the existing `valor --help` contract)
+- [ ] **Regression guard:** `valor "anything" --help` creates no session (spy confirms `cmd_create` not called) — already holds today, locked in to prevent future regression
 - [ ] `valor "anything" -h` behaves identically
 - [ ] `valor --help` and `valor agent-session --help` still work (regression)
+- [ ] `valor list --help` reaches `list` sub-help (first-token guard does not over-fire)
 - [ ] Feature doc §5 reframes the PTY-path item as a design boundary; force-legacy documented as N/A (no legacy substrate post-#1572)
-- [ ] #1288 guard has a decided, documented answer for human-operator commits from the main checkout (the chosen policy is encoded in `.githooks/pre-commit` and documented in the feature doc — even if the decision is "no change")
+- [ ] #1288 guard implements option (a): a `session/{slug}` commit from the main checkout is allowed iff no `.worktrees/{slug}/` exists (with an informational stderr note); an existing worktree still blocks. Encoded in `.githooks/pre-commit`, documented in the feature doc.
 - [ ] `KNOWN_SUBCOMMANDS` is derived from the registered subparsers; the hand-maintained literal is removed
 - [ ] `tests/unit/test_valor_cli.py::test_known_subcommands_matches_parser` converted to verify the derivation
 - [ ] Feature doc shortcomings §2, §4, §5, §6 updated to reflect resolved/reframed status
@@ -231,20 +236,20 @@ Standard tiers (see template). This plan uses `builder`, `documentarian`, and `v
 - **Assigned To**: cli-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `tools/valor_cli.py` `main()`, add a help-token guard before the positional rewrite: if a standalone `-h`/`--help` appears anywhere in argv (and no recognized subcommand precedes it), build the parser, print top-level help, return 0.
-- Replace the literal `KNOWN_SUBCOMMANDS` set with a derivation from the registered subparsers (build the parser once at import, read the `_SubParsersAction.choices` keys). Update the module docstring/comment accordingly.
-- Add help-case tests (`valor "prompt" --help`, `-h`, empty-prompt-with-help) asserting top-level help and no `cmd_create` call (spy/mock).
+- In `tools/valor_cli.py` `main()`, add a first-token help guard on the **pre-rewrite** argv: fire iff `argv` non-empty AND `argv[0]` does not start with `-` AND `argv[0] not in KNOWN_SUBCOMMANDS` AND a standalone `-h`/`--help` token is present. When it fires: `parser = _build_parser(); parser.print_help(); raise SystemExit(0)` — NOT `return 0` (must match the existing `test_help_flag_exits_zero` SystemExit(0) contract).
+- Replace the literal `KNOWN_SUBCOMMANDS` set with a derivation from the registered subparsers. Apply `@functools.lru_cache(maxsize=None)` to `_build_parser` so the import-time derivation and runtime calls share one parser build (NIT mitigation — no double build, no import-order side effects). Read the `_SubParsersAction.choices` keys for the derivation. Update the module docstring/comment accordingly.
+- Add help-case tests (`valor "prompt" --help`, `valor "prompt" -h`, `valor "" --help`) asserting `SystemExit(0)`, top-level help TEXT (printed output contains the subcommand list / `agent-session` metavar, not the sub-help), and no `cmd_create` call (spy/mock). Add a `valor list --help` regression asserting the guard does NOT fire and `list` sub-help is reached.
 
 ### 2. #1288 guard operator path
 
 - **Task ID**: build-guard
-- **Depends On**: none (gated on Open Question 1 answer)
+- **Depends On**: none (policy decided: option (a))
 - **Validates**: manual/shell verification (see Verification table)
 - **Assigned To**: cli-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Encode the decided policy in `.githooks/pre-commit` Phase 0.5 (default candidate: honor `VALOR_GUARD_OVERRIDE=1`, emit a `[#1288-guard-override]` audit line to stderr, allow the commit; block as before when unset).
-- Update the Phase 0.5 comment block to describe the override path.
+- Encode option (a) in `.githooks/pre-commit` Phase 0.5: in the `TOPLEVEL` mismatch branch, before blocking, check whether `${repo_root}/.worktrees/${SLUG}` exists on disk. If it does NOT, print an informational stderr note (main checkout is the only workspace for this slug) and allow the commit (skip the `exit 1`). If it does, block as before.
+- Update the Phase 0.5 comment block to describe the self-detecting allow-when-no-worktree path (option a) and reference #1288 + #1620.
 
 ### 3. Convert allowlist drift test
 
@@ -283,12 +288,15 @@ Standard tiers (see template). This plan uses `builder`, `documentarian`, and `v
 |-------|---------|----------|
 | Wrapper tests pass | `pytest tests/unit/test_valor_cli.py -q` | exit code 0 |
 | Help short-circuits, no session | `.venv/bin/python -c "from tools import valor_cli; import sys; rc=None;\nimport types\nfrom unittest import mock\nwith mock.patch('tools.valor_session.cmd_create') as m:\n  try: valor_cli.main(['x','--help'])\n  except SystemExit: pass\n  assert not m.called"` | exit code 0 |
+| Help text is top-level, not sub-help | `pytest tests/unit/test_valor_cli.py -q -k help` | exit code 0 (asserts printed help contains the subcommand list, raises SystemExit(0)) |
+| `list --help` still reaches sub-help | `pytest tests/unit/test_valor_cli.py -q -k list_help` | exit code 0 |
 | Allowlist derived (no literal set) | `grep -n 'KNOWN_SUBCOMMANDS = {' tools/valor_cli.py` | exit code 1 |
-| Guard override audit line present | `grep -n 'VALOR_GUARD_OVERRIDE' .githooks/pre-commit` | output contains VALOR_GUARD_OVERRIDE |
+| #1288 policy documented in hook | `grep -n '#1288' .githooks/pre-commit` | output contains the chosen-policy comment block (policy-neutral — passes for any decided option) |
+| #1288 option-(a) allowance encoded | `grep -n 'worktrees' .githooks/pre-commit` | hook references the worktree-existence check (option a) |
 | Lint clean | `python -m ruff check tools/valor_cli.py tests/unit/test_valor_cli.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/valor_cli.py tests/unit/test_valor_cli.py` | exit code 0 |
 
-(The "Allowlist derived" and "Guard override" checks assume the leading-candidate decisions; if the PM chooses a different option in Open Questions 1/2, update these rows during finalization.)
+(All rows reflect the decided policies: item-1 top-level help, item-3 option (a). The `#1288` grep row is policy-neutral by design — it asserts the chosen policy is *documented* in the hook comment block, which holds regardless of which option had been chosen.)
 
 ## Critique Results
 
@@ -308,14 +316,15 @@ _War room run 2026-06-12. Verdict: **NEEDS REVISION** (2 blockers). Critics: Ske
 
 ---
 
-## Open Questions
+## Decisions (resolved during revision)
 
-1. **#1288 operator path policy (item 3) — needs an operator decision.** Three options:
-   (a) allow the commit from the main checkout only when no `.worktrees/{slug}/` exists for that slug (low abuse surface, but allows commits that may later collide with a re-created worktree);
-   (b) explicit `VALOR_GUARD_OVERRIDE=1` env-var escape with a loud stderr audit line (simple, deliberate, but an agent session could set it — relies on convention + the independent #887 worker-side enforcement);
-   (c) keep the guard absolute and document the worktree dance as the only sanctioned path (zero new code, zero new risk, but the operator pain that prompted this issue persists).
-   The plan currently assumes **(b)** as the leading candidate. Which do you want?
+The three open questions raised in the draft are now decided. They are recorded here as durable rationale for build and review.
 
-2. **Help text choice (item 1).** The plan bakes in **top-level** help for `valor "prompt" --help` (the user clearly wants help, not to create the prompt). Confirm, or do you prefer `agent-session` sub-help (the current behavior, which is already what shows)?
+1. **#1288 operator path policy (item 3) — DECIDED: option (a), allow-when-no-worktree.**
+   Rejected (b) (`VALOR_GUARD_OVERRIDE` env escape): it is the "force-legacy path under a different name" the plan's own Rabbit Holes warn against — an agent session could set the var, recreating exactly the bypass surface #1288 closed, and its stderr-only audit line vanishes in non-interactive contexts (worker/PTY/CI) with no durable forensic trace.
+   Rejected (c) (no code, document the dance): leaves the operator pain that prompted this issue unsolved.
+   Chose (a): zero operator friction (the guard self-detects — no var to remember), low abuse surface (an existing worktree is never bypassed, so the agent-contamination case stays blocked), and no durable-bypass surface to audit. The only residual risk (a commit that a *later*-created worktree could collide with) is narrow, visible via the stderr note, and acceptable at this Small appetite.
 
-3. **Item 2 force-legacy knob.** Confirm it should be documented as **N/A** (no legacy substrate exists post-#1572) rather than "future" — i.e. we are not reserving the idea, because reintroducing a second substrate would be its own initiative. Agree?
+2. **Help text choice (item 1) — DECIDED: top-level help.** `valor "prompt" --help` shows top-level help; the user clearly wants help, not to create the prompt. The genuine fix is the help *text* (top-level vs the `agent-session` sub-help that shows today); the no-session property already holds and is kept as a regression guard.
+
+3. **Item 2 force-legacy knob — DECIDED: documented as N/A.** No legacy substrate exists post-#1572; reintroducing a second substrate would be its own initiative. We are not reserving the idea as "future" — item 2 is a pure doc reframe with zero code.
