@@ -155,7 +155,7 @@ The resolved slug is stored in `_compute_meta`'s return dict under the `_resolve
 "_resolved_target_repo": resolved_repo,   # owner/name or None
 ```
 
-This value flows into `sdlc_router.route()` via the `meta` dict it receives. The router uses it in the distinguishable Blocked message described below.
+This value flows into `sdlc_router.decide_next_dispatch()` via the `meta` dict it receives. The router uses it in the distinguishable Blocked message described below.
 
 ### Blocked reason when merge state is unresolvable
 
@@ -166,7 +166,7 @@ Blocked: PR #42 merge state 'UNKNOWN' — could not resolve mergeability
          (target repo: tomcounsell/ai; check GH_REPO / SDLC_TARGET_REPO env)
 ```
 
-This replaces the generic `"no matching dispatch rule"` message and tells the operator exactly which env var to check. The check is in `agent/sdlc_router.py` at the end of the `route()` function — it fires only when `pr_merge_state` is `None` or `"UNKNOWN"`, not for real GitHub states like `DIRTY` or `BLOCKED` (those route normally).
+This replaces the generic `"no matching dispatch rule"` message and tells the operator exactly which env var to check. The check is in `agent/sdlc_router.py` at the end of the `decide_next_dispatch()` function — it fires only when `pr_merge_state` is `None` or `"UNKNOWN"`, not for real GitHub states like `DIRTY` or `BLOCKED` (those route normally).
 
 ### Environment variable reference
 
