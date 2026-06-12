@@ -2,12 +2,12 @@
 
 All magic strings for session routing, persona selection, and intent classification
 are defined here as StrEnum members. StrEnum inherits from str, so members compare
-equal to their string values (e.g., SessionType.PM == "pm" is True).
+equal to their string values (e.g., SessionType.ENG == "eng" is True).
 
 Usage:
     from config.enums import SessionType, PersonaType, ClassificationType
 
-    if session.session_type == SessionType.PM:
+    if session.session_type == SessionType.ENG:
         ...
 """
 
@@ -15,27 +15,25 @@ from enum import StrEnum
 
 
 class SessionType(StrEnum):
-    """Discriminator for AgentSession: pm, teammate, dev, or granite.
+    """Discriminator for AgentSession: eng, teammate, or granite.
 
     ``GRANITE`` is used exclusively by the standalone ``valor-granite-loop``
-    CLI (``tools/granite_loop/cli.py``). Bridge-originated
-    sessions that run through the granite PTY container are still typed as
-    ``PM`` or ``DEV`` — ``GRANITE`` labels only direct CLI invocations so
+    CLI (``tools/granite_interactive_tui_poc/cli.py``). Bridge-originated
+    sessions that run through the granite PTY container are typed as
+    ``ENG`` — ``GRANITE`` labels only direct CLI invocations so
     they appear in the dashboard and ``valor-session list`` without being
     misclassified as bridge-originated sessions.
     """
 
-    PM = "pm"
+    ENG = "eng"
     TEAMMATE = "teammate"
-    DEV = "dev"
     GRANITE = "granite"
 
 
 class PersonaType(StrEnum):
     """Persona identifiers from projects.json group configuration."""
 
-    DEVELOPER = "developer"
-    PROJECT_MANAGER = "project-manager"
+    ENGINEER = "engineer"
     TEAMMATE = "teammate"
     CUSTOMER_SERVICE = "customer-service"
 
@@ -50,10 +48,7 @@ class AccessLevel(StrEnum):
 
     - ``WORKER``: full permissions; prepends ``WORKER_RULES`` (safety rails)
       and appends principal context + completion criteria. Maps to
-      ``SessionType.DEV`` today.
-    - ``PM_READONLY``: read-only PM mode; omits ``WORKER_RULES``; appends
-      work-vault ``CLAUDE.md``. Maps to ``SessionType.PM`` today. Caller must
-      pass a ``working_directory``.
+      ``SessionType.ENG`` today.
     - ``TEAMMATE``: conversational, no rails. Maps to ``SessionType.TEAMMATE``
       with the teammate persona today.
     - ``CUSTOMER_SERVICE``: action-oriented, no code writes, no rails. Used by
@@ -64,7 +59,6 @@ class AccessLevel(StrEnum):
     """
 
     WORKER = "worker"
-    PM_READONLY = "pm-readonly"
     TEAMMATE = "teammate"
     CUSTOMER_SERVICE = "customer-service"
 

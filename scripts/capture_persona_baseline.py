@@ -6,7 +6,7 @@ Reads the local hostname and writes the current `load_system_prompt()` and
 
 These fixtures protect issue #1227's prompt-cache invariant: after the composed
 persona refactor lands, `compose_system_prompt(...)` for the
-`(DEVELOPER, WORKER)` and `(PROJECT_MANAGER, PM_READONLY, work_dir)` cells must
+`(ENGINEER, WORKER)` cells must
 produce byte-identical bytes to what these baselines captured.
 
 Idempotent — re-running overwrites the local-machine fixtures with the current
