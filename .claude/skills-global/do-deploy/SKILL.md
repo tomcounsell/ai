@@ -20,6 +20,12 @@ For this repo, production deployment is simple:
 
 There is no manual promotion step, no container registry, no platform CLI. Merging IS deploying.
 
+### Per-machine setup not covered by auto-update
+
+A few things are **one-time, per-machine human steps** that the auto-update cron cannot do (they need a browser or interactive consent). These are not part of a deploy, but if a machine is misbehaving after picking up changes, check whether it was ever set up:
+
+- **`gws` (Google Workspace CLI) auth** — installed by `/update` but ships unauthenticated. Authenticate by copying the shared vault OAuth client to `~/.config/gws/client_secret.json` and running `gws auth login` (skips the broken gcloud path). Full procedure: `docs/features/gws-cli-auth.md` (in the `ai` repo). The shared credential `~/Desktop/Valor/google_credentials.json` is identical on every machine (iCloud-synced), so the steps are the same everywhere.
+
 ## What This Skill Does
 
 1. Verifies the PR was merged to main
