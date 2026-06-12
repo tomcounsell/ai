@@ -505,9 +505,22 @@ builds directly — they deploy team members and coordinate.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict: NEEDS REVISION** (cycle 1, real plan — supersedes the pre-plan router-quirk verdict)
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| MAJOR | Archaeologist / Structural | **Fourth force-delete site missed.** `agent/session_revival.py:230-238` force-deletes session branches by **age alone** (`age_hours > max_age_hours`) via `git branch -D` with **zero merge check** — and is invoked autonomously by the `stale-branch-cleanup` reflection (`cleanup_stale_branches_all_projects`, scheduler-driven across all projects). This is the exact root-cause pattern the plan names ("deletion as an unconditional side effect"), and is arguably a *higher-risk* data-loss vector than the completion path because it runs on a schedule, not just on session completion. The plan's Freshness Check and Data Flow enumerate only 3 sites (executor:2018, worktree:882, worktree:1226) and claim to enumerate "force-delete sites" — that claim is incomplete. | UNADDRESSED — needs plan revision | Route `session_revival.py:232` through `safe_delete_branch` (same helper, trivial), OR explicitly carve it out in No-Gos with a justification for why age-based force-delete of unmerged work is acceptable there. The former is strongly preferred: an age threshold is not a merged-ness proof, so the scheduler can silently destroy unmerged work the same way the incident did. Add a test for the revival path if routed. |
+| MINOR | Skeptic / Structural | **Internal success-criteria contradiction.** Success Criterion line 394 (`grep -rn 'branch.*"-D"...' agent/`, expects "intentional non-cleanup only / none") will still return `session_revival.py:232` after the fix as scoped — and revival is a *cleanup* reflection, so it reads as a cleanup-path hit that fails the criterion. Verification-table line 503 is narrowly scoped to only `session_executor.py` + `worktree_manager.py` and will pass. The two acceptance gates disagree on whether revival.py is in scope, so the plan can be simultaneously "passing" (table) and "failing" (criterion). | UNADDRESSED — needs plan revision | Reconcile the two greps. If revival.py is routed through the helper (preferred per the MAJOR finding), both can be repo-wide and agree. If carved out, line 394's grep must explicitly allow the revival.py occurrence and the carve-out must be named. |
+
+**Structural checks that PASSED:**
+- All four required sections present (Documentation, Update System, Agent Integration, Test Impact).
+- Task dependency graph valid — no gaps, no cycles; all `Depends On` references resolve.
+- All cited `file:line` references hold against HEAD (executor:2018, worktree_manager:882 & :1226, branch_manager:387/445, worktree_manager:1150 docstring).
+- All referenced existing tests exist (`test_branch_deletion_fails`, the four `test_post_merge_cleanup` cases); `post_merge_cleanup.py` import confirmed.
+- `is-ancestor` correctness oracle, fail-safe base resolution, and TOCTOU/`-d` fail-closed reasoning are sound.
+- Scope boundary vs. #1647 (PM landing handshake) and #1643 (persona wording) is cleanly drawn and justified.
+
+**Why NEEDS REVISION rather than READY (with concerns):** The plan's central promise is "cleanup can **never** delete a branch holding unmerged commits" (Problem / Desired outcome). A scheduler-driven force-delete site that does exactly that remains untouched and unmentioned, while the plan asserts it enumerated the force-delete sites. That is a correctness gap in the stated invariant, not a stylistic concern — closing it is a small edit (one more call routed through the helper the plan already introduces). Fixing the two findings is low-cost and makes the data-loss class genuinely closed.
 
 ---
 
