@@ -19,6 +19,35 @@ from models.agent_session import AgentSession
 logger = logging.getLogger(__name__)
 
 
+def normalize_verdict(text: str | None) -> str:
+    """Normalize a verdict string to its canonical space-separated uppercase form.
+
+    Idempotent: calling normalize_verdict on an already-normalized string
+    returns the same string unchanged. The canonical form uses spaces (not
+    underscores) as word separators, collapses internal whitespace, and is
+    fully uppercased.
+
+    Examples::
+
+        normalize_verdict("CHANGES REQUESTED") -> "CHANGES REQUESTED"  # idempotent
+        normalize_verdict("changes_requested")  -> "CHANGES REQUESTED"
+        normalize_verdict("  Changes  Requested  ") -> "CHANGES REQUESTED"
+        normalize_verdict(None) -> ""
+        normalize_verdict("") -> ""
+
+    Args:
+        text: Raw verdict string from a skill or stored record. May contain
+            underscores, mixed case, or extra whitespace. May be None.
+
+    Returns:
+        Canonical uppercase space-form string, or ``""`` for falsy/non-str input.
+    """
+    if not text or not isinstance(text, str):
+        return ""
+    # Replace underscores with spaces, collapse runs of whitespace, uppercase.
+    return re.sub(r"\s+", " ", text.replace("_", " ")).strip().upper()
+
+
 def _git_toplevel(cwd: Path | None = None) -> Path | None:
     """Return the git working-tree root for ``cwd`` (default: process cwd).
 
