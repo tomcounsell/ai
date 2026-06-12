@@ -671,7 +671,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         _stype_pre = getattr(session, "session_type", None)
         _slug_pre = getattr(session, "slug", None)
         _aid_pre = getattr(session, "agent_session_id", None)
-        if _stype_pre == "dev" and _slug_pre is None and _aid_pre is None:
+        if _stype_pre == "eng" and _slug_pre is None and _aid_pre is None:
             _parent = getattr(session, "parent_agent_session_id", None)
             logger.error(
                 "[executor-guard] Refusing to start slugless dev session with None "
@@ -800,7 +800,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # ``aid`` is non-None before this line runs.
         # Synthetic dev slug shape: dev-{first 8 chars of agent_session_id}.
         is_synthetic_slug = False
-        if not slug and getattr(session, "session_type", None) == "dev":
+        if not slug and getattr(session, "session_type", None) == "eng":
             _aid_for_slug = getattr(session, "agent_session_id", None)
             if _aid_for_slug:
                 slug = f"dev-{_aid_for_slug[:8]}"
@@ -847,7 +847,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             # the primary checkout. Trust the worktree's branch.
             _stype_early = getattr(session, "session_type", None)
             if (
-                _stype_early == "dev"
+                _stype_early == "eng"
                 and slug
                 and stage is None
                 and resolved_branch == "main"
@@ -874,7 +874,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     )
                 except Exception as e:
                     _stype = getattr(session, "session_type", None)
-                    if _stype == "dev":
+                    if _stype == "eng":
                         # Dev sessions with a slug MUST have worktree isolation.
                         # Falling back to the main checkout would contaminate it.
                         # See issue #887: session-isolation-bypass incident (2026-04-10).
@@ -904,7 +904,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # parent CWD (the main checkout) at shell-launch time.
         _stype = getattr(session, "session_type", None)
         if (
-            _stype == "dev"
+            _stype == "eng"
             and slug
             and (WORKTREES_DIR not in str(working_dir) or not working_dir.exists())
         ):
@@ -929,7 +929,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # auto-recovers clean worktrees and raises on dirty ones — the latter
         # surfaces as a session failure with last_error populated instead of
         # a silent hang.
-        if _stype == "dev" and slug and WORKTREES_DIR in str(working_dir):
+        if _stype == "eng" and slug and WORKTREES_DIR in str(working_dir):
             from agent.worktree_manager import (  # noqa: PLC0415
                 WorktreeBranchMismatchError,
                 verify_worktree_branch,
@@ -1545,7 +1545,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
             _resolve_compose_args,
             _resolve_sentry_auth_token,
             build_harness_turn_input,
-            load_pm_system_prompt,
         )
         from config.enums import AccessLevel, PersonaType
 
@@ -1677,12 +1676,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
             f"{_resolved_persona or '<none>'} (source={_persona_source})"
         )
 
-        if _composed_access_level == AccessLevel.PM_READONLY:
+        if _composed_access_level == AccessLevel.WORKER:
             try:
-                _pm_system_prompt = load_pm_system_prompt(str(working_dir))
+                _pm_system_prompt = load_eng_system_prompt(str(working_dir))
             except Exception as e:
                 logger.warning(
-                    f"{log_prefix} [pm-persona-missing] Failed to load PM persona: {e}; "
+                    f"{log_prefix} [eng-persona-missing] Failed to load engineer persona: {e}; "
                     "session will run without SDLC orchestration rules"
                 )
         elif _resolved_persona:
