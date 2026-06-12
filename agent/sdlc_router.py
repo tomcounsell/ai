@@ -654,7 +654,16 @@ def _rule_plan_not_critiqued(stage_states: dict, meta: dict, context: dict) -> b
 
 
 def _rule_critique_needs_revision(stage_states: dict, meta: dict, context: dict) -> bool:
-    """Plan critiqued (NEEDS REVISION)."""
+    """Plan critiqued (NEEDS REVISION).
+
+    Staleness step-aside (#1639): if the critique verdict predates the latest
+    ``/do-plan`` dispatch, the plan was already revised, so this row steps aside
+    (returns False) and lets row 2b re-dispatch ``/do-plan-critique`` for a
+    fresh critique. Mirrors the ``_review_verdict_is_stale`` step-aside in
+    ``_rule_review_has_findings``.
+    """
+    if _critique_verdict_is_stale(stage_states):
+        return False
     verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     return CRITIQUE_NEEDS_REVISION in verdict
 
@@ -773,6 +782,59 @@ def _review_verdict_is_stale(stage_states: dict) -> bool:
         return False
 
 
+def _critique_verdict_is_stale(stage_states: dict) -> bool:
+    """Return True if the CRITIQUE verdict predates the latest /do-plan dispatch (stale).
+
+    Structural twin of :func:`_review_verdict_is_stale` (mirrors PR #1657's
+    REVIEW pattern for the CRITIQUE path, #1639). A critique verdict is stale
+    once the plan it judged has been revised — i.e. a ``/do-plan`` dispatch is
+    recorded *after* the verdict's ``recorded_at``. A stale NEEDS REVISION
+    verdict must route back to ``/do-plan-critique`` (row 2b) rather than
+    dead-ending on ``/do-plan`` (row 3).
+
+    Fails safe to False (not stale) on any missing data or parse error.
+
+    Edge cases:
+    - ``_verdicts.CRITIQUE`` absent / not a dict → False (not stale)
+    - missing ``recorded_at`` → False (not stale)
+    - no prior ``/do-plan`` dispatch → False (not stale)
+    - equal timestamps → False (not stale, strict ``<``)
+    - parse failure (non-iso timestamp) → False (not stale)
+    """
+    try:
+        verdict_dict = stage_states.get("_verdicts", {}).get("CRITIQUE", {})
+        if not isinstance(verdict_dict, dict):
+            return False
+        recorded_at = verdict_dict.get("recorded_at")
+        if not recorded_at:
+            return False
+        latest_plan_at = _latest_dispatch_at(stage_states, SKILL_DO_PLAN)
+        if not latest_plan_at:
+            return False
+        verdict_dt = datetime.fromisoformat(recorded_at)
+        plan_dt = datetime.fromisoformat(latest_plan_at)
+        return verdict_dt < plan_dt
+    except Exception:
+        return False
+
+
+def _rule_critique_verdict_stale(stage_states: dict, meta: dict, context: dict) -> bool:
+    """Critique verdict is stale (plan revised since the verdict was recorded).
+
+    Fires row 2b (``/do-plan-critique``) when the CRITIQUE verdict predates the
+    latest ``/do-plan`` dispatch AND a non-empty critique verdict text exists.
+    Marker-agnostic by design: the #1639 dead-end leaves CRITIQUE at
+    ``in_progress``, so this rule must NOT require any particular marker value.
+
+    Loop-bound: G5 (``guard_g5_artifact_hash_cache``) runs before this row and
+    short-circuits re-critique when the plan hash is unchanged, so this rule can
+    only progress on a genuinely revised plan. See the docstring on row 2b.
+    """
+    if not _critique_verdict_is_stale(stage_states):
+        return False
+    return bool(_latest_critique_verdict(stage_states, meta).strip())
+
+
 def _rule_pr_exists_no_review(stage_states: dict, meta: dict, context: dict) -> bool:
     """PR exists, no review."""
     if not meta.get("pr_number"):
@@ -864,6 +926,7 @@ def _rule_stage_states_unavailable_pr_open(stage_states: dict, meta: dict, conte
 # these to cross-check SKILL.md row state cells. Keep in sync with SKILL.md.
 _rule_no_plan.__doc__ = "No plan exists"
 _rule_plan_not_critiqued.__doc__ = "Plan exists, not yet critiqued"
+_rule_critique_verdict_stale.__doc__ = "Critique verdict is stale (plan revised since)"
 _rule_critique_needs_revision.__doc__ = "Plan critiqued (NEEDS REVISION)"
 _rule_critique_ready_no_concerns.__doc__ = (
     "Plan critiqued (READY TO BUILD, zero concerns), no branch/PR"
@@ -905,6 +968,19 @@ DISPATCH_RULES: list[DispatchRule] = [
         state_predicate=_rule_plan_not_critiqued,
         skill=SKILL_DO_PLAN_CRITIQUE,
         reason="Plan must pass critique before build",
+    ),
+    # Row 2b (#1639): a stale CRITIQUE verdict (recorded before the latest
+    # /do-plan dispatch) means the plan was revised since the verdict — re-run
+    # the critique rather than dead-ending on /do-plan. Placed BEFORE row 3 so
+    # stale → re-critique wins over row 3's stale-text → /do-plan match. Mirrors
+    # REVIEW row 8b. Disjoint from G1 (which fires only when the last dispatch
+    # was /do-plan-critique; the #1639 dead-end has last dispatch = /do-plan),
+    # and bounded by G5 (re-critique short-circuits on an unchanged plan hash).
+    DispatchRule(
+        row_id="2b",
+        state_predicate=_rule_critique_verdict_stale,
+        skill=SKILL_DO_PLAN_CRITIQUE,
+        reason="Critique verdict is stale (plan revised since) — re-critique",
     ),
     DispatchRule(
         row_id="3",

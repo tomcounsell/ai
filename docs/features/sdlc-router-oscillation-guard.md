@@ -182,6 +182,31 @@ All edge cases fail safe to "not stale":
 
 This prevents the router from dispatching `/do-patch` against review findings that were already addressed by a prior patch cycle, which would create an oscillation between row 8 and row 8b.
 
+## Stale-Verdict Supersession — CRITIQUE (Row 2b / Row 3)
+
+The REVIEW staleness pattern above is mirrored for the CRITIQUE path (#1639), fixing the stale-critique dead-end: after a plan is revised in response to a plain `NEEDS REVISION` verdict, the router previously kept matching the stale cached verdict text and re-dispatching `/do-plan` forever.
+
+- A CRITIQUE verdict is **stale** iff its `recorded_at` timestamp predates the latest `/do-plan` dispatch timestamp in `_sdlc_dispatches`. The plan was demonstrably revised after the verdict.
+- This is encoded as `_critique_verdict_is_stale(stage_states)` — a structural twin of `_review_verdict_is_stale`, swapping `REVIEW`→`CRITIQUE` and `/do-patch`→`/do-plan`. The two helpers are kept as parallel functions intentionally (no DRY merge) to keep the already-shipped REVIEW path's blast radius zero.
+- **Row 3** (`_rule_critique_needs_revision`) steps aside (returns False) when the verdict is stale.
+- **Row 2b** (`_rule_critique_verdict_stale`, inserted before row 3) dispatches `/do-plan-critique` for a fresh critique. It is marker-agnostic — the dead-end leaves CRITIQUE at `in_progress`, so the rule must not require any particular marker value; it requires only a stale verdict AND non-empty verdict text.
+
+**Row 2b / Row 3 behavior with staleness check:**
+
+| Condition | Next dispatch |
+|-----------|---------------|
+| CRITIQUE verdict `NEEDS REVISION`, verdict fresh (recorded after latest `/do-plan`) | `/do-plan` (row 3) — revise |
+| CRITIQUE verdict `NEEDS REVISION`, verdict stale (plan revised since) | `/do-plan-critique` (row 2b) — re-critique |
+| No CRITIQUE verdict / empty verdict text | Row 2b does not fire |
+
+All edge cases fail safe to "not stale" (missing/unparseable `recorded_at`, no prior `/do-plan`, equal timestamps, any parse exception), exactly as in the REVIEW twin.
+
+**G5 is the loop-breaker (NOT G4).** The row-2b (`/do-plan-critique`) ↔ row-3 (`/do-plan`) cycle alternates *two different* skills, so `guard_g4_oscillation` (which keys on the *same* skill repeated) never trips it, and `guard_g2_critique_cycle_cap` (which only increments via `fail_stage("CRITIQUE")`) is never reached. The terminating bound is **G5 (`guard_g5_artifact_hash_cache`)**: it runs before the dispatch rows and, when the current plan-file hash equals the cached CRITIQUE verdict's `artifact_hash`, short-circuits the re-critique to the cached verdict's downstream dispatch. Re-critique therefore cannot loop on an unchanged plan — row 2b only progresses when the plan hash genuinely changed.
+
+**G5 activation in the CLI path.** G5 only fires if `context["current_plan_hash"]` is populated. Previously `tools/sdlc_next_skill.py::_build_context` never set it, leaving G5 inert via `sdlc-tool next-skill` (a latent inertness that also affected nothing else, since G5 is CRITIQUE-only). `_build_context` now computes `current_plan_hash = compute_plan_hash(find_plan_path(issue_number))` (None-safe: no plan or unreadable file leaves the key unset), so G5's loop bound on row 2b is real in production.
+
+**Disjointness from G1.** G1 (`guard_g1_critique_loop`) fires only when `last_dispatched_skill == /do-plan-critique` (the critique just ran; plan unchanged) and routes to `/do-plan`. The #1639 dead-end has `last_dispatched_skill == /do-plan` (plan just revised). The two conditions are disjoint on `last_dispatched_skill`, so G1 and row 2b never fire each other's skill.
+
 ## Single-Writer Invariant
 
 There is exactly ONE writer for the `_verdicts` metadata key:
