@@ -236,7 +236,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/merge_pm_dev_i
   `dev` removed, `granite` retained CLI-only). `PersonaType.DEVELOPER`+`PROJECT_MANAGER` → `ENGINEER`.
   `AccessLevel`/`SessionMode` reconciled so `SessionType.ENG` resolves `AccessLevel.WORKER`.
 - **Persona merge:** `config/personas/project-manager.md` + `developer.md` → one
-  `config/personas/engineer.md`. Update `manifest.json` / segment references.
+  `config/personas/engineer.md`. Update `config/personas/segments/manifest.json` / segment references.
 - **Bridge routing:** `bridge/routing.py` resolves `engineer`; `Eng:` prefix fallback only;
   `Dev:`/`PM:` branches and `is_team_chat` prefix tuple deleted. `bridge/telegram_bridge.py` and
   `bridge/email_bridge.py` map to `SessionType.ENG`.
@@ -246,7 +246,9 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/merge_pm_dev_i
 - **Dev machinery removal:** delete `_handle_dev_session_completion()` and its *dev-only*
   callers/parent-steering in `session_executor.py` / `session_health.py` / `output_router.py` **and the
   re-export in `agent/agent_session_queue.py:49-53`** (B1) — surgically, leaving the shared
-  `_transition_parent` and any surviving `_create_continuation_pm` callers intact; delete
+  `_transition_parent` (kept; also imported by `tools/agent_session_scheduler.py:417-419`, C4-B2) and
+  any surviving `_create_continuation_pm` callers intact; also flip the hardcoded
+  `session_type == "pm"` delivery literal at `agent/output_router.py:159` to `"eng"` (C4-B1); delete
   `tools/sdlc_decompose.py` + its pyproject entry + `MAX_PARALLEL_DEVS`/`PARALLEL_SAFE_PAIRS` in
   `agent/sdlc_router.py`; delete the `--role dev`/`--role pm` paths in `tools/valor_session.py` (+
   `valor_cli.py`, `sdlc_session_ensure.py`, `agent_session_scheduler.py`); remove the PM read-only Bash
@@ -326,6 +328,11 @@ Migration: stop bridge → Telegram rename PM→Eng / archive-or-rename Dev → 
 - [ ] Migration scripts on an empty Redis (no `pm` keys / no Dev chat) must no-op cleanly (`--dry-run`
       and live), exit 0, report zero renames — assert idempotency on a second run.
 - [ ] `resolve_persona` with empty/whitespace chat title resolves the documented default.
+- [ ] **`ClassificationType.QUESTION` messages to an eng session resolve to nudge/deliver, never spawn a
+      child dev session (CONCERN C4-C3).** The QUESTION fast-path (`sdk_client.py:3166,3202` — the critique
+      cited 3265, verified actually ~3164-3210 in the classification block) must survive the B2 deletion of
+      the `project_mode == "pm"` guards unchanged: a plain question still classifies as QUESTION and answers
+      conversationally rather than entering the SDLC/child-dev path.
 
 ### Error State Rendering
 - [ ] An eng session that errors must still deliver a PM-persona-safe Telegram message (no raw
@@ -345,6 +352,14 @@ Migration: stop bridge → Telegram rename PM→Eng / archive-or-rename Dev → 
 - [ ] Multi-dev fan-out tests for `tools/sdlc_decompose.py` / `MAX_PARALLEL_DEVS` /
       `PARALLEL_SAFE_PAIRS` — DELETE: feature removed.
 - [ ] `_handle_dev_session_completion` tests — DELETE: function removed.
+- [ ] `tests/unit/test_output_router.py` `determine_delivery_action` nudge-path test (BLOCKER C4-B1) —
+      UPDATE: switch the `session_type="pm"` + `classification_type="sdlc"` → `nudge_continue` case to
+      `session_type="eng"`, so the renamed delivery branch is exercised.
+- [ ] `tests/unit/test_continuation_pm.py` and `tests/integration/test_continuation_pm_handoff.py`
+      (BLOCKER C4-B2) — DELETE/REPLACE: both import `_create_continuation_pm` directly from
+      `agent.agent_session_queue`; disposition must stay consistent with the Task 3 decision on
+      `_create_continuation_pm` (delete the tests if the symbol is deleted; otherwise rewrite for the
+      surviving caller).
 - [ ] Child-session tests (`waiting_for_children`, `_finalize_parent_sync`,
       `VALOR_PARENT_SESSION_ID`) — VERIFY-UNCHANGED + ADD: the pattern survives; add/keep a test
       proving `VALOR_PARENT_SESSION_ID` propagates into container-spawned children after the rename.
@@ -507,8 +522,12 @@ No update-script **code** changes required. The feature is delivered to each mac
 4. **Edit vault `projects.json`:** replace `PM:`/`Dev:` group declarations with the single `Eng:`
    group, set persona `engineer`, **and remove any `"mode": "pm"` key (BLOCKER B2)** — the mode
    validator normalizes a missing/unknown mode to `"dev"`, so stripping it is the safe operational
-   complement to deleting the `project_mode == "pm"` code guards in Task 3. Validated by
-   `bridge/config_validation.py::validate_projects_config` at update Step 4.6.
+   complement to deleting the `project_mode == "pm"` code guards in Task 3. **Also update any
+   `pm_briefing.target_groups` entries from `PM: {Project}` to `Eng: {Project}` in the same vault edit
+   (CONCERN C4-C1)** — `pm_briefing.target_groups` (see `config/projects.example.json:72`,
+   `["PM: My Project"]`) names the group the daily PM voice briefing is delivered to via the Telegram
+   outbox; leaving it pointing at the renamed/archived `PM:` group silently sends briefings to a dead
+   group. Validated by `bridge/config_validation.py::validate_projects_config` at update Step 4.6.
 5. **`/update`** on the machine: pulls the merged (`PM`-less) code, `env_sync`/restart proceed normally.
    Because step 3 already drained the `pm` records, the new code never encounters a `session_type=pm`
    record.
@@ -554,7 +573,9 @@ work through the same Telegram path, now via one `Eng: {Project}` group instead 
 - [ ] Update `config/personas/engineer.md` (merged persona) docstring/header.
 
 ### Config & Command Surfaces
-- [ ] Update `config/projects.example.json` to the single `Eng:` group + `engineer` persona shape.
+- [ ] Update `config/projects.example.json` to the single `Eng:` group + `engineer` persona shape,
+      **including the `pm_briefing.target_groups` example (line 72, `["PM: My Project"]` → `["Eng: My Project"]`)
+      (CONCERN C4-C1)** and the `projects.telegram.groups` doc string at line 7.
 - [ ] Update `CLAUDE.md` command tables / architecture prose mentioning PM→Dev session spawning,
       `--role dev`/`--role pm`, and `sdlc-decompose`.
 
@@ -586,6 +607,13 @@ work through the same Telegram path, now via one `Eng: {Project}` group instead 
       container-spawned children (test or documented verification).
 - [ ] Pilot completed on Valor the Cowboy: `Eng: Valor` and `Eng: Popoto` groups live, end-to-end
       message → container → Telegram reply verified, before any other machine migrates.
+- [ ] **Conversational-question behavior verified on `Eng:` (CONCERN C4-C3):** during the Cowboy pilot,
+      a plain factual question (e.g., "what branch is this repo on?") sent to `Eng: Valor` receives a
+      conversational reply **without opening a GitHub issue or creating a PR** — confirming the single
+      Eng surface answers questions as well as doing work.
+- [ ] **`pm_briefing` delivery verified post-rename if the pilot project uses it (CONCERN C4-C1):** if
+      `valor`/`popoto` has `pm_briefing.enabled`, confirm the daily briefing still lands in the renamed
+      `Eng: {Project}` group after `target_groups` is updated.
 - [ ] Docs updated (see Documentation section): architecture, parallel-execution removal, ownership
       examples, persona docs, `projects.example.json`, `CLAUDE.md`.
 - [ ] Tests pass (`/do-test`)
@@ -617,12 +645,6 @@ The lead agent orchestrates; it never builds directly.
   - Agent Type: migration-specialist
   - Resume: true
 
-- **Validator (parent-linkage)**
-  - Name: `linkage-validator`
-  - Role: Verify `VALOR_PARENT_SESSION_ID` propagates into container-spawned children after rename.
-  - Agent Type: validator
-  - Resume: true
-
 - **Documentarian**
   - Name: `docs-writer`
   - Role: All Documentation-section tasks.
@@ -647,12 +669,15 @@ The lead agent orchestrates; it never builds directly.
 - `config/enums.py`: `SessionType` → `{ENG, TEAMMATE, GRANITE}` (`pm`→`eng`, remove `DEV`, keep
   `GRANITE`); `PersonaType.DEVELOPER`+`PROJECT_MANAGER` → `ENGINEER`; update docstrings.
 - Merge `config/personas/project-manager.md` + `developer.md` → `config/personas/engineer.md`; update
-  `manifest.json`/segment references.
+  `config/personas/segments/manifest.json` (correct path — manifest lives under `segments/`, not directly
+  under `config/personas/`) / segment references.
 
 ### 2. Rewire bridge routing, SDK client, email bridge
 - **Task ID**: build-routing
 - **Depends On**: build-enums-persona
-- **Validates**: `bridge/routing.py` persona tests; email-bridge persona tests
+- **Validates**: `bridge/routing.py` persona tests; email-bridge persona tests; **`VALOR_PARENT_SESSION_ID`
+  propagates into container-spawned (pooled-PTY) children after the rename (folded in from former Task 5,
+  CONCERN C4-C4) — add/keep a test asserting it**
 - **Assigned To**: core-builder
 - **Agent Type**: builder
 - **Parallel**: false
@@ -661,6 +686,9 @@ The lead agent orchestrates; it never builds directly.
 - `bridge/telegram_bridge.py` + `bridge/email_bridge.py`: map to `SessionType.ENG`.
 - `agent/sdk_client.py`: `(ENGINEER, AccessLevel.WORKER)` resolution in `compose_system_prompt`
   + `_resolve_*` (~1168); re-gate `VALOR_PARENT_SESSION_ID` (~1595) on ENG/Teammate.
+- **Parent-linkage check (folded in from former Task 5, CONCERN C4-C4):** confirm
+  `VALOR_PARENT_SESSION_ID` propagates into container-spawned (pooled-PTY) children after the rename;
+  add/keep a test asserting it.
 
 ### 3. Remove dev machinery
 - **Task ID**: build-removal
@@ -687,14 +715,38 @@ The lead agent orchestrates; it never builds directly.
     only the deleted symbol(s) and keep the survivors.
   - Also audit `agent/hooks/pre_tool_use.py:503` and `agent/output_router.py:13,118` which reference
     `_handle_dev_session_completion` in comments/logic.
+  - **Expand the audit grep beyond `agent/` (BLOCKER C4-B2):** run
+    `grep -rn "_handle_dev_session_completion\|_create_continuation_pm\|_transition_parent" agent/ tools/ tests/`
+    — the `agent/`-only scope misses two live callers: **`tools/agent_session_scheduler.py:417-419`**
+    (`from agent.agent_session_queue import _transition_parent` then
+    `_transition_parent(parent_session, "waiting_for_children")` — `_transition_parent` is a KEEPER; the
+    hazard is careless restructuring of the `agent/agent_session_queue.py:49-53` re-export block →
+    ImportError kills the scheduler at startup) and **`tests/unit/test_continuation_pm.py` +
+    `tests/integration/test_continuation_pm_handoff.py`** (both import `_create_continuation_pm` directly
+    from `agent.agent_session_queue`). The `_transition_parent` re-export MUST survive the removal; the
+    `python -c "import agent.agent_session_queue"` verification only protects the scheduler if it does.
+- **Fix the hardcoded `session_type == "pm"` delivery branch (BLOCKER C4-B1):**
+  `agent/output_router.py:159` (in `determine_delivery_action`, def at L79) reads
+  `if session_type == "pm" and classification_type == "sdlc": return "nudge_continue"` — a bare string
+  literal, NOT `SessionType.PM`. After the rename, eng sessions carry `"eng"` and this branch never
+  fires, so SDLC sessions get `deliver` instead of `nudge_continue`, silently breaking the pipeline
+  auto-continue loop. (Note: the critique cited line 636; the literal is actually at **line 159** —
+  verified against live `main`.) Change `"pm"` → `"eng"` (StrEnum equality means `SessionType.ENG == "eng"`,
+  either form works). No other grep in the existing Verification table catches this — the `"pm"` grep
+  scanned only `config/enums.py`.
 - Delete `_handle_dev_session_completion()` + its dev-only callers/parent-steering in
   `session_executor.py` (import L17, call L1915), `session_health.py`, `output_router.py`, **and the
-  re-export in `agent/agent_session_queue.py`** — surgically, per the audit above.
+  re-export in `agent/agent_session_queue.py`** — surgically, per the audit above. In
+  `agent/output_router.py`, additionally change the `session_type == "pm"` delivery literal at **line 159**
+  to `"eng"` (BLOCKER C4-B1, above). **Must-not-break callers of the re-export block:**
+  `session_health.py:1955,2015` (`_transition_parent`) and **`tools/agent_session_scheduler.py:417-419`**
+  (`_transition_parent`) — leave `_transition_parent` exported.
 - **Parent-sync machinery disposition (CONCERN, Consistency):** `_finalize_parent_sync` /
   `waiting_for_children` are general child-session machinery, **not** dev-specific — they survive the
   removal. `_handle_dev_session_completion` was only one *trigger* of the parent-sync path; the
-  container-completion path and `session_health.py`'s `_transition_parent` calls remain. Task 5
-  (validate-linkage) confirms the surviving path still finalizes parents. The child-session tests
+  container-completion path and `session_health.py`'s `_transition_parent` calls remain. The
+  parent-linkage check folded into Task 2 (formerly Task 5) confirms the surviving path still finalizes
+  parents. The child-session tests
   (`waiting_for_children`, `_finalize_parent_sync`) are therefore **kept and must still pass**; only
   tests exercising the dev-completion *trigger* are deleted.
 - Delete `tools/sdlc_decompose.py` + `pyproject.toml` `sdlc-decompose` entry +
@@ -790,16 +842,7 @@ The lead agent orchestrates; it never builds directly.
     read path operators rely on. Idempotency guard: skip any key already bearing the target Eng `chat_id`
     segment (mirror the precedent's `skipped_already_migrated`). This gives a mid-scan kill a safe resume.
 
-### 5. Verify parent-session linkage
-- **Task ID**: validate-linkage
-- **Depends On**: build-routing, build-removal
-- **Assigned To**: linkage-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Confirm `VALOR_PARENT_SESSION_ID` propagates into container-spawned (pooled-PTY) children after the
-  rename; add/keep a test asserting it.
-
-### 6. Documentation
+### 5. Documentation
 - **Task ID**: document-feature
 - **Depends On**: build-routing, build-removal, build-migrations
 - **Assigned To**: docs-writer
@@ -808,9 +851,9 @@ The lead agent orchestrates; it never builds directly.
 - Execute all Documentation-section tasks (architecture rewrite, parallel-execution removal, ownership
   examples, persona docs, `projects.example.json`, `CLAUDE.md`).
 
-### 7. Final validation
+### 6. Final validation
 - **Task ID**: validate-all
-- **Depends On**: build-routing, build-removal, build-migrations, validate-linkage, document-feature
+- **Depends On**: build-routing, build-removal, build-migrations, document-feature
 - **Assigned To**: final-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -825,7 +868,8 @@ The lead agent orchestrates; it never builds directly.
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| No `pm` session value | `grep -rn 'SessionType.PM\b\|"pm"' config/enums.py` | output does not contain SessionType.PM |
+| No `pm` session value | `grep -rn 'SessionType.PM\b' config/ agent/ bridge/ tools/ ui/ tests/ --include="*.py"` | exit code 1 (CONCERN C4-C2: scope widened from `config/enums.py` to match the `dev` row and the "no value remains anywhere" criterion) |
+| No `"pm"` literal in output_router | `grep -n '"pm"' agent/output_router.py` | no matches (BLOCKER C4-B1: the `session_type == "pm"` delivery branch is now `"eng"`) |
 | No `dev` session value | `grep -rn 'SessionType.DEV\b' config/ agent/ bridge/ tools/ ui/ tests/` | exit code 1 |
 | No `Dev:`/`PM:` fallback | `grep -rn 'startswith("Dev:")\|startswith("PM:")' bridge/routing.py` | exit code 1 |
 | sdlc-decompose removed | `grep -n 'sdlc-decompose\|sdlc_decompose' pyproject.toml` | exit code 1 |
@@ -911,6 +955,27 @@ place — the rest of the plan's claims verified accurate.
 `agent/agent_session_queue.py` re-export block (B1); `bridge/email_bridge.py:879` PM write (C2-B3);
 `config/enums.py` `SessionType` `{PM,TEAMMATE,DEV,GRANITE}` + `PersonaType`
 `{DEVELOPER,PROJECT_MANAGER,…}` pre-rename shape. No blockers or concerns remain; plan stays Ready.
+
+### Cycle 4 — war room re-run 2026-06-12
+
+**Verdict:** NEEDS REVISION (2 blockers, 4 concerns, 1 nit) → **REVISION APPLIED 2026-06-12.**
+
+This cycle surfaced two new blockers (hardcoded `"pm"` literals the prior cycles' enum-grep never
+scanned) plus four concerns and a structural path fix. All folded into the body and re-verified against
+live `main`. Two cited line numbers had **drifted** and were corrected during this revision (see notes).
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | — | Hardcoded `session_type == "pm"` delivery branch — critique cited `agent/output_router.py:636`; the literal is actually at **line 159** in `determine_delivery_action` (def L79). Bare string, not `SessionType.PM`; after rename eng sessions get `deliver` instead of `nudge_continue`, silently breaking pipeline auto-continue. Not caught by the existing `"pm"`-in-`config/enums.py` grep. | **FIXED — Task 3 (new bullet + audit), Solution dev-machinery bullet, Verification (new `grep '"pm"' output_router.py` row), Test Impact (`test_output_router.py` nudge-path UPDATE)**: flip `"pm"` → `"eng"` at line 159. | **Line drift corrected:** critique said 636, verified 159 against live `main`. |
+| BLOCKER | — | Task 3 pre-removal grep scoped to `agent/` only — misses `tools/agent_session_scheduler.py:417-419` (`from agent.agent_session_queue import _transition_parent`, a KEEPER; hazard is breaking the `:49-53` re-export block → scheduler ImportError at startup) and `tests/unit/test_continuation_pm.py` + `tests/integration/test_continuation_pm_handoff.py` (import `_create_continuation_pm` directly). | **FIXED — Task 3 (audit grep expanded to `agent/ tools/ tests/`; scheduler added to must-not-break caller list; re-export survival note), Test Impact (two continuation-pm test files DELETE/REPLACE)**. | Verified `tools/agent_session_scheduler.py:417-419` import + call against live `main`. |
+| CONCERN | — | `pm_briefing.target_groups` still points at `PM:` group names — critique cited `config/projects.example.json:443`; the field is actually at **line 72** (`["PM: My Project"]`). Runbook step 4 never updated it → briefings target a dead group. | **FIXED — Update System runbook step 4 (update `target_groups`), Documentation Config-surfaces task, Success Criteria (pilot pm_briefing verification)**. | **Line drift corrected:** critique said 443, verified 72 against live `main`. |
+| CONCERN | — | Verification grep asymmetry — `pm` scanned 1 dir, `dev` scanned 6. | **FIXED — Verification table**: "No `pm` session value" grep widened from `config/enums.py` to `config/ agent/ bridge/ tools/ ui/ tests/ --include="*.py"`, matching the `dev` row and the "no value remains anywhere" criterion. | — |
+| CONCERN | — | No acceptance test for conversational-question behavior on `Eng:`. | **FIXED — Success Criteria (Cowboy plain-question → conversational reply, no issue/PR) + Failure Path Test Strategy (`ClassificationType.QUESTION` must resolve to nudge/deliver, never spawn a child dev session; QUESTION fast-path survives B2 deletion)**. | **Line drift corrected:** critique cited the QUESTION fast-path near `sdk_client.py:3265`; verified at `:3166,3202` (classification block ~3164-3210) against live `main`. |
+| CONCERN | — | Fold Task 5 (validate-linkage) into Task 2; delete Task 5 + the `linkage-validator` team member; Task 7's dependency drops `validate-linkage`; roster shrinks to 5. | **FIXED — Task 2 Validates line + new parent-linkage bullet; former Task 5 deleted; Tasks 6/7 renumbered to 5/6; `validate-linkage` dep dropped from final-validation; `linkage-validator` team member removed (roster now 5)**. | — |
+| NIT | — | Team roster right-sizes to 5 after the Task 5 fold; no standalone action. | **Subsumed by the CONCERN above** (roster trimmed to 5). | — |
+| STRUCTURAL | — | Task 1 said `manifest.json` under `config/personas/` — correct path is `config/personas/segments/manifest.json`. | **FIXED — Task 1 + Solution persona-merge bullet**: path corrected to `config/personas/segments/manifest.json`. | Verified `config/personas/segments/manifest.json` exists; no `config/personas/manifest.json`. |
+
+**All 2 blockers + 4 concerns + 1 nit + structural fix resolved in the body; plan status → Ready.**
 
 ---
 
