@@ -80,10 +80,30 @@ def _build_context(proposed_skill: str | None, issue_number: int | None) -> dict
     - ``proposed_skill``: the skill the LLM was about to invoke (used by G3
       to detect plan-family redirects when a PR is already open).
     - ``branch_exists``: whether the session branch already exists (Row 5).
+    - ``current_plan_hash``: sha256 of the plan file (used by G5 to short-circuit
+      re-critique on an unchanged plan; #1639). Without this, G5's loop bound on
+      router row 2b is inert in the CLI path.
     """
     context: dict = {}
     if proposed_skill:
         context["proposed_skill"] = proposed_skill
+
+    # G5 activation (#1639): supply the current plan-file hash so
+    # guard_g5_artifact_hash_cache can compare it against the cached CRITIQUE
+    # verdict's artifact_hash and bound the row-2b re-critique loop. None-safe:
+    # no plan path or unreadable file leaves the key unset (G5 then no-ops).
+    if issue_number:
+        try:
+            from tools._sdlc_utils import find_plan_path
+            from tools.sdlc_verdict import compute_plan_hash
+
+            plan_path = find_plan_path(issue_number)
+            if plan_path is not None:
+                plan_hash = compute_plan_hash(plan_path)
+                if plan_hash is not None:
+                    context["current_plan_hash"] = plan_hash
+        except Exception:
+            pass
 
     # Check whether the issue-specific session branch already exists (informs Row 5).
     # Uses `session/sdlc-{issue_number}` — the canonical branch name for SDLC work.
