@@ -235,6 +235,16 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/merge_pm_dev_i
 - **Enum collapse (`config/enums.py`):** `SessionType` → `{ENG, TEAMMATE, GRANITE}` (`pm`→`eng`,
   `dev` removed, `granite` retained CLI-only). `PersonaType.DEVELOPER`+`PROJECT_MANAGER` → `ENGINEER`.
   `AccessLevel`/`SessionMode` reconciled so `SessionType.ENG` resolves `AccessLevel.WORKER`.
+- **`AccessLevel.PM_READONLY` reconciled (BLOCKER C7-B3, decided — re-gate, not silent-drop):** the
+  member is **deleted** (no resolver returns it once SessionType.PM and `project_mode=="pm"` go away —
+  unreachable dead code under NO LEGACY CODE), but the **work-vault `CLAUDE.md` business-context layer
+  it carried is preserved** by folding the append into the `AccessLevel.WORKER` branch of
+  `compose_system_prompt` and re-gating the `load_eng_system_prompt` (formerly `load_pm_system_prompt`)
+  SDLC-orchestration load in `session_executor.py` onto the eng/WORKER path. Non-container CLI eng
+  sessions still compose system prompts via `compose_system_prompt` and keep the vault layer; the
+  granite container path manages its own context. This is a deliberate decision recorded so the builder
+  does not silently strip business context — see Task 2 for the exact surgery and the full PM_READONLY
+  consumer audit.
 - **Persona merge:** `config/personas/project-manager.md` + `developer.md` → one
   `config/personas/engineer.md`. Update `config/personas/segments/manifest.json` / segment references.
 - **Bridge routing:** `bridge/routing.py` resolves `engineer`; `Eng:` prefix fallback only;
@@ -363,6 +373,14 @@ Migration: stop bridge → Telegram rename PM→Eng / archive-or-rename Dev → 
 - [ ] `tests/unit/test_pm_session_permissions.py::TestPMBashRestriction` — REPLACE/DELETE: the PM
       read-only Bash rails in `pre_tool_use.py` are removed for work sessions; rewrite to assert the
       new eng behavior or delete if the rail is fully gone.
+- [ ] **`tests/unit/test_compose_system_prompt.py` (BLOCKER C7-B3) — REPLACE:** the #1227 byte-stability
+      fixtures pin the composed system prompt for the `(PROJECT_MANAGER, PM_READONLY)` and
+      `(DEVELOPER, WORKER)` cells. Both `(persona, access_level)` pairs are deleted; rewrite the fixtures
+      for the single `(ENGINEER, WORKER)` cell — including the case where a `working_directory` with a
+      `CLAUDE.md` is supplied (asserts the re-gated vault layer is appended on the WORKER branch) and the
+      case where it is absent (asserts the layer is skipped without raising). Re-baseline any golden
+      output. Also update `tests/unit/test_resolve_compose_args.py` if it asserts the removed
+      PM_READONLY validation raise.
 - [ ] Tests asserting `SessionType.PM` / `SessionType.DEV` (enum membership, routing, scheduler,
       dashboard) — UPDATE: switch to `SessionType.ENG`; assert `DEV`/`PM` no longer exist.
 - [ ] `tests/unit/granite_container/test_cli.py` (GRANITE type) — VERIFY-UNCHANGED: GRANITE retained;
@@ -389,6 +407,14 @@ Migration: stop bridge → Telegram rename PM→Eng / archive-or-rename Dev → 
 - [ ] Child-session tests (`waiting_for_children`, `_finalize_parent_sync`,
       `VALOR_PARENT_SESSION_ID`) — VERIFY-UNCHANGED + ADD: the pattern survives; add/keep a test
       proving `VALOR_PARENT_SESSION_ID` propagates into container-spawned children after the rename.
+- [ ] **`tests/unit/test_bridge_dispatch_contract.py` (BLOCKER C7-B1) — NO CHANGE (correction):** the
+      cycle-7 critique claimed this test "imports `SessionType.PM` at line 200" and asked for an UPDATE.
+      **Verified against live `main`: the file has ZERO `SessionType` references** — it is an AST contract
+      test asserting `dispatch_telegram_session` enqueues-then-records-dedup, and the live-handler call at
+      line 200 passes no `session_type` kwarg. Changing the `bridge/dispatch.py:87` default from
+      `SessionType.PM` to `SessionType.ENG` does not touch this test's assertions, so **no edit is
+      required** here. The `bridge/dispatch.py` fix is covered by the Task 2 file-list bullet and the
+      `SessionType.PM\b` Verification grep.
 - [ ] `bridge/routing.py` persona-resolution tests (`Dev:`/`PM:`/`Eng:` prefixes) — UPDATE: assert
       `Eng:` resolves engineer; `Dev:`/`PM:` no longer special.
 - [ ] `valor-session` role tests — UPDATE: `eng`/`teammate` accepted; `dev`/`pm` rejected.
@@ -562,6 +588,14 @@ No update-script **code** changes required. The feature is delivered to each mac
    three must stay down for the whole migration window: the worker's hourly cleanup +
    `reflection_scheduler.py` and the email bridge's inbound handler each create `session_type="pm"`
    records outside the Telegram bridge.
+   **Email-bridge launchd asymmetry (NIT C7-N1):** `worker-disable` suppresses launchd respawn for the
+   worker, but `email-stop` is a transient `bootout` — on machines that have installed the optional
+   email-bridge launchd plist (`scripts/install_email_bridge.sh`), `KeepAlive=true` may relaunch the
+   email bridge mid-migration, and the migration's `pgrep`/`email:last_poll_ts` guard is point-in-time,
+   so a respawned bridge could write a fresh `pm` record after the guard passed. **On machines with the
+   email-bridge launchd plist installed, unload it (`launchctl bootout` the
+   `com.valor.email-bridge` label, or use the disable variant) before migrating, and re-load/re-enable
+   it in step 6.** On machines without the plist, `email-stop` is sufficient.
 2. **Telegram:** rename `PM: {Project}` → `Eng: {Project}` (preserves chat_id/history); archive
    `Dev: {Project}` (or rename `Dev:`→`Eng:` for Dev-only projects).
 3. **Run the Redis migration(s) against the still-current (pre-update) code (BLOCKER B4):**
@@ -585,7 +619,8 @@ No update-script **code** changes required. The feature is delivered to each mac
    Because step 3 already drained the `pm` records, the new code never encounters a `session_type=pm`
    record.
 6. **Re-enable + restart the worker** (`worker-start` re-enables launchd respawn), the Telegram bridge,
-   **and the email bridge (`email-start`)**; verify end-to-end via
+   **and the email bridge (`email-start`)**; **on machines where step 1 unloaded the email-bridge launchd
+   plist, re-load/re-enable it now (NIT C7-N1)**; verify end-to-end via
    `valor-telegram read --chat "Eng: {Project}"`.
 7. **Post-restart steady-state canary — confirm no writer re-mints `pm`/`dev` records (CONCERN C5-C1,
    Operator).** Message delivery (step 6) proves the read path; it does **not** prove the renamed writers
@@ -617,6 +652,12 @@ work through the same Telegram path, now via one `Eng: {Project}` group instead 
 - [ ] Rename `docs/features/pm-dev-session-architecture.md` → `docs/features/eng-session-architecture.md`
       (NO LEGACY naming rule; supervisor-confirmed) and rewrite it to describe the single Eng role and
       `{eng, teammate}` (+ CLI-only granite) session types. Update all inbound references to the old path.
+- [ ] In the renamed architecture doc, document the **`AccessLevel.PM_READONLY` removal + work-vault
+      `CLAUDE.md` re-gate (BLOCKER C7-B3)**: `PM_READONLY` is deleted; the per-project work-vault
+      `CLAUDE.md` business-context layer now rides the `(ENGINEER, AccessLevel.WORKER)` cell of
+      `compose_system_prompt`, and `load_pm_system_prompt` is renamed `load_eng_system_prompt`. State
+      that this preserves the business-context behavior the old PM persona had — it is not a silent
+      capability drop.
 - [ ] Remove/replace `docs/features/sdlc-parallel-execution.md` (multi-dev fan-out deleted).
 - [ ] Update `docs/features/single-machine-ownership.md` examples to the `Eng:` group shape.
 - [ ] Update `docs/features/README.md` index table for any renamed/removed pages.
@@ -704,6 +745,13 @@ work through the same Telegram path, now via one `Eng: {Project}` group instead 
       back to the `Eng:` group. This proves the bridge's reply-to session-continuation (keyed on Telegram
       thread ID, not group name) survives the `PM:`→`Eng:` group rename; check via
       `python -m tools.valor_session status --id <ID>` (pending steering messages) on the live session.
+- [ ] **Background-job alerts reach `Eng: Valor` post-rename (BLOCKER C7-B4):** the grep gate proves no
+      `"Dev: Valor"` delivery literal survives in `reflections/ scripts/ agent/`; additionally, on the
+      Cowboy pilot, trigger at least one background-job alert path and confirm it lands in the renamed
+      group — e.g. `python scripts/nightly_regression_tests.py --dry-run` (or a live tick) sends to
+      `Eng: Valor`, verified via `valor-telegram read --chat "Eng: Valor"`. Guards against
+      nightly-test / Sentry-triage / docs-audit / memory-consolidation / hibernate-wake alerts silently
+      going dark into the archived `Dev: Valor` group.
 - [ ] Docs updated (see Documentation section): architecture, parallel-execution removal, ownership
       examples, persona docs, `projects.example.json`, `CLAUDE.md`.
 - [ ] Tests pass (`/do-test`)
@@ -754,12 +802,31 @@ The lead agent orchestrates; it never builds directly.
 - **Depends On**: none
 - **Validates**: `tests/unit/` enum/persona tests; `tests/unit/granite_container/test_cli.py` (GRANITE unchanged);
   **`tests/unit/test_enums.py` (alias-equality), `tests/unit/test_agent_session.py` (`worker_key`/`_ENG_WORKTREE_STAGES`),
-  and the `import models.agent_session` smoke (BLOCKER C6-B1) — the ENG alias/worker_key surgery must keep these green**
+  and the `import models.agent_session` smoke (BLOCKER C6-B1) — the ENG alias/worker_key surgery must keep these green;
+  `tests/unit/test_compose_system_prompt.py` (re-baselined for `(ENGINEER, WORKER)` after the PM_READONLY removal, BLOCKER C7-B3)**
 - **Assigned To**: core-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - `config/enums.py`: `SessionType` → `{ENG, TEAMMATE, GRANITE}` (`pm`→`eng`, remove `DEV`, keep
-  `GRANITE`); `PersonaType.DEVELOPER`+`PROJECT_MANAGER` → `ENGINEER`; update docstrings.
+  `GRANITE`); `PersonaType.DEVELOPER`+`PROJECT_MANAGER` → `ENGINEER`; **delete `AccessLevel.PM_READONLY`
+  (config/enums.py:67) and its docstring block (lines 54-58) (BLOCKER C7-B3)** — after Task 2/Task 3
+  remove every resolver that returns it, the member and its rails become unreachable dead code (NO
+  LEGACY CODE). The behavior it carried (the work-vault `CLAUDE.md` context layer) is **re-gated onto
+  the WORKER branch for eng sessions** in Task 2 — see the BLOCKER C7-B3 bullet there; update docstrings.
+- **`ui/data/machine.py:52-57` — `persona_order` dict keyed on deleted `PersonaType` members (BLOCKER
+  C7-B2):** the dashboard machine-page sort builds a dict literal **inside a function body** —
+  `persona_order = {PersonaType.PROJECT_MANAGER: 0, PersonaType.DEVELOPER: 1, PersonaType.TEAMMATE: 2}`
+  (lines 53-55, used at line 57). Because it is a runtime literal, not a module-level constant, it
+  raises `AttributeError` only on the **first dashboard machine-page render** — deferred past import
+  smoke tests and likely past CI. **Rekey to `{PersonaType.ENGINEER: 0, PersonaType.TEAMMATE: 1}`**
+  (collapse the two deleted PM/DEV entries into the single ENGINEER rank). Verified live: dict at
+  52-57 (critique cited 50-57 — minor drift, corrected here).
+- **`scripts/capture_persona_baseline.py:9` (BLOCKER C7-B2, docstring) — UPDATE:** the
+  `(DEVELOPER, WORKER)` / `(PROJECT_MANAGER, PM_READONLY, work_dir)` baseline-cell label lives in the
+  module **docstring** (line 9), not a runtime dict, so it does not crash — but it names the deleted
+  `(persona, access_level)` pairs. Rewrite the docstring cell labels to `(ENGINEER, WORKER)` (the single
+  surviving cell) so the baseline-capture prose matches the collapsed enum. Verified live: the only
+  `PROJECT_MANAGER`/`DEVELOPER` reference in the file is this docstring line.
 - **`models/agent_session.py` — the core ORM model; absent from prior cycles' file list and from every
   Verification grep scope (BLOCKER C6-B1, flagged by all 7 critics). Its module-level aliases evaluate at
   import, so leaving them un-renamed crashes `import models.agent_session` — and therefore worker, bridge,
@@ -802,15 +869,61 @@ The lead agent orchestrates; it never builds directly.
 - **Depends On**: build-enums-persona
 - **Validates**: `bridge/routing.py` persona tests; email-bridge persona tests; **`VALOR_PARENT_SESSION_ID`
   propagates into container-spawned (pooled-PTY) children after the rename (folded in from former Task 5,
-  CONCERN C4-C4) — add/keep a test asserting it**
+  CONCERN C4-C4) — add/keep a test asserting it**; **`tests/unit/test_compose_system_prompt.py` — the
+  re-gated work-vault `CLAUDE.md` layer now appends on the `(ENGINEER, WORKER)` branch (BLOCKER C7-B3)**;
+  **`bridge/dispatch.py` import smoke — the `SessionType.ENG` default param must not raise (BLOCKER C7-B1)**
 - **Assigned To**: core-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - `bridge/routing.py`: resolve `engineer`; `Eng:` prefix fallback only; delete `Dev:`/`PM:` branches +
   `is_team_chat` prefix tuple.
 - `bridge/telegram_bridge.py` + `bridge/email_bridge.py`: map to `SessionType.ENG`.
+- **`bridge/dispatch.py:87` — `def`-time default param crash (BLOCKER C7-B1):** the
+  `dispatch_telegram_session(..., session_type: str = SessionType.PM, ...)` default binds at **import
+  time**, and `bridge/telegram_bridge.py:107` imports `bridge.dispatch`, so the bridge raises
+  `AttributeError` at startup the instant Task 1 deletes `SessionType.PM` — before serving a single
+  message. This file was in **no** prior task list. **Change the default to `SessionType.ENG`.** Before
+  editing, run `grep -n 'SessionType\.' bridge/dispatch.py` to confirm no other member defaults in the
+  file (verified live: line 87 is the sole `SessionType.` reference). The existing `SessionType.PM\b`
+  Verification grep over `bridge/` already backstops this, but the task-level assignment is the fix.
 - `agent/sdk_client.py`: `(ENGINEER, AccessLevel.WORKER)` resolution in `compose_system_prompt`
   + `_resolve_*` (~1168); re-gate `VALOR_PARENT_SESSION_ID` (~1595) on ENG/Teammate.
+- **Re-gate the work-vault `CLAUDE.md` context layer onto the eng/WORKER path (BLOCKER C7-B3; decided —
+  preserve the layer, do not silently drop it):** with `SessionType.ENG` resolving
+  `(ENGINEER, AccessLevel.WORKER)`, the persona falls through `_resolve_persona`→`engineer`→
+  `_access_level_for_persona`→`WORKER` (engineer is not PM/TEAMMATE/CS, so it hits the default
+  `return AccessLevel.WORKER`, verified live at sdk_client.py:1186-1194), and the
+  `if access_level == AccessLevel.PM_READONLY:` work-vault-`CLAUDE.md`-append block at
+  **sdk_client.py:1109-1116** becomes unreachable. That block is the **only** site that injects the
+  per-project work-vault `CLAUDE.md` business-context layer; deleting PM_READONLY without re-gating
+  would **silently strip business context** from every eng session the PM persona used to receive.
+  **Concrete surgery (verified against live `main`):**
+  - The `AccessLevel.WORKER` branch (lines 1098-1107) `return`s early, *before* the PM_READONLY block —
+    so re-gating cannot be a simple gate rename. **Fold the work-vault `CLAUDE.md` append INTO the
+    WORKER branch:** when `access_level == AccessLevel.WORKER` and a `working_directory` is provided and
+    a `CLAUDE.md` exists there, append it to the composed WORKER prompt (the same
+    `Path(working_directory) / "CLAUDE.md"` read the PM_READONLY block did at 1110-1115), then return.
+    Make `working_directory` optional for WORKER (no longer required) — the eng path may run without a
+    vault dir, in which case the layer is simply skipped (no raise). **Delete** the
+    `access_level == AccessLevel.PM_READONLY` validation raise at sdk_client.py:1087-1091 and the whole
+    PM_READONLY append block at 1109-1116.
+  - Update the `compose_system_prompt` docstring (lines 1040-1068) that still says the vault layer
+    applies "only when `access_level == AccessLevel.PM_READONLY`" and references the
+    `(PROJECT_MANAGER, PM_READONLY, work_dir)` cell → describe the `(ENGINEER, WORKER)` cell.
+  - **Audit and clean every remaining `PM_READONLY` consumer** so the deletion is total (verified live
+    references): sdk_client.py:1040, 1044, 1058, 1068 (docstrings), 1087-1091 (validation raise),
+    1109-1116 (append block), 1141, 1153 (docstrings), 1169, 1174 (resolver returns — gone with the
+    SessionType.PM / project_mode=="pm" deletions in Task 2/Task 3), 1187 (`_access_level_for_persona`
+    PROJECT_MANAGER→PM_READONLY mapping — the PROJECT_MANAGER branch is removed with the persona merge),
+    1243 (docstring/example), 3646 (`if _access_level == AccessLevel.PM_READONLY:` guard). None may
+    survive once the member is deleted.
+- **`agent/session_executor.py:1658` — mirror the re-gate (BLOCKER C7-B3):** the
+  `if _composed_access_level == AccessLevel.PM_READONLY:` guard (line 1658) that calls
+  `load_pm_system_prompt(str(working_dir))` (imported at line 1526, called 1660) gates the SDLC-
+  orchestration system-prompt load the same way. **Re-gate it on the eng/WORKER path** (e.g.
+  `_composed_access_level == AccessLevel.WORKER`) so eng sessions still load it, and **rename
+  `load_pm_system_prompt` → `load_eng_system_prompt`** (its name no longer reflects the persona) at its
+  definition and both references here. Update the `[pm-persona-missing]` warning label accordingly.
 - **Parent-linkage check (folded in from former Task 5, CONCERN C4-C4):** confirm
   `VALOR_PARENT_SESSION_ID` propagates into container-spawned (pooled-PTY) children after the rename;
   add/keep a test asserting it.
@@ -940,6 +1053,29 @@ The lead agent orchestrates; it never builds directly.
     `grep -n '_stype\b\|_stype_pre\b\|_stype_early\b\|_session_type\b\|"dev"' agent/session_executor.py`
     and map every hit to RENAME (the six setup-path guards: 652/781/828/855/885/910) or DELETED-WITH-FUNCTION
     (the single completion gate: 1914) before editing. Re-verify any new gate that appears in context.
+  - **Rename the hardcoded `"Dev: Valor"` background-job delivery targets → `"Eng: Valor"` (BLOCKER
+    C7-B4):** post-archive of the `Dev: Valor` group these `--chat "Dev: Valor"` / `chat="Dev: Valor"`
+    send-targets still *resolve* — into a group nobody reads — so nightly-test failures, Sentry triage,
+    docs audits, SDLC-progress pings, memory-consolidation alerts, and worker hibernate/wake notices all
+    go dark. These are **delivery targets**, distinct from the persona-routing `"Dev:"` prefix removed by
+    Task 2. **Eight verified delivery-target literals (grep'd live across the whole repo, the critique's
+    six was an undercount):**
+    - `reflections/docs_auditor.py:844` (`["valor-telegram", "send", "--chat", "Dev: Valor", message]`)
+    - `reflections/sentry_triage.py:428` (same shape)
+    - `reflections/sdlc_progress.py:210` (same shape)
+    - `scripts/memory_consolidation.py:340` (same shape, `telegram_msg`)
+    - `scripts/nightly_regression_tests.py:25` — module-level `TELEGRAM_CHAT = "Dev: Valor"`
+    - `agent/sustainability.py:239` and `:250` — `f"Send a Telegram message to the 'Dev: Valor' chat..."`
+      hibernate/wake prompt bodies (single-quoted, embedded in the prompt the worker executes)
+    - `agent/sustainability.py:603` — `"Send via valor-telegram to the 'Dev: Valor' chat."` (already
+      noted in the bare-literal block as the cosmetic companion to the `:610` `session_type` kwarg;
+      rename the chat string here too so the alert lands in `Eng: Valor`)
+    Rename every one to `"Eng: Valor"`. **Scope is `reflections/ scripts/ agent/` only.** Do NOT
+    blanket-rename the `"Dev: Valor"` occurrences in `tests/` — those are persona-**routing** fixtures
+    (`find_project_for_chat`, `_resolve_persona`, `is_team_chat` prefix tests) that exercise the OLD
+    `Dev:` routing being deleted by Task 2; they are handled by the Task 2 routing-test updates, not this
+    delivery-target rename. The `"Dev: Valor"` strings in docs/CLAUDE.md/skill examples are covered by
+    the Documentation section's CLAUDE.md/tool-doc updates.
   - **`scripts/steer_child.py:94` (BLOCKER C6-B1 item 5):** `if not child.is_dev:` — `is_dev` is **deleted**
     from `agent_session.py` (Task 1), so this guard must follow. Replace with the eng equivalent
     (`if not child.is_eng:`) or remove the guard if it no longer makes sense under the single Eng role.
@@ -1097,8 +1233,11 @@ critical path* changes.
 | No `pm` session value | `grep -rn 'SessionType.PM\b' config/ agent/ bridge/ tools/ ui/ models/ scripts/ tests/ --include="*.py"` | exit code 1 (CONCERN C4-C2: scope widened from `config/enums.py` to match the `dev` row and the "no value remains anywhere" criterion; **`models/` + `scripts/` added in cycle 6 — BLOCKER C6-B1**) |
 | No bare `session_type` pm/dev literal (codebase-wide, BLOCKER C5-B1) | `grep -rnE 'session_type\s*=\s*["'"'"']?(pm\|dev)["'"'"']' agent/ bridge/ tools/ scripts/ models/ --include="*.py" \| grep -vE '#\|::\|→\|"session_type='` | no matches (exit 1). This is the mechanical enforcement of "no pm/dev value remains anywhere" for the bare-string sites the `SessionType.PM`/`SessionType.DEV` rows can't see. The pattern is keyed on `session_type` (so a chance `"pm"` elsewhere is ignored) and catches assignment + filter-kwarg sites (`reflection_scheduler.py:571`, `sustainability.py:610`, `sdk_client.py:2408`, `sdlc_stage_marker.py:99`, `sdlc_session_ensure.py:139,188`, `_sdlc_utils.py:97`); the `grep -v` strips comment (`#`), docstring (`::`), arrow-prose (`→`), and log-f-string (`"session_type=`) false positives surfaced during verification. **`models/` added in cycle 6 (BLOCKER C6-B1)** — `agent_session.py` carries `session_type=SESSION_TYPE_*` alias references (caught by the `SESSION_TYPE_PM`/`SESSION_TYPE_DEV` model row above), not bare `"pm"/"dev"` literals, but the scope is widened so a future literal cannot slip in. **The `== "pm"`/`!= "pm"`/`== "dev"` comparison gates (`sdlc_session_ensure.py:83`, `_sdlc_utils.py:87,162`, `session_executor.py:652/781/828/855/885/910`) are not caught by this `=`-anchored pattern** — they are covered by their own Task-3 rename bullets, and the `grep -rnE 'session_type[^=]*(==\|!=) *"(pm\|dev)"'` comparison row below is the complementary spot-check (also exit 1). |
 | No `dev` session value | `grep -rn 'SessionType.DEV\b' config/ agent/ bridge/ tools/ ui/ models/ scripts/ tests/` | exit code 1 (**`models/` + `scripts/` added in cycle 6 — BLOCKER C6-B1**) |
+| No deleted `PersonaType` members (BLOCKER C7-B2) | `grep -rn 'PersonaType.PROJECT_MANAGER\|PersonaType.DEVELOPER' config/ agent/ bridge/ tools/ ui/ models/ scripts/ tests/ --include="*.py"` | exit code 1 (catches the `ui/data/machine.py` runtime `persona_order` dict the prior Verification rows missed — they checked only `SessionType` + `session_type` literals, never `PersonaType` member refs; verified live consumers: `sdk_client.py`, `routing.py`, `telegram_bridge.py`, `ui/data/machine.py`, plus tests) |
+| No `AccessLevel.PM_READONLY` (BLOCKER C7-B3) | `grep -rn 'PM_READONLY\|load_pm_system_prompt' config/ agent/ bridge/ tools/ ui/ models/ scripts/ tests/ --include="*.py"` | exit code 1 (member deleted, `load_pm_system_prompt`→`load_eng_system_prompt`; the work-vault `CLAUDE.md` layer now rides the `(ENGINEER, WORKER)` branch) |
 | No `SESSION_TYPE_PM`/`SESSION_TYPE_DEV`/`is_pm`/`is_dev` in model + scripts (BLOCKER C6-B1) | `grep -rnE 'SESSION_TYPE_PM\b\|SESSION_TYPE_DEV\b\|\bis_pm\b\|\bis_dev\b' models/agent_session.py scripts/steer_child.py` | exit code 1 (the renamed/removed `agent_session.py` aliases + properties and the `steer_child.py` `is_dev` consumer leave no trace) |
 | No `Dev:`/`PM:` fallback | `grep -rn 'startswith("Dev:")\|startswith("PM:")' bridge/routing.py` | exit code 1 |
+| No `"Dev: Valor"` delivery target (BLOCKER C7-B4) | `grep -rn '"Dev: Valor"\|'"'"'Dev: Valor'"'"'' reflections/ scripts/ agent/ --include="*.py"` | exit code 1 (all eight background-job send-targets renamed to `Eng: Valor`; `tests/` deliberately out of scope — routing fixtures, handled by Task 2) |
 | sdlc-decompose removed | `grep -n 'sdlc-decompose\|sdlc_decompose' pyproject.toml` | exit code 1 |
 | GRANITE retained | `grep -n 'GRANITE' config/enums.py` | output contains GRANITE |
 | Migration dry-run runs | `python scripts/migrate_session_type_pm_to_eng.py --dry-run` | exit code 0 |
@@ -1246,6 +1385,29 @@ folded into the body.
 | CONCERN | User | The Cowboy pilot tests that a question does NOT spawn work, but not the inverse (a real work request DOES spawn a container). | **FIXED — Success Criteria (new paired AC)**: a concrete work request ("fix the login bug") to `Eng: Valor` spawns a granite container — verify via `python -m tools.valor_session list` that an `eng` session was created and left pending/running, and a Telegram reply arrives. Guards against the conversational-first path swallowing real work requests. | — |
 
 **All 2 blockers + 1 concern resolved in the body; plan status → Ready.**
+
+### Cycle 7 — war room re-run 2026-06-12
+
+**Verdict:** NEEDS REVISION (4 blockers, 1 nit) → **REVISION APPLIED 2026-06-12.**
+This revision addresses the cycle-7 blockers and the nit.
+
+All four blockers are the same bug class the prior cycles chased — `pm`/`dev`/`PM_READONLY` references in
+files or constructs no prior cycle added to any task or grep scope: a `def`-time default param
+(`bridge/dispatch.py`), a runtime dict literal keyed on deleted `PersonaType` members
+(`ui/data/machine.py`), an undispositioned `AccessLevel` member with a load-bearing behavioral side
+effect (`PM_READONLY`'s work-vault context layer), and eight hardcoded `"Dev: Valor"` delivery targets.
+Every cited site was re-verified against live `main`; **line-number/disposition corrections and one
+under-count were found** (see notes). All fixes folded into the body.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | — | `bridge/dispatch.py:87` default param `session_type: str = SessionType.PM` binds at import time; `bridge/telegram_bridge.py:107` imports `bridge.dispatch`, so the bridge `AttributeError`s at startup the instant Task 1 drops `SessionType.PM`. File was in no task list. | **FIXED — Task 2 (new `bridge/dispatch.py:87` bullet: default → `SessionType.ENG`); Task 2 Validates (dispatch import smoke); Test Impact (correction — see note).** | Verified live: line 87 is the sole `SessionType.` ref in the file. **Correction vs critique:** the critique asked to add `tests/unit/test_bridge_dispatch_contract.py` (claimed it "imports SessionType.PM at line 200") to Test Impact as UPDATE — but the file has **zero** `SessionType` references (it is an AST enqueue-then-dedup contract test; the line-200 handler passes no `session_type`). Recorded as **NO CHANGE** in Test Impact with the correction; the default-param change does not touch it. |
+| BLOCKER | — | `ui/data/machine.py:52-57` `persona_order` dict literal keyed on `PersonaType.PROJECT_MANAGER`/`DEVELOPER` is inside a function body → `AttributeError` on first dashboard machine-page render, deferred past import smoke + likely past CI. No Verification grep covered `PersonaType` member refs. | **FIXED — Task 1 (new `ui/data/machine.py` bullet: rekey to `{ENGINEER:0, TEAMMATE:1}`; `scripts/capture_persona_baseline.py:9` docstring UPDATE); Verification (new `PersonaType.PROJECT_MANAGER\|DEVELOPER` grep row, exit 1).** | **Line drift corrected:** critique cited 50-57, verified dict at **52-57**. `capture_persona_baseline.py` reference is a **docstring (line 9)**, not a runtime cell — disposition is a doc-label UPDATE, no crash. |
+| BLOCKER | — | `AccessLevel.PM_READONLY` had no disposition: after Task 2/3 remove every resolver returning it, the member + rails are unreachable dead code (NO LEGACY); and `sdk_client.py:1109-1116` appends the work-vault `CLAUDE.md` business-context layer ONLY under PM_READONLY, `session_executor.py:1658` gates `load_pm_system_prompt` the same way — eng (WORKER) sessions would silently lose the layer. | **FIXED — decided: re-gate, not silent-drop.** Task 1 (delete `AccessLevel.PM_READONLY` config/enums.py:67); Task 2 (fold the vault `CLAUDE.md` append INTO the WORKER branch of `compose_system_prompt`; re-gate `session_executor.py:1658` on WORKER; rename `load_pm_system_prompt`→`load_eng_system_prompt`; full PM_READONLY consumer audit — 1040/1044/1058/1068/1087-1091/1109-1116/1141/1153/1169/1174/1187/1243/3646); Solution Key Elements ("AccessLevel.PM_READONLY reconciled" bullet); Documentation (architecture-doc note); Verification (new `PM_READONLY\|load_pm_system_prompt` grep row); Test Impact (`test_compose_system_prompt.py` REPLACE for the `(ENGINEER, WORKER)` baseline). | Verified the recommended re-gate is **coherent with live code**: `engineer` resolves WORKER via `_access_level_for_persona`'s default `return AccessLevel.WORKER` (sdk_client.py:1186-1194); the WORKER branch (1098-1107) `return`s **before** the PM_READONLY block (1109-1116), so the fix must **fold** the vault append into the WORKER branch (not merely rename the gate) and make `working_directory` optional for WORKER. The documented-deletion alternative was **not** chosen — live code shows the vault layer is the only business-context injection path, so preserving it is correct. |
+| BLOCKER | — | Hardcoded `"Dev: Valor"` delivery targets route background-job alerts into the archived group (nightly tests, Sentry triage, docs audits, SDLC progress, memory consolidation, hibernate/wake all go dark). Plan covered only `sustainability.py:603` as cosmetic. | **FIXED — Task 3 (new delivery-target rename block → `"Eng: Valor"`); Verification (new `"Dev: Valor"` grep over `reflections/ scripts/ agent/`, exit 1); Success Criteria (new Cowboy-pilot background-alert criterion).** | **Under-count corrected — eight sites, not six** (grep'd live across the whole repo): `reflections/docs_auditor.py:844`, `reflections/sentry_triage.py:428`, `reflections/sdlc_progress.py:210`, `scripts/memory_consolidation.py:340`, `scripts/nightly_regression_tests.py:25` (module `TELEGRAM_CHAT`), `agent/sustainability.py:239`, `:250`, `:603`. **Scope explicitly excludes `tests/`** — the many `"Dev: Valor"` test occurrences are persona-**routing** fixtures for the OLD `Dev:` routing being deleted by Task 2, not delivery targets; docs/CLAUDE.md occurrences are covered by the Documentation section. |
+| NIT | — | Email-bridge stop asymmetry: runbook uses `worker-disable` (suppresses launchd respawn) for the worker but only transient `email-stop` for the email bridge; on machines with the opt-in email-bridge launchd plist, `KeepAlive=true` may respawn it mid-migration past the point-in-time pgrep guard. | **FIXED — Update System runbook step 1 (note: on plist-equipped machines, unload `com.valor.email-bridge` / use the disable variant before migrating) + step 6 (re-load/re-enable after).** | — |
+
+**All 4 blockers + 1 nit resolved in the body; plan status → Ready.**
 
 ---
 
