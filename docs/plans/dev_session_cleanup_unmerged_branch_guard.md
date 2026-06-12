@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-06-12
 tracking: https://github.com/tomcounsell/ai/issues/1646
 last_comment_id:
+revision_applied: true
 ---
 
 # Dev-Session Completion Cleanup: Guard Against Destroying Unmerged Work
@@ -70,6 +71,14 @@ recovered via `git fsck` onto `rescued/dev-ec1e7c6e`.
 - `agent/worktree_manager.py:882` `remove_worktree(delete_branch=True)` — additional
   force-delete site (`git branch -D`) found during recon, not cited in the issue but in
   the same blast radius.
+- `agent/session_revival.py:230-238` `cleanup_stale_branches` — **fourth force-delete site**
+  (surfaced by cycle-1 critique). Force-deletes any `session/*` branch by **age alone**
+  (`age_hours > max_age_hours`, default 72h) via `git branch -D` with **no merge check**.
+  Invoked autonomously by `cleanup_stale_branches_all_projects` (`session_revival.py:246`),
+  the scheduler-driven `stale-branch-cleanup` reflection that runs across **all projects**.
+  This is the same root-cause pattern (deletion as an unconditional side effect) and is a
+  *higher-risk* vector than the completion path because it fires on a schedule, not just on
+  completion. Routed through `safe_delete_branch` by this plan (see Solution / Site D).
 
 **Cited sibling issues/PRs re-checked:**
 - #1644 (PM→Dev relay drop) — OPEN. Same observed session; orthogonal defect (relay), not
@@ -142,7 +151,15 @@ each guard lands:
 4. **`worktree_manager.remove_worktree(delete_branch=True)` (882):** ← **DESTRUCTION SITE C.**
    Not on the incident path (callers pass `delete_branch=False` there), but the same force-delete
    primitive. *Guard: route all branch deletion through one safe helper.*
-5. **Output:** session reported success; commit dangling. *Desired output: work landed (merged
+5. **`session_revival.cleanup_stale_branches` (230-238):** ← **DESTRUCTION SITE D.** Off the
+   completion path entirely — fires from the scheduler-driven `stale-branch-cleanup` reflection
+   (`cleanup_stale_branches_all_projects`, 246) across *all* projects. Force-deletes any
+   `session/*` branch whose tip commit is older than `max_age_hours` (default 72h) with `git
+   branch -D` and **no merge check**. An age threshold is not a merged-ness proof, so this can
+   silently destroy unmerged work the same way the incident did — autonomously, on a timer.
+   *Guard: route the deletion through `safe_delete_branch`; the age filter only selects
+   *candidates*, the merged check decides deletion.*
+6. **Output:** session reported success; commit dangling. *Desired output: work landed (merged
    or PR-open) before any deletion, or branch preserved with an actionable recovery marker.*
 
 ## Why Previous Fixes Failed
@@ -166,8 +183,9 @@ the work is safe to discard" — an invariant nothing establishes.
     `post_merge_cleanup.py`).
   - A new small helper `safe_delete_branch(repo_root, branch_name, *, base="main")` centralizes
     the `is-ancestor`-then-`-d` logic so all three destruction sites share one implementation.
-- **Coupling:** *decreases* — three ad-hoc `git branch -D` call sites collapse to one guarded
-  helper.
+- **Coupling:** *decreases* — four ad-hoc `git branch -D` call sites (executor auto-mark,
+  `cleanup_after_merge`, `remove_worktree`, and the stale-branch reflection) collapse to one
+  guarded helper.
 - **Data ownership:** the executor stops owning "delete the branch on completion." Branch
   lifecycle ownership moves to the landing step (PM-authorized), matching Tom's policy.
 - **Reversibility:** trivial to revert (localized to two files plus tests). No data migration.
@@ -203,6 +221,11 @@ and runs against the local git toolchain already present.
 - **Executor stops force-deleting** (`agent/session_executor.py`): replace the
   `git branch -D` in the auto-mark block (Site A) with `safe_delete_branch`. The synthetic-slug
   `finally` path (Site B) inherits the guard automatically via `cleanup_after_merge`.
+- **Stale-branch reflection stops force-deleting** (`agent/session_revival.py:230-238`, Site D):
+  replace its `git branch -D` with `safe_delete_branch`. The age threshold continues to select
+  *candidate* branches; `safe_delete_branch` then deletes only the merged ones and preserves
+  unmerged ones with the same `[unmerged-branch-guard]` warning. This closes the scheduler-driven
+  vector — the autonomous reflection can no longer destroy unmerged work on a timer.
 - **Recovery marker:** when a branch is preserved because it is unmerged, the path logs a clear,
   greppable warning and persists the branch name (and the worktree path, if still present) so a
   human or follow-up automation can recover the work — never a silent skip.
@@ -223,7 +246,8 @@ Dev session completes → executor auto-mark runs → `safe_delete_branch(repo, 
 ### Technical Approach
 
 - Centralize: extract `safe_delete_branch(repo_root, branch_name, *, base="main") -> dict` and
-  route Sites A, B, and C through it. No raw `git branch -D` remains in the cleanup paths.
+  route Sites A, B, C, and D through it. No raw `git branch -D` remains in any cleanup path
+  (completion *or* scheduler-driven).
 - `is-ancestor` is the correctness oracle: `git merge-base --is-ancestor <branch> <base>` exits 0
   iff `<branch>`'s tip is reachable from `<base>` — i.e. fully merged. Exit 1 = unmerged → refuse.
   Treat any other exit (e.g. missing branch, 128) as "do not delete, surface the error."
@@ -246,6 +270,10 @@ Dev session completes → executor auto-mark runs → `safe_delete_branch(repo, 
   the branch survives (observable behavior, not a silent pass).
 - [ ] The auto-mark block's `except Exception` (`session_executor.py:~2028`) — add a test that an
   unmerged branch is preserved and a `[unmerged-branch-guard]` warning is emitted, not swallowed.
+- [ ] The stale-branch reflection (`session_revival.py:cleanup_stale_branches`) keeps its
+  `except Exception` swallow (a reflection must never crash the scheduler) — but add a test
+  asserting that a stale-but-unmerged branch is preserved (the warning is logged, the branch
+  survives), so the autonomous path's safety is observable, not silent.
 
 ### Empty/Invalid Input Handling
 - [ ] `safe_delete_branch` with a non-existent branch name → returns a structured "not found"
@@ -278,6 +306,11 @@ Dev session completes → executor auto-mark runs → `safe_delete_branch(repo, 
 - [ ] NEW `tests/unit/test_session_executor_cleanup.py` — ADD: regression test reproducing the
   incident — a dev session branch with an unmerged commit goes through the auto-mark cleanup and
   the commit remains reachable afterward (the canonical "this bug never recurs" test).
+- [ ] NEW `tests/unit/test_session_revival_cleanup.py` — ADD: no existing test exercises
+  `cleanup_stale_branches`' deletion behavior (the only repo reference, `test_worker_entry.py:193`,
+  is an import allowlist and is unaffected). Add a focused case against a real temp git repo: a
+  stale-but-**unmerged** `session/*` branch is preserved (not force-deleted) while a
+  stale-and-**merged** branch is still cleaned — proving the scheduler-driven vector is closed.
 
 ## Rabbit Holes
 
@@ -289,7 +322,10 @@ Dev session completes → executor auto-mark runs → `safe_delete_branch(repo, 
   policy is a PM decision and merging from the executor would bypass review for substantive
   changes. Out of scope.
 - **Rewriting worktree lifecycle / garbage collection.** `prune_worktrees`, stale-session
-  cleanup, and worktree GC are adjacent but separate. Touch only the branch-deletion guard.
+  cleanup, and worktree GC are adjacent but separate. Touch only the branch-deletion guard —
+  including in the stale-branch reflection (`cleanup_stale_branches`), where the *only* change is
+  swapping the `git branch -D` for `safe_delete_branch`. Do not rework the reflection's age
+  selection, scheduling, or all-projects iteration.
 - **Auto-pushing every session branch to origin as a backup.** Network/credential surface, remote
   clutter, and policy questions. The `is-ancestor` guard + preserved local branch already prevents
   data loss; remote backup is a possible later enhancement, not this fix.
@@ -378,10 +414,10 @@ No external docs site changes — this repo has no Sphinx/MkDocs site for these 
 
 ## Success Criteria
 
-- [ ] No `git branch -D` remains in the cleanup paths (`session_executor.py` auto-mark block,
-  `worktree_manager.py` `cleanup_after_merge` / `remove_worktree`) — all branch deletion routes
-  through `safe_delete_branch`. (`grep -n "branch.*-D" agent/session_executor.py
-  agent/worktree_manager.py` returns no cleanup-path hits.)
+- [ ] No `git branch -D` remains in **any** cleanup path — completion (`session_executor.py`
+  auto-mark block, `worktree_manager.py` `cleanup_after_merge` / `remove_worktree`) **and**
+  scheduler-driven (`session_revival.py` `cleanup_stale_branches`). All four sites route through
+  `safe_delete_branch`. (`grep -rn 'branch.*"-D"\|branch.*'"'"'-D'"'"'' agent/` returns no hits.)
 - [ ] A dev session that commits unmerged work and completes leaves its branch (and synthetic
   worktree) intact, with a `[unmerged-branch-guard]` warning — verified by the regression test
   reproducing incident `ec1e7c6e`.
@@ -391,8 +427,10 @@ No external docs site changes — this repo has no Sphinx/MkDocs site for these 
   delete an unmerged branch.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] No raw `git branch -D` in cleanup code: `grep -rn "branch.*\"-D\"\|branch.*'-D'" agent/`
-  shows only intentional, non-cleanup uses (or none).
+- [ ] No raw `git branch -D` anywhere in `agent/`: `grep -rn 'branch.*"-D"\|branch.*'"'"'-D'"'"'' agent/`
+  returns **no hits** (exit 1). All four sites — including `session_revival.py` — are routed
+  through `safe_delete_branch`, so this repo-wide gate and the scoped Verification-table grep now
+  agree.
 
 ## Team Orchestration
 
@@ -404,7 +442,8 @@ builds directly — they deploy team members and coordinate.
 - **Builder (cleanup-guard)**
   - Name: `cleanup-guard-builder`
   - Role: Implement `safe_delete_branch`, route all cleanup-path deletions through it, add the
-    `is-ancestor` precondition to `cleanup_after_merge`, replace the executor `-D`.
+    `is-ancestor` precondition to `cleanup_after_merge`, replace the executor `-D`, and route the
+    stale-branch reflection (`session_revival.py`) through the same helper.
   - Agent Type: builder
   - Resume: true
 
@@ -447,11 +486,15 @@ builds directly — they deploy team members and coordinate.
   `skipped_unmerged` + branch name to the `cleanup_after_merge` result dict.
 - Replace `git branch -D {branch}` in `agent/session_executor.py` auto-mark block with
   `safe_delete_branch`; inspect the result and log instead of swallowing.
+- Replace `git branch -D {branch}` in `agent/session_revival.py:231` (`cleanup_stale_branches`,
+  Site D) with `safe_delete_branch`; the age threshold still selects candidates, the helper
+  decides deletion. Only branches the helper reports `deleted` go into the `cleaned` list;
+  preserved (unmerged) branches are logged via the helper, not appended as "cleaned."
 
 ### 2. Tests
 - **Task ID**: build-tests
 - **Depends On**: build-guard
-- **Validates**: tests/unit/test_worktree_manager.py, tests/unit/test_post_merge_cleanup.py, tests/unit/test_session_executor_cleanup.py (create)
+- **Validates**: tests/unit/test_worktree_manager.py, tests/unit/test_post_merge_cleanup.py, tests/unit/test_session_executor_cleanup.py (create), tests/unit/test_session_revival_cleanup.py (create)
 - **Assigned To**: cleanup-test-builder
 - **Agent Type**: test-engineer
 - **Parallel**: false
@@ -459,6 +502,9 @@ builds directly — they deploy team members and coordinate.
   unmerged→preserves+`skipped_unmerged`, missing branch, unresolvable base.
 - Add `tests/unit/test_session_executor_cleanup.py` reproducing incident `ec1e7c6e`: unmerged
   commit survives the auto-mark cleanup.
+- Add `tests/unit/test_session_revival_cleanup.py`: a stale-but-unmerged `session/*` branch is
+  preserved by `cleanup_stale_branches` while a stale-and-merged branch is still cleaned —
+  closing the scheduler-driven vector.
 - Update `test_branch_deletion_fails` and `cleanup_after_merge` happy-path tests for the new
   precondition; extend `test_post_merge_cleanup.py` fakes with `skipped_unmerged`.
 
@@ -468,11 +514,11 @@ builds directly — they deploy team members and coordinate.
 - **Assigned To**: cleanup-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Confirm no `git branch -D` in cleanup paths (grep).
+- Confirm no `git branch -D` anywhere in `agent/` (repo-wide grep, includes `session_revival.py`).
 - Confirm the regression test reproduces the bug on pre-fix code (git stash the fix, run, expect
   fail) and passes with the fix.
 - Run `pytest tests/unit/test_worktree_manager.py tests/unit/test_post_merge_cleanup.py
-  tests/unit/test_session_executor_cleanup.py -q`.
+  tests/unit/test_session_executor_cleanup.py tests/unit/test_session_revival_cleanup.py -q`.
 
 ### 4. Documentation
 - **Task ID**: document-feature
@@ -497,10 +543,10 @@ builds directly — they deploy team members and coordinate.
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Affected unit tests pass | `pytest tests/unit/test_worktree_manager.py tests/unit/test_post_merge_cleanup.py tests/unit/test_session_executor_cleanup.py -q` | exit code 0 |
+| Affected unit tests pass | `pytest tests/unit/test_worktree_manager.py tests/unit/test_post_merge_cleanup.py tests/unit/test_session_executor_cleanup.py tests/unit/test_session_revival_cleanup.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check agent/` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/` | exit code 0 |
-| No force-delete in cleanup paths | `grep -n "branch\", \"-D\"\|branch', '-D'" agent/session_executor.py agent/worktree_manager.py` | exit code 1 |
+| No force-delete anywhere in agent/ | `grep -rn 'branch.*"-D"\|branch.*'"'"'-D'"'"'' agent/` | exit code 1 (no hits — includes session_revival.py) |
 | Guard helper exists | `grep -n "def safe_delete_branch" agent/worktree_manager.py` | output contains safe_delete_branch |
 
 ## Critique Results
@@ -509,8 +555,8 @@ builds directly — they deploy team members and coordinate.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| MAJOR | Archaeologist / Structural | **Fourth force-delete site missed.** `agent/session_revival.py:230-238` force-deletes session branches by **age alone** (`age_hours > max_age_hours`) via `git branch -D` with **zero merge check** — and is invoked autonomously by the `stale-branch-cleanup` reflection (`cleanup_stale_branches_all_projects`, scheduler-driven across all projects). This is the exact root-cause pattern the plan names ("deletion as an unconditional side effect"), and is arguably a *higher-risk* data-loss vector than the completion path because it runs on a schedule, not just on session completion. The plan's Freshness Check and Data Flow enumerate only 3 sites (executor:2018, worktree:882, worktree:1226) and claim to enumerate "force-delete sites" — that claim is incomplete. | UNADDRESSED — needs plan revision | Route `session_revival.py:232` through `safe_delete_branch` (same helper, trivial), OR explicitly carve it out in No-Gos with a justification for why age-based force-delete of unmerged work is acceptable there. The former is strongly preferred: an age threshold is not a merged-ness proof, so the scheduler can silently destroy unmerged work the same way the incident did. Add a test for the revival path if routed. |
-| MINOR | Skeptic / Structural | **Internal success-criteria contradiction.** Success Criterion line 394 (`grep -rn 'branch.*"-D"...' agent/`, expects "intentional non-cleanup only / none") will still return `session_revival.py:232` after the fix as scoped — and revival is a *cleanup* reflection, so it reads as a cleanup-path hit that fails the criterion. Verification-table line 503 is narrowly scoped to only `session_executor.py` + `worktree_manager.py` and will pass. The two acceptance gates disagree on whether revival.py is in scope, so the plan can be simultaneously "passing" (table) and "failing" (criterion). | UNADDRESSED — needs plan revision | Reconcile the two greps. If revival.py is routed through the helper (preferred per the MAJOR finding), both can be repo-wide and agree. If carved out, line 394's grep must explicitly allow the revival.py occurrence and the carve-out must be named. |
+| MAJOR | Archaeologist / Structural | **Fourth force-delete site missed.** `agent/session_revival.py:230-238` force-deletes session branches by **age alone** (`age_hours > max_age_hours`) via `git branch -D` with **zero merge check** — and is invoked autonomously by the `stale-branch-cleanup` reflection (`cleanup_stale_branches_all_projects`, scheduler-driven across all projects). This is the exact root-cause pattern the plan names ("deletion as an unconditional side effect"), and is arguably a *higher-risk* data-loss vector than the completion path because it runs on a schedule, not just on session completion. The plan's Freshness Check and Data Flow enumerate only 3 sites (executor:2018, worktree:882, worktree:1226) and claim to enumerate "force-delete sites" — that claim is incomplete. | ADDRESSED (cycle-1 revision) | Routed `session_revival.py:231` (Site D) through `safe_delete_branch` — the strongly-preferred option. Now enumerated in Freshness Check, Data Flow (Site D), Solution, Technical Approach (Sites A–D), build-guard task, Failure Path, and Test Impact. New `test_session_revival_cleanup.py` proves a stale-but-unmerged branch is preserved while a stale-merged branch is still cleaned. The age threshold now only selects *candidates*; the merged check decides deletion. |
+| MINOR | Skeptic / Structural | **Internal success-criteria contradiction.** Success Criterion line 394 (`grep -rn 'branch.*"-D"...' agent/`, expects "intentional non-cleanup only / none") will still return `session_revival.py:232` after the fix as scoped — and revival is a *cleanup* reflection, so it reads as a cleanup-path hit that fails the criterion. Verification-table line 503 is narrowly scoped to only `session_executor.py` + `worktree_manager.py` and will pass. The two acceptance gates disagree on whether revival.py is in scope, so the plan can be simultaneously "passing" (table) and "failing" (criterion). | ADDRESSED (cycle-1 revision) | Both acceptance gates reconciled to the same repo-wide grep (`grep -rn ... agent/`, expect no hits / exit 1). Because revival.py (Site D) is now routed through the helper, the repo-wide Success Criterion, the second grep criterion, and the Verification-table grep all agree — no remaining `git branch -D` anywhere in `agent/`. |
 
 **Structural checks that PASSED:**
 - All four required sections present (Documentation, Update System, Agent Integration, Test Impact).
