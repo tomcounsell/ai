@@ -24,6 +24,10 @@ PR #1612 (the granite PTY container cutover, merged 2026-06-11) changed executio
 PM-steering and a Dev-builder `claude` TUI. The PM/Dev split now lives inside the container,
 making the bridge-level split redundant — and, in the dev case, semantically broken.
 
+`SessionType` collapses to `{eng, teammate}` (GRANITE retained as a CLI-only type; see Resolved
+Decisions) — i.e. the *bridge-originated work* discriminator becomes two values, while the CLI-only
+`granite` type added by #1635 survives untouched.
+
 **Current behavior:**
 - 13 projects across 4 machines carry paired (or partial) `PM:`/`Dev:` groups, forcing
   humans to pick the "right" group before messaging.
@@ -144,6 +148,14 @@ End-to-end trace of a bridge work message under the new model:
 6. **Output:** `TelegramRelayOutputHandler` writes the container's reply to the Redis outbox →
    delivered to the `Eng: {Project}` group.
 
+**Conversational vs. work path (CONCERN, User):** the old `PM:` group doubled as a lightweight
+"just ask a question / steer" surface. Under the Eng model every `Eng:` message resolves
+`AccessLevel.WORKER` and spawns a granite container, so the lightweight surface moves to the existing
+`Teammate: {Project}` group (conversational Teammate persona, no container spin-up). The
+group-routing contract becomes: **`Teammate: {Project}` = ask a question / discuss; `Eng: {Project}`
+= do work.** This split is documented explicitly in CLAUDE.md and the renamed architecture doc so the
+human's group-routing muscle memory has a clear replacement for the retired `PM:` group.
+
 **Migration-time data flow (per machine, atomic):**
 1. Telegram rename `PM: {Project}` → `Eng: {Project}` (preserves chat_id, members, history). Archive
    `Dev: {Project}` (or, for Dev-only projects, rename `Dev:` → `Eng:`).
@@ -194,6 +206,7 @@ KeyField migrations and the eng access-level decision.
 |-------------|---------------|---------|
 | PR #1612 merged | `gh pr view 1612 --json state -q .state` (expect `MERGED`) | Granite container is the execution substrate this plan assumes |
 | Bridge stoppable on target machine | `./scripts/valor-service.sh status` | Migrations require the bridge stopped before Redis key renames |
+| **Worker stoppable on target machine** | `./scripts/valor-service.sh worker-status` | **The worker (`python -m worker`) is a *separate* process that also writes AgentSessions and whose hourly `agent-session-cleanup` + reflection scheduler (`agent/reflection_scheduler.py:571` creates `session_type="pm"` sessions) can write `pm` records mid-migration. It MUST be stopped — and stay down — before the `pm→eng` rename loop (BLOCKER B3).** Use `worker-disable` to also suppress launchd auto-respawn during the migration window. |
 | Redis reachable | `python -c "import popoto; popoto.redis_db.get_REDIS_DB().ping()"` | Migration + ORM operations |
 
 Run all checks: `python scripts/check_prerequisites.py docs/plans/merge_pm_dev_into_eng_role.md`
@@ -213,20 +226,27 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/merge_pm_dev_i
 - **SDK client:** `agent/sdk_client.py` `(persona, access_level, channel)` resolution and
   `compose_system_prompt` updated for `(ENGINEER, AccessLevel.WORKER)`. `VALOR_PARENT_SESSION_ID`
   injection re-gated on ENG/Teammate and verified to propagate into the container's pooled PTYs.
-- **Dev machinery removal:** delete `_handle_dev_session_completion()` and its callers/parent-steering
-  in `session_executor.py` / `session_health.py` / `output_router.py`; delete `tools/sdlc_decompose.py`
-  + its pyproject entry + `MAX_PARALLEL_DEVS`/`PARALLEL_SAFE_PAIRS` in `agent/sdlc_router.py`; delete
-  the `--role dev`/`--role pm` paths in `tools/valor_session.py` (+ `valor_cli.py`,
-  `sdlc_session_ensure.py`, `agent_session_scheduler.py`); remove the PM read-only Bash rails in
-  `agent/hooks/pre_tool_use.py` for work sessions; update `ui/data/sdlc.py` display mapping.
+- **Dev machinery removal:** delete `_handle_dev_session_completion()` and its *dev-only*
+  callers/parent-steering in `session_executor.py` / `session_health.py` / `output_router.py` **and the
+  re-export in `agent/agent_session_queue.py:49-53`** (B1) — surgically, leaving the shared
+  `_transition_parent` and any surviving `_create_continuation_pm` callers intact; delete
+  `tools/sdlc_decompose.py` + its pyproject entry + `MAX_PARALLEL_DEVS`/`PARALLEL_SAFE_PAIRS` in
+  `agent/sdlc_router.py`; delete the `--role dev`/`--role pm` paths in `tools/valor_session.py` (+
+  `valor_cli.py`, `sdlc_session_ensure.py`, `agent_session_scheduler.py`); remove the PM read-only Bash
+  rails in `agent/hooks/pre_tool_use.py` for work sessions; **delete the four `project_mode == "pm"`
+  config-side-channel guards in `agent/sdk_client.py` (B2)**; update `ui/data/sdlc.py` display mapping.
 - **Data migrations (two scripts):**
   - `scripts/migrate_session_type_pm_to_eng.py` — clone of the #652 precedent; rename
     `session_type=pm` AgentSession Redis keys to `eng` (raw `rename` + `hset` for the embedded
-    KeyField), then `AgentSession.rebuild_indexes()`. `--dry-run`, idempotent, "stop the bridge".
+    KeyField), then `AgentSession.rebuild_indexes()`. `--dry-run`, idempotent, **"stop the bridge AND
+    worker"**, with a **worker-heartbeat guard** (`sys.exit(1)` on fresh heartbeat, B3). Reads
+    `session_type` directly (NOT the deprecated `session_mode`); skips `:dev:` keys as no-ops.
   - `scripts/merge_dev_chat_into_eng.py` — re-key a Dev group's `TelegramMessage` records onto the
-    Eng chat_id (KeyField re-key, same raw-`rename` pattern as the precedent, since chat_id is in the
-    key), and `Chat` rename via ORM delete-recreate (`tools/telegram_history` pattern). Project-scoped,
-    `--dry-run`, idempotent.
+    Eng chat_id (KeyField re-key, same raw-`rename` pattern, since chat_id is in the key), with an
+    **EXISTS-check before every rename** (skip-on-collision, never clobber — B5) and a dry-run
+    collision report; `Chat` rename via ORM **create-then-delete** (Eng created+verified before Dev
+    deleted); **pre/post count assertion** for partial-failure recovery. Project-scoped, `--dry-run`,
+    idempotent. Same worker-heartbeat guard. Running it is a per-project operator decision.
 - **Staged per-machine rollout:** code lands on main once; each machine migrates atomically
   (Telegram renames + vault `projects.json` edit + `/update` + local Redis migrations). Order: Cowboy
   (valor, popoto) pilot → Captain (cuttlefish, psyoptimal, royop) → Pirate (mondayflowers, gato,
@@ -254,6 +274,18 @@ Migration: stop bridge → Telegram rename PM→Eng / archive-or-rename Dev → 
 - **Sequence the enum change carefully:** `config/enums.py` is imported nearly everywhere; land the
   enum rename, persona merge, routing, SDK-client, CLI, hook, and dashboard edits together so the tree
   is never half-migrated (the test suite must be green on the same commit).
+- **Deploy ordering — migration BEFORE `/update` (BLOCKER B4, decided):** code lands on main once,
+  removing `SessionType.PM`. But each machine migrates Redis at a different time. If a machine runs
+  `/update` (pulling the `PM`-less code) *before* its `pm→eng` Redis migration, the worker will pop
+  existing `session_type=pm` records against code where `SessionType.PM` no longer exists —
+  `session_type == SessionType.PM` against a deleted member simply **never matches** (no crash), so the
+  record falls through to the default/`else` persona+access-level path in `sdk_client.py:1168` and
+  `session_executor.py` → **silent wrong behavior**, not a loud failure. **Resolution (chosen over a
+  one-release `PM = "eng"` alias shim, per NO LEGACY CODE):** the per-machine runbook **mandates the
+  ordering: stop bridge+worker → run `migrate_session_type_pm_to_eng.py` → THEN `/update`**. The
+  migration drains all `pm` records to `eng` while the old `SessionType.PM` member still exists in the
+  *currently-running* (pre-update) code, so every comparison is valid throughout the rename. No alias
+  shim is introduced. This ordering is baked into the Update System runbook.
 - **GRANITE retained (decided):** narrow the "exactly ENG and TEAMMATE" criterion to "no `pm`/`dev`
   value remains anywhere"; GRANITE stays for `valor-granite-loop`.
 - **Eng access level (decided):** `(ENGINEER, …)` resolves `AccessLevel.WORKER` in
@@ -349,16 +381,47 @@ call `rebuild_indexes()`. Operator reviews dry-run output before the live run. C
 **Mitigation:** Dedicated verification task + test that the env var propagates into pooled PTYs after
 the rename (issue AC item).
 
+### Risk 6: `project_mode == "pm"` config side channel survives the rename (BLOCKER B2)
+**Impact:** `agent/sdk_client.py` branches on `project.get("mode") == "pm"` at four sites independently
+of `SessionType`; a project still carrying `"mode": "pm"` silently keeps PM rails / suppresses
+`WORKER_RULES` / skips SDLC classification under the new Eng model.
+**Mitigation:** Two-part fix — (1) Task 3 deletes the four `project_mode == "pm"` literal guards so the
+Eng model has one code path; (2) the per-machine runbook strips `"mode": "pm"` from vault projects.json
+(the mode validator normalizes the absence to `"dev"`, so it is safe).
+
+### Risk 7: `pm` records popped against `PM`-less code mid-rollout (BLOCKER B4)
+**Impact:** If a machine `/update`s (removing `SessionType.PM`) before its Redis migration, the worker
+pops `session_type=pm` records that never match any comparison → silent fall-through to the wrong
+persona/access-level (no crash).
+**Mitigation:** The runbook mandates **migration before `/update`** on every machine, so all `pm`
+records are drained to `eng` while `SessionType.PM` still exists in the running code. No alias shim.
+
+### Risk 8: Redis `RENAME` clobbers an existing Eng record (BLOCKER B5)
+**Impact:** `merge_dev_chat_into_eng.py` re-keys `TelegramMessage` keys; `RENAME` silently `DEL`s the
+destination, and same-`msg_id` keys across the Dev/Eng chats collide on the rewritten chat_id segment
+(`msg_id` is `AutoKeyField`), destroying existing Eng records.
+**Mitigation:** EXISTS-check before every rename (skip + log on collision, never clobber); dry-run
+emits a full collision report; create-then-delete `Chat` order; pre/post count assertion. Running the
+merge at all is a per-project operator decision (archiving already preserves history).
+
 ## Race Conditions
 
-### Race 1: Migration runs while the bridge is live
+### Race 1: Migration runs while the bridge OR worker is live
 **Location:** `scripts/migrate_session_type_pm_to_eng.py`, `scripts/merge_dev_chat_into_eng.py`
-**Trigger:** The bridge creates/writes an AgentSession or TelegramMessage mid-rename.
+**Trigger:** The bridge **or the worker** creates/writes an AgentSession or TelegramMessage mid-rename.
+The worker is the more dangerous concurrent writer: its hourly `agent-session-cleanup` reflection and
+`agent/reflection_scheduler.py:571` (which creates `session_type="pm"` sessions) run independently of
+the bridge, so a `pm` record can appear *during* the rename loop, leaving an unmigrated record or
+rebuilding indexes on partial state.
 **Data prerequisite:** No concurrent writer to the keys being renamed.
-**State prerequisite:** Bridge + worker stopped on the target machine.
-**Mitigation:** Both scripts require the bridge stopped (precedent already states this); the per-machine
-runbook stops the bridge before migration and restarts after. `rebuild_indexes()` runs after all
-renames so the index reflects the final key set.
+**State prerequisite:** **Bridge AND worker stopped** on the target machine (BLOCKER B3).
+**Mitigation:** The per-machine runbook stops **both** the bridge (`valor-service.sh stop`-equivalent)
+and the worker (`valor-service.sh worker-disable` — stop *and* suppress launchd respawn) before
+migration, and restarts both after. **Defense-in-depth:** both migration scripts read the worker
+heartbeat key at startup (`register_worker_pid` / `_write_worker_heartbeat`, freshness governed by
+`HEARTBEAT_FRESHNESS_WINDOW`) and `sys.exit(1)` with a clear error if a *fresh* worker heartbeat is
+detected — so the migration refuses to run against a live worker even if the operator forgets the
+stop step. `rebuild_indexes()` runs after all renames so the index reflects the final key set.
 
 ### Race 2: Telegram rename vs. in-flight message to the old group
 **Location:** Telegram + `bridge/routing.py`
@@ -379,18 +442,45 @@ edit, so no message is routed against a half-applied config.
 - [SEPARATE-SLUG] Rebuilding parallel-eng-container fan-out on the surviving child-session machinery —
   not filed; explicitly deferred as a future capability, not part of this cutover. (If pursued, file a
   fresh issue; this plan only deletes the dead #1409 machinery.)
+- [OPERATOR-DECISION] **Running** `merge_dev_chat_into_eng.py` per project is an operator choice, not a
+  blanket requirement. The default is to **archive** the Dev group (history preserved in-place, readable
+  via `valor-telegram --chat-id`); the merge re-key is only run where a single consolidated Eng channel
+  is operationally important, and only after reviewing the script's dry-run collision report.
 
 ## Update System
 
 No update-script **code** changes required. The feature is delivered to each machine by the existing
-`/update` flow: `/update` pulls the merged code, `env_sync`/restart proceed normally, and the
-per-machine vault `projects.json` edit (replacing `PM:`/`Dev:` group declarations with one `Eng:`
-group, persona `engineer`) is validated by `bridge/config_validation.py::validate_projects_config` at
-update Step 4.6 — the existing gate blocks a bridge restart on a malformed config. The only new
-operator steps per machine are: Telegram group rename/archive, the vault `projects.json` edit, and
-running the two Redis migration scripts; these are documented in the rollout runbook, not in the update
-script. This plan's `single-machine-ownership.md` doc update keeps the ownership examples consistent
-with the new `Eng:` group shape.
+`/update` flow, but the **per-machine step ordering is load-bearing** and must be followed exactly.
+
+**Per-machine runbook (ordered — migration BEFORE `/update`, per BLOCKER B4):**
+
+1. **Stop the bridge AND the worker (BLOCKER B3).** `./scripts/valor-service.sh` stop the bridge and
+   `./scripts/valor-service.sh worker-disable` (stop *and* suppress launchd auto-respawn — a plain
+   `worker-stop` may be relaunched by `KeepAlive=true`). The worker must stay down for the whole
+   migration window because its hourly cleanup + `reflection_scheduler.py` create `session_type="pm"`
+   records outside the bridge.
+2. **Telegram:** rename `PM: {Project}` → `Eng: {Project}` (preserves chat_id/history); archive
+   `Dev: {Project}` (or rename `Dev:`→`Eng:` for Dev-only projects).
+3. **Run the Redis migration(s) against the still-current (pre-update) code (BLOCKER B4):**
+   `python scripts/migrate_session_type_pm_to_eng.py --dry-run` then live. This drains all `pm` records
+   to `eng` *while `SessionType.PM` still exists in the running code*, so no record is ever compared
+   against a deleted enum member. (Optionally, per the operator's per-project decision, run
+   `python scripts/merge_dev_chat_into_eng.py --dry-run` then live — review the collision report first.)
+   Both scripts refuse to run if a fresh worker heartbeat is detected (defense-in-depth for step 1).
+4. **Edit vault `projects.json`:** replace `PM:`/`Dev:` group declarations with the single `Eng:`
+   group, set persona `engineer`, **and remove any `"mode": "pm"` key (BLOCKER B2)** — the mode
+   validator normalizes a missing/unknown mode to `"dev"`, so stripping it is the safe operational
+   complement to deleting the `project_mode == "pm"` code guards in Task 3. Validated by
+   `bridge/config_validation.py::validate_projects_config` at update Step 4.6.
+5. **`/update`** on the machine: pulls the merged (`PM`-less) code, `env_sync`/restart proceed normally.
+   Because step 3 already drained the `pm` records, the new code never encounters a `session_type=pm`
+   record.
+6. **Re-enable + restart the worker** (`worker-start` re-enables launchd respawn) and the bridge;
+   verify end-to-end via `valor-telegram read --chat "Eng: {Project}"`.
+
+This ordering is the chosen resolution to BLOCKER B4 over a one-release `PM = "eng"` alias shim (NO
+LEGACY CODE). This plan's `single-machine-ownership.md` doc update keeps the ownership examples
+consistent with the new `Eng:` group shape.
 
 ## Agent Integration
 
@@ -411,6 +501,9 @@ work through the same Telegram path, now via one `Eng: {Project}` group instead 
 - [ ] Remove/replace `docs/features/sdlc-parallel-execution.md` (multi-dev fan-out deleted).
 - [ ] Update `docs/features/single-machine-ownership.md` examples to the `Eng:` group shape.
 - [ ] Update `docs/features/README.md` index table for any renamed/removed pages.
+- [ ] In the renamed `eng-session-architecture.md` **and** `CLAUDE.md`, document the conversational-vs-work
+      group contract (CONCERN, User): **`Teammate: {Project}` = ask a question / discuss; `Eng: {Project}`
+      = do work** — the documented replacement for the retired `PM:` lightweight surface.
 
 ### Inline Documentation
 - [ ] Update `config/enums.py` `SessionType`/`PersonaType` docstrings (remove pm/dev prose; describe
@@ -434,9 +527,13 @@ work through the same Telegram path, now via one `Eng: {Project}` group instead 
       resolved access level).
 - [ ] `scripts/migrate_session_type_pm_to_eng.py` renames existing `session_type=pm` AgentSession Redis
       records to `eng` and rebuilds indexes; `--dry-run`, idempotent, runnable per machine.
-- [ ] `scripts/merge_dev_chat_into_eng.py` re-keys a Dev group's `TelegramMessage` history onto the Eng
-      chat_id via the rename pattern; `valor-telegram read --chat "Eng: Valor"` returns merged history
-      after the pilot migration.
+- [ ] `scripts/merge_dev_chat_into_eng.py` **exists and is correct** (EXISTS-checked rename, create-then-delete
+      Chat order, count assertion, dry-run collision report). **Authoring the script is the mandatory AC;
+      *running* it is a per-project operator decision (CONCERN, Simplifier/User)** — archiving the Dev
+      group already preserves its history in-place (readable via `valor-telegram --chat-id`), and a
+      one-way re-key collides two timelines on one chat_id (out-of-order display if Dev's last message
+      is newer than Eng's). For any project where the operator *chooses* to merge,
+      `valor-telegram read --chat "Eng: {Project}"` returns the merged history after the run.
 - [ ] `python -m tools.memory_search status --project valor` is healthy post-migration with no memory
       count change (proving zero memory impact).
 - [ ] `tools/sdlc_decompose.py`, its `pyproject.toml` entry, `MAX_PARALLEL_DEVS`/`PARALLEL_SAFE_PAIRS`,
@@ -529,28 +626,92 @@ The lead agent orchestrates; it never builds directly.
 - **Assigned To**: removal-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Delete `_handle_dev_session_completion()` + callers/parent-steering in `session_executor.py`,
-  `session_health.py`, `output_router.py`.
+- **Pre-removal audit (BLOCKER B1):** run
+  `grep -rn "_handle_dev_session_completion\|_create_continuation_pm\|_transition_parent" agent/`
+  and enumerate every caller/importer BEFORE writing the removal diff. The dev-completion path is
+  **entangled with shared parent-child machinery** — the removal must be surgical:
+  - **`_transition_parent` (`session_completion.py:171`) MUST NOT be deleted** — it is the generic
+    parent-status transition, called by `session_health.py:1955,2015` for *all* parent-child
+    completion, not just dev. Leave it in place.
+  - **`_create_continuation_pm` (`session_completion.py:277`) has surviving callers inside
+    `_handle_dev_session_completion` itself (`session_completion.py:1669,1709,1724`).** Audit whether
+    any caller survives outside the dev-completion path before deleting; if all callers live inside
+    the deleted function, delete it too — otherwise keep it.
+  - **`agent/agent_session_queue.py:49-53` re-exports all three symbols** (`_handle_dev_session_completion`,
+    `_create_continuation_pm`, `_transition_parent`) for backward compatibility. Deleting
+    `_handle_dev_session_completion` without fixing this re-export **breaks module load at import
+    time → fails every session enqueue, not just dev completions.** Update the re-export block to drop
+    only the deleted symbol(s) and keep the survivors.
+  - Also audit `agent/hooks/pre_tool_use.py:503` and `agent/output_router.py:13,118` which reference
+    `_handle_dev_session_completion` in comments/logic.
+- Delete `_handle_dev_session_completion()` + its dev-only callers/parent-steering in
+  `session_executor.py` (import L17, call L1915), `session_health.py`, `output_router.py`, **and the
+  re-export in `agent/agent_session_queue.py`** — surgically, per the audit above.
+- **Parent-sync machinery disposition (CONCERN, Consistency):** `_finalize_parent_sync` /
+  `waiting_for_children` are general child-session machinery, **not** dev-specific — they survive the
+  removal. `_handle_dev_session_completion` was only one *trigger* of the parent-sync path; the
+  container-completion path and `session_health.py`'s `_transition_parent` calls remain. Task 5
+  (validate-linkage) confirms the surviving path still finalizes parents. The child-session tests
+  (`waiting_for_children`, `_finalize_parent_sync`) are therefore **kept and must still pass**; only
+  tests exercising the dev-completion *trigger* are deleted.
 - Delete `tools/sdlc_decompose.py` + `pyproject.toml` `sdlc-decompose` entry +
   `MAX_PARALLEL_DEVS`/`PARALLEL_SAFE_PAIRS` in `agent/sdlc_router.py`.
 - `tools/valor_session.py` (+ `valor_cli.py`, `sdlc_session_ensure.py`, `agent_session_scheduler.py`):
   accept `eng`/`teammate`, reject `dev`/`pm`.
 - Remove PM read-only Bash rails for work sessions in `agent/hooks/pre_tool_use.py`.
+- **Reconcile the `project_mode == "pm"` config side channel (BLOCKER B2):** `agent/sdk_client.py`
+  reads `project.get("mode", "dev")` and branches on `project_mode == "pm"` at lines 1173, 2119, 3164
+  (plus the `has_worker_rules = project_mode != "pm"` at 3605 and the SDLC-skip guards at 3082, 3277).
+  This is independent of `SessionType`, so after the rename a project still carrying `"mode": "pm"` in
+  projects.json silently keeps PM rails / suppresses `WORKER_RULES` / skips SDLC classification. Fix:
+  delete the four `project_mode == "pm"` literal guards (and the `!= "pm"` complements) so the Eng
+  model has a single code path. The mode validator (`sdk_client.py:3160`) already normalizes any
+  unrecognized mode to `"dev"`, so stripping `"mode": "pm"` from a vault projects.json is safe —
+  the per-machine runbook step that removes it (see Update System) is the operational complement.
 - `ui/data/sdlc.py`: update display mapping (`pm`→Engineer; drop dev internal-sender entries).
 
 ### 4. Author migration scripts + tests
 - **Task ID**: build-migrations
 - **Depends On**: build-enums-persona
-- **Validates**: new migration tests (dry-run, idempotency, error path), project-scoped
+- **Validates**: new migration tests (dry-run, idempotency, error path, EXISTS-check collision skip,
+  worker-heartbeat-guard exit, create-then-delete Chat order, pre/post count assertion), project-scoped
 - **Informed By**: `scripts/migrate_session_type_chat_to_pm.py` (#652 precedent),
   `tools/telegram_history/__init__.py:~1097` (Chat delete-recreate)
 - **Assigned To**: migration-builder
 - **Agent Type**: migration-specialist
 - **Parallel**: true
 - `scripts/migrate_session_type_pm_to_eng.py`: raw `rename` + `hset` for the `session_type` KeyField,
-  then `AgentSession.rebuild_indexes()`; `--dry-run`, idempotent, "stop the bridge".
+  then `AgentSession.rebuild_indexes()`; `--dry-run`, idempotent, **"stop the bridge AND worker"**.
+  - **Worker-heartbeat guard (BLOCKER B3):** at startup, read the worker heartbeat key
+    (`register_worker_pid` / `HEARTBEAT_FRESHNESS_WINDOW`); `sys.exit(1)` with a clear message if a
+    fresh worker heartbeat exists. Both migration scripts share this guard.
+  - **Read `session_type` directly, NOT `session_mode` (CONCERN, Archaeologist):** the #652 precedent
+    script branches on the deprecated `session_mode` field, a no-op since #1026. Header comment must
+    state: *"Unlike #652, do NOT read session_mode — deprecated no-op since #1026; read session_type
+    directly."* Idempotency for non-target records: `if ":dev:" in key_str:
+    stats["skipped_dev_record"] += 1; continue` — `dev` deletion is code-side (Task 3), not a Redis
+    rename, so dev keys are left untouched here.
 - `scripts/merge_dev_chat_into_eng.py`: re-key Dev `TelegramMessage` records onto Eng chat_id (rename
-  pattern), `Chat` rename via ORM delete-recreate; project-scoped, `--dry-run`, idempotent.
+  pattern), `Chat` rename via ORM; project-scoped, `--dry-run`, idempotent. `TelegramMessage` uses
+  `msg_id = AutoKeyField()` + `chat_id = KeyField()` (`models/telegram.py:23-24`), so the re-keyed key
+  carries the chat_id segment — same-`msg_id` keys across the two chats collide on the rewritten
+  segment. Required guards:
+  - **EXISTS-check before every `rename` (BLOCKER B5):** Redis `RENAME` silently overwrites (implicit
+    `DEL`) the destination if it exists, destroying an existing Eng `TelegramMessage`. Before each
+    rename, `redis_client.exists(new_key)`; non-zero = collision → **log and skip, never clobber**.
+    `--dry-run` must enumerate **all** prospective collisions in a report so the operator sees them
+    before any live run.
+  - **`Chat` rename order — create-then-delete, not delete-then-create (CONCERN, Adversary):** the
+    ORM delete+create is non-atomic; a kill between the two permanently loses the Eng `Chat` record
+    and orphans every re-keyed message. **Create the Eng `Chat` first, verify it exists, then delete
+    the Dev `Chat` as the final step.** `chat_name` is a KeyField and `chat_id` a UniqueKeyField, so a
+    `create()` with a colliding `chat_name` errors at the Popoto level (detectable, not silent).
+  - **Pre/post count assertion + checkpoint idempotency (CONCERN, Operator):** capture the total Dev-chat
+    `TelegramMessage` key count pre-run; after the run, assert the count under the Eng chat_id segment
+    equals (pre-existing Eng count + migrated Dev count minus skipped collisions); mismatch →
+    `sys.exit(1)` prompting re-run. Idempotency guard: skip any key already bearing the target Eng
+    `chat_id` segment (mirror the precedent's `skipped_already_migrated`). This gives a mid-scan-kill
+    a safe resume.
 
 ### 5. Verify parent-session linkage
 - **Task ID**: validate-linkage
@@ -593,10 +754,20 @@ The lead agent orchestrates; it never builds directly.
 | sdlc-decompose removed | `grep -n 'sdlc-decompose\|sdlc_decompose' pyproject.toml` | exit code 1 |
 | GRANITE retained | `grep -n 'GRANITE' config/enums.py` | output contains GRANITE |
 | Migration dry-run runs | `python scripts/migrate_session_type_pm_to_eng.py --dry-run` | exit code 0 |
+| No `project_mode == "pm"` guard | `grep -n 'project_mode == "pm"\|project_mode != "pm"' agent/sdk_client.py` | exit code 1 |
+| Migration refuses live worker | (manual) start worker, run migration | `sys.exit(1)` with fresh-heartbeat error |
+| Merge dry-run reports collisions | `python scripts/merge_dev_chat_into_eng.py --dry-run --project test-x` | exit 0; collisions enumerated, no rename performed |
+| agent_session_queue imports load | `python -c "import agent.agent_session_queue"` | exit code 0 (re-export block fixed) |
 
 ## Critique Results
 
 **Verdict:** NEEDS REVISION (5 blockers) — war room run 2026-06-12.
+**Revision applied 2026-06-12:** all 5 blockers folded into tasks/sections, all 6 concerns and the 1 nit
+addressed (none deferred). The "Addressed By" / "Implementation Note" columns below record the
+disposition; the changes are now live in the body (Task 3 for B1/B2/Consistency; Prerequisites +
+Race Conditions + Update System for B3; Technical Approach + Update System for B4; Task 4 + Risks for
+B5 and the migration concerns; Data Flow + Documentation for the conversational-path concern; Success
+Criteria + No-Gos for the merge-demotion concern; Problem statement for the nit).
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
