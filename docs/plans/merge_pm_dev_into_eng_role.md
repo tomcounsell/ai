@@ -248,7 +248,13 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/merge_pm_dev_i
   re-export in `agent/agent_session_queue.py:49-53`** (B1) — surgically, leaving the shared
   `_transition_parent` (kept; also imported by `tools/agent_session_scheduler.py:417-419`, C4-B2) and
   any surviving `_create_continuation_pm` callers intact; also flip the hardcoded
-  `session_type == "pm"` delivery literal at `agent/output_router.py:159` to `"eng"` (C4-B1); delete
+  `session_type == "pm"` delivery literal at `agent/output_router.py:159` to `"eng"` (C4-B1); **rename the
+  six (verified seven) bare-string `session_type="pm"/"dev"` literal sites outside the enum-grep's reach
+  (BLOCKER C5-B1): writers `reflection_scheduler.py:571` and `sustainability.py:610`, the metric-label
+  source `sdk_client.py:2408` (the `cold_start_metrics.py:37` hit is a docstring example) + its
+  docstrings, and readers `sdlc_stage_marker.py:99`, `sdlc_session_ensure.py:83/139/188`,
+  `_sdlc_utils.py:87/97/162` — the three `sdlc_*` reader files are renamed, NOT deleted by the fan-out
+  removal**; delete
   `tools/sdlc_decompose.py` + its pyproject entry + `MAX_PARALLEL_DEVS`/`PARALLEL_SAFE_PAIRS` in
   `agent/sdlc_router.py`; delete the `--role dev`/`--role pm` paths in `tools/valor_session.py` (+
   `valor_cli.py`, `sdlc_session_ensure.py`, `agent_session_scheduler.py`); remove the PM read-only Bash
@@ -333,6 +339,11 @@ Migration: stop bridge → Telegram rename PM→Eng / archive-or-rename Dev → 
       cited 3265, verified actually ~3164-3210 in the classification block) must survive the B2 deletion of
       the `project_mode == "pm"` guards unchanged: a plain question still classifies as QUESTION and answers
       conversationally rather than entering the SDLC/child-dev path.
+- [ ] **Reply-to steering routes to the existing session, not a new one (CONCERN C5-C4, User).** A
+      reply-to message against a running `Eng:` session must land in `AgentSession.queued_steering_messages`
+      on that session (steered at the turn boundary), NOT spawn a fresh `eng` session. Asserts the bridge's
+      reply-to session-continuation is keyed on Telegram thread ID and survives the `PM:`→`Eng:` rename;
+      pairs with the Cowboy-pilot Success Criterion.
 
 ### Error State Rendering
 - [ ] An eng session that errors must still deliver a PM-persona-safe Telegram message (no raw
@@ -355,6 +366,14 @@ Migration: stop bridge → Telegram rename PM→Eng / archive-or-rename Dev → 
 - [ ] `tests/unit/test_output_router.py` `determine_delivery_action` nudge-path test (BLOCKER C4-B1) —
       UPDATE: switch the `session_type="pm"` + `classification_type="sdlc"` → `nudge_continue` case to
       `session_type="eng"`, so the renamed delivery branch is exercised.
+- [ ] **Bare-string `session_type` literal renames (BLOCKER C5-B1)** — UPDATE: tests pinned to the
+      renamed reader/writer/label sites assert `session_type="pm"`/`"dev"` and will break on the rename.
+      Verified affected: `tests/unit/test_sdlc_stage_marker.py`, `tests/unit/test_sdlc_utils.py`,
+      `tests/unit/test_sdlc_session_ensure.py` (+ `tests/integration/test_sdlc_session_ensure_integration.py`,
+      `tests/integration/test_sdlc_cross_repo_resolution.py`), `tests/unit/test_check_ttft.py` (TTFT
+      metric label), and any reflection-scheduler / sustainability-digest test asserting the enqueued
+      `session_type`. Switch every `"pm"`/`"dev"` expectation to `"eng"`. Run the BLOCKER C5-B1 grep gate
+      (extended to `tests/`) to confirm none remain.
 - [ ] `tests/unit/test_continuation_pm.py` and `tests/integration/test_continuation_pm_handoff.py`
       (BLOCKER C4-B2) — DELETE/REPLACE: both import `_create_continuation_pm` directly from
       `agent.agent_session_queue`; disposition must stay consistent with the Task 3 decision on
@@ -501,6 +520,9 @@ No update-script **code** changes required. The feature is delivered to each mac
 
 **Per-machine runbook (ordered — migration BEFORE `/update`, per BLOCKER B4):**
 
+0. **Heads-up to other group members first (NIT, User).** If any other humans are members of the
+   `PM: {Project}` / `Dev: {Project}` groups, post a brief notice before renaming so the rename does
+   not look like a group vanished — e.g. *"Consolidating PM:/Dev: → Eng: — one group, same purpose."*
 1. **Stop the Telegram bridge, the worker, AND the email bridge (BLOCKER B3 + C2-B3).**
    `./scripts/valor-service.sh` stop the bridge, `./scripts/valor-service.sh worker-disable` (stop *and*
    suppress launchd auto-respawn — a plain `worker-stop` may be relaunched by `KeepAlive=true`), and
@@ -534,6 +556,15 @@ No update-script **code** changes required. The feature is delivered to each mac
 6. **Re-enable + restart the worker** (`worker-start` re-enables launchd respawn), the Telegram bridge,
    **and the email bridge (`email-start`)**; verify end-to-end via
    `valor-telegram read --chat "Eng: {Project}"`.
+7. **Post-restart steady-state canary — confirm no writer re-mints `pm`/`dev` records (CONCERN C5-C1,
+   Operator).** Message delivery (step 6) proves the read path; it does **not** prove the renamed writers
+   (`reflection_scheduler.py`, `sustainability.py`, the email bridge) stopped minting wrong-typed
+   sessions. On the Cowboy pilot, after the worker has been up through **at least one reflection cycle**
+   (so the hourly scheduler has run), run this ORM-only check (never raw Redis):
+   `python -c "from models.agent_session import AgentSession; bad=[s for s in AgentSession.query.all() if s.session_type in ('pm','dev')]; print(len(bad)); raise SystemExit(1 if bad else 0)"`.
+   Exit 0 = clean. **Break-glass canary:** if any `pm`/`dev` session reappears (exit 1), a writer site was
+   missed — `worker-disable` immediately and investigate (re-run the BLOCKER C5-B1 grep gate to find the
+   un-renamed literal).
 
 This ordering is the chosen resolution to BLOCKER B4 over a one-release `PM = "eng"` alias shim (NO
 LEGACY CODE). This plan's `single-machine-ownership.md` doc update keeps the ownership examples
@@ -582,7 +613,12 @@ work through the same Telegram path, now via one `Eng: {Project}` group instead 
 ## Success Criteria
 
 - [ ] `SessionType` contains `ENG`, `TEAMMATE`, `GRANITE` (CLI-only); **no `pm` or `dev` value remains
-      anywhere** in code (enums, hooks, router, CLI, dashboard, persona files, tests).
+      anywhere** in code (enums, hooks, router, CLI, dashboard, persona files, tests). **Mechanically
+      enforced** by two greps that must both exit 1: the `SessionType.PM`/`SessionType.DEV` enum-name
+      rows AND the codebase-wide bare-string `session_type` literal gate (BLOCKER C5-B1, Verification
+      table) — the latter is what catches the writer/reader/label sites
+      (`reflection_scheduler.py`, `sustainability.py`, `sdk_client.py:2408`, the three `sdlc_*` readers)
+      that carry `"pm"`/`"dev"` as plain strings invisible to the enum-name greps.
 - [ ] `bridge/routing.py` resolves an `engineer` persona from config and an `Eng:` title prefix;
       `Dev:`/`PM:` fallbacks are gone.
 - [ ] `valor-session create` accepts roles `eng` and `teammate` only; `--role dev`/`--role pm` are
@@ -614,6 +650,13 @@ work through the same Telegram path, now via one `Eng: {Project}` group instead 
 - [ ] **`pm_briefing` delivery verified post-rename if the pilot project uses it (CONCERN C4-C1):** if
       `valor`/`popoto` has `pm_briefing.enabled`, confirm the daily briefing still lands in the renamed
       `Eng: {Project}` group after `target_groups` is updated.
+- [ ] **Reply-to steering survives the `Eng:` rename (CONCERN C5-C4, User):** with a work session already
+      running in `Eng: Valor`, send a **reply-to** message against that session's thread and verify
+      (a) the bridge **routes it to steering** — it lands in `AgentSession.queued_steering_messages` on the
+      *existing* session rather than spawning a new `eng` session — and (b) the steered reply is delivered
+      back to the `Eng:` group. This proves the bridge's reply-to session-continuation (keyed on Telegram
+      thread ID, not group name) survives the `PM:`→`Eng:` group rename; check via
+      `python -m tools.valor_session status --id <ID>` (pending steering messages) on the live session.
 - [ ] Docs updated (see Documentation section): architecture, parallel-execution removal, ownership
       examples, persona docs, `projects.example.json`, `CLAUDE.md`.
 - [ ] Tests pass (`/do-test`)
@@ -741,6 +784,42 @@ The lead agent orchestrates; it never builds directly.
   to `"eng"` (BLOCKER C4-B1, above). **Must-not-break callers of the re-export block:**
   `session_health.py:1955,2015` (`_transition_parent`) and **`tools/agent_session_scheduler.py:417-419`**
   (`_transition_parent`) — leave `_transition_parent` exported.
+- **Rename the six (verified seven) bare-string `session_type="pm"/"dev"` literal sites (BLOCKER
+  C5-B1):** the cycle-4 `output_router.py:159` bug class repeats at scale — `session_type` literals that
+  are **not** `SessionType.PM`/`SessionType.DEV` references, so the enum-name greps in the Verification
+  table never see them. Post-rename they silently re-mint wrong-typed sessions (writers) or return zero
+  results (readers). Each site was re-verified against live `main`; dispositions below. **None of the
+  three `tools/sdlc_*` reader files are deleted by Task 3's fan-out removal** — Task 3 deletes only
+  `tools/sdlc_decompose.py`; `sdlc_stage_marker.py`, `sdlc_session_ensure.py`, and `_sdlc_utils.py` are
+  part of the live `sdlc-tool` family (stage-query / verdict / dispatch / meta-set), so they are
+  **renamed, not deleted**.
+  - **Writers (re-mint wrong-typed records forever post-restart):**
+    - `agent/reflection_scheduler.py:571` — real `_push_agent_session(..., session_type="pm")` (verified;
+      holds). Rename to `"eng"`. Previously cited in the plan only as a process to *stop* during
+      migration (Race 1 / Prerequisites) — it is **also** a code site that must be renamed.
+    - `agent/sustainability.py:610` — real `AgentSession.create_and_enqueue(..., session_type="dev")`
+      (verified; holds). Rename to `"eng"`. (Its prompt body at `:603` also names the `'Dev: Valor'`
+      chat — a cosmetic string the docs/runbook rename covers; the load-bearing fix is the
+      `session_type` kwarg.)
+    - `agent/cold_start_metrics.py:37` — **NOT a code site: it is a docstring `Usage::` example** (the
+      `:17` hit is the JSON-schema docstring block). The real metric-label source is
+      **`agent/sdk_client.py:2408`**: `_session_type_tag = "pm" if system_prompt else "other"`, passed
+      into `record_ttft` via `_ttft_meta`. This is a **metrics label** written to
+      `logs/cold_start_metrics.jsonl`, not a session create and not a worker query. Per the critique's
+      "change to match what the worker queries", change the literal to `"eng"` and update the
+      `cold_start_metrics.py` docstring examples (`:17`, `:37`) + the `session_type` param doc (`:78`,
+      which lists `"pm"/"dev"`) to the `eng`/`teammate` vocabulary.
+  - **Readers (query/filter — silently return zero post-migration, no crash):**
+    - `tools/sdlc_stage_marker.py:99` — `AgentSession.query.count(session_type="pm")` (verified; holds).
+      Rename to `"eng"`.
+    - `tools/sdlc_session_ensure.py:139` (create `session_type="pm"`) and `:188`
+      (`AgentSession.query.filter(session_type="pm", status="running")` running-PM gate) — **plus the
+      `:83` `getattr(resolved, "session_type", None) == "pm"` gate the critique did not enumerate** and
+      the `:170` docstring line. All four verified; rename every `"pm"` literal to `"eng"`. Distinct from
+      the `--role` CLI rejection already listed for this file.
+    - `tools/_sdlc_utils.py:97` (`AgentSession.query.filter(session_type="pm")`) — **plus the `:87` and
+      `:162` `getattr(s, "session_type", None) == "pm"` gates the critique cited only `:97` for.** All
+      three verified; rename to `"eng"`.
 - **Parent-sync machinery disposition (CONCERN, Consistency):** `_finalize_parent_sync` /
   `waiting_for_children` are general child-session machinery, **not** dev-specific — they survive the
   removal. `_handle_dev_session_completion` was only one *trigger* of the parent-sync path; the
@@ -800,12 +879,35 @@ The lead agent orchestrates; it never builds directly.
     stop; `HEARTBEAT_FRESHNESS_WINDOW`=90 governs a different per-session progress field. A
     `pgrep -f "python -m worker"` / `os.kill(pid, 0)` liveness check is a valid *additional* signal. Both
     migration scripts share this guard.
+  - **Code-version ordering guard — assert `SessionType.PM` still exists (CONCERN C5-C2, Consistency):**
+    the liveness guards (worker heartbeat, email-bridge pgrep) catch a *live writer* but **not** an
+    aborted-then-retried wrong ordering where `/update` already ran and removed `SessionType.PM` from the
+    installed code (BLOCKER B4's failure mode). After the liveness checks, the migrate script must
+    `from config.enums import SessionType` and assert `hasattr(SessionType, "PM")`; if absent, `sys.exit(1)`
+    with: *"Run this migration BEFORE /update — SessionType.PM has already been removed from the installed
+    code; pm records can no longer be matched. See Update System runbook step 3."* This makes the
+    migration-before-`/update` ordering self-enforcing instead of runbook-only. (The `merge_dev` script
+    does not touch `session_type`, so this guard is the migrate script's alone.)
   - **Read `session_type` directly, NOT `session_mode` (CONCERN, Archaeologist):** the #652 precedent
     script branches on the deprecated `session_mode` field, a no-op since #1026. Header comment must
     state: *"Unlike #652, do NOT read session_mode — deprecated no-op since #1026; read session_type
     directly."* Idempotency for non-target records: `if ":dev:" in key_str:
     stats["skipped_dev_record"] += 1; continue` — `dev` deletion is code-side (Task 3), not a Redis
     rename, so dev keys are left untouched here.
+
+**Critical-path scope of Task 4 is `migrate_session_type_pm_to_eng.py` only.** It is the sole migration
+the per-machine rollout (and every downstream task dependency) hangs off — the `pm→eng` session rename is
+mandatory wherever `pm` records exist. The chat-history merge below is operator-optional (No-Gos
+[OPERATOR-DECISION]; archiving already preserves Dev history in-place) and is therefore broken out into
+its own sub-section so it carries no critical-path weight. The migration-builder still authors **both**
+scripts (authoring `merge_dev_chat_into_eng.py` remains a Success Criterion); only its *position on the
+critical path* changes.
+
+### 4b. Optional operator tool: merge Dev chat history (CONCERN C5-C3, Simplifier)
+- **Task ID**: build-migrations (same builder/task; documented as a sub-deliverable, not a separate
+  scheduling node — nothing depends on it)
+- **Criticality**: operator-optional — **running** it is a per-project decision (No-Gos
+  [OPERATOR-DECISION]); **authoring** it is required (Success Criteria). No downstream task depends on it.
 - `scripts/merge_dev_chat_into_eng.py`: re-key Dev `TelegramMessage` records onto Eng chat_id (rename
   pattern), `Chat` rename via ORM; project-scoped, `--dry-run`, idempotent. `TelegramMessage` uses
   `msg_id = AutoKeyField()` + `chat_id = KeyField()` (`models/telegram.py:23-24`), so the re-keyed key
@@ -869,7 +971,7 @@ The lead agent orchestrates; it never builds directly.
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No `pm` session value | `grep -rn 'SessionType.PM\b' config/ agent/ bridge/ tools/ ui/ tests/ --include="*.py"` | exit code 1 (CONCERN C4-C2: scope widened from `config/enums.py` to match the `dev` row and the "no value remains anywhere" criterion) |
-| No `"pm"` literal in output_router | `grep -n '"pm"' agent/output_router.py` | no matches (BLOCKER C4-B1: the `session_type == "pm"` delivery branch is now `"eng"`) |
+| No bare `session_type` pm/dev literal (codebase-wide, BLOCKER C5-B1) | `grep -rnE 'session_type\s*=\s*["'"'"']?(pm\|dev)["'"'"']' agent/ bridge/ tools/ scripts/ --include="*.py" \| grep -vE '#\|::\|→\|"session_type='` | no matches (exit 1). This is the mechanical enforcement of "no pm/dev value remains anywhere" for the bare-string sites the `SessionType.PM`/`SessionType.DEV` rows can't see. The pattern is keyed on `session_type` (so a chance `"pm"` elsewhere is ignored) and catches assignment + filter-kwarg sites (`reflection_scheduler.py:571`, `sustainability.py:610`, `sdk_client.py:2408`, `sdlc_stage_marker.py:99`, `sdlc_session_ensure.py:139,188`, `_sdlc_utils.py:97`); the `grep -v` strips comment (`#`), docstring (`::`), arrow-prose (`→`), and log-f-string (`"session_type=`) false positives surfaced during verification. **The `== "pm"`/`!= "pm"` comparison gates (`sdlc_session_ensure.py:83`, `_sdlc_utils.py:87,162`) are not caught by this `=`-anchored pattern** — they are covered by their own Task-3 rename bullet, and a `grep -rnE 'session_type[^=]*== *"(pm\|dev)"'` over the same dirs is the complementary spot-check (also exit 1). |
 | No `dev` session value | `grep -rn 'SessionType.DEV\b' config/ agent/ bridge/ tools/ ui/ tests/` | exit code 1 |
 | No `Dev:`/`PM:` fallback | `grep -rn 'startswith("Dev:")\|startswith("PM:")' bridge/routing.py` | exit code 1 |
 | sdlc-decompose removed | `grep -n 'sdlc-decompose\|sdlc_decompose' pyproject.toml` | exit code 1 |
@@ -878,6 +980,8 @@ The lead agent orchestrates; it never builds directly.
 | No `project_mode == "pm"` guard | `grep -n 'project_mode == "pm"\|project_mode != "pm"' agent/sdk_client.py` | exit code 1 |
 | Migration refuses live worker | (manual) start worker, run migration | `sys.exit(1)` with fresh-heartbeat error |
 | Merge dry-run reports collisions | `python scripts/merge_dev_chat_into_eng.py --dry-run --project test-x` | exit 0; collisions enumerated, no rename performed |
+| No `== "pm"`/`!= "pm"` session_type comparison (C5-B1 complement) | `grep -rnE 'session_type[^=]*(==\|!=) *"(pm\|dev)"' agent/ bridge/ tools/ scripts/ --include="*.py"` | no matches (exit 1); catches the `sdlc_session_ensure.py:83`, `_sdlc_utils.py:87,162` gates the `=`-anchored gate misses |
+| Reply-to steering routes to existing session (C5-C4) | (Cowboy pilot, manual) reply-to a running `Eng:` session; `python -m tools.valor_session status --id <ID>` | pending steering message present on the existing session; no new `eng` session created |
 | agent_session_queue imports load | `python -c "import agent.agent_session_queue"` | exit code 0 (re-export block fixed) |
 
 ## Critique Results
@@ -976,6 +1080,27 @@ live `main`. Two cited line numbers had **drifted** and were corrected during th
 | STRUCTURAL | — | Task 1 said `manifest.json` under `config/personas/` — correct path is `config/personas/segments/manifest.json`. | **FIXED — Task 1 + Solution persona-merge bullet**: path corrected to `config/personas/segments/manifest.json`. | Verified `config/personas/segments/manifest.json` exists; no `config/personas/manifest.json`. |
 
 **All 2 blockers + 4 concerns + 1 nit + structural fix resolved in the body; plan status → Ready.**
+
+### Cycle 5 — war room re-run 2026-06-12
+
+**Verdict:** NEEDS REVISION (1 blocker, 4 actionable concerns, 1 nit) → **REVISION APPLIED 2026-06-12.**
+This revision addresses the cycle-5 blocker and all concerns.
+
+The single blocker is the cycle-4 `output_router.py:159` bug class at scale: **six bare-string
+`session_type="pm"/"dev"` literal sites** outside the enum-grep's reach (flagged by 6 of 7 critics).
+Every cited site was re-verified against live `main`; **two cited line-number/disposition corrections
+were found** (see notes). All fixes folded into the body.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | 6 of 7 | Six bare-string `session_type="pm"/"dev"` literal sites invisible to the `SessionType.PM`/`.DEV` greps: writers `reflection_scheduler.py:571` (`"pm"`), `cold_start_metrics.py:37` (`"pm"`), `sustainability.py:610` (`"dev"`); readers `sdlc_stage_marker.py:99`, `sdlc_session_ensure.py:139/188`, `_sdlc_utils.py:97` (all `"pm"`). Post-rename: writers re-mint wrong-typed sessions forever, readers silently return zero. | **FIXED — Task 3 (new bare-literal bullet block with per-site disposition), Solution dev-machinery bullet, Verification (single-file `"pm"` row replaced by a codebase-wide `session_type` bare-literal gate + a `== "pm"` comparison spot-check), Success Criteria (grep gate named as the mechanical enforcement), Test Impact (new row for the affected tests), Update System (post-restart steady-state canary — CONCERN C5-C1).** | **Two corrections vs the critique.** (1) `cold_start_metrics.py:37` is **a docstring `Usage::` example, not code** — the real metric-label source is `agent/sdk_client.py:2408` `_session_type_tag = "pm" if system_prompt else "other"` (a JSONL metric label, not a session create); changed to `"eng"` per "match what the worker queries". (2) The three `tools/sdlc_*` reader files are **NOT deleted by Task 3's fan-out removal** (which deletes only `tools/sdlc_decompose.py`) — they belong to the live `sdlc-tool` family, so they are **renamed**. Also surfaced un-cited sibling literals in the same files (`sdlc_session_ensure.py:83`, `_sdlc_utils.py:87,162` `== "pm"` gates) and added them to the rename list. |
+| CONCERN | Operator | Runbook verifies message delivery but not that wrong-typed records *stopped being minted* post-restart. | **FIXED — Update System runbook step 7 (new)**: post-reflection-cycle ORM-only canary `[s for s in AgentSession.query.all() if s.session_type in ('pm','dev')]` → exit 1 if any; documented as the break-glass canary (worker-disable + investigate if pm/dev reappear). | Never raw Redis; ORM-only per repo policy. |
+| CONCERN | Consistency | Liveness guards don't catch an aborted-then-retried wrong ordering where `/update` already removed `SessionType.PM`. | **FIXED — Task 4 migrate-script guard bullet (new)**: after the liveness checks, assert `hasattr(SessionType, "PM")`; `sys.exit(1)` with "Run this migration BEFORE /update — SessionType.PM has already been removed" if absent. Makes the migration-before-`/update` ordering self-enforcing. | Migrate script only (the merge script does not touch `session_type`). |
+| CONCERN | Simplifier | `merge_dev_chat_into_eng.py` is operator-optional but carries first-class Task 4 weight. | **FIXED — Task 4 restructured into critical-path 4 (`migrate_session_type_pm_to_eng.py` only) + new `### 4b. Optional operator tool` sub-section** holding all merge-script bullets/guards/Test-Impact; downstream deps hang off the rename migration only. Migration-builder still authors both. | Authoring `merge_dev_chat_into_eng.py` stays a Success Criterion; only its critical-path position changes. |
+| CONCERN | User | No steering acceptance test. | **FIXED — Success Criteria (new Cowboy-pilot reply-to-steering criterion) + Failure Path Test Strategy (new entry) + Verification (new manual row)**: reply-to a running `Eng:` session lands in `queued_steering_messages` on the existing session (no new eng session) and the reply returns to the `Eng:` group; proves thread-ID continuation survives the prefix rename. | CONCERN C5-C5 (Skeptic verification-gap) is subsumed by the blocker's grep fix — no separate edit. |
+| NIT | User | Runbook had no "heads-up to other group members" step. | **FIXED — Update System runbook step 0 (new)**: post a brief notice before renaming if other humans are in the `PM:`/`Dev:` groups. | — |
+
+**All 1 blocker + 4 concerns + 1 nit resolved in the body; plan status → Ready.**
 
 ---
 
