@@ -446,6 +446,28 @@ Migration: stop bridge → Telegram rename PM→Eng / archive-or-rename Dev → 
         Rewrite to the ENG vocabulary / `is_eng`, matching the `steer_child.py:94` guard rewrite.
       - `tests/integration/test_steering.py` — UPDATE: creates `session_type="dev"` (1476) and
         `session_type="pm"` (1494) fixtures. Switch both to `"eng"`.
+- [ ] **Factory/property-call test files (CONCERN C8-5)** — each verified against live `main` (reference
+      counts confirmed by `grep -c`):
+      - `tests/e2e/test_nudge_loop.py` — UPDATE: `.create_pm()` → `.create_eng()` (**3** refs).
+      - `tests/e2e/test_queue_isolation.py` — UPDATE: `.create_pm()` → `.create_eng()` (**8** refs).
+      - `tests/e2e/test_session_lifecycle.py` — UPDATE: `.create_pm()` → `.create_eng()`, `.is_pm` →
+        `.is_eng` (**9** refs total).
+      - `tests/e2e/test_error_boundaries.py` — UPDATE: `.create_pm()` → `.create_eng()` (**5** refs).
+      - `tests/integration/test_bridge_routing.py` — UPDATE: `.is_pm`/`.is_dev` → `.is_eng`, and flip the
+        three `assert ... session_type == "pm"` asserts at **lines 133/161/176** → `"eng"` (**11** refs
+        total).
+      - `tests/unit/test_session_completion_dev_spawn_no_truncation.py` — UPDATE/DELETE: imports
+        `_create_continuation_pm` **from `agent.session_completion`** (line 23, def at
+        `session_completion.py:277`) and calls it at line 105. **Correction vs critique:** the critique
+        row did not name the import module; verified live the import is `from agent.session_completion
+        import _create_continuation_pm`, **not** `agent.agent_session_queue` (that is `test_continuation_pm.py`,
+        the C4-B2 row). Disposition follows Task 3's keep/delete decision for `_create_continuation_pm`:
+        delete the test if the symbol is deleted, otherwise update the call.
+      - `tests/unit/test_pm_session_factory.py` — DELETE or REPLACE entirely: it asserts `create_pm`/
+        `create_dev` exist, that `--role pm` appears in `sdk_client.py`, and that `project-manager.md`
+        contains the fan-out section — **all four assertions invert** once this plan ships (factories
+        renamed, `--role pm` rejected, persona merged into `engineer.md`, fan-out deleted). 17 matching
+        lines verified live.
 
 ## Rabbit Holes
 
@@ -681,6 +703,14 @@ work through the same Telegram path, now via one `Eng: {Project}` group instead 
       (CONCERN C4-C1)** and the `projects.telegram.groups` doc string at line 7.
 - [ ] Update `CLAUDE.md` command tables / architecture prose mentioning PM→Dev session spawning,
       `--role dev`/`--role pm`, and `sdlc-decompose`.
+- [ ] **Update the three skill files that invoke `valor-session create --role dev` → `--role eng`
+      (CONCERN C8-3; lines verified against live `main`):**
+  - [ ] `.claude/skills-global/sdlc/SKILL.md:228` (`valor-session create --role dev --parent ...`) —
+        **HIGHEST priority: this is a *global* skill, hardlinked to `~/.claude/skills/` on every machine
+        by `scripts/update/hardlinks.py`, so a stale `--role dev` here ships everywhere and breaks the
+        SDLC dispatch the instant the CLI starts rejecting `dev`.**
+  - [ ] `.claude/skills/x-com/SKILL.md:45` (`valor-session create --role dev --project-key valor ...`).
+  - [ ] `.claude/skills/linkedin/SKILL.md:85` (`--role dev \` in a multi-line invocation).
 
 ## Success Criteria
 
@@ -857,9 +887,24 @@ The lead agent orchestrates; it never builds directly.
     `SESSION_TYPE_ENG`; `create_child` (def 1396) body `session_type=SESSION_TYPE_DEV` (line 1430) →
     `SESSION_TYPE_ENG`; `create_dev` (def 1444, a backward-compat wrapper for `create_child`) — fold/rename
     to `create_eng` semantics or delete if no surviving caller (audit alongside Task 3).
-  - **Docstrings/comments:** class docstring (lines 87-112: "pm/teammate/or dev" prose, the
-    `PM session`/`Dev session` permission-model blocks, the `create_pm`/`create_dev` factory list) and the
-    field comment at line 144 (`# "pm", "teammate", or "dev" — discriminator`) → describe `eng`/`teammate`.
+  - **Docstrings/comments:** the **module-level docstring (lines 1-20, CONCERN C8-4)** — verified live to
+    carry `session_type="pm"` at **line 10** ("PM session (session_type=\"pm\"): Read-only ...") and
+    `session_type="dev"` at **line 14** ("Dev session (session_type=\"dev\"): Full-permission ...");
+    rewrite both to the single `eng` path — **plus** the class docstring (lines 87-112: "pm/teammate/or
+    dev" prose, the `PM session`/`Dev session` permission-model blocks at lines 93/99, the
+    `create_pm`/`create_dev` factory list) and the field comment at line 144 (`# "pm", "teammate", or
+    "dev" — discriminator`) → describe `eng`/`teammate`. **Why the module docstring matters mechanically:**
+    the bare-literal Verification grep (`session_type\s*=\s*["']?(pm|dev)`) matches **4 hits in this file**
+    — lines 10, 14, 93, 99 — and `grep -v` strips comment/docstring false positives only when they carry
+    `#`/`::`; the prose `session_type="pm"` lines do not, so they would survive the `grep -v` and keep the
+    bare-literal gate from reaching exit 1 unless the module docstring is rewritten too.
+- **Pre-edit test-call enumeration hint (CONCERN C8-5):** before renaming the `create_pm`/`is_pm`/`is_dev`/
+  `create_dev` model surface, run
+  `grep -rn '\.create_pm\b\|\.is_pm\b\|\.is_dev\b\|\.create_dev\b' tests/ --include="*.py"` to enumerate
+  every test call site up front — the seven test files in Test Impact (`test_nudge_loop`, `test_queue_isolation`,
+  `test_session_lifecycle`, `test_error_boundaries`, `test_bridge_routing`,
+  `test_session_completion_dev_spawn_no_truncation`, `test_pm_session_factory`) plus the BLOCKER C6-B1 set
+  all surface here. Map each to its Test Impact disposition before editing.
 - Merge `config/personas/project-manager.md` + `developer.md` → `config/personas/engineer.md`; update
   `config/personas/segments/manifest.json` (correct path — manifest lives under `segments/`, not directly
   under `config/personas/`) / segment references.
@@ -951,6 +996,24 @@ The lead agent orchestrates; it never builds directly.
     `_handle_dev_session_completion` without fixing this re-export **breaks module load at import
     time → fails every session enqueue, not just dev completions.** Update the re-export block to drop
     only the deleted symbol(s) and keep the survivors.
+  - **Four additional `SessionType.PM` sites in this same file must be renamed to `SessionType.ENG`
+    (CONCERN C8-1; verified against live `main`):** beyond the re-export block, `agent_session_queue.py`
+    carries the bare-`pm` work discriminator at four sites the re-export-only scope missed —
+    - **Lines 223 and 1085** — `def`-time default params `session_type: str = SessionType.PM` (in
+      `_push_agent_session` and `enqueue_agent_session`) → `SessionType.ENG`. These **bind at import time**
+      (the same class of crash as the `bridge/dispatch.py:87` C7-B1 fix), so leaving them un-renamed means
+      every enqueue without an explicit `session_type` silently defaults to the deleted `PM` member.
+    - **Lines 385 and 1146** — `elif session_type == SessionType.PM: _wk = project_key` inline
+      worker_key branches (each carries a `# KEEP IN SYNC with AgentSession.worker_key` comment) →
+      `SessionType.ENG`, preserving the surrounding `TEAMMATE`/`ENG`/`else` decision tree (the
+      `if session_type == SessionType.TEAMMATE:` branch at 383/1144 is unchanged).
+    - **Post-edit check for the builder:** `grep -n 'SessionType' agent/agent_session_queue.py` — expected
+      survivors are only `TEAMMATE` and `ENG` (plus the line-134 import).
+    - **Disputed-finding note:** this was a contested cycle-8 finding (Skeptic voted BLOCKER; three other
+      critics dismissed it as mechanically gated by the existing `SessionType.PM\b` Verification grep over
+      `agent/`). Resolved here by **explicit enumeration** so the builder needs no re-investigation — the
+      grep gate would catch it, but the four-site list removes any ambiguity about which sites and which
+      replacement.
   - Also audit `agent/hooks/pre_tool_use.py:503` and `agent/output_router.py:13,118` which reference
     `_handle_dev_session_completion` in comments/logic.
   - **Expand the audit grep beyond `agent/` (BLOCKER C4-B2):** run
@@ -1127,10 +1190,18 @@ The lead agent orchestrates; it never builds directly.
     `sys.exit(1)` if zero or >1, so a malformed key never gets a corrupted multi-replace. (Realistically
     no KeyField holds exactly `pm` outside the session_type segment, but the positional rewrite removes
     the risk entirely.)
-  - **Worker-liveness guard via `data/last_worker_connected` mtime (BLOCKER B3; corrected by C2-B2):**
-    at startup, stat the worker heartbeat **file** `data/last_worker_connected` (written every health
-    tick by `_write_worker_heartbeat`, `agent/session_health.py:2058`) and `sys.exit(1)` with a clear
-    message if `(now - mtime) < threshold` (a fresh worker is live). Resolve the path relative to the
+  - **Worker-liveness guard via `data/last_worker_connected` mtime (BLOCKER B3; corrected by C2-B2;
+    threshold pinned by CONCERN C8-2):** at startup, stat the worker heartbeat **file**
+    `data/last_worker_connected` (written every health tick by `_write_worker_heartbeat`,
+    `agent/session_health.py:2058`) and `sys.exit(1)` with a clear message if `(now - mtime) < threshold`
+    (a fresh worker is live). **Pin `threshold = 600` seconds** with a code comment citing the source
+    constant: the heartbeat is rewritten every `AGENT_SESSION_HEALTH_CHECK_INTERVAL = 300` seconds
+    (`agent/session_health.py:206`, verified live), so the guard threshold must be **2 × the write
+    interval = 600s** — anything under 300s false-passes a worker that was running moments ago (its last
+    tick may be up to one full interval old even while alive), and a threshold ≥ 600s guarantees a single
+    missed tick never reads as "stopped". The `pgrep -f "python -m worker"` / `os.kill(pid, 0)`
+    cross-check below remains the **primary** liveness signal; the mtime guard is defense-in-depth.
+    Resolve the path relative to the
     migration script's repo root (`Path(__file__).parent.parent / "data" / "last_worker_connected"`),
     **not** cwd. Do **NOT** key off `register_worker_pid` / `HEARTBEAT_FRESHNESS_WINDOW`: that key is
     `worker:registered_pid:{hostname}:{pid}` with a **24h TTL** and a **value of the PID, not a
@@ -1239,6 +1310,7 @@ critical path* changes.
 | No `Dev:`/`PM:` fallback | `grep -rn 'startswith("Dev:")\|startswith("PM:")' bridge/routing.py` | exit code 1 |
 | No `"Dev: Valor"` delivery target (BLOCKER C7-B4) | `grep -rn '"Dev: Valor"\|'"'"'Dev: Valor'"'"'' reflections/ scripts/ agent/ --include="*.py"` | exit code 1 (all eight background-job send-targets renamed to `Eng: Valor`; `tests/` deliberately out of scope — routing fixtures, handled by Task 2) |
 | sdlc-decompose removed | `grep -n 'sdlc-decompose\|sdlc_decompose' pyproject.toml` | exit code 1 |
+| No `--role dev`/`--role pm` in skills (CONCERN C8-3) | `grep -rn '\-\-role dev\|\-\-role pm' .claude/` | exit code 1 (the three skill files `skills-global/sdlc/SKILL.md:228`, `skills/x-com/SKILL.md:45`, `skills/linkedin/SKILL.md:85` all updated to `--role eng`; the global one ships to every machine via `scripts/update/hardlinks.py`) |
 | GRANITE retained | `grep -n 'GRANITE' config/enums.py` | output contains GRANITE |
 | Migration dry-run runs | `python scripts/migrate_session_type_pm_to_eng.py --dry-run` | exit code 0 |
 | No `project_mode == "pm"` guard | `grep -n 'project_mode == "pm"\|project_mode != "pm"' agent/sdk_client.py` | exit code 1 |
@@ -1408,6 +1480,27 @@ under-count were found** (see notes). All fixes folded into the body.
 | NIT | — | Email-bridge stop asymmetry: runbook uses `worker-disable` (suppresses launchd respawn) for the worker but only transient `email-stop` for the email bridge; on machines with the opt-in email-bridge launchd plist, `KeepAlive=true` may respawn it mid-migration past the point-in-time pgrep guard. | **FIXED — Update System runbook step 1 (note: on plist-equipped machines, unload `com.valor.email-bridge` / use the disable variant before migrating) + step 6 (re-load/re-enable after).** | — |
 
 **All 4 blockers + 1 nit resolved in the body; plan status → Ready.**
+
+### Cycle 8 — war room re-run 2026-06-12
+
+**Verdict:** READY TO BUILD (with concerns) — **0 blockers, 5 concerns** → **REVISION APPLIED 2026-06-12.**
+This was a **clarity pass**: every concern is an Implementation Note embedded surgically into the existing
+task/section text so the builder needs no re-investigation. No restructuring, no scope change. Two critics
+returned **clean** — the **Simplifier** ("genuinely exhausted from a simplification standpoint" — no further
+collapse available) and the **Archaeologist** (no historical-precedent findings). Every cited site was
+re-verified against live `main`; the line numbers, the `session_health.py:206` interval constant (300s),
+the three SKILL.md lines, the `models/agent_session.py` module-docstring lines (10/14), and all seven test
+files' reference counts held, with one import-source correction recorded below.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic (disputed; 3 critics dismissed as grep-gated) | Task 3 lists only the `agent_session_queue.py:49-53` re-export block, but four more `SessionType.PM` sites live in the same file: def-time defaults at **223/1085** and inline worker_key branches at **385/1146**. | **Task 3** — new four-site enumeration bullet under the re-export item. | Verified live: 223/1085 are import-time-binding `def` defaults (same crash class as `dispatch.py:87`), 385/1146 are `elif session_type == SessionType.PM:` worker_key branches with `# KEEP IN SYNC` comments. All → `SessionType.ENG`; post-edit `grep -n 'SessionType' agent/agent_session_queue.py` survivors = TEAMMATE + ENG only. Disputed finding resolved by explicit enumeration. |
+| CONCERN | Operator | The migration worker-liveness guard `(now - mtime) < threshold` never pinned `threshold`; anything under 300s false-passes a recently-stopped worker. | **Task 4** — pin `threshold = 600` (2 × write interval) with a comment citing the constant. | Verified live: heartbeat rewritten every `AGENT_SESSION_HEALTH_CHECK_INTERVAL = 300`s (`session_health.py:206`). 600s = 2× guarantees a single missed tick never reads as "stopped". `pgrep` remains primary; mtime is defense-in-depth. |
+| CONCERN | Operator | Three skill files invoke `valor-session create --role dev`, which the CLI starts rejecting after this plan ships. | **Documentation** (3 checkbox items) + **Verification** (new `grep -rn '--role dev\|--role pm' .claude/` row, exit 1). | Lines verified live: `skills-global/sdlc/SKILL.md:228` (HIGHEST — hardlinked to every machine via `scripts/update/hardlinks.py`), `skills/x-com/SKILL.md:45`, `skills/linkedin/SKILL.md:85`. All → `--role eng`. |
+| CONCERN | Archaeologist-adjacent (grep-mechanics) | Task 1's docstring scope was "lines 87-112 and 144", but the **module-level docstring at lines 10 and 14** also carries `session_type="pm"`/`"dev"` prose that the bare-literal grep matches (4 hits: 10/14/93/99) and `grep -v` does NOT strip (no `#`/`::`), keeping the gate from reaching exit 1. | **Task 1** — extend the docstring bullet to lines 1-20 (module docstring) with the grep-mechanics rationale. | Verified live: line 10 = `PM session (session_type="pm")`, line 14 = `Dev session (session_type="dev")`. Both must be rewritten for the bare-literal Verification grep to exit 1. |
+| CONCERN | User/Operator | Seven test files calling the renamed factory/property surface (`.create_pm`/`.is_pm`/`.is_dev`/`.create_dev`) were not in Test Impact; no pre-edit enumeration hint in Task 1. | **Test Impact** (seven new rows) + **Task 1** (pre-edit `grep -rn '\.create_pm\b\|\.is_pm\b\|...' tests/` hint). | Reference counts verified live by `grep -c`: nudge_loop **3**, queue_isolation **8**, session_lifecycle **9**, error_boundaries **5**, bridge_routing **11** (asserts at 133/161/176), pm_session_factory **17** (DELETE/REPLACE — all 4 assertions invert). **Correction:** `test_session_completion_dev_spawn_no_truncation.py` imports `_create_continuation_pm` from **`agent.session_completion`** (line 23, def at :277), NOT `agent.agent_session_queue` as the C4-B2 row's `test_continuation_pm.py` does — recorded in the new row. |
+
+**All 5 concerns embedded as Implementation Notes in the body; no item deferred; plan status → Ready (was already Ready — this pass only sharpens builder guidance).**
 
 ---
 
