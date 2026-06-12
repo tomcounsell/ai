@@ -39,18 +39,23 @@ gemma4:e2b call site is repointed following a simple rule:
 - **Classification / structured-output tasks → `granite4.1:3b`** (the model
   already resident for PTY work — reuse it, zero extra memory, zero network
   latency, and granite is strong at tool-structured output).
-- **Free-text generation tasks → Ollama Cloud `gemma4:31b-cloud`** (verified
-  real: 32B, gemma4 arch, 262k ctx, BF16; offloads compute off the local GPU).
-  The cloud tag is a lightweight pointer — no large local weights — so it fits
-  every machine in the fleet, including this 16 GB host. The model id lives in a
-  single per-machine setting `ollama_generation_model` (default
-  `gemma4:31b-cloud`), so a future RAM-rich machine can opt into a local variant
-  by overriding the env var *without a code change* — but this plan ships
-  **cloud-only**; no RAM detection, no local-MLX code path (see No-Gos).
+- **Free-text generation tasks → a configurable larger gemma**, selected
+  per-machine: the cloud variant `gemma4:31b-cloud` (verified real: 32B, gemma4
+  arch, 262k ctx, BF16; a lightweight pointer that fits any machine including
+  this 16 GB host) **or** the local Apple-Silicon MLX variant `gemma4:31b-mlx`
+  (https://ollama.com/library/gemma4:31b-mlx) on RAM-rich machines. The id lives
+  in a single per-machine setting `ollama_generation_model` (default
+  `gemma4:31b-cloud`); `/setup` selects the variant from available RAM and
+  `/update` verifies it. (User mandate: machine setup uses cloud **or** local
+  gemma4. The war-room Simplifier argued cloud-only YAGNI; the explicit
+  requirement overrides it — but its correctness findings on this path are
+  folded in.)
 
-End state on every machine: local Ollama runs `granite4.1:3b` (classifier +
-message classification) and `nomic-embed-text` (embeddings) only; generation
-goes to Ollama Cloud.
+End state: a cloud machine runs `granite4.1:3b` + `nomic-embed-text` locally and
+sends generation to the cloud; a RAM-rich machine additionally runs
+`gemma4:31b-mlx` locally. (On RAM-rich machines that is two local instruct models
+— the same count as today's granite+gemma4:e2b, but the second is opt-in and only
+on hardware that can absorb it.)
 
 This mirrors the just-landed granite config requirement (commits `98ca1b57`
 /update gate + `52740fbb` worker precondition + `ensure_granite_model()`
@@ -83,8 +88,9 @@ mis-route or crash anything).
 **Empirical environment check (`ollama list` / `ollama ps` / `ollama show`):**
 - `granite4.1:3b` present (2.1 GB). `gemma4:e2b` present (7.2 GB), currently resident.
 - `glm-5.1:cloud` present (cloud signed in 8 days ago) — cloud path is live, de-risks the generation bucket.
-- `gemma4:31b-cloud` confirmed real via `ollama show` (32B, BF16, 262k ctx) — the cloud generation target for every machine.
-- This host is **16 GB RAM** → cloud-only for generation (a 32B local model won't fit). No fleet machine is currently confirmed RAM-rich, so the local-MLX path is deferred (see No-Gos); this plan ships cloud-only.
+- `gemma4:31b-cloud` confirmed real via `ollama show` (32B, BF16, 262k ctx) — the default cloud generation target.
+- `gemma4:31b-mlx` confirmed real via the registry (https://ollama.com/library/gemma4:31b-mlx) — the local variant for RAM-rich Apple-Silicon machines. (`ollama show` returned "not found" locally only because the tag is neither pulled nor a cloud manifest — not evidence of absence.)
+- This host is **16 GB RAM** → cloud variant for generation (a 32B local model won't fit). RAM-rich machines use the mlx variant; `/setup` chooses per machine.
 - `nomic-embed-text` present (embeddings, out of scope).
 
 **Granite config precedent (build atop this — pulled at plan-revision time):**
@@ -128,7 +134,7 @@ https://docs.ollama.com/cloud
 
 ### spike-2: Cloud generation model reachability + latency
 - **Assumption**: "`gemma4:31b-cloud` returns a usable title in < 5 s via the title-generator's HTTP `/api/generate` path (and via `ollama.chat`) on this signed-in 16 GB host."
-- **Method**: prototype — on this 16 GB host, call `gemma4:31b-cloud` through both `ollama.chat` and the HTTP `/api/generate` path; measure latency. Tag is pre-confirmed real via `ollama show`; this spike is latency + path correctness only. (RAM-threshold / MLX-variant investigation is **cut** — this plan is cloud-only; see No-Gos.)
+- **Method**: prototype — on this 16 GB host, call `gemma4:31b-cloud` through both `ollama.chat` and the HTTP `/api/generate` path; measure latency (and confirm the 5 s title-gen timeout must rise for cloud — see Risk 4). Then derive `MIN_LOCAL_GEN_RAM_GB`: `gemma4:31b-mlx` is a ~18-20 GB resident MLX 32B that must coexist with granite (~2 GB) + nomic-embed (~0.4 GB) + OS — starting hypothesis 48 GB. Both tags are pre-confirmed real; this spike is latency + the threshold constant.
 - **Agent Type**: builder in worktree
 - **Time cap**: 5 minutes
 - **Result**: [filled after spike] — cloud tag pre-confirmed real via `ollama show`.
@@ -193,9 +199,11 @@ Two distinct flows touch the changed code:
   change in the same commit that removes the constant or `/update` crashes at
   import. `granite_classifier.DEFAULT_MODEL` repointed to
   `OLLAMA_CLASSIFIER_MODEL` so the granite model id lives in one place.
-- **Coupling**: reduces local model sprawl on every machine (one local
-  instruct model instead of two). Classification model centralized in
-  `config/models.py`; generation model centralized in the per-machine setting.
+- **Coupling**: reduces local model sprawl on cloud machines (one local
+  instruct model instead of two); a RAM-rich machine keeps two (granite +
+  gemma4:31b-mlx) — the same count as today's granite+gemma4:e2b, but the
+  second is opt-in and on hardware sized for it. Classification model
+  centralized in `config/models.py`; generation model in the per-machine setting.
 - **Data ownership**: title-generator content moves from local-only inference
   to Ollama Cloud egress (private-stripped, with a defensive runtime strip — see
   Risk 3 / Concern resolution).
@@ -237,27 +245,44 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/gemma4_ollama_
   Add `gemma4:e2b` to `OLLAMA_SUPERSEDED_MODELS`.
 - **Per-machine generation-model setting** (`config/settings.py`): add
   `ModelSettings.ollama_generation_model` (env `MODELS__OLLAMA_GENERATION_MODEL`),
-  **default `"gemma4:31b-cloud"`**. The generation sites read this setting. The
-  field is kept so a future RAM-rich machine can override to a local tag via env
-  — but this plan ships **cloud-only**: no RAM detection, no `/setup`
-  variant-selection logic, no `MIN_LOCAL_GEN_RAM_GB` constant, no local-MLX code
-  path.
+  **default `"gemma4:31b-cloud"`**. The generation sites read this setting. Each
+  machine runs **either** the cloud variant (`gemma4:31b-cloud`) **or** the local
+  Apple-Silicon MLX variant (`gemma4:31b-mlx`) — selected by `/setup` from
+  available RAM and verified by `/update`. (User mandate: "local machine setup
+  should either use the cloud or the local version of gemma4." The war-room
+  Simplifier recommended cloud-only YAGNI; the explicit per-machine requirement
+  overrides it. The critique's *correctness* findings on this path — iCloud write
+  collision and RAM-guarded pull — are folded in below.)
 - **`ensure_generation_model()` helper** (new, in **`config/models.py`**): probe
   the configured generation tag, return `(model_available: bool, detail: str)`.
-  It is a config-layer detection helper, **not** a startup gate — it is reused by
-  `/setup`, `/update`, and the title-generator, all of which treat a `False`
-  result per their own failure-cost profile (warning for `/update`; `None`/skip
-  for title-gen; hard-fail for the ai-judge — see "typed signal" below). For a
-  `:cloud` tag it is a near-no-op: a signed-in cloud tag is always reported
-  available, so the only real check is the cloud-signin warning. (The "mirrors
-  `ensure_granite_model()`" framing is dropped — granite's is a hard worker
-  precondition; this one is not.)
-- **`/setup` + `/update` cloud availability** (cloud-only): `/setup` writes
-  `MODELS__OLLAMA_GENERATION_MODEL=gemma4:31b-cloud` **unconditionally** (no RAM
-  branch). Both `/setup` and `/update` ensure the configured tag is reachable and
-  surface a **warning** if Ollama Cloud isn't signed in (`:cloud` tag with no
-  `:cloud` entry in `ollama list`). Warning-only — never suppresses the service
-  restart or blocks the worker.
+  It is a config-layer detection helper, **not** a startup gate — reused by
+  `/setup`, `/update`, and the title-generator, each treating a `False` result
+  per its own failure-cost profile (warning for `/update`; `None`/skip for
+  title-gen; hard-fail for the ai-judge — see "typed signal"). Two branches:
+  - **`:cloud` tag** → near-no-op: a signed-in cloud tag is always reported
+    available; the only real check is the cloud-signin warning. No local pull.
+  - **`-mlx` (local) tag** → **RAM-guard first**: if measured RAM <
+    `MIN_LOCAL_GEN_RAM_GB`, skip the pull entirely and return
+    `(False, "RAM too low for local mlx — use cloud")` so a misconfigured small
+    host never triggers an ~18-20 GB pull (resolves Operator concern). Above the
+    threshold, probe→pull-once→re-probe like `ensure_granite_model()`.
+  (The "mirrors `ensure_granite_model()`" framing applies only to the local
+  branch; granite's is a hard worker precondition, this one is never.)
+- **`/setup` RAM-based variant selection** (mirrors the granite setup flow):
+  `/setup` measures RAM (`sysctl -n hw.memsize`) and selects
+  `gemma4:31b-mlx` when RAM ≥ `MIN_LOCAL_GEN_RAM_GB` (starting hypothesis 48 GB —
+  a ~18-20 GB MLX 32B must coexist with granite + nomic-embed + OS), else
+  `gemma4:31b-cloud`. It writes `MODELS__OLLAMA_GENERATION_MODEL` to a
+  **machine-local destination (`~/.zshenv`, grep-before-append idempotent), NOT
+  the iCloud-synced `~/Desktop/Valor/.env`** — writing to the vault `.env` would
+  let one machine's value overwrite every other machine's via iCloud (resolves
+  Operator BLOCKER). For the launchd worker (which skips `.env`),
+  `install_worker.sh` injects the same var into the plist `EnvironmentVariables`
+  block. `/setup` then ensures the chosen tag via `ensure_generation_model()`.
+- **`/update` variant verification**: reads the configured tag and ensures it via
+  `ensure_generation_model()` (cloud → signin warning; mlx → RAM-guarded pull).
+  Surfaces a **warning** if Ollama Cloud isn't signed in for a `:cloud` tag.
+  Warning-only — never suppresses the service restart or blocks the worker.
 - **Classification bucket → granite** (5 sites): the three `bridge/routing.py`
   classifiers, `reflections/memory_management.py::_gemma_classify`, and
   `tools/email_cs/triage.py` tier-1.
@@ -277,16 +302,18 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/gemma4_ollama_
 | 3 | `routing._classify_work_request_llm` | 4-way classify | yes | Haiku | **granite** |
 | 4 | `reflections._gemma_classify` | structured JSON | no | fail-soft None | **granite** |
 | 5 | `email_cs.triage` (tier-1) | structured JSON | no | escalate | **granite** |
-| 6 | `title_generator` | free-text gen | no | fail-soft no-op (skip on unavailable) | **gemma4:31b-cloud** (via `ollama_generation_model`) |
-| 7 | `tests/ai_judge.judge` | free-text/eval | no (test) | OpenRouter free-tier | **gemma4:31b-cloud** (same setting; hard-fails first call on misconfig) |
+| 6 | `title_generator` | free-text gen | no | fail-soft no-op (skip on unavailable) | **gemma4:31b** (cloud or mlx, via `ollama_generation_model`) |
+| 7 | `tests/ai_judge.judge` | free-text/eval | no (test) | OpenRouter free-tier | **gemma4:31b** (same setting; hard-fails first call on misconfig) |
 
 ### Flow
 
 Incoming message → routing classifier → granite (resident, local) → decision.
-Memory save → title generator → `ollama_generation_model` (`gemma4:31b-cloud`)
-→ title persisted (or skipped if the model reports unavailable).
-Local Ollama steady state on every machine: **granite4.1:3b + nomic-embed-text
-only**; generation runs in the cloud.
+Memory save → title generator → `ollama_generation_model` (`gemma4:31b-cloud`
+on most machines, `gemma4:31b-mlx` on RAM-rich ones) → title persisted (or
+skipped if the model reports unavailable).
+Local Ollama steady state: a cloud machine runs **granite4.1:3b +
+nomic-embed-text** and generation goes to the cloud; a RAM-rich machine
+additionally runs **gemma4:31b-mlx** locally.
 
 ### Technical Approach
 
@@ -366,7 +393,7 @@ only**; generation runs in the cloud.
 - [ ] **`scripts/update/` import smoke (Blocker 1)** — ADD: `python -c "import scripts.update.run; import scripts.update.mcp_memory; import scripts.update.verify"` must exit 0 after `OLLAMA_LOCAL_MODEL` removal. Add as a CI/verification check (it has no module-level side effects gating on `do_ollama`).
 - [ ] **`scripts/update/run.py` superseded-rm gate** — ADD: test that `ollama rm gemma4:e2b` is skipped when the granite smoke-test boolean is False in the same run.
 - [ ] `tests/ai_judge/test_ai_judge.py` — additionally assert the ai-judge HARD-fails at first call when `ensure_generation_model()` reports unavailable (opposite of title-gen's skip).
-- [ ] **No MLX/RAM test added** — the `MIN_LOCAL_GEN_RAM_GB` / `/setup` variant-selection path is cut from this plan (cloud-only), so no test covers it.
+- [ ] **MLX/RAM selection tests** — ADD: `ensure_generation_model()` with an `-mlx` tag below `MIN_LOCAL_GEN_RAM_GB` returns `(False, ...)` and does NOT pull; above the threshold it probes/pulls. `/setup` variant selection picks mlx vs cloud from a mocked `hw.memsize`. `/setup` writes to `~/.zshenv` (not `.env`) — assert the write target.
 
 ## Rabbit Holes
 
@@ -397,7 +424,9 @@ only**; generation runs in the cloud.
 **Impact:** `ollama rm gemma4:e2b` during `/update` superseded-cleanup is irreversible without a manual re-pull. A rollback after granite mislabels would leave the machine pointing (post-code-revert) at a gemma binary that no longer exists locally; `mcp_memory.py`'s health check silently falls through to category-only titles.
 **Mitigation:** Gate the `ollama rm gemma4:e2b` step on the **granite smoke-test having passed earlier in the same `/update` run** (a boolean set by the Step 4.75 smoke-test, checked immediately before the `rm`). `ollama rm` exits 0 even when the model is already absent, so the gate cannot rely on `rm`'s exit code — it must read the smoke-test boolean. This keeps the in-flight transition window recoverable and mirrors the `ensure_granite_model()` gate pattern.
 
-(The earlier "wrong local-32B variant" risk is removed: this plan is cloud-only, with no local-MLX path to misconfigure. A future plan that reintroduces the local variant must restore that risk.)
+### Risk 6: Wrong variant configured for the machine (local 32B on a small host)
+**Impact:** If a RAM-constrained machine is misconfigured to `gemma4:31b-mlx`, `/update` would attempt a ~18-20 GB pull and the model would thrash/OOM at runtime — the exact failure this plan exists to remove, reintroduced by config.
+**Mitigation:** `/setup` auto-selects the variant from measured RAM, so the default is always machine-appropriate, and writes it machine-locally (no iCloud cross-contamination). The **RAM guard lives inside `ensure_generation_model()` itself** (not just `/setup`): an `-mlx` tag below `MIN_LOCAL_GEN_RAM_GB` returns `(False, ...)` and skips the pull, so even a hand-edited bad config on a `/update` run degrades to cloud rather than pulling 18 GB. Generation being fail-soft means a bad config degrades titles, never crashes.
 
 ## Race Conditions
 
@@ -409,14 +438,14 @@ single-thread executor. Neither timing contract changes.
 
 ## No-Gos (Out of Scope)
 
-- **Local-MLX generation variant (`gemma4:31b-mlx`) — DEFERRED to a follow-up.** No fleet machine is currently confirmed RAM-rich enough to run a ~18-20 GB local 32B model alongside granite + nomic-embed + OS, and this 16 GB host cannot. Building RAM detection, a `MIN_LOCAL_GEN_RAM_GB` threshold, `/setup` variant selection, the mlx pull path, and the setup SKILL.md subsection would be future-proofing for a target that does not exist. The `ollama_generation_model` env key is retained (zero-cost) so the follow-up is a config flip + a small `ensure_generation_model()` local-pull branch, **gated on ≥1 fleet machine being confirmed capable**. This plan ships **cloud-only**.
 - `[SEPARATE-SLUG]` Migrating `agent/embedding_provider.py` (`nomic-embed-text`) — different model class (embeddings), no cloud drop-in, no memory-contention problem. Not filed; genuinely separate concern, left local.
 - Removing the old `granite3.2-vision` model from disk — unrelated stale artifact; the `/update` superseded-cleanup can absorb it separately if desired.
 - Re-tuning classification prompts for granite beyond what spike-1 requires — prompt engineering is a follow-up only if parity testing demands it.
 
 (Everything that *could* be finished in this plan — the 7 call-site repoints, the
 config centralization, the dead `ollama_vision_model` cleanup, the `/update`
-superseded-list edit, and all test updates — is **in scope**, not deferred.)
+superseded-list edit, the `/setup` RAM-based variant selection + local-MLX path,
+and all test updates — is **in scope**, not deferred.)
 
 ## Update System
 
@@ -457,22 +486,30 @@ exit, because every generation call site is fail-soft.
   the model is already absent, so the gate reads the smoke-test boolean, not the
   `rm` exit code. This keeps the transition window recoverable if granite is
   broken on this run.
-- **`/update` Step 4 repoint (cloud-only)**: Step 4 currently pulls/smoke-tests
+- **`/update` Step 4 repoint (variant-aware)**: Step 4 currently pulls/smoke-tests
   `OLLAMA_LOCAL_MODEL` (gemma4:e2b). Repoint it to ensure the configured
-  **generation** model instead — read `settings.models.ollama_generation_model`
-  (always `gemma4:31b-cloud` in this plan), call `ensure_generation_model()`. For
-  a `:cloud` tag this is a near-no-op reachability/signin check, NOT a heavy local
-  pull. The classifier (granite) is already covered by Step 4.75, so Step 4 no
-  longer needs to touch gemma4:e2b except to retire it.
-- **`/setup` (cloud-only, NO RAM logic)**: `/setup` writes
-  `MODELS__OLLAMA_GENERATION_MODEL=gemma4:31b-cloud` **unconditionally** — no
-  `sysctl` RAM detection, no `MIN_LOCAL_GEN_RAM_GB`, no variant branch, no setup
-  SKILL.md "generation model" subsection (all cut per Blocker 4). It then ensures
-  the cloud tag is reachable via the helper.
-- **Cloud signin precondition**: because the generation model is a `:cloud` tag,
-  both `/setup` and `/update` surface a **warning** (not block) if Ollama Cloud
-  isn't signed in (`ollama list` shows no `:cloud` entry). Detection-only,
-  consistent with the gws-auth and granite patterns.
+  **generation** model instead — read `settings.models.ollama_generation_model`,
+  call `ensure_generation_model()`. For a `:cloud` tag this is a near-no-op
+  reachability/signin check, NOT a heavy local pull; for an `-mlx` tag it is the
+  RAM-guarded probe→pull-once path. The pull follows the configured tag, never a
+  hardcoded model. The classifier (granite) is already covered by Step 4.75, so
+  Step 4 no longer needs to touch gemma4:e2b except to retire it.
+- **`/setup` RAM-based variant selection (mirrors the granite setup flow)**:
+  `/setup` measures RAM (`sysctl -n hw.memsize`) and writes
+  `MODELS__OLLAMA_GENERATION_MODEL` = `gemma4:31b-mlx` when RAM ≥
+  `MIN_LOCAL_GEN_RAM_GB` (hypothesis 48 GB, confirmed in spike-2), else
+  `gemma4:31b-cloud`. **Write target is `~/.zshenv` (machine-local,
+  grep-before-append idempotent), NOT the iCloud-synced `~/Desktop/Valor/.env`**
+  — the vault `.env` would propagate one machine's variant to all others via
+  iCloud and break per-machine semantics (Operator BLOCKER). `install_worker.sh`
+  injects the same var into the launchd plist `EnvironmentVariables` block so the
+  worker (which skips `.env`) sees it. `/setup` then ensures the chosen tag via
+  the helper, and adds a short "generation model" subsection to
+  `.claude/skills-global/setup/SKILL.md`.
+- **Cloud signin precondition**: when the configured generation model is a
+  `:cloud` tag, both `/setup` and `/update` surface a **warning** (not block) if
+  Ollama Cloud isn't signed in (`ollama list` shows no `:cloud` entry).
+  Detection-only, consistent with the gws-auth and granite patterns.
 - No new config files. `OLLAMA_VISION_MODEL` env override is removed alongside
   the dead setting (verify no machine sets it before deleting).
 
@@ -489,9 +526,9 @@ constant name).
 
 ### Feature Documentation
 - [ ] Update `docs/features/subconscious-memory.md` — note title generation now runs on the configured `ollama_generation_model` (Ollama Cloud `gemma4:31b-cloud`) instead of local gemma4:e2b, with a defensive `<private>`-strip inside `_do_generate`.
-- [ ] Update `docs/features/granite-pty-production.md` (or the granite classifier doc) — note granite4.1:3b now also serves bridge message classification; document the "local Ollama = granite + nomic-embed-text only" steady state on every machine; note `ensure_generation_model()` lives in `config/models.py` as a detection helper (NOT a startup gate like `ensure_granite_model()`).
+- [ ] Update `docs/features/granite-pty-production.md` (or the granite classifier doc) — note granite4.1:3b now also serves bridge message classification; document the "local Ollama = granite + nomic-embed-text (+ gemma4:31b-mlx on RAM-rich machines)" steady state; note `ensure_generation_model()` lives in `config/models.py` as a detection helper (NOT a startup gate like `ensure_granite_model()`).
 - [ ] Add/refresh a short "Local model policy" note: classification → granite (hard precondition), generation → Ollama Cloud `gemma4:31b-cloud` (soft, env-overridable), embeddings → nomic-embed-text. Index it in `docs/features/README.md`.
-- [ ] Document the `MODELS__OLLAMA_GENERATION_MODEL` env override (cloud-only default; local-MLX variant is a deferred follow-up) in the setup guide — no RAM-threshold logic to document.
+- [ ] Document the `/setup` RAM-based variant selection, the `MIN_LOCAL_GEN_RAM_GB` threshold, the `~/.zshenv` (machine-local, non-iCloud) write target, and the manual `MODELS__OLLAMA_GENERATION_MODEL` override in the setup guide.
 
 ### Inline Documentation
 - [ ] Update the `config/settings.py` ModelSettings docstrings (remove the dead vision-model field; clarify `ollama_host` now serves granite + cloud).
@@ -505,7 +542,7 @@ constant name).
 - [ ] `config/models.py` defines `OLLAMA_CLASSIFIER_MODEL` and `ensure_generation_model()`; `OLLAMA_LOCAL_MODEL` is gone. `config/settings.py` defines `ollama_generation_model` (default `gemma4:31b-cloud`, env-overridable).
 - [ ] `gemma4:e2b` is in `OLLAMA_SUPERSEDED_MODELS`; `/update` Step 4 ensures the configured generation tag (cloud reachability check, no heavy local pull); the gemma `rm` is gated on the granite smoke-test passing in the same run.
 - [ ] `ensure_generation_model()` lives in `config/models.py`, returns `(model_available, detail)`, and is consumed per call-site profile (warning for `/update`, `None`/skip for title-gen, hard-fail for ai-judge) — never exits the worker or suppresses restart.
-- [ ] `/setup` writes `MODELS__OLLAMA_GENERATION_MODEL=gemma4:31b-cloud` unconditionally (cloud-only; no RAM detection, no `MIN_LOCAL_GEN_RAM_GB`).
+- [ ] `/setup` selects the generation variant from RAM (mlx ≥ `MIN_LOCAL_GEN_RAM_GB`, else cloud) and writes `MODELS__OLLAMA_GENERATION_MODEL` to `~/.zshenv` (machine-local, NOT the iCloud `.env`); `install_worker.sh` injects it into the launchd plist. The RAM guard also lives inside `ensure_generation_model()`.
 - [ ] `classify_needs_response` has a length-bound parse guard routing oversized granite output to the conservative `True` default.
 - [ ] `title_generator._do_generate` defensively strips `<private>` before the cloud call.
 - [ ] All 7 call sites pass their (updated) unit tests; fallback/fail-soft semantics unchanged.
@@ -533,7 +570,7 @@ constant name).
 
 - **Builder (setup/update integration)**
   - Name: `update-builder`
-  - Role: Add `ensure_generation_model()` helper in `config/models.py` (detection helper returning `(model_available, detail)`, NOT a startup gate); add gemma4:e2b to `OLLAMA_SUPERSEDED_MODELS`; migrate the three `scripts/update/` importers (`run.py`, `mcp_memory.py`, `verify.py`) in the same commit that removes `OLLAMA_LOCAL_MODEL`; repoint `/update` Step 4 to ensure the cloud generation model and gate the gemma `rm` on the granite smoke-test; write `MODELS__OLLAMA_GENERATION_MODEL=gemma4:31b-cloud` unconditionally in `/setup` (no RAM logic); add cloud-signin detection warning. All warning-level (no restart suppression, no worker gate).
+  - Role: Add `ensure_generation_model()` helper in `config/models.py` (detection helper returning `(model_available, detail)` with the `-mlx` RAM-guard branch, NOT a startup gate); add gemma4:e2b to `OLLAMA_SUPERSEDED_MODELS`; migrate the three `scripts/update/` importers (`run.py`, `mcp_memory.py`, `verify.py`) in the same commit that removes `OLLAMA_LOCAL_MODEL`; repoint `/update` Step 4 to ensure the configured generation model (cloud or mlx) and gate the gemma `rm` on the granite smoke-test; add `/setup` RAM-based variant selection writing `MODELS__OLLAMA_GENERATION_MODEL` to `~/.zshenv` (+ launchd plist injection in `install_worker.sh`) and the setup SKILL.md subsection; add cloud-signin detection warning. All warning-level (no restart suppression, no worker gate).
   - Agent Type: builder
   - Resume: true
 
@@ -611,9 +648,9 @@ constant name).
 - **Assigned To**: update-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Repoint `/update` Step 4: ensure the cloud `ollama_generation_model` via `ensure_generation_model()` (cloud reachability check, NOT a heavy local pull); the constant removal + `scripts/update/` importer migration already landed in build-config
+- Repoint `/update` Step 4: ensure the configured `ollama_generation_model` via `ensure_generation_model()` (cloud → reachability/signin check; mlx → RAM-guarded probe/pull); the constant removal + `scripts/update/` importer migration already landed in build-config
 - **Gate `ollama rm gemma4:e2b`** on the Step 4.75 granite smoke-test boolean (read the boolean, not `rm`'s exit code — `rm` exits 0 when absent)
-- Write `MODELS__OLLAMA_GENERATION_MODEL=gemma4:31b-cloud` unconditionally in `/setup` (cloud-only — NO `sysctl` RAM detection, NO `MIN_LOCAL_GEN_RAM_GB`, NO setup SKILL.md variant subsection)
+- Add `/setup` RAM detection (`sysctl -n hw.memsize`) → write `MODELS__OLLAMA_GENERATION_MODEL` (mlx if RAM ≥ `MIN_LOCAL_GEN_RAM_GB`, else cloud) to `~/.zshenv` (machine-local, NOT iCloud `.env`); inject into the launchd plist via `install_worker.sh`; add the "generation model" subsection to `.claude/skills-global/setup/SKILL.md`
 - Add cloud-signin detection warning when the configured tag ends in `:cloud`
 
 ### 6. Migration validation
@@ -668,7 +705,9 @@ constant name).
 | BLOCKER | Operator, Archaeologist, Consistency | `scripts/` is excluded from both the Success-Criteria grep (L422) and Verification table (L558-559), yet `scripts/update/run.py:790,793` imports `OLLAMA_LOCAL_MODEL` and `scripts/update/mcp_memory.py:281` imports it (with a hardcoded `"gemma4:e2b"` fallback at :283). Removing the constant crashes `/update` Step 4 at import time on every machine before granite is smoke-tested. The plan's "All importers updated" claim (L181) is unverifiable by its own greps. | RESOLVED — build-config migrates all three `scripts/update/` importers (run.py, mcp_memory.py, **and verify.py:1046**, which critique missed) in the same commit as the removal; `scripts/` added to both greps + Verification table; import-smoke check added. | Module-level `from config.models import OLLAMA_LOCAL_MODEL` in run.py:790 crashes before any try/except, so no in-step graceful degradation helps — the migration of both files MUST land in the same commit that removes the constant. Repoint run.py to `OLLAMA_GENERATION_MODEL` and drop the `OLLAMA_SUMMARIZER_MODEL` env fallback; edit mcp_memory.py:281 import **and** the hardcoded `"gemma4:e2b"` string at :283 (a pure rename leaves it stale). Add `scripts/` to both greps. CI guard: `python -c "import scripts.update.run; import scripts.update.mcp_memory"` must exit 0 after removal. |
 | BLOCKER | Consistency, Archaeologist, Simplifier | `ensure_generation_model` has two contradictory home modules: Architecture (L177) / Solution (L227) say it "mirrors `ensure_granite_model()`" (which lives in `agent/granite_container/granite_classifier.py:54`), but the Verification table (L563) imports it from `tools.memory_search.title_generator`. The two modules sit in different execution paths (agent-layer startup bootstrap vs. lazy memory-save tool). | RESOLVED — pinned to `config/models.py` as a detection helper (NOT a startup gate); "mirrors ensure_granite_model" framing dropped; Architecture/Solution/Verification all import from `config.models`. | Pin ONE canonical home and make L177/L227/L563 agree. If it lives in `tools.memory_search.title_generator`, drop the "parallels ensure_granite_model" framing — it is a tool-local call-site guard, NOT a worker-startup gate, and the Verification import path is correct. If it is meant as a startup gate, place it in `config/models.py` or `agent/` and fix the L563 import path. A mismatched path makes the L563 smoke command silently raise ImportError, invalidating the only automated check for the new helper. |
 | BLOCKER | Skeptic, Adversary, User | Classification parity is unverified (spike-1 "[filled after spike]") yet the plan is Ready, and `classify_needs_response` (bridge/routing.py:519-546) has NO Haiku fallback. The Haiku fallback on the other 2/3 sites fires only on granite *failure*, never on granite returning a *confident wrong label* — the dominant model-swap failure mode. The `"work" in result` substring parser is brittle against granite's verbose output (false positive on "...work-related...", false negative when the literal token is absent → silent dropped message). | RESOLVED — spike-1 made a blocking pre-build gate (per-classifier parity, `classify_needs_response` sampled separately); length-bound parse guard (>30 chars → conservative `True`) added to Technical Approach + build-classification; shadow-mode named as the fallback for poor parity. | Make spike-1 a blocking pre-build gate requiring per-classifier label agreement on the #1318 mined-misclassification corpus, sampling `classify_needs_response` separately (no fallback there). Add a length-bounded parse guard before the substring test: `normalized = result.strip().lower(); if len(normalized) > 30: raise ValueError(...)` so oversized granite output routes to the conservative bare-except `True` path instead of a false substring match. Consider shadow-mode (log granite, route gemma) until parity confirmed. |
-| BLOCKER | Simplifier | The local-MLX variant machinery (RAM measurement, `MIN_LOCAL_GEN_RAM_GB` threshold, `/setup` variant selection, setup SKILL.md subsection) builds a per-machine abstraction for a deployment target that does not exist: the 16 GB host is cloud-only, `gemma4:31b-mlx` is "not found" locally, and no fleet machine is confirmed RAM-rich. Future-proofing dressed as configuration; the core problem is solved by the classification repoint + superseded-cleanup alone. | RESOLVED — collapsed to cloud-only: deleted RAM detection, `MIN_LOCAL_GEN_RAM_GB`, `/setup` variant selection, mlx code path, and the setup SKILL.md subsection. Env key + `ModelSettings` field kept (zero-cost); mlx branch deferred to a follow-up (No-Gos) gated on ≥1 confirmed-capable machine. `ensure_generation_model()` kept but reduced to a near-no-op cloud reachability check. | Collapse `/setup` to write `MODELS__OLLAMA_GENERATION_MODEL=gemma4:31b-cloud` unconditionally; delete RAM detection, the threshold constant, the mlx code path, and the setup SKILL.md subsection. Keep the env key + `ModelSettings.ollama_generation_model` field (zero-cost). Defer the mlx branch to a follow-up gated on "≥1 fleet machine confirmed capable." If generation is cloud-only after this collapse, `ensure_generation_model()` reduces to a near-no-op (cloud tags are always "available") and may be deletable — resolving the location-ambiguity blocker too. |
+| BLOCKER | Simplifier | The local-MLX variant machinery (RAM measurement, `MIN_LOCAL_GEN_RAM_GB` threshold, `/setup` variant selection, setup SKILL.md subsection) builds a per-machine abstraction for a deployment target that does not exist: the 16 GB host is cloud-only and no fleet machine is confirmed RAM-rich. Future-proofing dressed as configuration. | **OVERRIDDEN BY USER** — the per-machine cloud-**or**-local config is a direct, repeated supervisor requirement ("local machine setup should either use the cloud or the local version of gemma4; ensure during /setup and /update"). The Simplifier didn't have that context. The automated revision briefly collapsed to cloud-only; that was reversed. **The critique's *correctness* sub-findings on this path ARE adopted**: the iCloud-write collision (write `~/.zshenv`, not the vault `.env`) and the RAM-guarded pull (guard inside `ensure_generation_model()`, not just `/setup`) — see Operator rows below. | The YAGNI argument is sound in the abstract but loses to an explicit operator mandate. Keep RAM detection + `MIN_LOCAL_GEN_RAM_GB` + `/setup` variant selection + the mlx code path. Do it correctly: machine-local env write + helper-level RAM guard. `gemma4:31b-mlx` is confirmed real (registry library page); `ollama show` "not found" was a local-not-pulled artifact, not absence. |
+| BLOCKER (iCloud) | Operator | `/setup` "writes `MODELS__OLLAMA_GENERATION_MODEL`" with no destination named. The repo `.env` symlinks to the iCloud-synced `~/Desktop/Valor/.env`; writing the per-machine variant there propagates one machine's value to all machines via iCloud, breaking per-machine semantics entirely. | RESOLVED — `/setup` writes to `~/.zshenv` (machine-local, grep-before-append idempotent), NOT the vault `.env`; `install_worker.sh` injects the var into the launchd plist `EnvironmentVariables` block so the worker (which skips `.env`) sees it. Wired into Solution, Update System, build-update, Risk 6, and tests. | Safe write target is `~/.zshenv` (already in the zshenv loader chain). For launchd, inject into the plist at install time. Do NOT follow the `MODELS__SESSION_DEFAULT_MODEL` precedent which loads from the iCloud vault. |
+| CONCERN (RAM pull) | Operator | "Warning-only" governs restart suppression, not pull suppression: a RAM-constrained machine misconfigured to `gemma4:31b-mlx` would still trigger an ~18-20 GB `ollama pull` (via the granite-mirrored unconditional pull) before any warning. | RESOLVED — the RAM guard lives **inside `ensure_generation_model()`**: an `-mlx` tag below `MIN_LOCAL_GEN_RAM_GB` returns `(False, "RAM too low — use cloud")` and skips the pull, so the guard fires on `/update` runs too, not just `/setup`. Wired into Solution, Risk 6, and tests. | `sysctl -n hw.memsize` / 1024³ → GB. Guard condition `"mlx" in tag and ram_gb < MIN_LOCAL_GEN_RAM_GB` at the top of the helper, before any pull. Returns the soft `(False, reason)` callers already handle. |
 | CONCERN | Adversary | Privacy stripping for title-gen is a caller-side docstring convention (title_generator.py:14,161), not enforced in `_do_generate`. With cloud now the DEFAULT generation target, any un-audited caller that forgets `strip_private` exfiltrates raw `<private>` content off-machine, asynchronously (daemon thread), invisible to request-path logs. Risk 3 asserts the mitigation "is already mandatory at the call site" but it is unenforced. | RESOLVED — defensive runtime `<private>`-strip added inside `_do_generate` (Technical Approach + build-generation task + failure-path test); Risk 3 reworded to claim two-layer (caller + defensive) stripping. | Add a defensive runtime guard inside `_do_generate` before the HTTP call: `if "<private>" in text: logger.warning("title_generator: unstripped private tag — stripping defensively"); text = strip_private(text)` (import from `agent.private_tag`). Converts silent exfiltration into an observable defensive strip with zero caller breakage. Known callers (memory_search/__init__.py:266, knowledge/indexer.py:390, memory_extraction.py:456) already strip; this guards future ones. |
 | CONCERN | User | The Risk section frames "Haiku fallback on 2/3 sites" as drift protection, but it only triggers on granite exception/timeout, not on a confident-but-wrong label — overstating the actual protection for the dominant model-swap failure mode. | RESOLVED — Risk 1 reworded: Haiku fallback covers *unavailability* only, NOT miscalibration; spike-1 parity gate named as the real miscalibration guard; shadow-mode named as the honest interim protection. | Reword Risk 1 to state the fallback covers granite *unavailability*, not *miscalibration*; pair it with the spike-1 parity gate (above) which is the real miscalibration guard. Optionally add shadow-mode as the honest protection: route gemma labels while logging granite until parity is confirmed. |
 | CONCERN | Skeptic, Simplifier | `ensure_generation_model()` is warning-only (fail-soft), so a configured-but-absent generation model silently degrades: title_generator persists empty/garbage titles, and `tests/ai_judge/judge.py` produces unreliable verdicts that could pass bad builds. The "mirrors ensure_granite_model" framing implies startup-precondition parity it does not have. | RESOLVED — helper returns `(model_available: bool, detail)`; title-gen returns `None`/skips persistence on unavailable, ai-judge HARD-fails at first call (opposite profiles wired in build-generation + tests); "mirrors ensure_granite_model" framing dropped. | Keep warning-only for the bridge/worker path, but give the helper a typed signal (`model_available: bool` or raise `GenerationModelUnavailableError`). title_generator returns `None` → caller skips persistence (no garbage title). judge.py should HARD-fail at first call so CI catches misconfiguration rather than silently passing — the two call sites have opposite failure-cost profiles. If the plan collapses to cloud-only (Simplifier blocker), the cloud tag is always available and this helper may be removable. |
@@ -680,29 +719,45 @@ constant name).
 
 All three plan-time questions were settled by the supervisor on 2026-06-12:
 
-1. **Generation destination — Ollama Cloud (cloud-only this plan).** Generation
-   tasks (title-gen, ai-judge) use `gemma4:31b-cloud` via the per-machine setting
-   `ollama_generation_model` (default `gemma4:31b-cloud`). The env key is kept so
-   a future RAM-rich machine can override to a local tag, but the local-MLX path
-   is **deferred** (see No-Gos) — no machine in the fleet is confirmed capable.
-2. **Which model — `gemma4:31b-cloud`.** Confirmed real via `ollama show` (32B,
-   BF16, 262k ctx). The cloud tag is a lightweight pointer that fits every
-   machine including this 16 GB host.
+1. **Generation destination — per-machine cloud OR local.** Generation tasks
+   (title-gen, ai-judge) use a larger gemma via the per-machine setting
+   `ollama_generation_model`: cloud `gemma4:31b-cloud` (default) or local
+   `gemma4:31b-mlx` on RAM-rich Apple-Silicon machines. `/setup` selects from RAM;
+   `/update` verifies. (Direct supervisor mandate — overrides the war-room
+   Simplifier's cloud-only recommendation; the critique's correctness fixes on
+   this path are adopted.)
+2. **Which model — `gemma4:31b`, cloud or mlx.** Both confirmed real:
+   `gemma4:31b-cloud` (via `ollama show`: 32B, BF16, 262k ctx) and
+   `gemma4:31b-mlx` (registry library page). The cloud tag is a lightweight
+   pointer that fits any machine including this 16 GB host; the mlx tag is the
+   local variant for RAM-rich hosts.
 3. **ai-judge uses the same setting** as title-gen. Its existing OpenRouter
    free-tier fallback stays as a safety net, BUT the ai-judge HARD-fails at first
    call if `ensure_generation_model()` reports the configured model unavailable —
    so CI catches a misconfiguration instead of silently passing on unreliable
    verdicts (Concern resolution).
 4. **Configured properly during /setup and /update**, built atop the granite
-   config pattern that just landed (`98ca1b57`, `52740fbb`). `/setup` writes the
-   cloud tag unconditionally (no RAM branch); `/update` ensures cloud
-   reachability and gates the gemma `rm` on the granite smoke-test. All
-   warning-level — generation is fail-soft, not a hard precondition like granite.
+   config pattern that just landed (`98ca1b57`, `52740fbb`). `/setup` selects the
+   variant from RAM and writes `MODELS__OLLAMA_GENERATION_MODEL` to `~/.zshenv`
+   (machine-local, not the iCloud `.env`) + launchd plist; `/update` ensures the
+   configured tag (cloud signin check, or RAM-guarded mlx pull) and gates the
+   gemma `rm` on the granite smoke-test. All warning-level — generation is
+   fail-soft, not a hard precondition like granite.
 
-**Revision note (2026-06-12):** This plan was revised to resolve 4 critique
-blockers + 6 concerns. Key changes: (a) `scripts/update/` importers migrate in
+**Revision note (2026-06-12):** This plan was revised to resolve the critique
+blockers + concerns. Key changes: (a) `scripts/update/` importers migrate in
 the same commit as the constant removal; (b) `ensure_generation_model()` is
 pinned to `config/models.py` as a detection helper (not a startup gate); (c)
 spike-1 parity is a blocking pre-build gate, plus a length-bound parse guard on
-`classify_needs_response`; (d) the local-MLX / RAM-threshold machinery is cut —
-this plan ships cloud-only, MLX deferred to a follow-up.
+`classify_needs_response`.
+
+**Override note (2026-06-12, second revision):** The first revision briefly
+collapsed generation to cloud-only per the war-room Simplifier. That was
+**reversed** — the per-machine cloud-**or**-local gemma4 config is a direct
+supervisor mandate ("ensure during /setup and /update"). The local-MLX variant
+(`gemma4:31b-mlx`), `/setup` RAM-based variant selection, and `MIN_LOCAL_GEN_RAM_GB`
+are **in scope**. The critique's correctness findings on that path are kept: the
+per-machine env write goes to `~/.zshenv` (machine-local), NOT the iCloud-synced
+vault `.env` (Operator iCloud BLOCKER), and the RAM guard lives inside
+`ensure_generation_model()` so a misconfigured small host never pulls the 32B
+weights (Operator RAM concern).
