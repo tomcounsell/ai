@@ -8,8 +8,14 @@ Why bypass the ORM for seeding?
     The normal save() path now stamps utc_now() for updated_at, so future values
     can no longer be created through the ORM. To reproduce the pre-fix condition
     (popoto auto_now writing naive local time on UTC+7 hosts), we write the raw
-    Redis hash directly, using the same datetime encoding format popoto uses:
-    "%Y%m%dT%H:%M:%S.%f" (strftime).
+    Redis hash directly.
+
+Seed mechanism (CONCERN — Skeptic/Adversary):
+    Popoto encodes datetime fields using msgpack with the schema:
+        {'__datetime__': True, 'as_encodable': '20260613T00:03:13.103209'}
+    and stores them in the Redis hash key at `session._redis_key`.
+    The seed step writes this encoded value directly to Redis; the heal and
+    all assertions still go through the ORM.
 
 Isolation:
     All tests depend on the `redis_test_db` fixture (autouse=True in conftest.py),
@@ -18,8 +24,10 @@ Isolation:
 """
 
 import subprocess
+import uuid
 from datetime import UTC, datetime, timedelta
 
+import msgpack
 import pytest
 
 from models.agent_session import AgentSession
@@ -28,33 +36,49 @@ from models.agent_session import AgentSession
 # Helpers
 # ---------------------------------------------------------------------------
 
-_POPOTO_DT_FMT = "%Y%m%dT%H:%M:%S.%f"
+
+def _as_utc(dt: datetime) -> datetime:
+    """Attach UTC tzinfo to a naive datetime (popoto strips tzinfo on load).
+
+    This is the same logic used by bridge/utc.py::to_unix_ts and the
+    AgentSession read-back normalization: naive == UTC.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
 
 
-def _popoto_encode_dt(dt: datetime) -> str:
-    """Encode a datetime as popoto's DatetimeField wire format."""
-    # Popoto strips tzinfo on save (it's stored as a naive-looking string).
-    # We replicate that here so the seeded value looks exactly like what
-    # popoto auto_now would have written on a UTC+7 host.
-    return dt.strftime(_POPOTO_DT_FMT)
+def _popoto_encode_datetime(dt: datetime) -> bytes:
+    """Encode a datetime as popoto's msgpack wire format.
+
+    Popoto's DatetimeField stores datetimes as:
+        msgpack({'__datetime__': True, 'as_encodable': '20260613T00:03:13.103209'})
+    with tzinfo stripped (the strftime format drops tz).
+    """
+    dt_str = dt.strftime("%Y%m%dT%H:%M:%S.%f")
+    return msgpack.packb({"__datetime__": True, "as_encodable": dt_str})
 
 
 def _seed_future_updated_at(session: AgentSession, offset_hours: int = 7) -> datetime:
     """Directly write a future updated_at into the Redis hash for the given session.
 
-    Returns the future datetime that was seeded.
+    Returns the future datetime that was seeded (tz-aware UTC).
 
     This bypasses the ORM save() path (which now stamps correct UTC) to
     reproduce the pre-fix condition where popoto auto_now wrote naive local time.
+
+    Uses:
+    - session._redis_key  — the full composite Redis hash key
+    - msgpack encoding    — the wire format popoto's DatetimeField uses
     """
     import popoto.redis_db as rdb
 
     future_dt = datetime.now(UTC) + timedelta(hours=offset_hours)
-    # Encode without tzinfo (popoto's naive-looking wire format)
-    encoded = _popoto_encode_dt(future_dt)
+    encoded = _popoto_encode_datetime(future_dt)
 
-    redis_key = f"AgentSession:{session.id}"
-    rdb.POPOTO_REDIS_DB.hset(redis_key, "updated_at", encoded)
+    rdb.POPOTO_REDIS_DB.hset(session._redis_key, "updated_at", encoded)
     return future_dt
 
 
@@ -66,11 +90,12 @@ def _seed_future_updated_at(session: AgentSession, offset_hours: int = 7) -> dat
 @pytest.fixture
 def future_session(redis_test_db):
     """Create an AgentSession and seed its updated_at ~7h in the future."""
+    uid = uuid.uuid4().hex[:8]
     session = AgentSession.create(
-        session_id="heal-integration-1",
+        session_id=f"heal-integration-{uid}",
         project_key="test-heal",
         status="completed",
-        chat_id="heal-chat-1",
+        chat_id=f"heal-chat-{uid}",
         working_dir="/tmp/test-heal",
     )
     _seed_future_updated_at(session, offset_hours=7)
@@ -92,8 +117,11 @@ class TestHealIntegration:
         assert reloaded is not None
 
         now_before = datetime.now(UTC)
-        assert reloaded.updated_at > now_before, (
-            "Seed did not produce a future updated_at — test setup is broken"
+        # Normalize to tz-aware for comparison (popoto strips tzinfo on read)
+        reloaded_updated_at = _as_utc(reloaded.updated_at)
+        assert reloaded_updated_at > now_before, (
+            "Seed did not produce a future updated_at — test setup is broken. "
+            f"updated_at={reloaded_updated_at!r}, now={now_before!r}"
         )
 
         # Run heal
@@ -106,8 +134,9 @@ class TestHealIntegration:
         now_after = datetime.now(UTC)
 
         assert healed.updated_at is not None
-        assert healed.updated_at <= now_after + timedelta(seconds=5), (
-            f"updated_at {healed.updated_at!r} is still in the future after heal "
+        healed_updated_at = _as_utc(healed.updated_at)
+        assert healed_updated_at <= now_after + timedelta(seconds=5), (
+            f"updated_at {healed_updated_at!r} is still in the future after heal "
             f"(now={now_after!r})"
         )
 
@@ -122,9 +151,12 @@ class TestHealIntegration:
         assert healed.created_at is not None
         assert healed.updated_at is not None
 
-        assert healed.created_at <= healed.updated_at, (
-            f"Invariant violated: created_at={healed.created_at!r} > "
-            f"updated_at={healed.updated_at!r}"
+        healed_created_at = _as_utc(healed.created_at)
+        healed_updated_at = _as_utc(healed.updated_at)
+
+        assert healed_created_at <= healed_updated_at, (
+            f"Invariant violated: created_at={healed_created_at!r} > "
+            f"updated_at={healed_updated_at!r}"
         )
 
     def test_heal_idempotent_on_redis_records(self, future_session, redis_test_db):
@@ -137,24 +169,26 @@ class TestHealIntegration:
 
     def test_sane_sessions_not_healed(self, redis_test_db):
         """Sessions with updated_at already in the past are not touched by heal."""
+        uid = uuid.uuid4().hex[:8]
         session = AgentSession.create(
-            session_id="sane-heal-1",
+            session_id=f"sane-heal-{uid}",
             project_key="test-heal",
             status="completed",
-            chat_id="heal-chat-sane",
+            chat_id=f"heal-chat-sane-{uid}",
             working_dir="/tmp/test-heal-sane",
         )
         # ORM save() already stamps correct UTC — no seeding needed
-        original_updated_at = session.updated_at
+        original_updated_at = _as_utc(session.updated_at)
 
         count = AgentSession._heal_future_updated_at()
         assert count == 0, f"Sane session must not be healed, got count={count}"
 
         reloaded = AgentSession.get_by_id(session.id)
         assert reloaded is not None
-        # updated_at should not have changed (no heal save() was called)
+        # updated_at should not have changed significantly (no heal save() was called)
         if original_updated_at is not None:
-            assert abs((reloaded.updated_at - original_updated_at).total_seconds()) < 5, (
+            reloaded_updated_at = _as_utc(reloaded.updated_at)
+            assert abs((reloaded_updated_at - original_updated_at).total_seconds()) < 5, (
                 "Sane session's updated_at should not have been rewritten by heal"
             )
 
@@ -171,7 +205,11 @@ class TestHealIntegration:
         # First verify the session is future-dated before heal
         pre_heal = AgentSession.get_by_id(future_session.id)
         now = datetime.now(UTC)
-        assert pre_heal.updated_at > now, "Pre-heal session must be future-dated"
+        pre_heal_updated_at = _as_utc(pre_heal.updated_at)
+        assert pre_heal_updated_at > now, (
+            f"Pre-heal session must be future-dated. "
+            f"updated_at={pre_heal_updated_at!r}, now={now!r}"
+        )
 
         # Run heal
         AgentSession._heal_future_updated_at()
@@ -179,8 +217,9 @@ class TestHealIntegration:
         # Reload and check that the value is now sane
         post_heal = AgentSession.get_by_id(future_session.id)
         now_after = datetime.now(UTC)
-        assert post_heal.updated_at <= now_after + timedelta(seconds=5), (
-            f"Post-heal updated_at {post_heal.updated_at!r} is still in the future"
+        post_heal_updated_at = _as_utc(post_heal.updated_at)
+        assert post_heal_updated_at <= now_after + timedelta(seconds=5), (
+            f"Post-heal updated_at {post_heal_updated_at!r} is still in the future"
         )
 
         # Verify via CLI output — run valor-session status and check the timestamp

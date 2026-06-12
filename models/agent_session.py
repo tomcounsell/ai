@@ -894,12 +894,11 @@ class AgentSession(Model):
                 if hasattr(floor, "tzinfo") and floor.tzinfo is None:
                     floor = floor.replace(tzinfo=UTC)
                 record.updated_at = max(floor, now)
-                # Save via the override (which will re-stamp utc_now(), which == now — idempotent).
-                # Use update_fields to limit the write to only the fields we changed.
-                update_fields_list = ["updated_at"]
-                if record.created_at and record.created_at == now:
-                    update_fields_list.append("created_at")
-                record.save(update_fields=update_fields_list)
+                # Full save (no update_fields) so all changed fields are persisted
+                # and all popoto indexes (including SortedField created_at) are
+                # kept in sync. The save() override will re-stamp utc_now() for
+                # updated_at (idempotent — it will equal now).
+                record.save()
                 count += 1
                 logger.info(f"_heal_future_updated_at: healed session {record.id}")
             except Exception as e:
