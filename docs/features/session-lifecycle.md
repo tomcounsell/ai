@@ -294,6 +294,22 @@ A stale caller can at worst append a spurious `session_events` entry. It cannot 
 
 `scripts/reflections.py` scans bridge logs daily for `"Stale index entry"` warnings. A non-zero count triggers a finding tagged `(regression marker for #898)`. The `finalized_by_execute` fix should eliminate all such warnings; a reappearance indicates a regression.
 
+## Timestamp Convention — `updated_at` is Explicit UTC
+
+`AgentSession.updated_at` is always an explicit UTC wall-clock timestamp. It is stamped inside the `save()` override using `bridge.utc.utc_now()`, not by a Popoto `auto_now` field.
+
+**Why:** Popoto's `auto_now` calls `datetime.now()` (no `tz` argument), which mints a naive datetime in the host's local timezone. On non-UTC hosts the stored value is naive-local, but every downstream reader (watchdog, dashboard, stale-cleanup) interprets it as UTC. The result is a future-dated `updated_at` for sessions created on hosts running ahead of UTC, causing the watchdog/dashboard to report sessions as perpetually "fresh" and stale-cleanup to skip them forever.
+
+**The fix (issue #1645):** `auto_now` was removed from the field declaration. The `save()` override stamps `self.updated_at = utc_now()` unconditionally unless `update_fields` is provided *without* `"updated_at"` — in which case the stamp is skipped entirely (no in-memory mutation without a matching persist, to avoid memory/Redis desync).
+
+**Rule for new fields:** Do not use `auto_now=True` on any `DatetimeField`. Always stamp explicitly with `utc_now()` at the appropriate call site. The `auto_now` ban is enforced by the comment on the field declaration at `models/agent_session.py` line 153–155 (#1645).
+
+### First-deploy callout
+
+`_heal_future_updated_at()` (a classmethod on `AgentSession`) runs once at worker startup after the fix is deployed. It clamps any `updated_at` that is in the future down to `max(created_at, now)`. After the clamp, those previously-future-dated records appear newly-updated to the watchdog and dashboard staleness checks for exactly one staleness window — operators should **not** interpret this momentary freshness as real session activity. No threshold change is required; the clamp only moves timestamps from future to now.
+
+The heal is idempotent: a re-run clamps only still-future records, so a mid-run restart is safe.
+
 ## Stale Session Cleanup
 
 `_cleanup_stale_sessions()` in `scripts/update/run.py` runs during every `/update` deploy and terminates `running` or `pending` sessions that have no live process. It is a safety net for sessions that were never finalized due to a crash or abrupt restart.
