@@ -177,7 +177,7 @@ The CLI wraps `agent.sdlc_router.record_dispatch()` and `tools.stage_states_help
 
 ## Step 4: Dispatch ONE Sub-Skill (or a Parallel-Safe Pair)
 
-**Do not pattern-match against a hand-edited table.** Instead, call the routing tool and dispatch whatever skill it returns. The tool evaluates all guards (G1–G7) and dispatch rules (14 rows) against live state.
+**Do not pattern-match against a hand-edited table.** Instead, call the routing tool and dispatch whatever skill it returns. The tool evaluates all guards (G1–G7) and dispatch rules (16 rows) against live state.
 
 ```bash
 # Get the next dispatch decision

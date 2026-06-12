@@ -129,7 +129,24 @@ def test_every_dispatch_rule_has_documented_predicate():
 
 def test_dispatch_rules_cover_expected_row_ids():
     """DISPATCH_RULES must cover the canonical row set (1–10b)."""
-    expected = {"1", "2", "2b", "3", "4a", "4b", "4c", "5", "6", "7", "8", "8b", "9", "10", "10b"}
+    expected = {
+        "1",
+        "2",
+        "2b",
+        "2c",
+        "3",
+        "4a",
+        "4b",
+        "4c",
+        "5",
+        "6",
+        "7",
+        "8",
+        "8b",
+        "9",
+        "10",
+        "10b",
+    }
     actual = {r.row_id for r in DISPATCH_RULES}
     missing = expected - actual
     extra = actual - expected

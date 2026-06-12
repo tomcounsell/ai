@@ -835,6 +835,38 @@ def _rule_critique_verdict_stale(stage_states: dict, meta: dict, context: dict) 
     return bool(_latest_critique_verdict(stage_states, meta).strip())
 
 
+def _rule_critique_in_progress_no_verdict(stage_states: dict, meta: dict, context: dict) -> bool:
+    """CRITIQUE is in_progress but never recorded a verdict — re-dispatch critique.
+
+    The #1668 dead-end: /do-plan-critique ran (CRITIQUE marker == "in_progress")
+    but never persisted a verdict, so _verdicts.CRITIQUE is empty and
+    latest_critique_verdict is None. With no PR yet, rows 2/2b/3/4* and G1 all
+    miss, leaving Blocked('no matching dispatch rule'). Re-running the critique
+    is the correct recovery (it is what the supervisor did manually).
+
+    Distinct from row 2b (#1639): 2b owns the *recorded-but-stale* verdict (it
+    requires a recorded_at timestamp); 2c owns the *empty* verdict. The two are
+    disjoint.
+
+    Narrowly gated so it cannot fire when:
+      - a PR exists (defer to G3 / PR-stage rows 7-10b)
+      - any critique verdict IS recorded (let rows 2b/3/4a handle it)
+      - CRITIQUE is not in_progress (None/pending → row 2; completed/failed → other rows)
+
+    Loop-bound by G4 (guard_g4_oscillation): same_stage_dispatch_count caps
+    re-dispatches and escalates to a human. G2 does not bound it (it keys off
+    critique_cycle_count, which stays 0 with no recorded verdict).
+    """
+    if meta.get("pr_number"):
+        return False
+    if stage_states.get("CRITIQUE") != STATUS_IN_PROGRESS:
+        return False
+    # A recorded verdict (in _verdicts or meta) means another row owns this state.
+    if _latest_critique_verdict(stage_states, meta).strip():
+        return False
+    return True
+
+
 def _rule_pr_exists_no_review(stage_states: dict, meta: dict, context: dict) -> bool:
     """PR exists, no review."""
     if not meta.get("pr_number"):
@@ -927,6 +959,9 @@ def _rule_stage_states_unavailable_pr_open(stage_states: dict, meta: dict, conte
 _rule_no_plan.__doc__ = "No plan exists"
 _rule_plan_not_critiqued.__doc__ = "Plan exists, not yet critiqued"
 _rule_critique_verdict_stale.__doc__ = "Critique verdict is stale (plan revised since)"
+_rule_critique_in_progress_no_verdict.__doc__ = (
+    "Critique in_progress, no verdict recorded (stalled) — re-critique"
+)
 _rule_critique_needs_revision.__doc__ = "Plan critiqued (NEEDS REVISION)"
 _rule_critique_ready_no_concerns.__doc__ = (
     "Plan critiqued (READY TO BUILD, zero concerns), no branch/PR"
@@ -981,6 +1016,20 @@ DISPATCH_RULES: list[DispatchRule] = [
         state_predicate=_rule_critique_verdict_stale,
         skill=SKILL_DO_PLAN_CRITIQUE,
         reason="Critique verdict is stale (plan revised since) — re-critique",
+    ),
+    # Row 2c (#1668): CRITIQUE is in_progress but NO verdict was ever recorded
+    # (_verdicts.CRITIQUE empty, latest_critique_verdict None) and no PR exists —
+    # the critique skill ran but never persisted a verdict, dead-ending the router
+    # at Blocked('no matching dispatch rule'). Re-run the critique. Distinct from
+    # row 2b (#1639): 2b = recorded-but-stale verdict; 2c = empty verdict. Disjoint
+    # predicates. Placed after 2b (groups critique-staleness recovery) and before
+    # row 3 (rows 3/4* all require a recorded verdict, so never match this state).
+    # Loop-bound by G4 (oscillation), not G2 (which keys off recorded verdicts).
+    DispatchRule(
+        row_id="2c",
+        state_predicate=_rule_critique_in_progress_no_verdict,
+        skill=SKILL_DO_PLAN_CRITIQUE,
+        reason="Critique stalled with no recorded verdict — re-run critique",
     ),
     DispatchRule(
         row_id="3",
