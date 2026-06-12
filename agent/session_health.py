@@ -857,7 +857,7 @@ def _has_progress(entry: AgentSession) -> bool:
     if not sdk_ever_output:
         _hb_own = getattr(entry, "last_heartbeat_at", None)
         _own_progress_fresh = False
-        if _hb_own is not None:
+        if isinstance(_hb_own, datetime):
             _hb_own_aware = _hb_own if _hb_own.tzinfo else _hb_own.replace(tzinfo=UTC)
             _hb_age = (now_utc - _hb_own_aware).total_seconds()
             if _hb_age < NO_OUTPUT_BUDGET_SECONDS:
