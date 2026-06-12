@@ -192,5 +192,78 @@ class TestPersonaPrimingSmokeEnvGated(unittest.TestCase):
             driver.close(force=True)
 
 
+class TestPrimeSessionUserMessageSeparation(unittest.TestCase):
+    """S1 (issue #1644): Dev prime does NOT carry user_message; PM prime does.
+
+    The Container._prime_session method now accepts include_user_message=True/False.
+    PM prime uses True (needs the task context); Dev prime uses False (must wait
+    for the operator relay, not self-start on the raw user message).
+    """
+
+    def test_pm_prime_write_carries_user_message(self) -> None:
+        """PM prime writes slash_cmd + space + user_message to the PTY."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.granite_container.container import PM_PRIME_SLASH_CMD, Container
+        from agent.granite_container.pty_driver import PTYDriver
+
+        user_msg = "implement the new feature"
+        c = Container(user_message=user_msg, max_turns=1)
+        pm_mock = MagicMock(spec=PTYDriver)
+        pm_mock.read_until_idle.return_value = MagicMock(
+            saw_idle=True, buffer="startup idle", idle_marker="bypass permissions on", elapsed_ms=0
+        )
+
+        with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
+            c._pm_pty = pm_mock
+            c._dev_pty = MagicMock(spec=PTYDriver)
+            c._prime_session(pm_mock, PM_PRIME_SLASH_CMD, include_user_message=True)
+
+        write_arg = pm_mock.write.call_args.args[0]
+        self.assertIn(
+            user_msg, write_arg, f"PM prime write should contain user_message; got {write_arg!r}"
+        )
+
+    def test_dev_prime_write_does_not_carry_user_message(self) -> None:
+        """Dev prime writes only the slash command, NOT self.user_message."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.granite_container.container import DEV_PRIME_SLASH_CMD, Container
+        from agent.granite_container.pty_driver import PTYDriver
+
+        user_msg = "implement the new feature"
+        c = Container(user_message=user_msg, max_turns=1)
+        dev_mock = MagicMock(spec=PTYDriver)
+        dev_mock.read_until_idle.return_value = MagicMock(
+            saw_idle=True, buffer="startup idle", idle_marker="bypass permissions on", elapsed_ms=0
+        )
+
+        with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
+            c._pm_pty = MagicMock(spec=PTYDriver)
+            c._dev_pty = dev_mock
+            c._prime_session(dev_mock, DEV_PRIME_SLASH_CMD, include_user_message=False)
+
+        write_arg = dev_mock.write.call_args.args[0]
+        self.assertNotIn(
+            user_msg,
+            write_arg,
+            f"Dev prime write must NOT contain user_message "
+            f"(Dev self-start fix, #1644); got {write_arg!r}",
+        )
+        self.assertEqual(write_arg, DEV_PRIME_SLASH_CMD)
+
+    def test_dev_prime_file_says_no_task_yet(self) -> None:
+        """Dev persona file text says no task is present yet (not $ARGUMENTS with task).
+
+        The persona file must NOT say 'What the user said' or embed a task
+        from $ARGUMENTS — Dev waits for the operator relay.
+        """
+        body = DEV_PRIME.read_text()
+        # The updated persona says no task is present and instructs waiting.
+        self.assertIn("No task", body, "Dev prime file should say 'No task yet'")
+        # Must not tell Dev 'What the user said' (the old $ARGUMENTS section)
+        self.assertNotIn("What the user said", body)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

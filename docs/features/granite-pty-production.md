@@ -140,6 +140,79 @@ In production every bridge-originated session carries a non-empty env, so
 pair only serves spec-less callers (the granite CLI, tests). A spec matching
 the pool defaults reuses the pre-warmed pair as-is.
 
+## Prime/work separation (issues #1644 and #1647)
+
+Granite runs in two distinct phases. Getting these phases right is critical:
+**self-starting Dev races** and **zero-message completions** are both
+production bugs that stem from blurring them.
+
+### Phase 1 — Persona priming
+
+Each PTY receives a persona-priming slash command (`/granite-poc:prime-pm-role`
+and `/granite-poc:prime-dev-role`). The key asymmetry (issue #1644 fix):
+
+- **PM prime** carries `$ARGUMENTS = user_message`. PM gets full task context
+  immediately so it can start planning before the Dev prime even completes.
+- **Dev prime does NOT carry user_message.** Dev's persona file says explicitly
+  "no task is present yet — wait for the operator relay." This prevents Dev
+  from self-starting on the raw user prompt, which races ahead of any PM
+  routing decision.
+
+### Prime-turn relay
+
+After both primes complete and the startup phase settles, the container reads
+PM's prime-turn buffer (the output PM produced in response to its priming
+command) and routes it through the same `_route_pm_classification` helper used
+by the steady-state loop. PM often emits the first `[/dev]` instruction **in
+its prime turn** rather than waiting for a steady-state read; without the
+prime-turn relay this instruction was silently discarded.
+
+The relay sets `_prime_relayed = True` and `_prime_pm_buf_hash` regardless of
+the routing outcome (including dev routes). The first steady-state iteration
+then reads a **fresh** PM idle before classifying — the stale-buffer race guard
+— so the prime buffer is never double-classified.
+
+### Wrap-up guard — mandatory user-facing delivery (issue #1647)
+
+The `_run_wrapup_guard` method fires when the run exits in a
+*successful-shaped* state (`pm_complete`, `pm_user`, `pm_max_turns`) but
+`result.user_facing_routed` is still `False`. This happens when PM performs
+only `[/dev]` routing turns and never emits `[/user]` or `[/complete]`.
+
+The guard:
+
+1. Seeds a Dev report from `_last_dev_report` (captured on every summarize
+   call), a fresh Dev idle read, or `DEV_REPORT_UNAVAILABLE` as fallback.
+2. Writes `PM_WRAPUP_PROMPT` (seeded with the Dev report) to PM's PTY and
+   waits for PM to respond — capped at `MAX_WRAPUP_ATTEMPTS = 1`.
+3. If PM responds with a `[/user]` or `[/complete]`, that payload is delivered
+   and `user_facing_routed = True`.
+4. If PM still does not produce a user-facing message after all attempts,
+   delivers `OPERATOR_TERMINAL_MESSAGE` directly via `on_user_payload` and
+   sets `exit_reason = "pm_no_user_message"`.
+
+**The human is never left with only an emoji.** The wrap-up guard guarantees
+at least `OPERATOR_TERMINAL_MESSAGE` reaches the user for every successful run,
+regardless of how the PM classified its turns internally.
+
+### Completion emoji and `user_facing_routed`
+
+The granite path never calls `messenger.send()`, so `has_communicated()` is
+always `False` on this path. The executor's post-run emoji branch was updated
+(issue #1647 fix) to also consult `agent_session.user_facing_routed`, a new
+`Field(default=False)` on `AgentSession` set by `BridgeAdapter._publish_exit_summary`
+when `_deliver_sync` confirms at least one `[/user]` or `[/complete]` delivery.
+The branch reads:
+
+```python
+elif messenger.has_communicated() or getattr(agent_session, "user_facing_routed", False):
+    emoji = REACTION_COMPLETE
+```
+
+This means a granite session that successfully delivered at least one
+user-facing message gets a ✅ completion emoji, consistent with harness
+sessions.
+
 ## User-visible behavior
 
 The harness path delivered one final result at session end. The granite path
@@ -153,6 +226,10 @@ delivers per-turn `[/user]` payloads **mid-loop** — the user sees responses
 - (d) A second, silent `[/user]` payload at session end is possible if the
   PM's final turn classifies as `[/user]` — this is the same model behavior,
   now visible to the operator in real time.
+- (e) A session that completes via `pm_no_user_message` (wrap-up guard
+  exhausted) sends `OPERATOR_TERMINAL_MESSAGE` — a brief canned notice that
+  the task was handled. This is a last resort; the wrap-up guard should
+  normally coax a summary from PM.
 
 ## Per-turn silence cap (not total runtime cap)
 
@@ -171,8 +248,13 @@ The adapter writes non-user-visible progress to `agent_session.session_events`
 | `type` | When | Key fields |
 |--------|------|------------|
 | `exit_summary` | every run, on completion | `exit_reason`, `turns`, `compliance_misses`, `ts` |
-| `exit_anomaly` | `exit_reason in {pm_hang, dev_hang, startup_unresolved}` | `exit_reason`, `ts` — also logged at ERROR (Sentry log-capture picks it up; this is the on-call path for kernel regressions) |
+| `exit_anomaly` | `exit_reason in {pm_hang, dev_hang, startup_unresolved, pm_no_user_message}` | `exit_reason`, `ts` — also logged at ERROR (Sentry log-capture picks it up; this is the on-call path for kernel regressions) |
 | `delivery_failure` | a mid-loop `send_cb` raised | `payload_chars`, `reason`, `ts` |
+
+Normal completions (`pm_complete`, `pm_user`, `pm_max_turns`) do **not** emit
+`exit_anomaly`, because they are expected outcomes. `pm_no_user_message` emits
+an anomaly despite delivering `OPERATOR_TERMINAL_MESSAGE` (the guard fired as a
+last resort), so the operator knows the PM failed to self-summarize.
 
 > Note: `session_events` starts as `None` on a fresh `AgentSession`
 > (`ListField(null=True)`). The adapter initializes the list before its first
