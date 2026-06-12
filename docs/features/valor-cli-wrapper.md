@@ -202,10 +202,11 @@ environment — not the CLI. This is the correct separation: the CLI
 knows nothing about how sessions are executed, and the worker knows nothing
 about how sessions are created.
 
-Post-cutover (#1572 / PR #1612) there is no legacy execution substrate left.
-All sessions route through the granite PTY container. A "force-legacy" env
-knob is therefore not applicable — there is nothing to switch to. This is not
-a reserved future idea; it is a closed question.
+Post-cutover (#1572 / PR #1612) the granite PTY container is the only
+execution substrate — all sessions route through it, and no alternate path
+remains. A "force-the-other-substrate" env knob is therefore not applicable:
+there is nothing to switch to. This is not a reserved future idea; it is a
+closed question.
 
 `valor "do the thing"` guarantees a session is enqueued and will be run on
 the granite PTY substrate. It does not need to name the substrate to deliver
