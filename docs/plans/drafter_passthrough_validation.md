@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-06-13
 tracking: https://github.com/tomcounsell/ai/issues/1680
 last_comment_id:
+revision_applied: true
 ---
 
 # Reposition Message Drafter from Rewriting Summarizer to Pass-Through Validation Filter
@@ -155,13 +156,21 @@ failed fix for this specific problem.
   `persona`, `session`). `MessageDraft` shrinks — `was_drafted` is removed (it is read
   in exactly one place, `agent/output_handler.py:404`, to gate routing-field
   persistence; that gate is replaced — see Technical Approach). `context_summary` and
-  `expectations` fields: see Open Question #2 resolution — `expectations` is retained
-  (populated deterministically from `_extract_open_questions`), `context_summary` is
-  removed (it was only ever Haiku-generated).
+  `expectations` fields are both **retained on `MessageDraft` and still persisted**:
+  `expectations` is populated deterministically from `_extract_open_questions`;
+  `context_summary` is now populated by a new deterministic helper
+  `_derive_context_summary(raw_text)` (first non-narration sentence, capped) instead of
+  Haiku. **The field is NOT removed** — see Blocker-1 resolution in Technical Approach.
+  Three live routing readers (`bridge/session_router.py:85`,
+  `bridge/telegram_bridge.py:2001`, `agent/session_executor.py:1979`, plus a fourth at
+  `bridge/telegram_bridge.py:779`) consume `session.context_summary` for session-resume
+  routing and incoming-message intent classification; removing the writer would silently
+  degrade all four (each or-guards to a fallback string — no crash, just worse routing).
 - **Coupling**: **decreases.** Removes the Anthropic/OpenRouter HTTP dependency from
   the hot message-delivery path. The drafter no longer imports `MODEL_FAST`,
   `OPENROUTER_HAIKU`, `OPENROUTER_URL` for the rewrite path (`classify_output` may still
-  need `MODEL_FAST` — see OQ#2).
+  need `MODEL_FAST` — see OQ#2). The retained `context_summary` source is deterministic
+  (string slicing), so it adds **no** new LLM dependency.
 - **Data ownership**: the **agent** now owns the final message prose end-to-end; the
   drafter owns only the format/integrity verdict.
 - **Reversibility**: high. The deleted functions are self-contained; reverting the PR
@@ -202,6 +211,14 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/drafter_passth
 - **Steering-first flagging**: when a blocking flag fires (over-length without a clean
   truncation path, wire-format violation, empty promise), the drafter returns
   `needs_self_draft=True` so `_inject_self_draft_steering` nudges the authoring agent.
+  A persisted `self_draft_attempts` counter (cap = `SELF_DRAFT_MAX_ATTEMPTS` = 2) bounds
+  the **sequential** nudge loop so a structurally-unfixable flag eventually falls through
+  to narration-fallback/file delivery instead of looping forever (Blocker-2).
+- **Routing fields retained deterministically**: `expectations` (from
+  `_extract_open_questions`) and `context_summary` (from a new deterministic
+  `_derive_context_summary`) are still persisted to the `AgentSession` so the live
+  session-routing readers (`session_router.py`, `telegram_bridge.py`,
+  `session_executor.py`) keep working — no reader site is touched (Blocker-1).
 - **Rewrite machinery deleted**: `_draft_with_haiku`, `_draft_with_openrouter`,
   `STRUCTURED_DRAFT_TOOL`, `StructuredDraft`, `_build_draft_prompt`,
   `BASE_DRAFTER_PROMPT`/`MEDIUM_RULES`/`DRAFTER_SYSTEM_PROMPT` (the rewrite system
@@ -216,6 +233,53 @@ applied) → human reads Opus's words; **(b)** flagged: return `needs_self_draft
 steering nudge → agent re-drafts next turn → loop until clean or delivered.
 
 ### Technical Approach
+
+**Blocker-1 resolution — retain `context_summary` via a deterministic source (war-room critique):**
+The critique found that removing `context_summary`'s only writer
+(`_persist_routing_fields`, `agent/output_handler.py:790-808`) would **silently break
+four live routing readers**, all of which or-guard to a fallback so the regression ships
+with no crash, just degraded routing:
+- `bridge/session_router.py:85` — `context = s.context_summary or "(no context)"` —
+  builds the multiple-choice prompt that routes a reply-less message to the right active
+  session.
+- `bridge/telegram_bridge.py:2001` — `session_context=target_session.context_summary or ""`
+  — feeds the intake intent classifier (interjection vs. new_work).
+- `agent/session_executor.py:1979` — `getattr(agent_session, "context_summary", None) or
+  "This continues a previously completed session."` — augments a resumed session's prompt.
+- `bridge/telegram_bridge.py:779` — reads the completed session's `context_summary` for
+  the best resume context.
+
+Removing the writer also contradicts this plan's own No-Go "do not redesign
+`bridge/session_router.py`."
+
+**Decision: option (a) — retain a deterministic `context_summary` source so persistence
+keeps populating the field.** This is preferred over option (b) (migrate all four reader
+sites + add a Redis round-trip integration test) because it preserves the
+net-negative-diff goal AND the No-Go, and a cheap deterministic summary is viable: the
+routing readers consume `context_summary` only as a coarse topic hint (each already
+or-guards to a generic fallback), so a deterministic first-sentence summary is strictly
+better than empty and good enough for routing.
+
+Implementation: add a small helper to `bridge/message_drafter.py`:
+```python
+def _derive_context_summary(raw_text: str) -> str | None:
+    """Deterministic, non-LLM one-line session topic for routing.
+    First non-narration sentence of the agent's own text, capped at ~140 chars.
+    Returns None for empty/whitespace input."""
+```
+`draft_message` populates `MessageDraft.context_summary` from this helper (operating on
+the narration-stripped raw text) instead of `structured.context_summary`. The
+`MessageDraft.context_summary` field and the `_persist_routing_fields` write path are
+**unchanged in shape** — only the source flips from Haiku to deterministic. No reader
+site is touched; the No-Go holds. The `STRUCTURED_DRAFT_TOOL` schema's `context_summary`
+property is deleted along with the rest of the tool (that schema field was only the
+Haiku input), but the persisted `session.context_summary` keeps getting populated.
+
+**Verification-gate fix (Blocker-1, second half):** the war room flagged that the
+Verification table inspected the wrong file — it would pass while this regression ships.
+The Verification section now includes an explicit check that the `context_summary` writer
+still fires and a `grep` asserting the deterministic helper exists, replacing any
+`promise_gate.py`-targeted check that does not exercise this path.
 
 **Open Question #1 resolution — SDLC structured template / footer:**
 Keep the **deterministic, non-LLM footer-appender**. `_compose_structured_draft` does
@@ -254,11 +318,36 @@ None depend on the regenerated `response` text beyond `.text` (which is now the 
 agent text). Confirmed reads:
 - `agent/output_handler.py:371` — uses `.text`, `.full_output_file`, `.needs_self_draft`,
   `.violations`, and persists `.context_summary`/`.expectations` only when
-  `was_drafted` (line 404). **Change:** remove the `was_drafted` gate; persist
-  `.expectations` whenever present (it is now deterministically extracted), drop
-  `.context_summary` persistence (field removed). Keep the `needs_self_draft` →
+  `was_drafted` (line 404). **Change:** remove the `was_drafted` gate (which is being
+  deleted), but **keep persisting BOTH `.context_summary` and `.expectations`** via
+  `_persist_routing_fields` — the persistence call must now fire on the pass-through
+  path, not only the old "drafted" path, or the four routing readers silently degrade
+  (see Blocker-1 resolution). The persist gate condition changes from
+  `getattr(draft, "was_drafted", False)` to `session is not None` (persist whenever we
+  have a draft and a session). `_persist_routing_fields` already writes
+  `context_summary` only when truthy and `expectations` only when `is not None`, so the
+  None-vs-empty contract below is honored unchanged. Keep the `needs_self_draft` →
   `_inject_self_draft_steering` path (now the primary path, not just the all-backends-
   failed path).
+
+**CONCERN resolution — `expectations` None-vs-empty-string contract + recall parity:**
+The war room noted that demoting Haiku to deterministic-only for `expectations` is a
+behavioral change, not a no-op "retention" — today Haiku's `structured.expectations`
+takes priority and `_extract_open_questions` is only the fallback
+(`message_drafter.py:1865-1869`). Removing Haiku makes `_extract_open_questions` the
+**sole** source. Two tightening requirements:
+- **Explicit None-vs-empty contract:** `MessageDraft.expectations` is `str | None`.
+  When `_extract_open_questions` finds questions, `expectations` is a non-empty
+  `>>`-joined string. When it finds none, `expectations` is **`None`** (never `""`).
+  `_persist_routing_fields` persists `expectations` exactly when `is not None`, so an
+  empty extraction must yield `None` and leave the prior persisted value untouched —
+  it must NOT clobber a session's existing `expectations` with an empty string. This is
+  the persist gate's contract and the deterministic path must respect it.
+- **Recall-parity test:** add a test asserting that a representative output which
+  previously produced Haiku `expectations` now produces equivalent `expectations` from
+  `_extract_open_questions` on the same raw text (the `## Open Questions` / trailing-`?`
+  extraction covers the real cases), and that a declarative-only output yields `None`
+  (no fabricated questions). See Test Impact.
 - `agent/hooks/stop.py:150` — uses `.text` + `.violations`. No change beyond `.text`
   now being raw.
 - `tools/send_telegram.py:91` — uses `.text` only. No change.
@@ -269,9 +358,44 @@ No-Gos).
 
 **`needs_self_draft` promotion:** the existing `_inject_self_draft_steering`
 (`agent/output_handler.py`) + `SELF_DRAFT_INSTRUCTION` + `STEERING_DEFERRED` machinery
-is reused as-is. `SELF_DRAFT_INSTRUCTION` text should be updated to reflect "your
+is reused. `SELF_DRAFT_INSTRUCTION` text should be updated to reflect "your
 message was flagged for <reason>; rewrite it yourself" rather than "could not be
 drafted by the automated drafter."
+
+**Blocker-2 resolution — bound sequential re-draft attempts, not just concurrent ones
+(war-room critique):** The existing loop guard in `_inject_self_draft_steering`
+(`agent/output_handler.py:730`) checks `peek_steering_sender(session_id) ==
+"drafter-fallback"`, which only caps **pending/concurrent** injections. Once the agent
+consumes the nudge at a turn boundary, the steering queue empties and the guard resets.
+A **structurally-unfixable** flag — a persona that always emits a markdown table, or
+output that strips to empty after narration removal — therefore yields an unbounded
+`flag → inject → consume → re-emit → flag …` loop that never terminates and never
+delivers.
+
+**Decision: add a persisted per-session re-draft attempt counter on `AgentSession` that
+abandons self-draft after a small cap and falls through to the
+narration-fallback/file-delivery path.**
+- Add a new field `self_draft_attempts` (int, default 0) to `models/agent_session.py`
+  and register it in `_AGENT_SESSION_FIELDS`
+  (`agent/agent_session_queue.py`) so it round-trips through Redis like the other
+  routing fields.
+- In `_inject_self_draft_steering`, BEFORE pushing the steering message: read
+  `session.self_draft_attempts`. If it is `>= SELF_DRAFT_MAX_ATTEMPTS` (constant = 2),
+  log a warning, return `False` (so the caller applies `_apply_narration_fallback` and
+  delivers via file/narration), and do NOT push another nudge. Otherwise increment and
+  persist `self_draft_attempts` (`session.self_draft_attempts += 1; session.save()`),
+  push the nudge, and return `True`. The persisted counter is what makes the bound
+  **sequential** — it survives the consume-at-turn-boundary reset that defeats the
+  `peek_steering_sender` guard.
+- **Reset semantics:** the counter resets to 0 on the first successful (un-flagged)
+  delivery for that session, so a session that self-corrects once does not carry a stale
+  count into a later, unrelated over-length/flag event. Reset happens on the clean
+  delivery path in `TelegramRelayOutputHandler.send` (when `delivery_text` is delivered
+  without `needs_self_draft`).
+- The existing `peek_steering_sender` concurrent guard is **retained** — it still
+  prevents double-injection from two near-simultaneous flagged outputs. The two guards
+  are complementary: `peek` bounds concurrency, `self_draft_attempts` bounds the
+  sequential loop.
 
 ## Failure Path Test Strategy
 
@@ -288,10 +412,19 @@ drafted by the automated drafter."
   (`message_drafter.py:1794`). Test asserts it returns `MessageDraft(text="")` (or SDLC
   empty-progress render) and does **not** trigger a self-draft loop.
 - [ ] None session: validators run, raw text passes through, emoji defaults apply.
-- [ ] Verify the steering loop is bounded: `_inject_self_draft_steering` already
-  guards against re-injecting when a `"drafter-fallback"` sender is already pending
-  (`peek_steering_sender`). Test asserts a second flagged draft does NOT push a second
-  steering message (prevents infinite nudge loop).
+- [ ] Verify the **concurrent** steering guard: `_inject_self_draft_steering` guards
+  against re-injecting when a `"drafter-fallback"` sender is already pending
+  (`peek_steering_sender`). Test asserts a second flagged draft while one is still
+  pending does NOT push a second steering message.
+- [ ] Verify the **sequential** steering bound (Blocker-2): simulate a structurally-
+  unfixable flag across multiple turns (consume the nudge between each, so
+  `peek_steering_sender` resets). Test asserts that after `SELF_DRAFT_MAX_ATTEMPTS` (2)
+  injections, the next call returns `False`, pushes NO further steering, and falls
+  through to `_apply_narration_fallback` / file delivery — i.e. the loop terminates.
+  Assert `session.self_draft_attempts` is persisted and capped.
+- [ ] Verify the counter **reset**: after a clean (un-flagged) delivery,
+  `session.self_draft_attempts` is reset to 0 so a later independent flag gets a fresh
+  budget.
 
 ### Error State Rendering
 - [ ] Over-length output: test asserts `full_output_file` is set and the user-visible
@@ -312,7 +445,7 @@ Disposition for every affected test (verified against the test surface):
 - [ ] `tests/unit/test_message_drafter.py::TestQuestionFabricationPrevention::*` (7 tests) — DELETE: they patch `_draft_with_haiku` and assert Haiku-sourced `expectations`. Replace the still-relevant behavior (questions extracted verbatim, declaratives not turned into questions) with tests against `_extract_open_questions` directly.
 - [ ] `tests/unit/test_message_drafter.py::TestQuestionFabricationIntegration::*` (3 tests) — DELETE (real Haiku calls)
 - [ ] `tests/unit/test_message_drafter.py::TestDraftMessageIntegration::test_real_haiku_summarization` — DELETE
-- [ ] `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_routing_fields_persisted_on_successful_draft` — DELETE (`was_drafted` gate + `context_summary` removed)
+- [ ] `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_routing_fields_persisted_on_successful_draft` — REPLACE (not delete): the `was_drafted` gate is gone, but routing-field persistence is RETAINED on the pass-through path. Rewrite to assert BOTH `context_summary` (deterministic source) and `expectations` persist when `session is not None`, and that an empty `expectations` (None) does NOT clobber a pre-existing value.
 - [ ] `tests/integration/test_worker_pm_long_output.py` — DELETE or REPLACE: file attachment tied to LLM summarization; rewrite to assert over-length attaches a file on the verbatim path.
 - [ ] `tests/integration/test_message_drafter_integration.py::test_classify_output_real_api` — DELETE **if** `classify_output` is removed (OQ#2 full-deletion path); otherwise keep.
 
@@ -326,10 +459,15 @@ Disposition for every affected test (verified against the test surface):
 - [ ] `tests/unit/test_output_handler.py::TestDrafterInHandler::test_send_includes_file_paths_when_drafter_returns_file` — UPDATE: file attach on verbatim path.
 - [ ] `tests/unit/test_output_handler.py::TestDrafterInHandler::test_send_falls_back_to_raw_text_on_drafter_exception` — UPDATE: exception path now applies to validators, not LLM calls.
 - [ ] `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_needs_self_draft_pushes_steering_and_defers_outbox_write` — UPDATE/KEEP: steering is now primary; assert a flag (not backend failure) triggers it.
-- [ ] `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_needs_self_draft_skips_steering_if_already_pending` — KEEP (loop-guard still required).
+- [ ] `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_needs_self_draft_skips_steering_if_already_pending` — KEEP (concurrent `peek_steering_sender` guard still required).
+- [ ] **NEW** `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_self_draft_attempts_bound_terminates_loop` — ADD: structurally-unfixable flag across turns (consume nudge between each so `peek` resets); assert after `SELF_DRAFT_MAX_ATTEMPTS` injections the next call returns `False`, pushes no further steering, falls through to narration fallback; assert `session.self_draft_attempts` persisted and capped.
+- [ ] **NEW** `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_self_draft_attempts_reset_on_clean_delivery` — ADD: after a clean delivery the counter resets to 0.
+- [ ] **NEW** `tests/unit/test_output_handler.py::TestDrafterInHandler::test_routing_fields_persisted_on_passthrough` — ADD: `context_summary` (deterministic) + `expectations` persist on the verbatim path; None `expectations` does not overwrite a prior value.
 - [ ] `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_narration_fallback_*` (2 tests) — UPDATE: narration fallback path retained for the non-steering case.
 - [ ] `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_routing_field_persistence_failure_is_silent` / `test_routing_fields_not_persisted_when_draft_skipped` — UPDATE for the new persistence gate.
 - [ ] `tests/unit/test_open_question_gate.py::TestSummarizeResponseOpenQuestions::*` — UPDATE: `expectations` now sourced from `_extract_open_questions` on raw text, not Haiku; drop `_draft_with_haiku` patches.
+- [ ] **NEW** `tests/unit/test_message_drafter.py::TestExpectationsRecallParity::*` — ADD (CONCERN): a representative output that previously produced Haiku `expectations` now produces equivalent `expectations` from `_extract_open_questions` on the same raw text; a declarative-only output yields `None` (no fabrication); assert the None-vs-empty contract (`expectations` is `None`, never `""`, when no questions found).
+- [ ] **NEW** `tests/unit/test_message_drafter.py::TestDeriveContextSummary::*` — ADD (Blocker-1): `_derive_context_summary` returns a deterministic first-sentence summary (capped), `None` for empty/whitespace input, and strips narration; `draft_message` populates `MessageDraft.context_summary` from it on the pass-through path.
 - [ ] `tests/unit/test_send_telegram.py` (long-text draft test ~line 802) — REPLACE: expect pass-through, not rewrite.
 
 **SAFE — no change (use drafter-bypass fixture or test composition/validation only):**
@@ -354,8 +492,13 @@ Disposition for every affected test (verified against the test surface):
   exists and works; reuse it. Do not build a new nudge channel.
 - **Read-the-Room / redundancy filter.** Downstream of the drafter, bypass-fixtured in
   tests, unaffected. Do not refactor it.
-- **`expectations` / session-routing semantics.** Keep `_extract_open_questions`
-  verbatim extraction; do not redesign `bridge/session_router.py`.
+- **`expectations` / `context_summary` / session-routing semantics.** Keep
+  `_extract_open_questions` verbatim extraction and the deterministic
+  `_derive_context_summary` helper; **do not** touch or redesign
+  `bridge/session_router.py`, `bridge/telegram_bridge.py`, or
+  `agent/session_executor.py`. The retained deterministic `context_summary` source keeps
+  all four routing readers working without any reader-site change — that is the entire
+  point of choosing option (a) over migrating the readers.
 
 ## Risks
 
@@ -373,8 +516,12 @@ and `tests/unit/test_cross_wire_fixes.py` passing/updated.
 re-emits long → flag …) and never deliver.
 **Mitigation:** Over-length is handled by **file attachment**, not by a blocking flag —
 the message delivers with a `.txt` attachment and a short pointer. Reserve `needs_self_draft`
-for wire-format/empty-promise flags, which the agent can actually fix. The existing
-`peek_steering_sender` loop-guard caps re-injection at one pending nudge.
+for wire-format/empty-promise flags, which the agent can actually fix. Two guards bound
+the loop: the `peek_steering_sender` guard caps **concurrent** re-injection at one pending
+nudge, and the new persisted `self_draft_attempts` counter (cap = `SELF_DRAFT_MAX_ATTEMPTS`
+= 2) caps **sequential** re-violations across turn boundaries — a structurally-unfixable
+flag abandons self-draft and falls through to narration-fallback/file delivery rather than
+looping forever (Blocker-2 resolution).
 
 ### Risk 3: Teammate/PM voice regressions are subjective and untested by unit tests
 **Impact:** "Verbatim" could surface raw narration or formatting the old rewrite hid.
@@ -455,7 +602,13 @@ verbatim-pass-through + flag-routes-steering behavior.
   the "Uses structured tool_use output… Fallback chain: Haiku → OpenRouter" paragraph;
   describe pass-through + validation + steering.
 - [ ] Update `SELF_DRAFT_INSTRUCTION` text and its comment.
-- [ ] Update `MessageDraft` docstring to reflect the shrunk field set.
+- [ ] Update `MessageDraft` docstring: `was_drafted` removed; `context_summary` now
+  deterministic; `expectations` None-vs-empty contract documented.
+- [ ] Document the new `self_draft_attempts` field on `AgentSession` (model docstring)
+  and the `SELF_DRAFT_MAX_ATTEMPTS` constant + `_derive_context_summary` helper
+  (docstrings).
+- [ ] In `docs/features/message-drafter.md` / `agent-message-delivery.md`, document the
+  bounded sequential self-draft loop and the deterministic routing-field sources.
 
 ## Success Criteria
 
@@ -467,6 +620,14 @@ verbatim-pass-through + flag-routes-steering behavior.
 - [ ] Flagged problems route a **steering nudge** back to the authoring agent via the
   promoted `needs_self_draft` → `_inject_self_draft_steering` path; the validator never
   substitutes its own prose.
+- [ ] **Sequential self-draft loop is bounded (Blocker-2):** a structurally-unfixable
+  flag abandons self-draft after `SELF_DRAFT_MAX_ATTEMPTS` (2) persisted attempts and
+  falls through to narration-fallback/file delivery — verified by
+  `test_self_draft_attempts_bound_terminates_loop`.
+- [ ] **`context_summary` routing readers stay fed (Blocker-1):** the persisted
+  `session.context_summary` is populated deterministically (`_derive_context_summary`),
+  the four reader sites are untouched, and `_persist_routing_fields` still fires on the
+  pass-through path — verified by `test_routing_fields_persisted_on_passthrough`.
 - [ ] **Net-negative diff** in `bridge/message_drafter.py`: `_draft_with_haiku`,
   `_draft_with_openrouter`, `STRUCTURED_DRAFT_TOOL`, and the rewrite system prompt are
   deleted; the PR removes more lines than it adds in that file
@@ -548,7 +709,12 @@ verbatim-pass-through + flag-routes-steering behavior.
   → write full-output file if over `FILE_ATTACH_THRESHOLD` → return verbatim text (with
   deterministic emoji/linkify/footer composition) OR `needs_self_draft=True` on a
   blocking flag.
-- Retain `_extract_open_questions` → `expectations`; drop `context_summary`.
+- Retain `_extract_open_questions` → `expectations` (sole source now; honor the
+  None-vs-empty contract — `None` when no questions, never `""`).
+- **Retain `context_summary`** on `MessageDraft`, sourced from a new deterministic
+  `_derive_context_summary(raw_text)` helper (first non-narration sentence, capped),
+  NOT from Haiku. The field and persistence path stay; only the source flips. This keeps
+  the four live routing readers working (Blocker-1).
 - Per the gate decision, delete or thin-wrap `classify_output` and its helpers.
 - Remove now-unused imports (`MODEL_FAST` etc.) where applicable.
 
@@ -559,9 +725,15 @@ verbatim-pass-through + flag-routes-steering behavior.
 - **Assigned To**: callsite-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- `agent/output_handler.py`: remove the `was_drafted` persistence gate; persist
-  `expectations` when present; keep/promote `needs_self_draft` → `_inject_self_draft_steering`
-  as the primary flag handler.
+- `agent/output_handler.py`: remove the `was_drafted` persistence gate; persist BOTH
+  `context_summary` and `expectations` via `_persist_routing_fields` on the pass-through
+  path (gate becomes `session is not None`); keep/promote `needs_self_draft` →
+  `_inject_self_draft_steering` as the primary flag handler.
+- **Blocker-2:** add `self_draft_attempts` field to `models/agent_session.py` + register
+  in `_AGENT_SESSION_FIELDS` (`agent/agent_session_queue.py`); add a
+  `SELF_DRAFT_MAX_ATTEMPTS = 2` constant; in `_inject_self_draft_steering`, check/
+  increment/persist the counter and abandon self-draft (return `False`, fall through to
+  narration fallback) once the cap is hit; reset the counter to 0 on clean delivery.
 - `agent/hooks/stop.py`, `tools/send_telegram.py`, `bridge/email_bridge.py`: confirm
   `.text` consumption still correct against raw text.
 - Update `SELF_DRAFT_INSTRUCTION` to describe the flag reason.
@@ -604,15 +776,23 @@ verbatim-pass-through + flag-routes-steering behavior.
 | Tests pass | `pytest tests/unit/test_message_drafter.py tests/unit/test_drafter_validators.py tests/unit/test_output_handler.py -q` | exit code 0 |
 | Rewrite machinery gone | `grep -c "_draft_with_haiku\|_draft_with_openrouter\|STRUCTURED_DRAFT_TOOL" bridge/message_drafter.py` | output contains 0 |
 | Net-negative diff | `git show --stat HEAD -- bridge/message_drafter.py` | deletions > insertions |
+| context_summary writer retained (Blocker-1) | `grep -c "_derive_context_summary" bridge/message_drafter.py` | output ≥ 1 (deterministic source exists) |
+| context_summary persist path intact (Blocker-1) | `grep -n "session.context_summary = " agent/output_handler.py` | matches `_persist_routing_fields` write (writer still fires) |
+| Routing readers untouched (Blocker-1, No-Go) | `git diff --stat HEAD~1 -- bridge/session_router.py bridge/telegram_bridge.py agent/session_executor.py` | no changes to reader sites |
+| Sequential self-draft bound (Blocker-2) | `grep -c "self_draft_attempts\|SELF_DRAFT_MAX_ATTEMPTS" agent/output_handler.py models/agent_session.py` | output ≥ 2 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Module imports | `python -c "import bridge.message_drafter, agent.output_handler"` | exit code 0 |
+| Module imports | `python -c "import bridge.message_drafter, agent.output_handler, models.agent_session"` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Critique verdict: **NEEDS REVISION** (war room). Both blockers resolved in this revision.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Archaeologist/Adversary | Removing `context_summary`'s only writer silently breaks 4 live routing readers (`session_router.py:85`, `telegram_bridge.py:2001`, `session_executor.py:1979`, `telegram_bridge.py:779`); contradicts the No-Go. Verification gate inspected wrong file. | Technical Approach → Blocker-1 resolution; Verification table | Option (a): retain `context_summary` via deterministic `_derive_context_summary`; keep persist path; no reader touched. Verification gate now checks the writer + reader-untouched + deterministic source. |
+| BLOCKER | Operator | `peek_steering_sender=="drafter-fallback"` guard bounds only concurrent injections; sequential re-violations loop unbounded after the agent consumes the nudge. | Technical Approach → Blocker-2 resolution; Failure Path Test Strategy; Test Impact | Persisted `self_draft_attempts` on `AgentSession`, cap `SELF_DRAFT_MAX_ATTEMPTS=2`, abandon to narration-fallback/file delivery; reset on clean delivery. |
+| CONCERN | Skeptic | Demoting Haiku `expectations` to deterministic-only is a behavioral change presented as a no-op; needs recall parity + None-vs-empty contract. | OQ#3 → CONCERN resolution; Test Impact | Explicit `None` (never `""`) contract on empty extraction; recall-parity test added. |
 
 ---
 
