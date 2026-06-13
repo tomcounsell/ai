@@ -720,10 +720,14 @@ async def draft_message(
     3. Run _validate_for_medium on the composed text
     4. If over FILE_ATTACH_THRESHOLD, write full-output file (delivery still
        proceeds — text is NOT emptied for over-length responses)
-    5. If any BLOCKING flag fires (wire-format violation or empty promise):
+    5. If _detect_empty_promise fires (empty promise: agent acknowledged feedback
+       without substance — "will do", "going forward" etc.):
        return MessageDraft(text="", needs_self_draft=True, violations=[...])
        — caller injects a self-draft steering nudge back to the agent
-       (PRIMARY flag-handling path, not a failure fallback)
+       (PRIMARY flag-handling path, not a failure fallback).
+       Wire-format violations (markdown table in Telegram, etc.) are collected
+       in violations but do NOT trigger needs_self_draft — they surface via
+       the stop-hook review gate (agent/hooks/stop.py).
     6. Populate context_summary from _derive_context_summary(stripped_raw_text)
     7. Populate expectations from _extract_open_questions(raw_response)
        (None when no questions found, never "")

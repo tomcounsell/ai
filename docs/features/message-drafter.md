@@ -75,7 +75,7 @@ Note: `was_drafted` has been removed. The drafter no longer calls any LLM — th
 2. Apply deterministic structural composition (`_compose_structured_draft`) — emoji prefix, SDLC stage line, bullet/question parsing, link footer.
 3. Run `_validate_for_medium` on the composed text.
 4. If over `FILE_ATTACH_THRESHOLD`, write a full-output `.txt` file (delivery still proceeds).
-5. If any **blocking** flag fires (wire-format violation, empty promise detected via `_detect_empty_promise`): return `MessageDraft(text="", needs_self_draft=True, violations=[...])`.
+5. If `_detect_empty_promise` fires (agent made a promise without substance — "will do", "going forward" etc.): return `MessageDraft(text="", needs_self_draft=True, violations=[...])` — caller injects a self-draft steering nudge. Wire-format violations are populated into `violations` but do **not** set `needs_self_draft`; they surface via the stop-hook review gate.
 6. Populate `context_summary` from `_derive_context_summary(stripped_raw_text)`.
 7. Populate `expectations` from `_extract_open_questions(stripped_raw_text)` — `None` when no questions, never `""`.
 8. Return `MessageDraft(text=<composed>, context_summary=..., expectations=..., violations=[...])`.

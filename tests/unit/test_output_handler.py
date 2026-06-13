@@ -752,20 +752,50 @@ class TestDrafterFailureRecovery:
         handler._redis.rpush.assert_called_once()
 
     def test_self_draft_attempts_bound_terminates_loop(self):
-        """After SELF_DRAFT_MAX_ATTEMPTS (2) injections, the next call must NOT push
-        additional steering — it falls through to the narration fallback instead.
+        """After SELF_DRAFT_MAX_ATTEMPTS (2) concurrent injections, the next call
+        must NOT push additional steering — it falls through to the narration
+        fallback instead.
 
-        Two sequential flagged send() calls exhaust the budget. The third call
-        must not push steering even though needs_self_draft=True.
+        Two CONCURRENT flagged send() coroutines are launched via asyncio.gather
+        so both race to bump the real Redis INCR counter simultaneously. This
+        verifies atomicity: the counter must reach exactly 2 (no lost increments
+        under TOCTOU). A third sequential call must then be blocked by the
+        exhausted budget.
+
+        Uses the real ``bump_self_draft_attempts`` (real Redis INCR) — skips
+        gracefully when Redis is unreachable.
         """
         from unittest.mock import AsyncMock, MagicMock, patch
 
-        from agent.steering import SELF_DRAFT_MAX_ATTEMPTS
+        import pytest
+
+        from agent.steering import (
+            SELF_DRAFT_MAX_ATTEMPTS,
+            _get_redis,
+            _self_draft_attempts_key,
+            reset_self_draft_attempts,
+        )
+
+        # Verify real Redis is reachable before proceeding.  We use _get_redis()
+        # — the same connection that bump_self_draft_attempts uses — so we stay
+        # on whatever db the autouse redis_test_db fixture redirected popoto to
+        # (db=1 under serial pytest, db=N under xdist workers).
+        try:
+            r = _get_redis()
+            r.ping()
+        except Exception:
+            pytest.skip("Redis not available — skipping real-counter concurrency test")
+
         from bridge.message_drafter import MessageDraft
+
+        session_id = "sess-concurrent-budget-test"
+
+        # Clean up any leftover key from a previous run.
+        reset_self_draft_attempts(session_id)
 
         handler = self._make_handler()
         session = MagicMock()
-        session.session_id = "sess-budget-test"
+        session.session_id = session_id
 
         drafted_flagged = MessageDraft(
             text="",
@@ -777,37 +807,65 @@ class TestDrafterFailureRecovery:
         # Track how many times steering was pushed.
         push_call_count = 0
 
-        def counting_push(session_id, text, sender=None, **kwargs):
+        def counting_push(sid, text, sender=None, **kwargs):
             nonlocal push_call_count
             push_call_count += 1
 
-        # Use a fake Redis counter so bump_self_draft_attempts works without real Redis.
-        counter = {"val": 0}
+        try:
+            with (
+                patch(
+                    "bridge.message_drafter.draft_message",
+                    AsyncMock(return_value=drafted_flagged),
+                ),
+                patch("agent.steering.peek_steering_sender", return_value=None),
+                patch("agent.steering.push_steering_message", side_effect=counting_push),
+            ):
+                # Two CONCURRENT flagged send() calls — both race to bump the
+                # Redis counter at the same time. asyncio.gather runs them in the
+                # same event loop so both coroutines interleave; the Redis INCR
+                # is still atomic, so no increment is lost.
+                async def _run_concurrent():
+                    await asyncio.gather(
+                        handler.send("123", "Needs a self draft? yes", 0, session=session),
+                        handler.send("123", "Needs a self draft again? yes", 0, session=session),
+                    )
 
-        def fake_bump(sid):
-            counter["val"] += 1
-            return counter["val"]
+                asyncio.run(_run_concurrent())
 
-        with (
-            patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted_flagged)),
-            patch("agent.steering.peek_steering_sender", return_value=None),
-            patch("agent.steering.push_steering_message", side_effect=counting_push),
-            patch("agent.steering.bump_self_draft_attempts", side_effect=fake_bump),
-        ):
-            # First two calls: within budget → steering IS pushed.
-            asyncio.run(handler.send("123", "Needs a self draft? yes", 0, session=session))
-            asyncio.run(handler.send("123", "Needs a self draft again? yes", 0, session=session))
+                # Verify: both concurrent calls incremented the counter — no lost
+                # increments under concurrent access.  Read via _get_redis() to
+                # stay on the same db that bump_self_draft_attempts wrote to.
+                redis_key = _self_draft_attempts_key(session_id)
+                actual_count = int(r.get(redis_key) or 0)
+                assert actual_count == SELF_DRAFT_MAX_ATTEMPTS, (
+                    f"Redis counter should be {SELF_DRAFT_MAX_ATTEMPTS} after "
+                    f"{SELF_DRAFT_MAX_ATTEMPTS} concurrent bumps, got {actual_count}"
+                )
 
-            # Third call: budget exhausted → steering must NOT be pushed.
-            asyncio.run(
-                handler.send("123", "Needs a self draft? yes but budget gone", 0, session=session)
+                # Both concurrent calls were within budget → both pushed steering.
+                assert push_call_count == SELF_DRAFT_MAX_ATTEMPTS, (
+                    f"Expected {SELF_DRAFT_MAX_ATTEMPTS} pushes from concurrent calls, "
+                    f"got {push_call_count}"
+                )
+
+                # Third call: budget exhausted → steering must NOT be pushed, and
+                # session.save() must NOT be called on the steering path (no
+                # full-hash save for a budget-exhausted deferral).
+                session.save.reset_mock()
+                asyncio.run(
+                    handler.send(
+                        "123", "Needs a self draft? yes but budget gone", 0, session=session
+                    )
+                )
+
+            assert push_call_count == SELF_DRAFT_MAX_ATTEMPTS, (
+                f"Third call must not push steering after budget exhaustion; "
+                f"total pushes: {push_call_count}"
             )
-
-        # Only 2 pushes — the third call fell through without steering injection.
-        assert push_call_count == SELF_DRAFT_MAX_ATTEMPTS, (
-            f"Expected exactly {SELF_DRAFT_MAX_ATTEMPTS} steering pushes "
-            f"before budget exhaustion, got {push_call_count}"
-        )
+            session.save.assert_not_called()
+        finally:
+            # Always clean up the Redis key so subsequent runs start fresh.
+            reset_self_draft_attempts(session_id)
 
     def test_self_draft_attempts_reset_pinned_before_early_return(self):
         """Counter reset fires on the clean (not needs_self_draft) branch BEFORE
