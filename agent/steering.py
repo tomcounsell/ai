@@ -160,3 +160,55 @@ def peek_steering_sender(session_id: str) -> str | None:
         return msg.get("sender")
     except (json.JSONDecodeError, AttributeError):
         return None
+
+
+# ── Self-draft attempt budget ─────────────────────────────────────────────────
+# Redis counter that tracks how many consecutive times the drafter has injected
+# a self-draft steering message for a session. Prevents infinite steering loops
+# when the agent's self-draft also fails validation.
+
+SELF_DRAFT_MAX_ATTEMPTS = 2
+
+_SELF_DRAFT_ATTEMPTS_TTL = 3600  # 1 hour — abandoned sessions don't leak
+
+
+def _self_draft_attempts_key(session_id: str) -> str:
+    """Redis key for the self-draft attempt counter."""
+    return f"steering:attempts:{session_id}"
+
+
+def bump_self_draft_attempts(session_id: str) -> int:
+    """Atomically increment the self-draft attempt counter and return the new value.
+
+    Sets a 1-hour TTL on first bump so counters for abandoned sessions
+    expire automatically without a manual cleanup step.
+
+    Args:
+        session_id: The session whose counter to increment.
+
+    Returns:
+        Post-increment count (1 on first bump, 2 on second, …).
+    """
+    r = _get_redis()
+    key = _self_draft_attempts_key(session_id)
+    count = r.incr(key)
+    if count == 1:
+        # First bump — set TTL so the key expires if the session is abandoned.
+        r.expire(key, _SELF_DRAFT_ATTEMPTS_TTL)
+    logger.debug("[steering] Self-draft attempts for %s: %d", session_id, count)
+    return count
+
+
+def reset_self_draft_attempts(session_id: str) -> None:
+    """Reset the self-draft attempt counter for a session.
+
+    Called when a clean (non-self-draft) delivery path completes, so a
+    subsequent failure in the same session starts fresh from zero.
+
+    Args:
+        session_id: The session whose counter to reset.
+    """
+    r = _get_redis()
+    key = _self_draft_attempts_key(session_id)
+    r.delete(key)
+    logger.debug("[steering] Reset self-draft attempts for %s", session_id)

@@ -99,7 +99,9 @@ class FileOutputHandler:
         log_path = self.log_dir / f"{session_id}.log"
 
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-        entry = f"[{timestamp}] chat={chat_id} reply_to={reply_to_msg_id}\n{text}\n---\n"
+        entry = (
+            f"[{timestamp}] chat={chat_id} reply_to={reply_to_msg_id}\n{text}\n---\n"
+        )
 
         try:
             with open(log_path, "a") as f:
@@ -156,7 +158,9 @@ class TelegramRelayOutputHandler:
         redis_url: str | None = None,
         file_handler: FileOutputHandler | None = None,
     ):
-        self._redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        self._redis_url = redis_url or os.environ.get(
+            "REDIS_URL", "redis://localhost:6379/0"
+        )
         self._file_handler = file_handler
         self._redis = None  # Lazy connection
 
@@ -250,7 +254,9 @@ class TelegramRelayOutputHandler:
         reply_all = [chat_id] + [
             a
             for a in (list(original_to) + list(original_cc))
-            if isinstance(a, str) and a.lower() != own_addr and a.lower() != primary_lower
+            if isinstance(a, str)
+            and a.lower() != own_addr
+            and a.lower() != primary_lower
         ]
         # Deduplicate while preserving order in case the bridge stamped the
         # same address twice across To and CC.
@@ -373,34 +379,46 @@ class TelegramRelayOutputHandler:
                 session=session,
                 medium=drafter_medium,
             )
-            # If the drafter produced a drafted result, use its text. When
-            # was_drafted is False (short output or empty), keep the original
-            # raw text (drafter returns it verbatim in that case).
+            # Use the drafter's composed text when non-empty. The drafter
+            # returns verbatim pass-through for short outputs and empty
+            # strings for blocking conditions (needs_self_draft=True).
             if draft.text:
                 delivery_text = draft.text
             if draft.full_output_file is not None:
                 drafter_overflow_file = str(draft.full_output_file)
 
             # ── Self-draft fallback via session steering ──
-            # When all drafter backends fail (needs_self_draft=True), inject
-            # a steering message asking the agent to self-draft. This
-            # mirrors the pre-consolidation behavior from the deleted
-            # bridge/response.py::send_response_with_files. Silent failure:
+            # When the delivery validator flags a wire-format violation or an
+            # empty promise (needs_self_draft=True), inject a steering message
+            # asking the agent to rewrite and resend. Silent failure:
             # any error here MUST NOT block delivery.
             if getattr(draft, "needs_self_draft", False):
                 steering_deferred = self._inject_self_draft_steering(session)
                 if not steering_deferred:
-                    # Steering unavailable or failed — apply narration gate
-                    # on the original text as a last resort. Substitutes the
+                    # Steering budget exhausted or push failed — apply narration
+                    # gate on the original text as a last resort. Substitutes
                     # NARRATION_FALLBACK_MESSAGE when the raw text is pure
                     # process narration with no substantive content.
                     delivery_text = self._apply_narration_fallback(text)
+            else:
+                # Clean path — reset the self-draft attempt counter so a later
+                # failure in the same session starts fresh from zero. This runs
+                # BEFORE the steering_deferred early-return below so that a
+                # clean-but-suppressed send (where the redundancy filter returns
+                # early) still resets the budget.
+                if session_id:
+                    try:
+                        from agent.steering import reset_self_draft_attempts
+
+                        reset_self_draft_attempts(session_id)
+                    except Exception:
+                        pass  # counter reset is best-effort; never blocks delivery
 
             # ── Persist routing fields to session ──
             # Write context_summary and expectations back to the AgentSession
             # so bridge/session_router.py and bridge/telegram_bridge.py can
-            # route correctly. The drafter now always populates these fields
-            # deterministically (no longer gated on was_drafted). Silent failure.
+            # route correctly. The drafter always populates these fields
+            # deterministically on every pass-through. Silent failure.
             if session is not None and draft is not None:
                 self._persist_routing_fields(session, draft)
         except Exception as e:
@@ -432,7 +450,9 @@ class TelegramRelayOutputHandler:
         # unchanged — the guard must never block delivery.
         #
         # Sequencing: redundancy filter → RTR → outbox rpush → record_recent_sent_draft
-        _draft_artifacts: dict = {}  # initialized here so record_sent section always has it
+        _draft_artifacts: dict = (
+            {}
+        )  # initialized here so record_sent section always has it
         try:
             from bridge.redundancy_filter import (
                 RTR_SUPPRESS_EMOJI as _REDUND_EMOJI,
@@ -460,15 +480,19 @@ class TelegramRelayOutputHandler:
                 # so PR URLs embedded in the raw text are not missed.
                 # (draft.artifacts = {} means "no artifacts found", not "drafter failed".)
                 try:
-                    from bridge.message_drafter import extract_artifacts as _extract_arts
-
-                    _draft_artifacts = getattr(draft, "artifacts", None) or _extract_arts(
-                        delivery_text
+                    from bridge.message_drafter import (
+                        extract_artifacts as _extract_arts,
                     )
+
+                    _draft_artifacts = getattr(
+                        draft, "artifacts", None
+                    ) or _extract_arts(delivery_text)
                 except Exception:
                     _draft_artifacts = {}
 
-                _recent_drafts: list = getattr(session, "recent_sent_drafts", None) or []
+                _recent_drafts: list = (
+                    getattr(session, "recent_sent_drafts", None) or []
+                )
                 _redund_verdict: _SuppressionVerdict = should_suppress(
                     delivery_text,
                     _draft_artifacts,
@@ -483,8 +507,12 @@ class TelegramRelayOutputHandler:
                     _matched_prior_preview: str | None = None
                     if _redund_verdict.matched_index is not None:
                         try:
-                            _matched_entry = _recent_drafts[_redund_verdict.matched_index]
-                            _matched_prior_preview = str(_matched_entry.get("text", ""))[:200]
+                            _matched_entry = _recent_drafts[
+                                _redund_verdict.matched_index
+                            ]
+                            _matched_prior_preview = str(
+                                _matched_entry.get("text", "")
+                            )[:200]
                         except (IndexError, AttributeError):
                             pass
                     self._rtr_emit_event(
@@ -508,7 +536,9 @@ class TelegramRelayOutputHandler:
                             chat_id, reply_to_msg_id, _REDUND_EMOJI, session_id
                         )
                         if self._file_handler is not None:
-                            await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
+                            await self._file_handler.send(
+                                chat_id, text, reply_to_msg_id, session
+                            )
                         return
                     # No anchor for the reaction — fall through and send.
                     # Mirrors RTR's no-anchor contract (lines 437-443 below).
@@ -567,7 +597,9 @@ class TelegramRelayOutputHandler:
                             chat_id, reply_to_msg_id, RTR_SUPPRESS_EMOJI, session_id
                         )
                         if self._file_handler is not None:
-                            await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
+                            await self._file_handler.send(
+                                chat_id, text, reply_to_msg_id, session
+                            )
                         return
                     # No anchor: fall through to send original.
                     # F4: silent suppression breaks the I-heard-you contract --
@@ -609,7 +641,9 @@ class TelegramRelayOutputHandler:
                         chat_id, reply_to_msg_id, RTR_SUPPRESS_EMOJI, session_id
                     )
                     if self._file_handler is not None:
-                        await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
+                        await self._file_handler.send(
+                            chat_id, text, reply_to_msg_id, session
+                        )
                     return
                 # No anchor for the 👀 reaction. F4: silent suppression breaks
                 # the I-heard-you contract -- fall-through preserves the audit
@@ -640,7 +674,9 @@ class TelegramRelayOutputHandler:
         # the same overflow path the drafter just produced).
         merged_paths: list[str] = []
         _seen_paths: set[str] = set()
-        for fp in (file_paths or []) + ([drafter_overflow_file] if drafter_overflow_file else []):
+        for fp in (file_paths or []) + (
+            [drafter_overflow_file] if drafter_overflow_file else []
+        ):
             if not fp or fp in _seen_paths:
                 continue
             _seen_paths.add(fp)
@@ -688,7 +724,11 @@ class TelegramRelayOutputHandler:
         # Append AFTER a successful rpush so a Redis failure does not pollute
         # the dedup baseline. The helper uses update_fields= to avoid clobbering
         # concurrent writes to other session fields (context_summary, expectations).
-        if _rpush_succeeded and session is not None and getattr(session, "is_sdlc", False):
+        if (
+            _rpush_succeeded
+            and session is not None
+            and getattr(session, "is_sdlc", False)
+        ):
             try:
                 session.record_recent_sent_draft(delivery_text, _draft_artifacts)
             except Exception as _rec_err:
@@ -705,37 +745,69 @@ class TelegramRelayOutputHandler:
     def _inject_self_draft_steering(self, session: Any) -> bool:
         """Push a self-draft instruction to the session's steering queue.
 
-        Called when ``draft.needs_self_draft`` is True (all LLM drafter backends
-        failed). The agent will notice the steering message at its next turn
-        boundary and re-draft its own output.
+        Called when ``draft.needs_self_draft`` is True (delivery validator
+        flagged a wire-format violation or an empty promise). The agent will
+        notice the steering message at its next turn boundary and re-draft its
+        own output.
 
-        Includes loop prevention via ``peek_steering_sender``: if a prior
-        self-draft steering message is already pending, returns False so the
-        caller falls through to the narration gate rather than looping.
+        Attempt budget: uses ``bump_self_draft_attempts`` to track consecutive
+        self-draft injections for this session. When the budget is exhausted
+        (count > SELF_DRAFT_MAX_ATTEMPTS), returns False so the caller falls
+        through to the narration fallback instead of looping forever.
+
+        Also includes a concurrent-guard via ``peek_steering_sender``: if a
+        prior self-draft steering message is already pending in the queue,
+        returns False immediately (complementary to the attempt budget — the
+        budget catches repeated failures while the peek-guard catches the case
+        where the agent hasn't consumed the previous steering message yet).
 
         Returns:
             True if steering was successfully pushed (delivery should be
-            deferred), False if steering was skipped or failed (caller should
-            apply narration fallback).
+            deferred), False if the budget is exhausted, a steering message is
+            already pending, or the push failed (caller should apply narration
+            fallback).
         """
         session_id = getattr(session, "session_id", None) if session else None
         if not session_id:
             return False
 
-        # Loop prevention: don't push a second self-draft steering message if
-        # one is already pending (the agent's self-draft also failed).
+        # Concurrent-guard: don't push a second self-draft steering message if
+        # one is already pending in the queue (agent hasn't consumed it yet).
         try:
             from agent.steering import peek_steering_sender
 
             if peek_steering_sender(session_id) == "drafter-fallback":
                 logger.warning(
-                    "Self-summary steering already pending for session %s; "
+                    "Self-draft steering already pending for session %s; "
                     "falling through to narration gate",
                     session_id,
                 )
                 return False
         except Exception:
-            # peek failed, continue with steering attempt
+            # peek failed, continue with budget check
+            pass
+
+        # Attempt budget: prevent infinite steering loops when the agent's
+        # self-draft also fails validation repeatedly.
+        try:
+            from agent.steering import (
+                SELF_DRAFT_MAX_ATTEMPTS,
+                bump_self_draft_attempts,
+            )
+
+            attempt_count = bump_self_draft_attempts(session_id)
+            if attempt_count > SELF_DRAFT_MAX_ATTEMPTS:
+                logger.warning(
+                    "Self-draft attempt budget exhausted for session %s "
+                    "(count=%d > max=%d); falling through to narration gate",
+                    session_id,
+                    attempt_count,
+                    SELF_DRAFT_MAX_ATTEMPTS,
+                )
+                return False
+        except Exception:
+            # bump failed — proceed without budget enforcement rather than
+            # blocking delivery entirely
             pass
 
         try:
@@ -748,7 +820,7 @@ class TelegramRelayOutputHandler:
                 sender="drafter-fallback",
             )
             logger.info(
-                "Injected self-summary steering for session %s (drafter failed)",
+                "Injected self-draft steering for session %s (validator flagged output)",
                 session_id,
             )
             return True
@@ -882,15 +954,21 @@ class TelegramRelayOutputHandler:
         orphan the reaction in a different queue when ``session.session_id
         != chat_id`` (the normal case). See Implementation Note F7.
         """
-        payload = self._build_reaction_payload(chat_id, reply_to_msg_id, emoji, session_id)
+        payload = self._build_reaction_payload(
+            chat_id, reply_to_msg_id, emoji, session_id
+        )
         queue_key = f"telegram:outbox:{session_id}"
         try:
             r = self._get_redis()
             r.rpush(queue_key, json.dumps(payload))
             r.expire(queue_key, self.OUTBOX_TTL)
-            logger.info("Queued RTR suppress reaction to %s (emoji=%s)", queue_key, emoji)
+            logger.info(
+                "Queued RTR suppress reaction to %s (emoji=%s)", queue_key, emoji
+            )
         except Exception as e:
-            logger.error("Failed to write RTR reaction to Redis outbox %s: %s", queue_key, e)
+            logger.error(
+                "Failed to write RTR reaction to Redis outbox %s: %s", queue_key, e
+            )
 
     @staticmethod
     def _build_reaction_payload(

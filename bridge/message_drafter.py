@@ -23,7 +23,9 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
+from bridge.message_quality import (
+    PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS,
+)
 from config.enums import SessionType
 
 logger = logging.getLogger(__name__)
@@ -133,7 +135,9 @@ def _extract_open_questions(text: str) -> list[str]:
     # Extract list items (numbered or bulleted)
     questions = []
     # Match lines starting with number+period, dash, asterisk, or bullet
-    list_item_pattern = re.compile(r"^\s*(?:\d+[\.\)]\s*|[-*+]\s*|•\s*)(.*)", re.MULTILINE)
+    list_item_pattern = re.compile(
+        r"^\s*(?:\d+[\.\)]\s*|[-*+]\s*|•\s*)(.*)", re.MULTILINE
+    )
     for item_match in list_item_pattern.finditer(section_content):
         item_text = item_match.group(1).strip()
         # Skip empty, whitespace-only, or placeholder items
@@ -225,7 +229,9 @@ class MessageDraft:
     violations: list[Violation] = field(default_factory=list)
 
 
-_TABLE_SEPARATOR_PATTERN = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+_TABLE_SEPARATOR_PATTERN = re.compile(
+    r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$"
+)
 
 
 def validate_telegram(text: str) -> list[Violation]:
@@ -344,7 +350,9 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
     files_changed = re.findall(file_pat, text, re.IGNORECASE)
     files_changed += re.findall(r"^\s*[MADR]\s+(\S+)", text, re.MULTILINE)
     if files_changed:
-        artifacts["files_changed"] = list(dict.fromkeys(f.strip() for f in files_changed))
+        artifacts["files_changed"] = list(
+            dict.fromkeys(f.strip() for f in files_changed)
+        )
 
     # Test results
     test_pat = r"(\d+\s+passed" r"(?:,\s*\d+\s+(?:failed|error|warning|skipped))*)"
@@ -553,8 +561,8 @@ def _write_full_output_file(text: str) -> Path:
 # drafter quality rules but kept short to avoid polluting the agent's context
 # window.
 SELF_DRAFT_INSTRUCTION = (
-    "Your previous output could not be drafted by the automated drafter. "
-    "Please re-state your output as a concise update for the project manager. "
+    "Your message was flagged by the delivery validator for a wire-format violation "
+    "or an unsubstantiated promise. Please rewrite it yourself and resend. "
     "Rules: lead with outcomes, not process. Use 2-4 bullet points starting with "
     '"\\u2022 ". Omit internal code details, line counts, and plans for next steps. '
     "Preserve any commit hashes, PR/issue numbers, and explicit questions. "
@@ -620,7 +628,9 @@ def _parse_draft_and_questions(
     return summary_text, None
 
 
-def _compose_structured_draft(summary_text: str, session=None, is_completion: bool = True) -> str:
+def _compose_structured_draft(
+    summary_text: str, session=None, is_completion: bool = True
+) -> str:
     """Compose the full structured draft with emoji, stage line, bullets, questions, and links.
 
     Two modes:
@@ -648,10 +658,14 @@ def _compose_structured_draft(summary_text: str, session=None, is_completion: bo
         try:
             from models.agent_session import AgentSession
 
-            fresh_sessions = list(AgentSession.query.filter(session_id=session.session_id))
+            fresh_sessions = list(
+                AgentSession.query.filter(session_id=session.session_id)
+            )
             if fresh_sessions:
                 session = fresh_sessions[0]
-                logger.debug(f"Refreshed session {session.session_id} for structured draft")
+                logger.debug(
+                    f"Refreshed session {session.session_id} for structured draft"
+                )
         except Exception as e:
             logger.debug(f"Could not refresh session for draft: {e}")
 
@@ -725,7 +739,9 @@ async def draft_message(
     if not raw_response or not raw_response.strip():
         # Even with empty response, render SDLC progress if available
         if session:
-            fallback = _compose_structured_draft("", session=session, is_completion=True)
+            fallback = _compose_structured_draft(
+                "", session=session, is_completion=True
+            )
             if fallback.strip():
                 return MessageDraft(text=fallback)
         return MessageDraft(text=raw_response or "")
@@ -767,7 +783,9 @@ async def draft_message(
             logger.warning(f"Failed to write full output file: {e}")
 
     # Apply deterministic composition on the agent's own text
-    composed_text = _compose_structured_draft(stripped_text, session=session, is_completion=True)
+    composed_text = _compose_structured_draft(
+        stripped_text, session=session, is_completion=True
+    )
 
     # Run the per-medium validator on the composed text
     violations = _validate_for_medium(composed_text, medium)
