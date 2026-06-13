@@ -8,15 +8,14 @@ This solves a common workflow problem: PM feedback often arrives as fresh messag
 
 ## How It Works
 
-### Phase 1: Structured Drafter Output
+### Phase 1: Drafter Routing Fields
 
-The message drafter (`bridge/message_drafter.py`, formerly `bridge/summarizer.py` — renamed per [#1035](https://github.com/tomcounsell/ai/issues/1035)) produces structured output via Haiku `tool_use` calls, extracting three fields:
+The message drafter (`bridge/message_drafter.py`, formerly `bridge/summarizer.py` — renamed per [#1035](https://github.com/tomcounsell/ai/issues/1035)) derives two routing hint fields deterministically on every delivery pass — no LLM call:
 
-- **context_summary** (max 200 chars): A brief description of what the session is working on. Example: "Building dark mode toggle for settings page"
-- **response**: The drafted text sent to Telegram (existing behavior, now structured).
-- **expectations** (nullable, max 500 chars): What the agent needs from the human next. Example: "Waiting for feedback on the color palette choices". Null when the session is complete or not waiting for input.
+- **context_summary** (max 140 chars): First non-blank, non-heading line of the narration-stripped agent output, capped at a word boundary. Example: "Building dark mode toggle for settings page". Populated by `_derive_context_summary()`.
+- **expectations** (nullable): Open questions extracted from a `## Open Questions` section in the agent's output. Example: "Waiting for feedback on the color palette choices". `None` when the section is absent or empty, never `""`.
 
-These fields are persisted to the `AgentSession` model after every drafting call (`bridge/response.py`).
+These fields are persisted to the `AgentSession` model after every delivery via `_persist_routing_fields` in `agent/output_handler.py`. (The old `response` field was part of the removed `StructuredDraft` dataclass — it is not persisted; the delivered text flows through the outbox directly.)
 
 ### Phase 2: Semantic Router
 
@@ -98,40 +97,26 @@ These are nullable Popoto/Redis fields. No migration is needed -- Redis is schem
 
 ## Drafter Changes
 
-The message drafter was upgraded from plain text output to structured extraction:
+The message drafter was initially upgraded from plain text output to Haiku-based structured extraction (the `StructuredDraft` dataclass era). That architecture was later replaced by a deterministic pass-through. The `StructuredDraft` dataclass, `STRUCTURED_DRAFT_TOOL` schema, `_draft_with_haiku`, and `_draft_with_openrouter` have all been removed.
 
-- **Primary path**: Haiku `tool_use` with `structured_draft` tool schema returning `StructuredDraft` dataclass
-- **Fallback within Haiku**: If tool_use fails, falls back to text-only Haiku response
-- **Secondary fallback**: OpenRouter (replaces Ollama) with the same structured extraction attempt
-- **Final fallback**: Truncation (unchanged)
-
-The `StructuredDraft` dataclass (formerly `StructuredSummary`):
-
-```python
-@dataclass
-class StructuredDraft:
-    context_summary: str
-    response: str
-    expectations: str | None
-```
-
-The `MessageDraft` (formerly `SummarizedResponse`) now carries `context_summary` and `expectations` fields through to the persistence layer in `bridge/response.py`.
+`context_summary` and `expectations` now come from `_derive_context_summary()` and `_extract_open_questions()` respectively — both are deterministic Python functions with no LLM dependency. `MessageDraft` carries these fields and they are persisted via `_persist_routing_fields` in `agent/output_handler.py` after every delivery (not just after LLM calls).
 
 ## Persistence
 
-After drafting succeeds (`bridge/response.py`), routing fields are saved to the session:
+After drafting, routing fields are saved to the session via `_persist_routing_fields` in `agent/output_handler.py`:
 
 ```python
-if session and draft.context_summary:
-    session.context_summary = draft.context_summary
-if session and draft.expectations is not None:
-    session.expectations = draft.expectations
-elif session:
-    session.expectations = None  # Clear stale expectations
-session.save()
+if session is not None and draft is not None:
+    if draft.context_summary:
+        session.context_summary = draft.context_summary
+    if draft.expectations is not None:
+        session.expectations = draft.expectations
+    else:
+        session.expectations = None  # Clear stale expectations
+    session.save()
 ```
 
-This is non-fatal -- save failures are caught and logged without affecting message delivery.
+Persistence is non-fatal — save failures are caught and logged without affecting message delivery. Fields are now persisted on **every** drafting pass (not only after LLM calls), so `context_summary` and `expectations` are populated even for short-output pass-throughs and teammate sessions.
 
 ## Confidence Threshold
 
@@ -148,11 +133,11 @@ The threshold is intentionally conservative. False positives (routing to the wro
 | File | Change |
 |------|--------|
 | `models/agent_session.py` | Added `context_summary` and `expectations` fields |
-| `bridge/message_drafter.py` (née `bridge/summarizer.py`) | Structured `tool_use` output, `StructuredDraft` dataclass (formerly `StructuredSummary`), OpenRouter fallback (replaces Ollama) |
+| `bridge/message_drafter.py` (née `bridge/summarizer.py`) | Deterministic `_derive_context_summary()` and `_extract_open_questions()` for routing fields (LLM rewrite machinery removed) |
 | `bridge/session_router.py` | Semantic router: `find_matching_session()` (always-on, no feature flag) |
-| `bridge/response.py` | Persist routing fields after drafting |
+| `agent/output_handler.py` | `_persist_routing_fields` persists `context_summary` and `expectations` after every delivery |
 | `bridge/telegram_bridge.py` | Integrate semantic router in non-reply-to message handling; active session steering (#318) |
-| `tests/unit/test_message_drafter.py` | Updated mocks for `StructuredDraft` returns and OpenRouter fallback |
+| `tests/unit/test_message_drafter.py` | Updated for pass-through validation and deterministic routing field extraction |
 | `tests/test_unthreaded_routing.py` | Decision matrix tests: active steering, dormant passthrough, abort detection, FIFO ordering, missing session fallthrough |
 
 ## In-Memory Coalescing Guard
@@ -183,11 +168,7 @@ The in-memory coalescing guard (`_recent_session_by_chat`) bridges the Redis vis
 
 ## Testing
 
-All 120 message drafter tests pass. The semantic router is tested through the existing test infrastructure. Key test updates:
-
-- Mock returns changed from `str` to `StructuredDraft` objects
-- Ollama fallback tests renamed to OpenRouter fallback tests
-- All `_summarize_with_ollama` patches replaced with `_draft_with_openrouter`
+The semantic router is tested through the existing test infrastructure. The drafter tests cover deterministic routing field extraction (`_derive_context_summary`, `_extract_open_questions`) without LLM mocks.
 
 ### Unthreaded Routing Tests (`tests/test_unthreaded_routing.py`)
 

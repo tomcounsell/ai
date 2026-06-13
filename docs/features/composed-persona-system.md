@@ -125,38 +125,16 @@ encouraged to call the composer directly.
 
 ## Drafter (medium-aware split)
 
-The message drafter
-([`bridge/message_drafter.py`](../../bridge/message_drafter.py)) now composes
-its system prompt as `BASE_DRAFTER_PROMPT + MEDIUM_RULES[medium]`:
+> **Updated (drafter_passthrough_validation):** The Haiku LLM rewrite path was removed from the drafter. `_draft_with_haiku`, `_draft_with_openrouter`, `_compose_drafter_prompt`, `BASE_DRAFTER_PROMPT`, and `MEDIUM_RULES` are all deleted. The `medium` parameter on `draft_message` is still active — it now routes to deterministic validators (`_validate_for_medium`) rather than to an LLM system prompt composer.
 
-```python
-BASE_DRAFTER_PROMPT = ""                        # empty for byte-stability
-MEDIUM_RULES = {
-    "telegram": DRAFTER_SYSTEM_PROMPT,          # today's full prompt verbatim
-    "email": DRAFTER_SYSTEM_PROMPT,             # stub — will diverge later
-}
+The `medium` parameter on `draft_message` discriminates which wire-format validator runs:
 
-def _compose_drafter_prompt(medium: str = "telegram") -> str:
-    rules = MEDIUM_RULES.get(medium, MEDIUM_RULES["telegram"])
-    return BASE_DRAFTER_PROMPT + rules
-```
-
-The `medium` parameter on `draft_message` (already existed at
-`bridge/message_drafter.py:1720`) is now threaded through to
-`_draft_with_haiku` and `_draft_with_openrouter`, both of which call
-`_compose_drafter_prompt(medium)` to build the system prompt for the Haiku /
-OpenRouter API call.
-
-Today the email cell is a stub identical to telegram. A follow-up plan will
-extract Telegram-specific format rules into the telegram cell and let email
-diverge.
+- `"telegram"` → `validate_telegram(text)` — checks for Markdown table syntax (`| --- |`) which does not render in Telegram
+- `"email"` → `validate_email(text)` — checks for any Markdown on the wire (plain prose only)
 
 The naming convention is **`medium`** (not `channel`) on the drafter's public
 surface because that's the existing parameter name and it ties through to
-`_validate_for_medium(text, medium)` at `bridge/message_drafter.py:381`. The
-composer's internal parameter is `channel=None` because no working-agent cell
-consumes it today (Open Question 1 in the plan); renaming would be churn for
-no value.
+`_validate_for_medium(text, medium)` in `bridge/message_drafter.py`.
 
 ## Byte stability (issue #1227)
 

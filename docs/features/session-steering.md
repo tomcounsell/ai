@@ -143,15 +143,19 @@ All symbols that previously lived only in `agent/agent_session_queue.py` are re-
 
 Existing callers (tests, integrations) that import from `agent.agent_session_queue` continue to work unchanged. The canonical location is now `agent.output_router`.
 
-## Drafter Fallback Steering (née "Summarizer Fallback")
+## Drafter Self-Draft Steering (née "Summarizer Fallback")
 
-When both drafter backends (Haiku and OpenRouter) fail, `send_response_with_files()` uses the steering infrastructure to request agent self-draft rather than delivering raw truncated text to Telegram.
+When the drafter detects a blocking flag (empty promise / forward-deferral without evidence), `_inject_self_draft_steering()` in `agent/output_handler.py` uses the steering infrastructure to request a self-draft from the authoring agent rather than delivering a bad message to the user.
 
-**Mechanism:** `push_steering_message(session_id, SELF_DRAFT_INSTRUCTION, sender="summarizer-fallback")` injects a compact self-draft instruction. The agent produces a clean draft on its next turn. (Constants were renamed from `SELF_SUMMARY_INSTRUCTION` per [#1035](https://github.com/tomcounsell/ai/issues/1035); the `sender="summarizer-fallback"` string is kept for backward compatibility with existing Redis-queued steering messages.)
+This is the **primary** flag-handling path — not a fallback. The drafter no longer calls Haiku or OpenRouter; the steering nudge is how the system handles any output that fails validation.
 
-**Loop prevention:** `peek_steering_sender(session_id)` checks if a `"summarizer-fallback"` message is already queued before pushing another. This prevents infinite steering loops if the self-draft output also fails drafting.
+**Mechanism:** `push_steering_message(session_id, SELF_DRAFT_INSTRUCTION, sender="drafter-fallback")` injects a compact self-draft instruction. The agent produces a clean draft on its next turn. (The `sender="drafter-fallback"` string supersedes the older `"summarizer-fallback"` string used before the drafter rewrite.)
 
-**Fallback chain:** If steering cannot be used (no session, Redis down, loop prevention), the system falls through to `is_narration_only()` as a last-resort gate before delivering text.
+**Loop prevention:** `peek_steering_sender(session_id)` checks if a `"drafter-fallback"` message is already queued before pushing another, blocking double-injection if the agent hasn't yet consumed the prior steering message. Additionally, the attempt count is tracked atomically at `steering:attempts:{session_id}` in Redis (`bump_self_draft_attempts`, `reset_self_draft_attempts` in `agent/steering.py`).
+
+**Attempt cap:** `SELF_DRAFT_MAX_ATTEMPTS = 2` (in `agent/steering.py`). After two consecutive steering injections without a clean delivery in between, the handler falls through to the narration fallback rather than injecting a third message. The counter resets on any clean (non-blocking) delivery via `reset_self_draft_attempts`.
+
+**Fallback chain:** If steering cannot be used (no session, Redis down, cap exceeded), the system falls through to the narration fallback — a fixed message substituted in place of the agent's raw output.
 
 See [Message Drafter](message-drafter.md) for the current feature doc covering the drafter module. (The previous pointer to `summarizer-format.md` is gone — content migrated into `message-drafter.md`.)
 
