@@ -787,8 +787,8 @@ async def run_memory_quality_audit() -> dict:
     Layer 2 (heuristic anomaly detection): Compute 4 signals against the
         post-Layer-1 corpus. Cross-threshold signals file GitHub issues
         (deduped via title-prefix search).
-    Layer 3 (Gemma classification, fail-soft): Sample up to 20 last-24h
-        records and classify via gemma4:e2b. Wallclock-budgeted at 30s
+    Layer 3 (granite classification, fail-soft): Sample up to 20 last-24h
+        records and classify via granite4.1:3b. Wallclock-budgeted at 30s
         with 10s per-call timeout. Files issues for clusters of >=3 records
         sharing an anomaly_signal.
 
