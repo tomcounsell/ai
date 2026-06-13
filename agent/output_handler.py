@@ -397,11 +397,11 @@ class TelegramRelayOutputHandler:
                     delivery_text = self._apply_narration_fallback(text)
 
             # ── Persist routing fields to session ──
-            # When the drafter succeeds, write context_summary and
-            # expectations back to the AgentSession. bridge/session_router.py
-            # and bridge/telegram_bridge.py still read session.expectations
-            # from the outbound path. Silent failure.
-            if session is not None and getattr(draft, "was_drafted", False):
+            # Write context_summary and expectations back to the AgentSession
+            # so bridge/session_router.py and bridge/telegram_bridge.py can
+            # route correctly. The drafter now always populates these fields
+            # deterministically (no longer gated on was_drafted). Silent failure.
+            if session is not None and draft is not None:
                 self._persist_routing_fields(session, draft)
         except Exception as e:
             # Drafter failure MUST NOT block delivery. Fall back to raw text;

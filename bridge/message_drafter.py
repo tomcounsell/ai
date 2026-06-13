@@ -1,39 +1,30 @@
 """
 Message drafting for user-visible delivery.
 
-Long agent responses are drafted into concise PM-facing messages
-using Haiku (primary) or OpenRouter (fallback). Key artifacts
-(commit hashes, URLs, PRs) are extracted and preserved.
+Agent responses are passed through deterministic composition:
+1. Process narration is stripped
+2. Per-medium wire-format is validated
+3. Very long responses are attached as a .txt file
+4. The agent's own text is composed with emoji, stage progress, and link footer
+5. context_summary and expectations are derived for session routing
 
-For very long responses, the full output is saved as a .txt file
-for attachment.
+No LLM rewriting of the agent's output. The drafter's job is
+validation + structural composition, not summarization.
 
-Output classification determines whether agent output needs human
-input (question/blocker) or can auto-continue (status/completion).
-
-Anti-fabrication rule: The drafter must NEVER fabricate questions
-that are not verbatim present in the raw agent output. Only explicit
-questions (sentences ending in "?" directed at the human) may appear
-in the "?" section or set the expectations field. Declarative statements
-like "I will do X" must never be reframed as questions.
+Anti-fabrication rule: expectations must NEVER be fabricated.
+Only explicit questions (from ## Open Questions sections or sentences
+ending in "?") may populate expectations. Declarative plans are NOT questions.
 """
 
-import json
 import logging
 import os
 import re
 import tempfile
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 
-import httpx
-
-from agent.anthropic_client import anthropic_slot
 from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
 from config.enums import SessionType
-from config.models import MODEL_FAST, OPENROUTER_HAIKU, OPENROUTER_URL
-from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -60,18 +51,11 @@ def _safe_float(env_key: str, default: float) -> float:
 # FILE_ATTACH_THRESHOLD: character count above which the full agent response is
 # also sent as a .txt file attachment. Valid range: 500-10000 (default 3000).
 FILE_ATTACH_THRESHOLD = _safe_int("FILE_ATTACH_THRESHOLD", 3000)
-# SAFETY_TRUNCATE: hard ceiling in characters when all drafting backends
-# fail and we must truncate the raw text. Valid range: 1000-8192 (default 4096).
-SAFETY_TRUNCATE = _safe_int("SAFETY_TRUNCATE", 4096)
 
-# OpenRouter config imported from config.models
-
-# Classification confidence threshold — below this, default to QUESTION
-# (conservative: pauses for human input rather than auto-continuing)
-# Override via env var; value must be a float between 0.0 and 1.0.
-# Valid range: 0.0-1.0 (default 0.80). Higher values make the system more
-# conservative, defaulting to QUESTION when confidence is below this threshold.
-CLASSIFICATION_CONFIDENCE_THRESHOLD = _safe_float("CLASSIFICATION_CONFIDENCE_THRESHOLD", 0.80)
+# Short-output early return threshold (D5a): texts shorter than this skip the
+# LLM drafter and return as-is. 200 chars matches the current bridge/response.py
+# threshold and bounds per-message latency on short replies.
+SHORT_OUTPUT_THRESHOLD = 200
 
 
 def _truncate_at_sentence_boundary(text: str, limit: int = 4096) -> str:
@@ -149,7 +133,7 @@ def _extract_open_questions(text: str) -> list[str]:
     # Extract list items (numbered or bulleted)
     questions = []
     # Match lines starting with number+period, dash, asterisk, or bullet
-    list_item_pattern = re.compile(r"^\s*(?:\d+[\.\)]\s*|[-*+]\s*|\u2022\s*)(.*)", re.MULTILINE)
+    list_item_pattern = re.compile(r"^\s*(?:\d+[\.\)]\s*|[-*+]\s*|•\s*)(.*)", re.MULTILINE)
     for item_match in list_item_pattern.finditer(section_content):
         item_text = item_match.group(1).strip()
         # Skip empty, whitespace-only, or placeholder items
@@ -194,85 +178,6 @@ def _strip_process_narration(text: str) -> str:
     return result if result else text
 
 
-class OutputType(Enum):
-    """Classification of agent output for routing decisions.
-
-    Used by the bridge to determine whether to pause for human input
-    or auto-continue the agent session.
-    """
-
-    QUESTION = "question"  # Needs human input
-    STATUS_UPDATE = "status"  # Progress report, no input needed
-    COMPLETION = "completion"  # Work finished
-    BLOCKER = "blocker"  # Stuck, needs help
-    ERROR = "error"  # Something failed
-
-
-@dataclass
-class ClassificationResult:
-    """Result of classifying agent output.
-
-    Attributes:
-        output_type: The classified type of the output.
-        confidence: How confident the classifier is (0.0-1.0).
-        reason: Brief explanation of the classification decision.
-    """
-
-    output_type: OutputType
-    confidence: float  # 0.0-1.0
-    reason: str  # Brief explanation
-    was_rejected_completion: bool = False  # True when COMPLETION → STATUS_UPDATE downgrade
-    nudge_feedback: str | None = None  # LLM-generated feedback for rejected completions
-    has_workarounds: bool = False  # True when agent encountered problems it worked around
-
-
-@dataclass
-class StructuredDraft:
-    """Structured output from the drafter's tool_use call.
-
-    Contains the three routing fields produced by the structured_draft tool:
-    - context_summary: one-sentence session topic for routing
-    - response: the Telegram-formatted message text
-    - expectations: what the agent needs from the human, or None
-    """
-
-    context_summary: str
-    response: str
-    expectations: str | None
-
-
-# Tool schema for structured drafter output via tool_use
-STRUCTURED_DRAFT_TOOL = {
-    "name": "structured_draft",
-    "description": "Produce a structured draft of the developer session output.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "context_summary": {
-                "type": "string",
-                "description": (
-                    "One sentence: what this session is about (for routing). "
-                    "Be specific about the topic and scope, not vague."
-                ),
-            },
-            "response": {
-                "type": "string",
-                "description": ("The Telegram message. Follow format rules from system prompt."),
-            },
-            "expectations": {
-                "type": ["string", "null"],
-                "description": (
-                    "Set ONLY when the raw output contains an explicit question directed "
-                    "at the human (a sentence ending in '?'). Copy it verbatim. "
-                    "Null when no explicit questions exist — declarative plans are NOT questions."
-                ),
-            },
-        },
-        "required": ["context_summary", "response", "expectations"],
-    },
-}
-
-
 @dataclass
 class Violation:
     """A wire-format violation surfaced by a per-medium validator."""
@@ -284,11 +189,35 @@ class Violation:
 
 @dataclass
 class MessageDraft:
-    """Result of drafting an agent response."""
+    """Result of drafting an agent response.
+
+    Attributes:
+        text: The composed message text for delivery. Empty string signals
+            needs_self_draft (wire-format violation or empty promise the
+            agent can fix by rewriting).
+        full_output_file: Path to the full-output .txt file when the raw
+            response exceeds FILE_ATTACH_THRESHOLD. None otherwise.
+        needs_self_draft: True when a BLOCKING condition fired (wire-format
+            violation or empty promise) and the agent should rewrite. NOT
+            set for over-length — those still deliver with a file pointer.
+        artifacts: Dict of extracted artifacts (commits, urls, files_changed,
+            test_results, errors).
+        context_summary: Coarse one-sentence routing hint for session_router.py
+            and bridge/telegram_bridge.py. Derived deterministically from the
+            narration-stripped text (first non-narration sentence, ≤140 chars).
+            None when the stripped text is empty.
+        expectations: Verbatim questions extracted from ## Open Questions
+            sections or explicit question sentences in the raw output. None
+            when no questions are found (never ""). The None-vs-empty
+            distinction matters: _persist_routing_fields in output_handler.py
+            only writes expectations when it is not None, preserving any prior
+            persisted value when no new questions are present.
+        violations: List of wire-format violations from the per-medium
+            validator. Informational — surfaced to the agent for editing.
+    """
 
     text: str
     full_output_file: Path | None = None
-    was_drafted: bool = False
     needs_self_draft: bool = False
     artifacts: dict[str, list[str]] = field(default_factory=dict)
     context_summary: str | None = None
@@ -435,649 +364,66 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
     return artifacts
 
 
-CLASSIFIER_SYSTEM_PROMPT = """\
-You classify developer agent output to determine if human input is needed.
-
-Respond with ONLY a JSON object — no markdown, no explanation, no extra text:
-{"type": "question|status|completion|blocker|error", \
-"confidence": 0.95, "reason": "brief explanation", "nudge_feedback": null, \
-"has_workarounds": false}
-
-The nudge_feedback field is REQUIRED in your response. Set it to a helpful string \
-when you classify as "status" and the output LOOKS like a completion attempt but \
-lacks evidence (i.e., you are downgrading a completion to status). The nudge \
-feedback should explain what was missing and what the agent should include next time. \
-Set it to null for all other classifications.
-
-The has_workarounds field detects when the agent encountered problems, errors, or \
-obstacles during work that it had to work around but didn't fully resolve. Set to true when:
-- The agent mentions errors/failures it encountered and worked around
-- Something broke or was unavailable and the agent found an alternative
-- The agent explicitly mentions a workaround, fallback, or "skipped" step
-- There are warnings or issues discovered that should be tracked as GitHub issues
-Set to false when work completed cleanly without encountering problems.
-
-Classification rules:
-
-QUESTION — The agent is directly asking the human for a decision or input.
-  Examples: "Should I proceed?", "Which approach do you prefer?", "Do you want me to...?"
-  Key signals: direct question marks aimed at the user, "should I", "would you like", "which do you"
-  IMPORTANT: Messages seeking permission or approval are QUESTION, not STATUS_UPDATE.
-  Examples of approval gates (classify as QUESTION):
-  - "Ready to build when approved"
-  - "Waiting for your go-ahead"
-  - "Shall I proceed with the implementation?"
-  - "Awaiting approval before merging"
-
-  NOT a question (classify as STATUS_UPDATE instead):
-  - Rhetorical questions in status reports ("What could cause this? Let me investigate...")
-  - "Should I fix this?" when it's obviously a bug the agent should fix
-  - Questions about implementation details the agent should decide itself
-  - Asking permission for things clearly within the agent's authority
-  - Self-directed questions like "Let me check if..." or "I wonder if..."
-
-STATUS_UPDATE — Progress report with no question. The agent is still working.
-  Examples: "Running tests...", "Found 3 issues, fixing now", "Analyzing the codebase"
-  Key signals: present tense activity, no question directed at human, intermediate progress
-
-COMPLETION — The work is done AND evidence is provided, OR the user's question has been answered.
-  Two paths to COMPLETION:
-
-  Path A — SDLC/work completion (evidence required):
-  REQUIRES at least one of:
-  - Command output showing test results (N passed, 0 failed)
-  - Specific numbers (test counts, error counts, line counts)
-  - Command exit codes or verification output
-  - File paths confirmed to exist
-  - PR/commit URLs with passing status
-  Examples: "All 42 tests passed, committed abc1234", \
-"PR created: https://... — CI green", "ruff check: 0 errors, black: reformatted 3 files"
-  Key signals: specific numbers, command output pasted, exit codes mentioned
-
-  Path B — Conversational/Teammate completion (no evidence needed):
-  When the user asked a question and the agent answered it with factual, substantive content.
-  DOES NOT require test output, numbers, or URLs — the answer itself IS the deliverable.
-  Examples: "The drafter works by...", "Here's how the routing system handles...", \
-"The bridge uses Telethon to...", "There are 3 main components: ..."
-  Key signals: explanatory prose, factual descriptions, architecture explanations, \
-direct answers to "how does X work?" or "what is X?" questions
-  IMPORTANT: If the output explains a system, answers a question, or provides information \
-the user asked for — that is COMPLETION, not STATUS_UPDATE. The user asked, the agent answered.
-
-  NOT completion (classify as STATUS_UPDATE instead, and provide a nudge_feedback):
-  - "Done" or "Complete" without any evidence (for work tasks)
-  - "Should work now" (hedging = not verified)
-  - "Committed and pushed" without test results
-  - Hedging language: "should", "probably", "seems to", "looks like", "I think", "I believe"
-  - Claims without proof: "Fixed the bug" without reproduction test output
-
-BLOCKER — The agent is stuck and needs human help to proceed.
-  Examples: "I don't have access to...", "This requires permissions I don't have", "Blocked on..."
-  Key signals: inability to proceed, missing access/permissions, explicit "blocked"
-
-ERROR — Something failed or broke.
-  Examples: "Error: ModuleNotFoundError", "Build failed with exit code 1", "Tests failing: 3 errors"
-  Key signals: "error:", "failed:", exception names, non-zero exit codes
-
-Few-shot examples of nudge_feedback for downgraded completions:
-
-Input: "I think the bug is fixed now. Should work."
-Output: {"type": "status", "confidence": 0.92, "reason": "Hedging language without verification", \
-"nudge_feedback": "You used hedging language ('I think', 'should work') which signals \
-uncertainty. Run the reproduction steps or tests and share the actual output to confirm the fix."}
-
-Input: "All tests pass. Task complete."
-(but no test output shown)
-Output: {"type": "status", "confidence": 0.90, "reason": "Claims tests pass but shows no output", \
-"nudge_feedback": "You claimed tests pass but didn't include the test output. Run pytest and \
-paste the results showing pass/fail counts so completion can be verified."}
-
-Input: "Fixed the issue and committed. I believe everything is working correctly."
-Output: {"type": "status", "confidence": 0.91, \
-"reason": "Completion claim with hedging, no evidence", \
-"nudge_feedback": "You said 'I believe everything is working' — \
-that's hedging, not evidence. Show the commit hash, test output, \
-and any verification commands you ran."}
-
-Input: "I'll implement a fix for this by adding a check in the hook..."
-Output: {"type": "status", "confidence": 0.93, \
-"reason": "Agent plans to write code outside SDLC pipeline", \
-"nudge_feedback": "Implementation work should go through /sdlc to ensure proper branch, \
-testing, and review. Use /sdlc to create an issue and start the pipeline instead of \
-writing code directly."}
-
-Few-shot examples of Teammate completions (Path B — no evidence needed):
-
-Input: "The drafter works by classifying agent output into types (question, status, \
-completion, blocker, error) using an LLM call. Status updates are auto-continued while \
-completions and questions are delivered to Telegram. The structured format uses bullet \
-points with stage progress lines for SDLC work."
-Output: {"type": "completion", "confidence": 0.92, \
-"reason": "Factual answer to user question about system architecture", \
-"nudge_feedback": null, "has_workarounds": false}
-
-Input: "There are two root causes: the classifier misclassifies informational answers as status \
-updates because they lack evidence like test output, and the shared Claude Code session \
-causes context to leak between concurrent conversations."
-Output: {"type": "completion", "confidence": 0.93, \
-"reason": "Direct analysis answering user's question about a bug", \
-"nudge_feedback": null, "has_workarounds": false}
-
-Input: "Let me investigate the logs to find out what happened..."
-Output: {"type": "status", "confidence": 0.90, \
-"reason": "Agent describing planned investigation, not yet answering", \
-"nudge_feedback": null, "has_workarounds": false}
-
-Few-shot examples of EMPTY PROMISES (must be classified as status with nudge feedback):
-
-CRITICAL CONTEXT: By the time a response reaches Telegram, the agent's session is OVER. \
-There is no future execution. The agent cannot "will do" anything — it has already finished. \
-Any "I will", "I'll", "going forward", "from now on", "next time" language is an empty promise \
-UNLESS the agent already made the change in this session and shows evidence. \
-The only exception is scheduling/queuing a session that will execute later AND report back \
-via Telegram (e.g., "I've queued a build session — you'll get a message when it completes"). \
-Otherwise the only honest responses are: "I did X (proof)" or "I didn't do X (why)."
-
-There are TWO classes of empty promises:
-
-1. BEHAVIORAL-CHANGE promises: "got it / will do / going forward / won't happen again" \
-without evidence of a durable change.
-2. FORWARD-DEFERRAL promises: "I'll come back with X / will follow up / stay tuned / \
-more soon / I'll report back" — these create explicit dated user expectations and are \
-forbidden UNLESS the agent references a verifiable autonomous-delivery mechanism \
-(queued session ID, scheduled cron, scheduled agent — surfaced as a session_id, \
-schedule_id, or PR URL).
-
-Even when the deferral is combined with substantive content (file paths, commit hashes, \
-descriptions of work done), the deferral itself is the violation and must be classified \
-as STATUS_UPDATE. The exception is when the deferral itself names a verifiable \
-autonomous-delivery reference matching the form `(?:scheduled|queued)\\s+session\\s+[a-f0-9]{6,}` \
-or equivalent (schedule_id, PR URL).
-
-Input: "Will do. I'll update the config next time."
-Output: {"type": "status", "confidence": 0.95, \
-"reason": "Empty promise — agent says 'will do' but session is ending, there is no next time", \
-"nudge_feedback": "You said 'will do' but your session is about to end — there is no \
-future execution to fulfill this promise. Either make the change NOW (edit a file, save a \
-memory, update a config) and show evidence, or be honest that you didn't do it.", \
-"has_workarounds": false}
-
-Input: "Noted. I'll adjust my approach going forward."
-Output: {"type": "status", "confidence": 0.95, \
-"reason": "Empty promise — 'going forward' implies future action but session is ending", \
-"nudge_feedback": "You said 'going forward' but this session is ending. There is no \
-'going forward' unless you made a durable change right now. What did you actually change? \
-Show a commit hash, file path, or memory entry — or admit no change was made.", \
-"has_workarounds": false}
-
-Input: "Reading the docs now, will come back with thoughts."
-Output: {"type": "status", "confidence": 0.95, \
-"reason": "Forward-deferral without evidence or scheduled-delivery reference", \
-"nudge_feedback": "You said 'will come back with thoughts' but your session is about to end — \
-there is no future 'coming back'. Either deliver the thoughts NOW (paste them in this reply) \
-or honestly say you didn't form an opinion. Forward-deferrals like this create dated user \
-expectations that no future execution can fulfill.", \
-"has_workarounds": false}
-
-Input: "Found three issues in `bridge/foo.py`. I'll come back with fixes once tests run."
-Output: {"type": "status", "confidence": 0.93, \
-"reason": "Forward-deferral combined with substantive content but no scheduled-delivery \
-reference — the deferral itself is the violation", \
-"nudge_feedback": "Substantive content (file path, issue description) does not redeem a \
-forward-deferral. Either commit the fixes NOW with a commit hash, or say 'I found three \
-issues but didn't fix them yet'. Do not say 'I'll come back'.", \
-"has_workarounds": false}
-
-Input: "I queued session abc1234ef. You'll get a Telegram message when it completes."
-Output: {"type": "completion", "confidence": 0.94, \
-"reason": "Forward-deferral with verifiable scheduled-delivery reference (queued session ID)", \
-"nudge_feedback": null, "has_workarounds": false}
-
-Input: "Updated bridge/message_drafter.py to reject empty promises. Committed abc1234."
-Output: {"type": "completion", "confidence": 0.90, \
-"reason": "Concrete action taken with evidence — file path and commit hash", \
-"nudge_feedback": null, "has_workarounds": false}"""
-
-# False question detection explained:
-# Many agent outputs contain question-like text that should NOT pause for human input:
-# 1. Rhetorical questions - the agent is thinking aloud, not asking the human
-# 2. Obvious bugs - "Should I fix this obvious bug?" is not a real question
-# 3. Implementation details - the agent should make these decisions autonomously
-# 4. Permission-seeking for routine tasks - the agent has authority to proceed
-# Misclassifying these as QUESTION causes premature stopping and unnecessary pauses.
-
-
-def _detect_workarounds(text_lower: str) -> bool:
-    """Detect if the agent encountered problems it worked around."""
-    workaround_patterns = [
-        r"\bwork(?:ed)?\s*around\b",
-        r"\bworkaround\b",
-        r"\bfallback\b",
-        r"\bskipp(?:ed|ing)\b.*\b(?:step|phase|sync|check)\b",
-        r"\bunavailable\b",
-        r"\bcould not fetch\b",
-        r"\bfailed.*\busing\b.*\binstead\b",
-        r"\bhad to\b.*\b(?:instead|alternative|manually)\b",
-        r"\b(?:warning|warn)\b.*\b(?:found|discovered|detected)\b",
-    ]
-    return any(re.search(p, text_lower) for p in workaround_patterns)
-
-
 def _detect_empty_promise(text_lower: str) -> bool:
     """Detect if the agent acknowledged feedback without concrete evidence.
 
     Backward-compat shim — the actual heuristic logic now lives in
     :mod:`bridge.promise_gate`. This wrapper preserves the old contract
     (returns True when the text looks like an empty promise) so existing
-    call sites (``_classify_with_heuristics``) continue to work without
-    structural changes.
+    call sites continue to work without structural changes.
 
     The new heuristic in ``bridge.promise_gate`` covers BOTH the legacy
     behavioral-change class ("got it / will do / going forward") AND the
     new forward-deferral class ("I'll come back with X / will follow up /
-    stay tuned / more soon / I'll report back"). Patterns fire only
-    inside the heuristic-fallback branch (no API key / SDK exception /
-    parse failure) — the LLM-first architecture is enforced upstream in
-    ``classify_output()``.
+    stay tuned / more soon / I'll report back").
     """
     from bridge.promise_gate import _detect_empty_promise as _impl
 
     return _impl(text_lower)
 
 
-def _classify_with_heuristics(text: str) -> ClassificationResult:
-    """Fallback keyword-based classification when LLM is unavailable.
+def _derive_context_summary(raw_text: str) -> str | None:
+    """Derive a coarse context summary from the narration-stripped raw text.
 
-    Uses pattern matching to make a best-effort classification.
-    Conservative: defaults to QUESTION when uncertain, so the bridge
-    pauses for human review rather than auto-continuing incorrectly.
-    """
-    text_lower = text.lower().strip()
+    Returns the first non-narration sentence, capped at ~140 characters.
+    This is a deliberately simple deterministic helper — string slicing,
+    no NLP or LLM. Its purpose is to give session_router.py and other
+    routing readers a coarse topic hint for the session.
 
-    # Check for approval gate patterns (permission-seeking language)
-    approval_patterns = [
-        r"\bwhen approved\b",
-        r"\bready to build\b.*\bapproved\b",
-        r"\bwaiting for.*\bgo-ahead\b",
-        r"\blet me know when\b",
-        r"\bshall i proceed\b",
-        r"\bawaiting.*\bapproval\b",
-        r"\bready to (?:proceed|start|begin)\b.*\bapproved\b",
-        r"\bwaiting for your\b.*\b(?:approval|confirmation|go-ahead)\b",
-    ]
-    for pattern in approval_patterns:
-        if re.search(pattern, text_lower):
-            return ClassificationResult(
-                output_type=OutputType.QUESTION,
-                confidence=0.85,
-                reason="Detected approval gate pattern — agent seeking permission",
-            )
-
-    # Check for direct questions aimed at the user
-    question_patterns = [
-        r"\bshould i\b.*\?",
-        r"\bdo you want\b.*\?",
-        r"\bwould you like\b.*\?",
-        r"\bwhich\b.*\bdo you prefer\b",
-        r"\bwhich\b.*\bshould\b.*\?",
-        r"\bwhat\b.*\bshould\b.*\?",
-        r"\bcan you\b.*\?",
-        r"\bplease\s+(?:confirm|choose|decide|let me know)\b",
-        r"\bwhat do you think\b",
-        r"\bhow would you like\b",
-    ]
-    for pattern in question_patterns:
-        if re.search(pattern, text_lower):
-            return ClassificationResult(
-                output_type=OutputType.QUESTION,
-                confidence=0.85,
-                reason="Detected direct question pattern",
-            )
-
-    # Check for empty promises — agent acknowledged feedback without evidence
-    if _detect_empty_promise(text_lower):
-        return ClassificationResult(
-            output_type=OutputType.STATUS_UPDATE,
-            confidence=0.90,
-            reason="Empty promise — session is ending, 'will do' has no future execution",
-            nudge_feedback=(
-                "Your session is about to end. You cannot 'will do' anything — "
-                "there is no future execution. Make the change NOW (edit a file, "
-                "save a memory, update a config) and show evidence, or honestly "
-                "say you didn't make the change."
-            ),
-        )
-
-    # Check for error indicators
-    error_patterns = [
-        r"\berror:\s",
-        r"\bfailed:\s",
-        r"\bexception:\s",
-        r"\btraceback\b.*\bcall\b",
-        r"\bexit code [1-9]",
-        r"\bfailed with\b",
-        r"\bcrash\b",
-        r"\bpanic\b",
-    ]
-    for pattern in error_patterns:
-        if re.search(pattern, text_lower):
-            return ClassificationResult(
-                output_type=OutputType.ERROR,
-                confidence=0.85,
-                reason="Detected error/failure pattern",
-            )
-
-    # Check for blocker indicators
-    blocker_patterns = [
-        r"\bblocked\b",
-        r"\bblocking\b",
-        r"\bdon'?t have access\b",
-        r"\bpermission denied\b",
-        r"\bcannot proceed\b",
-        r"\bunable to continue\b",
-        r"\bneed.{0,20}permission\b",
-    ]
-    for pattern in blocker_patterns:
-        if re.search(pattern, text_lower):
-            return ClassificationResult(
-                output_type=OutputType.BLOCKER,
-                confidence=0.80,
-                reason="Detected blocker/access pattern",
-            )
-
-    # Check for completion indicators
-    completion_patterns = [
-        r"\bdone\b",
-        r"\bcomplete[d]?\b",
-        r"\bfinished\b",
-        r"\bpushed\b.*\b(?:to|origin|main|master)\b",
-        r"\bcommitted\b",
-        r"\bmerged\b",
-        r"\bpr created\b",
-        r"\bpull request\b.*\bcreated\b",
-        r"https?://github\.com/.+/pull/\d+",
-    ]
-    for pattern in completion_patterns:
-        if re.search(pattern, text_lower):
-            return ClassificationResult(
-                output_type=OutputType.COMPLETION,
-                confidence=0.80,
-                reason="Detected completion pattern",
-                has_workarounds=_detect_workarounds(text_lower),
-            )
-
-    # Default: QUESTION (conservative — show to user rather than silently auto-continue)
-    # When no pattern matches, it's safer to pause for human review than to
-    # auto-continue what might be a question the heuristics didn't catch.
-    # Confidence is set at the threshold (0.80) so the confidence gate in
-    # classify_output() passes this through without redundant re-conversion.
-    result = ClassificationResult(
-        output_type=OutputType.QUESTION,
-        confidence=CLASSIFICATION_CONFIDENCE_THRESHOLD,
-        reason="No strong signal detected — defaulting to show user",
-    )
-    result.has_workarounds = _detect_workarounds(text_lower)
-    return result
-
-
-def _apply_heuristic_confidence_gate(
-    result: ClassificationResult,
-) -> ClassificationResult:
-    """Apply the same confidence threshold to heuristic results as the LLM path.
-
-    When heuristic confidence is below CLASSIFICATION_CONFIDENCE_THRESHOLD,
-    default to QUESTION (conservative). This closes the asymmetry where a
-    heuristic result at 0.60 would be returned as STATUS_UPDATE, while an
-    LLM result at 0.60 would become QUESTION.
-    """
-    if result.confidence < CLASSIFICATION_CONFIDENCE_THRESHOLD:
-        logger.info(
-            f"Heuristic confidence {result.confidence:.2f} below "
-            f"threshold {CLASSIFICATION_CONFIDENCE_THRESHOLD}, "
-            f"defaulting to QUESTION"
-        )
-        return ClassificationResult(
-            output_type=OutputType.QUESTION,
-            confidence=result.confidence,
-            reason=f"Low heuristic confidence ({result.confidence:.2f}): {result.reason}",
-        )
-    return result
-
-
-# Classification audit log — lightweight JSONL observability
-_AUDIT_LOG_PATH = Path(__file__).parent.parent / "logs" / "classification_audit.jsonl"
-_AUDIT_LOG_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
-
-
-def _write_classification_audit(text: str, result: ClassificationResult, source: str) -> None:
-    """Append a JSONL entry to the classification audit log.
-
-    Provides structured observability for every classify_output() call.
-    Uses append mode, no locking needed (single writer). Rotates by
-    renaming to .1 when file exceeds 10 MB.
-    """
-    try:
-        from datetime import UTC, datetime
-
-        _AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-        # Size-based rotation
-        if _AUDIT_LOG_PATH.exists() and _AUDIT_LOG_PATH.stat().st_size > _AUDIT_LOG_MAX_SIZE:
-            rotated = _AUDIT_LOG_PATH.with_suffix(".jsonl.1")
-            _AUDIT_LOG_PATH.rename(rotated)
-
-        entry = {
-            "ts": datetime.now(UTC).isoformat(),
-            "text_preview": text[:200] if text else "",
-            "result": result.output_type.value,
-            "confidence": round(result.confidence, 3),
-            "reason": result.reason,
-            "source": source,
-        }
-        with open(_AUDIT_LOG_PATH, "a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception as e:
-        logger.debug(f"Classification audit log write failed (non-fatal): {e}")
-
-
-async def classify_output(text: str) -> ClassificationResult:
-    """Classify agent output to determine if human input is needed.
-
-    Uses Haiku (MODEL_FAST) for intelligent classification with a
-    keyword heuristic fallback. If the LLM confidence is below
-    CLASSIFICATION_CONFIDENCE_THRESHOLD, defaults to QUESTION to
-    conservatively pause for human review.
-
-    The promise gate (``bridge.promise_gate.evaluate_promise``) is
-    invoked at the end of this function with ``classifier_verdict`` set
-    to the classification result, so the gate's drafter-path delegation
-    can derive its verdict without paying a second Haiku call. This
-    preserves the "no double-charge" invariant from Concern C5.
+    The summary is a routing hint, not a quality deliverable. Callers that
+    need a precise summary should not rely on this field for display.
 
     Args:
-        text: The agent output text to classify.
+        raw_text: The narration-stripped agent output text.
 
     Returns:
-        ClassificationResult with the output type, confidence, and reason.
+        First sentence of the text, capped at 140 chars, or None for
+        empty/whitespace-only input.
     """
-    if not text or not text.strip():
-        result = ClassificationResult(
-            output_type=OutputType.STATUS_UPDATE,
-            confidence=1.0,
-            reason="Empty output",
-        )
-        _write_classification_audit(text or "", result, source="empty")
-        return result
-
-    # Try LLM-based classification first
-    try:
-        api_key = get_anthropic_api_key()
-        if not api_key:
-            logger.warning("No API key for classification, using heuristics")
-            result = _classify_with_heuristics(text)
-            result = _apply_heuristic_confidence_gate(result)
-            _write_classification_audit(text, result, source="heuristic")
-            _delegate_to_promise_gate(text, result)
-            return result
-
-        # Truncate very long text to save tokens — classification
-        # only needs the beginning and end of the output
-        classify_text = text
-        if len(text) > 2000:
-            classify_text = text[:1000] + "\n\n[...truncated...]\n\n" + text[-1000:]
-
-        # Shared semaphore-gated client (#1111)
-        async with anthropic_slot() as client:
-            response = await client.messages.create(
-                model=MODEL_FAST,
-                max_tokens=256,
-                system=CLASSIFIER_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": classify_text}],
-            )
-
-        raw_response = response.content[0].text.strip()
-        result = _parse_classification_response(raw_response)
-        if result is not None:
-            # If confidence is below threshold, default to QUESTION
-            if result.confidence < CLASSIFICATION_CONFIDENCE_THRESHOLD:
-                logger.info(
-                    f"Classification confidence {result.confidence:.2f} below "
-                    f"threshold {CLASSIFICATION_CONFIDENCE_THRESHOLD}, "
-                    f"defaulting to QUESTION"
-                )
-                result = ClassificationResult(
-                    output_type=OutputType.QUESTION,
-                    confidence=result.confidence,
-                    reason=f"Low confidence ({result.confidence:.2f}): {result.reason}",
-                )
-            _write_classification_audit(text, result, source="llm")
-            _delegate_to_promise_gate(text, result)
-            return result
-
-        # LLM returned unparseable response — fall through to heuristics
-        logger.warning(f"Could not parse classification response: {raw_response[:200]}")
-
-    except Exception as e:
-        logger.warning(f"LLM classification failed: {e}")
-
-    # Fallback to heuristic classification
-    # Apply the same confidence threshold as the LLM path (Item 5)
-    result = _classify_with_heuristics(text)
-    result = _apply_heuristic_confidence_gate(result)
-    _write_classification_audit(text, result, source="heuristic")
-    _delegate_to_promise_gate(text, result)
-    return result
-
-
-def _delegate_to_promise_gate(text: str, result: "ClassificationResult") -> None:
-    """Invoke the promise gate with the existing classification verdict.
-
-    Drafter-path delegation (Concern C5): the drafter has already paid
-    one Haiku call for ``classify_output``. Pass that result into the
-    gate so it can derive its verdict without a second Haiku call. The
-    gate writes its own audit JSONL entry with
-    ``source="promise_gate_drafter_delegation"`` and best-effort
-    ``promise_gate.blocked`` session_event when the gate decides BLOCK.
-
-    The gate's verdict is not used to mutate ``result`` — the drafter's
-    own classification (STATUS_UPDATE with nudge_feedback for empty
-    promises) already handles the auto-continue / nudge-loop behaviour.
-    The gate's role on the drafter path is **observability** — its audit
-    entry adds the promise-class telemetry next to the classify_output
-    audit entry.
-
-    Failures in the gate are silently swallowed so the drafter never
-    breaks on gate infrastructure issues.
-    """
-    try:
-        from bridge.promise_gate import evaluate_promise
-
-        # ``transport="drafter"`` discriminator differentiates drafter
-        # audit entries from CLI ones in the JSONL log.
-        evaluate_promise(
-            text,
-            transport="drafter",
-            session_id=os.environ.get("VALOR_SESSION_ID"),
-            classifier_verdict=result,
-        )
-    except Exception as e:  # pragma: no cover - defensive
-        logger.debug(f"promise_gate delegation from classify_output failed: {e!r}")
-
-
-def _parse_classification_response(raw: str) -> ClassificationResult | None:
-    """Parse the LLM's JSON classification response.
-
-    Handles common issues like markdown code fences around JSON,
-    extra whitespace, and invalid type values.
-
-    Returns None if the response cannot be parsed.
-    """
-    # Strip markdown code fences if present
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        # Remove opening fence (with optional language tag)
-        cleaned = re.sub(r"^```\w*\n?", "", cleaned)
-        cleaned = re.sub(r"\n?```$", "", cleaned)
-        cleaned = cleaned.strip()
-
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
+    if not raw_text or not raw_text.strip():
         return None
 
-    # Validate required fields
-    if not isinstance(data, dict):
-        return None
-
-    type_str = data.get("type", "")
-    confidence = data.get("confidence", 0.0)
-    reason = data.get("reason", "")
-
-    # Map type string to OutputType enum
-    type_map = {
-        "question": OutputType.QUESTION,
-        "status": OutputType.STATUS_UPDATE,
-        "completion": OutputType.COMPLETION,
-        "blocker": OutputType.BLOCKER,
-        "error": OutputType.ERROR,
-    }
-
-    output_type = type_map.get(type_str)
-    if output_type is None:
-        return None
-
-    # Clamp confidence to valid range
-    try:
-        confidence = float(confidence)
-        confidence = max(0.0, min(1.0, confidence))
-    except (TypeError, ValueError):
-        confidence = 0.5
-
-    # Extract optional nudge_feedback from LLM response
-    nudge_feedback = data.get("nudge_feedback")
-    if nudge_feedback is not None:
-        nudge_feedback = str(nudge_feedback)
-        # Treat JSON null / empty string as None
-        if not nudge_feedback or nudge_feedback == "null":
-            nudge_feedback = None
-
-    # Extract has_workarounds flag
-    has_workarounds = bool(data.get("has_workarounds", False))
-
-    result = ClassificationResult(
-        output_type=output_type,
-        confidence=confidence,
-        reason=str(reason),
-        nudge_feedback=nudge_feedback,
-        has_workarounds=has_workarounds,
-    )
-
-    # Detect rejected completions: LLM provided a nudge_feedback on a
-    # STATUS_UPDATE, meaning it downgraded a completion attempt
-    if result.output_type == OutputType.STATUS_UPDATE and result.nudge_feedback:
-        result.was_rejected_completion = True
-
-    return result
+    # Take the first non-blank line as a proxy for the opening sentence
+    for line in raw_text.split("\n"):
+        stripped = line.strip()
+        # Skip blank lines and markdown heading/separator lines
+        if not stripped or stripped.startswith("#") or stripped.startswith("---"):
+            continue
+        # Strip leading bullet/list markers
+        stripped = re.sub(r"^[-*+•]\s+", "", stripped)
+        stripped = re.sub(r"^\d+[.)]\s+", "", stripped)
+        if not stripped:
+            continue
+        # Cap at 140 chars at a word boundary
+        if len(stripped) <= 140:
+            return stripped
+        # Truncate at a word boundary within 140 chars
+        truncated = stripped[:137]
+        last_space = truncated.rfind(" ")
+        if last_space > 100:
+            truncated = truncated[:last_space]
+        return truncated + "..."
+    return None
 
 
 def linkify_references(text: str, project_key: str | None = None) -> str:
@@ -1194,96 +540,6 @@ def _get_status_emoji(session, is_completion: bool = True) -> str:
     return "⏳"
 
 
-def _build_draft_prompt(
-    text: str,
-    artifacts: dict[str, list[str]],
-    session=None,
-) -> str:
-    """Build the drafting prompt.
-
-    The system prompt handles format rules. This provides the content,
-    extracted artifacts, and optional session context for enrichment.
-    """
-    artifact_section = ""
-    if artifacts:
-        parts = []
-        for key, values in artifacts.items():
-            parts.append(f"- {key}: {', '.join(values[:10])}")
-        artifact_section = "\n\nPreserve these artifacts verbatim:\n" + "\n".join(parts) + "\n"
-
-    context_section = ""
-    if session:
-        context_parts = []
-        if session.message_text:
-            context_parts.append(f"Original request: {(session.message_text or '')[:200]}")
-        if session.classification_type:
-            context_parts.append(f"Work type: {session.classification_type}")
-        if session.branch_name:
-            context_parts.append(f"Branch: {session.branch_name}")
-        if hasattr(session, "slug") and session.slug:
-            context_parts.append(f"Work item: {session.slug}")
-        # Include tracked links for context
-        if hasattr(session, "get_links"):
-            links = session.get_links()
-            if links.get("issue"):
-                context_parts.append(f"Issue: {links['issue']}")
-            if links.get("plan"):
-                context_parts.append(f"Plan: {links['plan']}")
-            if links.get("pr"):
-                context_parts.append(f"PR: {links['pr']}")
-        # Include recent history for context
-        if hasattr(session, "_get_history_list"):
-            history = session._get_history_list()
-            if history:
-                recent = history[-5:]  # Last 5 entries
-                context_parts.append("Recent history: " + " | ".join(str(e) for e in recent))
-        # Signal Teammate mode so the LLM uses prose format
-        if getattr(session, "session_type", None) == SessionType.TEAMMATE:
-            context_parts.append("persona=teammate (use conversational prose, no bullets or emoji)")
-        if context_parts:
-            context_section = "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
-
-    # Build the chat-log block from session.chat_message_log (issue #1192).
-    # Cap at CHAT_LOG_DISPLAY_ENTRIES most-recent entries so the prompt stays bounded.
-    # The drafter seeing "out" entries from prior turns prevents self-duplication.
-    # Tolerates missing keys, None log, and empty list — all degrade gracefully.
-    # NOTE: We do NOT see the CURRENT turn's outbound text here — the relay appends
-    # AFTER the successful send, which happens after the drafter produces the text.
-    chat_log_section = ""
-    if session is not None:
-        try:
-            from models.agent_session import CHAT_LOG_DISPLAY_ENTRIES
-
-            raw_log = getattr(session, "chat_message_log", None) or []
-            if isinstance(raw_log, list) and raw_log:
-                display_entries = raw_log[-CHAT_LOG_DISPLAY_ENTRIES:]
-                lines = []
-                for entry in display_entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    direction = entry.get("direction", "?")
-                    sender = entry.get("sender") or "unknown"
-                    content = (entry.get("content") or "").strip()
-                    if not content:
-                        continue
-                    lines.append(f"[{direction}] {sender}: {content}")
-                if lines:
-                    chat_log_section = (
-                        "\n\nRecent chat in this thread"
-                        " (you have already said the 'out' lines — avoid repeating them):\n"
-                        + "\n".join(lines)
-                        + "\n"
-                    )
-        except Exception:
-            pass  # Chat log is enrichment — never crash the drafter
-
-    header = (
-        f"/no_think\nDraft a message from this developer session output:"
-        f"{artifact_section}{context_section}{chat_log_section}"
-    )
-    return f"{header}\n\n{text}"
-
-
 def _write_full_output_file(text: str) -> Path:
     """Write full agent output to a temp file for attachment."""
     fd, path = tempfile.mkstemp(suffix=".txt", prefix="valor_full_output_")
@@ -1292,181 +548,10 @@ def _write_full_output_file(text: str) -> Path:
     return Path(path)
 
 
-DRAFTER_SYSTEM_PROMPT = """\
-You condense a developer's messages into Telegram-length updates for a project manager.
-
-You produce STRUCTURED OUTPUT with three fields via the structured_draft tool:
-
-1. **context_summary**: One sentence describing what this session is about. Be specific \
-about the topic and scope (e.g., "Implementing semantic session routing for unthreaded \
-Telegram messages") — NOT vague (e.g., "Working on a feature").
-
-2. **response**: The Telegram message text. Follow the FORMAT RULES below.
-
-3. **expectations**: Set ONLY when the raw output contains an explicit question directed at \
-the human (a sentence ending in "?" that asks for a decision, approval, or input). Copy the \
-question verbatim. Set to null when no explicit questions exist — even if the agent describes \
-plans or next steps. Declarative statements are NOT questions. \
-Examples of non-null: "Should we use approach A or B?", "Approve the PR for merge?", \
-"Is the confidence threshold of 0.80 acceptable?".
-
-Input: ANY output from an autonomous developer — work summaries, conversational replies, \
-design discussions, informational answers, status updates, or technical analysis. May include \
-terminal output, commit messages, file diffs, opinions, or free-form notes.
-
-CRITICAL: Never reject, editorialize, or add meta-commentary about the input. \
-Your job is to condense, not to judge whether the content is "valid". \
-If the input is a conversational reply or opinion, condense it faithfully.
-
-FORMAT RULES for the **response** field (adaptive based on content type):
-
-1. SIMPLE COMPLETIONS: Just "Done ✅" or "Yes" or "No"
-
-2. CONVERSATIONAL REPLIES: Condense while preserving tone and key points. Prose format.
-
-3. QUESTIONS DIRECTED AT PM: Preserve the question exactly (never rewrite or drop questions)
-
-4. SDLC / DEVELOPMENT WORK (when session context is provided):
-   Output ONLY the bullet points — 2-4 bullets max, each starting with "• ".
-   The stage progress line and link footer are added automatically — do NOT include them.
-   Do NOT include any emoji status prefix (✅, ⏳, etc.) — that is added automatically.
-   Do NOT include any issue/PR URLs — those are rendered from session data automatically.
-   Focus on WHAT was accomplished, not process details.
-
-   If the output contains EXPLICIT questions directed at the human (sentences that literally \
-   end with "?" and ask the human to decide or provide input), list them AFTER the bullets, \
-   separated by "---" on its own line. Prefix each with ">> ":
-
-   NEVER fabricate questions. NEVER reframe declarative statements as questions. \
-   If the agent says "I will do X", that is NOT a question — it is a plan. \
-   Only surface questions that are VERBATIM in the raw output.
-
-   Example:
-   • Built auth token rotation with retry
-   • 12 tests passing
-   ---
-   >> Should we use exponential backoff or fixed intervals?
-   >> 2 nits found in review — skip or patch?
-
-   WRONG — do NOT do this:
-   Raw: "I will add sdlc to classifier categories"
-   Output: ? Should classifier be updated to output 'sdlc'?   <-- FABRICATED, WRONG
-
-   RIGHT:
-   Raw: "I will add sdlc to classifier categories"
-   Output: • Added sdlc to classifier categories   <-- No question, no "---"
-
-   If there are no explicit questions in the raw output, do NOT include the "---" separator.
-
-5. STATUS UPDATES / WORK WITH CONTEXT: 2-4 bullet points starting with "• "
-
-6. TEAMMATE SESSIONS (when session context indicates persona=teammate):
-   Respond in conversational prose — no bullets, no status emoji prefix, no structured template.
-   Write as a knowledgeable teammate answering a question. Cite sources naturally in prose.
-
-GENERAL RULES:
-- NEVER include the agent's plan, approach, or strategy. The PM wants RESULTS, not plans.
-  If work is in progress, report what has been DONE so far, not what will be done next.
-- NEVER send empty promises. If the agent acknowledged feedback with "Got it", "Understood", \
-"Noted", "Will do" but made no concrete change (no commit, no file edit, no config update, \
-no memory write), flag it with ⚠️ and note that the promise lacks evidence.
-- NEVER offer or relay an offer of a phone or video call. Valor cannot make calls. If the raw \
-output contains any synchronous-voice invitation ("happy to hop on a quick call", "let's jump \
-on a Zoom", "give me a ring", "call me"), strip it — do NOT reproduce it in the response.
-- Lead with the outcome, not the process
-- Preserve commit hashes inline (e.g., `abc1234`)
-- Flag with ⚠️ ONLY for genuinely external blockers (missing credentials, need third-party \
-access, policy decisions). Do NOT flag: implementation choices, internal obstacles, things \
-the agent could resolve with its tools
-- Tone: direct, no preamble, no filler
-- Do NOT include bare URLs at the end — link rendering is handled separately
-- OMIT obvious process bullets that describe routine agent activity rather than outcomes. \
-Examples of what to OMIT: "Analyzed the codebase", "Read through the plan", \
-"Created execution plan", "Examined the existing code", "Reviewed the implementation", \
-"Investigated the issue", "Here's my approach", "I'll tackle this by", \
-"My plan is to", "Step 1: ...", "The strategy is". \
-These are process noise — the PM only cares about WHAT was \
-accomplished, not THAT you read files or analyzed code or what you plan to do next.
-
-SDLC STAGE NATURALIZATION:
-- Translate raw SDLC stage labels to natural language equivalents: \
-PLAN → planning, BUILD → building, TEST → testing, REVIEW → reviewing, \
-DOCS → documenting, MERGE → merging. Never emit the raw uppercase labels \
-(PLAN, BUILD, TEST, REVIEW, DOCS, MERGE) in the response field. \
-The term "SDLC" itself is acceptable as a process reference.
-
-QUESTION PREFIX:
-- When listing explicit questions after the "---" separator, prefix each with \
-">> " instead of "? ". The ">>" prefix is visually distinct in Telegram.
-
-LINK FORMATTING:
-- Use short-form references only in bullet text (PR #N, issue #N). \
-Never include full URLs in bullets — link rendering is handled separately by \
-the _linkify_references post-processor.
-
-DEVELOPER INTERNALS SUPPRESSION:
-- Do not include line counts, file counts, addition/deletion counts, or exact test \
-pass/fail numbers. Use outcome language instead: "shipped and tested", "all tests \
-passing", "reviewed and approved". The PM cares about outcomes, not metrics.
-- Never include root-cause explanations or describe HOW a fix works internally. \
-Do not mention internal method, function, or class names (e.g., _internal_method, \
-SomeModel, InternalClass). Do not reference deserialization/serialization logic, \
-architectural component names, or code line numbers.
-- Describe WHAT was fixed and the user-visible outcome, not the internal mechanism. \
-Good: "Fixed the data migration bug that caused fields to be empty on save." \
-Bad: "Root cause was lazy deserialization not populating the key tracking fields. \
-Fix: eagerly decode only certain field values during internal model creation."
-- If the original text contains internal code references, translate them into \
-stakeholder-friendly language describing the feature or behavior affected."""
-
-
-# Medium-aware drafter prompt assembly (issue #1268).
-#
-# Today the drafter has a single combined prompt (DRAFTER_SYSTEM_PROMPT above).
-# To support per-medium format rules without rewriting the prompt, we treat the
-# existing prompt as the ``"telegram"`` cell of a MEDIUM_RULES table:
-#
-#     prompt_for_medium = BASE_DRAFTER_PROMPT + MEDIUM_RULES[medium]
-#
-# - BASE_DRAFTER_PROMPT is empty for now — keeps the byte-stable invariant
-#   (BASE + MEDIUM_RULES["telegram"] == DRAFTER_SYSTEM_PROMPT verbatim).
-# - MEDIUM_RULES["telegram"] = today's full prompt verbatim.
-# - MEDIUM_RULES["email"] = same prompt as a stub; future work can extract the
-#   Telegram-specific format rules into MEDIUM_RULES["telegram"]-only and have
-#   "email" diverge.
-#
-# Voice consolidation (banned phrases, tone, no-empty-promises) into a shared
-# segment is **deferred** to a follow-up plan to keep the byte-stability
-# mitigation clean — see Risk 4 / No-Gos in
-# docs/plans/composed-persona-system.md.
-BASE_DRAFTER_PROMPT = ""
-MEDIUM_RULES: dict[str, str] = {
-    "telegram": DRAFTER_SYSTEM_PROMPT,
-    "email": DRAFTER_SYSTEM_PROMPT,
-}
-
-
-def _compose_drafter_prompt(medium: str = "telegram") -> str:
-    """Return the drafter system prompt for the given medium.
-
-    Falls back to the ``"telegram"`` cell when ``medium`` is unknown — the
-    drafter has historically only been wired for Telegram and a typo on the
-    caller side should not produce a no-prompt drafter call.
-    """
-    rules = MEDIUM_RULES.get(medium, MEDIUM_RULES["telegram"])
-    return BASE_DRAFTER_PROMPT + rules
-
-
-# Blocker flag logic explained:
-# The ⚠️ flag is meant to alert the PM only when human intervention is truly required.
-# Genuine blockers: missing API keys, need admin access to a service, policy/legal decisions,
-# waiting on external team, need credentials the agent cannot obtain.
-# NOT blockers: code bugs (agent can fix), test failures (agent can debug), implementation
-# decisions (agent should decide), finding the right approach (agent's job).
-
-# Compact self-draft instruction injected via session steering when all drafter
-# backends fail. Derived from DRAFTER_SYSTEM_PROMPT quality rules but kept short
-# to avoid polluting the agent's context window.
+# Compact self-draft instruction injected via session steering when a blocking
+# condition (wire-format violation, empty promise) fires. Derived from the
+# drafter quality rules but kept short to avoid polluting the agent's context
+# window.
 SELF_DRAFT_INSTRUCTION = (
     "Your previous output could not be drafted by the automated drafter. "
     "Please re-state your output as a concise update for the project manager. "
@@ -1483,161 +568,6 @@ SELF_DRAFT_INSTRUCTION = (
 # external references even though the primary historical caller
 # (send_response_with_files) was deleted in the #1074 follow-up.
 STEERING_DEFERRED = "STEERING_DEFERRED"
-
-
-async def _draft_with_haiku(prompt: str, medium: str = "telegram") -> StructuredDraft | None:
-    """Try structured drafting via Anthropic Haiku API using tool_use.
-
-    Returns a StructuredDraft with context_summary, response, and expectations
-    fields extracted via the structured_draft tool. Falls back to text-only
-    Haiku if tool_use fails, wrapping the result in a StructuredDraft with
-    empty routing fields.
-    """
-    system_prompt = _compose_drafter_prompt(medium)
-    try:
-        api_key = get_anthropic_api_key()
-        if not api_key:
-            logger.warning("No Anthropic API key found for drafting")
-            return None
-
-        # Try tool_use for structured output (shared semaphore-gated client, #1111)
-        try:
-            async with anthropic_slot() as client:
-                response = await client.messages.create(
-                    model=MODEL_FAST,
-                    max_tokens=1024,
-                    system=system_prompt,
-                    messages=[{"role": "user", "content": prompt}],
-                    tools=[STRUCTURED_DRAFT_TOOL],
-                    tool_choice={"type": "tool", "name": "structured_draft"},
-                )
-
-            # Parse tool_use response — tool_use returns the input dict directly
-            for block in response.content:
-                if block.type == "tool_use" and block.name == "structured_draft":
-                    tool_input = block.input
-                    return StructuredDraft(
-                        context_summary=tool_input.get("context_summary", ""),
-                        response=tool_input.get("response", ""),
-                        expectations=tool_input.get("expectations"),
-                    )
-
-            logger.warning("Haiku tool_use returned no tool_use block, falling back to text")
-        except Exception as e:
-            logger.warning(f"Haiku tool_use failed, falling back to text-only: {e}")
-
-        # Fallback: text-only Haiku (no structured routing fields). Reacquire
-        # a semaphore slot for the second API call (#1111).
-        async with anthropic_slot() as client:
-            response = await client.messages.create(
-                model=MODEL_FAST,
-                max_tokens=512,
-                system=system_prompt,
-                messages=[{"role": "user", "content": prompt}],
-            )
-        text_result = response.content[0].text
-        return StructuredDraft(
-            context_summary="",
-            response=text_result,
-            expectations=None,
-        )
-    except Exception as e:
-        logger.warning(f"Haiku drafting failed: {e}")
-        return None
-
-
-async def _draft_with_openrouter(prompt: str, medium: str = "telegram") -> StructuredDraft | None:
-    """Fallback: draft via OpenRouter API (Haiku model).
-
-    Uses the OpenRouter chat completions endpoint with tool_use for structured
-    output. Falls back to text-only if tool_use fails. Requires OPENROUTER_API_KEY
-    environment variable.
-    """
-    system_prompt = _compose_drafter_prompt(medium)
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        logger.warning("No OPENROUTER_API_KEY found for drafting fallback")
-        return None
-
-    try:
-        # OpenRouter uses OpenAI-compatible format for tools
-        openrouter_tool = {
-            "type": "function",
-            "function": {
-                "name": STRUCTURED_DRAFT_TOOL["name"],
-                "description": STRUCTURED_DRAFT_TOOL["description"],
-                "parameters": STRUCTURED_DRAFT_TOOL["input_schema"],
-            },
-        }
-
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-
-        # Try with tool_use first
-        try:
-            payload = {
-                "model": OPENROUTER_HAIKU,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-                "tools": [openrouter_tool],
-                "tool_choice": {
-                    "type": "function",
-                    "function": {"name": "structured_draft"},
-                },
-                "max_tokens": 1024,
-            }
-
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(OPENROUTER_URL, headers=headers, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-
-            # Parse tool call from response
-            message = data.get("choices", [{}])[0].get("message", {})
-            tool_calls = message.get("tool_calls", [])
-            for tc in tool_calls:
-                if tc.get("function", {}).get("name") == "structured_draft":
-                    args = json.loads(tc["function"]["arguments"])
-                    return StructuredDraft(
-                        context_summary=args.get("context_summary", ""),
-                        response=args.get("response", ""),
-                        expectations=args.get("expectations"),
-                    )
-
-            logger.warning("OpenRouter tool_use returned no tool call, falling back to text")
-        except Exception as e:
-            logger.warning(f"OpenRouter tool_use failed, falling back to text-only: {e}")
-
-        # Fallback: text-only via OpenRouter
-        payload = {
-            "model": OPENROUTER_HAIKU,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": 512,
-        }
-
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(OPENROUTER_URL, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-
-        text_result = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        if text_result:
-            return StructuredDraft(
-                context_summary="",
-                response=text_result,
-                expectations=None,
-            )
-        return None
-    except Exception as e:
-        logger.warning(f"OpenRouter drafting failed: {e}")
-        return None
 
 
 def _normalize_question_prefix(text: str) -> str:
@@ -1660,9 +590,9 @@ def _normalize_question_prefix(text: str) -> str:
 def _parse_draft_and_questions(
     summary_text: str,
 ) -> tuple[str, str | None]:
-    """Parse LLM draft output into bullets and optional questions.
+    """Parse draft output into bullets and optional questions.
 
-    The LLM may produce (using >> prefix, or legacy ? prefix):
+    The text may produce (using >> prefix, or legacy ? prefix):
         * Bullet 1
         * Bullet 2
         ---
@@ -1726,11 +656,11 @@ def _compose_structured_draft(summary_text: str, session=None, is_completion: bo
             logger.debug(f"Could not refresh session for draft: {e}")
 
     # Teammate bypass: return prose directly without emoji prefix, bullet parsing,
-    # or structured template. The LLM draft is already in conversational form.
+    # or structured template. The agent's text is already in conversational form.
     if session and (getattr(session, "session_type", None) == SessionType.TEAMMATE):
         return summary_text.strip()
 
-    # Parse questions from LLM output
+    # Parse questions from text output
     bullets, questions = _parse_draft_and_questions(summary_text)
 
     parts = []
@@ -1754,12 +684,6 @@ def _compose_structured_draft(summary_text: str, session=None, is_completion: bo
     return result
 
 
-# Short-output early return threshold (D5a): texts shorter than this skip the
-# LLM drafter and return as-is. 200 chars matches the current bridge/response.py
-# threshold and bounds per-message latency on short replies.
-SHORT_OUTPUT_THRESHOLD = 200
-
-
 async def draft_message(
     raw_response: str,
     session=None,
@@ -1769,39 +693,46 @@ async def draft_message(
 ) -> MessageDraft:
     """Draft an agent response for user-visible delivery.
 
-    Uses structured tool_use output to extract context_summary, response,
-    and expectations fields. Fallback chain: Haiku tool_use -> Haiku text ->
-    OpenRouter tool_use -> OpenRouter text -> raw truncation.
+    Pass-through with validation and deterministic structural composition.
+    No LLM rewriting — the agent's own text is used verbatim after
+    narration stripping and composition.
 
-    - All non-empty responses: drafted via Haiku, then OpenRouter fallback
-    - Very long responses (> FILE_ATTACH_THRESHOLD): full output
-      attached as file
-    - SDLC sessions: structured template with stage progress + link footer
-    - Short non-SDLC outputs (<200 chars): bypass the LLM drafter entirely
+    Flow:
+    1. Strip process narration from raw text
+    2. Run _validate_for_medium on the composed text
+    3. If over FILE_ATTACH_THRESHOLD, write full-output file (delivery still proceeds)
+    4. If any BLOCKING flag fires (wire-format violation, empty promise):
+       return MessageDraft(text="", needs_self_draft=True, violations=[...])
+    5. Apply deterministic composition (_compose_structured_draft) on the
+       agent's own text
+    6. Populate context_summary from _derive_context_summary(stripped_raw_text)
+    7. Populate expectations from _extract_open_questions(stripped_raw_text)
+       (None when no questions found, never "")
+    8. Return MessageDraft(text=<composed>, context_summary=..., expectations=...,
+       violations=[...])
 
     Args:
         raw_response: The raw agent output text.
         session: Optional AgentSession for context enrichment.
-        medium: Delivery medium discriminator. Currently "telegram" (default)
-            or "email". Per-medium prompt/validator rules are planned; this
-            parameter is wired through now so output handlers can pass it
-            without further signature changes.
+        medium: Delivery medium discriminator. "telegram" (default) or "email".
+            Per-medium validator rules enforce wire-format constraints.
         persona: Optional persona name (pm/dev/teammate/customer-service) for
             tone hints. Not used today — medium and persona stay orthogonal.
 
-    Falls back to safety truncation if all drafting fails.
+    Returns:
+        MessageDraft with text, routing fields, and any violations.
     """
     if not raw_response or not raw_response.strip():
         # Even with empty response, render SDLC progress if available
         if session:
             fallback = _compose_structured_draft("", session=session, is_completion=True)
             if fallback.strip():
-                return MessageDraft(text=fallback, was_drafted=True)
-        return MessageDraft(text=raw_response or "", was_drafted=False)
+                return MessageDraft(text=fallback)
+        return MessageDraft(text=raw_response or "")
 
     artifacts = extract_artifacts(raw_response)
 
-    # Short-output early return: skip the LLM call for brief non-SDLC replies
+    # Short-output early return: skip composition for brief non-SDLC replies
     # (per Risk 1 + D5a in docs/plans/message-drafter.md — bounds per-message
     # latency). Skip only when *all* conditions hold:
     #   - len < 200 chars
@@ -1820,12 +751,14 @@ async def draft_message(
     ):
         return MessageDraft(
             text=raw_response,
-            was_drafted=False,
             artifacts=artifacts,
             violations=_validate_for_medium(raw_response, medium),
         )
 
-    # Write full output file for very long responses
+    # Strip process narration before composition
+    stripped_text = _strip_process_narration(raw_response)
+
+    # Write full output file for very long responses (delivery still proceeds)
     full_output_file = None
     if len(raw_response) > FILE_ATTACH_THRESHOLD:
         try:
@@ -1833,71 +766,41 @@ async def draft_message(
         except Exception as e:
             logger.warning(f"Failed to write full output file: {e}")
 
-    # Strip process narration before drafting
-    cleaned_response = _strip_process_narration(raw_response)
+    # Apply deterministic composition on the agent's own text
+    composed_text = _compose_structured_draft(stripped_text, session=session, is_completion=True)
 
-    # Build prompt once, try multiple backends
-    prompt = _build_draft_prompt(cleaned_response, artifacts, session=session)
+    # Run the per-medium validator on the composed text
+    violations = _validate_for_medium(composed_text, medium)
 
-    # Try Haiku first, then OpenRouter
-    structured = await _draft_with_haiku(prompt, medium=medium)
-    if structured is None:
-        logger.info("Falling back to OpenRouter for drafting")
-        structured = await _draft_with_openrouter(prompt, medium=medium)
-
-    if structured is not None:
-        summary_text = structured.response
-
-        # Safety: if draft is somehow longer than original, truncate
-        if len(summary_text) >= len(raw_response):
-            logger.warning("Draft longer than original, using truncated original")
-            if len(raw_response) > SAFETY_TRUNCATE:
-                summary_text = raw_response[: SAFETY_TRUNCATE - 3] + "..."
-            else:
-                summary_text = raw_response
-
-        # Open question extraction: if the raw output contains an
-        # ## Open Questions section with substantive questions, populate
-        # expectations with the extracted questions. This bypasses the
-        # anti-fabrication filter because questions are extracted verbatim
-        # from structured document sections, not fabricated by the LLM.
-        # LLM-detected expectations take priority (if already set).
-        expectations = structured.expectations
-        if not expectations:
-            open_questions = _extract_open_questions(raw_response)
-            if open_questions:
-                expectations = "\n".join(f">> {q}" for q in open_questions)
-                logger.info(
-                    f"Extracted {len(open_questions)} open questions from ## Open Questions section"
-                )
-
-        # Compose structured output with stage progress and links
-        summary_text = _compose_structured_draft(summary_text, session=session, is_completion=True)
-
-        # Run the per-medium validator. Violations are informational —
-        # the caller (stop-hook review gate) surfaces them to the agent
-        # so they can edit before sending. We do not re-draft server-side.
-        violations = _validate_for_medium(summary_text, medium)
-
+    # Detect empty promises — agent acknowledged feedback without evidence
+    if _detect_empty_promise(stripped_text.lower()):
+        logger.info("Empty promise detected — requesting self-draft via steering")
         return MessageDraft(
-            text=summary_text,
+            text="",
             full_output_file=full_output_file,
-            was_drafted=True,
+            needs_self_draft=True,
             artifacts=artifacts,
-            context_summary=structured.context_summary or None,
-            expectations=expectations,
             violations=violations,
         )
 
-    # All backends failed — signal self-draft via session steering instead
-    # of delivering raw truncated text. The caller will push a steering
-    # message and the agent will self-draft on its next turn. Files and
-    # artifacts are preserved for immediate delivery.
-    logger.error("All drafting backends failed, requesting self-draft via steering")
+    # Derive routing fields deterministically
+    context_summary = _derive_context_summary(stripped_text)
+
+    # Extract open questions; return None when none found (never "")
+    expectations: str | None = None
+    open_questions = _extract_open_questions(raw_response)
+    if open_questions:
+        expectations = "\n".join(f">> {q}" for q in open_questions)
+        logger.info(
+            f"Extracted {len(open_questions)} open questions from ## Open Questions section"
+        )
+
     return MessageDraft(
-        text="",
+        text=composed_text,
         full_output_file=full_output_file,
-        was_drafted=False,
-        needs_self_draft=True,
+        needs_self_draft=False,
         artifacts=artifacts,
+        context_summary=context_summary,
+        expectations=expectations,
+        violations=violations,
     )
