@@ -812,7 +812,9 @@ class TestSendTelegramDrafter:
             assert persona == "pm"
             from bridge.message_drafter import MessageDraft
 
-            return MessageDraft(text="• Drafted bullet outcome", was_drafted=True)
+            return MessageDraft(
+                text="• Drafted bullet outcome",
+            )
 
         # Long, jargon-heavy raw text that would normally bypass the drafter's
         # 200-char short-output gate.
@@ -849,7 +851,9 @@ class TestSendTelegramDrafter:
             draft_call_count["n"] += 1
             from bridge.message_drafter import MessageDraft
 
-            return MessageDraft(text="MUTATED", was_drafted=True)
+            return MessageDraft(
+                text="MUTATED",
+            )
 
         with (
             patch.dict(os.environ, env, clear=True),
@@ -903,7 +907,9 @@ class TestSendTelegramDrafter:
             draft_call_count["n"] += 1
             from bridge.message_drafter import MessageDraft
 
-            return MessageDraft(text="MUTATED", was_drafted=True)
+            return MessageDraft(
+                text="MUTATED",
+            )
 
         with (
             patch.dict(os.environ, env, clear=True),

@@ -1,40 +1,15 @@
 """
-Integration tests for the summarizer pipeline.
+Integration tests for the drafter pipeline.
 
-Tests real API calls and the response->summarizer wiring chain.
+Tests the response->drafter wiring chain. The classify_output cluster was
+deleted in the drafter passthrough refactor (issue #1680) — routing decisions
+now live in bridge/promise_gate.py and the nudge loop.
 """
 
 import json
-import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from bridge.message_drafter import ClassificationResult, OutputType, classify_output
-
-
-@pytest.mark.integration
-@pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="ANTHROPIC_API_KEY not set -- skipping live classification test",
-)
-@pytest.mark.asyncio
-async def test_classify_output_real_api():
-    """Call classify_output() with real Anthropic API and validate the result."""
-    text = (
-        "I've finished implementing the feature. The tests pass and the PR is ready "
-        "for review at https://github.com/example/repo/pull/42. Let me know if you "
-        "want any changes."
-    )
-
-    result = await classify_output(text)
-
-    # Must return a valid ClassificationResult
-    assert isinstance(result, ClassificationResult)
-    assert isinstance(result.output_type, OutputType)
-    assert result.confidence > 0
-    assert isinstance(result.reason, str)
-    assert len(result.reason) > 0
 
 
 @pytest.mark.integration
@@ -66,7 +41,7 @@ async def test_response_summarizer_wiring():
     ):
         from bridge.message_drafter import MessageDraft
 
-        mock_draft.return_value = MessageDraft(text="Summarized output", was_drafted=True)
+        mock_draft.return_value = MessageDraft(text="Summarized output")
         mock_redis.return_value = MagicMock()
 
         await handler.send(
@@ -117,7 +92,7 @@ def rtr_handler_setup(monkeypatch):
     mock_session.session_events = None
 
     def bypass_drafter(text, *, session=None, medium="telegram"):
-        return MessageDraft(text=text, was_drafted=False)
+        return MessageDraft(text=text)
 
     monkeypatch.setattr(
         "bridge.message_drafter.draft_message",
@@ -279,7 +254,7 @@ def redundancy_handler_setup(monkeypatch):
     sdlc_session.record_recent_sent_draft = MagicMock()
 
     def bypass_drafter(text, *, session=None, medium="telegram"):
-        return MessageDraft(text=text, was_drafted=False, artifacts={})
+        return MessageDraft(text=text, artifacts={})
 
     monkeypatch.setattr(
         "bridge.message_drafter.draft_message",

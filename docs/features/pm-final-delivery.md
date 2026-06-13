@@ -192,8 +192,9 @@ existing `send_cb` call:
 1. **Pass 1 prompt injection** — a "you already sent these messages in
    this thread" block is appended to the harness prompt, drawn from
    `parent.chat_message_log` outbound entries within the redundancy
-   window. Mirrors (but does not share code with)
-   `bridge/message_drafter.py::_build_draft_prompt`'s chat-log block.
+   window. (`_build_draft_prompt` was removed from `bridge/message_drafter.py`
+   in the drafter_passthrough_validation refactor; this prompt injection in
+   `agent/session_completion.py` is now the sole chat-log read path.)
 2. **Post-draft suppression check** — calls
    `bridge/redundancy_filter.should_suppress(...)` against an adapter-mapped
    view of the same `chat_message_log` outbound entries

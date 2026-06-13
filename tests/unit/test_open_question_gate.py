@@ -7,12 +7,9 @@ Tests the _extract_open_questions() function and its integration with:
 Run with: pytest tests/test_open_question_gate.py -v
 """
 
-from unittest.mock import AsyncMock, patch
-
 import pytest
 
 from bridge.message_drafter import (
-    StructuredDraft,
     _extract_open_questions,
     draft_message,
 )
@@ -209,12 +206,15 @@ class TestExtractOpenQuestions:
 
 
 class TestSummarizeResponseOpenQuestions:
-    """Tests for open question integration with draft_message()."""
+    """Tests for open question integration with draft_message().
+
+    With the pass-through drafter, expectations come directly from
+    _extract_open_questions() — no LLM mock needed.
+    """
 
     @pytest.mark.asyncio
     async def test_open_questions_populate_expectations(self):
-        """When raw output has open questions and LLM sets no expectations,
-        expectations are populated from extracted questions."""
+        """When raw output has open questions, expectations are populated."""
         raw_output = (
             "Plan created for feature X.\n\n"
             "## Open Questions\n\n"
@@ -222,55 +222,18 @@ class TestSummarizeResponseOpenQuestions:
             "2. What is the acceptable latency?\n\n"
             "## Solution\n\nBuild it.\n"
         )
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Planning feature X",
-                response="• Created plan for feature X",
-                expectations=None,  # LLM did not detect questions
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(raw_output)
+        result = await draft_message(raw_output)
 
         assert result.expectations is not None
         assert "Should we use approach A or B?" in result.expectations
         assert "What is the acceptable latency?" in result.expectations
 
     @pytest.mark.asyncio
-    async def test_llm_expectations_take_priority(self):
-        """When LLM sets expectations, extracted questions don't override."""
-        raw_output = (
-            "Some output.\n\n"
-            "## Open Questions\n\n"
-            "1. A question from the section?\n\n"
-            "Should I merge this now?"
-        )
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Work in progress",
-                response="• Working on it\n---\n? Should I merge this now?",
-                expectations="Should I merge this now?",
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(raw_output)
-
-        # LLM expectations should take priority
-        assert result.expectations == "Should I merge this now?"
-
-    @pytest.mark.asyncio
-    async def test_no_open_questions_no_expectations_change(self):
+    async def test_no_open_questions_no_expectations(self):
         """When raw output has no open questions, expectations stay None."""
-        raw_output = "Built the feature. All tests passing."
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Feature complete",
-                response="• Built the feature\n• All tests passing",
-                expectations=None,
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(raw_output)
+        # Long enough to bypass short-output path, no ## Open Questions
+        raw_output = "Built the feature. All tests passing. No open questions. " * 5
+        result = await draft_message(raw_output)
 
         assert result.expectations is None
 
@@ -278,39 +241,23 @@ class TestSummarizeResponseOpenQuestions:
     async def test_empty_open_questions_section_no_expectations(self):
         """Empty ## Open Questions section does not populate expectations."""
         raw_output = "Plan created.\n\n## Open Questions\n\n## Solution\n\nBuild it.\n"
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Plan created",
-                response="• Created plan",
-                expectations=None,
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(raw_output)
+        result = await draft_message(raw_output)
 
         assert result.expectations is None
 
     @pytest.mark.asyncio
     async def test_anti_fabrication_preserved(self):
-        """Existing anti-fabrication behavior is preserved — declarative
-        statements with open questions don't fabricate extra questions."""
+        """Declarative statements do not produce expectations — only real
+        ## Open Questions items do."""
         raw_output = (
             "I will implement feature X.\n\n"
             "## Open Questions\n\n"
             "1. Should we use Redis or PostgreSQL?\n\n"
             "## Solution\n\nImplement with Redis.\n"
         )
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Planning feature X",
-                response="• Will implement feature X with Redis",
-                expectations=None,  # LLM correctly doesn't fabricate
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(raw_output)
+        result = await draft_message(raw_output)
 
-        # Expectations should contain the real open question, not fabricated ones
+        # Expectations contain the real open question
         assert result.expectations is not None
         assert "Redis or PostgreSQL" in result.expectations
         # Should NOT contain fabricated questions from declarative statements
@@ -451,7 +398,7 @@ class TestWorkflowAnnouncementExtraction:
     async def test_workflow_question_populates_expectations(self):
         """When a PM response carries the workflow announcement and a
         ## Open Questions section, draft_message populates expectations
-        from the section even if Haiku does not detect it."""
+        from the section deterministically (no LLM involved)."""
         pm_response = (
             "Unless you directly instruct me to skip our standard workflow, "
             "we need to file an issue to plan all improvements and changes to "
@@ -461,19 +408,7 @@ class TestWorkflowAnnouncementExtraction:
             "## Open Questions\n\n"
             "1. Should I file an issue (`plan`) or skip SDLC (`skip`)?\n"
         )
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="PM announcing workflow contract for a coding request",
-                response=(
-                    "Unless you directly instruct me to skip our standard workflow, "
-                    "we need to file an issue. Reply `plan` or `skip`."
-                ),
-                # Haiku might miss the workflow question — extraction must back-fill it
-                expectations=None,
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(pm_response)
+        result = await draft_message(pm_response)
 
         assert result.expectations is not None, (
             "expectations should be populated from the verbatim ## Open Questions section "
@@ -485,9 +420,8 @@ class TestWorkflowAnnouncementExtraction:
         assert "skip" in result.expectations.lower()
 
     @pytest.mark.asyncio
-    async def test_haiku_expectations_take_priority_for_workflow(self):
-        """If Haiku already extracts the workflow question, that wins
-        (consistent with the existing LLM-priority rule)."""
+    async def test_workflow_question_verbatim_extraction(self):
+        """The workflow question is extracted verbatim from ## Open Questions."""
         pm_response = (
             "Unless you directly instruct me to skip our standard workflow, "
             "we need to file an issue to plan all improvements and changes to "
@@ -495,14 +429,8 @@ class TestWorkflowAnnouncementExtraction:
             "## Open Questions\n\n"
             "1. Should I file an issue (`plan`) or skip SDLC (`skip`)?\n"
         )
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="PM workflow announcement",
-                response="Unless you directly instruct me to skip... reply `plan` or `skip`.",
-                expectations="Should I file an issue (plan) or skip SDLC (skip)?",
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(pm_response)
+        result = await draft_message(pm_response)
 
-        assert result.expectations == "Should I file an issue (plan) or skip SDLC (skip)?"
+        assert result.expectations is not None
+        # Verbatim question text must appear in expectations
+        assert "Should I file an issue" in result.expectations

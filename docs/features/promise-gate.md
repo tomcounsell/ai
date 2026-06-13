@@ -31,7 +31,7 @@ outbox:
 
 | Send path | Gate state before #1219 | Gate state after #1219 |
 |---|---|---|
-| Worker drafted (nudge loop, `bridge/message_drafter.classify_output`) | Gated (LLM + heuristic) | Gated (drafter delegation, no double-charge) |
+| Worker path (nudge loop, `bridge/message_drafter.draft_message`) | Gated (LLM + heuristic) | Gated via `_detect_empty_promise` in the drafter; `needs_self_draft=True` triggers self-draft steering instead of delivery |
 | `tools/send_telegram.py` | Bypassed | **Gated** |
 | `tools/send_message.py` (telegram or email) | Bypassed | **Gated** |
 | `tools/valor_telegram.py send` | Bypassed | **Gated** |
@@ -39,10 +39,11 @@ outbox:
 
 The gate is implemented in [`bridge/promise_gate.py`](../../bridge/promise_gate.py).
 Each CLI tool calls `cli_check_or_exit(text, transport, session_id)`
-immediately before its Redis `rpush`. The drafter's `classify_output`
-calls `evaluate_promise(text, transport="drafter", classifier_verdict=result)`
-to delegate the existing classification result without paying a second
-Haiku call.
+immediately before its Redis `rpush`. The drafter calls `_detect_empty_promise`
+(a shim that delegates to `bridge.promise_gate._detect_empty_promise`) as part
+of the pass-through validation flow — no Haiku call, no double-charge.
+`evaluate_promise` still accepts an optional `classifier_verdict` parameter
+(kept for backward compatibility) but the drafter no longer populates it.
 
 ## Architectural posture
 
@@ -179,7 +180,7 @@ The `source` discriminator takes one of:
 | `promise_gate_heuristic` | LLM unavailable / parse failure → fell through to regex |
 | `promise_gate_timeout` | LLM SDK 3-second timeout fired |
 | `promise_gate_disabled` | Kill switch was on |
-| `promise_gate_drafter_delegation` | Verdict derived from drafter's `ClassificationResult` |
+| `promise_gate_drafter_delegation` | Verdict derived from a pre-computed `classifier_verdict` (backward-compat path; the drafter no longer populates this) |
 | `promise_gate_cli_exception` | `cli_check_or_exit` swallowed an unexpected raise (fail-open) |
 
 Empty-input calls (empty / whitespace-only / `None` text) write **no**
@@ -294,7 +295,9 @@ sed -i '' '/^PROMISE_GATE_ENABLED=/d' ~/Desktop/Valor/.env
 ### Tuning the LLM prompt
 
 The forward-deferral and behavioral-change few-shot examples live in
-`bridge/message_drafter.py::CLASSIFIER_SYSTEM_PROMPT` (drafter path)
-and `bridge/promise_gate.py::PROMISE_GATE_SYSTEM_PROMPT` (CLI Haiku
-path). If telemetry shows a class of false-positives the LLM cannot
-catch from text alone, the prompt is the right knob to turn.
+`bridge/promise_gate.py::PROMISE_GATE_SYSTEM_PROMPT`. The drafter no longer
+has its own classifier system prompt — empty-promise detection runs via
+`_detect_empty_promise` (a regex/heuristic shim), not a Haiku call.
+If telemetry shows a class of false-positives the LLM cannot catch from
+text alone, the `PROMISE_GATE_SYSTEM_PROMPT` in `bridge/promise_gate.py`
+is the right knob to turn (for the CLI send paths that call `evaluate_promise`).

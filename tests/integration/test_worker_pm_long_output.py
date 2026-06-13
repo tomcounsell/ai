@@ -107,7 +107,6 @@ async def test_long_output_gets_drafted_and_full_text_attached(tmp_path):
     fake_draft = MessageDraft(
         text=short_draft,
         full_output_file=full_output_path,
-        was_drafted=True,
         artifacts={},
     )
 

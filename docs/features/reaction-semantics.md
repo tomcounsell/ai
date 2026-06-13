@@ -97,7 +97,7 @@ Three paths to silent text loss have been identified and guarded:
 | File | Role |
 |------|------|
 | `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` constants |
-| `bridge/response.py` | Re-exports reaction constants, OutputType enum, MAX_AUTO_CONTINUES, filter_tool_logs |
+| `bridge/response.py` | Re-exports reaction constants, `filter_tool_logs`, `set_reaction`, `VALIDATED_REACTIONS` (`OutputType` enum was removed in drafter_passthrough_validation) |
 | `agent/agent_session_queue.py` | Reaction selection logic, auto-continue re-enqueue, has_communicated() check |
 | `agent/messenger.py` | BossMessenger with `has_communicated()` tracking, BackgroundTask with internal health watchdog |
 | `agent/agent_session_queue.py` | Nudge loop: output routing decisions via `determine_delivery_action()` |
