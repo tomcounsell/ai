@@ -2,17 +2,39 @@
 Tests for the AI Judge Framework
 """
 
+from unittest.mock import patch
+
+import pytest
+
 from .judge import (
     AIJudgeTestRunner,
+    GenerationModelUnavailableError,
     JudgeConfig,
     JudgmentResult,
     JudgmentScore,
+    _call_ollama,
     _heuristic_judgment,
     _parse_judgment_response,
     judge_response_quality,
     judge_test_result,
     judge_tool_selection,
 )
+
+
+class TestGenerationModelHardFail:
+    """ai-judge HARD-fails at first call when the generation model is unavailable.
+
+    Opposite of the title generator's silent skip: a misconfigured generation
+    model must surface in CI rather than silently produce unreliable verdicts.
+    """
+
+    def test_call_ollama_raises_when_model_unavailable(self):
+        with patch(
+            "config.models.ensure_generation_model",
+            return_value=(False, "not signed in"),
+        ):
+            with pytest.raises(GenerationModelUnavailableError):
+                _call_ollama("evaluate this", JudgeConfig(model="gemma4:31b-cloud"))
 
 
 class TestJudgmentScore:
@@ -37,8 +59,12 @@ class TestJudgeConfig:
 
     def test_default_config(self):
         """Test default configuration values."""
+        from config.settings import settings
+
         config = JudgeConfig()
-        assert config.model == "gemma4:e2b"
+        # The judge default now reads the configured generation model.
+        assert config.model == settings.models.ollama_generation_model
+        assert config.model == "gemma4:31b-cloud"
         assert config.temperature == 0.1
         assert config.strict_mode is True
         assert config.fallback_to_heuristics is True

@@ -17,10 +17,48 @@ import pytest
 from bridge import routing
 from bridge.routing import (
     classify_conversation_terminus,
+    classify_needs_response,
     get_valor_usernames,
     is_message_for_others,
     is_message_for_valor,
 )
+
+
+def _install_fake_ollama(monkeypatch, content: str):
+    """Inject a fake ``ollama`` module whose chat() returns ``content``."""
+    import sys
+    import types
+
+    fake_module = types.ModuleType("ollama")
+    fake_module.chat = lambda **kwargs: {"message": {"content": content}}
+    monkeypatch.setitem(sys.modules, "ollama", fake_module)
+
+
+def test_classify_needs_response_oversized_output_defaults_true(monkeypatch):
+    """Verbose (>30 char) granite output → conservative True via the parse guard.
+
+    The length-bound guard raises ValueError before the brittle ``"work" in
+    result`` substring test, so an oversized response (which contains the literal
+    "work" and would false-positive anyway) routes through the bare-except
+    conservative ``True`` default instead of a silent mis-parse.
+    """
+    _install_fake_ollama(
+        monkeypatch,
+        "This message looks work-related to me, so I would respond to it.",
+    )
+    assert classify_needs_response("ship the deploy pipeline fix when ready") is True
+
+
+def test_classify_needs_response_normal_work_label(monkeypatch):
+    """A short 'work' label routes to True without tripping the guard."""
+    _install_fake_ollama(monkeypatch, "work")
+    assert classify_needs_response("can you fix the bug in routing?") is True
+
+
+def test_classify_needs_response_normal_ignore_label(monkeypatch):
+    """A short 'ignore' label routes to False."""
+    _install_fake_ollama(monkeypatch, "ignore")
+    assert classify_needs_response("thanks, that is great news everyone") is False
 
 
 def test_get_valor_usernames_none_returns_empty_set():
@@ -135,7 +173,7 @@ async def test_classify_terminus_acknowledgment_fires_after_bot_check():
 async def test_classify_terminus_ollama_failure_defaults_to_respond(monkeypatch):
     """When both Ollama and Haiku fail, classifier returns RESPOND (conservative)."""
     # Patch Ollama to raise
-    monkeypatch.setattr(routing, "OLLAMA_LOCAL_MODEL", "nonexistent-model-xyz")
+    monkeypatch.setattr(routing, "OLLAMA_CLASSIFIER_MODEL", "nonexistent-model-xyz")
     # Patch Haiku to raise (return no API key)
     monkeypatch.setattr(routing, "get_anthropic_api_key", lambda: None)
 
@@ -210,7 +248,7 @@ async def test_classify_terminus_human_short_reply_to_valor_question_returns_res
     conservative default of RESPOND is returned.
     """
     # Force both LLM paths to fail so we hit the conservative default.
-    monkeypatch.setattr(routing, "OLLAMA_LOCAL_MODEL", "nonexistent-model-xyz")
+    monkeypatch.setattr(routing, "OLLAMA_CLASSIFIER_MODEL", "nonexistent-model-xyz")
     monkeypatch.setattr(routing, "get_anthropic_api_key", lambda: None)
 
     result = await classify_conversation_terminus(

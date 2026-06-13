@@ -821,8 +821,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         else:
             log(f"WARN: generation model {ollama_model}: {gen_detail}", v, always=True)
             result.warnings.append(f"generation model {ollama_model}: {gen_detail}")
-        # Cloud-signin precondition: a :cloud tag needs the host signed in.
-        if ollama_model.endswith(":cloud"):
+        # Cloud-signin precondition: a cloud tag needs the host signed in.
+        from config.models import _is_cloud_tag
+
+        if _is_cloud_tag(ollama_model):
             try:
                 import subprocess as _sp_signin
 

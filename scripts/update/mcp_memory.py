@@ -285,9 +285,15 @@ def check_ollama_for_titles(host: str = "http://localhost:11434") -> tuple[bool,
             gen_model = "gemma4:31b-cloud"
 
         # Cloud generation tags are hosted pointers — not present in local
-        # /api/tags. Treat a configured :cloud tag as available (the real check
+        # /api/tags. Treat a configured cloud tag as available (the real check
         # is cloud-signin, surfaced by /update); only verify local tags by name.
-        if gen_model.endswith(":cloud"):
+        try:
+            from config.models import _is_cloud_tag
+
+            is_cloud = _is_cloud_tag(gen_model)
+        except Exception:
+            is_cloud = gen_model.endswith(":cloud") or gen_model.endswith("-cloud")
+        if is_cloud:
             return True, f"Ollama generation: {gen_model} (cloud)"
 
         models = data.get("models", []) or []

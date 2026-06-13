@@ -194,6 +194,16 @@ def _host_ram_gb() -> float:
     return 0.0
 
 
+def _is_cloud_tag(model: str) -> bool:
+    """True if ``model`` is an Ollama Cloud tag.
+
+    Ollama Cloud tags appear in two shapes: ``<model>:cloud`` (e.g.
+    ``glm-5.1:cloud``) and ``<model>:<size>-cloud`` (e.g. ``gemma4:31b-cloud``).
+    Both route to Ollama's hosted GPUs; treat either as cloud.
+    """
+    return model.endswith(":cloud") or model.endswith("-cloud")
+
+
 def ensure_generation_model(model: str | None = None) -> tuple[bool, str]:
     """Detection helper for the free-text *generation* model (NOT a startup gate).
 
@@ -231,7 +241,9 @@ def ensure_generation_model(model: str | None = None) -> tuple[bool, str]:
 
     # Cloud branch: a cloud tag is a lightweight hosted pointer. No pull; the
     # only real precondition is cloud-signin, surfaced as a warning by callers.
-    if model.endswith(":cloud"):
+    # Ollama Cloud tags appear as both ``<model>:cloud`` (e.g. glm-5.1:cloud)
+    # and ``<model>:<size>-cloud`` (e.g. gemma4:31b-cloud) — accept both.
+    if _is_cloud_tag(model):
         return True, "cloud tag assumed available"
 
     # Local branch. RAM-guard BEFORE any pull for mlx tags.
