@@ -17,6 +17,25 @@ from typing import Any
 from config.models import OPENROUTER_URL
 
 
+def _default_judge_model() -> str:
+    """Resolve the configured generation model for the ai-judge default."""
+    try:
+        from config.settings import settings
+
+        return settings.models.ollama_generation_model
+    except Exception:
+        return "gemma4:31b-cloud"
+
+
+class GenerationModelUnavailableError(RuntimeError):
+    """Raised when the configured ai-judge generation model is unavailable.
+
+    The ai-judge HARD-fails on misconfiguration (opposite of the title
+    generator's silent skip) so CI surfaces a broken generation model instead
+    of silently emitting unreliable verdicts that could pass a bad build.
+    """
+
+
 class JudgmentScore(Enum):
     """Score levels for AI judgments."""
 
@@ -31,7 +50,7 @@ class JudgmentScore(Enum):
 class JudgeConfig:
     """Configuration for AI judge."""
 
-    model: str = "gemma4:e2b"  # Local model for speed
+    model: str = field(default_factory=_default_judge_model)  # configured generation model
     temperature: float = 0.1  # Low for consistency
     strict_mode: bool = True  # High quality standards
     custom_criteria: list[str] | None = None
@@ -68,7 +87,19 @@ class JudgmentResult:
 
 
 def _call_ollama(prompt: str, config: JudgeConfig) -> str | None:
-    """Call Ollama for local LLM inference."""
+    """Call Ollama for local LLM inference.
+
+    HARD-fails (raises GenerationModelUnavailableError) when the configured
+    generation model reports unavailable, so a misconfigured CI surfaces the
+    problem instead of silently falling back to unreliable verdicts.
+    """
+    from config.models import ensure_generation_model
+
+    gen_ok, gen_detail = ensure_generation_model(config.model)
+    if not gen_ok:
+        raise GenerationModelUnavailableError(
+            f"ai-judge generation model {config.model} unavailable: {gen_detail}"
+        )
     try:
         result = subprocess.run(
             [
