@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 from config.enums import ClassificationType, PersonaType
-from config.models import OLLAMA_LOCAL_MODEL
+from config.models import OLLAMA_CLASSIFIER_MODEL
 from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
@@ -520,7 +520,7 @@ def classify_needs_response(text: str) -> bool:
         import ollama
 
         response = ollama.chat(
-            model=OLLAMA_LOCAL_MODEL,
+            model=OLLAMA_CLASSIFIER_MODEL,
             messages=[
                 {
                     "role": "user",
@@ -538,8 +538,24 @@ Classification:"""
             ],
             options={"temperature": 0},
         )
-        result = response["message"]["content"].strip().lower()
-        return "work" in result
+        result = response["message"]["content"]
+        # Length-bound parse guard: granite's output is more verbose than gemma's.
+        # A confident label is a single short word; anything longer is a verbose
+        # response that the brittle ``"work" in result`` substring test could
+        # mis-parse (false positive on "...work-related...", false negative when
+        # the literal token is absent). Route oversized output to the conservative
+        # ``True`` default via the bare-except below rather than risk a silent
+        # dropped work message.
+        normalized = result.strip().lower()
+        if len(normalized) > 30:
+            raise ValueError("oversized classifier output")
+        label = "work" in normalized
+        logger.info(
+            "classify_needs_response: raw=%r -> %s",
+            result.strip()[:60],
+            "RESPOND" if label else "IGNORE",
+        )
+        return label
     except Exception as e:
         logger.debug(f"Ollama classification failed, defaulting to respond: {e}")
         # Default to responding if Ollama fails (conservative)
@@ -712,13 +728,14 @@ async def classify_conversation_terminus(
         import ollama
 
         response = ollama.chat(
-            model=OLLAMA_LOCAL_MODEL,
+            model=OLLAMA_CLASSIFIER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             options={"temperature": 0},
         )
         raw = response["message"]["content"].strip().upper()
         if raw in ("RESPOND", "REACT", "SILENT"):
             result = raw
+        logger.info("classify_terminus: raw=%r -> %s", raw[:60], result or "fallback")
     except Exception as e:
         logger.debug(f"Ollama terminus classification failed: {e}")
 
@@ -906,7 +923,7 @@ def _classify_work_request_llm(text: str) -> str:
         import ollama
 
         response = ollama.chat(
-            model=OLLAMA_LOCAL_MODEL,
+            model=OLLAMA_CLASSIFIER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             options={"temperature": 0, "num_predict": 10},
         )
