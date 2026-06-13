@@ -112,6 +112,28 @@ except Exception as e:
     print(f"Warning: could not parse .env: {e}", file=sys.stderr)
     sys.exit(0)
 
+# Also parse machine-local MODELS__* vars from ~/.zshenv. /setup writes the
+# per-machine generation model (MODELS__OLLAMA_GENERATION_MODEL) there — NOT to
+# the iCloud-synced .env — so the launchd worker (which never reads the shell)
+# would otherwise see only the gemma4:31b-cloud default. Merge these in so the
+# worker honors the per-machine variant.
+zshenv_path = Path.home() / ".zshenv"
+if zshenv_path.exists():
+    try:
+        for raw_line in zshenv_path.read_text().splitlines():
+            line = raw_line.strip()
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if not line.startswith("MODELS__") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and value:
+                env_vars[key] = value
+    except Exception as e:
+        print(f"Warning: could not parse ~/.zshenv MODELS__ vars: {e}", file=sys.stderr)
+
 # Load the plist
 with open(plist_dst, "rb") as f:
     plist = plistlib.load(f)

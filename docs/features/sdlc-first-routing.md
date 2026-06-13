@@ -24,7 +24,7 @@ A two-stage routing system: fast-path pattern matching for obvious cases, LLM cl
    - Short acknowledgments (`continue`, `ok`, `yes`) → `passthrough`
 
 2. **LLM classification** (for everything else):
-   - Primary: Ollama (gemma4:e2b, fast, local, free)
+   - Primary: Ollama (`granite4.1:3b` via `OLLAMA_CLASSIFIER_MODEL`, fast, local, free)
    - Fallback: Anthropic Haiku (when Ollama unavailable)
    - Prompt asks for single-word `sdlc`, `collaboration`, `other`, or `question` response
    - Default for ambiguous messages: `collaboration` (cheaper when wrong than SDLC)

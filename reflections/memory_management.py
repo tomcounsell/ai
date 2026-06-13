@@ -50,7 +50,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 from agent.memory_extraction import _looks_like_refusal, extract_json_payload
-from config.models import OLLAMA_LOCAL_MODEL
+from config.models import OLLAMA_CLASSIFIER_MODEL
 
 # Public-seam reference (resolves critique C2): the literal pattern below is
 # what the plan #1231 verification table greps for. The actual module-level
@@ -94,7 +94,7 @@ GEMMA_CALL_TIMEOUT_SEC = 10  # per-record asyncio.wait_for timeout (resolves cri
 # Layer 3 — Gemma classification prompt (two-example few-shot, JSON output)
 GEMMA_AUDIT_PROMPT = """You are auditing memory records produced by an automated extraction pipeline. Each record is supposed to be a one-sentence observation about an agent session. Some are valid; some are extractor failures (raw JSON output, refusal prose, error text).
 
-CRITICAL: code snippets, HTML examples, JSON config, and shell commands are LEGITIMATE memory content. Do not flag them as junk merely because they contain `<`, `&`, `{`, or quotes. Junk looks like extractor JSON output stored as the observation OR refusal/error text.
+CRITICAL: code snippets, HTML examples, JSON config, and shell commands are LEGITIMATE memory content. Do not flag them as junk merely because they contain `<`, `&`, `{{`, or quotes. Junk looks like extractor JSON output stored as the observation OR refusal/error text.
 
 Examples:
 
@@ -540,7 +540,7 @@ def _gemma_classify(content: str) -> dict | None:
         import ollama
 
         response = ollama.chat(
-            model=OLLAMA_LOCAL_MODEL,
+            model=OLLAMA_CLASSIFIER_MODEL,
             messages=[
                 {"role": "user", "content": GEMMA_AUDIT_PROMPT.format(content=content[:1000])}
             ],
@@ -787,8 +787,8 @@ async def run_memory_quality_audit() -> dict:
     Layer 2 (heuristic anomaly detection): Compute 4 signals against the
         post-Layer-1 corpus. Cross-threshold signals file GitHub issues
         (deduped via title-prefix search).
-    Layer 3 (Gemma classification, fail-soft): Sample up to 20 last-24h
-        records and classify via gemma4:e2b. Wallclock-budgeted at 30s
+    Layer 3 (granite classification, fail-soft): Sample up to 20 last-24h
+        records and classify via granite4.1:3b. Wallclock-budgeted at 30s
         with 10s per-call timeout. Files issues for clusters of >=3 records
         sharing an anomaly_signal.
 

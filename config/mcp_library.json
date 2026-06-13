@@ -130,7 +130,7 @@
       "env_var": null,
       "tools": ["memory_get", "memory_search"],
       "description": "Progressive-disclosure access to subconscious memory: stub injection in <thought> blocks, full bodies on demand via memory_get(id), active mid-task search via memory_search(query)",
-      "setup_instructions": "Auto-registered in ~/.claude.json by scripts/update/run.py. Requires local Redis. Title generation uses Ollama (gemma4:e2b); brew install ollama && ollama pull gemma4:e2b for richer stub titles, otherwise stubs render as [category] only."
+      "setup_instructions": "Auto-registered in ~/.claude.json by scripts/update/run.py. Requires local Redis. Title generation uses the configured ollama_generation_model (default Ollama Cloud gemma4:31b-cloud); set MODELS__OLLAMA_GENERATION_MODEL=gemma4:31b-mlx for local generation on RAM-rich hosts, otherwise stubs render as [category] only."
     }
   ],
   "categories": {

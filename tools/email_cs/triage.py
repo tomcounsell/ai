@@ -1,8 +1,9 @@
 """Tier 1 triage — cheap local classification of every inbound customer email.
 
 Mirrors ``reflections/memory_management.py::_gemma_classify``: a single
-``ollama.chat(model=OLLAMA_LOCAL_MODEL, options={"temperature": 0})`` call with
-tolerant post-hoc JSON extraction (``extract_json_payload``), NOT ``format=json``.
+``ollama.chat(model=OLLAMA_CLASSIFIER_MODEL, options={"temperature": 0})`` call
+with tolerant post-hoc JSON extraction (``extract_json_payload``), NOT
+``format=json``. Classification runs on granite (the resident classifier).
 
 Fail-safe contract: this function NEVER raises into the bridge. Any failure
 (Ollama down, parse error, validation error, empty input, ``customer_id is
@@ -17,7 +18,7 @@ import json
 import logging
 
 from agent.memory_extraction import extract_json_payload
-from config.models import OLLAMA_LOCAL_MODEL
+from config.models import OLLAMA_CLASSIFIER_MODEL
 
 from .schema import Category, Triage, escalate_triage
 
@@ -93,7 +94,7 @@ def triage_local(subject: str, body: str, customer_id: str | None) -> Triage:
             body=(body or "").strip()[:_MAX_BODY_CHARS],
         )
         response = ollama.chat(
-            model=OLLAMA_LOCAL_MODEL,
+            model=OLLAMA_CLASSIFIER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             options={"temperature": 0},
         )

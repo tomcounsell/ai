@@ -463,6 +463,51 @@ These permissions cannot be granted programmatically.
 
 On **no**: skip everything. Don't write the sentinel; `/update` will leave bcu alone.
 
+## Step 8.6: Generation Model Selection (RAM-based)
+
+Free-text generation (memory titles, the test AI judge, knowledge-doc
+summarization) runs on a larger `gemma4:31b` model. Classification (bridge
+routing, memory-audit, email triage) runs on the resident `granite4.1:3b` and
+needs no choice here. Pick the generation variant from this machine's RAM:
+
+- **RAM ≥ `MIN_LOCAL_GEN_RAM_GB` (48 GB)** → local Apple-Silicon MLX variant
+  `gemma4:31b-mlx` (the ~18-20 GB MLX 32B coexists with granite + nomic-embed + OS).
+- **RAM < 48 GB** → Ollama Cloud variant `gemma4:31b-cloud` (a lightweight hosted
+  pointer that fits any machine, including a 16 GB host).
+
+Write the choice to `~/.zshenv` — **machine-local**, NOT the iCloud-synced
+`~/Desktop/Valor/.env` (the vault `.env` would propagate one machine's variant to
+every other machine via iCloud and break per-machine semantics). The write is
+grep-before-append idempotent:
+
+```bash
+RAM_GB=$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 ))
+if [ "$RAM_GB" -ge 48 ]; then
+  GEN_MODEL="gemma4:31b-mlx"
+else
+  GEN_MODEL="gemma4:31b-cloud"
+fi
+LINE="export MODELS__OLLAMA_GENERATION_MODEL=$GEN_MODEL"
+grep -qxF "$LINE" ~/.zshenv 2>/dev/null || echo "$LINE" >> ~/.zshenv
+echo "Generation model: $GEN_MODEL (RAM=${RAM_GB}GB)"
+```
+
+Then ensure the chosen tag (the RAM guard inside `ensure_generation_model()`
+re-checks and degrades a misconfigured mlx tag to a soft warning — it never pulls
+18 GB on a small host):
+
+```bash
+python -c "from config.models import ensure_generation_model; ok,d=ensure_generation_model('$GEN_MODEL'); print(('OK' if ok else 'WARN'), d)"
+```
+
+**Cloud-signin warning:** when `GEN_MODEL` ends in `:cloud`, the machine must be
+signed in to Ollama Cloud (`ollama list` shows a `:cloud` entry). If not, warn the
+user to run `ollama signin` — generation is fail-soft, so this does not block setup.
+
+The launchd worker does not read the shell, so `scripts/install_worker.sh` parses
+`MODELS__*` lines from `~/.zshenv` and injects them into the plist
+`EnvironmentVariables` block — no extra action needed here.
+
 ## Step 9: Start the Bridge
 
 Ensure the logs directory exists, then start the bridge as a background process:

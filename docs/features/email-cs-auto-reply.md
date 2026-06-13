@@ -35,7 +35,7 @@ Every inbound resolved-customer email is sorted into exactly one lane:
 ```
 _process_inbound_email()  (bridge/email_bridge.py)
   customer_resolver -> customer_id (or drop)
-  TIER 1  triage_local()   Ollama gemma4:e2b, temp=0, tolerant JSON parse
+  TIER 1  triage_local()   Ollama granite4.1:3b (OLLAMA_CLASSIFIER_MODEL), temp=0, tolerant JSON parse
        parse-fail / customer_id None / conf<0.75 / escalation-signal -> escalate
   GATE    decide()         the only function before a side effect
   TIER 2  run_action_agent()  Anthropic MODEL_FAST, tools=[whitelist], tool_choice=any
@@ -48,7 +48,8 @@ _process_inbound_email()  (bridge/email_bridge.py)
 ### Tier 1 — `tools/email_cs/triage.py`
 
 Mirrors `reflections/memory_management.py::_gemma_classify`: one
-`ollama.chat(model=OLLAMA_LOCAL_MODEL, options={"temperature": 0})` call with
+`ollama.chat(model=OLLAMA_CLASSIFIER_MODEL, options={"temperature": 0})` call
+(where `OLLAMA_CLASSIFIER_MODEL = "granite4.1:3b"` from `config/models.py`) with
 tolerant post-hoc JSON extraction (`extract_json_payload`), **not**
 `format=json`. Fail-safe by contract: every error path (Ollama down, parse
 failure, validation failure, empty input, `customer_id is None`)

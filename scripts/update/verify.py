@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from config.models import OLLAMA_CLASSIFIER_MODEL
 from scripts.update.service import is_bridge_running
 
 # Ensure PATH includes common tool locations (launchd has minimal PATH)
@@ -389,7 +390,7 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
     return results
 
 
-def check_ollama(model: str = "gemma4:e2b") -> ToolCheck:
+def check_ollama(model: str = OLLAMA_CLASSIFIER_MODEL) -> ToolCheck:
     """Check if Ollama is available and has the required model."""
     if not shutil.which("ollama"):
         return ToolCheck(name="ollama", available=False, error="Not installed")
@@ -412,7 +413,7 @@ def check_ollama(model: str = "gemma4:e2b") -> ToolCheck:
         return ToolCheck(name="ollama", available=False, error=str(e))
 
 
-def pull_ollama_model(model: str = "gemma4:e2b") -> bool:
+def pull_ollama_model(model: str = OLLAMA_CLASSIFIER_MODEL) -> bool:
     """Pull an Ollama model. Returns True if successful."""
     if not shutil.which("ollama"):
         return False
@@ -1043,7 +1044,9 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.valor_tools.append(check_valor_alias_shadow())
 
     if check_ollama_model:
-        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "gemma4:e2b")
+        from config.settings import settings as _settings
+
+        ollama_model = _settings.models.ollama_generation_model
         result.ollama = check_ollama(ollama_model)
 
     result.sdk_auth = check_sdk_auth(project_dir)

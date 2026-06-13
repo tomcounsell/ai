@@ -520,6 +520,30 @@ at line 208 that would re-destroy the preserved work).
 **The only `git branch -D` in `agent/`** lives inside `safe_delete_branch`, behind a
 proven-landed check. All other deletion uses `git branch -d` (fails-closed).
 
+## Local Ollama model policy (post-consolidation)
+
+Since issue #1636, `granite4.1:3b` is the **only local instruct model** required on every machine. It serves two roles:
+
+| Role | Call sites | Constant |
+|------|-----------|----------|
+| PTY operator (PM↔Dev routing) | `Container.extract_dev_prompt`, `Container.summarize_for_pm` | `GRANITE__DEV_MODEL` (default `granite4.1:3b`) |
+| Bridge message classification | `routing.classify_needs_response`, `routing.classify_terminus`, `routing._classify_work_request_llm`, `reflections._gemma_classify` (memory audit Layer 3), `email_cs.triage` | `OLLAMA_CLASSIFIER_MODEL = "granite4.1:3b"` in `config/models.py` |
+
+Free-text generation (memory title generation, test AI judge) uses the per-machine `ollama_generation_model` setting (`config/settings.py::ModelSettings`, env `MODELS__OLLAMA_GENERATION_MODEL`, default `gemma4:31b-cloud`). The generation model is **not** a hard worker precondition — generation is fail-soft everywhere. Compare to granite, which IS a hard precondition (Step 4b.5 in `worker/__main__.py`).
+
+**Steady-state local Ollama on a cloud machine (16 GB RAM):**
+- `granite4.1:3b` — classification + PTY routing
+- `nomic-embed-text` — vector embeddings
+
+**Steady-state on a RAM-rich Apple-Silicon machine (≥ 48 GB):**
+- `granite4.1:3b` — classification + PTY routing
+- `nomic-embed-text` — vector embeddings
+- `gemma4:31b-mlx` — local generation (opt-in, selected by `/setup` from RAM)
+
+**`ensure_generation_model()` helper** (`config/models.py`): probes the configured generation tag and returns `(model_available: bool, detail: str)`. It is a config-layer detection helper, NOT a startup gate like `ensure_granite_model()`. For `:cloud` tags it is a near-no-op (checks cloud signin); for `-mlx` tags it includes a RAM guard that skips the pull when RAM < `MIN_LOCAL_GEN_RAM_GB`. Called by `/setup` and `/update` Step 4 (warning-only, never suppresses restart or blocks worker).
+
+`gemma4:e2b` was the previous local model (standardized in issue #671) and is now in `OLLAMA_SUPERSEDED_MODELS` — removed from every machine by `/update` superseded-cleanup once the granite smoke-test passes.
+
 ## See also
 
 - [Granite Operator: Interactive TUI](granite-interactive-tui.md) — the
