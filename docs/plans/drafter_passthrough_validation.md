@@ -211,9 +211,13 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/drafter_passth
 - **Steering-first flagging**: when a blocking flag fires (over-length without a clean
   truncation path, wire-format violation, empty promise), the drafter returns
   `needs_self_draft=True` so `_inject_self_draft_steering` nudges the authoring agent.
-  A persisted `self_draft_attempts` counter (cap = `SELF_DRAFT_MAX_ATTEMPTS` = 2) bounds
-  the **sequential** nudge loop so a structurally-unfixable flag eventually falls through
-  to narration-fallback/file delivery instead of looping forever (Blocker-2).
+  An **atomic Redis counter** `steering:attempts:{session_id}` (cap =
+  `SELF_DRAFT_MAX_ATTEMPTS` = 2), incremented server-side via `INCR` so two concurrent
+  flagged outputs cannot under-count, bounds the **sequential** nudge loop so a
+  structurally-unfixable flag eventually falls through to narration-fallback/file delivery
+  instead of looping forever (Blocker-2). The counter lives **outside** the `AgentSession`
+  hash, so it adds no full-hash `save()` and cannot clobber `context_summary`/`expectations`
+  (new Race 3).
 - **Routing fields retained deterministically**: `expectations` (from
   `_extract_open_questions`) and `context_summary` (from a new deterministic
   `_derive_context_summary`) are still persisted to the `AgentSession` so the live
@@ -298,10 +302,10 @@ prose.
 internal `_delegate_to_promise_gate` reaches `bridge/promise_gate.py` for an audit
 trail). The empty-promise detection that the *validator surface* needs already lives in
 `_detect_empty_promise` (deterministic, in `bridge/promise_gate.py`) and is independent
-of `classify_output`. **Decision: delete `classify_output`, `ClassificationResult`,
-`OutputType`, `CLASSIFIER_SYSTEM_PROMPT`, `_classify_with_heuristics`,
-`_parse_classification_response`, `_apply_heuristic_confidence_gate`,
-`_delegate_to_promise_gate`, and the classification audit helpers** — *contingent on
+of `classify_output`. **Decision: delete `classify_output` and its entire classification cluster**
+(`ClassificationResult`, `OutputType`, `CLASSIFIER_SYSTEM_PROMPT`, the heuristic/parse/
+confidence-gate helpers, `_delegate_to_promise_gate`, and the classification audit
+helpers — the builder removes the full transitive set) — *contingent on
 confirming `bridge/promise_gate.py` does not depend on the drafter-delegation path for
 a live verdict* (it derives its own verdict; the delegation only avoids a double Haiku
 charge that no longer exists once the drafter stops calling Haiku). If promise_gate
@@ -372,30 +376,75 @@ output that strips to empty after narration removal — therefore yields an unbo
 `flag → inject → consume → re-emit → flag …` loop that never terminates and never
 delivers.
 
-**Decision: add a persisted per-session re-draft attempt counter on `AgentSession` that
-abandons self-draft after a small cap and falls through to the
-narration-fallback/file-delivery path.**
-- Add a new field `self_draft_attempts` (int, default 0) to `models/agent_session.py`
-  and register it in `_AGENT_SESSION_FIELDS`
-  (`agent/agent_session_queue.py`) so it round-trips through Redis like the other
-  routing fields.
-- In `_inject_self_draft_steering`, BEFORE pushing the steering message: read
-  `session.self_draft_attempts`. If it is `>= SELF_DRAFT_MAX_ATTEMPTS` (constant = 2),
-  log a warning, return `False` (so the caller applies `_apply_narration_fallback` and
-  delivers via file/narration), and do NOT push another nudge. Otherwise increment and
-  persist `self_draft_attempts` (`session.self_draft_attempts += 1; session.save()`),
-  push the nudge, and return `True`. The persisted counter is what makes the bound
-  **sequential** — it survives the consume-at-turn-boundary reset that defeats the
-  `peek_steering_sender` guard.
-- **Reset semantics:** the counter resets to 0 on the first successful (un-flagged)
-  delivery for that session, so a session that self-corrects once does not carry a stale
-  count into a later, unrelated over-length/flag event. Reset happens on the clean
-  delivery path in `TelegramRelayOutputHandler.send` (when `delivery_text` is delivered
-  without `needs_self_draft`).
-- The existing `peek_steering_sender` concurrent guard is **retained** — it still
-  prevents double-injection from two near-simultaneous flagged outputs. The two guards
-  are complementary: `peek` bounds concurrency, `self_draft_attempts` bounds the
-  sequential loop.
+**Decision: bound the loop with an ATOMIC per-session re-draft attempt counter stored as
+a dedicated Redis key — NOT a field on the `AgentSession` hash.** The second war-room pass
+found that the original "field + read-modify-write + `session.save()`" design re-introduces
+two defects (see the New-Blocker resolution immediately below); the atomic-key design
+avoids both by construction.
+
+- **Storage:** a dedicated Redis key `steering:attempts:{session_id}` managed through
+  `agent/steering.py` (which already owns the `steering:{session_id}` namespace via
+  `_get_redis()` → `POPOTO_REDIS_DB`). The counter is **NOT** added to
+  `models/agent_session.py` and **NOT** registered in `_AGENT_SESSION_FIELDS`. Keeping it
+  out of the `AgentSession` hash means there is no `session.save()` on the steering path at
+  all, so the full-hash clobber of `context_summary`/`expectations` cannot happen.
+- **Atomic increment-and-branch:** add two helpers to `agent/steering.py`:
+  `bump_self_draft_attempts(session_id) -> int` (calls `r.incr(key)`, sets a TTL via
+  `r.expire(key, <e.g. 1 hour>)` on first bump so abandoned sessions don't leak keys, and
+  returns the **post-increment** value) and `reset_self_draft_attempts(session_id)` (calls
+  `r.delete(key)`). `INCR` is a single atomic server-side op: two concurrent flagged
+  `send()` coroutines for the same session get distinct return values (1 and 2), so neither
+  under-counts and the cap genuinely bounds the loop.
+- **Branch in `_inject_self_draft_steering`:** call `bump_self_draft_attempts(session_id)`
+  and branch on its returned value. If the returned count is `> SELF_DRAFT_MAX_ATTEMPTS`
+  (constant = 2), log a warning, return `False` (so the caller applies
+  `_apply_narration_fallback` and delivers via file/narration), and do NOT push another
+  nudge. Otherwise push the nudge and return `True`. Because the bump is the gate, the
+  read and the increment are the same atomic op — there is no read-then-increment window.
+- **Reset semantics + PINNED location (supporting concern #1):** the counter is reset via
+  `reset_self_draft_attempts(session_id)` on the first successful (un-flagged) delivery for
+  that session. **The reset MUST fire on the `not needs_self_draft` clean branch, BEFORE
+  the `steering_deferred` early-return at `agent/output_handler.py:417-424` — NOT at the
+  terminal outbox `rpush`.** The redundancy filter and RTR-suppress paths return early
+  (around `:480-499`), so a reset pinned to the terminal `rpush` is unreachable whenever a
+  clean send is suppressed as redundant or RTR-deferred; a session that produces a clean
+  (but suppressed) send would then never reset and would burn its self-draft budget
+  permanently. Pin the reset to the point where the code has decided the output is NOT
+  flagged (`needs_self_draft` is falsy) and `session is not None`, i.e. immediately after
+  the `needs_self_draft` block and before the `steering_deferred` early-return — that point
+  is reached on every non-flagged path, suppressed or not.
+- The existing `peek_steering_sender` concurrent guard is **retained** — it still prevents
+  double *injection* (two pending nudges) from two near-simultaneous flagged outputs. The
+  two guards are complementary and address different things: `peek` gates whether a second
+  steering *message* is pushed; the atomic `steering:attempts` counter bounds the
+  **sequential** loop across turn boundaries (where `peek` resets) AND is the
+  read-modify-write-safe counter under concurrency (where the old in-memory `+= 1; save()`
+  raced). `peek` does NOT impose read-modify-write ordering on the counter, so it cannot
+  substitute for the atomic increment.
+
+**New-Blocker resolution — `self_draft_attempts` TOCTOU + full-hash `save()` clobber
+(second war-room pass):** The critique found that the *original* Blocker-2 fix (a
+`self_draft_attempts` int field on `AgentSession`, read-incremented-saved in
+`_inject_self_draft_steering`) created a fresh blocker that the atomic-key design above
+fixes:
+- **TOCTOU under-count.** `send()` operates on a stale in-memory `session` it never
+  re-reads from Redis. Under two near-simultaneous flagged outputs for the same session
+  (the plan's own Race 2 premise), both read `attempts == 0`, both `+= 1` to `1`, both
+  save `1`: the counter under-counts and the sequential cap silently fails to bound the
+  loop. `peek_steering_sender` does NOT serialize the read-modify-write — it only gates a
+  second *push*. **Fix:** the atomic `INCR` returns distinct post-increment values to the
+  two coroutines; there is no read-then-write window.
+- **Full-hash `save()` clobber.** A bare `session.save()` is a full-hash write that
+  re-introduces exactly the `context_summary`/`expectations` clobber that
+  `record_recent_sent_draft` (`agent/output_handler.py:689-690`,
+  `models/agent_session.py:1755`) deliberately avoids via
+  `update_fields=["recent_sent_drafts", "updated_at"]` — softly reopening Blocker-1's
+  routing regression. **Fix:** the counter is not an `AgentSession` field, so the steering
+  path performs **no** `session.save()` at all; nothing on this path can clobber the
+  routing fields. (If a future maintainer insists on a persisted field instead of the
+  Redis key, the field write MUST use `session.save(update_fields=["self_draft_attempts",
+  "updated_at"])` and the increment MUST still be made race-safe — but the atomic Redis key
+  is the chosen design precisely because it sidesteps both requirements.)
 
 ## Failure Path Test Strategy
 
@@ -421,10 +470,19 @@ narration-fallback/file-delivery path.**
   `peek_steering_sender` resets). Test asserts that after `SELF_DRAFT_MAX_ATTEMPTS` (2)
   injections, the next call returns `False`, pushes NO further steering, and falls
   through to `_apply_narration_fallback` / file delivery — i.e. the loop terminates.
-  Assert `session.self_draft_attempts` is persisted and capped.
-- [ ] Verify the counter **reset**: after a clean (un-flagged) delivery,
-  `session.self_draft_attempts` is reset to 0 so a later independent flag gets a fresh
-  budget.
+  Assert the atomic `steering:attempts:{session_id}` Redis counter is capped.
+- [ ] Verify the **concurrency safety** of the bound (Race 3 / New Blocker): spawn **two
+  concurrent flagged `send()` coroutines** for the same session (via `asyncio.gather`)
+  and assert the atomic counter reaches the true count (no lost increment / TOCTOU
+  under-count) and the loop still terminates — a sequential-only test would pass while
+  the race ships. Also assert NO `session.save()` (full-hash write) is issued on the
+  steering path, so `context_summary`/`expectations` are not clobbered.
+- [ ] Verify the counter **reset is pinned correctly** (supporting concern #1): after a
+  clean (un-flagged) delivery the counter is reset to 0; AND the reset fires on a clean
+  delivery that is **suppressed by the redundancy/RTR filter** (which returns early before
+  the terminal `rpush`) — proving the reset is pinned to the `not needs_self_draft` branch
+  before the `steering_deferred` early-return, not to the unreachable terminal `rpush`. A
+  session whose clean send is suppressed must NOT burn its self-draft budget permanently.
 
 ### Error State Rendering
 - [ ] Over-length output: test asserts `full_output_file` is set and the user-visible
@@ -460,14 +518,16 @@ Disposition for every affected test (verified against the test surface):
 - [ ] `tests/unit/test_output_handler.py::TestDrafterInHandler::test_send_falls_back_to_raw_text_on_drafter_exception` — UPDATE: exception path now applies to validators, not LLM calls.
 - [ ] `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_needs_self_draft_pushes_steering_and_defers_outbox_write` — UPDATE/KEEP: steering is now primary; assert a flag (not backend failure) triggers it.
 - [ ] `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_needs_self_draft_skips_steering_if_already_pending` — KEEP (concurrent `peek_steering_sender` guard still required).
-- [ ] **NEW** `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_self_draft_attempts_bound_terminates_loop` — ADD: structurally-unfixable flag across turns (consume nudge between each so `peek` resets); assert after `SELF_DRAFT_MAX_ATTEMPTS` injections the next call returns `False`, pushes no further steering, falls through to narration fallback; assert `session.self_draft_attempts` persisted and capped.
-- [ ] **NEW** `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_self_draft_attempts_reset_on_clean_delivery` — ADD: after a clean delivery the counter resets to 0.
+- [ ] **NEW** `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_self_draft_attempts_bound_terminates_loop` — ADD: must spawn **TWO CONCURRENT flagged `send()` coroutines** for the same session (`asyncio.gather`), NOT a sequential loop — a sequential-only test passes while the TOCTOU race ships. Assert: the atomic `steering:attempts:{session_id}` Redis counter reaches the true count under concurrency (no lost increment); after `SELF_DRAFT_MAX_ATTEMPTS` the next call returns `False`, pushes no further steering, falls through to narration fallback; and NO full-hash `session.save()` is issued on the steering path (so routing fields are not clobbered — Race 3 / New Blocker).
+- [ ] **NEW** `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_self_draft_attempts_reset_pinned_before_early_return` — ADD: the counter reset must fire on the `not needs_self_draft` clean branch BEFORE the `steering_deferred` early-return — assert reset on a normal clean delivery AND on a clean delivery that the redundancy/RTR filter suppresses (early-returns before the terminal `rpush`). A clean-but-suppressed send must reset the budget; pinning the reset to the terminal `rpush` (unreachable on the suppress path) would fail this test (supporting concern #1).
+- [ ] **NEW** `tests/unit/test_steering.py::test_self_draft_attempts_atomic_increment` — ADD: `bump_self_draft_attempts` returns distinct post-increment values under concurrent calls; TTL is set on first bump; `reset_self_draft_attempts` deletes the key.
 - [ ] **NEW** `tests/unit/test_output_handler.py::TestDrafterInHandler::test_routing_fields_persisted_on_passthrough` — ADD: `context_summary` (deterministic) + `expectations` persist on the verbatim path; None `expectations` does not overwrite a prior value.
 - [ ] `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_narration_fallback_*` (2 tests) — UPDATE: narration fallback path retained for the non-steering case.
 - [ ] `tests/unit/test_output_handler.py::TestDrafterFailureRecovery::test_routing_field_persistence_failure_is_silent` / `test_routing_fields_not_persisted_when_draft_skipped` — UPDATE for the new persistence gate.
 - [ ] `tests/unit/test_open_question_gate.py::TestSummarizeResponseOpenQuestions::*` — UPDATE: `expectations` now sourced from `_extract_open_questions` on raw text, not Haiku; drop `_draft_with_haiku` patches.
 - [ ] **NEW** `tests/unit/test_message_drafter.py::TestExpectationsRecallParity::*` — ADD (CONCERN): a representative output that previously produced Haiku `expectations` now produces equivalent `expectations` from `_extract_open_questions` on the same raw text; a declarative-only output yields `None` (no fabrication); assert the None-vs-empty contract (`expectations` is `None`, never `""`, when no questions found).
 - [ ] **NEW** `tests/unit/test_message_drafter.py::TestDeriveContextSummary::*` — ADD (Blocker-1): `_derive_context_summary` returns a deterministic first-sentence summary (capped), `None` for empty/whitespace input, and strips narration; `draft_message` populates `MessageDraft.context_summary` from it on the pass-through path.
+- [ ] **NEW** `tests/unit/test_message_drafter.py::TestDeriveContextSummaryRecallParity::*` — ADD (supporting concern #2): a **recall-parity** test (parallel to `TestExpectationsRecallParity`, not a mere existence test) that VALIDATES the "strictly better than empty" claim rather than asserting it. For ≥3 representative agent outputs (a code-task reply, a question-bearing reply, a multi-paragraph status reply), assert the deterministic `_derive_context_summary` produces a routing-usable topic hint: non-empty, ≤ the cap, drawn from the agent's own text, and meaningfully distinguishing one session's topic from another's (e.g. two different-topic outputs yield different summaries). Explicitly acknowledge in the test docstring that a first-sentence slice is often NOT the session topic the interpretive Haiku source produced — the assertion is "strictly better than the `(no context)` fallback the readers or-guard to," NOT "equivalent to Haiku." If the first-sentence heuristic fails the distinguishing assertion for a realistic case, that is a signal to widen the heuristic (e.g. first N sentences) before build, not to ship a worse summary than empty.
 - [ ] `tests/unit/test_send_telegram.py` (long-text draft test ~line 802) — REPLACE: expect pass-through, not rewrite.
 
 **SAFE — no change (use drafter-bypass fixture or test composition/validation only):**
@@ -485,7 +545,13 @@ Disposition for every affected test (verified against the test surface):
 - **Rewriting the validators.** They are already good. Do not "improve" the markdown-table
   regex or add new wire-format rules — that is a separate concern.
 - **Building a deterministic re-implementation of Haiku's summarization.** The whole
-  point is to stop summarizing. Do not replace Haiku with a regex/heuristic "summarizer."
+  point is to stop summarizing the **user-facing message**. Do not replace Haiku with a
+  regex/heuristic "summarizer" for the delivered prose. **Carve-out:** the small
+  `_derive_context_summary` helper (a first-sentence slice for the internal *routing*
+  `context_summary` field) is explicitly in scope — it is a coarse routing hint, never
+  user-facing prose, and exists only so the four routing readers stay fed (Blocker-1). It
+  must stay deliberately dumb (string slicing, capped); do not grow it into an
+  LLM-or-NLP-backed summarizer.
 - **Touching the granite layer.** Tracked in #1681. Stay in `bridge/message_drafter.py`
   + the four call sites + tests + docs.
 - **Re-architecting the steering mechanism.** `_inject_self_draft_steering` already
@@ -518,16 +584,21 @@ re-emits long → flag …) and never deliver.
 the message delivers with a `.txt` attachment and a short pointer. Reserve `needs_self_draft`
 for wire-format/empty-promise flags, which the agent can actually fix. Two guards bound
 the loop: the `peek_steering_sender` guard caps **concurrent** re-injection at one pending
-nudge, and the new persisted `self_draft_attempts` counter (cap = `SELF_DRAFT_MAX_ATTEMPTS`
-= 2) caps **sequential** re-violations across turn boundaries — a structurally-unfixable
-flag abandons self-draft and falls through to narration-fallback/file delivery rather than
-looping forever (Blocker-2 resolution).
+nudge, and the new **atomic Redis counter** `steering:attempts:{session_id}` (cap =
+`SELF_DRAFT_MAX_ATTEMPTS` = 2, incremented via `INCR` so concurrent flagged outputs cannot
+under-count) caps **sequential** re-violations across turn boundaries — a
+structurally-unfixable flag abandons self-draft and falls through to
+narration-fallback/file delivery rather than looping forever (Blocker-2 + New-Blocker
+resolution; the counter is off the `AgentSession` hash so it issues no full-hash `save()`).
 
 ### Risk 3: Teammate/PM voice regressions are subjective and untested by unit tests
 **Impact:** "Verbatim" could surface raw narration or formatting the old rewrite hid.
 **Mitigation:** `_strip_process_narration` still runs. Add an integration assertion that
 a representative Opus teammate reply passes through byte-identical (modulo narration
-stripping). Manual smoke via the local session is a review-round item.
+stripping). The subjective UX side is no longer a buried footnote — it is promoted to a
+**checkable Success Criterion** (the user-outcome / message-quality criterion: verbatim
+reply runs LONGER than the Haiku-condensed one in the common sub-3000-char case) that must
+be run with a proof artifact during the review round.
 
 ## Race Conditions
 
@@ -551,6 +622,26 @@ before the second checks it.
 message.
 **Mitigation:** Existing `peek_steering_sender == "drafter-fallback"` guard returns
 `False` (skips) on the second injection. No new race introduced; test asserts the guard.
+
+### Race 3: Self-draft attempt counter under-count / routing-field clobber
+**Location:** `agent/output_handler.py::_inject_self_draft_steering` + `agent/steering.py`
+**Trigger:** two near-simultaneous flagged `send()` coroutines for the same session (the
+same concurrency premise as Race 2), each trying to bound the self-draft loop.
+**Data prerequisite:** the attempt counter must reflect BOTH increments before either
+coroutine reads it to decide whether the cap is hit.
+**State prerequisite:** the increment must be a single atomic read-modify-write; and it
+must NOT be carried on the `AgentSession` hash (a full-hash `save()` would clobber the
+deterministically-persisted `context_summary`/`expectations` from Blocker-1).
+**Hazard if naive:** a Python `session.self_draft_attempts += 1; session.save()` on a
+stale in-memory session loses one of the two increments (TOCTOU under-count → cap never
+binds → unbounded loop) AND the full-hash `save()` overwrites the routing fields that
+`record_recent_sent_draft` protects with `update_fields=`.
+**Mitigation:** the counter is a dedicated Redis key `steering:attempts:{session_id}`
+incremented with atomic `INCR` (returns the post-increment value; concurrent callers get
+distinct values), with a TTL on first bump and `DELETE` for reset. It is **not** an
+`AgentSession` field, so the steering path issues no `session.save()` and cannot clobber
+the routing fields. Test asserts the bound holds under **two concurrent** flagged `send()`
+coroutines (see `test_self_draft_attempts_bound_terminates_loop` in Test Impact).
 
 ## No-Gos (Out of Scope)
 
@@ -604,9 +695,12 @@ verbatim-pass-through + flag-routes-steering behavior.
 - [ ] Update `SELF_DRAFT_INSTRUCTION` text and its comment.
 - [ ] Update `MessageDraft` docstring: `was_drafted` removed; `context_summary` now
   deterministic; `expectations` None-vs-empty contract documented.
-- [ ] Document the new `self_draft_attempts` field on `AgentSession` (model docstring)
-  and the `SELF_DRAFT_MAX_ATTEMPTS` constant + `_derive_context_summary` helper
-  (docstrings).
+- [ ] Document the atomic self-draft attempt counter: the
+  `bump_self_draft_attempts`/`reset_self_draft_attempts` helpers and the
+  `steering:attempts:{session_id}` Redis key in `agent/steering.py` (docstrings), the
+  `SELF_DRAFT_MAX_ATTEMPTS` constant, and the `_derive_context_summary` helper
+  (docstring). Note explicitly that the counter is a Redis key (NOT an `AgentSession`
+  field) so the steering path issues no `session.save()`.
 - [ ] In `docs/features/message-drafter.md` / `agent-message-delivery.md`, document the
   bounded sequential self-draft loop and the deterministic routing-field sources.
 
@@ -637,6 +731,18 @@ verbatim-pass-through + flag-routes-steering behavior.
   `bridge/email_bridge.py`).
 - [ ] Drafter tests updated to assert **verbatim pass-through + flagging**, not
   rewriting (see Test Impact for the full disposition).
+- [ ] **User-outcome / message-quality criterion (supporting concern #3):** message
+  quality measurably *improves*, not merely changes byte-for-byte. The named, checkable
+  behavior change: for the common sub-3000-char teammate/PM reply, the delivered message
+  is the **verbatim Opus text and runs LONGER** than the Haiku-condensed version it
+  replaces (Haiku's rewrite systematically shortens/strips). Verify by a **manual UX
+  smoke** in a local session: send a representative conversational prompt, confirm the
+  delivered reply is the agent's own words (not a condensed paraphrase) and is at least as
+  long/detailed as the prior Haiku output for the same input. Capture the before/after
+  pair (or a single after-sample plus a note that it is no longer Haiku-shaped) as a
+  review-round proof artifact. This is an executable success criterion, not a Risk
+  footnote — it must be actually run and the artifact attached, not flipped to `[x]` on
+  the basis of byte-identity/grep/diff checks alone.
 - [ ] Open Question #2 resolved in code: `classify_output` either fully deleted or
   reduced to a deterministic wrapper, with `bridge/promise_gate.py` confirmed unaffected.
 - [ ] Tests pass (`/do-test`)
@@ -729,11 +835,19 @@ verbatim-pass-through + flag-routes-steering behavior.
   `context_summary` and `expectations` via `_persist_routing_fields` on the pass-through
   path (gate becomes `session is not None`); keep/promote `needs_self_draft` →
   `_inject_self_draft_steering` as the primary flag handler.
-- **Blocker-2:** add `self_draft_attempts` field to `models/agent_session.py` + register
-  in `_AGENT_SESSION_FIELDS` (`agent/agent_session_queue.py`); add a
-  `SELF_DRAFT_MAX_ATTEMPTS = 2` constant; in `_inject_self_draft_steering`, check/
-  increment/persist the counter and abandon self-draft (return `False`, fall through to
-  narration fallback) once the cap is hit; reset the counter to 0 on clean delivery.
+- **Blocker-2 + New Blocker (atomic, no AgentSession field):** add
+  `bump_self_draft_attempts(session_id) -> int` (atomic `r.incr` + TTL on first bump,
+  returns post-increment value) and `reset_self_draft_attempts(session_id)` (`r.delete`)
+  to `agent/steering.py`, keyed `steering:attempts:{session_id}`. Do NOT add a field to
+  `models/agent_session.py` or `_AGENT_SESSION_FIELDS` — the counter stays out of the
+  hash so the steering path issues no `session.save()` (no routing-field clobber). Add a
+  `SELF_DRAFT_MAX_ATTEMPTS = 2` constant. In `_inject_self_draft_steering`, call
+  `bump_self_draft_attempts` and branch on its return: if `> SELF_DRAFT_MAX_ATTEMPTS`,
+  return `False` (abandon to narration fallback) and push no nudge; else push and return
+  `True`. **Reset:** call `reset_self_draft_attempts` on the `not needs_self_draft` clean
+  branch BEFORE the `steering_deferred` early-return (`agent/output_handler.py:417-424`),
+  so a clean-but-redundancy/RTR-suppressed send still resets the budget — NOT at the
+  terminal `rpush` (unreachable on suppress paths).
 - `agent/hooks/stop.py`, `tools/send_telegram.py`, `bridge/email_bridge.py`: confirm
   `.text` consumption still correct against raw text.
 - Update `SELF_DRAFT_INSTRUCTION` to describe the flag reason.
@@ -777,22 +891,36 @@ verbatim-pass-through + flag-routes-steering behavior.
 | Rewrite machinery gone | `grep -c "_draft_with_haiku\|_draft_with_openrouter\|STRUCTURED_DRAFT_TOOL" bridge/message_drafter.py` | output contains 0 |
 | Net-negative diff | `git show --stat HEAD -- bridge/message_drafter.py` | deletions > insertions |
 | context_summary writer retained (Blocker-1) | `grep -c "_derive_context_summary" bridge/message_drafter.py` | output ≥ 1 (deterministic source exists) |
-| context_summary persist path intact (Blocker-1) | `grep -n "session.context_summary = " agent/output_handler.py` | matches `_persist_routing_fields` write (writer still fires) |
+| context_summary persist GATE flipped (Blocker-1) | `grep -n "was_drafted" agent/output_handler.py` | the persist gate no longer reads `was_drafted` (gate is `session is not None`); checks the call-site gate flip, not the unchanged `_persist_routing_fields` body |
 | Routing readers untouched (Blocker-1, No-Go) | `git diff --stat HEAD~1 -- bridge/session_router.py bridge/telegram_bridge.py agent/session_executor.py` | no changes to reader sites |
-| Sequential self-draft bound (Blocker-2) | `grep -c "self_draft_attempts\|SELF_DRAFT_MAX_ATTEMPTS" agent/output_handler.py models/agent_session.py` | output ≥ 2 |
+| Self-draft bound is ATOMIC + off the hash (Blocker-2 / New Blocker) | `grep -c "bump_self_draft_attempts\|reset_self_draft_attempts\|SELF_DRAFT_MAX_ATTEMPTS" agent/steering.py agent/output_handler.py` | output ≥ 2 |
+| No AgentSession field / no full-hash save on steering path (New Blocker) | `grep -c "self_draft_attempts" models/agent_session.py` | output is 0 (counter is a Redis key, not an AgentSession field) |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Module imports | `python -c "import bridge.message_drafter, agent.output_handler, models.agent_session"` | exit code 0 |
 
 ## Critique Results
 
-Critique verdict: **NEEDS REVISION** (war room). Both blockers resolved in this revision.
+Two war-room passes. Pass 1 verdict: **NEEDS REVISION** (Blocker-1 context_summary
+readers; Blocker-2 sequential loop). Pass 2 verdict: **NEEDS REVISION** — the Blocker-2
+fix introduced one new blocker plus supporting concerns. All resolved below.
+
+**Pass 1:**
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
 | BLOCKER | Archaeologist/Adversary | Removing `context_summary`'s only writer silently breaks 4 live routing readers (`session_router.py:85`, `telegram_bridge.py:2001`, `session_executor.py:1979`, `telegram_bridge.py:779`); contradicts the No-Go. Verification gate inspected wrong file. | Technical Approach → Blocker-1 resolution; Verification table | Option (a): retain `context_summary` via deterministic `_derive_context_summary`; keep persist path; no reader touched. Verification gate now checks the writer + reader-untouched + deterministic source. |
-| BLOCKER | Operator | `peek_steering_sender=="drafter-fallback"` guard bounds only concurrent injections; sequential re-violations loop unbounded after the agent consumes the nudge. | Technical Approach → Blocker-2 resolution; Failure Path Test Strategy; Test Impact | Persisted `self_draft_attempts` on `AgentSession`, cap `SELF_DRAFT_MAX_ATTEMPTS=2`, abandon to narration-fallback/file delivery; reset on clean delivery. |
+| BLOCKER | Operator | `peek_steering_sender=="drafter-fallback"` guard bounds only concurrent injections; sequential re-violations loop unbounded after the agent consumes the nudge. | Technical Approach → Blocker-2 resolution; Failure Path Test Strategy; Test Impact | (superseded by Pass 2) original fix added a `self_draft_attempts` int field on `AgentSession`. |
 | CONCERN | Skeptic | Demoting Haiku `expectations` to deterministic-only is a behavioral change presented as a no-op; needs recall parity + None-vs-empty contract. | OQ#3 → CONCERN resolution; Test Impact | Explicit `None` (never `""`) contract on empty extraction; recall-parity test added. |
+
+**Pass 2 (this revision):**
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Operator/Adversary | The Blocker-2 fix's `self_draft_attempts += 1; session.save()` on a stale in-memory session is a TOCTOU under-count under two concurrent flagged outputs (Race 2 premise), so the cap silently fails to bound the loop; AND the bare full-hash `save()` re-clobbers `context_summary`/`expectations` (reopening Blocker-1). | Technical Approach → New-Blocker resolution + Blocker-2 rewrite; Race 3; Failure Path Test Strategy; Test Impact; Verification | Counter moved off the `AgentSession` hash to an atomic Redis key `steering:attempts:{session_id}` (`INCR` returns post-increment value; no read-then-write window; no `session.save()` on the steering path). `test_self_draft_attempts_bound_terminates_loop` rewritten to spawn TWO CONCURRENT `send()` coroutines. |
+| CONCERN | Operator | Counter reset at the terminal `rpush` is unreachable on redundancy/RTR-suppress paths — a clean-but-suppressed send would permanently burn its budget. | Technical Approach → reset pinned location; Failure Path Test Strategy; Test Impact; Step 3 | Reset pinned to the `not needs_self_draft` branch BEFORE the `steering_deferred` early-return (`output_handler.py:417-424`); new test exercises the suppress path. |
+| CONCERN | Skeptic | `_derive_context_summary` had only an existence test; the "strictly better than empty" claim was asserted, not validated (a first-sentence slice is often not the session topic). | Test Impact → `TestDeriveContextSummaryRecallParity` | Recall-parity test (parallel to expectations parity) validating distinguishing routing-usable topic hints, with an explicit "better than `(no context)`, not equivalent to Haiku" framing. |
+| CONCERN | User | Manual UX smoke was a Risk-3 footnote, not a checkable outcome. | Success Criteria → user-outcome/message-quality criterion; Risk 3 | Promoted to an executable Success Criterion naming the behavior change: verbatim replies run LONGER than Haiku-condensed ones in the common sub-3000-char case; requires a proof artifact. |
 
 ---
 
