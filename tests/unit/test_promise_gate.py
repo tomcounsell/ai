@@ -11,6 +11,8 @@ Plan: docs/plans/sdlc-1219.md (issue #1219).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import Enum
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -26,6 +28,33 @@ from bridge.promise_gate import (
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.sdlc]
+
+
+# === Stub for drafter ClassificationResult (removed from message_drafter) ===
+# The promise_gate uses duck typing on classifier_verdict (getattr), so any
+# object with .output_type and .nudge_feedback attributes works.
+
+
+class _OutputType(Enum):
+    """Stub for tests that need to supply a classifier_verdict to evaluate_promise."""
+
+    QUESTION = "question"
+    STATUS_UPDATE = "status"
+    COMPLETION = "completion"
+    BLOCKER = "blocker"
+    ERROR = "error"
+
+
+@dataclass
+class _ClassificationResult:
+    """Stub dataclass for drafter classification verdicts in tests."""
+
+    output_type: _OutputType
+    confidence: float = 0.9
+    reason: str = ""
+    nudge_feedback: str | None = None
+    was_rejected_completion: bool = False
+    has_workarounds: bool = False
 
 
 # === Helpers ===
@@ -194,10 +223,8 @@ class TestEmptyInputAndKillSwitch:
 
     def test_classifier_verdict_status_with_nudge_blocks(self):
         """Drafter delegation: STATUS_UPDATE + nudge_feedback → BLOCK, no LLM call."""
-        from bridge.message_drafter import ClassificationResult, OutputType
-
-        result = ClassificationResult(
-            output_type=OutputType.STATUS_UPDATE,
+        result = _ClassificationResult(
+            output_type=_OutputType.STATUS_UPDATE,
             confidence=0.95,
             reason="Forward-deferral",
             nudge_feedback="You said 'will come back' — empty promise",
@@ -213,10 +240,8 @@ class TestEmptyInputAndKillSwitch:
         async_mock.assert_not_called()
 
     def test_classifier_verdict_completion_allows(self):
-        from bridge.message_drafter import ClassificationResult, OutputType
-
-        result = ClassificationResult(
-            output_type=OutputType.COMPLETION,
+        result = _ClassificationResult(
+            output_type=_OutputType.COMPLETION,
             confidence=0.9,
             reason="Done",
             nudge_feedback=None,
@@ -529,12 +554,10 @@ class TestAuditOrdering:
         assert "cli-123" in contents
 
     def test_drafter_delegation_writes_audit(self, tmp_path, monkeypatch):
-        from bridge.message_drafter import ClassificationResult, OutputType
-
         log_path = tmp_path / "audit.jsonl"
         monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
-        result = ClassificationResult(
-            output_type=OutputType.COMPLETION,
+        result = _ClassificationResult(
+            output_type=_OutputType.COMPLETION,
             confidence=0.9,
             reason="Done",
         )

@@ -194,7 +194,9 @@ class TestDraftMessageViolations:
         result = await draft_message(text, medium="telegram")
 
         assert isinstance(result, MessageDraft)
-        assert result.was_drafted is False, "short-output path should not invoke the drafter"
+        assert not hasattr(result, "was_drafted"), (
+            "was_drafted field removed in passthrough refactor"
+        )
         assert len(result.violations) >= 1, f"expected >=1 violation, got {result.violations}"
         rules = {v.rule for v in result.violations}
         assert "no_markdown_tables" in rules
@@ -208,7 +210,9 @@ class TestDraftMessageViolations:
         result = await draft_message(text, medium="telegram")
         assert result.violations == []
         assert result.text == text
-        assert result.was_drafted is False
+        assert not hasattr(result, "was_drafted"), (
+            "was_drafted field removed in passthrough refactor"
+        )
 
     @pytest.mark.asyncio
     async def test_email_medium_rejects_inline_code(self):
