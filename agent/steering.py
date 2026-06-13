@@ -166,6 +166,15 @@ def peek_steering_sender(session_id: str) -> str | None:
 # Redis counter that tracks how many consecutive times the drafter has injected
 # a self-draft steering message for a session. Prevents infinite steering loops
 # when the agent's self-draft also fails validation.
+#
+# SELF_DRAFT_MAX_ATTEMPTS: Cap on consecutive self-draft steering injections.
+# When the drafter sets needs_self_draft=True (wire-format violation or empty
+# promise), _inject_self_draft_steering in output_handler.py bumps this counter
+# and injects a steering nudge asking the agent to rewrite. If the agent's
+# rewrite also fails, the counter bumps again. At cap (>= SELF_DRAFT_MAX_ATTEMPTS)
+# the handler falls through to the narration fallback instead of steering again.
+# This is NOT an AgentSession field — it is a Redis key only, scoped per
+# session_id and TTL-expiring after 1 hour so abandoned sessions don't leak.
 
 SELF_DRAFT_MAX_ATTEMPTS = 2
 
@@ -180,14 +189,19 @@ def _self_draft_attempts_key(session_id: str) -> str:
 def bump_self_draft_attempts(session_id: str) -> int:
     """Atomically increment the self-draft attempt counter and return the new value.
 
-    Sets a 1-hour TTL on first bump so counters for abandoned sessions
-    expire automatically without a manual cleanup step.
+    Uses Redis INCR (atomic) so concurrent drafter calls for the same session
+    cannot double-count. Sets a 1-hour TTL on first bump (count == 1) so
+    counters for abandoned sessions expire automatically without a cleanup step.
+    The counter is stored at ``steering:attempts:{session_id}`` — it is NOT
+    a field on AgentSession.
 
     Args:
         session_id: The session whose counter to increment.
 
     Returns:
-        Post-increment count (1 on first bump, 2 on second, …).
+        Post-increment count (1 on first bump, 2 on second, …). Caller
+        compares against SELF_DRAFT_MAX_ATTEMPTS to decide whether to steer
+        or fall through to the narration fallback.
     """
     r = _get_redis()
     key = _self_draft_attempts_key(session_id)
@@ -200,10 +214,16 @@ def bump_self_draft_attempts(session_id: str) -> int:
 
 
 def reset_self_draft_attempts(session_id: str) -> None:
-    """Reset the self-draft attempt counter for a session.
+    """Reset the self-draft attempt counter for a session (Redis DELETE).
 
-    Called when a clean (non-self-draft) delivery path completes, so a
-    subsequent failure in the same session starts fresh from zero.
+    Called on clean (non-self-draft) delivery immediately before the
+    STEERING_DEFERRED early-return in the output handler, so a subsequent
+    flagged message in the same session starts fresh from zero rather than
+    inheriting a stale count from a previous violation.
+
+    The counter is a Redis key (``steering:attempts:{session_id}``), not an
+    AgentSession field. Deletion is idempotent — safe to call even if the
+    key does not exist.
 
     Args:
         session_id: The session whose counter to reset.

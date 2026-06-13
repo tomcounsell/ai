@@ -135,9 +135,7 @@ def _extract_open_questions(text: str) -> list[str]:
     # Extract list items (numbered or bulleted)
     questions = []
     # Match lines starting with number+period, dash, asterisk, or bullet
-    list_item_pattern = re.compile(
-        r"^\s*(?:\d+[\.\)]\s*|[-*+]\s*|•\s*)(.*)", re.MULTILINE
-    )
+    list_item_pattern = re.compile(r"^\s*(?:\d+[\.\)]\s*|[-*+]\s*|•\s*)(.*)", re.MULTILINE)
     for item_match in list_item_pattern.finditer(section_content):
         item_text = item_match.group(1).strip()
         # Skip empty, whitespace-only, or placeholder items
@@ -195,29 +193,40 @@ class Violation:
 class MessageDraft:
     """Result of drafting an agent response.
 
+    The drafter is a verbatim pass-through + validator — no LLM rewriting.
+    The agent's own text reaches the human after narration stripping and
+    structural composition (emoji prefix, SDLC stage line, link footer).
+
     Attributes:
         text: The composed message text for delivery. Empty string signals
             needs_self_draft (wire-format violation or empty promise the
-            agent can fix by rewriting).
+            agent can fix by rewriting itself via the self-draft steering
+            path). was_drafted has been removed — the drafter no longer
+            calls Haiku or any other LLM.
         full_output_file: Path to the full-output .txt file when the raw
-            response exceeds FILE_ATTACH_THRESHOLD. None otherwise.
+            response exceeds FILE_ATTACH_THRESHOLD. None otherwise. Over-
+            length responses still deliver (text is not emptied); the file
+            is an additional attachment.
         needs_self_draft: True when a BLOCKING condition fired (wire-format
-            violation or empty promise) and the agent should rewrite. NOT
-            set for over-length — those still deliver with a file pointer.
+            violation or empty promise) and the agent should rewrite via
+            the self-draft steering path. NOT set for over-length — those
+            still deliver with a file pointer.
         artifacts: Dict of extracted artifacts (commits, urls, files_changed,
             test_results, errors).
         context_summary: Coarse one-sentence routing hint for session_router.py
-            and bridge/telegram_bridge.py. Derived deterministically from the
-            narration-stripped text (first non-narration sentence, ≤140 chars).
-            None when the stripped text is empty.
+            and bridge/telegram_bridge.py. Derived deterministically by
+            _derive_context_summary from the narration-stripped text (first
+            non-blank, non-heading line, ≤140 chars). None when the stripped
+            text is empty. Not user-facing prose — a routing hint only.
         expectations: Verbatim questions extracted from ## Open Questions
-            sections or explicit question sentences in the raw output. None
-            when no questions are found (never ""). The None-vs-empty
-            distinction matters: _persist_routing_fields in output_handler.py
-            only writes expectations when it is not None, preserving any prior
-            persisted value when no new questions are present.
+            sections by _extract_open_questions (sole source). None when no
+            questions are found (never ""). The None-vs-empty distinction
+            matters: _persist_routing_fields in output_handler.py only writes
+            expectations when it is not None, preserving any prior persisted
+            value when no new questions are present.
         violations: List of wire-format violations from the per-medium
-            validator. Informational — surfaced to the agent for editing.
+            validator. Informational — surfaced to the agent for editing
+            via the review-gate presentation.
     """
 
     text: str
@@ -229,9 +238,7 @@ class MessageDraft:
     violations: list[Violation] = field(default_factory=list)
 
 
-_TABLE_SEPARATOR_PATTERN = re.compile(
-    r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$"
-)
+_TABLE_SEPARATOR_PATTERN = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 
 
 def validate_telegram(text: str) -> list[Violation]:
@@ -350,9 +357,7 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
     files_changed = re.findall(file_pat, text, re.IGNORECASE)
     files_changed += re.findall(r"^\s*[MADR]\s+(\S+)", text, re.MULTILINE)
     if files_changed:
-        artifacts["files_changed"] = list(
-            dict.fromkeys(f.strip() for f in files_changed)
-        )
+        artifacts["files_changed"] = list(dict.fromkeys(f.strip() for f in files_changed))
 
     # Test results
     test_pat = r"(\d+\s+passed" r"(?:,\s*\d+\s+(?:failed|error|warning|skipped))*)"
@@ -393,20 +398,22 @@ def _detect_empty_promise(text_lower: str) -> bool:
 def _derive_context_summary(raw_text: str) -> str | None:
     """Derive a coarse context summary from the narration-stripped raw text.
 
-    Returns the first non-narration sentence, capped at ~140 characters.
-    This is a deliberately simple deterministic helper — string slicing,
-    no NLP or LLM. Its purpose is to give session_router.py and other
-    routing readers a coarse topic hint for the session.
+    Returns the first non-blank, non-heading line, capped at ~140 chars
+    at a word boundary. This is a deliberately simple deterministic helper
+    — string slicing only, no NLP or LLM. Its purpose is to populate
+    session.context_summary for session_router.py and other routing readers
+    with a coarse topic hint for the session.
 
-    The summary is a routing hint, not a quality deliverable. Callers that
-    need a precise summary should not rely on this field for display.
+    The summary is a ROUTING HINT, not a quality deliverable and not
+    user-facing prose. Callers that need a precise summary should not rely
+    on this field for display.
 
     Args:
         raw_text: The narration-stripped agent output text.
 
     Returns:
-        First sentence of the text, capped at 140 chars, or None for
-        empty/whitespace-only input.
+        First non-blank, non-heading line, capped at 140 chars (word
+        boundary), or None for empty/whitespace-only input.
     """
     if not raw_text or not raw_text.strip():
         return None
@@ -628,9 +635,7 @@ def _parse_draft_and_questions(
     return summary_text, None
 
 
-def _compose_structured_draft(
-    summary_text: str, session=None, is_completion: bool = True
-) -> str:
+def _compose_structured_draft(summary_text: str, session=None, is_completion: bool = True) -> str:
     """Compose the full structured draft with emoji, stage line, bullets, questions, and links.
 
     Two modes:
@@ -658,14 +663,10 @@ def _compose_structured_draft(
         try:
             from models.agent_session import AgentSession
 
-            fresh_sessions = list(
-                AgentSession.query.filter(session_id=session.session_id)
-            )
+            fresh_sessions = list(AgentSession.query.filter(session_id=session.session_id))
             if fresh_sessions:
                 session = fresh_sessions[0]
-                logger.debug(
-                    f"Refreshed session {session.session_id} for structured draft"
-                )
+                logger.debug(f"Refreshed session {session.session_id} for structured draft")
         except Exception as e:
             logger.debug(f"Could not refresh session for draft: {e}")
 
@@ -707,41 +708,45 @@ async def draft_message(
 ) -> MessageDraft:
     """Draft an agent response for user-visible delivery.
 
-    Pass-through with validation and deterministic structural composition.
-    No LLM rewriting — the agent's own text is used verbatim after
-    narration stripping and composition.
+    Verbatim pass-through with validation and deterministic structural
+    composition. No LLM rewriting — the agent's own text is used after
+    narration stripping and composition. Haiku, OpenRouter, and all
+    LLM-rewrite paths have been removed.
 
     Flow:
-    1. Strip process narration from raw text
-    2. Run _validate_for_medium on the composed text
-    3. If over FILE_ATTACH_THRESHOLD, write full-output file (delivery still proceeds)
-    4. If any BLOCKING flag fires (wire-format violation, empty promise):
+    1. Strip process narration from raw text (_strip_process_narration)
+    2. Apply deterministic structural composition (_compose_structured_draft)
+       on the agent's own text (emoji prefix, SDLC stage line, link footer)
+    3. Run _validate_for_medium on the composed text
+    4. If over FILE_ATTACH_THRESHOLD, write full-output file (delivery still
+       proceeds — text is NOT emptied for over-length responses)
+    5. If any BLOCKING flag fires (wire-format violation or empty promise):
        return MessageDraft(text="", needs_self_draft=True, violations=[...])
-    5. Apply deterministic composition (_compose_structured_draft) on the
-       agent's own text
+       — caller injects a self-draft steering nudge back to the agent
+       (PRIMARY flag-handling path, not a failure fallback)
     6. Populate context_summary from _derive_context_summary(stripped_raw_text)
-    7. Populate expectations from _extract_open_questions(stripped_raw_text)
+    7. Populate expectations from _extract_open_questions(raw_response)
        (None when no questions found, never "")
     8. Return MessageDraft(text=<composed>, context_summary=..., expectations=...,
        violations=[...])
 
     Args:
         raw_response: The raw agent output text.
-        session: Optional AgentSession for context enrichment.
+        session: Optional AgentSession for context enrichment (SDLC stage
+            progress, persona bypass for Teammate, link footer).
         medium: Delivery medium discriminator. "telegram" (default) or "email".
             Per-medium validator rules enforce wire-format constraints.
         persona: Optional persona name (pm/dev/teammate/customer-service) for
             tone hints. Not used today — medium and persona stay orthogonal.
 
     Returns:
-        MessageDraft with text, routing fields, and any violations.
+        MessageDraft with verbatim composed text, routing fields, and any
+        wire-format violations.
     """
     if not raw_response or not raw_response.strip():
         # Even with empty response, render SDLC progress if available
         if session:
-            fallback = _compose_structured_draft(
-                "", session=session, is_completion=True
-            )
+            fallback = _compose_structured_draft("", session=session, is_completion=True)
             if fallback.strip():
                 return MessageDraft(text=fallback)
         return MessageDraft(text=raw_response or "")
@@ -783,9 +788,7 @@ async def draft_message(
             logger.warning(f"Failed to write full output file: {e}")
 
     # Apply deterministic composition on the agent's own text
-    composed_text = _compose_structured_draft(
-        stripped_text, session=session, is_completion=True
-    )
+    composed_text = _compose_structured_draft(stripped_text, session=session, is_completion=True)
 
     # Run the per-medium validator on the composed text
     violations = _validate_for_medium(composed_text, medium)
