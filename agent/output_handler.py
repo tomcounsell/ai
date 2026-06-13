@@ -99,9 +99,7 @@ class FileOutputHandler:
         log_path = self.log_dir / f"{session_id}.log"
 
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-        entry = (
-            f"[{timestamp}] chat={chat_id} reply_to={reply_to_msg_id}\n{text}\n---\n"
-        )
+        entry = f"[{timestamp}] chat={chat_id} reply_to={reply_to_msg_id}\n{text}\n---\n"
 
         try:
             with open(log_path, "a") as f:
@@ -158,9 +156,7 @@ class TelegramRelayOutputHandler:
         redis_url: str | None = None,
         file_handler: FileOutputHandler | None = None,
     ):
-        self._redis_url = redis_url or os.environ.get(
-            "REDIS_URL", "redis://localhost:6379/0"
-        )
+        self._redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0")
         self._file_handler = file_handler
         self._redis = None  # Lazy connection
 
@@ -254,9 +250,7 @@ class TelegramRelayOutputHandler:
         reply_all = [chat_id] + [
             a
             for a in (list(original_to) + list(original_cc))
-            if isinstance(a, str)
-            and a.lower() != own_addr
-            and a.lower() != primary_lower
+            if isinstance(a, str) and a.lower() != own_addr and a.lower() != primary_lower
         ]
         # Deduplicate while preserving order in case the bridge stamped the
         # same address twice across To and CC.
@@ -450,9 +444,7 @@ class TelegramRelayOutputHandler:
         # unchanged — the guard must never block delivery.
         #
         # Sequencing: redundancy filter → RTR → outbox rpush → record_recent_sent_draft
-        _draft_artifacts: dict = (
-            {}
-        )  # initialized here so record_sent section always has it
+        _draft_artifacts: dict = {}  # initialized here so record_sent section always has it
         try:
             from bridge.redundancy_filter import (
                 RTR_SUPPRESS_EMOJI as _REDUND_EMOJI,
@@ -484,15 +476,13 @@ class TelegramRelayOutputHandler:
                         extract_artifacts as _extract_arts,
                     )
 
-                    _draft_artifacts = getattr(
-                        draft, "artifacts", None
-                    ) or _extract_arts(delivery_text)
+                    _draft_artifacts = getattr(draft, "artifacts", None) or _extract_arts(
+                        delivery_text
+                    )
                 except Exception:
                     _draft_artifacts = {}
 
-                _recent_drafts: list = (
-                    getattr(session, "recent_sent_drafts", None) or []
-                )
+                _recent_drafts: list = getattr(session, "recent_sent_drafts", None) or []
                 _redund_verdict: _SuppressionVerdict = should_suppress(
                     delivery_text,
                     _draft_artifacts,
@@ -507,12 +497,8 @@ class TelegramRelayOutputHandler:
                     _matched_prior_preview: str | None = None
                     if _redund_verdict.matched_index is not None:
                         try:
-                            _matched_entry = _recent_drafts[
-                                _redund_verdict.matched_index
-                            ]
-                            _matched_prior_preview = str(
-                                _matched_entry.get("text", "")
-                            )[:200]
+                            _matched_entry = _recent_drafts[_redund_verdict.matched_index]
+                            _matched_prior_preview = str(_matched_entry.get("text", ""))[:200]
                         except (IndexError, AttributeError):
                             pass
                     self._rtr_emit_event(
@@ -536,9 +522,7 @@ class TelegramRelayOutputHandler:
                             chat_id, reply_to_msg_id, _REDUND_EMOJI, session_id
                         )
                         if self._file_handler is not None:
-                            await self._file_handler.send(
-                                chat_id, text, reply_to_msg_id, session
-                            )
+                            await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
                         return
                     # No anchor for the reaction — fall through and send.
                     # Mirrors RTR's no-anchor contract (lines 437-443 below).
@@ -597,9 +581,7 @@ class TelegramRelayOutputHandler:
                             chat_id, reply_to_msg_id, RTR_SUPPRESS_EMOJI, session_id
                         )
                         if self._file_handler is not None:
-                            await self._file_handler.send(
-                                chat_id, text, reply_to_msg_id, session
-                            )
+                            await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
                         return
                     # No anchor: fall through to send original.
                     # F4: silent suppression breaks the I-heard-you contract --
@@ -641,9 +623,7 @@ class TelegramRelayOutputHandler:
                         chat_id, reply_to_msg_id, RTR_SUPPRESS_EMOJI, session_id
                     )
                     if self._file_handler is not None:
-                        await self._file_handler.send(
-                            chat_id, text, reply_to_msg_id, session
-                        )
+                        await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
                     return
                 # No anchor for the 👀 reaction. F4: silent suppression breaks
                 # the I-heard-you contract -- fall-through preserves the audit
@@ -674,9 +654,7 @@ class TelegramRelayOutputHandler:
         # the same overflow path the drafter just produced).
         merged_paths: list[str] = []
         _seen_paths: set[str] = set()
-        for fp in (file_paths or []) + (
-            [drafter_overflow_file] if drafter_overflow_file else []
-        ):
+        for fp in (file_paths or []) + ([drafter_overflow_file] if drafter_overflow_file else []):
             if not fp or fp in _seen_paths:
                 continue
             _seen_paths.add(fp)
@@ -724,11 +702,7 @@ class TelegramRelayOutputHandler:
         # Append AFTER a successful rpush so a Redis failure does not pollute
         # the dedup baseline. The helper uses update_fields= to avoid clobbering
         # concurrent writes to other session fields (context_summary, expectations).
-        if (
-            _rpush_succeeded
-            and session is not None
-            and getattr(session, "is_sdlc", False)
-        ):
+        if _rpush_succeeded and session is not None and getattr(session, "is_sdlc", False):
             try:
                 session.record_recent_sent_draft(delivery_text, _draft_artifacts)
             except Exception as _rec_err:
@@ -954,21 +928,15 @@ class TelegramRelayOutputHandler:
         orphan the reaction in a different queue when ``session.session_id
         != chat_id`` (the normal case). See Implementation Note F7.
         """
-        payload = self._build_reaction_payload(
-            chat_id, reply_to_msg_id, emoji, session_id
-        )
+        payload = self._build_reaction_payload(chat_id, reply_to_msg_id, emoji, session_id)
         queue_key = f"telegram:outbox:{session_id}"
         try:
             r = self._get_redis()
             r.rpush(queue_key, json.dumps(payload))
             r.expire(queue_key, self.OUTBOX_TTL)
-            logger.info(
-                "Queued RTR suppress reaction to %s (emoji=%s)", queue_key, emoji
-            )
+            logger.info("Queued RTR suppress reaction to %s (emoji=%s)", queue_key, emoji)
         except Exception as e:
-            logger.error(
-                "Failed to write RTR reaction to Redis outbox %s: %s", queue_key, e
-            )
+            logger.error("Failed to write RTR reaction to Redis outbox %s: %s", queue_key, e)
 
     @staticmethod
     def _build_reaction_payload(
