@@ -172,14 +172,14 @@ memory_search(query: str, category=None, tag=None, limit=5) -> dict
 
 ### Title generation
 
-The stub label comes from a `Memory.title` field populated asynchronously by a local LLM. `tools/memory_search/title_generator.generate_title_async(memory_id, content)` spawns a daemon thread that calls Ollama (`OLLAMA_LOCAL_MODEL`, currently `gemma4:e2b`) with a 5s timeout and writes back the normalized title via `record.save()`. The function returns synchronously — writers never block.
+The stub label comes from a `Memory.title` field populated asynchronously by a local LLM. `tools/memory_search/title_generator.generate_title_async(memory_id, content)` spawns a daemon thread that calls Ollama via `settings.models.ollama_generation_model` (default `gemma4:31b-cloud`; env `MODELS__OLLAMA_GENERATION_MODEL`) with a 5s timeout and writes back the normalized title via `record.save()`. The function returns synchronously — writers never block. A defensive `<private>`-strip runs inside `_do_generate` before the HTTP call.
 
 Title generation is wired at every Memory writer call site in this hook path (no model-layer hook):
 
 - `.claude/hooks/hook_utils/memory_bridge.py::ingest()` after `Memory.safe_save` — content already passes through `strip_private`.
 - See [Subconscious Memory: Title generation](subconscious-memory.md#title-generation) for the full list of 7 writer call sites and the design rationale.
 
-**Graceful degradation:** if Ollama is unreachable or the model is not pulled, no title is written and stubs render as `[category]` only on next recall. The agent can still call `memory_get(memory_id)` to pull the full body — recall function is unaffected. `scripts/update/run.py` Step 4.8 pings Ollama on every `/update` and logs a non-fatal warning if `gemma4:e2b` is not available.
+**Graceful degradation:** if Ollama is unreachable or the configured generation model is unavailable (cloud or local), no title is written and stubs render as `[category]` only on next recall. The agent can still call `memory_get(memory_id)` to pull the full body — recall function is unaffected. `scripts/update/run.py` Step 4.8 pings Ollama on every `/update` and logs a non-fatal warning if the generation model is unavailable.
 
 ### MCP registration in `~/.claude.json`
 

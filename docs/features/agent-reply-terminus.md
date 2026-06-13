@@ -81,7 +81,7 @@ A regex anchored only to message start (`^\s*`) would have missed this — the i
 
 #### Few-Shot LLM Prompt
 
-The previous zero-shot prompt produced SILENT for explicit imperatives that didn't hit Fast-Path 0 (e.g., "merge it", "run it again"). The local Ollama model (`gemma4:e2b`) lacks the precision to distinguish continuation imperatives from conversation closers without examples.
+The previous zero-shot prompt produced SILENT for explicit imperatives that didn't hit Fast-Path 0 (e.g., "merge it", "run it again"). The local Ollama classifier (`granite4.1:3b` via `OLLAMA_CLASSIFIER_MODEL`) benefits from the few-shot examples to reliably distinguish continuation imperatives from conversation closers.
 
 The prompt now includes 14 labeled few-shot examples drawn from real misclassified messages and canonical patterns:
 

@@ -480,10 +480,10 @@ memory_search(query: str, category: str | None = None, tag: str | None = None, l
 `tools/memory_search/title_generator.generate_title_async(memory_id, content)` returns synchronously and spawns a daemon thread that calls Ollama out-of-band. The writer path never blocks. The thread:
 
 1. Reads `settings.models.ollama_host` and `settings.models.memory_title_timeout_s` (5s default).
-2. Uses `OLLAMA_LOCAL_MODEL` (currently `gemma4:e2b`) — there is no separate `MEMORY_TITLE_MODEL` setting; the title generator deliberately reuses the project's canonical local model.
-3. Prompts `"Generate a single descriptive title (max 12 words, no quotes, no period) for this memory:\n\n{content}"` (content truncated to 1000 chars).
+2. Uses `settings.models.ollama_generation_model` (default `gemma4:31b-cloud`; env `MODELS__OLLAMA_GENERATION_MODEL`) — there is no separate `MEMORY_TITLE_MODEL` setting; the title generator reads the per-machine generation model. A defensive `<private>`-strip runs inside `_do_generate` on the content before the HTTP call, regardless of whether the caller already stripped.
+3. Prompts `"Generate a single descriptive title (max 12 words, no quotes, no period) for this memory:\n\n{content}"` (content truncated to 1000 chars; the private strip runs before truncation so a `<private>` opener inside the first 1000 chars with its close beyond char 1000 is still removed).
 4. Normalizes the result (trims wrapping quotes, collapses whitespace, caps at 200 chars) and writes back via `record.save()`.
-5. Fails silently — Ollama unreachable / model not pulled → no title written → stub renders as `[category]` only on next recall.
+5. Fails silently — Ollama unreachable / model not pulled / cloud unavailable → no title written → stub renders as `[category]` only on next recall.
 
 **Wired at 7 writer call sites individually — no model-layer hook.** The cycle-3 architectural reversal in the plan rejected a `Memory.save()` override in favor of explicit `generate_title_async(...)` calls at each writer site. Sites:
 
@@ -518,7 +518,7 @@ PYTHONPATH is resolved per-machine via `git rev-parse --show-toplevel`. Concurre
 - Atomic write: `shutil.copy2` to `~/.claude.json.bak`, write to `.tmp`, `os.rename` (atomic on POSIX).
 - Idempotent: if the existing entry already matches all four fields (`type`/`command`/`args`/`env.PYTHONPATH`), the action returns `"ok"` without rewriting.
 
-Wired into `scripts/update/run.py` Step 4.8. Runs in `--full` and `--cron` (write modes that repair drift) and `--verify` (read-only — reports drift without writing). Every `/update` invocation rechecks the registration and fixes missing entries, drifted PYTHONPATH (after a repo move), and corrupt JSON. Step 4.8 also calls `mcp_memory.check_ollama_for_titles()` for an informational ping — non-fatal log line indicating whether `gemma4:e2b` is available for title generation.
+Wired into `scripts/update/run.py` Step 4.8. Runs in `--full` and `--cron` (write modes that repair drift) and `--verify` (read-only — reports drift without writing). Every `/update` invocation rechecks the registration and fixes missing entries, drifted PYTHONPATH (after a repo move), and corrupt JSON. Step 4.8 also calls `mcp_memory.check_ollama_for_titles()` for an informational ping — non-fatal log line indicating whether the configured generation model is available for title generation.
 
 ### Backfill for pre-existing records
 
@@ -634,7 +634,7 @@ The `memory-quality-audit` reflection (`reflections/memory_management.py::run_me
 
 Each cross-threshold signal becomes an "anomaly candidate" carrying observed/threshold values, 3-5 sample memory_ids, and an evidence string.
 
-**Layer 3 — Gemma classification (`gemma4:e2b`, fail-soft).** Samples up to 20 last-24h non-superseded `extraction-*` records and classifies them via a few-shot prompt at `temperature=0`. Wallclock-budgeted at 30s with a 10s `asyncio.wait_for` timeout per call (`GEMMA_CALL_TIMEOUT_SEC`; bumped from 5s — cold-start was too tight); runs sequentially in a dedicated single-thread `ThreadPoolExecutor` so the worker event loop stays unblocked. Verdicts grouped by `anomaly_signal`; signals with **≥ 3** matching records become candidates. Top-level `try/except` so any failure (Ollama daemon down, model missing, network error) cannot break the audit return contract — the audit completes layers 0+1+2 successfully without Layer 3.
+**Layer 3 — granite classification (`granite4.1:3b`, fail-soft).** Samples up to 20 last-24h non-superseded `extraction-*` records and classifies them via a few-shot structured-JSON prompt at `temperature=0`. Wallclock-budgeted at 30s with a 10s `asyncio.wait_for` timeout per call (`GEMMA_CALL_TIMEOUT_SEC`; bumped from 5s — cold-start was too tight); runs sequentially in a dedicated single-thread `ThreadPoolExecutor` so the worker event loop stays unblocked. Verdicts grouped by `anomaly_signal`; signals with **≥ 3** matching records become candidates. Top-level `try/except` so any failure (Ollama daemon down, model missing, network error) cannot break the audit return contract — the audit completes layers 0+1+2 successfully without Layer 3. Uses `OLLAMA_CLASSIFIER_MODEL` (`config/models.py`), which is the same `granite4.1:3b` already resident for PTY work — no extra memory load.
 
 **Issue surfacing.** For each Layer-2 or Layer-3 candidate (Layer 0 flags and Layer 1 supersedes never produce candidates), the audit calls `_file_anomaly_issue` which:
 
@@ -661,7 +661,7 @@ Returns `{"status": "ok", "findings": [...], "summary": "Memory health audit: N 
 | `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, BM25, write filter, access tracker, bloom, DictField metadata, reference pointer, `title` StringField for stub injection) |
 | `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants, RRF tuning, and dismissal tracking thresholds |
 | `mcp_servers/memory_server.py` | Stdio FastMCP server exposing `memory_get(memory_id)` and `memory_search(query, ...)`. Lazy imports for cold-start budget; `MCP_MEMORY_DRY_RUN=1` env enables fresh-shell smoke check. |
-| `tools/memory_search/title_generator.py` | `generate_title_async(memory_id, content)` — fire-and-forget Ollama call (uses `OLLAMA_LOCAL_MODEL`, 5s timeout) that writes `record.title` from a daemon thread. Fail-silent on Ollama down. |
+| `tools/memory_search/title_generator.py` | `generate_title_async(memory_id, content)` — fire-and-forget Ollama call (uses `settings.models.ollama_generation_model`, default `gemma4:31b-cloud`, 5s timeout) that writes `record.title` from a daemon thread. Defensive `<private>`-strip runs inside `_do_generate` before the HTTP call. Fail-silent on Ollama unavailable. |
 | `scripts/update/mcp_memory.py` | Idempotent `~/.claude.json` registration under `fcntl.flock` with atomic backup→tmp→rename. Wired into `scripts/update/run.py` Step 4.8 (write in `--full`/`--cron`, read-only in `--verify`). |
 | `scripts/backfill_memory_titles.py` | One-shot backfill for pre-existing records (idempotent — skips records with non-empty `title`). |
 | `agent/memory_hook.py` | PostToolUse thought injection with sliding window rate limiting, multi-query decomposition via `_cluster_keywords()` (Telegram agent path) |
@@ -752,7 +752,7 @@ Title-generation settings live on `settings.models` (in `config/settings.py`) ra
 | `models.ollama_host` | `http://localhost:11434` | `MODELS__OLLAMA_HOST` | Ollama base URL used by the memory title generator |
 | `models.memory_title_timeout_s` | `5.0` | `MODELS__MEMORY_TITLE_TIMEOUT_S` | HTTP timeout for the title-gen Ollama call. Title generation is fire-and-forget — exceeding the timeout logs at DEBUG and leaves `title` unchanged; stubs fall back to category-only rendering. |
 
-The model is `OLLAMA_LOCAL_MODEL` (`config/models.py`, currently `gemma4:e2b`) — there is no separate `MEMORY_TITLE_MODEL` setting.
+The model is `settings.models.ollama_generation_model` (default `gemma4:31b-cloud`, env `MODELS__OLLAMA_GENERATION_MODEL`) — there is no separate `MEMORY_TITLE_MODEL` setting.
 
 ## Project Key Partitioning
 
