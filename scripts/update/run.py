@@ -802,72 +802,43 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: ffmpeg: {fr.error}", v)
         result.warnings.append(f"ffmpeg: {fr.error}")
 
-    # Step 4: Ollama model (full mode only)
+    # Step 4: Ollama generation model (full mode only).
+    # Ensures the configured ollama_generation_model. For a :cloud tag this is a
+    # near-no-op reachability/signin check (no heavy local pull); for an -mlx tag
+    # it is the RAM-guarded probe→pull-once path inside ensure_generation_model().
+    # The granite *classifier* is covered separately by Step 4.75. The superseded
+    # gemma4:e2b rm is deferred to AFTER Step 4.75 and gated on the granite
+    # smoke-test + spike-1 parity marker (see Step 4.76).
     if config.do_ollama:
-        from config.models import OLLAMA_LOCAL_MODEL, OLLAMA_SUPERSEDED_MODELS
+        from config.models import ensure_generation_model
+        from config.settings import settings as _settings
 
-        log("Checking Ollama model...", v)
-        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", OLLAMA_LOCAL_MODEL)
-        ollama_check = verify.check_ollama(ollama_model)
-
-        if not ollama_check.available:
-            if ollama_check.error and "Not installed" not in ollama_check.error:
-                log(f"Pulling Ollama model {ollama_model}...", v)
-                if verify.pull_ollama_model(ollama_model):
-                    log(f"Ollama model {ollama_model} pulled", v)
-                else:
-                    result.warnings.append(f"Failed to pull Ollama model {ollama_model}")
-            else:
-                log("Ollama not installed, skipping", v)
-
-        # Smoke test: verify the model can generate a response
-        if ollama_check.available or verify.check_ollama(ollama_model).available:
-            log(f"Smoke testing {ollama_model}...", v)
+        log("Checking Ollama generation model...", v)
+        ollama_model = _settings.models.ollama_generation_model
+        gen_ok, gen_detail = ensure_generation_model(ollama_model)
+        if gen_ok:
+            log(f"Generation model OK ({ollama_model}): {gen_detail}", v)
+        else:
+            log(f"WARN: generation model {ollama_model}: {gen_detail}", v, always=True)
+            result.warnings.append(f"generation model {ollama_model}: {gen_detail}")
+        # Cloud-signin precondition: a :cloud tag needs the host signed in.
+        if ollama_model.endswith(":cloud"):
             try:
-                import subprocess
+                import subprocess as _sp_signin
 
-                smoke_result = subprocess.run(
-                    ["ollama", "run", ollama_model, "hi"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
+                _list = _sp_signin.run(
+                    ["ollama", "list"], capture_output=True, text=True, timeout=30
                 )
-                if smoke_result.returncode == 0 and smoke_result.stdout.strip():
-                    log(f"Smoke test passed for {ollama_model}", v)
-                else:
-                    result.warnings.append(
-                        f"Smoke test failed for {ollama_model}: "
-                        f"{smoke_result.stderr.strip() or 'empty response'}"
+                if _list.returncode == 0 and ":cloud" not in _list.stdout:
+                    msg = (
+                        "Ollama Cloud not signed in (no :cloud entry in 'ollama list') — "
+                        f"generation model {ollama_model} will be unreachable. "
+                        "Run: ollama signin"
                     )
-            except subprocess.TimeoutExpired:
-                result.warnings.append(f"Smoke test timed out for {ollama_model}")
-            except Exception as e:
-                result.warnings.append(f"Smoke test error for {ollama_model}: {e}")
-
-        # Cleanup superseded models (best-effort, never fail the update)
-        if ollama_check.available or verify.check_ollama(ollama_model).available:
-            log("Cleaning up superseded Ollama models...", v)
-            for old_model in OLLAMA_SUPERSEDED_MODELS:
-                try:
-                    import subprocess
-
-                    rm_result = subprocess.run(
-                        ["ollama", "rm", old_model],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-                    if rm_result.returncode == 0:
-                        log(f"  Removed {old_model}", v, always=True)
-                    else:
-                        # Model may not exist, that is fine
-                        stderr = rm_result.stderr.strip()
-                        if "not found" in stderr.lower():
-                            log(f"  {old_model} not present, skipping", v)
-                        else:
-                            log(f"  WARN: Failed to remove {old_model}: {stderr}", v)
-                except Exception as e:
-                    log(f"  WARN: Failed to remove {old_model}: {e}", v)
+                    log(f"WARN: {msg}", v, always=True)
+                    result.warnings.append(msg)
+            except Exception:
+                pass
 
     # Step 4.5: Machine identity verification
     log("Verifying machine identity...", v)
@@ -960,6 +931,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # silently mis-routes. Pull the model automatically if Ollama is running
     # but the model is missing; fail the update (suppress restart) if the
     # smoke test can't get a response within 30s.
+    granite_smoke_passed = False
     if config.do_service_restart:
         granite_model = "granite4.1:3b"
         log("Checking granite classifier model...", v)
@@ -1012,6 +984,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 )
                 if _smoke.returncode == 0 and _smoke.stdout.strip():
                     log(f"  {granite_model} smoke test passed", v)
+                    granite_smoke_passed = True
                 else:
                     log(
                         f"FAIL: {granite_model} smoke test returned no output"
@@ -1037,6 +1010,51 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             except Exception as _e:
                 result.warnings.append(f"granite classifier smoke test error: {_e}")
                 config = replace(config, do_service_restart=False)
+
+    # Step 4.76: Retire superseded Ollama models (relocated AFTER the granite
+    # smoke-test). The gemma4:e2b rm is irreversible per-machine, so it is gated
+    # on BOTH (a) the granite smoke-test having passed earlier in THIS run
+    # (granite_smoke_passed — read the boolean, never `rm`'s exit code, which is
+    # 0 even when the model is already absent), AND (b) the spike-1 parity marker
+    # `data/spike1_parity_ok` (shadow-mode, a valid poor-parity response, needs
+    # gemma resident — never delete it out from under shadow-mode). If either is
+    # missing, the machine keeps its superseded models until both conditions hold.
+    if config.do_ollama:
+        from config.models import OLLAMA_SUPERSEDED_MODELS
+
+        spike1_parity_ok = (project_dir / "data" / "spike1_parity_ok").exists()
+        if granite_smoke_passed and spike1_parity_ok:
+            log("Cleaning up superseded Ollama models...", v)
+            for old_model in OLLAMA_SUPERSEDED_MODELS:
+                try:
+                    import subprocess as _sp_rm
+
+                    rm_result = _sp_rm.run(
+                        ["ollama", "rm", old_model],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if rm_result.returncode == 0:
+                        log(f"  Removed {old_model}", v, always=True)
+                    else:
+                        stderr = rm_result.stderr.strip()
+                        if "not found" in stderr.lower():
+                            log(f"  {old_model} not present, skipping", v)
+                        else:
+                            log(f"  WARN: Failed to remove {old_model}: {stderr}", v)
+                except Exception as e:
+                    log(f"  WARN: Failed to remove {old_model}: {e}", v)
+        else:
+            reason = []
+            if not granite_smoke_passed:
+                reason.append("granite smoke-test not passed this run")
+            if not spike1_parity_ok:
+                reason.append("spike-1 parity marker absent")
+            log(
+                f"Skipping superseded-model cleanup ({'; '.join(reason)})",
+                v,
+            )
 
     # Step 4.8: Verify memory MCP registration in ~/.claude.json (idempotent).
     # Self-heals drift, fresh-machine setup, and manual edits. Runs in all

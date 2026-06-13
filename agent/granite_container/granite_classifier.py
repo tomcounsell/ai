@@ -47,7 +47,8 @@ except ImportError:  # pragma: no cover -- ollama is a hard runtime dep
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "granite4.1:3b"
+# Single source of truth for the granite classifier model id (config/models.py).
+from config.models import OLLAMA_CLASSIFIER_MODEL as DEFAULT_MODEL  # noqa: E402
 
 
 def ensure_granite_model(

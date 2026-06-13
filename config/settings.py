@@ -169,20 +169,25 @@ class GoogleAuthSettings(BaseModel):
 class ModelSettings(BaseModel):
     """Local model configuration settings."""
 
-    ollama_vision_model: str = Field(
-        default="gemma4:e2b",
+    ollama_generation_model: str = Field(
+        default="gemma4:31b-cloud",
         description=(
-            "Ollama vision model for local image analysis (env: OLLAMA_VISION_MODEL). "
-            "Defaults to the same multimodal model as OLLAMA_LOCAL_MODEL so a single "
-            "Ollama pull serves both text and vision paths."
+            "Per-machine free-text generation model for memory titles and the "
+            "test AI judge (env: MODELS__OLLAMA_GENERATION_MODEL). Default is the "
+            "Ollama Cloud variant 'gemma4:31b-cloud' (a lightweight hosted pointer "
+            "that fits any machine). RAM-rich Apple-Silicon hosts may set "
+            "'gemma4:31b-mlx' to run generation locally. /setup selects the "
+            "variant from available RAM (written to ~/.zshenv, machine-local); "
+            "/update verifies it via ensure_generation_model(). Classification "
+            "uses OLLAMA_CLASSIFIER_MODEL (granite), not this setting."
         ),
     )
     ollama_host: str = Field(
         default="http://localhost:11434",
         description=(
-            "Base URL of the local Ollama HTTP API. Used by the memory title "
-            "generator for async title creation on memory save (env: "
-            "MODELS__OLLAMA_HOST). Default points at the standard Ollama port."
+            "Base URL of the local Ollama HTTP API. Serves the granite classifier "
+            "and the memory title generator's async title creation on memory save "
+            "(env: MODELS__OLLAMA_HOST). Default points at the standard Ollama port."
         ),
     )
     memory_title_timeout_s: float = Field(

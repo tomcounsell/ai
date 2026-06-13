@@ -17,7 +17,7 @@ import logging
 import os
 from pathlib import Path
 
-from config.models import HAIKU, OLLAMA_LOCAL_MODEL
+from config.models import HAIKU
 from utils.json_cache import JsonCache, get_or_compute
 
 logger = logging.getLogger(__name__)
@@ -86,10 +86,12 @@ def _summarize_via_ollama(prompt: str) -> str | None:
         from config.settings import settings
 
         base_url = settings.models.ollama_host
+        gen_model = settings.models.ollama_generation_model
     except Exception:
         base_url = "http://localhost:11434"
+        gen_model = "gemma4:31b-cloud"
 
-    payload = json.dumps({"model": OLLAMA_LOCAL_MODEL, "prompt": prompt, "stream": False}).encode()
+    payload = json.dumps({"model": gen_model, "prompt": prompt, "stream": False}).encode()
     req = urllib.request.Request(
         f"{base_url.rstrip('/')}/api/generate",
         data=payload,
