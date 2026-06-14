@@ -1250,7 +1250,7 @@ class TestWrapupGuard(unittest.TestCase):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
             # Should not raise NameError or crash.
-            c.run()
+            result = c.run()
 
         # OPERATOR_TERMINAL_MESSAGE delivered (max attempts exhausted).
         self.assertIn(OPERATOR_TERMINAL_MESSAGE, terminal_deliveries)
@@ -1260,6 +1260,14 @@ class TestWrapupGuard(unittest.TestCase):
             wrapup_with_seed,
             f"expected PM_WRAPUP_PROMPT to contain DEV_REPORT_UNAVAILABLE; "
             f"PM writes were: {wrapup_prompts_written!r}",
+        )
+        # Wrap-up seed-build fallback must increment transcript_fallback_count (SDLC tech-debt fix).
+        # The prime-turn and wrapup-response also fall back (both transcript reads return ""),
+        # so the counter is >= 1 from the seed-build site alone.
+        self.assertGreaterEqual(
+            result.transcript_fallback_count,
+            1,
+            "wrap-up seed-build DEV_REPORT_UNAVAILABLE branch must increment transcript_fallback_count",
         )
 
     def test_terminal_message_sent_when_pm_silent(self) -> None:

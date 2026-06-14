@@ -1189,6 +1189,7 @@ class Container:
                         "[granite-container] wrap-up guard: Dev transcript empty/missing; "
                         "using DEV_REPORT_UNAVAILABLE seed"
                     )
+                    result.transcript_fallback_count += 1
 
             for _attempt in range(MAX_WRAPUP_ATTEMPTS):
                 # Write the wrap-up prompt to PM.
