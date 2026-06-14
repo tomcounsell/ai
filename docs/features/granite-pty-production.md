@@ -62,15 +62,20 @@ Telegram inbound → bridge enqueue → AgentSession in Redis
 
 ## Startup precondition: granite must be reachable
 
-Granite is the routing brain — every PM/Dev turn is classified and translated
-by an `ollama` call against `granite4.1:3b`. A worker that comes up without it
-would accept sessions and silently mis-route every one of them. Because the
-granite PTY path is **all-or-nothing** (no runtime fallback), worker startup
-treats granite as a **hard precondition**, not a best-effort init.
+Granite is the classification model — every PM/Dev turn is classified by a
+regex parse over the session's JSONL transcript content; payloads are forwarded
+verbatim — no LLM rewrite on the PM↔Dev channel. A worker that comes up
+without granite would accept sessions and silently mis-route every one of them
+(the classification role still requires it). Because the granite PTY path is
+**all-or-nothing** (no runtime fallback), worker startup treats granite as a
+**hard precondition**, not a best-effort init.
 
 `worker/__main__.py` Step 4b.5 calls
 `granite_classifier.ensure_granite_model()` (run off the event loop via
-`asyncio.to_thread`) *before* the PTY pool is built. The helper:
+`asyncio.to_thread`) *before* the PTY pool is built. This is a precondition for
+the **classification** role — the PM↔Dev content channel no longer calls ollama
+(payloads are forwarded verbatim from the JSONL transcript), but the
+turn-classification step still requires the model. The helper:
 
 1. confirms the `ollama` python client is importable (the classifier uses it),
 2. confirms the `ollama` CLI/daemon is on `PATH`,
@@ -304,6 +309,18 @@ raw ISO-8601 timestamp string from the JSONL entry. Before assigning it to
 it with `datetime.fromisoformat()` to a tz-aware `datetime` object. A conversion
 failure is silently ignored (the field stays at its previous value).
 
+### JSONL Transcript Content Surface
+
+The PTY operator reads message content from the Claude Code JSONL transcript
+(the same surface the telemetry tailer consumes) rather than scraping the painted
+PTY frame. `last_assistant_text()` in `transcript_tailer.py` reads the last
+assistant turn's text blocks, walking newest-first to skip tool-only final entries.
+
+The flush-timing heuristic (read-at-idle vs. assistant-message-flushed) is mitigated
+by an mtime snapshot before each idle poll, but not fully eliminated. The deterministic
+complement is followup issue **#1688** ("Hook-driven turn returns for granite PTY
+shuttle"), which replaces idle-poll heuristics with hook-driven turn boundaries.
+
 ### Granite identity fields
 
 `AgentSession` now carries four first-class granite identity fields (issue
@@ -392,13 +409,15 @@ steady-state budget and report a misleading `pm_hang`.
    context-prefixed message a first turn gets), so threaded conversations
    keep their conversation context — what is lost is the TUI-internal
    transcript (tool-call history), not the conversational context.
-2. **`[/dev]` turns hard-depend on local ollama.** `extract_dev_prompt` /
-   `summarize_for_pm` call `ollama.chat` (`granite4.1:3b`); if ollama goes down
-   *after* startup the container exits `exception` on the first dev-routed
-   turn. Worker startup now health-checks granite as a hard precondition (see
-   [Startup precondition](#startup-precondition-granite-must-be-reachable)), so
-   a worker can no longer come up with granite already absent — but it does not
-   re-check mid-run.
+2. **`[/dev]` content is read from the JSONL transcript, not from ollama.** The
+   `extract_dev_prompt` / `summarize_for_pm` ollama call sites have been
+   removed. PM→Dev now uses `classification.payload` (verbatim from the PM's
+   JSONL transcript) and Dev→PM forwards Dev's last assistant text verbatim via
+   `last_assistant_text()` in `transcript_tailer.py`. If ollama goes down
+   *after* startup the classification step would fail, but message content
+   forwarding is unaffected. Worker startup still health-checks granite as a
+   hard precondition for the classification role (see
+   [Startup precondition](#startup-precondition-granite-must-be-reachable)).
 3. **Multi-turn conversations end at the first `[/user]`.** The container
    exits on `pm_user`; a user reply spawns a new container run (fresh PTYs,
    fresh context apart from the steering message).
@@ -526,7 +545,7 @@ Since issue #1636, `granite4.1:3b` is the **only local instruct model** required
 
 | Role | Call sites | Constant |
 |------|-----------|----------|
-| PTY operator (PM↔Dev routing) | `Container.extract_dev_prompt`, `Container.summarize_for_pm` | `GRANITE__DEV_MODEL` (default `granite4.1:3b`) |
+| PTY operator (PM↔Dev routing) | regex classify + verbatim transcript-content forward via `last_assistant_text()` in `transcript_tailer.py` (no model call on the content channel) | `GRANITE__DEV_MODEL` (default `granite4.1:3b`) — used for turn classification only |
 | Bridge message classification | `routing.classify_needs_response`, `routing.classify_terminus`, `routing._classify_work_request_llm`, `reflections._gemma_classify` (memory audit Layer 3), `email_cs.triage` | `OLLAMA_CLASSIFIER_MODEL = "granite4.1:3b"` in `config/models.py` |
 
 Free-text generation (memory title generation, test AI judge) uses the per-machine `ollama_generation_model` setting (`config/settings.py::ModelSettings`, env `MODELS__OLLAMA_GENERATION_MODEL`, default `gemma4:31b-cloud`). The generation model is **not** a hard worker precondition — generation is fail-soft everywhere. Compare to granite, which IS a hard precondition (Step 4b.5 in `worker/__main__.py`).
