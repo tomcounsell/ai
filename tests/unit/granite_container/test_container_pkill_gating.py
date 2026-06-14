@@ -62,7 +62,7 @@ class TestPkillGating(unittest.TestCase):
         dev._released_to_pool = True
         c = Container(user_message="hi", pm_pty=pm, dev_pty=dev)
 
-        def _lat_stub(path, *, mtime_before=None):
+        def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
                 return ""
             return "[/complete]\nDone."

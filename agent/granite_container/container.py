@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -52,7 +51,10 @@ from agent.granite_container.startup_parser import (
     StartupEvent,
     parse_startup_frame,
 )
-from agent.granite_container.transcript_tailer import last_assistant_text
+from agent.granite_container.transcript_tailer import (
+    last_assistant_text,
+    text_bearing_count,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -792,14 +794,11 @@ class Container:
             # destination (user/complete/dev) during its prime response
             # rather than waiting for the first steady-state idle.
             pm_transcript = result.pm_transcript_path
-            # Snapshot PM transcript mtime before the idle read so
-            # last_assistant_text can guard against stale-flush.
-            pm_prime_mtime_before = None
-            if pm_transcript:
-                try:
-                    pm_prime_mtime_before = os.path.getmtime(pm_transcript)
-                except OSError:
-                    pass
+            # Snapshot the count of text-bearing PM assistant entries before the
+            # idle read so last_assistant_text can require a NEW text-bearing
+            # entry this cycle (content-identity guard; immune to intra-turn
+            # tool_use/tool_result writes that defeated the old mtime guard).
+            pm_prime_baseline = text_bearing_count(pm_transcript) if pm_transcript else 0
             pm_prime_idle, pm_prime_buf, pm_prime_marker, pm_prime_ms = self._cycle_idle(
                 self._pm_pty
             )
@@ -813,7 +812,7 @@ class Container:
                 # Read PM's last assistant text verbatim from the JSONL
                 # transcript (zero-LLM path: no classify on painted pm_buf).
                 pm_prime_text = (
-                    last_assistant_text(pm_transcript, mtime_before=pm_prime_mtime_before)
+                    last_assistant_text(pm_transcript, baseline_text_count=pm_prime_baseline)
                     if pm_transcript
                     else ""
                 )
@@ -865,14 +864,10 @@ class Container:
                                 "PM buffer unchanged; falling through to fresh idle read"
                             )
 
-                    # Snapshot PM transcript mtime before idle read so
-                    # last_assistant_text can guard against stale-flush.
-                    pm_mtime_before = None
-                    if pm_transcript:
-                        try:
-                            pm_mtime_before = os.path.getmtime(pm_transcript)
-                        except OSError:
-                            pass
+                    # Snapshot the count of text-bearing PM assistant entries
+                    # before the idle read so last_assistant_text can require a
+                    # NEW text-bearing entry this cycle (content-identity guard).
+                    pm_baseline = text_bearing_count(pm_transcript) if pm_transcript else 0
 
                     # Wait for PM idle.
                     pm_idle, pm_buf, pm_marker, pm_ms = self._cycle_idle(self._pm_pty)
@@ -889,7 +884,7 @@ class Container:
                     # transcript (zero-LLM: classify on transcript, not
                     # painted PTY buffer pm_buf).
                     pm_text = (
-                        last_assistant_text(pm_transcript, mtime_before=pm_mtime_before)
+                        last_assistant_text(pm_transcript, baseline_text_count=pm_baseline)
                         if pm_transcript
                         else ""
                     )
@@ -1092,15 +1087,13 @@ class Container:
             return RouteOutcome(should_break=True, exit_reason="dev_hang")
         self._dev_pty.write(dev_prompt)
 
-        # Snapshot mtime before waiting for Dev so last_assistant_text
-        # can detect whether the transcript was updated this cycle.
+        # Snapshot the count of text-bearing Dev assistant entries before waiting
+        # for Dev so last_assistant_text can require a NEW text-bearing entry this
+        # cycle. This is the dominant bug shape: the Dev→PM verbatim forward is the
+        # most tool-heavy path, and the old mtime guard was defeated by intra-turn
+        # tool_use/tool_result writes (forwarding the prior turn's text).
         dev_transcript = result.dev_transcript_path
-        dev_mtime_before = None
-        if dev_transcript:
-            try:
-                dev_mtime_before = os.path.getmtime(dev_transcript)
-            except OSError:
-                pass
+        dev_baseline = text_bearing_count(dev_transcript) if dev_transcript else 0
 
         # Wait for Dev to respond and reach idle.
         dev_idle, dev_buf, dev_marker, dev_ms = self._cycle_idle(self._dev_pty)
@@ -1113,16 +1106,16 @@ class Container:
         # Read Dev's verbatim last assistant text from the JSONL transcript.
         # This is the zero-LLM shuttle: no summarize_for_pm rewrite.
         dev_text = (
-            last_assistant_text(dev_transcript, mtime_before=dev_mtime_before)
+            last_assistant_text(dev_transcript, baseline_text_count=dev_baseline)
             if dev_transcript
             else ""
         )
         if not dev_text:
             logger.warning(
                 "[granite-container] Dev transcript read returned empty "
-                "(path=%r, mtime_before=%s); falling back to transcript_fallback_count bump",
+                "(path=%r, baseline_text_count=%s); falling back to transcript_fallback_count bump",
                 dev_transcript,
-                dev_mtime_before,
+                dev_baseline,
             )
             result.transcript_fallback_count += 1
             # Still write something to PM so the loop can continue.
@@ -1199,15 +1192,11 @@ class Container:
                     break
                 self._pm_pty.write(PM_WRAPUP_PROMPT.format(seed=seed))
 
-                # Snapshot PM transcript mtime before the cycle so
-                # last_assistant_text can detect stale-flush.
+                # Snapshot the count of text-bearing PM assistant entries before
+                # the cycle so last_assistant_text can require a NEW text-bearing
+                # entry this cycle (content-identity guard).
                 pm_transcript = result.pm_transcript_path
-                pm_mtime_before = None
-                if pm_transcript:
-                    try:
-                        pm_mtime_before = os.path.getmtime(pm_transcript)
-                    except OSError:
-                        pass
+                pm_baseline = text_bearing_count(pm_transcript) if pm_transcript else 0
 
                 # Wait for PM to respond.
                 pm_idle, pm_buf, _, _ = self._cycle_idle(self._pm_pty)
@@ -1218,7 +1207,7 @@ class Container:
                 # Read PM's last assistant text verbatim from the JSONL
                 # transcript (zero-LLM path: no ollama classify on pm_buf).
                 pm_text = (
-                    last_assistant_text(pm_transcript, mtime_before=pm_mtime_before)
+                    last_assistant_text(pm_transcript, baseline_text_count=pm_baseline)
                     if pm_transcript
                     else ""
                 )

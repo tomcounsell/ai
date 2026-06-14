@@ -139,7 +139,7 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
         # before classify), then prime-relay "[/complete]\nShipped PR #42.".
         pm_transcript_texts = iter(["[/complete]\nShipped PR #42."])
 
-        def _lat_stub(path, *, mtime_before=None):
+        def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
                 return ""
             try:
@@ -220,7 +220,7 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
         )
         dev_transcript_text = "I added foo to bar.py and ran tests."
 
-        def _last_assistant_text_stub(path, *, mtime_before=None):
+        def _last_assistant_text_stub(path, *, baseline_text_count=None):
             if not path:
                 return ""
             if "mock-session-dev" in path:
@@ -311,7 +311,7 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
             ]
         )
 
-        def _lat_stub(path, *, mtime_before=None):
+        def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
                 return ""
             try:
@@ -389,7 +389,7 @@ class TestContainerUserAddress(unittest.TestCase):
         # PM transcript: only the prime-relay call matters (returns [/user] text).
         pm_transcript_texts = iter(["[/user]\nstatus update 1"])
 
-        def _lat_stub(path, *, mtime_before=None):
+        def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
                 return ""
             try:
@@ -473,7 +473,7 @@ class TestContainerMaxTurns(unittest.TestCase):
             ]
         )
 
-        def _lat_stub(path, *, mtime_before=None):
+        def _lat_stub(path, *, baseline_text_count=None):
             if not path:
                 return ""
             if "mock-session-dev" in path:
@@ -572,7 +572,7 @@ class TestContainerStartupHardCeiling(unittest.TestCase):
         # PM transcript: prime-relay returns [/complete]\nDone.
         pm_transcript_texts = iter(["[/complete]\nDone."])
 
-        def _lat_stub(path, *, mtime_before=None):
+        def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
                 return ""
             try:
@@ -805,7 +805,7 @@ class TestContainerOnTurnHook(unittest.TestCase):
             ]
         )
 
-        def _lat_stub(path, *, mtime_before=None):
+        def _lat_stub(path, *, baseline_text_count=None):
             if path is None:
                 return ""
             try:
@@ -993,7 +993,7 @@ class TestPrimeTurnRelay(unittest.TestCase):
             ]
         )
 
-        def _lat_stub(path, *, mtime_before=None):
+        def _lat_stub(path, *, baseline_text_count=None):
             if not path:
                 return ""
             if "mock-session-dev" in path:
@@ -1055,7 +1055,7 @@ class TestPrimeTurnRelay(unittest.TestCase):
         # PM transcript: prime-relay returns [/user] text.
         pm_transcript_texts = iter(["[/user]\nStatus: all good."])
 
-        def _lat_stub(path, *, mtime_before=None):
+        def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
                 return ""
             try:
@@ -1142,7 +1142,7 @@ class TestWrapupGuard(unittest.TestCase):
             ]
         )
 
-        def _lat_stub(path, *, mtime_before=None):
+        def _lat_stub(path, *, baseline_text_count=None):
             if not path:
                 return ""
             if "mock-session-dev" in path:
@@ -1229,7 +1229,7 @@ class TestWrapupGuard(unittest.TestCase):
             ]
         )
 
-        def _lat_stub(path, *, mtime_before=None):
+        def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
                 return ""
             try:
@@ -1305,7 +1305,7 @@ class TestWrapupGuard(unittest.TestCase):
             ]
         )
 
-        def _lat_stub(path, *, mtime_before=None):
+        def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
                 return ""
             try:
@@ -1363,7 +1363,7 @@ class TestWrapupGuard(unittest.TestCase):
             ]
         )
 
-        def _lat_stub(path, *, mtime_before=None):
+        def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
                 return ""
             try:

@@ -18,6 +18,7 @@ from agent.granite_container.transcript_tailer import (
     fold_events,
     last_assistant_text,
     read_transcript_telemetry,
+    text_bearing_count,
 )
 
 # ---------------------------------------------------------------------------
@@ -686,24 +687,6 @@ class TestLastAssistantText(unittest.TestCase):
         )
         self.assertEqual(last_assistant_text(path), "second")
 
-    def test_concatenates_text_blocks(self) -> None:
-        """Concatenates multiple text blocks in a single entry."""
-        path = self._write_transcript(
-            self._tmp,
-            [
-                {
-                    "type": "assistant",
-                    "message": {
-                        "content": [
-                            {"type": "text", "text": "hello "},
-                            {"type": "text", "text": "world"},
-                        ]
-                    },
-                },
-            ],
-        )
-        self.assertEqual(last_assistant_text(path), "hello world")
-
     def test_excludes_tool_use_tool_result_thinking_blocks(self) -> None:
         """Does not include non-text blocks in the result."""
         path = self._write_transcript(
@@ -777,39 +760,157 @@ class TestLastAssistantText(unittest.TestCase):
         result = last_assistant_text(path)
         self.assertEqual(result, "complete")
 
-    def test_stale_mtime_returns_empty(self) -> None:
-        """Returns '' when file mtime has NOT advanced past mtime_before."""
-        import os
-        import time
+    def test_stale_prior_turn_intra_turn_tool_writes_returns_empty(self) -> None:
+        """BLOCKER regression: with a baseline at the prior turn's count, an
+        intra-turn tool round-trip (tool_use + tool_result, NO new assistant
+        text) must NOT forward the prior turn's text — returns ''.
 
-        path = os.path.join(self._tmp, "stale.jsonl")
-        with open(path, "w") as f:
-            f.write(
-                '{"type": "assistant", "message": '
-                '{"content": [{"type": "text", "text": "stale"}]}}\n'
-            )
-        # Use mtime AFTER writing (same or later) as mtime_before
-        mtime = os.path.getmtime(path)
-        time.sleep(0.01)  # ensure we're past the write
-        result = last_assistant_text(path, mtime_before=mtime)
-        # mtime has NOT advanced since mtime_before — should return ""
+        This is the exact shape the old mtime guard mishandled: mtime advances
+        on the tool_use/tool_result line writes, so the mtime guard PASSED and
+        the newest-first walk returned the prior turn's text. The content-
+        identity baseline (count of text-bearing entries) is immune: tool lines
+        do not increment the count.
+        """
+        path = self._write_transcript(
+            self._tmp,
+            [
+                # Prior completed turn (baseline = 1 text-bearing entry).
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "prior turn text"}]},
+                },
+                # Current turn opens with a tool round-trip but has NOT yet
+                # flushed its closing assistant text.
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {"content": [{"type": "tool_result", "content": "ok"}]},
+                },
+            ],
+        )
+        result = last_assistant_text(path, baseline_text_count=1)
         self.assertEqual(result, "")
 
-    def test_fresh_mtime_returns_text(self) -> None:
-        """Returns text when file mtime HAS advanced past mtime_before."""
-        import os
-        import time
+    def test_fresh_turn_after_new_text_entry_returns_new_text(self) -> None:
+        """After a new assistant[text] entry flushes (count grows past the
+        baseline), returns the NEW final text — not the prior turn's text."""
+        path = self._write_transcript(
+            self._tmp,
+            [
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "prior turn text"}]},
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {"content": [{"type": "tool_result", "content": "ok"}]},
+                },
+                # New closing text flushes — count is now 2 > baseline 1.
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "new final text"}]},
+                },
+            ],
+        )
+        result = last_assistant_text(path, baseline_text_count=1)
+        self.assertEqual(result, "new final text")
 
-        path = os.path.join(self._tmp, "fresh.jsonl")
-        # Capture mtime_before BEFORE writing
-        mtime_before = time.time() - 1  # 1 second before now
-        with open(path, "w") as f:
-            f.write(
-                '{"type": "assistant", "message": '
-                '{"content": [{"type": "text", "text": "fresh"}]}}\n'
-            )
-        result = last_assistant_text(path, mtime_before=mtime_before)
-        self.assertEqual(result, "fresh")
+    def test_no_baseline_returns_newest_text(self) -> None:
+        """With baseline_text_count=None, behaves as before — newest text."""
+        path = self._write_transcript(
+            self._tmp,
+            [
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "first"}]},
+                },
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "second"}]},
+                },
+            ],
+        )
+        self.assertEqual(last_assistant_text(path, baseline_text_count=None), "second")
+
+    def test_multiple_text_blocks_joined_with_newline(self) -> None:
+        """Multiple text blocks within one entry are joined with '\\n'."""
+        path = self._write_transcript(
+            self._tmp,
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "line one"},
+                            {"type": "text", "text": "line two"},
+                        ]
+                    },
+                },
+            ],
+        )
+        self.assertEqual(last_assistant_text(path), "line one\nline two")
+
+    def test_bom_first_line_still_parses(self) -> None:
+        """A UTF-8 BOM on the first line does not drop that line."""
+        import os
+
+        path = os.path.join(self._tmp, "bom.jsonl")
+        line = json.dumps(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "bom text"}]},
+            }
+        )
+        # Write with a leading UTF-8 BOM.
+        with open(path, "w", encoding="utf-8-sig") as f:
+            f.write(line + "\n")
+        self.assertEqual(last_assistant_text(path), "bom text")
+
+    def test_text_bearing_count(self) -> None:
+        """text_bearing_count returns the number of text-bearing assistant
+        entries: 0 for empty/missing, correct count for multi-entry."""
+        import os
+
+        # Missing file.
+        self.assertEqual(text_bearing_count("/nonexistent/x.jsonl"), 0)
+
+        # Empty file.
+        empty = os.path.join(self._tmp, "empty_count.jsonl")
+        open(empty, "w").close()
+        self.assertEqual(text_bearing_count(empty), 0)
+
+        # Multi-entry: two text-bearing, one tool-only (not counted).
+        multi = self._write_transcript(
+            self._tmp,
+            [
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "a"}]},
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "b"}]},
+                },
+            ],
+        )
+        self.assertEqual(text_bearing_count(multi), 2)
 
     def test_skips_tool_only_final_entry_returns_earlier_text(self) -> None:
         """Skips a final entry that is pure tool_use; returns earlier text-bearing entry."""
