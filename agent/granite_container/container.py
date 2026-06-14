@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -796,9 +797,7 @@ class Container:
             pm_prime_mtime_before = None
             if pm_transcript:
                 try:
-                    import os as _os
-
-                    pm_prime_mtime_before = _os.path.getmtime(pm_transcript)
+                    pm_prime_mtime_before = os.path.getmtime(pm_transcript)
                 except OSError:
                     pass
             pm_prime_idle, pm_prime_buf, pm_prime_marker, pm_prime_ms = self._cycle_idle(
@@ -871,9 +870,7 @@ class Container:
                     pm_mtime_before = None
                     if pm_transcript:
                         try:
-                            import os as _os
-
-                            pm_mtime_before = _os.path.getmtime(pm_transcript)
+                            pm_mtime_before = os.path.getmtime(pm_transcript)
                         except OSError:
                             pass
 
@@ -1101,9 +1098,7 @@ class Container:
         dev_mtime_before = None
         if dev_transcript:
             try:
-                import os as _os
-
-                dev_mtime_before = _os.path.getmtime(dev_transcript)
+                dev_mtime_before = os.path.getmtime(dev_transcript)
             except OSError:
                 pass
 
@@ -1209,9 +1204,7 @@ class Container:
                 pm_mtime_before = None
                 if pm_transcript:
                     try:
-                        import os as _os
-
-                        pm_mtime_before = _os.path.getmtime(pm_transcript)
+                        pm_mtime_before = os.path.getmtime(pm_transcript)
                     except OSError:
                         pass
 

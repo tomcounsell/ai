@@ -956,7 +956,7 @@ class TestPrimeTurnRelay(unittest.TestCase):
         # Buffer sequence:
         # [0] startup
         # [1] prime-turn relay: [/dev]\nBuild X → routes to Dev
-        #     Dev cycle runs, summarize_for_pm called, summary written to PM.
+        #     Dev cycle runs, last_assistant_text read, verbatim text written to PM.
         #     _prime_relayed=True (else branch fires for all non-break outcomes
         #     including dev routes).
         # [2] await PM idle for summary write (inside dev routing)
