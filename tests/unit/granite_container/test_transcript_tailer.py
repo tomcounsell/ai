@@ -785,7 +785,8 @@ class TestLastAssistantText(unittest.TestCase):
         path = os.path.join(self._tmp, "stale.jsonl")
         with open(path, "w") as f:
             f.write(
-                '{"type": "assistant", "message": {"content": [{"type": "text", "text": "stale"}]}}\n'
+                '{"type": "assistant", "message": '
+                '{"content": [{"type": "text", "text": "stale"}]}}\n'
             )
         # Use mtime AFTER writing (same or later) as mtime_before
         mtime = os.path.getmtime(path)
@@ -804,7 +805,8 @@ class TestLastAssistantText(unittest.TestCase):
         mtime_before = time.time() - 1  # 1 second before now
         with open(path, "w") as f:
             f.write(
-                '{"type": "assistant", "message": {"content": [{"type": "text", "text": "fresh"}]}}\n'
+                '{"type": "assistant", "message": '
+                '{"content": [{"type": "text", "text": "fresh"}]}}\n'
             )
         result = last_assistant_text(path, mtime_before=mtime_before)
         self.assertEqual(result, "fresh")
@@ -821,9 +823,7 @@ class TestLastAssistantText(unittest.TestCase):
                 {
                     "type": "assistant",
                     "message": {
-                        "content": [
-                            {"type": "tool_use", "id": "t1", "name": "bash", "input": {}}
-                        ]
+                        "content": [{"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]
                     },
                 },
             ],
@@ -838,9 +838,7 @@ class TestLastAssistantText(unittest.TestCase):
                 {
                     "type": "assistant",
                     "message": {
-                        "content": [
-                            {"type": "tool_use", "id": "t1", "name": "bash", "input": {}}
-                        ]
+                        "content": [{"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]
                     },
                 },
                 {
