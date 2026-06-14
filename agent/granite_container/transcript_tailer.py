@@ -40,6 +40,7 @@ poll so the function can ``seek()`` past already-processed bytes.  Passing
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -322,3 +323,70 @@ def read_transcript_telemetry(
             tailer_last_read_at=base.tailer_last_read_at,
             byte_offset=base.byte_offset,
         )
+
+
+def last_assistant_text(transcript_path: str, *, mtime_before: float | None = None) -> str:
+    """Return the concatenated text blocks from the most recent assistant entry
+    in the Claude Code JSONL transcript that has at least one text block.
+
+    Walks assistant entries newest-first, skipping entries that are pure
+    tool_use/tool_result/thinking with no text blocks, so a tool-only final
+    entry does not collapse to empty when an earlier textual turn exists.
+
+    Returns "" when:
+    - file is missing / unreadable
+    - no assistant entry with text blocks exists
+    - all JSONL lines fail to parse
+    - mtime_before is given and the file's mtime has NOT advanced past it
+      (stale-but-complete guard: the current turn was not flushed this cycle)
+
+    Fail-silent: never raises. Tolerates a partial (non-newline-terminated)
+    trailing line by reading only complete lines.
+
+    Note: the flush-timing heuristic means this returns the last FLUSHED
+    assistant text, not necessarily the current turn. The deterministic fix
+    (hook-driven Stop signal) is followup #1688.
+    """
+    if not transcript_path:
+        return ""
+    try:
+        mtime = os.path.getmtime(transcript_path)
+        if mtime_before is not None and mtime <= mtime_before:
+            return ""
+    except OSError:
+        return ""
+    try:
+        with open(transcript_path, encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return ""
+    # Read only complete lines (partial trailing line excluded)
+    if content and not content.endswith("\n"):
+        content = content[: content.rfind("\n") + 1]
+    if not content:
+        return ""
+    # Collect assistant entries in order, then walk newest-first
+    assistant_entries = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("type") == "assistant":
+            assistant_entries.append(entry)
+    # Walk newest-first, return first entry that has at least one text block
+    for entry in reversed(assistant_entries):
+        message = entry.get("message", {})
+        content_blocks = message.get("content", [])
+        text_parts = [
+            block.get("text", "")
+            for block in content_blocks
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        text = "".join(text_parts)
+        if text:
+            return text
+    return ""

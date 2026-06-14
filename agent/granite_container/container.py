@@ -9,10 +9,11 @@ classifier. It runs the loop:
   2. prime both personas via /granite:prime-{pm,dev}-role
   3. startup-phase parser watches both PTYs; on trust-folder
      prompt, dismiss with "1\\r"
-  4. steady state: wait for PM idle -> call granite to classify
-     (regex parse) and extract_dev_prompt (ollama) -> write to Dev
-     PTY -> wait for Dev idle -> call granite to summarize_for_pm
-     (ollama) -> write summary to PM PTY -> repeat
+  4. steady state: wait for PM idle -> read the PM's last assistant
+     text from the JSONL transcript, classify it (regex parse),
+     forward the verbatim [/dev] payload to Dev PTY -> wait for Dev
+     idle -> read Dev's last assistant text verbatim from transcript
+     -> write to PM PTY -> repeat
   5. exit on PM [/complete] prefix, max_turns safety cap, dev
      hang (await_idle timeout), startup_unresolved (neither PTY
      settles within STARTUP_HARD_CEILING_S), or any exception
@@ -39,9 +40,8 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from agent.granite_container.granite_classifier import (
+    ClassificationResult,
     classify_pm_prefix,
-    extract_dev_prompt,
-    summarize_for_pm,
 )
 from agent.granite_container.pty_driver import (
     DEFAULT_MIN_CONTENT_BYTES,
@@ -51,6 +51,7 @@ from agent.granite_container.startup_parser import (
     StartupEvent,
     parse_startup_frame,
 )
+from agent.granite_container.transcript_tailer import last_assistant_text
 
 logger = logging.getLogger(__name__)
 
@@ -209,8 +210,6 @@ class TurnRecord:
     compliance_miss: bool
     pm_first_line: str
     routed_payload_chars: int
-    granite_extract_ms: int
-    granite_summarize_ms: int
     pm_idle_marker: str
     dev_idle_marker: str
 
@@ -239,6 +238,7 @@ class ContainerResult:
     total_dev_pty_bytes: int = 0
     parse_failures: int = 0
     classification_compliance_misses: int = 0
+    transcript_fallback_count: int = 0
     resume_uuid: str | None = None
     startup_events: list[dict[str, Any]] = field(default_factory=list)
     coord_test_pass: bool | None = None
@@ -307,6 +307,21 @@ def _truncate_exit_message(text: str) -> str:
     if len(text) <= EXIT_MESSAGE_MAX_CHARS:
         return text
     return text[: EXIT_MESSAGE_MAX_CHARS - 3] + "..."
+
+
+def _unknown_classification() -> ClassificationResult:
+    """Synthetic unknown classification for conservative PM-classify fallback.
+
+    Used when the PM transcript read returns empty or the path is None.
+    Drives the existing compliance-miss branch (PM_COMPLIANCE_NUDGE + re-poll).
+    Never re-parses pm_buf -- the painted buffer is not a routing source.
+    """
+    return ClassificationResult(
+        destination="unknown",
+        compliance_miss=True,
+        payload="",
+        raw_first_line="",
+    )
 
 
 def _make_sandbox_cwd() -> tuple[str, str]:
@@ -399,9 +414,9 @@ class Container:
         self._pm_pty: PTYDriver | None = None
         self._dev_pty: PTYDriver | None = None
         self._sandbox: tuple[str, str] | None = None
-        # Last Dev report captured after each successful summarize_for_pm
-        # in the steady-state dev branch. Used as the seed for the
-        # wrap-up guard prompt so the PM can deliver a specific summary.
+        # Last Dev report captured from the Dev JSONL transcript after
+        # each dev branch cycle. Used as the seed for the wrap-up guard
+        # prompt so the PM can deliver a specific summary.
         self._last_dev_report: str | None = None
         # One-shot flags for prime-turn relay (issue #1644).
         # _prime_relayed=True means the PM's prime-turn buffer was routed
@@ -775,6 +790,17 @@ class Container:
             # _route_pm_classification. PM may already have decided the
             # destination (user/complete/dev) during its prime response
             # rather than waiting for the first steady-state idle.
+            pm_transcript = result.pm_transcript_path
+            # Snapshot PM transcript mtime before the idle read so
+            # last_assistant_text can guard against stale-flush.
+            pm_prime_mtime_before = None
+            if pm_transcript:
+                try:
+                    import os as _os
+
+                    pm_prime_mtime_before = _os.path.getmtime(pm_transcript)
+                except OSError:
+                    pass
             pm_prime_idle, pm_prime_buf, pm_prime_marker, pm_prime_ms = self._cycle_idle(
                 self._pm_pty
             )
@@ -785,7 +811,22 @@ class Container:
                 )
             else:
                 result.total_pm_pty_bytes += len(pm_prime_buf)
-                prime_classification = classify_pm_prefix(pm_prime_buf)
+                # Read PM's last assistant text verbatim from the JSONL
+                # transcript (zero-LLM path: no classify on painted pm_buf).
+                pm_prime_text = (
+                    last_assistant_text(pm_transcript, mtime_before=pm_prime_mtime_before)
+                    if pm_transcript
+                    else ""
+                )
+                if pm_prime_text:
+                    prime_classification = classify_pm_prefix(pm_prime_text)
+                else:
+                    logger.warning(
+                        "[granite-container] prime-turn: PM transcript read empty; "
+                        "using unknown classification"
+                    )
+                    result.transcript_fallback_count += 1
+                    prime_classification = _unknown_classification()
                 if self._on_turn is not None:
                     try:
                         self._on_turn()
@@ -825,6 +866,17 @@ class Container:
                                 "PM buffer unchanged; falling through to fresh idle read"
                             )
 
+                    # Snapshot PM transcript mtime before idle read so
+                    # last_assistant_text can guard against stale-flush.
+                    pm_mtime_before = None
+                    if pm_transcript:
+                        try:
+                            import os as _os
+
+                            pm_mtime_before = _os.path.getmtime(pm_transcript)
+                        except OSError:
+                            pass
+
                     # Wait for PM idle.
                     pm_idle, pm_buf, pm_marker, pm_ms = self._cycle_idle(self._pm_pty)
                     if not pm_idle:
@@ -836,12 +888,24 @@ class Container:
 
                     result.total_pm_pty_bytes += len(pm_buf)
 
-                    # Classify PM's output. The classifier is a regex
-                    # parse on PM's first non-empty line; no ollama
-                    # call. The classification is what determines
-                    # whether we route to Dev, route to user (results
-                    # log), or exit on complete.
-                    classification = classify_pm_prefix(pm_buf)
+                    # Read PM's last assistant text verbatim from the JSONL
+                    # transcript (zero-LLM: classify on transcript, not
+                    # painted PTY buffer pm_buf).
+                    pm_text = (
+                        last_assistant_text(pm_transcript, mtime_before=pm_mtime_before)
+                        if pm_transcript
+                        else ""
+                    )
+                    if pm_text:
+                        classification = classify_pm_prefix(pm_text)
+                    else:
+                        logger.warning(
+                            "[granite-container] steady-state turn %d: PM transcript read empty; "
+                            "using unknown classification",
+                            turn,
+                        )
+                        result.transcript_fallback_count += 1
+                        classification = _unknown_classification()
                     # Per-turn progress hook (TD1): every classified PM
                     # turn counts as progress for the two-tier no-progress
                     # detector, regardless of destination.
@@ -915,9 +979,9 @@ class Container:
             pm_complete so the loop exits; user_facing_routed stays False.
           - user: deliver via on_user_payload, set
             result.user_facing_routed=True, return should_break=True.
-          - dev: extract dev_prompt, write to Dev PTY, cycle Dev idle,
-            summarize_for_pm, write summary to PM PTY, capture
-            self._last_dev_report. Returns should_break=False.
+          - dev: forward classification.payload verbatim to Dev PTY,
+            cycle Dev idle, read Dev transcript text, write to PM PTY,
+            capture self._last_dev_report. Returns should_break=False.
 
         All exits (complete/user) set result.exit_reason before
         returning. The caller sets result.exit_reason from
@@ -936,8 +1000,6 @@ class Container:
                 compliance_miss=classification.compliance_miss,
                 pm_first_line=classification.raw_first_line,
                 routed_payload_chars=0,
-                granite_extract_ms=0,
-                granite_summarize_ms=0,
                 pm_idle_marker="",
                 dev_idle_marker="",
             )
@@ -955,8 +1017,6 @@ class Container:
                 compliance_miss=classification.compliance_miss,
                 pm_first_line=classification.raw_first_line,
                 routed_payload_chars=len(payload),
-                granite_extract_ms=0,
-                granite_summarize_ms=0,
                 pm_idle_marker="",
                 dev_idle_marker="",
             )
@@ -988,8 +1048,6 @@ class Container:
                 compliance_miss=classification.compliance_miss,
                 pm_first_line=classification.raw_first_line,
                 routed_payload_chars=len(payload),
-                granite_extract_ms=0,
-                granite_summarize_ms=0,
                 pm_idle_marker="",
                 dev_idle_marker="",
             )
@@ -1006,8 +1064,11 @@ class Container:
                     )
             return RouteOutcome(should_break=True, exit_reason="pm_user")
 
-        # destination == "dev" — extract a developer instruction.
-        if not classification.payload.strip():
+        # destination == "dev" — forward the verbatim payload to Dev.
+        # classification.payload is the PM transcript text following the
+        # [/dev] prefix token; it is forwarded verbatim (no LLM rewrite).
+        dev_prompt = classification.payload
+        if not dev_prompt.strip():
             # PM emitted [/dev] but no payload; compliance miss —
             # re-prompt PM so the next read sees fresh output.
             result.parse_failures += 1
@@ -1019,35 +1080,6 @@ class Container:
                 compliance_miss=True,
                 pm_first_line=classification.raw_first_line,
                 routed_payload_chars=0,
-                granite_extract_ms=0,
-                granite_summarize_ms=0,
-                pm_idle_marker="",
-                dev_idle_marker="",
-            )
-            result.turns.append(turn_record)
-            self._pm_pty.write(PM_COMPLIANCE_NUDGE)
-            return RouteOutcome(should_break=False, exit_reason=None)
-
-        extract_start = time.monotonic()
-        try:
-            dev_prompt = extract_dev_prompt(pm_buf)
-        except Exception as e:
-            result.exit_message = _truncate_exit_message(f"extract_dev_prompt failed: {e}")
-            return RouteOutcome(should_break=True, exit_reason="exception")
-        extract_ms = int((time.monotonic() - extract_start) * 1000)
-
-        if not dev_prompt.strip():
-            result.parse_failures += 1
-            turn_record = TurnRecord(
-                turn_index=turn_index,
-                pm_idle_ms=0,
-                dev_idle_ms=0,
-                classification="dev",
-                compliance_miss=classification.compliance_miss,
-                pm_first_line=classification.raw_first_line,
-                routed_payload_chars=0,
-                granite_extract_ms=extract_ms,
-                granite_summarize_ms=0,
                 pm_idle_marker="",
                 dev_idle_marker="",
             )
@@ -1063,6 +1095,18 @@ class Container:
             return RouteOutcome(should_break=True, exit_reason="dev_hang")
         self._dev_pty.write(dev_prompt)
 
+        # Snapshot mtime before waiting for Dev so last_assistant_text
+        # can detect whether the transcript was updated this cycle.
+        dev_transcript = result.dev_transcript_path
+        dev_mtime_before = None
+        if dev_transcript:
+            try:
+                import os as _os
+
+                dev_mtime_before = _os.path.getmtime(dev_transcript)
+            except OSError:
+                pass
+
         # Wait for Dev to respond and reach idle.
         dev_idle, dev_buf, dev_marker, dev_ms = self._cycle_idle(self._dev_pty)
         if not dev_idle:
@@ -1071,25 +1115,34 @@ class Container:
 
         result.total_dev_pty_bytes += len(dev_buf)
 
-        # Summarize Dev's output for PM.
-        summarize_start = time.monotonic()
-        try:
-            summary = summarize_for_pm(dev_buf)
-        except Exception as e:
-            result.exit_message = _truncate_exit_message(f"summarize_for_pm failed: {e}")
-            return RouteOutcome(should_break=True, exit_reason="exception")
-        summarize_ms = int((time.monotonic() - summarize_start) * 1000)
+        # Read Dev's verbatim last assistant text from the JSONL transcript.
+        # This is the zero-LLM shuttle: no summarize_for_pm rewrite.
+        dev_text = (
+            last_assistant_text(dev_transcript, mtime_before=dev_mtime_before)
+            if dev_transcript
+            else ""
+        )
+        if not dev_text:
+            logger.warning(
+                "[granite-container] Dev transcript read returned empty "
+                "(path=%r, mtime_before=%s); falling back to transcript_fallback_count bump",
+                dev_transcript,
+                dev_mtime_before,
+            )
+            result.transcript_fallback_count += 1
+            # Still write something to PM so the loop can continue.
+            dev_text = DEV_REPORT_UNAVAILABLE
 
-        # Capture the summary as the last Dev report for the wrap-up
+        # Capture the Dev text as the last Dev report for the wrap-up
         # guard (issue #1647).
-        self._last_dev_report = summary
+        self._last_dev_report = dev_text
 
-        # Write summary to PM's PTY.
+        # Write Dev's verbatim text to PM's PTY.
         await_pm, _, _, _ = self._cycle_idle(self._pm_pty)
         if not await_pm:
-            result.exit_message = "PM did not reach idle before summary"
+            result.exit_message = "PM did not reach idle before Dev report"
             return RouteOutcome(should_break=True, exit_reason="pm_hang")
-        self._pm_pty.write(summary)
+        self._pm_pty.write(dev_text)
 
         turn_record = TurnRecord(
             turn_index=turn_index,
@@ -1099,8 +1152,6 @@ class Container:
             compliance_miss=classification.compliance_miss,
             pm_first_line=classification.raw_first_line,
             routed_payload_chars=len(dev_prompt),
-            granite_extract_ms=extract_ms,
-            granite_summarize_ms=summarize_ms,
             pm_idle_marker="",
             dev_idle_marker=dev_marker,
         )
@@ -1127,17 +1178,22 @@ class Container:
         guard must never crash the run.
         """
         try:
-            # Build the seed report.
+            # Build the seed report from the last Dev transcript text
+            # (zero-LLM: no summarize_for_pm rewrite).
             if self._last_dev_report:
                 seed = self._last_dev_report
-            elif self._dev_pty is not None:
-                try:
-                    _, dev_buf, _, _ = self._cycle_idle(self._dev_pty)
-                    seed = summarize_for_pm(dev_buf) if dev_buf.strip() else DEV_REPORT_UNAVAILABLE
-                except Exception:
-                    seed = DEV_REPORT_UNAVAILABLE
             else:
-                seed = DEV_REPORT_UNAVAILABLE
+                dev_transcript = result.dev_transcript_path
+                seed = (
+                    last_assistant_text(dev_transcript) or DEV_REPORT_UNAVAILABLE
+                    if dev_transcript
+                    else DEV_REPORT_UNAVAILABLE
+                )
+                if seed == DEV_REPORT_UNAVAILABLE:
+                    logger.warning(
+                        "[granite-container] wrap-up guard: Dev transcript empty/missing; "
+                        "using DEV_REPORT_UNAVAILABLE seed"
+                    )
 
             for _attempt in range(MAX_WRAPUP_ATTEMPTS):
                 # Write the wrap-up prompt to PM.
@@ -1147,13 +1203,40 @@ class Container:
                     break
                 self._pm_pty.write(PM_WRAPUP_PROMPT.format(seed=seed))
 
+                # Snapshot PM transcript mtime before the cycle so
+                # last_assistant_text can detect stale-flush.
+                pm_transcript = result.pm_transcript_path
+                pm_mtime_before = None
+                if pm_transcript:
+                    try:
+                        import os as _os
+
+                        pm_mtime_before = _os.path.getmtime(pm_transcript)
+                    except OSError:
+                        pass
+
                 # Wait for PM to respond.
                 pm_idle, pm_buf, _, _ = self._cycle_idle(self._pm_pty)
                 if not pm_idle:
                     logger.warning("[granite-container] wrap-up guard: PM hung after wrapup prompt")
                     break
 
-                wrapup_classification = classify_pm_prefix(pm_buf)
+                # Read PM's last assistant text verbatim from the JSONL
+                # transcript (zero-LLM path: no ollama classify on pm_buf).
+                pm_text = (
+                    last_assistant_text(pm_transcript, mtime_before=pm_mtime_before)
+                    if pm_transcript
+                    else ""
+                )
+                if pm_text:
+                    wrapup_classification = classify_pm_prefix(pm_text)
+                else:
+                    logger.warning(
+                        "[granite-container] wrap-up guard: PM transcript read empty; "
+                        "using unknown classification"
+                    )
+                    result.transcript_fallback_count += 1
+                    wrapup_classification = _unknown_classification()
                 outcome = self._route_pm_classification(
                     wrapup_classification, pm_buf, turn_index=-2, result=result
                 )
