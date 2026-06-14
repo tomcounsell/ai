@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-06-14
 tracking: https://github.com/tomcounsell/ai/issues/1681
 last_comment_id:
+revision_applied: true
 ---
 
 # Make granite PTY operator a zero-LLM transcript-content shuttle (remove PM↔Dev rewrites)
@@ -60,10 +61,23 @@ artifact-free — strictly better than scraping the frame.
 
 **Desired outcome — a zero-LLM *transcript-content* shuttle on the PM↔Dev channel:**
 
-1. **`extract_dev_prompt` deleted.** The `[/dev]` write uses `classify_pm_prefix`
-   run on the PM's **last assistant text** read from the PM transcript (not the
-   painted `pm_buf`), then writes `classification.payload`. The PM's exact words
-   reach Dev — from clean structured text.
+1. **`extract_dev_prompt` deleted.** The `[/dev]` write uses
+   `classification.payload` — the verbatim text after the `[/dev]` token — not an
+   LLM re-extraction. The one-line swap at the `[/dev]` write site
+   (`container.py:1033`) is `dev_prompt = extract_dev_prompt(pm_buf)` →
+   `dev_prompt = classification.payload`. The `[/user]`/`[/complete]` branches
+   already write `classification.payload` directly; this aligns `[/dev]` with
+   them.
+
+   The classify **input** moves from the painted `pm_buf` to the PM's **last
+   assistant text** read from the PM transcript (the three `classify_pm_prefix`
+   call sites: `container.py:788` prime-turn, `:844` steady-state, `:1156`
+   wrap-up). This is required so the dead painted-frame anchored path can be
+   deleted (desired-outcome #3 / BLOCKER below): on clean transcript text there
+   is no container-echo prefix, so the strict `PREFIX_TOKEN_RE` first-line path
+   is sufficient and the `⏺`-anchoring root-cause class disappears. Each site
+   gets an empty/`None`-path fallback to `classify_pm_prefix(pm_buf)` so a flush
+   race or unknown session_id never silently drops a PM turn.
 2. **`summarize_for_pm` deleted.** The Dev session's **last assistant text** (its
    final authored turn) is read from the Dev transcript and forwarded to the PM
    **verbatim**. No 3B summary, no Dev self-summarization contract, no frame
@@ -72,8 +86,17 @@ artifact-free — strictly better than scraping the frame.
 3. **The ollama *translation* path is removed** from the classifier:
    `ollama_chat` translation usage, `TRANSLATION_TOOLS`, `SYSTEM_PROMPT`, the two
    translation functions, `GraniteTranslationError`, `_events_from_text`,
-   `_extract_tool_calls`, `_normalize_arguments`. Net-negative diff in
-   `granite_classifier.py`.
+   `_extract_tool_calls`, `_normalize_arguments`. **Plus the dead painted-frame
+   anchored path** (`PREFIX_TOKEN_ANCHORED_RE` at line 142, `_FRAME_ARTIFACT_RE`
+   at line 148, and the anchored-match block at lines 284-297) — it is *live*,
+   not a no-op: it fires on any `⏺`/`●` char and takes the LAST match *before*
+   the strict first-line path, so a PM message that quotes Dev output or code
+   containing `⏺` would misroute. It only existed to recover the model's reply
+   from a painted frame where the container's echo precedes it; once the PM
+   classify input is the PM's clean transcript text (outcome #1), there is no
+   echo prefix and the strict `PREFIX_TOKEN_RE` first-line path is sufficient.
+   Deleting it dissolves this plan's own routing-token Risk entirely. Net-negative
+   diff in `granite_classifier.py`.
 4. **One new pure function** — `last_assistant_text(transcript_path) -> str` —
    reads the JSONL and returns the most recent assistant turn's concatenated
    `text` blocks. No new dependency; reuses the JSONL surface the tailer already
@@ -103,6 +126,8 @@ structured content; #1688 = deterministic boundaries.
 - `agent/granite_container/granite_classifier.py:51` — `DEFAULT_MODEL` import from `config.models.OLLAMA_CLASSIFIER_MODEL` — still holds.
 - `agent/granite_container/container.py:1033` — `extract_dev_prompt(pm_buf)` call — still holds (line 1033).
 - `agent/granite_container/container.py:1077` — `summarize_for_pm(dev_buf)` call — still holds (line 1077). **Drift note:** the issue cites the Dev→PM forward at "~:1077"; confirmed exact. A **third** call site exists at `container.py:1136` (wrap-up guard seed) that the issue did not enumerate — it must also be de-LLM'd (see Solution).
+- **`classify_pm_prefix` call sites (corrected from an earlier draft):** the three live calls are `container.py:788` (prime-turn relay), `:844` (steady-state loop), and `:1156` (wrap-up guard). An earlier draft of this plan mis-cited these as 1033/1077/1136 — those are the `extract_dev_prompt`/`summarize_for_pm` sites, NOT the classify sites. Verified via `grep -n "classify_pm_prefix\|extract_dev_prompt\|summarize_for_pm" container.py`. The classify *input* must change at all three (read PM transcript), so the anchored-frame path can be deleted (see Risk 4 / Solution).
+- **Telemetry-field consumer grep (archaeology artifact):** `grep -rn "granite_extract_ms\|granite_summarize_ms" . --include="*.py" --include="*.json" --include="*.yaml" | grep -v "def granite_"` returns matches ONLY in `container.py` (the `TurnRecord` definition at :212-213 and the assignment sites) and the `test_to_json` fixture at `tests/unit/granite_container/test_container.py:745-746`. **No dashboard, reflection, or analytics consumer reads either field** — confirming the fields are safe to delete (no `record["granite_extract_ms"]` access anywhere). This grep is the cited artifact backing the "no consumer" claim.
 
 **Cited sibling issues/PRs re-checked:**
 - #1680 — Message drafter repositioned to verbatim pass-through — merged as #1685 (commit `ef452704`). Confirms the principle this issue extends; no overlap in touched files (drafter lives in a different module).
@@ -135,28 +160,32 @@ structured content; #1688 = deterministic boundaries.
 
 Trace of the PM↔Dev channel inside `Container._route_pm_classification` and `_run_wrapup_guard`. The PTY idle cycle (`_cycle_idle`) still detects turn boundaries; the change is **what content is read** at each boundary — the JSONL transcript, not the painted buffer.
 
-1. **Entry point**: PM PTY reaches idle; `_cycle_idle(self._pm_pty)` returns `pm_buf` (still used to detect idle; no longer the source of routed content).
-2. **Classify**: compute the PM transcript path (`_transcript_path(self.cwd, self._pm_pty._session_id)`), read `pm_text = last_assistant_text(pm_transcript)`, then `classify_pm_prefix(pm_text)` → `ClassificationResult`. The classifier now runs on **clean structured text**, so its painted-frame internals (`PREFIX_TOKEN_ANCHORED_RE` `⏺`-anchoring, `_FRAME_ARTIFACT_RE` cut) are largely no-ops — the token still anchors via the strict `PREFIX_TOKEN_RE` first-line path; `payload` is the verbatim text after `[/dev]`. (Fallback: if `pm_text` is empty — flush race or read miss — fall back to classifying `pm_buf` so the turn is never silently dropped; see Flush-timing Risk.)
+1. **Entry point**: PM PTY reaches idle; `_cycle_idle(self._pm_pty)` returns `pm_buf` (still used to detect idle; `pm_buf` is no longer the *primary* classify source, but remains the fallback).
+2. **Classify** (three sites: `container.py:788` prime-turn, `:844` steady-state, `:1156` wrap-up): compute the PM transcript path (`_transcript_path(self.cwd, self._pm_pty._session_id)` or the populated `result.pm_transcript_path`), snapshot its mtime before `_cycle_idle`, read `pm_text = last_assistant_text(pm_transcript, mtime_before=...)`, then `classify_pm_prefix(pm_text)` → `ClassificationResult`. The classifier now runs on **clean structured text** with no container-echo prefix, so the strict `PREFIX_TOKEN_RE` first-line path carries the classification and the anchored-frame path is deleted. `payload` is the verbatim text after `[/dev]`. **Fallback:** if `pm_text` is empty (flush race, mtime-unchanged, read miss, or `None` transcript path), fall back to `classify_pm_prefix(pm_buf)` so the turn is never silently dropped — and `logger.warning` the fallback.
 3. **PM → Dev (`destination == "dev"`)**:
    - *Today:* discard `classification.payload`, call `extract_dev_prompt(pm_buf)` → ollama → write 3B re-extraction to Dev PTY (`container.py:1033`, `:1064`).
-   - *After:* write `classification.payload` directly to Dev PTY, guarded for emptiness (`self._dev_pty.write(payload or PM_COMPLIANCE_NUDGE)` — empty payload already routes through the compliance-miss branch at `container.py:1010`). No ollama.
+   - *After:* `dev_prompt = classification.payload`; write it directly to Dev PTY. Empty payload already routes through the compliance-miss branch at `container.py:1010` (writes `PM_COMPLIANCE_NUDGE`) BEFORE the write site, so the write at `:1064` only ever receives non-empty text. No ollama.
 4. **Dev cycle**: `_cycle_idle(self._dev_pty)` detects Dev idle (boundary only). The painted `dev_buf` is no longer parsed for content.
 5. **Dev → PM**:
    - *Today:* `summarize_for_pm(dev_buf)` → ollama → write 3B summary to PM PTY (`container.py:1077`, `:1092`).
-   - *After:* `dev_text = last_assistant_text(dev_transcript)` — Dev's final authored turn, structurally clean. Dev emits no routing token (it's a report), so this is forwarded verbatim. Empty-guard the PTY write: `self._pm_pty.write(dev_text or DEV_REPORT_UNAVAILABLE)` — `PTYDriver.write()` raises on empty input (`pty_driver.py:439-440`), so the guard is mandatory. No ollama.
+   - *After:* `dev_text = last_assistant_text(dev_transcript, mtime_before=...)` — Dev's final authored turn, structurally clean. Dev emits no routing token (it's a report), so this is forwarded verbatim. Empty-guard the PTY write: `self._pm_pty.write(dev_text or DEV_REPORT_UNAVAILABLE)` — `PTYDriver.write()` raises on empty input (`pty_driver.py:439`), so the guard is mandatory. When the guard fires (empty/stale read), `logger.warning(..., extra={"session_id": ..., "transcript_path": ..., "fallback": "DEV_REPORT_UNAVAILABLE"})` so the substitution is grep-able in `worker.log`. **Tool-only-final-turn invariant:** `last_assistant_text` walks assistant entries newest-first and returns the most recent one that has at least one `text` block (skipping a final entry that is pure `tool_use`/`thinking`). A Dev turn whose true final assistant entry has text is therefore forwarded; `DEV_REPORT_UNAVAILABLE` is reserved for the genuine no-text-anywhere case (which the prime-dev-role wording correction frames as the protocol the Dev persona must follow: end each turn with a natural-language report). No ollama.
 6. **Wrap-up seed (`container.py:1136`)**:
    - *Today:* `seed = summarize_for_pm(dev_buf) if dev_buf.strip() else DEV_REPORT_UNAVAILABLE`.
-   - *After:* `seed = last_assistant_text(dev_transcript) or DEV_REPORT_UNAVAILABLE`.
+   - *After:* `seed = last_assistant_text(dev_transcript) or DEV_REPORT_UNAVAILABLE`; `logger.warning` the fallback when it resolves to `DEV_REPORT_UNAVAILABLE`.
 7. **Output**: `self._last_dev_report` holds the verbatim Dev final turn; PM reads it; the `[/user]`/`[/complete]` path (unchanged) delivers PM's verbatim words to the human.
 
-**Flush-timing note:** the "last assistant entry" must be the *completed* turn. We read after `_cycle_idle` reports idle, by which point Claude Code has normally flushed the assistant message to the JSONL — but this is a heuristic, not a guarantee. `last_assistant_text` reads only complete JSONL lines (ignoring any partial trailing line, exactly as the tailer does), so a half-written final line is skipped rather than mis-parsed. The deterministic fix (a hook-driven Stop signal so we read only after the turn is provably complete) is followup issue **#1688**.
+**Flush-timing note:** the "last assistant entry" must be the *completed* turn. We read after `_cycle_idle` reports idle, by which point Claude Code has normally flushed the assistant message to the JSONL — but this is a heuristic, not a guarantee. Two distinct failure modes:
+1. **Half-written final line** — `last_assistant_text` reads only complete `\n`-terminated JSONL lines (ignoring any partial trailing line, exactly as the tailer does), so a half-written line is skipped rather than mis-parsed.
+2. **Stale-but-complete read** (the subtle one) — if the *current* turn hasn't flushed at all but *prior* turns are fully flushed, a naive "last assistant entry" read returns the PRIOR turn's text: non-empty, passing the empty-guard, and forwarded verbatim as if it were the current turn. The mitigation is an **mtime snapshot**: the caller records `os.path.getmtime(transcript)` *before* `_cycle_idle` polls, and passes it as `mtime_before` to `last_assistant_text`. If the file's mtime has not advanced since the snapshot, the current turn was not flushed during this idle cycle → return `""` (treated as a flush-miss → fallback + `logger.warning`). This is a one-line check that does NOT require #1688. (#1688's hook-driven Stop signal still supersedes the whole heuristic later.)
 
-The `[/user]` and `[/complete]` paths (`container.py:981`, `:944`) already use `classification.payload` directly and make **no** ollama call. With this change they classify `pm_text` (the same clean read) rather than `pm_buf`, but their *delivery* logic is otherwise unchanged and **out of scope** (do not alter their human-delivery behavior; they only benefit from the cleaner classify input).
+The deterministic fix (a hook-driven Stop signal so we read only after the turn is provably complete) is followup issue **#1688**.
+
+The `[/user]` and `[/complete]` paths (`container.py:981`, `:948`) already use `classification.payload` directly and make **no** ollama call. With this change they classify `pm_text` (the same clean PM-transcript read, since all three classify sites switch input) rather than `pm_buf`, but their *delivery* logic is otherwise unchanged and **out of scope** (do not alter their human-delivery behavior; they only benefit from the cleaner classify input).
 
 ## Architectural Impact
 
 - **New dependencies**: None added. The new `last_assistant_text` reads the same JSONL surface the tailer already consumes (stdlib `json` + file I/O). Net removal of the `ollama` translation usage from `granite_classifier.py` (the runtime stays only insofar as `ensure_granite_model` needs it for the classification role — see Risk 1).
-- **Interface changes**: `extract_dev_prompt`, `summarize_for_pm`, `GraniteTranslationError`, `TRANSLATION_TOOLS`, `SYSTEM_PROMPT`, `_events_from_text`, `_extract_tool_calls`, `_normalize_arguments` removed from the classifier's public/module surface. One new pure function added: `last_assistant_text(transcript_path: str) -> str`. The two dead `TurnRecord` telemetry fields (`granite_extract_ms`, `granite_summarize_ms`) are **deleted** (see Test Impact).
+- **Interface changes**: `extract_dev_prompt`, `summarize_for_pm`, `GraniteTranslationError`, `TRANSLATION_TOOLS`, `SYSTEM_PROMPT`, `_events_from_text`, `_extract_tool_calls`, `_normalize_arguments`, `PREFIX_TOKEN_ANCHORED_RE`, `_FRAME_ARTIFACT_RE` removed from the classifier's module surface. `classify_pm_prefix` keeps its signature but loses the anchored-frame branch. One new pure function added: `last_assistant_text(transcript_path: str, *, mtime_before: float | None = None) -> str`. The two dead `TurnRecord` telemetry fields (`granite_extract_ms`, `granite_summarize_ms`) are **deleted** (see Test Impact).
 - **New content surface**: the routing path now reads message content from the Claude Code JSONL transcript (already computed by the container) instead of the painted PTY scrollback. The PTY idle cycle remains the turn-boundary detector.
 - **Coupling**: Net change is mixed but favorable. The PTY routing path no longer depends on the ollama runtime at all (only the classification role does), and stops depending on painted-frame layout. It gains a dependency on the JSONL transcript being present and flushed at the idle boundary — a heuristic this plan documents and #1688 makes deterministic.
 - **Data ownership**: Unchanged. The container still owns the PTY drivers, the transcript paths, and the routing decisions.
@@ -186,10 +215,14 @@ The build itself needs no live ollama — every translation unit test mocks `oll
 
 ### Key Elements
 
-- **`last_assistant_text(transcript_path: str) -> str` (new, pure)**: reads the Claude Code JSONL transcript, finds the **most recent `type:"assistant"` entry**, and returns the concatenation of its `message.content[]` blocks where `type == "text"` (EXCLUDING `tool_use`, `tool_result`, `thinking`). Returns `""` if no assistant entry / file missing / all lines fail to parse. Fail-silent like the existing tailer; tolerate a partial trailing line (parse only complete `\n`-terminated lines, mirroring `read_transcript_telemetry`'s safe-offset logic). **Placement:** put it in `transcript_tailer.py` next to the existing JSONL parsing (preferred — keeps the JSONL contract in one module and lets it share the partial-line handling); the builder may instead place it in `granite_classifier.py` if that reads more cohesively, and must document the choice in the PR.
-- **`classify_pm_prefix` (light adaptation)**: now receives clean transcript text rather than a painted frame. Its chrome-stripping internals (`PREFIX_TOKEN_ANCHORED_RE` `⏺`-anchoring, `_FRAME_ARTIFACT_RE` cut) become largely no-ops on clean input — that is fine, leave them in place (they harmlessly no-op and keep the function robust if ever fed a frame). The token-anchoring via the strict `PREFIX_TOKEN_RE` first-line path is what now carries the classification. No signature change.
-- **Container call-site edits (3)**: `container.py:1033` (PM→Dev: read PM transcript → classify → write `classification.payload`), `:1077` (Dev→PM: read Dev transcript → write verbatim), `:1136` (wrap-up seed: read Dev transcript). All three PTY writes empty-guarded.
-- **Deletions in `granite_classifier.py`**: the entire "Translation (the 2 ollama calls)" block plus `TRANSLATION_TOOLS`, `SYSTEM_PROMPT`, `GraniteTranslationError`, `_events_from_text`, `_extract_tool_calls`, `_normalize_arguments`, and the translation-only `ollama_chat` usage. `ensure_granite_model` stays (it uses the `ollama` CLI for the classification role; its docstring is corrected per Risk 1).
+- **`last_assistant_text(transcript_path: str, *, mtime_before: float | None = None) -> str` (new, pure)**: reads the Claude Code JSONL transcript and returns the concatenation of `text` blocks from the **most recent `type:"assistant"` entry that has at least one `text` block** (walking newest-first; EXCLUDING `tool_use`, `tool_result`, `thinking` — and skipping a final entry that is pure tool/thinking with no text, so a tool-only final turn does not collapse to empty when an earlier textual turn exists). Returns `""` if: no assistant entry has text / file missing / all lines fail to parse / **the file's mtime has not advanced past `mtime_before`** (stale-but-complete guard: the current turn was not flushed during this idle cycle). Fail-silent like the existing tailer; tolerate a partial trailing line (parse only complete `\n`-terminated lines, mirroring `read_transcript_telemetry`'s safe-offset logic). **Placement:** put it in `transcript_tailer.py` next to the existing JSONL parsing (preferred — keeps the JSONL contract in one module and lets it share the partial-line handling); the builder may instead place it in `granite_classifier.py` if that reads more cohesively, and must document the choice in the PR.
+- **`classify_pm_prefix` (real change — delete the anchored-frame path)**: now receives clean transcript text rather than a painted frame, so the container-echo prefix that the `⏺`-anchored path existed to skip is no longer present. **Delete** the anchored-match block (`granite_classifier.py:284-297`), `PREFIX_TOKEN_ANCHORED_RE` (line 142), and `_FRAME_ARTIFACT_RE` (line 148). The anchored path is NOT a harmless no-op — it fires on any `⏺`/`●` and takes the LAST match before the strict path, misrouting any PM message that quotes a `⏺`. After deletion, classification flows: strip ANSI → strict `PREFIX_TOKEN_RE` on the first non-empty line → `PREFIX_TOKEN_FALLBACK_RE` on the first 200 chars → `unknown`. No signature change. The `_strip_ansi` call stays (transcript text is clean but the call is cheap and defensive). Update the anchored-frame tests in `test_granite_classifier.py` (`TestAnchoredPaintedFrames` / the `⏺` tests) — DELETE them (they validate deleted behavior).
+- **Container call-site edits**:
+  - **PM classify input (3 sites)**: `container.py:788` (prime-turn), `:844` (steady-state), `:1156` (wrap-up) — read `last_assistant_text(pm_transcript, mtime_before=...)`, fall back to `pm_buf` (with a `logger.warning`) when the read is empty or the transcript path is `None`. Then `classify_pm_prefix(pm_text)` as before.
+  - **PM→Dev payload (`:1033`)**: `dev_prompt = classification.payload` (delete `extract_dev_prompt(pm_buf)` and its `extract_start`/`extract_ms`/`try-except`). The write at `:1064` is unchanged (non-empty guaranteed by the `:1010` compliance branch).
+  - **Dev→PM (`:1077`)**: `dev_text = last_assistant_text(dev_transcript, mtime_before=...)`; `self._pm_pty.write(dev_text or DEV_REPORT_UNAVAILABLE)` (empty-guarded + `logger.warning` on fallback); `self._last_dev_report = dev_text`.
+  - **Wrap-up seed (`:1136`)**: `seed = last_assistant_text(dev_transcript) or DEV_REPORT_UNAVAILABLE` (+ `logger.warning` on fallback).
+- **Deletions in `granite_classifier.py`**: the entire "Translation (the 2 ollama calls)" block plus `TRANSLATION_TOOLS`, `SYSTEM_PROMPT`, `GraniteTranslationError`, `_events_from_text`, `_extract_tool_calls`, `_normalize_arguments`, the translation-only `ollama_chat` usage, AND the anchored-frame path + its two regexes (above). `ensure_granite_model` stays (it uses the `ollama` CLI for the classification role; its docstring is corrected per Risk 1).
 
 ### Flow
 
@@ -197,12 +230,14 @@ PM idle → read PM transcript → `last_assistant_text` → `classify_pm_prefix
 
 ### Technical Approach
 
-- **PM → Dev** (`container.py:~1031-1064`): replace `dev_prompt = extract_dev_prompt(pm_buf)` with `dev_prompt = classification.payload` (where `classification` was produced by classifying `last_assistant_text(pm_transcript)`). Remove the `extract_start`/`extract_ms` timing and the surrounding `try/except` (deleted with the call). The empty-payload compliance-miss branch (`container.py:1010`) is kept. Guard the Dev PTY write against emptiness.
+- **PM classify input** (`container.py:788`, `:844`, `:1156`): before each `classify_pm_prefix(...)`, snapshot `mtime_before = os.path.getmtime(pm_transcript)` (guarded for missing file) prior to the preceding `_cycle_idle`, then `pm_text = last_assistant_text(pm_transcript, mtime_before=mtime_before)`; if `pm_text` is falsy or the transcript path is `None`, `logger.warning` and fall back to `classify_pm_prefix(pm_buf)`. Otherwise `classify_pm_prefix(pm_text)`. (The mtime snapshot must be taken before the idle wait so a fresh flush is detectable.)
+- **PM → Dev** (`container.py:~1031-1064`): replace `dev_prompt = extract_dev_prompt(pm_buf)` with `dev_prompt = classification.payload`. Remove the `extract_start`/`extract_ms` timing and the surrounding `try/except` (deleted with the call). The empty-payload compliance-miss branch (`container.py:1010`) is kept and runs before the write, so the `:1064` write is non-empty by construction; no extra guard needed at `:1064`.
 - **Dev → PM** (`container.py:~1074-1092`): replace `summary = summarize_for_pm(dev_buf)` with `dev_text = last_assistant_text(dev_transcript)`. Keep `self._last_dev_report = dev_text` (now the verbatim final turn). Remove the `summarize_start`/`summarize_ms` timing and `try/except`. **Empty-guard the PTY write**: `self._pm_pty.write(dev_text or DEV_REPORT_UNAVAILABLE)` — `PTYDriver.write()` raises `PTYDriverError` on empty input (`pty_driver.py:439-440`).
 - **Wrap-up seed** (`container.py:1136`): replace `summarize_for_pm(dev_buf) if dev_buf.strip() else DEV_REPORT_UNAVAILABLE` with `last_assistant_text(dev_transcript) or DEV_REPORT_UNAVAILABLE`. (The surviving outer `try/except` at `:1137` stays — it guards `_cycle_idle`.)
 - **Transcript paths in scope**: inside `_route_pm_classification`, compute via the existing `_transcript_path(self.cwd, self._pm_pty._session_id)` and `_transcript_path(self.cwd, self._dev_pty._session_id)` (or read the already-populated `result.pm_transcript_path` / `result.dev_transcript_path`). If a path is `None` (unknown session_id), fall back to classifying/forwarding the painted buffer so the turn is never dropped, and log a warning.
 - **`TurnRecord.granite_extract_ms` / `granite_summarize_ms`**: **DELETE both fields** and all assignment sites (`container.py:212-213` definition; the `0`/`extract_ms`/`summarize_ms` assignments at `:939, :958, :991, :1022, :1049, :1102` and `:940, :959, :992, :1023, :1050, :1103`). Archaeology confirmed NO dashboard/reflection/analytics consumer reads them. Do NOT zero-fill (violates NO LEGACY CODE TOLERANCE). `result_to_json` uses `asdict` so the JSON shrinks automatically; update `test_to_json` to drop the fields.
 - **`SYSTEM_PROMPT`**: deleted (only the translation calls used it).
+- **`ClassificationResult` docstring** (`granite_classifier.py:160-184`): the `payload` field doc currently says "for `dev` and `user`, the translation call's output." After the refactor `payload` is always the verbatim text following the prefix token. Replace "the translation call's output" with "the verbatim text following the prefix token."
 - **Module docstring + `container.py` loop docstring (`container.py:12-15`)**: rewrite to describe the zero-LLM transcript-content shuttle ("classify the PM's last assistant text by regex → forward Dev's last assistant text verbatim"). Any invariant that says "each ollama.chat sees only the current turn" is moot for the routing path — update it.
 
 ## Failure Path Test Strategy
@@ -210,30 +245,34 @@ PM idle → read PM transcript → `last_assistant_text` → `classify_pm_prefix
 ### Exception Handling Coverage
 - [ ] The two `try/except Exception` blocks wrapping `extract_dev_prompt`/`summarize_for_pm` (`container.py:1034`, `:1078`) are removed with the calls. `last_assistant_text` is fail-silent (returns `""` on any I/O / parse / missing-file error) and cannot raise — add a test that a corrupt/garbage JSONL file yields `""`, not an exception.
 - [ ] The wrap-up-guard `except Exception` at `container.py:1137` stays (it guards `_cycle_idle`, not the translation) — assert it still falls back to `DEV_REPORT_UNAVAILABLE`.
-- [ ] **Empty-guard on the main Dev→PM PTY write** (BLOCKER): `last_assistant_text` can return `""`, and `PTYDriver.write()` raises `PTYDriverError` on empty input (`pty_driver.py:439-440`). Add a test that a no-content Dev turn forwards `DEV_REPORT_UNAVAILABLE` and **never raises** at the PTY write.
+- [ ] **Empty-guard on the main Dev→PM PTY write** (BLOCKER): `last_assistant_text` can return `""`, and `PTYDriver.write()` raises `PTYDriverError` on empty input (`pty_driver.py:439`). Add a test that a no-content Dev turn forwards `DEV_REPORT_UNAVAILABLE` and **never raises** at the PTY write.
+- [ ] **Fallback observability** (CONCERN): every fallback substitution (Dev→PM `DEV_REPORT_UNAVAILABLE`, wrap-up seed `DEV_REPORT_UNAVAILABLE`, PM-classify `None`/empty-read fallback to `pm_buf`) emits a `logger.warning` with `extra={"session_id", "transcript_path", "fallback"}`. Assert via `assertLogs` in the empty-content test that the warning fires — a systemic flush-race after a Claude Code version bump must leave a grep-able `worker.log` line, not loop silently.
 
 ### Empty/Invalid Input Handling
 - [ ] `last_assistant_text("")`-equivalent (missing file) → `""`; empty file → `""`; file with only `user`/`tool_result` entries (no assistant) → `""`; corrupt/partial-only JSONL → `""`.
+- [ ] **Stale-but-complete guard** (BLOCKER): two complete assistant entries exist but the file's mtime has NOT advanced past `mtime_before` → `last_assistant_text` returns `""` (so the caller falls back rather than forwarding the prior turn as current). Add a test that constructs this exact condition.
+- [ ] **Tool-only final assistant turn** (CONCERN): the most recent assistant entry is pure `tool_use` (no `text` block) but an earlier assistant entry has text → `last_assistant_text` returns the earlier entry's text (does NOT collapse to `""`). And the genuine no-text-anywhere case → `""` → caller forwards `DEV_REPORT_UNAVAILABLE` (the intended degradation; the prime-dev-role wording makes "end each turn with a text report" the protocol).
 - [ ] Empty `[/dev]` payload still routes through the existing compliance-miss branch (`container.py:1010`) and writes `PM_COMPLIANCE_NUDGE` — verify unchanged behavior.
 - [ ] Empty `last_assistant_text(dev_transcript)` at the wrap-up seed falls back to `DEV_REPORT_UNAVAILABLE`.
-- [ ] `None` transcript path (unknown session_id) → graceful fallback (classify/forward the painted buffer), no crash, warning logged.
+- [ ] `None` transcript path (unknown session_id) → graceful fallback (classify the painted `pm_buf` / forward `DEV_REPORT_UNAVAILABLE`), no crash, `logger.warning` fires (assert via `assertLogs`).
 
 ### Error State Rendering
 - [ ] The `[/user]`/`[/complete]` delivery path is unchanged — assert the human still receives PM's verbatim words (regression).
 - [ ] When Dev produces no usable content, the wrap-up guard still delivers `OPERATOR_TERMINAL_MESSAGE` to the human (no silent loop).
 
-### Routing-token re-injection (CONCERN, not blocker)
-- [ ] With the classifier now running only on the PM's own structured assistant text, the surface is smaller than scraping a shared frame. But if a Dev turn's final text literally contains `⏺ [/complete]` (or another routing token) and the PM later echoes it verbatim, `classify_pm_prefix` takes the LAST anchored match and could misroute. Add a defang note in code and a test feeding a Dev report whose text contains a literal routing token, asserting the PM's *own* token (not Dev's echoed one) drives routing. Downgraded to CONCERN under the transcript mechanism.
+### Routing-token re-injection (RESOLVED by anchored-path deletion)
+- [ ] With the anchored-frame path **deleted** and the PM classify input being the PM's own clean transcript text, classification flows only through the strict `PREFIX_TOKEN_RE` first-line match (then the 200-char fallback). A mid-body echoed token (e.g. the PM quoting Dev's `[/complete]` *after* its own `[/dev]` on line 1) can no longer hijack routing, because the strict path keys on the first non-empty line only — not the LAST anchored match. Add a regression test: a PM transcript turn whose first line is `[/dev] ...` and whose body later contains a literal `⏺ [/complete]` still routes to `dev`. This is the test that proves the ordering-attack class is closed by the deletion (not merely downgraded).
 
 ## Test Impact
 
-- [ ] `tests/unit/granite_container/test_granite_classifier.py` — DELETE the translation test artifacts: the `_make_ollama_response` helper (line 301), `TestExtractDevPromptMocked` (line 316), `TestSummarizeForPmMocked` (line 343), `TestTranslationTools` (line 369 — references `TRANSLATION_TOOLS`/`SYSTEM_PROMPT` and MUST be deleted), and the imports of `SYSTEM_PROMPT`, `TRANSLATION_TOOLS`, `extract_dev_prompt`, `summarize_for_pm`, `GraniteTranslationError` (lines ~24-25 and surrounding). The `classify_pm_prefix`, `_strip_ansi`, anchored-frame, and `TestEnsureGraniteModel` (line 414) classes STAY.
-- [ ] `tests/unit/granite_container/` — ADD a `TestLastAssistantText` class (in the test file matching `last_assistant_text`'s placement — `test_transcript_tailer.py` if placed there, else `test_granite_classifier.py`) covering: picks the LAST assistant entry when several exist; concatenates only `text` blocks; EXCLUDES `tool_use`/`tool_result`/`thinking` blocks; returns `""` on empty/missing/corrupt file; returns `""` when only `user`/`tool_result` entries exist; tolerates a partial (non-newline-terminated) trailing line; a multi-assistant-entry fixture returns the LAST one's text.
-- [ ] `tests/unit/granite_container/test_container.py` — UPDATE the dev-routing tests at patch sites lines ~185-186, ~381-382, ~848-849, ~960-961, and ~1028 (each currently `patch("agent.granite_container.container.extract_dev_prompt")` and/or `...summarize_for_pm`). Drop those patches; instead stub `last_assistant_text` (patch where it is imported in `container`) to return fixture text, and assert: the Dev PTY receives `classification.payload` verbatim (PM→Dev) and the PM PTY receives the Dev transcript's last assistant text verbatim (Dev→PM). Note: `TestClassifyDevRoutesToDev` does NOT exist — patch sites are identified by line, not class name.
+- [ ] `tests/unit/granite_container/test_granite_classifier.py` — DELETE the translation test artifacts: the `_make_ollama_response` helper (line 301), `TestExtractDevPromptMocked` (line 316), `TestSummarizeForPmMocked` (line 343), `TestTranslationTools` (line 369 — references `TRANSLATION_TOOLS`/`SYSTEM_PROMPT` and MUST be deleted), and the imports of `SYSTEM_PROMPT`, `TRANSLATION_TOOLS`, `extract_dev_prompt`, `summarize_for_pm`, `GraniteTranslationError` (lines ~24-25 and surrounding). **ALSO DELETE the anchored-frame tests** in `TestAnchoredPaintedFrames` (class at line 111: `test_anchored_token_wins_over_echo`, `test_anchored_token_collapsed_whitespace`, `test_anchored_beats_nudge_echo_poisoning`, `test_last_anchored_match_wins`, `test_payload_cut_at_frame_artifacts`) — these validate the deleted anchored path. KEEP `test_clean_synthetic_input_unaffected` (currently inside `TestAnchoredPaintedFrames` at line 170 — move it into `TestClassifyPmPrefix` since the anchored class is being emptied/deleted). The `TestClassifyPmPrefix` (line 37, strict/fallback first-line), `TestAnsiStripping` (191), `TestCursorPositionedSpacingSurvives` (226), and `TestEnsureGraniteModel` (line 414) classes STAY.
+- [ ] `tests/unit/granite_container/` — ADD a `TestLastAssistantText` class (in the test file matching `last_assistant_text`'s placement — `test_transcript_tailer.py` if placed there, else `test_granite_classifier.py`) covering: picks the LAST text-bearing assistant entry when several exist; concatenates only `text` blocks; EXCLUDES `tool_use`/`tool_result`/`thinking` blocks; returns `""` on empty/missing/corrupt file; returns `""` when only `user`/`tool_result` entries exist; tolerates a partial (non-newline-terminated) trailing line; a multi-assistant-entry fixture returns the LAST text-bearing one's text; **stale-but-complete: two complete assistant entries but `mtime_before` >= file mtime → returns `""`**; **tool-only final turn: last assistant entry is pure `tool_use` but an earlier entry has text → returns the earlier text; no text anywhere → `""`**.
+- [ ] `tests/unit/granite_container/test_container.py` — UPDATE the dev-routing tests at patch sites lines ~185-186, ~381-382, ~848-849, ~960-961, and ~1028 (each currently `patch("agent.granite_container.container.extract_dev_prompt")` and/or `...summarize_for_pm`). Drop those patches; instead stub `last_assistant_text` (patch where it is imported in `container`) to return fixture text, and assert: the Dev PTY receives `classification.payload` verbatim (PM→Dev — note `classification` is now produced from the stubbed PM-transcript read) and the PM PTY receives the Dev transcript's last assistant text verbatim (Dev→PM). Because the PM classify input now reads the transcript, tests must stub `last_assistant_text` to return the PM's `[/dev] ...` text for the PM-side read and the Dev report for the Dev-side read (keyed by transcript path, or via `side_effect`). Note: `TestClassifyDevRoutesToDev` does NOT exist — patch sites are identified by line, not class name.
+- [ ] `tests/unit/granite_container/test_container.py` — ADD: a fallback test where the PM transcript read returns `""` (or path `None`) → classification falls back to `classify_pm_prefix(pm_buf)` AND a `logger.warning` fires (assert via `assertLogs`).
 - [ ] `tests/unit/granite_container/test_container.py::test_to_json` (line ~732, asserts `granite_extract_ms=50`/`granite_summarize_ms=30`) — UPDATE: the fields are DELETED from `TurnRecord`, so remove them from the constructed `TurnRecord` and from the expected JSON.
-- [ ] `tests/unit/granite_container/test_container.py` — ADD: a no-content Dev turn (`last_assistant_text` → `""`) forwards `DEV_REPORT_UNAVAILABLE` to PM and never raises `PTYDriverError`; a Dev report whose text contains a literal routing token does not hijack PM routing.
+- [ ] `tests/unit/granite_container/test_container.py` — ADD: a no-content Dev turn (`last_assistant_text` → `""`) forwards `DEV_REPORT_UNAVAILABLE` to PM and never raises `PTYDriverError`, and emits the fallback `logger.warning` (assert via `assertLogs`); a PM turn whose first line is `[/dev]` and whose body contains a literal `⏺ [/complete]` still routes to `dev` (ordering-attack regression, proves the anchored-path deletion closed the class).
 - [ ] `scripts/granite_smoke_test.py` — DELETE the `extract_dev_prompt`/`summarize_for_pm` operator scenarios (4 each, lines ~166-200; they validate a removed capability). Confirmed NOT CI/launchd/cron-wired (`grep -rn granite_smoke_test` outside the file itself returns nothing). Keep any classification-token scenarios if present; if the file is left with no live scenarios, DELETE the whole file. Builder re-confirms no wiring before deleting.
-- [ ] `tests/unit/granite_container/test_persona_priming.py` — NO CHANGE expected (it asserts the PM body quotes `PREFIX_TOKEN_RE`; the Dev prime *body wording* changes but its persona contract is unchanged). Verify it still passes; if it asserts the now-corrected "summarized by the operator" Dev-prime wording, UPDATE that assertion.
+- [ ] `tests/unit/granite_container/test_persona_priming.py` — Verify it still passes after the Dev-prime wording correction (verbatim forwarding + "end each turn with a natural-language report"). If it asserts the now-removed "summarized by the operator" Dev-prime wording, UPDATE that assertion to the verbatim-forwarding wording. The PM-body `PREFIX_TOKEN_RE` assertion is unchanged.
 
 ## Rabbit Holes
 
@@ -251,17 +290,24 @@ PM idle → read PM transcript → `last_assistant_text` → `classify_pm_prefix
 **Mitigation:** Refine the criterion to its true intent: **no ollama call remains in the PM↔Dev *routing/translation* path.** `ensure_granite_model` and its worker gate are retained for the classification role. Update `ensure_granite_model`'s docstring (which currently claims "every PM/Dev turn is routed by an ollama call") to reflect that the PTY routing role is now zero-LLM and the gate exists for classification. The `grep` in Success Criteria is scoped to exclude `ensure_granite_model`.
 
 ### Risk 2: Flush-timing race — the "last assistant entry" may not be the completed turn
-**Impact:** We read the JSONL transcript right after `_cycle_idle` reports the PTY idle. The assistant message is *normally* flushed to JSONL by then, but this is a heuristic, not a guarantee. If we read a beat early we could miss the final turn (`last_assistant_text` returns the prior turn, or `""`) and forward stale/empty content.
-**Mitigation (this plan):** `last_assistant_text` reads only complete `\n`-terminated JSONL lines (mirroring `read_transcript_telemetry`'s safe-offset logic), so a half-written final line is skipped rather than mis-parsed. Empty-guard every PTY write so an early read degrades to `DEV_REPORT_UNAVAILABLE` / a compliance nudge rather than a crash. Add a test that reads a fixture with a partial trailing line and returns the last *complete* assistant entry.
+**Impact:** We read the JSONL transcript right after `_cycle_idle` reports the PTY idle. The assistant message is *normally* flushed to JSONL by then, but this is a heuristic, not a guarantee. Two failure modes: (a) a half-written final line, and (b) **stale-but-complete** — the current turn hasn't flushed at all but prior turns have, so a naive read returns the PRIOR turn's text (non-empty, passes the empty-guard, forwarded as if current).
+**Mitigation (this plan):**
+- (a) `last_assistant_text` reads only complete `\n`-terminated JSONL lines (mirroring `read_transcript_telemetry`'s safe-offset logic), so a half-written final line is skipped rather than mis-parsed.
+- (b) **mtime snapshot** — the caller records `os.path.getmtime(transcript)` before `_cycle_idle` polls and passes it as `mtime_before`; if the file's mtime has not advanced, the current turn was not flushed → `last_assistant_text` returns `""` → caller falls back (not the stale prior turn). One-line check; does NOT require #1688.
+- Empty-guard every PTY write so an early/stale read degrades to `DEV_REPORT_UNAVAILABLE` / a compliance nudge (with a `logger.warning`) rather than a crash or a silently-stale forward. Tests: a partial-trailing-line fixture returns the last *complete* entry; an mtime-unchanged fixture returns `""`.
 **Deterministic fix (followup #1688):** a hook-driven Stop signal so we read only after the turn is provably complete — removing the idle-poll + flush heuristic entirely. Tracked separately; out of scope here.
 
 ### Risk 3: Large/tool-spammy Dev turns now reach the read-only, context-limited PM verbatim
 **Impact:** A large Dev final turn could pressure the PM PTY's context window — the original reason `summarize_for_pm` existed. Note: reading only Dev's *last assistant turn* (not the whole scrollback the old `summarize_for_pm(dev_buf)` consumed) already bounds this far tighter than the rejected whole-frame approach.
 **Mitigation:** Per the product decision, accept raw forwarding; do NOT reintroduce summarization. Confirm during build that the PM PTY tolerates the larger inbound payload (it is the same TUI input channel that already accepts the prime persona body, a large payload). Add a behavioral acceptance check (see Success Criteria) that the PM still routes correctly (`[/dev]`/`[/user]`/`[/complete]`) on a real, tool-spammy Dev turn fed through the new path. Document the operational characteristic in `granite-pty-production.md`. If it ever becomes a real problem, that is a separate issue — not a reason to relaunder Dev's words through a 3B model.
 
-### Risk 4: Routing-token re-injection (CONCERN)
-**Impact:** If a Dev report's final text literally contains a routing token (`⏺ [/complete]`, etc.) and the PM echoes it, `classify_pm_prefix` (which takes the LAST anchored match) could misroute.
-**Mitigation:** Smaller surface than the rejected shared-frame scrape — the classifier now runs only on the PM's *own* structured assistant text. Add a defang note in code and a test (Dev report text contains a literal token; PM's own token still drives routing). Downgraded to CONCERN, not a blocker.
+### Risk 3.5: Tool-only final Dev turn → false `DEV_REPORT_UNAVAILABLE`
+**Impact:** If Dev's *final* assistant entry is pure `tool_use`/`thinking` with no `text` block, a naive "last assistant entry, text blocks only" read returns `""` → forwards `DEV_REPORT_UNAVAILABLE` even though Dev did real work. This is strictly more likely than the old `summarize_for_pm(dev_buf)` path (which consumed the whole scrollback).
+**Mitigation:** `last_assistant_text` walks assistant entries **newest-first and returns the most recent one that has a `text` block** — so a tool-only *final* entry is skipped in favor of the preceding textual turn. `DEV_REPORT_UNAVAILABLE` is reserved for the genuine no-text-anywhere case. The prime-dev-role wording correction makes "end each turn with a natural-language report" the explicit Dev protocol, so a fully text-less turn is a protocol violation whose intended degradation is `DEV_REPORT_UNAVAILABLE` (asserted in a test). Both branches are covered in `TestLastAssistantText`.
+
+### Risk 4: Routing-token re-injection — DISSOLVED by deleting the anchored path
+**Original impact:** `classify_pm_prefix` took the LAST anchored (`⏺`) match, so a PM turn that echoed Dev's `[/complete]` *after* its own `[/dev]` could misroute (the echoed token wins).
+**Resolution:** The anchored-frame path is **deleted** (see Solution / desired-outcome #3). With the PM classify input now the PM's clean transcript text and only the strict first-line `PREFIX_TOKEN_RE` path live, the LAST-match hijack is structurally impossible — classification keys on the first non-empty line only. This is not a downgrade to CONCERN; the failure class is removed. A regression test (PM first line `[/dev]`, body contains a literal `⏺ [/complete]`, still routes `dev`) locks it in.
 
 ## Race Conditions
 
@@ -271,7 +317,7 @@ The one **temporal** hazard introduced is the JSONL flush-timing heuristic (read
 
 ## No-Gos (Out of Scope)
 
-- The `[/user]` and `[/complete]` paths (`container.py:981`, `:944`) — already verbatim and zero-LLM; touching them risks regressing the working path. (Not deferred — genuinely correct as-is; modifying them is out of scope by design.)
+- The `[/user]` and `[/complete]` paths (`container.py:981`, `:948`) — already verbatim and zero-LLM; touching them risks regressing the working path. (Not deferred — genuinely correct as-is; modifying them is out of scope by design.)
 - Dev-persona **self-summarization** — explicitly rejected by the product owner. (Not deferred — rejected.) NOTE: this is distinct from the required *wording correction* in `/granite:prime-dev-role` (removing the false "your output is summarized by the operator" claim), which IS in scope — see Documentation.
 - The classification role's ollama dependency (`OLLAMA_CLASSIFIER_MODEL`, `ensure_granite_model`, the worker startup gate) — out of scope; required by bridge classification. (Not deferred — must remain.)
 - The message drafter — shipped in #1680/#1685. (Not deferred — already done.)
@@ -303,14 +349,16 @@ No agent integration required — this is a bridge/worker-internal change.
   - Lines ~525-540 (model roles table): keep granite as the classification model; remove/rewrite the "PTY operator (PM↔Dev routing)" row that lists `Container.extract_dev_prompt`/`Container.summarize_for_pm` to "PTY operator (PM↔Dev routing) — regex classify + verbatim transcript-content forward (no model)."
   - Lines ~75-78 (`ensure_granite_model` rationale): reframe the gate as a precondition for the **classification** role, not "every PM/Dev turn is routed by an ollama call."
   - Add a short subsection on the JSONL-transcript content surface (it's the same surface the telemetry tailer reads) and the flush-timing heuristic, cross-referencing followup **#1688** as the deterministic (hook-driven) complement.
-- [ ] Correct `.claude/commands/granite/prime-dev-role.md`: the persona body falsely claims Dev output is summarized by the operator — line 11 ("Your output is summarized by the granite operator and forwarded to the PM"), line 18 ("The operator will summarize your output and forward it back to the PM"), and the "the PM's summary reaches the human" wording (~line 25). Rewrite all of these to reflect **verbatim forwarding of Dev's final authored message** (e.g. "Your final message each turn is forwarded verbatim to the PM — write it as the report you want the PM to read"). This is a doc/wording edit, NOT Dev self-summarization.
+- [ ] Correct `.claude/commands/granite/prime-dev-role.md`: the persona body falsely claims Dev output is summarized by the operator — line 11 ("Your output is summarized by the granite operator and forwarded to the PM"), line 18 ("The operator will summarize your output and forward it back to the PM"), and the "the PM's summary reaches the human" wording (line 25). Rewrite all of these to reflect **verbatim forwarding of Dev's final authored message** (e.g. "Your final message each turn is forwarded verbatim to the PM — write it as the report you want the PM to read"). **Also add the end-turn-with-text protocol** the tool-only invariant relies on: state explicitly that each turn must END with a natural-language text report (not a bare tool call), because only the final assistant turn's text is forwarded — a text-less final turn degrades to `DEV_REPORT_UNAVAILABLE`. This is a doc/wording edit, NOT Dev self-summarization.
 - [ ] No `docs/features/README.md` index change needed (the feature already has an entry).
 
 ### External Documentation Site
 - [ ] N/A — this repo has no Sphinx/MkDocs site for this area.
 
 ### Inline Documentation
-- [ ] Rewrite the `granite_classifier.py` module docstring (lines 1-31): drop the "classification vs translation" framing; it is now classification-only.
+- [ ] Rewrite the `granite_classifier.py` module docstring (lines 1-31): drop the "classification vs translation" framing and the "each ollama.chat sees only the current turn" invariant; it is now classification-only (a regex parse, no ollama on the routing path).
+- [ ] Correct the `ClassificationResult` docstring (`granite_classifier.py:160-184`): replace "for `dev` and `user`, the translation call's output" with "the verbatim text following the prefix token" (NIT — `payload` is no longer a translation output).
+- [ ] Remove the now-stale comments above `PREFIX_TOKEN_ANCHORED_RE` / `_FRAME_ARTIFACT_RE` (lines ~132-153) — they are deleted with the regexes.
 - [ ] Rewrite the `container.py` loop docstring (lines 12-15): replace "call granite to extract_dev_prompt (ollama) ... summarize_for_pm (ollama)" with "read the PM's last assistant text from the JSONL transcript, classify it, forward the verbatim `[/dev]` payload to Dev; forward Dev's last assistant text verbatim to PM."
 - [ ] Update `ensure_granite_model`'s docstring per Risk 1.
 - [ ] Docstring for the new `last_assistant_text` helper: states the JSONL contract (last `assistant` entry, `text` blocks only, fail-silent, partial-trailing-line tolerant) and notes the flush-timing heuristic / #1688.
@@ -322,7 +370,10 @@ No agent integration required — this is a bridge/worker-internal change.
 - [ ] `last_assistant_text` exists, is pure/fail-silent, returns the last assistant entry's `text` blocks only, and tolerates a partial trailing line (asserted in `TestLastAssistantText`).
 - [ ] The `[/dev]` instruction written to Dev is `classification.payload` verbatim (classified from the PM transcript's last assistant text), not an LLM re-extraction (asserted in `test_container.py`).
 - [ ] Dev's last assistant text is forwarded to PM verbatim, with no 3B-rewritten prose and no summarization step, and a no-content Dev turn forwards `DEV_REPORT_UNAVAILABLE` without raising `PTYDriverError` (asserted in `test_container.py`).
-- [ ] `granite_extract_ms`/`granite_summarize_ms` are removed from `TurnRecord` and from `result_to_json` output (asserted in updated `test_to_json`); no zero-fill remains.
+- [ ] `granite_extract_ms`/`granite_summarize_ms` are removed from `TurnRecord` and from `result_to_json` output (asserted in updated `test_to_json`); no zero-fill remains. The repo-wide grep `grep -rn "granite_extract_ms\|granite_summarize_ms" . --include="*.py" --include="*.json" --include="*.yaml" | grep -v "def granite_"` returns 0 matches (no consumer reads the deleted fields — verified at plan time: only `container.py` and the `test_to_json` fixture referenced them).
+- [ ] The painted-frame anchored path (`PREFIX_TOKEN_ANCHORED_RE`, `_FRAME_ARTIFACT_RE`, the 284-297 block) is deleted; classification flows only through `PREFIX_TOKEN_RE` (strict first line) → `PREFIX_TOKEN_FALLBACK_RE` (first 200 chars) → `unknown`. The PM classify input is the PM's transcript text (with `pm_buf` fallback).
+- [ ] `last_assistant_text` accepts `mtime_before` and returns `""` when the transcript mtime has not advanced (stale-but-complete guard), and skips a tool-only final entry in favor of the most recent text-bearing one (asserted in `TestLastAssistantText`).
+- [ ] Every fallback substitution emits a grep-able `logger.warning` (Dev→PM `DEV_REPORT_UNAVAILABLE`, wrap-up seed, PM-classify `pm_buf` fallback) — asserted via `assertLogs`.
 - [ ] `[/user]`/`[/complete]` human-delivery path unchanged and still verbatim (regression assertion in `test_container.py`).
 - [ ] **Behavioral acceptance:** the PM routes correctly (`[/dev]`/`[/user]`/`[/complete]`) on a real, tool-spammy Dev turn fed through the new transcript path — a lightweight integration test or a manual e2e smoke with a captured JSONL trace artifact attached to the PR.
 - [ ] Net-negative diff in `granite_classifier.py` (`git diff --stat` shows more deletions than insertions for that file).
@@ -338,13 +389,13 @@ No agent integration required — this is a bridge/worker-internal change.
 
 - **Builder (classifier-de-llm)**
   - Name: shuttle-builder
-  - Role: Delete the translation path in `granite_classifier.py`, add `last_assistant_text` (transcript JSONL reader), edit the three `container.py` call sites to read transcript content with empty-guarded PTY writes, delete the two dead `TurnRecord` telemetry fields, update docstrings.
+  - Role: Delete the translation path AND the anchored-frame path (regexes + 284-297 block) in `granite_classifier.py`; add `last_assistant_text` (transcript JSONL reader with mtime/tool-only handling); switch the three PM classify sites to read the PM transcript (with `pm_buf` fallback + warning); edit the Dev→PM / wrap-up / PM→Dev sites with empty-guarded PTY writes and fallback warnings; delete the two dead `TurnRecord` telemetry fields; update docstrings (module, `ClassificationResult`, loop, `ensure_granite_model`).
   - Agent Type: builder
   - Resume: true
 
 - **Builder (tests)**
   - Name: shuttle-test-builder
-  - Role: Delete translation tests (incl. `TestTranslationTools`), add `TestLastAssistantText`, update `test_container.py` to stub `last_assistant_text` and assert verbatim forwarding + empty-guard + token-defang, fix `test_to_json`, handle `granite_smoke_test.py`.
+  - Role: Delete translation tests (incl. `TestTranslationTools`) AND the anchored-frame tests, add `TestLastAssistantText` (with stale-mtime + tool-only fixtures), update `test_container.py` to stub `last_assistant_text` (PM + Dev reads) and assert verbatim forwarding + empty-guard + fallback-warning + ordering-attack regression, fix `test_to_json`, handle `granite_smoke_test.py`.
   - Agent Type: test-engineer
   - Resume: true
 
@@ -366,7 +417,7 @@ No agent integration required — this is a bridge/worker-internal change.
 
 ## Step by Step Tasks
 
-### 1. Delete translation path + add chrome stripper + edit call sites
+### 1. Delete translation + anchored-frame paths; add transcript reader; edit call sites
 - **Task ID**: build-shuttle
 - **Depends On**: none
 - **Validates**: tests/unit/granite_container/test_granite_classifier.py, tests/unit/granite_container/test_container.py
@@ -374,10 +425,16 @@ No agent integration required — this is a bridge/worker-internal change.
 - **Agent Type**: builder
 - **Parallel**: false
 - Delete `extract_dev_prompt`, `summarize_for_pm`, `TRANSLATION_TOOLS`, `SYSTEM_PROMPT`, `GraniteTranslationError`, `_events_from_text`, `_extract_tool_calls`, `_normalize_arguments`, and the translation-only `ollama_chat` usage from `granite_classifier.py`.
-- Add `last_assistant_text(transcript_path: str) -> str` (pure, fail-silent; last `assistant` entry; `text` blocks only; partial-trailing-line tolerant). Place in `transcript_tailer.py` (preferred) or `granite_classifier.py`; document the choice.
-- Edit `container.py`: PM→Dev (`~:1031-1064`) → classify `last_assistant_text(pm_transcript)`, write `classification.payload` (empty-guarded); Dev→PM (`~:1074-1092`) → `self._pm_pty.write(last_assistant_text(dev_transcript) or DEV_REPORT_UNAVAILABLE)`; wrap-up seed (`:1136`) → `last_assistant_text(dev_transcript) or DEV_REPORT_UNAVAILABLE`. Reuse `_transcript_path(self.cwd, pty._session_id)`; fall back to the painted buffer when the path is `None`. Remove the now-dead extract/summarize try/except and timing.
-- DELETE `granite_extract_ms`/`granite_summarize_ms` from `TurnRecord` and every assignment site; `result_to_json` (asdict) drops them automatically.
-- Update module docstring, container loop docstring, and `ensure_granite_model` docstring (Risk 1).
+- **Delete the anchored-frame path**: `PREFIX_TOKEN_ANCHORED_RE` (line 142), `_FRAME_ARTIFACT_RE` (line 148), and the anchored-match block (lines 284-297) plus their stale comments. Classification now flows strict `PREFIX_TOKEN_RE` → `PREFIX_TOKEN_FALLBACK_RE` → `unknown`.
+- Add `last_assistant_text(transcript_path: str, *, mtime_before: float | None = None) -> str` (pure, fail-silent; most recent text-bearing `assistant` entry; `text` blocks only; skips tool-only final entry; partial-trailing-line tolerant; returns `""` when mtime hasn't advanced past `mtime_before`). Place in `transcript_tailer.py` (preferred) or `granite_classifier.py`; document the choice.
+- Edit `container.py`:
+  - **PM classify input (`:788`, `:844`, `:1156`)**: snapshot transcript mtime before `_cycle_idle`; `pm_text = last_assistant_text(pm_transcript, mtime_before=...)`; `classify_pm_prefix(pm_text)`; on empty/`None` → `logger.warning` + fall back to `classify_pm_prefix(pm_buf)`.
+  - **PM→Dev (`:1033`)**: `dev_prompt = classification.payload` (no extra guard at `:1064`; the `:1010` compliance branch already runs first).
+  - **Dev→PM (`:1077`)**: `self._pm_pty.write(last_assistant_text(dev_transcript, mtime_before=...) or DEV_REPORT_UNAVAILABLE)` + `logger.warning` on fallback; `self._last_dev_report = dev_text`.
+  - **Wrap-up seed (`:1136`)**: `last_assistant_text(dev_transcript) or DEV_REPORT_UNAVAILABLE` + `logger.warning` on fallback.
+  - Reuse `_transcript_path(self.cwd, pty._session_id)` / `result.{pm,dev}_transcript_path`. Remove the now-dead extract/summarize try/except and timing.
+- DELETE `granite_extract_ms`/`granite_summarize_ms` from `TurnRecord` (`:212-213`) and every assignment site; `result_to_json` (asdict) drops them automatically.
+- Update module docstring, `ClassificationResult` docstring (`payload` is verbatim, not translation output), container loop docstring, and `ensure_granite_model` docstring (Risk 1). Add a defang comment at the strict-path classify noting the anchored path was removed.
 
 ### 2. Test changes
 - **Task ID**: build-tests
@@ -386,8 +443,8 @@ No agent integration required — this is a bridge/worker-internal change.
 - **Assigned To**: shuttle-test-builder
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Delete translation test classes + imports in `test_granite_classifier.py` (incl. `TestExtractDevPromptMocked`, `TestSummarizeForPmMocked`, `TestTranslationTools`, `_make_ollama_response`); add `TestLastAssistantText`.
-- Update `test_container.py` dev-routing tests (stub `last_assistant_text`) to assert verbatim PM→Dev and verbatim Dev→PM forwarding; add empty-guard test (`DEV_REPORT_UNAVAILABLE`, no `PTYDriverError`) and routing-token defang test; fix `test_to_json` (drop the two deleted fields).
+- Delete translation test classes + imports in `test_granite_classifier.py` (incl. `TestExtractDevPromptMocked`, `TestSummarizeForPmMocked`, `TestTranslationTools`, `_make_ollama_response`) AND the anchored-frame tests in `TestAnchoredPaintedFrames` (keep `test_clean_synthetic_input_unaffected`, moved into `TestClassifyPmPrefix`); add `TestLastAssistantText` (incl. stale-mtime and tool-only-final-turn fixtures).
+- Update `test_container.py` dev-routing tests (stub `last_assistant_text` for both PM-side and Dev-side reads via `side_effect`/path key) to assert verbatim PM→Dev and verbatim Dev→PM forwarding; add: empty-guard test (`DEV_REPORT_UNAVAILABLE`, no `PTYDriverError`, warning fires); PM-classify fallback test (transcript read `""`/`None` → `pm_buf` fallback + warning); ordering-attack regression (PM first line `[/dev]`, body has literal `⏺ [/complete]`, routes `dev`); fix `test_to_json` (drop the two deleted fields).
 - Update or delete `scripts/granite_smoke_test.py` (confirm not CI-wired first).
 
 ### 3. Documentation
@@ -414,7 +471,9 @@ No agent integration required — this is a bridge/worker-internal change.
 | No live translation ollama call in classifier | `grep -n "ollama_chat(" agent/granite_container/granite_classifier.py` | exit code 1 |
 | Translation functions deleted | `grep -nE "def (extract_dev_prompt\|summarize_for_pm)\b" agent/granite_container/granite_classifier.py` | exit code 1 |
 | Transcript reader exists | `grep -rn "def last_assistant_text" agent/granite_container/` | output contains last_assistant_text |
-| Dead telemetry fields deleted | `grep -rn "granite_extract_ms\|granite_summarize_ms" agent/granite_container/` | exit code 1 |
+| Dead telemetry fields deleted (src + tests) | `grep -rn "granite_extract_ms\|granite_summarize_ms" agent/granite_container/ tests/unit/granite_container/` | exit code 1 |
+| No consumer reads deleted fields | `grep -rn "granite_extract_ms\|granite_summarize_ms" . --include="*.py" --include="*.json" --include="*.yaml" \| grep -v "def granite_"` | exit code 1 (no matches after deletion) |
+| Anchored-frame path deleted | `grep -nE "PREFIX_TOKEN_ANCHORED_RE\|_FRAME_ARTIFACT_RE" agent/granite_container/granite_classifier.py` | exit code 1 |
 | Prime-dev wording corrected | `grep -in "summarized by the" .claude/commands/granite/prime-dev-role.md` | exit code 1 |
 | Net-negative classifier diff | `git diff --stat main -- agent/granite_container/granite_classifier.py` | more deletions than insertions |
 | Classification gate retained | `grep -n "def ensure_granite_model" agent/granite_container/granite_classifier.py` | output contains ensure_granite_model |
@@ -423,15 +482,25 @@ No agent integration required — this is a bridge/worker-internal change.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) 2026-06-14. Verdict: NEEDS REVISION. -->
+<!-- Revision applied 2026-06-14 — all 3 BLOCKERs + 4 CONCERNs + 2 NITs addressed; citations re-verified against live code. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Simplifier, Skeptic, Consistency | PM-side classify-input switch to `last_assistant_text(pm_transcript)` is both unnecessary AND un-enumerated. `classify_pm_prefix(pm_buf)` already returns `payload`=verbatim text after `[/dev]` (granite_classifier.py:314-329). The actual classify call sites are container.py:788/844/1156 (outside `_route_pm_classification`), but Solution/Task 1 only lists 1033/1077/1136. Either resolution requires plan text changes. | ✅ RESOLVED (revision) | The `[/dev]` write now uses `classification.payload` (one-line swap at :1033; no LLM re-extraction) — the Simplifier's core point. The PM classify *input* IS moved to the PM transcript, but only because BLOCKER 2 (anchored-path deletion) requires clean echo-free input; this is the critique's own explicitly-offered alternative. Citations corrected throughout: classify sites are **788/844/1156** (Freshness Check, Solution, Data Flow, Task 1 all fixed); extract/summarize sites are 1033/1077/1136. Each classify site gets an empty/`None` fallback to `classify_pm_prefix(pm_buf)`. |
+| BLOCKER | Archaeologist | The anchored-frame path in `classify_pm_prefix` (granite_classifier.py:284-297) is NOT a no-op on clean text — it fires on ANY `⏺`/`●` char and takes the LAST match, before the strict first-line path. If a PM message contains `⏺` (quoting Dev output / code), it misroutes. Plan says "leave them in place (harmlessly no-op)" — false, and violates NO LEGACY CODE TOLERANCE. | ✅ RESOLVED (revision) | Anchored block (284-297) + `PREFIX_TOKEN_ANCHORED_RE` (142) + `_FRAME_ARTIFACT_RE` (148) are now **deleted** in Solution/Task 1 (no longer "leave them in place"). Justified by the PM classify input being clean transcript text (no echo prefix). `TestAnchoredPaintedFrames` tests deleted (keep `test_clean_synthetic_input_unaffected`). Risk 4 rewritten as DISSOLVED. |
+| BLOCKER | Adversary, Skeptic | Stale-but-complete read: if Claude Code hasn't flushed the current turn but prior turns are flushed, `last_assistant_text` returns the PRIOR turn's text — non-empty, passes the empty-guard, forwarded verbatim as if current. Plan's Risk 2 only mitigates empty/partial-line, not stale-complete. (Skeptic CONCERN + Adversary BLOCKER → elevated.) | ✅ RESOLVED (revision) | `last_assistant_text` now takes `mtime_before: float | None`; caller snapshots `os.path.getmtime` before `_cycle_idle`; if mtime hasn't advanced → return `""` → fallback + warning. One-line check, no #1688. Risk 2 rewritten with the two failure modes; `TestLastAssistantText` gets a stale-mtime fixture. Does NOT require #1688. |
+| CONCERN | Adversary | Tool-only final assistant turn (pure `tool_use`, no `text` block) → `last_assistant_text` returns `""` → forwards `DEV_REPORT_UNAVAILABLE` even though Dev did real work. | ✅ RESOLVED (revision) | `last_assistant_text` walks newest-first and returns the most recent **text-bearing** assistant entry (skips a tool-only final entry). `DEV_REPORT_UNAVAILABLE` reserved for genuine no-text-anywhere. prime-dev-role wording adds the "end each turn with a text report" protocol. New Risk 3.5 + two `TestLastAssistantText` fixtures. |
+| CONCERN | Operator | Empty/None/fallback substitutions are invisible in prod. | ✅ RESOLVED (revision) | `logger.warning(..., extra={session_id, transcript_path, fallback})` added at all three substitution sites (Dev→PM, wrap-up seed, PM-classify `pm_buf` fallback). Asserted via `assertLogs`. Added to Failure Path Test Strategy + Success Criteria. |
+| CONCERN | Operator | "Archaeology confirmed NO consumer reads `granite_*_ms`" asserted without a cited grep artifact. | ✅ RESOLVED (revision) | Grep run at plan time; output pasted into Freshness Check (matches only in `container.py` + the `test_to_json` fixture — no analytics/dashboard/reflection consumer). New Success Criterion + Verification row: repo-wide grep returns 0 after deletion. |
+| CONCERN | Adversary | Routing-token re-injection defang test underspecified for the ordering attack (LAST anchored match wins). | ✅ RESOLVED (revision) | Subsumed by the anchored-path deletion. With only the strict first-line path, a mid-body echoed token can't hijack. Regression test specified: PM first line `[/dev]`, body has literal `⏺ [/complete]`, routes `dev`. |
+| NIT | Skeptic, Archaeologist | `ClassificationResult` docstring (160-184) falsely says `payload` is "the translation call's output." | ✅ RESOLVED (revision) | Added to Inline Documentation + Technical Approach: replace with "the verbatim text following the prefix token." |
+| NIT | Consistency | Verification "Dead telemetry fields deleted" grep scopes only `agent/granite_container/`; the `test_to_json` fixture would slip the check. | ✅ RESOLVED (revision) | Verification grep broadened to include `tests/unit/granite_container/`; plus a repo-wide no-consumer grep row. |
 
 ---
 
 ## Open Questions
 
-The mechanism pivot (read the JSONL transcript instead of scraping the painted frame) is resolved by the owner. The Dev→PM forwarding decision (verbatim, no self-summarization) and the classification-gate retention (Risk 1) are settled.
+The mechanism pivot (read the JSONL transcript instead of scraping the painted frame) is resolved by the owner. The Dev→PM forwarding decision (verbatim, no self-summarization) and the classification-gate retention (Risk 1) are settled. The critique's three BLOCKERs are resolved in this revision: (1) the PM→Dev write uses `classification.payload` (no LLM re-extraction) while the PM classify *input* moves to the PM transcript so that (2) the live anchored-frame path can be deleted (dissolving the routing-token risk), and (3) a one-line mtime snapshot closes the stale-but-complete read. The tool-only-final-turn concern is handled by walking to the most recent text-bearing entry; fallback substitutions now log warnings; the no-consumer grep artifact is in the Freshness Check.
 
 **One residual, honestly stated, deferred not blocking:** the flush-timing heuristic (read-at-idle vs. assistant-message-flushed-to-JSONL). This plan mitigates it (complete-lines-only read + empty-guards + a partial-line test) but cannot *eliminate* it on the idle-poll boundary. The deterministic elimination is followup **#1688** (hook-driven Stop signal). If the supervisor judges the heuristic unacceptable to ship even with the mitigations, the correct move is to sequence #1688 first — but the owner's stated sequencing is content-swap now (#1681), deterministic boundaries next (#1688).
 
