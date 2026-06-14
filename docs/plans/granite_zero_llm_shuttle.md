@@ -1,10 +1,11 @@
 ---
-status: Planning
+status: Done
 type: chore
 appetite: Small
 owner: Valor Engels
 created: 2026-06-14
 tracking: https://github.com/tomcounsell/ai/issues/1681
+pr: https://github.com/tomcounsell/ai/pull/1689
 last_comment_id:
 revision_applied: true
 ---
