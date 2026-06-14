@@ -16,6 +16,7 @@ from pathlib import Path
 from agent.granite_container.transcript_tailer import (
     TranscriptTelemetry,
     fold_events,
+    last_assistant_text,
     read_transcript_telemetry,
 )
 
@@ -636,6 +637,219 @@ class TestLastToolUseAtIsDatetime(unittest.TestCase):
             str,
             "tailer must return last_tool_use_at as a raw ISO string, not a datetime",
         )
+
+
+# ---------------------------------------------------------------------------
+# 15. last_assistant_text: JSONL transcript reader
+# ---------------------------------------------------------------------------
+
+
+class TestLastAssistantText(unittest.TestCase):
+    """Tests for last_assistant_text() JSONL transcript reader."""
+
+    def _write_transcript(self, tmp_path: str, lines: list) -> str:
+        """Write JSONL lines to a temp transcript file, return path as str."""
+        import os
+        import tempfile
+
+        fd, path = tempfile.mkstemp(suffix=".jsonl", dir=tmp_path)
+        with os.fdopen(fd, "w") as f:
+            for line in lines:
+                f.write(json.dumps(line) + "\n")
+        return path
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._tmp = tempfile.mkdtemp()
+
+    def tearDown(self) -> None:
+        import shutil
+
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_returns_last_text_bearing_assistant_entry(self) -> None:
+        """Picks the last assistant entry that has text blocks."""
+        path = self._write_transcript(
+            self._tmp,
+            [
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "first"}]},
+                },
+                {"type": "user", "message": {"content": [{"type": "text", "text": "user msg"}]}},
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "second"}]},
+                },
+            ],
+        )
+        self.assertEqual(last_assistant_text(path), "second")
+
+    def test_concatenates_text_blocks(self) -> None:
+        """Concatenates multiple text blocks in a single entry."""
+        path = self._write_transcript(
+            self._tmp,
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "hello "},
+                            {"type": "text", "text": "world"},
+                        ]
+                    },
+                },
+            ],
+        )
+        self.assertEqual(last_assistant_text(path), "hello world")
+
+    def test_excludes_tool_use_tool_result_thinking_blocks(self) -> None:
+        """Does not include non-text blocks in the result."""
+        path = self._write_transcript(
+            self._tmp,
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "id": "t1", "name": "bash", "input": {}},
+                            {"type": "text", "text": "done"},
+                            {"type": "thinking", "thinking": "internal"},
+                        ]
+                    },
+                },
+            ],
+        )
+        self.assertEqual(last_assistant_text(path), "done")
+
+    def test_returns_empty_on_missing_file(self) -> None:
+        """Returns '' when file doesn't exist."""
+        self.assertEqual(last_assistant_text("/nonexistent/path/transcript.jsonl"), "")
+
+    def test_returns_empty_on_empty_file(self) -> None:
+        """Returns '' on empty file."""
+        import os
+
+        path = os.path.join(self._tmp, "empty.jsonl")
+        open(path, "w").close()
+        self.assertEqual(last_assistant_text(path), "")
+
+    def test_returns_empty_when_no_assistant_entries(self) -> None:
+        """Returns '' when only user/tool_result entries exist."""
+        path = self._write_transcript(
+            self._tmp,
+            [
+                {"type": "user", "message": {"content": [{"type": "text", "text": "hello"}]}},
+                {"type": "tool_result", "content": "result"},
+            ],
+        )
+        self.assertEqual(last_assistant_text(path), "")
+
+    def test_tolerates_corrupt_partial_jsonl(self) -> None:
+        """Returns '' or partial result when JSONL is corrupt or partial."""
+        import os
+
+        path = os.path.join(self._tmp, "corrupt.jsonl")
+        with open(path, "w") as f:
+            f.write(
+                '{"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}}\n'
+            )
+            f.write("{corrupt json\n")
+        result = last_assistant_text(path)
+        # Should not raise; returns the valid entry's text
+        self.assertEqual(result, "ok")
+
+    def test_tolerates_partial_trailing_line(self) -> None:
+        """Ignores a partial (non-newline-terminated) trailing line."""
+        import os
+
+        good_line = json.dumps(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "complete"}]},
+            }
+        )
+        partial = '{"type": "assistant", "message": {"content": [{"type": "text"'
+        path = os.path.join(self._tmp, "partial.jsonl")
+        with open(path, "w") as f:
+            f.write(good_line + "\n" + partial)  # no trailing newline
+        result = last_assistant_text(path)
+        self.assertEqual(result, "complete")
+
+    def test_stale_mtime_returns_empty(self) -> None:
+        """Returns '' when file mtime has NOT advanced past mtime_before."""
+        import os
+        import time
+
+        path = os.path.join(self._tmp, "stale.jsonl")
+        with open(path, "w") as f:
+            f.write(
+                '{"type": "assistant", "message": {"content": [{"type": "text", "text": "stale"}]}}\n'
+            )
+        # Use mtime AFTER writing (same or later) as mtime_before
+        mtime = os.path.getmtime(path)
+        time.sleep(0.01)  # ensure we're past the write
+        result = last_assistant_text(path, mtime_before=mtime)
+        # mtime has NOT advanced since mtime_before — should return ""
+        self.assertEqual(result, "")
+
+    def test_fresh_mtime_returns_text(self) -> None:
+        """Returns text when file mtime HAS advanced past mtime_before."""
+        import os
+        import time
+
+        path = os.path.join(self._tmp, "fresh.jsonl")
+        # Capture mtime_before BEFORE writing
+        mtime_before = time.time() - 1  # 1 second before now
+        with open(path, "w") as f:
+            f.write(
+                '{"type": "assistant", "message": {"content": [{"type": "text", "text": "fresh"}]}}\n'
+            )
+        result = last_assistant_text(path, mtime_before=mtime_before)
+        self.assertEqual(result, "fresh")
+
+    def test_skips_tool_only_final_entry_returns_earlier_text(self) -> None:
+        """Skips a final entry that is pure tool_use; returns earlier text-bearing entry."""
+        path = self._write_transcript(
+            self._tmp,
+            [
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "earlier text"}]},
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "id": "t1", "name": "bash", "input": {}}
+                        ]
+                    },
+                },
+            ],
+        )
+        self.assertEqual(last_assistant_text(path), "earlier text")
+
+    def test_no_text_anywhere_returns_empty(self) -> None:
+        """Returns '' when NO assistant entry has any text blocks."""
+        path = self._write_transcript(
+            self._tmp,
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "id": "t1", "name": "bash", "input": {}}
+                        ]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "thinking", "thinking": "internal"}]},
+                },
+            ],
+        )
+        self.assertEqual(last_assistant_text(path), "")
 
 
 if __name__ == "__main__":

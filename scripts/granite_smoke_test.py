@@ -1,8 +1,12 @@
 """Granite4.1:3b smoke test (gate task for the granite-agent-loop PoC).
 
-Runs 20 scripted operator decision scenarios against granite4.1:3b via ollama
+Runs 12 scripted operator decision scenarios against granite4.1:3b via ollama
 and verifies that the model produces well-formed tool calls reliably enough to
 act as the session operator.
+
+Note: extract_dev_prompt and summarize_for_pm scenarios were removed in the
+zero-LLM shuttle refactor — the container now reads PM/Dev output verbatim
+from JSONL transcripts instead of using ollama for translation.
 
 Kill criteria: parse error rate > 20% (i.e. < 80% of scenarios produce a
 non-empty `tool_calls` whose function name is in the expected set).
@@ -36,46 +40,6 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 OPERATOR_TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "extract_dev_prompt",
-            "description": (
-                "Extract the next instruction the Dev session should receive, "
-                "based on what the PM session just produced."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "dev_prompt": {
-                        "type": "string",
-                        "description": "The full instruction text to send to Dev.",
-                    }
-                },
-                "required": ["dev_prompt"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "summarize_for_pm",
-            "description": (
-                "Summarize the Dev session output so the PM can evaluate progress "
-                "without seeing every raw tool call."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": "A short summary of what Dev did and produced.",
-                    }
-                },
-                "required": ["summary"],
-            },
-        },
-    },
     {
         "type": "function",
         "function": {
@@ -163,52 +127,6 @@ SYSTEM_PROMPT = (
 
 def build_scenarios() -> list[Scenario]:
     return [
-        # extract_dev_prompt (4)
-        Scenario(
-            "pm_gives_dev_instructions_1",
-            "PM just said: 'Have Dev create a file hello.py that prints Hello World.' "
-            "What do you do next?",
-            "extract_dev_prompt",
-        ),
-        Scenario(
-            "pm_gives_dev_instructions_2",
-            "PM result: 'Dev, please run the test suite and report failures.' Forward this to Dev.",
-            "extract_dev_prompt",
-        ),
-        Scenario(
-            "pm_gives_dev_instructions_3",
-            "PM said: 'Next, implement the granite router class.' Route to Dev.",
-            "extract_dev_prompt",
-        ),
-        Scenario(
-            "pm_gives_dev_instructions_4",
-            "PM result text: 'Tell Dev to write unit tests for the parser.'",
-            "extract_dev_prompt",
-        ),
-        # summarize_for_pm (4)
-        Scenario(
-            "dev_finished_summarize_1",
-            "Dev emitted 50 lines of tool calls editing 3 files and finished with "
-            "'created hello.py and committed it'. Summarize for PM.",
-            "summarize_for_pm",
-        ),
-        Scenario(
-            "dev_finished_summarize_2",
-            "Dev ran pytest and reported 'All 42 tests passed'. Pass this back to PM.",
-            "summarize_for_pm",
-        ),
-        Scenario(
-            "dev_finished_summarize_3",
-            "Dev produced a long stream of bash and edit operations, final result "
-            "was 'refactored module agent/foo.py'. Summarize.",
-            "summarize_for_pm",
-        ),
-        Scenario(
-            "dev_finished_summarize_4",
-            "Dev session output: 'Wrote 3 functions, added docstrings, ran format.' "
-            "Summarize for the PM session.",
-            "summarize_for_pm",
-        ),
         # handle_choice (4)
         Scenario(
             "multi_choice_1",

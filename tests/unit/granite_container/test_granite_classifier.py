@@ -1,18 +1,13 @@
 """Tests for the granite classifier (PoC #1546).
 
-The classifier has two surfaces:
+The classifier has one primary surface:
   - `classify_pm_prefix`: a deterministic regex parse on the first
     line of PM's tail. Fully unit-testable; no ollama call.
-  - `extract_dev_prompt` / `summarize_for_pm`: ollama.chat() calls
-    that translate between PM and Dev. Tested with a mocked ollama
-    response (so the test does not depend on the local ollama
-    service) plus an env-gated live test that exercises the real
-    translation path.
 
-Why split the test surface: the classification decision is
-deterministic and should never be exercised against a real LLM. The
-translation quality IS exercised against the real LLM in the
-env-gated test — that is the Q6 measurement the plan calls for.
+The LLM-based translation functions (`extract_dev_prompt`, `summarize_for_pm`,
+`TRANSLATION_TOOLS`, `SYSTEM_PROMPT`, `GraniteTranslationError`) were deleted
+in the zero-LLM shuttle (PR #1686) — the container now reads PM/Dev output
+verbatim from JSONL transcripts via `last_assistant_text`.
 """
 
 from __future__ import annotations
@@ -21,12 +16,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from agent.granite_container.granite_classifier import (
-    SYSTEM_PROMPT,
-    TRANSLATION_TOOLS,
     classify_pm_prefix,
     ensure_granite_model,
-    extract_dev_prompt,
-    summarize_for_pm,
 )
 
 # ---------------------------------------------------------------------------
@@ -107,71 +98,21 @@ class TestClassifyPmPrefix(unittest.TestCase):
         self.assertEqual(result.destination, "unknown")
         self.assertTrue(result.compliance_miss)
 
-
-class TestAnchoredPaintedFrames(unittest.TestCase):
-    """Real painted TUI captures: the `⏺`-anchored token wins.
-
-    The per-turn capture the container classifies contains the echo of
-    whatever the container just wrote AHEAD of the model's reply
-    (prime command, granite summary, compliance nudge), so first-line /
-    first-200-chars parsing reads the echo. The transcript bullet `⏺`
-    anchors the model's actual output (PR #1612 smoke debugging).
-    """
-
-    def test_anchored_token_wins_over_echo(self) -> None:
-        capture = (
-            "❯ /granite:prime-pm-role Send a one-line confirmation.\n"
-            "────────────────────────────\n"
-            "✻ Sprouting…\n"
-            "⏺ [/user] Online and ready.\n"
-            "────────────────────────────\n"
-            "⏵⏵ bypass permissions on (shift+tab to cycle)\n"
-        )
-        result = classify_pm_prefix(capture)
-        self.assertEqual(result.destination, "user")
-        self.assertEqual(result.payload, "Online and ready.")
-        self.assertFalse(result.compliance_miss)
-
-    def test_anchored_token_collapsed_whitespace(self) -> None:
-        """The TUI may paint with whitespace collapsed: `⏺[/user]Online...`."""
-        capture = "❯ some echo\n⏺[/dev]Run the unit tests in tests/unit.\n────────\n"
-        result = classify_pm_prefix(capture)
-        self.assertEqual(result.destination, "dev")
-        self.assertIn("Run the unit tests", result.payload)
-
-    def test_anchored_beats_nudge_echo_poisoning(self) -> None:
-        """The compliance nudge names the literal tokens; its echo must
-        not be classified as the PM's routing decision."""
-        capture = (
-            "❯ Your last reply did not start with a routing prefix on its "
-            "own line. Re-send your reply starting with exactly one of "
-            "[/dev], [/user], or [/complete] on the first line.\n"
-            "✻ Thinking…\n"
-            "⏺ [/complete] Confirmation sent; nothing further needed.\n"
-        )
-        result = classify_pm_prefix(capture)
-        self.assertEqual(result.destination, "complete")
-        self.assertIn("Confirmation sent", result.payload)
-
-    def test_last_anchored_match_wins(self) -> None:
-        """Repaints duplicate the reply; the LAST anchored token is the
-        final frame."""
-        capture = "⏺ [/dev] partial repai\n...\n⏺ [/dev] partial repaint now complete\n"
-        result = classify_pm_prefix(capture)
-        self.assertEqual(result.destination, "dev")
-        self.assertEqual(result.payload, "partial repaint now complete")
-
-    def test_payload_cut_at_frame_artifacts(self) -> None:
-        capture = "⏺ [/user] All done here.\n⏵⏵ bypass permissions on\n❯ \n"
-        result = classify_pm_prefix(capture)
-        self.assertEqual(result.destination, "user")
-        self.assertEqual(result.payload, "All done here.")
-
     def test_clean_synthetic_input_unaffected(self) -> None:
         """Inputs without a bullet marker keep the strict first-line path."""
         result = classify_pm_prefix("[/dev]\nadd a function `foo` to bar.py")
         self.assertEqual(result.destination, "dev")
         self.assertFalse(result.compliance_miss)
+
+    def test_ordering_attack_first_line_dev_body_has_complete_still_routes_dev(self) -> None:
+        """PM first line is [/dev], body has literal ⏺ [/complete] — must still route dev.
+
+        With the anchored-frame path deleted, classification is strict first-line only.
+        A mid-body echoed token cannot hijack routing.
+        """
+        text = "[/dev] Do the work\n\n⏺ [/complete] (echoed from Dev output)\n\nMore content."
+        result = classify_pm_prefix(text)
+        self.assertEqual(result.destination, "dev")
 
 
 # ---------------------------------------------------------------------------
@@ -271,127 +212,36 @@ class TestCursorPositionedSpacingSurvives(unittest.TestCase):
         once = _strip_ansi("Online\x1b[1Cand\x1b[1Cready.")
         self.assertEqual(_strip_ansi(once), once)
 
-    def test_realistic_multiline_capture_payload_keeps_spaces(self) -> None:
-        """End-to-end: a realistic multi-line painted capture (the exact
-        artifact from issue #1634 — `Onlineandrouting—PM...`) must
-        reconstruct to spaced text in the routed payload, not collapse."""
-        capture = (
-            "❯ /granite:prime-pm-role Send a one-line confirmation.\n"
-            "\x1b[2K────────────────────────────\n"
-            "✻ Sprouting…\n"
-            "⏺ [/user]\x1b[2COnline\x1b[1Cand\x1b[1Crouting\x1b[1C—"
-            "\x1b[1CPM\x1b[1Csession\x1b[1Cfor\x1b[1CPR\x1b[1C#1612\x1b[1Cis\x1b[1Clive.\n"
-            "────────────────────────────\n"
-            "⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+    def test_realistic_strip_ansi_on_pm_text_keeps_spaces(self) -> None:
+        """ANSI cursor-forward sequences in PM transcript text must reconstruct
+        as spaces, not collapse words (issue #1634).
+
+        With the zero-LLM shuttle, the container classifies PM's JSONL transcript
+        text via `last_assistant_text` (not the painted PTY buffer). This test
+        verifies that _strip_ansi correctly expands cursor-advance CSI sequences
+        to spaces — the same strip is applied to PM text before classification.
+        """
+        from agent.granite_container.pty_driver import _strip_ansi
+
+        # Simulate a PM transcript text with cursor-advance paint sequences.
+        pm_text_with_csi = (
+            "[/user]\x1b[2COnline\x1b[1Cand\x1b[1Crouting\x1b[1C—"
+            "\x1b[1CPM\x1b[1Csession\x1b[1Cfor\x1b[1CPR\x1b[1C#1612\x1b[1Cis\x1b[1Clive."
         )
-        result = classify_pm_prefix(capture)
+        stripped = _strip_ansi(pm_text_with_csi)
+        # After strip, [/user] token is intact and words are separated by spaces.
+        self.assertTrue(stripped.startswith("[/user]"))
+        self.assertIn("Online and routing", stripped)
+        self.assertIn("PM session", stripped)
+        self.assertNotIn("Onlineand", stripped)
+        self.assertNotIn("PMsession", stripped)
+        # The stripped text classifies correctly.
+        # Note: the \x1b[2C expands to 2 spaces, making the first line
+        # "[/user]  Online..." which triggers a fallback compliance miss
+        # (token not alone on its line). The destination is still "user".
+        result = classify_pm_prefix(stripped)
         self.assertEqual(result.destination, "user")
-        self.assertEqual(result.payload, "Online and routing — PM session for PR #1612 is live.")
-        self.assertFalse(result.compliance_miss)
-        # The space-stripped artifact must NOT appear in the payload.
-        self.assertNotIn("Onlineand", result.payload)
-        self.assertNotIn("PMsession", result.payload)
-
-
-# ---------------------------------------------------------------------------
-# extract_dev_prompt / summarize_for_pm: mocked ollama path
-# ---------------------------------------------------------------------------
-
-
-def _make_ollama_response(tool_name: str, arguments: dict) -> MagicMock:
-    """Build a mock ollama response carrying a single tool call."""
-    fn = MagicMock()
-    fn.name = tool_name
-    fn.arguments = arguments
-    tc = MagicMock()
-    tc.function = fn
-
-    msg = MagicMock()
-    msg.tool_calls = [tc]
-    response = MagicMock()
-    response.message = msg
-    return response
-
-
-class TestExtractDevPromptMocked(unittest.TestCase):
-    """`extract_dev_prompt` calls ollama and returns the dev_prompt arg."""
-
-    def test_returns_dev_prompt(self) -> None:
-        with patch("agent.granite_container.granite_classifier.ollama_chat") as mock_chat:
-            mock_chat.return_value = _make_ollama_response(
-                "extract_dev_prompt", {"dev_prompt": "add foo to bar.py"}
-            )
-            result = extract_dev_prompt("[/dev]\nadd foo to bar.py")
-        self.assertEqual(result, "add foo to bar.py")
-
-    def test_raises_on_wrong_tool(self) -> None:
-        with patch("agent.granite_container.granite_classifier.ollama_chat") as mock_chat:
-            mock_chat.return_value = _make_ollama_response(
-                "summarize_for_pm", {"summary": "wrong tool"}
-            )
-            with self.assertRaises(Exception) as ctx:
-                extract_dev_prompt("[/dev]\nadd foo to bar.py")
-        self.assertIn("extract_dev_prompt", str(ctx.exception))
-
-    def test_raises_on_ollama_failure(self) -> None:
-        with patch("agent.granite_container.granite_classifier.ollama_chat") as mock_chat:
-            mock_chat.side_effect = RuntimeError("ollama down")
-            with self.assertRaises(Exception):
-                extract_dev_prompt("[/dev]\nadd foo to bar.py")
-
-
-class TestSummarizeForPmMocked(unittest.TestCase):
-    """`summarize_for_pm` calls ollama and returns the summary arg."""
-
-    def test_returns_summary(self) -> None:
-        with patch("agent.granite_container.granite_classifier.ollama_chat") as mock_chat:
-            mock_chat.return_value = _make_ollama_response(
-                "summarize_for_pm", {"summary": "Dev added foo to bar.py and ran tests."}
-            )
-            result = summarize_for_pm("long dev output...")
-        self.assertIn("Dev added foo", result)
-
-    def test_raises_on_wrong_tool(self) -> None:
-        with patch("agent.granite_container.granite_classifier.ollama_chat") as mock_chat:
-            mock_chat.return_value = _make_ollama_response(
-                "extract_dev_prompt", {"dev_prompt": "wrong tool"}
-            )
-            with self.assertRaises(Exception) as ctx:
-                summarize_for_pm("long dev output...")
-        self.assertIn("summarize_for_pm", str(ctx.exception))
-
-
-# ---------------------------------------------------------------------------
-# Schema sanity: tools are well-formed
-# ---------------------------------------------------------------------------
-
-
-class TestTranslationTools(unittest.TestCase):
-    """The 2 translation tools are well-formed and match the SYSTEM_PROMPT."""
-
-    def test_two_tools(self) -> None:
-        names = {t["function"]["name"] for t in TRANSLATION_TOOLS}
-        self.assertEqual(len(names), 2)
-        self.assertIn("extract_dev_prompt", names)
-        self.assertIn("summarize_for_pm", names)
-
-    def test_extract_dev_prompt_schema(self) -> None:
-        # Find the tool.
-        tool = next(t for t in TRANSLATION_TOOLS if t["function"]["name"] == "extract_dev_prompt")
-        params = tool["function"]["parameters"]
-        self.assertEqual(params["type"], "object")
-        self.assertIn("dev_prompt", params["properties"])
-        self.assertEqual(params["required"], ["dev_prompt"])
-
-    def test_summarize_for_pm_schema(self) -> None:
-        tool = next(t for t in TRANSLATION_TOOLS if t["function"]["name"] == "summarize_for_pm")
-        params = tool["function"]["parameters"]
-        self.assertIn("summary", params["properties"])
-        self.assertEqual(params["required"], ["summary"])
-
-    def test_system_prompt_documents_both_tools(self) -> None:
-        self.assertIn("extract_dev_prompt", SYSTEM_PROMPT)
-        self.assertIn("summarize_for_pm", SYSTEM_PROMPT)
+        self.assertIn("Online and routing", result.payload)
 
 
 # ---------------------------------------------------------------------------
@@ -412,26 +262,39 @@ def _bad_probe() -> MagicMock:
 
 
 class TestEnsureGraniteModel(unittest.TestCase):
-    """The hard startup precondition: granite present + responsive."""
+    """The hard startup precondition: granite present + responsive.
+
+    `ensure_granite_model` checks that `import ollama` works (the
+    granite TUI runner needs the ollama client), the CLI is on PATH,
+    and the model answers a probe. The function no longer uses an
+    `ollama_chat` module-level alias — patch `builtins.__import__` for
+    the importability check and patch `shutil.which` + `subprocess.run`
+    for the CLI/probe checks.
+    """
 
     def test_returns_false_when_client_unimportable(self) -> None:
-        with patch(f"{_CLS}.ollama_chat", None):
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _no_ollama(name, *args, **kwargs):
+            if name == "ollama":
+                raise ImportError("no module named ollama")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=_no_ollama):
             ok, detail = ensure_granite_model()
         self.assertFalse(ok)
         self.assertIn("python client", detail)
 
     def test_returns_false_when_cli_absent(self) -> None:
-        with (
-            patch(f"{_CLS}.ollama_chat", MagicMock()),
-            patch(f"{_CLS}.shutil.which", return_value=None),
-        ):
+        with patch(f"{_CLS}.shutil.which", return_value=None):
             ok, detail = ensure_granite_model()
         self.assertFalse(ok)
         self.assertIn("CLI not found", detail)
 
     def test_ok_when_first_probe_responsive(self) -> None:
         with (
-            patch(f"{_CLS}.ollama_chat", MagicMock()),
             patch(f"{_CLS}.shutil.which", return_value="/usr/local/bin/ollama"),
             patch(f"{_CLS}.subprocess.run", return_value=_ok_probe()) as run,
         ):
@@ -445,7 +308,6 @@ class TestEnsureGraniteModel(unittest.TestCase):
         # First probe fails, pull succeeds, second probe succeeds.
         side_effects = [_bad_probe(), MagicMock(returncode=0, stdout="", stderr=""), _ok_probe()]
         with (
-            patch(f"{_CLS}.ollama_chat", MagicMock()),
             patch(f"{_CLS}.shutil.which", return_value="/usr/local/bin/ollama"),
             patch(f"{_CLS}.subprocess.run", side_effect=side_effects) as run,
         ):
@@ -464,7 +326,6 @@ class TestEnsureGraniteModel(unittest.TestCase):
             return _bad_probe()
 
         with (
-            patch(f"{_CLS}.ollama_chat", MagicMock()),
             patch(f"{_CLS}.shutil.which", return_value="/usr/local/bin/ollama"),
             patch(f"{_CLS}.subprocess.run", side_effect=_runner),
         ):
@@ -474,7 +335,6 @@ class TestEnsureGraniteModel(unittest.TestCase):
 
     def test_no_pull_when_disabled(self) -> None:
         with (
-            patch(f"{_CLS}.ollama_chat", MagicMock()),
             patch(f"{_CLS}.shutil.which", return_value="/usr/local/bin/ollama"),
             patch(f"{_CLS}.subprocess.run", return_value=_bad_probe()) as run,
         ):
@@ -486,7 +346,6 @@ class TestEnsureGraniteModel(unittest.TestCase):
         import subprocess
 
         with (
-            patch(f"{_CLS}.ollama_chat", MagicMock()),
             patch(f"{_CLS}.shutil.which", return_value="/usr/local/bin/ollama"),
             patch(
                 f"{_CLS}.subprocess.run",
