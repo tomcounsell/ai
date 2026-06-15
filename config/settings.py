@@ -276,11 +276,12 @@ class GraniteSettings(BaseModel):
         ),
     )
     dev_model: str = Field(
-        default="sonnet",
+        default="opus",
         description=(
             "Claude model alias for the Dev TUI PTY. See ``pm_model``. The "
-            "Dev role executes code under PM direction; sonnet is the cost/"
-            "latency default. Override via GRANITE__DEV_MODEL."
+            "Dev role now owns the full SDLC pipeline (issue #1692) and fans "
+            "out to Sonnet subagents for parallel work; opus is the default "
+            "for the Dev TUI itself. Override via GRANITE__DEV_MODEL."
         ),
     )
 

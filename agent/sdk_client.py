@@ -968,25 +968,6 @@ def load_persona_prompt(persona: str = "engineer", substitutions: dict | None = 
                 "Update ~/Desktop/Valor/personas/engineer.md to remove the Agent tool "
                 "dispatch pattern."
             )
-        # Engineer overlay drift guards: the engineer persona owns full SDLC pipelines
-        # via parallel subagent fan-out. The "Mode 3" multi-issue orchestrator and the
-        # stale-baseline `merge_authorized` bypass are the load-bearing pieces.
-        # Substrings chosen for their stability: "Mode 3" anchors the parallel
-        # orchestrator playbook; "merge_authorized" anchors the bypass section.
-        if persona == "engineer" and "Mode 3" not in overlay_content:
-            logger.warning(
-                f"Engineer persona overlay '{overlay_path}' is missing the "
-                "Mode 3 parallel orchestrator playbook — eng sessions will not "
-                "fan out across multiple issues. Sync from "
-                "config/personas/engineer.md."
-            )
-        if persona == "engineer" and "merge_authorized" not in overlay_content:
-            logger.warning(
-                f"Engineer persona overlay '{overlay_path}' is missing the "
-                "stale-baseline `merge_authorized` bypass section — eng "
-                "sessions will halt on Full Suite Gate false positives. "
-                "Sync from config/personas/engineer.md."
-            )
         logger.info(f"Loaded persona '{persona}' from {overlay_path}")
         result = f"{base_content}\n\n---\n\n{overlay_content}"
         if substitutions:

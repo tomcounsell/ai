@@ -116,8 +116,10 @@ class TestDevPrimeShape(unittest.TestCase):
         # absence of the usage phrase.
         self.assertNotIn("begin every output", self.body.lower())
 
-    def test_instructs_no_orchestration(self) -> None:
-        self.assertIn("orchestrate", self.body.lower())
+    def test_instructs_pipeline_ownership(self) -> None:
+        # Dev owns the SDLC pipeline and runs /do-* skills directly;
+        # the prime must mention the pipeline and the skill invocation pattern.
+        self.assertIn("pipeline", self.body.lower())
         self.assertIn("/do-", self.body)
 
 
@@ -192,11 +194,12 @@ class TestPersonaPrimingSmokeEnvGated(unittest.TestCase):
 
 
 class TestPrimeSessionUserMessageSeparation(unittest.TestCase):
-    """S1 (issue #1644): Dev prime does NOT carry user_message; PM prime does.
+    """Both PM and Dev primes now receive the user_message as $ARGUMENTS.
 
-    The Container._prime_session method now accepts include_user_message=True/False.
-    PM prime uses True (needs the task context); Dev prime uses False (must wait
-    for the operator relay, not self-start on the raw user message).
+    PM: receives the message for immediate routing.
+    Dev: receives the message as labeled background context (issue #1692).
+    Dev must NOT act before the [/dev] relay — this is enforced by the prime
+    text, not by withholding the message.
     """
 
     def test_pm_prime_write_carries_user_message(self) -> None:
@@ -223,8 +226,13 @@ class TestPrimeSessionUserMessageSeparation(unittest.TestCase):
             user_msg, write_arg, f"PM prime write should contain user_message; got {write_arg!r}"
         )
 
-    def test_dev_prime_write_does_not_carry_user_message(self) -> None:
-        """Dev prime writes only the slash command, NOT self.user_message."""
+    def test_dev_prime_write_carries_user_message_as_background_context(self) -> None:
+        """Dev prime writes slash_cmd + user_message (background context, issue #1692).
+
+        Dev receives the raw user prompt as labeled background context so it
+        understands the task when the PM's [/dev] relay arrives. The prime text
+        instructs Dev NOT to act until it receives the [/dev] relay.
+        """
         from unittest.mock import MagicMock, patch
 
         from agent.granite_container.container import DEV_PRIME_SLASH_CMD, Container
@@ -240,28 +248,133 @@ class TestPrimeSessionUserMessageSeparation(unittest.TestCase):
         with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
             c._pm_pty = MagicMock(spec=PTYDriver)
             c._dev_pty = dev_mock
-            c._prime_session(dev_mock, DEV_PRIME_SLASH_CMD, include_user_message=False)
+            c._prime_session(dev_mock, DEV_PRIME_SLASH_CMD, include_user_message=True)
 
         write_arg = dev_mock.write.call_args.args[0]
-        self.assertNotIn(
+        self.assertIn(
             user_msg,
             write_arg,
-            f"Dev prime write must NOT contain user_message "
-            f"(Dev self-start fix, #1644); got {write_arg!r}",
+            f"Dev prime write should contain user_message as background context "
+            f"(issue #1692); got {write_arg!r}",
         )
-        self.assertEqual(write_arg, DEV_PRIME_SLASH_CMD)
 
-    def test_dev_prime_file_says_no_task_yet(self) -> None:
-        """Dev persona file text says no task is present yet (not $ARGUMENTS with task).
+    def test_dev_prime_file_instructs_wait_for_relay(self) -> None:
+        """Dev prime file instructs Dev to wait for the [/dev] relay before acting.
 
-        The persona file must NOT say 'What the user said' or embed a task
-        from $ARGUMENTS — Dev waits for the operator relay.
+        Since Dev now receives the user message as background context (issue #1692),
+        the 'no-task-yet' guard lives in the prime text, not in message omission.
         """
         body = DEV_PRIME.read_text()
         # The updated persona says no task is present and instructs waiting.
         self.assertIn("No task", body, "Dev prime file should say 'No task yet'")
-        # Must not tell Dev 'What the user said' (the old $ARGUMENTS section)
+        # Must not tell Dev 'What the user said' (phrase from old PM prime style)
         self.assertNotIn("What the user said", body)
+        # The background context section must exist
+        self.assertIn(
+            "Background context",
+            body,
+            "Dev prime should have a background context section",
+        )
+
+
+TEAMMATE_PRIME = REPO_ROOT / ".claude" / "commands" / "granite" / "prime-teammate-role.md"
+
+
+class TestSessionTypePrimeSelection(unittest.TestCase):
+    """Container picks the right PM prime command based on session_type.
+
+    Blocker 1 from PR #1694 review: prime-teammate-role.md existed but was
+    never invoked. Container now accepts session_type and calls
+    _resolve_pm_prime_cmd() to select the appropriate command at run time.
+    """
+
+    def _make_idle_mock(self):  # type: ignore[return]
+        from unittest.mock import MagicMock
+
+        m = MagicMock()
+        m.read_until_idle.return_value = MagicMock(
+            saw_idle=True,
+            buffer="startup idle bypass permissions on",
+            idle_marker="bypass permissions on",
+            elapsed_ms=0,
+        )
+        return m
+
+    def test_teammate_session_gets_teammate_prime(self) -> None:
+        """Container with session_type='teammate' primes PM with the teammate prime."""
+        from agent.granite_container.container import (
+            TEAMMATE_PRIME_SLASH_CMD,
+            _resolve_pm_prime_cmd,
+        )
+
+        self.assertEqual(_resolve_pm_prime_cmd("teammate"), TEAMMATE_PRIME_SLASH_CMD)
+
+    def test_eng_session_gets_pm_prime(self) -> None:
+        """Container with session_type='eng' primes PM with the standard PM prime."""
+        from agent.granite_container.container import PM_PRIME_SLASH_CMD, _resolve_pm_prime_cmd
+
+        self.assertEqual(_resolve_pm_prime_cmd("eng"), PM_PRIME_SLASH_CMD)
+
+    def test_none_session_type_gets_pm_prime(self) -> None:
+        """Container with session_type=None primes PM with the standard PM prime."""
+        from agent.granite_container.container import PM_PRIME_SLASH_CMD, _resolve_pm_prime_cmd
+
+        self.assertEqual(_resolve_pm_prime_cmd(None), PM_PRIME_SLASH_CMD)
+
+    def test_container_teammate_prime_written_to_pty(self) -> None:
+        """Container with session_type='teammate' writes the teammate prime to the PM PTY."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.granite_container.container import TEAMMATE_PRIME_SLASH_CMD, Container
+        from agent.granite_container.pty_driver import PTYDriver
+
+        user_msg = "hello"
+        c = Container(user_message=user_msg, max_turns=1, session_type="teammate")
+        pm_mock = self._make_idle_mock()
+        pm_mock.__class__ = PTYDriver  # pass isinstance check if any
+
+        captured_writes: list[str] = []
+        pm_mock.write.side_effect = lambda s: captured_writes.append(s)
+
+        with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
+            c._pm_pty = pm_mock
+            c._dev_pty = MagicMock(spec=PTYDriver)
+            c._prime_session(pm_mock, TEAMMATE_PRIME_SLASH_CMD, include_user_message=True)
+
+        self.assertTrue(
+            any(TEAMMATE_PRIME_SLASH_CMD in w for w in captured_writes),
+            f"Expected teammate prime in PM writes; got {captured_writes}",
+        )
+
+    def test_container_eng_prime_written_to_pty(self) -> None:
+        """Container with session_type='eng' writes the standard PM prime to the PM PTY."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.granite_container.container import PM_PRIME_SLASH_CMD, Container
+        from agent.granite_container.pty_driver import PTYDriver
+
+        user_msg = "hello"
+        c = Container(user_message=user_msg, max_turns=1, session_type="eng")
+        pm_mock = self._make_idle_mock()
+        pm_mock.__class__ = PTYDriver
+
+        captured_writes: list[str] = []
+        pm_mock.write.side_effect = lambda s: captured_writes.append(s)
+
+        with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
+            c._pm_pty = pm_mock
+            c._dev_pty = MagicMock(spec=PTYDriver)
+            c._prime_session(pm_mock, PM_PRIME_SLASH_CMD, include_user_message=True)
+
+        self.assertTrue(
+            any(PM_PRIME_SLASH_CMD in w for w in captured_writes),
+            f"Expected PM prime in PM writes; got {captured_writes}",
+        )
+
+    def test_teammate_prime_file_exists(self) -> None:
+        """The prime-teammate-role.md file exists and is non-empty."""
+        self.assertTrue(TEAMMATE_PRIME.exists(), f"missing {TEAMMATE_PRIME}")
+        self.assertGreater(TEAMMATE_PRIME.stat().st_size, 0, "prime-teammate-role.md is empty")
 
 
 if __name__ == "__main__":

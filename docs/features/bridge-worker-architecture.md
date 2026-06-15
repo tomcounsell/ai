@@ -193,7 +193,9 @@ At runtime, the worker processes sessions via `_worker_loop(worker_key)` until t
 
 ### Persona Overlay Resolution (harness `--append-system-prompt`)
 
-`agent/session_executor.py` resolves which persona overlay to pass as the harness `system_prompt` (`--append-system-prompt`) for each session. The order is:
+> **Granite PTY sessions (all bridge-originated sessions) bypass this path entirely.** As of issue #1692, granite sessions receive their persona via prime commands (`.claude/commands/granite/prime-*-role.md`) run at PTY startup — no `--append-system-prompt` is set. The description below applies only to the legacy `claude -p` headless path, which is no longer used for bridge sessions.
+
+`agent/session_executor.py` resolves which persona overlay to pass as the harness `system_prompt` (`--append-system-prompt`) for non-granite sessions. The order is:
 
 1. `transport=email` or `project["email"]["persona"]` set → that persona overlay (e.g. `customer-service`), with `teammate` as fallback when the requested overlay file is missing
 2. `session_type=ENG` → `engineer` overlay (loaded via `load_eng_system_prompt`)

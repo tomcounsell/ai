@@ -118,24 +118,30 @@ Without **either** path, a session with `transport=email` would still write to `
 
 ### Persona resolution for email-spawned sessions
 
-Email-spawned sessions resolve their persona on the harness path in `agent/session_executor.py`, not in `agent/sdk_client.py::_resolve_persona` (the SDK path is dead code — `docs/plans/cli_harness_full_migration.md`). The resolution order at the harness call site is:
+As of issue #1692, persona is delivered to the granite PTY container via prime
+commands (`.claude/commands/granite/prime-*-role.md`), not via
+`--append-system-prompt`. The `compose_system_prompt` / `load_persona_prompt`
+path has been retired from the granite execution path.
 
-1. `_session_type == SessionType.ENG` → load the `engineer` overlay (source = `session_type=eng`). Eng sessions resolve to `AccessLevel.WORKER`, so the harness loads the engineer system prompt via `load_eng_system_prompt()` rather than a persona overlay file.
-2. `extra_context["transport"] == "email"` **or** `project["email"]["persona"]` is set:
-   - If `project["email"]["persona"]` is set → load that overlay with `teammate` as fallback (source = `project.email.persona`). This is how an email override resolves `customer-service`.
-   - Otherwise → load `teammate` overlay (source = `email-default`)
-3. `_session_type == SessionType.TEAMMATE` → load `teammate` overlay (source = `session_type=teammate`)
-4. Otherwise → no overlay (source = `none`); the harness runs in default Claude Code voice
+**Email sessions in the granite container:**
 
-The resolved name is logged BEFORE any file I/O via:
+- Email-spawned sessions become `SessionType.TEAMMATE` sessions.
+- The granite container primes the PM with `/granite:prime-teammate-role` (if
+  `session_type == TEAMMATE`) or `/granite:prime-pm-role` (if `ENG`).
+- The `_resolve_compose_args` resolver in `session_executor.py` is preserved to
+  derive the `(persona, access_level)` tuple from `project.email.persona`; this
+  will be used for prime-command selection in a future issue.
+- A log line is still emitted BEFORE any file I/O:
+  ```
+  agent.session_executor INFO [<cid|project>] Resolved persona for session=<sid>: <name> (source=prime-command; no system-prompt injection)
+  ```
 
-```
-agent.session_executor INFO [<cid|project>] Resolved persona for session=<sid>: <name|<none>> (source=<source>)
-```
-
-When `project.email.persona` is set but neither the requested overlay nor the fallback can be loaded, the worker emits an `ERROR [persona-load-failed]` line so the operator knows the harness will reply in the default voice. The `email:outbox:` payload is still queued — review it before SMTP relay.
-
-The mapping mirrors `bridge/email_bridge.py::_process_inbound_email` (which uses `project["email"]["persona"]` to derive `session_type`), keeping production inbound email and the `test-cuttlefish-*` skills (which inject `transport=email` into an in-memory project dict) on the same code path.
+**If you set `project.email.persona` in projects.json:** The resolver reads it and
+logs the resolved name, but the prime command selection is currently fixed to
+`prime-teammate-role` for all TEAMMATE sessions. A future issue will wire
+`project.email.persona` to select a per-project prime command (e.g. a
+`prime-customer-service` command). Email sessions will not land persona-less —
+`prime-teammate-role` is the safe fallback.
 
 ## Configuration
 
