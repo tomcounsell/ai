@@ -71,7 +71,7 @@ class TestRespawnKeepsCwd(_PoolTestBase):
         async def _run():
             pool = PTYPool(pool_size=1, pid_registry_path=self.registry)
             await pool.initialize(cwd="/configured/dir")
-            async with pool.acquire_pair() as (pm, dev):
+            async with pool.acquire_pair() as (pm, dev, _slot_idx):
                 self.assertEqual(pm.cwd, "/configured/dir")
             await pool.drain_respawns()
 
@@ -96,7 +96,7 @@ class TestAcquireLivenessCheck(_PoolTestBase):
             pm, dev = slot.pty_pair
             pm._alive = False
 
-            async with pool.acquire_pair() as (new_pm, new_dev):
+            async with pool.acquire_pair() as (new_pm, new_dev, _slot_idx):
                 # The acquired pair must be live — the dead one recycled.
                 self.assertTrue(new_pm.isalive())
                 self.assertTrue(new_dev.isalive())
@@ -112,7 +112,7 @@ class TestAcquireLivenessCheck(_PoolTestBase):
             slot = pool._slots[0]
             slot.pty_pair = None  # simulate a half-released slot
 
-            async with pool.acquire_pair() as (pm, dev):
+            async with pool.acquire_pair() as (pm, dev, _slot_idx):
                 self.assertIsNotNone(pm)
                 self.assertTrue(pm.isalive())
             await pool.drain_respawns()

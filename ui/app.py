@@ -461,6 +461,7 @@ def create_app() -> FastAPI:
             "dev_pid": s.dev_pid,
             "pm_transcript_path": s.pm_transcript_path,
             "dev_transcript_path": s.dev_transcript_path,
+            "pty_slot": s.pty_slot,
             # Output routing state (issue #1647).
             "user_facing_routed": s.user_facing_routed,
             "children": [_session_to_json(c) for c in s.children],
