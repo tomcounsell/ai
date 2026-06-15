@@ -78,20 +78,24 @@ The pipeline graph is the backbone of stage routing. Mandatory gate enforcement 
 
 Stage tracking is handled by `PipelineStateMachine` in `agent/pipeline_state.py`, which uses the pipeline graph for transitions. The state machine's `has_remaining_stages()` method uses `get_next_stage()` to check if a non-terminal next stage exists, correctly handling cycles and the PATCH routing-only stage.
 
-## Runtime Wiring (PR #601)
+## Runtime Wiring
 
-As of PR #601, the pipeline graph is fully wired into the runtime execution path. Previously, `classify_outcome()`, `fail_stage()`, and the graph-based routing were well-tested but never called in production.
+Stage transitions are written **in-session** by the Claude Code Skill hooks as the eng session dispatches each `/do-*` stage skill:
+- `agent/hooks/pre_tool_use.py::_start_pipeline_stage` calls `start_stage(stage)` on skill invoke (stage resolved via the `_SKILL_TO_STAGE` mapping).
+- `agent/hooks/post_tool_use.py::_complete_pipeline_stage` calls `complete_stage(stage)` on skill return (stage read via `current_stage()`).
 
-### Outcome Classification
+`complete_stage()` consults the graph to mark the next stage `ready`. The graph's `get_next_stage()` is the canonical traversal used by `PipelineStateMachine.has_remaining_stages()` and by the SDLC router to choose the next skill.
 
-When a Dev session completes, the worker's `_handle_dev_session_completion()` calls `classify_outcome(stage, None, result)` on the PipelineStateMachine. This uses a three-tier approach:
+### Outcome Classification (retained, not wired)
+
+`PipelineStateMachine.classify_outcome(stage, stop_reason, output_tail)` still implements a three-tier classifier:
 1. **Tier 0**: Parse `<!-- OUTCOME {...} -->` contracts from output (structured status from skills)
 2. **Tier 1**: SDK stop_reason — anything other than "end_turn" is a process failure
 3. **Tier 2**: Deterministic tail patterns scoped by stage (fallback when no OUTCOME contract)
 
-Tier 0 enables the `("REVIEW", "partial")` edge: when `/do-pr-review` finds tech debt or nits, it emits `status: "partial"`, routing to PATCH instead of DOCS.
+Tier 0 supports the `("REVIEW", "partial")` edge: when `/do-pr-review` finds tech debt or nits, it can emit `status: "partial"`, which the graph routes to PATCH instead of DOCS.
 
-The result routes to `complete_stage()` (success/ambiguous) or `fail_stage()` (fail/partial), which triggers the appropriate graph edge.
+However, `classify_outcome()` is **no longer wired into a completion handler**. The PM/Dev merge (PR #1691) removed `_handle_dev_session_completion()`, which previously called `classify_outcome()` and routed to `complete_stage()`/`fail_stage()`. The in-session hooks now call `complete_stage()` directly on skill return, so the method is orphaned in production and `fail_stage()` is not invoked post-turn. The classifier remains available on the state machine for callers that need to interpret a stage result.
 
 ### Stage States Initialization
 
@@ -103,11 +107,11 @@ The dashboard (`ui/data/sdlc.py`) routes stage reads through `PipelineStateMachi
 
 ## Integration
 
-PM session orchestration uses the graph for pipeline progression. Individual `/do-*` skills report their results; the PM session determines what happens next.
+The eng session uses the graph for pipeline progression: it both orchestrates and executes the pipeline, dispatching one `/do-*` stage skill at a time. The in-session hooks record each stage transition, and the eng session reads the resulting `stage_states` to determine what happens next.
 
 ## Per-Stage Model Selection
 
-The PM session chooses which Claude model runs each stage at dispatch time, via the `model` parameter on `Agent(subagent_type="dev-session", ...)`. The Agent tool supports `sonnet`, `opus`, and `haiku` as per-call overrides; `agent_definitions.py` sets `model=None` on `dev-session` so inheritance is the fallback when PM omits the override.
+The stage→model mapping lives in the engineer persona's Stage→Model Dispatch Table (`config/personas/engineer.md`). Model selection is applied at dispatch time via the `--model` flag on `valor-session create` when the eng session fans out child eng sessions (one per issue), and is mirrored by `/do-sdlc` local supervision, which spawns each stage subagent with the matching `model:` (see [SDLC Local Supervision](sdlc-local-supervision.md)). A single eng session that runs the pipeline in-process executes every stage on its own session model.
 
 Stages fall into two tiers based on the cognitive load of the work:
 
@@ -116,7 +120,7 @@ Stages fall into two tiers based on the cognitive load of the work:
 | ISSUE | sonnet | Template-driven issue drafting; isolated from downstream work |
 | PLAN | opus | Hardest reasoning in the pipeline; downstream stages depend on plan quality |
 | CRITIQUE | opus | Adversarial war-room critics; finding subtle flaws is where Opus earns its keep |
-| BUILD | sonnet | Translation of a detailed plan into code; PATCH is the escape hatch. Mid-build course correction comes from PM steering (see below), not a model swap |
+| BUILD | sonnet | Translation of a detailed plan into code; PATCH is the escape hatch. Mid-build course correction comes from parent-session steering (see below), not a model swap |
 | TEST | sonnet | Tool-heavy verification. Independence from BUILD is the anti-cheat property; Opus is overkill |
 | PATCH (easy) | sonnet | Targeted fix against a written checklist of failures or review findings |
 | PATCH (hard) | sonnet, resumed from BUILD | Eng session resumes the original BUILD transcript to leverage accumulated context — see [Eng Session Architecture](eng-session-architecture.md) |
@@ -128,11 +132,11 @@ Stages fall into two tiers based on the cognitive load of the work:
 
 The three Opus stages (PLAN, CRITIQUE, REVIEW) are the "hard thinking moments where quality of output gates everything downstream." Every other stage either executes a written plan or performs tool-driven verification, where Sonnet's capability ceiling is sufficient.
 
-As the Claude Code harness improves at BUILD execution and models get smarter, expect plans to become progressively more high-level, leaving more room for mid-build course correction via PM steering (PM is Opus by default). The model tier split assumes this trend and keeps BUILD on Sonnet even for non-trivial work.
+As the Claude Code harness improves at BUILD execution and models get smarter, expect plans to become progressively more high-level, leaving more room for mid-build course correction via parent-session steering. The model tier split assumes this trend and keeps BUILD on Sonnet even for non-trivial work.
 
 ### Mid-build course correction (no model swap)
 
-When PM observes a running BUILD going off-plan, the correction path is **steering**, not a model change. PM writes an Opus-reasoned steering message and delivers it to the BUILD's turn-boundary inbox via `scripts/steer_child.py`. The BUILD session stays on Sonnet but executes Opus-authored instructions. This avoids the complexity of mid-transcript model swaps and keeps the builder's context intact.
+When a parent eng session observes a running child BUILD session going off-plan, the correction path is **steering**, not a model change. The parent writes a steering message and delivers it to the BUILD's turn-boundary inbox via `scripts/steer_child.py`. The BUILD session stays on its model but executes the steered instructions. This avoids the complexity of mid-transcript model swaps and keeps the builder's context intact.
 
 ### Hard PATCH via resume
 
@@ -143,6 +147,7 @@ For PATCH failures that need deep context, the Eng session resumes the original 
 | File | Role |
 |------|------|
 | `agent/pipeline_graph.py` | Canonical graph definition. State-machine bookkeeping only — not consulted for dispatch decisions. |
-| `agent/agent_session_queue.py` | `_handle_dev_session_completion()` calls `classify_outcome()` and routes to `complete_stage()`/`fail_stage()`; initializes `stage_states` for SDLC sessions |
-| `agent/pipeline_state.py` | `PipelineStateMachine` -- stage tracking, outcome classification, and transitions using the graph. Canonical location. |
+| `agent/hooks/pre_tool_use.py` | `_start_pipeline_stage` calls `start_stage()` on stage-skill invoke (`_SKILL_TO_STAGE` mapping) |
+| `agent/hooks/post_tool_use.py` | `_complete_pipeline_stage` calls `complete_stage()` on stage-skill return (`current_stage()`) |
+| `agent/pipeline_state.py` | `PipelineStateMachine` -- stage tracking, transitions using the graph, and the retained-but-unwired `classify_outcome()`. Canonical location. |
 | `tests/unit/test_pipeline_graph.py` | 27 tests covering all routing scenarios |

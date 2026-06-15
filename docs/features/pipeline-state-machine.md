@@ -11,41 +11,34 @@ The previous system inferred pipeline stage status by parsing agent transcripts 
 
 ## Solution
 
-Stage status is set programmatically at the points where transitions actually happen. Two paths write stage records:
+Stage status is set programmatically at the points where transitions actually happen. Stage records are written **in-session**, by the Claude Code Skill hooks running inside the eng session as it dispatches each `/do-*` stage skill:
 
-**Dev-session path** (an eng session is created via `valor_session create --role eng`, worker executes):
-- `start_stage()` in the PreToolUse hook when the PM calls a Skill that maps to a stage
-- `complete_stage()` or `fail_stage()` in `_handle_dev_session_completion()` in the worker after harness execution returns
+- `start_stage()` in the PreToolUse hook (`agent/hooks/pre_tool_use.py::_start_pipeline_stage`) when the eng session invokes a Skill that maps to a stage via `_handle_skill_tool_start()` and the `_SKILL_TO_STAGE` dict — marks the stage `in_progress`
+- `complete_stage()` in the PostToolUse hook (`agent/hooks/post_tool_use.py::_complete_pipeline_stage`) when that mapped Skill returns — reads the current `in_progress` stage via `current_stage()` and marks it `completed`
 
-**Skill path** (when PM uses the Skill tool directly, e.g., `Skill(skill="do-build")`):
-- `start_stage()` in the PreToolUse hook via `_handle_skill_tool_start()`, mapped by `_SKILL_TO_STAGE` dict
-- `complete_stage()` in the PostToolUse hook via `_complete_pipeline_stage()`, reading the current in_progress stage from Redis
+A single eng session (`SessionType.ENG`, engineer persona) both orchestrates and executes the pipeline: it dispatches one stage skill at a time, and the hooks above advance the state machine at each skill's invoke/return boundary. There is no separate worker post-completion handler that classifies an outcome and routes to `complete_stage()`/`fail_stage()`. The previous PM/Dev split and its `_handle_dev_session_completion()` handler were removed when the roles merged into the single eng session (PR #1691).
 
 State is persisted as a JSON dict on `AgentSession.stage_states` -- one Redis field, no history parsing.
 
 ## Production Lifecycle
 
-The state machine is wired into the worker post-completion handler and the SDK hook system. This is the end-to-end flow for a single SDLC stage:
+The state machine is driven entirely by the in-session SDK hook system. This is the end-to-end flow for a single SDLC stage:
 
-1. **Eng session is created**: The session calls `python -m tools.valor_session create --role eng --slug {slug} --parent "$AGENT_SESSION_ID" --message "Stage: BUILD\n..."`. The `--slug` flag is required (or `issue #N` in the message body for auto-derivation) so the worktree is provisioned at create time.
+1. **Eng session runs a stage skill**: The eng session dispatches one `/do-*` stage skill at a time (e.g., `/do-build`, `/do-test`) via the Skill tool. The same session orchestrates the pipeline and executes the stage work; there is no separate child session per stage.
 
-2. **Worker executes dev session**: `_execute_agent_session()` routes to `get_response_via_harness()` or `get_agent_response_sdk()` based on `DEV_SESSION_HARNESS`.
+2. **PreToolUse hook fires on skill invoke**: `agent/hooks/pre_tool_use.py::_handle_skill_tool_start()` looks up the skill name in `_SKILL_TO_STAGE`, and `_start_pipeline_stage()` calls `start_stage(stage)` on the session's `PipelineStateMachine`, marking the stage `in_progress`.
 
-3. **Dev session executes**: Runs the assigned stage work (e.g., `/do-build`, `/do-test`).
-   - If the Skill tool is invoked, **PreToolUse hook fires** and calls `start_stage()` via `_handle_skill_tool_start()`.
+3. **Stage skill executes its work**: The skill produces its artifacts (a PR, test run, review, etc.).
 
-4. **Worker post-completion handler fires** (`_handle_dev_session_completion()` in `agent/agent_session_queue.py`):
-   - Looks up the parent PM session via `parent_agent_session_id`
-   - Loads the `PipelineStateMachine` on the parent and calls `current_stage()`
-   - `classify_outcome(stage, None, result_text)` determines success/fail/ambiguous
-   - Routes to `complete_stage()` (success/ambiguous) or `fail_stage()` (fail/partial)
-   - Posts GitHub stage comment and steers parent PM session
+4. **PostToolUse hook fires on skill return**: `agent/hooks/post_tool_use.py::_complete_pipeline_stage()` reads the current `in_progress` stage via `current_stage()` and calls `complete_stage(stage)`, marking it `completed` and the next stage `ready`.
 
-5. **PM receives steering message**: The PM session receives the completion status and routes to the next stage.
+5. **Eng session reads stage_states and routes**: The eng session consults the updated `stage_states` (via the SDLC router) to decide which stage skill to dispatch next, looping until the pipeline reaches MERGE / final delivery.
+
+Child eng sessions are spawned only for multi-issue fan-out (`valor-session create --role eng --parent "$AGENT_SESSION_ID"`, then `valor-session wait-for-children`), not per stage.
 
 ### Error Handling
 
-The PreToolUse and PostToolUse hooks and `_handle_dev_session_completion()` all wrap state machine operations in try/except blocks. A failure in `start_stage()`, `complete_stage()`, or `fail_stage()` is logged as a warning but never crashes the worker or PM session. The pipeline state machine is strictly additive — it enhances observability without introducing new failure modes.
+Both the PreToolUse and PostToolUse hooks wrap state machine operations in try/except blocks. A failure in `start_stage()` or `complete_stage()` is logged as a warning but never crashes the session. The pipeline state machine is strictly additive — it enhances observability without introducing new failure modes.
 
 ## API
 
@@ -95,6 +88,8 @@ See `docs/features/sdlc-stage-tracking.md` for why inference was removed and how
 
 ## Outcome Classification
 
+`classify_outcome()` is retained on `PipelineStateMachine` but is **not currently wired into the live transition path**. The in-session hooks call `complete_stage()` directly on skill return rather than classifying an outcome and routing through `fail_stage()`. The method (and its three-tier approach below) remains available for callers that need to interpret a stage result, but no production code path invokes it after the PM/Dev merge (PR #1691) removed the `_handle_dev_session_completion()` handler that previously called it.
+
 `classify_outcome()` uses a three-tier approach to classify the result of a completed stage:
 
 ### Tier 0: OUTCOME Contract (Structured)
@@ -129,7 +124,7 @@ Falls back to `"ambiguous"` when no pattern matches, for the Observer LLM to han
 
 ## Router Integration (Read Path)
 
-The SDLC router skill (`.claude/skills/sdlc/SKILL.md`) reads `stage_states` as the **primary signal** for routing decisions. This completes the read/write cycle: hooks write stage transitions (via `start_stage()`/`complete_stage()`/`fail_stage()`), and the router reads the resulting state to determine which sub-skill to dispatch next.
+The SDLC router skill (`.claude/skills/sdlc/SKILL.md`) reads `stage_states` as the **primary signal** for routing decisions. This completes the read/write cycle: the in-session hooks write stage transitions (via `start_stage()` on skill invoke and `complete_stage()` on skill return), and the router reads the resulting state to determine which sub-skill to dispatch next.
 
 ### How the Router Reads stage_states
 
@@ -143,7 +138,7 @@ python -m tools.sdlc_stage_query
 python -m tools.sdlc_stage_query --issue-number 941
 ```
 
-The CLI tool resolves the PM session from `--session-id`, `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, or `--issue-number` (in that priority order), reads `stage_states`, and returns a JSON dict mapping stage names to statuses.
+The CLI tool resolves the eng session from `--session-id`, `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, or `--issue-number` (in that priority order), reads `stage_states`, and returns a JSON dict mapping stage names to statuses.
 
 ### Routing Logic
 
@@ -158,21 +153,25 @@ When stage_states is unavailable (cold start), the merge gate emits an explicit 
 
 ### Merge-Before-Complete Enforcement
 
-The PM persona includes Rule 5 ("MERGE is Mandatory Before Dev-Session Sign-Off") which prevents the PM from declaring the issue done while an open PR exists. Additionally, the worker's `_handle_dev_session_completion` steering message includes a merge reminder (marker-free wording as of issue #1058), and continuation PMs carry explicit instructions to check for open PRs before completing. See `config/personas/project-manager.md` Rule 5 and issue #1005.
+The merge-before-sign-off gate is enforced in two places:
+
+1. **Engineer persona, Rule 5 ("MERGE is Mandatory Before Sign-Off")** in `config/personas/engineer.md` prevents the eng session from declaring the issue done while an open PR exists.
+2. **Final-delivery `pr_open` check**: `agent.pipeline_complete.is_pipeline_complete(states, outcome, pr_open)` only reports the pipeline complete when no PR is left open, so the final-delivery path cannot fire while an unmerged PR exists.
+
+There is no per-completion steering message carrying a merge reminder — that mechanism lived in the removed `_handle_dev_session_completion` handler. The single eng session enforces the gate directly via its persona and the final-delivery check. See `config/personas/engineer.md` Rule 5 and issue #1005.
 
 ### Final Delivery (issue #1058)
 
-Final delivery is driven by `_handle_dev_session_completion` detecting pipeline completion via `agent.pipeline_complete.is_pipeline_complete(psm.states, outcome, pr_open)` and invoking `agent.session_completion._deliver_pipeline_completion`, not by a persona-emitted marker. The runner acquires a Redis CAS lock (`pipeline_complete_pending:{parent_id}`, 60s TTL) to deduplicate across the `_handle_dev_session_completion` and `_agent_session_hierarchy_health_check` entry points, then runs a dedicated harness turn to compose the final summary and delivers it via `send_cb`. See `docs/features/pm-final-delivery.md` for the full protocol.
+Final delivery is driven by `_agent_session_hierarchy_health_check` (`agent/session_health.py`) detecting pipeline completion via `agent.pipeline_complete.is_pipeline_complete(states, outcome, pr_open)` and invoking `agent.session_completion.schedule_pipeline_completion` → `_deliver_pipeline_completion`, not by a persona-emitted marker. The completion runner acquires a Redis CAS lock (`pipeline_complete_pending:{parent_id}`, 60s TTL) to deduplicate concurrent invocations, then runs a dedicated harness turn to compose the final summary and delivers it via `send_cb`. See `docs/features/pm-final-delivery.md` for the full protocol.
 
 ## Integration Points
 
 - **SDLC Router** (`.claude/skills/sdlc/SKILL.md`): Reads `stage_states` via `tools/sdlc_stage_query.py` CLI tool as primary routing signal
-- **Stage Query Tool** (`tools/sdlc_stage_query.py`): CLI interface for reading `stage_states` from a PM session by session ID or issue number
-- **PreToolUse hook** (`agent/hooks/pre_tool_use.py`): Calls `start_stage()` for the Skill path (`_handle_skill_tool_start()` with `_SKILL_TO_STAGE` mapping), marking the stage as `in_progress`
-- **PostToolUse hook** (`agent/hooks/post_tool_use.py`): Calls `complete_stage()` when a mapped SDLC Skill tool finishes (Skill path)
-- **Worker post-completion handler** (`agent/agent_session_queue.py:_handle_dev_session_completion()`): Calls `classify_outcome()` and routes to `complete_stage()` or `fail_stage()` after dev session harness returns (dev-session path)
-- **PM session**: Uses state machine for stage queries and outcome classification
-- **Job Queue** (`agent/agent_session_queue.py`): Creates state machine in `send_to_chat()`, applies transitions from Observer decisions
+- **Stage Query Tool** (`tools/sdlc_stage_query.py`): CLI interface for reading `stage_states` from an eng session by session ID or issue number
+- **PreToolUse hook** (`agent/hooks/pre_tool_use.py`): Calls `start_stage()` on skill invoke (`_handle_skill_tool_start()` with `_SKILL_TO_STAGE` mapping), marking the stage as `in_progress`
+- **PostToolUse hook** (`agent/hooks/post_tool_use.py`): Calls `complete_stage()` when a mapped SDLC Skill tool finishes, reading the current `in_progress` stage via `current_stage()`
+- **Hierarchy health check** (`agent/session_health.py:_agent_session_hierarchy_health_check()`): Detects pipeline completion via `is_pipeline_complete()` and drives `schedule_pipeline_completion()` for final delivery
+- **Eng session**: Uses the state machine for stage queries and routing across the pipeline it both orchestrates and executes
 - **AgentSession** (`models/agent_session.py`): `get_stage_progress()` convenience wrapper around `get_display_progress()`
 - **Merge Gate** (`.claude/commands/do-merge.md`): Reads `get_display_progress()` for pre-merge pipeline validation
 
@@ -194,9 +193,9 @@ Final delivery is driven by `_handle_dev_session_completion` detecting pipeline 
 | `tools/sdlc_session_ensure.py` | CLI tool to create/find local SDLC sessions keyed by issue number |
 | `tools/_sdlc_utils.py` | Shared `find_session_by_issue()` helper (deduplicated from sdlc_stage_query) |
 | `.claude/skills/sdlc/SKILL.md` | SDLC router skill (reads stage_states in Step 2.0) |
-| `agent/agent_session_queue.py` | `_handle_dev_session_completion()` — `complete_stage()`/`fail_stage()` wiring for dev-session path |
-| `agent/hooks/pre_tool_use.py` | `start_stage()` wiring — Skill path via `_handle_skill_tool_start()` + `_SKILL_TO_STAGE` |
-| `agent/hooks/post_tool_use.py` | `complete_stage()` wiring for Skill path via `_complete_pipeline_stage()` |
+| `agent/hooks/pre_tool_use.py` | `start_stage()` wiring on skill invoke via `_handle_skill_tool_start()` + `_SKILL_TO_STAGE` |
+| `agent/hooks/post_tool_use.py` | `complete_stage()` wiring on skill return via `_complete_pipeline_stage()` |
+| `agent/session_health.py` | `_agent_session_hierarchy_health_check()` — drives `schedule_pipeline_completion()` for final delivery |
 | `tests/unit/test_pipeline_state_machine.py` | State machine unit tests |
 | `tests/unit/test_sdlc_stage_query.py` | Stage query CLI tool unit tests |
 | `tests/unit/test_pre_tool_use_start_stage.py` | Stage extraction and start_stage wiring tests |

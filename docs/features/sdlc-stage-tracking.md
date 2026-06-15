@@ -8,10 +8,14 @@ Pipeline stage completion is tracked exclusively through `PipelineStateMachine.s
 
 Two complementary paths write stage markers:
 
-### 1. Bridge hooks (primary path — bridge-initiated sessions)
+### 1. In-session Skill hooks (primary path — bridge-initiated sessions)
 
-- `pre_tool_use.py` detects dev-session Agent tool use, extracts the stage name from the prompt, and calls `PipelineStateMachine.start_stage()` on the parent PM session.
-- The worker post-completion handler `_handle_dev_session_completion()` in `agent/agent_session_queue.py` fires on dev-session completion, calls `classify_outcome()` then `complete_stage()` or `fail_stage()`. (Prior to the Phase 5 harness migration this logic lived in the SDK `SubagentStop` hook at `agent/hooks/subagent_stop.py`, which was stripped to logging-only and then deleted in issue #1024.)
+Stage state is written in-session as the Eng session invokes and returns from SDLC `/do-*` skills:
+
+- `pre_tool_use.py::_start_pipeline_stage()` detects an SDLC Skill tool call, maps the skill name to a stage via `_SKILL_TO_STAGE`, and calls `PipelineStateMachine.start_stage()` to mark the stage `in_progress`.
+- `post_tool_use.py::_complete_pipeline_stage()` fires when the Skill tool returns, reads the `in_progress` stage via `current_stage()`, and calls `complete_stage()`.
+
+Only `complete_stage()` fires from the hook. `classify_outcome()` and `fail_stage()` remain defined in `agent/pipeline_state.py` but are orphaned — the worker post-completion handler that once called them was removed when the PM and Dev roles merged into the single `eng` role (PR #1691). Earlier still, the SDK `SubagentStop` hook (`agent/hooks/subagent_stop.py`) that originally carried stage tracking was stripped to logging-only in the Phase 5 harness migration and then deleted in issue #1024.
 
 This path fires automatically for all sessions initiated through the Telegram bridge.
 

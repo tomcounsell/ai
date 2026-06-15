@@ -195,10 +195,9 @@ At runtime, the worker processes sessions via `_worker_loop(worker_key)` until t
 
 `agent/session_executor.py` resolves which persona overlay to pass as the harness `system_prompt` (`--append-system-prompt`) for each session. The order is:
 
-1. `session_type=PM` → `project-manager` overlay (loaded via `load_pm_system_prompt`)
-2. `transport=email` or `project["email"]["persona"]` set → that persona, with `teammate` as fallback when the requested overlay file is missing
+1. `transport=email` or `project["email"]["persona"]` set → that persona overlay (e.g. `customer-service`), with `teammate` as fallback when the requested overlay file is missing
+2. `session_type=ENG` → `engineer` overlay (loaded via `load_eng_system_prompt`)
 3. `session_type=TEAMMATE` (Telegram DM/teammate) → `teammate` overlay
-4. Otherwise (dev sessions) → no overlay; the harness keeps the default Claude Code protocol
 
 The resolution emits a single canonical INFO line BEFORE any disk read so absence-vs-fallback is visible in `logs/worker.log` without triangulating against the downstream "Persona overlay loaded" or "Appending N-char system prompt" lines:
 
@@ -273,7 +272,7 @@ Workers are keyed by `worker_key` — a computed property on `AgentSession` that
 | `dev` | no | any (main repo) | `project_key` | Serialized per project |
 | `teammate` | N/A | N/A | `chat_id` | Always parallel-safe |
 
-**PM routing note:** Slugged PM sessions use an allowlist (`_PM_WORKTREE_STAGES = {"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"}`) to determine when slug-based routing is safe. Stages not in this allowlist — including PLAN, ISSUE, CRITIQUE, MERGE, unknown/future stages — fall back to `project_key` so they serialize on the main checkout. Unknown stages fail closed (serialize) rather than accidentally parallelizing on an unaudited stage. The lazy `_ensure_worker` call in `session_pickup.py`'s project-keyed pop handles the routing gap: when a PM session advances to a worktree stage and the project-keyed filter rejects it, the correct slug-keyed worker is started automatically.
+**Eng routing note:** Slugged eng sessions use an allowlist (`_ENG_WORKTREE_STAGES = {"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"}`) to determine when slug-based routing is safe. Stages not in this allowlist — including PLAN, ISSUE, CRITIQUE, MERGE, unknown/future stages — fall back to `project_key` so they serialize on the main checkout. Unknown stages fail closed (serialize) rather than accidentally parallelizing on an unaudited stage. The lazy `_ensure_worker` call in `session_pickup.py`'s project-keyed pop handles the routing gap: when an eng session advances to a worktree stage and the project-keyed filter rejects it, the correct slug-keyed worker is started automatically.
 
 ### Why `chat_id` Is Not the Isolation Key
 

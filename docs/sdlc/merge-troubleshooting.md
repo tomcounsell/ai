@@ -9,8 +9,8 @@ retries at 3; anything beyond that escalates to a human.
 
 See also:
 - `.claude/commands/do-merge.md` — the gate script itself.
-- `config/personas/project-manager.md` → **Gate-Recovery Behavior** — the
-  PM persona's dispatch table mapping blockers to remediations.
+- `config/personas/engineer.md` → **Gate-Recovery Behavior** — the
+  engineer persona's dispatch table mapping blockers to remediations.
 - `docs/features/self-healing-merge-gate.md` — feature-level overview.
 
 ---

@@ -10,15 +10,15 @@
 
 ## Why
 
-A PM session that reaches the MERGE stage on an approved, mergeable PR should
+An Eng session that reaches the MERGE stage on an approved, mergeable PR should
 be able to finish the pipeline without pinging a human. Prior to this work,
 seven distinct gate conditions halted the pipeline with a "report and stop"
 output — each one was a well-understood failure mode with a well-understood
-fix, but the PM had no documented pattern for self-resolution. Routine gate
+fix, but the Eng session had no documented pattern for self-resolution. Routine gate
 mechanics were escalating to humans instead of self-healing.
 
 This feature either eliminates each friction point at the source or
-documents it as a senior-dev playbook the PM can follow. Human intervention
+documents it as a senior-dev playbook the Eng session can follow. Human intervention
 is reserved for genuinely unique architect-level judgement — not gate
 mechanics.
 
@@ -106,9 +106,9 @@ Post-merge wiring lives in `scripts/_baseline_post_merge_update.py`,
 invoked by `.claude/commands/do-merge.md` in the categorised-comparison
 pass path.
 
-### 5. PM gate-recovery rule
+### 5. Engineer gate-recovery rule
 
-`config/personas/project-manager.md` gains a `## Gate-Recovery Behavior`
+`config/personas/engineer.md` gains a `## Gate-Recovery Behavior`
 section after Rule 5 (Rule 5 itself is unchanged). The section:
 
 - Enumerates blocker categories (`PIPELINE_STATE`,
@@ -148,12 +148,12 @@ even if the tokenizer is broken. Covered by
 
 ## How the pieces compose
 
-**Typical autonomous recovery.** A PM session dispatches `/do-merge` on
-an approved PR. The gate reports `LOCKFILE: FAIL`. The PM reads the
+**Typical autonomous recovery.** An Eng session dispatches `/do-merge` on
+an approved PR. The gate reports `LOCKFILE: FAIL`. The Eng session reads the
 Gate-Recovery Behavior section (item 5), looks up the LOCKFILE row, and
 consults `docs/sdlc/merge-troubleshooting.md` (item 6) for the exact
-`uv lock && git add uv.lock && commit && push` recipe. The PM
-dispatches a dev session to run it, then re-dispatches `/do-merge`.
+`uv lock && git add uv.lock && commit && push` recipe. The Eng session
+dispatches a child session to run it, then re-dispatches `/do-merge`.
 The gate now passes the lockfile check; any remaining gates use the
 durable-signal fallback (item 1) or the commit-SHA filter (item 2)
 as needed. Item 3 would have caught this drift at commit time; item 4
@@ -161,7 +161,7 @@ advises on flake quarantine if the full suite surfaces repeat flakes.
 Item 7 stops the guard from self-blocking on quoted text in any
 intermediate commits.
 
-**G4 convergence.** If the same category recurs 3 times, the PM
+**G4 convergence.** If the same category recurs 3 times, the Eng session
 escalates to the human per the existing G4 oscillation guard. Item 5
 references G4 explicitly; items 1–4 and 7 do NOT loop (they are
 one-shot fixes).

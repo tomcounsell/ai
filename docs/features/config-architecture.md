@@ -60,7 +60,7 @@ from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, VALOR_DIR, LOGS_DIR
 | `config/projects.example.json` | Template for projects.json | Yes |
 | `config/models.py` | Model name constants | Yes |
 | `config/personas/_base.md` | Shared persona base (identity, values, tools, philosophy) | Yes |
-| `config/personas/{persona}.md` | Per-persona overlays (developer, project-manager, teammate) | Yes |
+| `config/personas/{persona}.md` | Per-persona overlays (engineer, customer-service; teammate has no in-repo overlay) | Yes |
 | `~/Desktop/Valor/` | Google OAuth tokens, DM whitelist, calendar config, `.env` vault | No (machine-local) |
 
 ### Secrets

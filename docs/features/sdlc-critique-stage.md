@@ -92,19 +92,20 @@ The `do-plan` skill adds a **Phase 2.6 Propagation Check** after all tasks are w
 | `.claude/skills/sdlc/SKILL.md` | Row 4a/4b/4c dispatch split, concern-triggered revision path |
 | `.claude/skills/do-plan/SKILL.md` | Phase 2.6 Propagation Check |
 | `.claude/skills/do-plan/PLAN_TEMPLATE.md` | Critique Results table with Implementation Note column |
-| `config/personas/project-manager.md` | Hard gate rule: CRITIQUE mandatory after PLAN (in-repo fallback) |
+| `config/personas/engineer.md` | Hard gate rule: CRITIQUE mandatory after PLAN — Rule 1 (in-repo fallback) |
 | `agent/sdk_client.py` line 1611 | Stage list injection includes CRITIQUE: `<PLAN\|CRITIQUE\|BUILD\|...>` |
 
 ## Gate Enforcement
 
 The CRITIQUE gate is enforced at two levels so it cannot be silently bypassed:
 
-1. **PM persona** (`config/personas/project-manager.md`): Hard rule text in the PM system prompt
-   states explicitly that there is no path from PLAN to BUILD without CRITIQUE. Loaded as the
-   in-repo fallback when `~/Desktop/Valor/personas/project-manager.md` is absent (dev machines).
-   The private overlay should include these same rules.
+1. **Engineer persona** (`config/personas/engineer.md`): Rule 1 ("CRITIQUE is Mandatory
+   After PLAN") in the engineer system prompt states explicitly that there is no path from
+   PLAN to BUILD without CRITIQUE. Loaded as the in-repo fallback when
+   `~/Desktop/Valor/personas/engineer.md` is absent (dev machines). The private vault overlay
+   should include these same rules.
 
-2. **Python stage list** (`agent/sdk_client.py` line 1611): The PM dispatch injection string
+2. **Python stage list** (`agent/sdk_client.py` line 1611): The stage dispatch injection string
    lists valid stages as `<PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>`. CRITIQUE is structurally
    present in the canonical sequence at the Python level — no persona text can omit it.
 
