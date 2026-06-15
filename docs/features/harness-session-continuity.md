@@ -2,7 +2,7 @@
 
 **Status:** Shipped (issue #976)
 **Owner:** agent/sdk_client.py, agent/agent_session_queue.py
-**Related:** [harness-abstraction.md](harness-abstraction.md), [pm-dev-session-architecture.md](pm-dev-session-architecture.md), PR #909
+**Related:** [harness-abstraction.md](harness-abstraction.md), [eng-session-architecture.md](eng-session-architecture.md), PR #909
 
 ## Problem
 

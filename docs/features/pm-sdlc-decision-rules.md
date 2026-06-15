@@ -37,7 +37,7 @@ When omitted, the `dev-session` agent definition's `model=None` inherits from th
 
 Most PATCH work is a targeted fix against a written checklist of findings — a fresh Sonnet session reads the review comments or test failures and applies the fix cleanly. PM dispatches this as a normal `/do-patch` stage with `model=sonnet`.
 
-Some PATCH work needs the original builder's context: accumulated reasoning, edge cases considered-and-dismissed, implementation rationale that lives only in the builder's transcript. For these, PM resumes the BUILD session instead of dispatching fresh. See [pm-dev-session-architecture.md](pm-dev-session-architecture.md) under "Dev Session Resume" for the mechanism.
+Some PATCH work needs the original builder's context: accumulated reasoning, edge cases considered-and-dismissed, implementation rationale that lives only in the builder's transcript. For these, the Eng session resumes the BUILD session instead of dispatching fresh. See [Eng Session Architecture](eng-session-architecture.md) for the mechanism.
 
 ### Resume difficulty signals
 
@@ -95,5 +95,5 @@ This creates a paper trail so the next reviewer does not re-flag the same issue.
 
 ## Related
 
-- [Chat/Dev Session Architecture](pm-dev-session-architecture.md) -- how PM session and Dev session interact
+- [Eng Session Architecture](eng-session-architecture.md) -- how Eng sessions handle both orchestration and execution
 - Issue [#544](https://github.com/tomcounsell/ai/issues/544) -- tracking issue

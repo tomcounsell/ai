@@ -62,6 +62,6 @@ Routine completions produce no emoji prefix, reducing noise. Only merged PRs and
 
 - [Message Drafter](message-drafter.md) -- Output format specification (formerly "Summarizer Format"; renamed per #1035)
 - [Bridge Response Improvements](bridge-response-improvements.md) -- Response pipeline
-- [Chat Dev Session Architecture](pm-dev-session-architecture.md) -- PM/Dev session split
+- [Eng Session Architecture](eng-session-architecture.md) -- PM/Dev session split
 - Issue [#540](https://github.com/tomcounsell/ai/issues/540) -- Tracking issue
 - PR [#548](https://github.com/tomcounsell/ai/pull/548) -- Implementation

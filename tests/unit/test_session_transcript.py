@@ -25,7 +25,7 @@ def waiting_pm_session(redis_test_db):
     """A PM session currently in waiting_for_children."""
     return AgentSession.create(
         session_id="pm-wfc-transcript-001",
-        session_type="pm",
+        session_type="eng",
         project_key="test",
         status="waiting_for_children",
         chat_id="999",
@@ -44,7 +44,7 @@ def running_session(redis_test_db):
     """A regular running session (no children waiting)."""
     return AgentSession.create(
         session_id="sess-running-transcript-001",
-        session_type="dev",
+        session_type="eng",
         project_key="test",
         status="running",
         chat_id="999",

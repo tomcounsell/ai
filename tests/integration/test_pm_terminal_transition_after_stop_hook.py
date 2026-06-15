@@ -12,7 +12,7 @@ plan: it prevents a future refactor from silently breaking PM session finalizati
 by exercising the full ``_complete_agent_session`` call path against a real
 (non-mocked) AgentSession record in the test Redis db.
 
-The test creates a live ``AgentSession`` with ``session_type="pm"``, a sidecar that
+The test creates a live ``AgentSession`` with ``session_type="eng"``, a sidecar that
 points at the record via its ``agent_session_id`` (NOT a ``local-*`` session_id),
 invokes ``_complete_agent_session``, and asserts the record's ``status`` transitioned
 to ``completed``.
@@ -40,7 +40,7 @@ def pm_session(redis_test_db, tmp_path, monkeypatch):
         session_id="0_pm_terminal_test_1",  # bridge-style session_id, NOT local-*
         project_key="test-phantom-dedupe",
         status="running",
-        session_type="pm",
+        session_type="eng",
         message_text="Integration test: PM terminal transition",
     )
     yield s

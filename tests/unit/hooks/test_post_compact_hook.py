@@ -37,7 +37,7 @@ def _make_session(
     """Create a minimal AgentSession for testing."""
     session = AgentSession(
         session_id=f"test-{claude_uuid[:8]}",
-        session_type="dev",
+        session_type="eng",
         project_key="test-postcompact",
         claude_session_uuid=claude_uuid,
     )

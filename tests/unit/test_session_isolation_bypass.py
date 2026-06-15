@@ -34,7 +34,7 @@ class TestWorktreeEnforcementGuard:
 
     def _make_session(
         self,
-        session_type="dev",
+        session_type="eng",
         slug="test-feature",
         working_dir="/Users/test/src/ai",
         session_id="0_12345",
@@ -82,7 +82,7 @@ class TestWorktreeEnforcementGuard:
 
     def test_dev_session_with_slug_fails_without_worktree(self):
         """A dev session with a slug in the main checkout must be rejected."""
-        session = self._make_session(session_type="dev", slug="my-feature")
+        session = self._make_session(session_type="eng", slug="my-feature")
         working_dir = Path(session.working_dir)
 
         assert WORKTREES_DIR not in str(working_dir)
@@ -92,7 +92,7 @@ class TestWorktreeEnforcementGuard:
         """A dev session with a slug in a worktree that exists on disk should pass."""
         wt_dir = tmp_path / WORKTREES_DIR / "my-feature"
         wt_dir.mkdir(parents=True)
-        session = self._make_session(session_type="dev", slug="my-feature", working_dir=str(wt_dir))
+        session = self._make_session(session_type="eng", slug="my-feature", working_dir=str(wt_dir))
         assert self._should_block(session, wt_dir) is False
 
     def test_dev_session_with_slug_path_but_missing_dir_fails(self, tmp_path):
@@ -107,7 +107,7 @@ class TestWorktreeEnforcementGuard:
         missing_wt = tmp_path / WORKTREES_DIR / "ghost-feature"
         # Deliberately do NOT create missing_wt
         session = self._make_session(
-            session_type="dev", slug="ghost-feature", working_dir=str(missing_wt)
+            session_type="eng", slug="ghost-feature", working_dir=str(missing_wt)
         )
         assert WORKTREES_DIR in str(missing_wt)
         assert not missing_wt.exists()
@@ -115,7 +115,7 @@ class TestWorktreeEnforcementGuard:
 
     def test_pm_session_with_slug_is_not_blocked(self):
         """PM sessions should never be blocked by the worktree guard."""
-        session = self._make_session(session_type="pm", slug="my-feature")
+        session = self._make_session(session_type="eng", slug="my-feature")
         working_dir = Path(session.working_dir)
         assert self._should_block(session, working_dir) is False
 
@@ -127,14 +127,14 @@ class TestWorktreeEnforcementGuard:
 
     def test_dev_session_without_slug_is_not_blocked(self):
         """Ad-hoc dev sessions (no slug) should proceed normally."""
-        session = self._make_session(session_type="dev", slug=None)
+        session = self._make_session(session_type="eng", slug=None)
         working_dir = Path(session.working_dir)
         assert self._should_block(session, working_dir) is False
 
     def test_worktree_creation_failure_raises_for_dev_session(self):
         """When worktree creation fails for a dev session, it should raise, not fall back."""
         # Simulate the escalated error handling path
-        session = self._make_session(session_type="dev", slug="my-feature")
+        session = self._make_session(session_type="eng", slug="my-feature")
 
         # The new code raises RuntimeError instead of falling back
         with pytest.raises(RuntimeError, match="Worktree provisioning failed"):
@@ -148,7 +148,7 @@ class TestWorktreeEnforcementGuard:
 
     def test_worktree_creation_failure_warns_for_non_dev_session(self):
         """When worktree creation fails for a non-dev session, it should warn and continue."""
-        session = self._make_session(session_type="pm", slug="my-feature")
+        session = self._make_session(session_type="eng", slug="my-feature")
 
         # For non-dev sessions, the original warning behavior is preserved
         _stype = session.session_type
@@ -307,11 +307,11 @@ class TestSyntheticSlugForSlugslessDev:
         """
         # Trigger condition mirrored from session_executor.py
         slug = None
-        session_type = "dev"
+        session_type = "eng"
         agent_session_id = "abcd1234-5678-9012-3456-789012345678"
         is_synthetic = False
 
-        if not slug and session_type == "dev" and agent_session_id:
+        if not slug and session_type == "eng" and agent_session_id:
             slug = f"dev-{agent_session_id[:8]}"
             is_synthetic = True
 
@@ -328,7 +328,7 @@ class TestSyntheticSlugForSlugslessDev:
         """
         # Mirror the executor-guard precondition logic
         session = MagicMock()
-        session.session_type = "dev"
+        session.session_type = "eng"
         session.slug = None
         session.agent_session_id = None
 
@@ -359,7 +359,7 @@ class TestSyntheticSlugForSlugslessDev:
     def test_dev_session_with_aid_passes_precondition(self):
         """Slugless dev session WITH aid must pass the precondition (synthesis runs)."""
         session = MagicMock()
-        session.session_type = "dev"
+        session.session_type = "eng"
         session.slug = None
         session.agent_session_id = "ffeeddcc-bbaa-9988-7766-554433221100"
 

@@ -201,7 +201,7 @@ class TestCLI:
 class TestBridgeShortCircuit:
     """Tests for the VALOR_SESSION_ID / AGENT_SESSION_ID env short-circuit."""
 
-    def test_short_circuit_returns_env_session_when_live_pm(self, monkeypatch):
+    def test_short_circuit_returns_env_session_when_live_eng(self, monkeypatch):
         """Env var set + live PM session that OWNS the issue returns it without
         creating anything and without an issue lookup (C1, #1671).
 
@@ -250,7 +250,7 @@ class TestBridgeShortCircuit:
         # Env session is a live PM but owns a DIFFERENT issue.
         env_session = MagicMock()
         env_session.session_id = "parent-pm-other-issue"
-        env_session.session_type = "pm"
+        env_session.session_type = "eng"
         env_session.status = "running"
         env_session.issue_url = "https://github.com/tomcounsell/ai/issues/9999"
 
@@ -282,7 +282,7 @@ class TestBridgeShortCircuit:
 
         env_session = MagicMock()
         env_session.session_id = "parent-pm-other-issue"
-        env_session.session_type = "pm"
+        env_session.session_type = "eng"
         env_session.status = "running"
         env_session.issue_url = "https://github.com/tomcounsell/ai/issues/9999"
 
@@ -357,8 +357,8 @@ class TestBridgeShortCircuit:
         # find_session should NOT be called when env vars are empty
         find_session_mock.assert_not_called()
 
-    def test_short_circuit_falls_through_for_non_pm_session(self, monkeypatch):
-        """Env var points at a Dev session — short-circuit must NOT activate (C2)."""
+    def test_short_circuit_falls_through_for_non_owning_session(self, monkeypatch):
+        """Env var points at an Eng session that does not own the issue — short-circuit must NOT activate (C2)."""
         from tools.sdlc_session_ensure import ensure_session
 
         monkeypatch.setenv("VALOR_SESSION_ID", "dev_session_id")
@@ -366,7 +366,7 @@ class TestBridgeShortCircuit:
 
         dev_session = MagicMock()
         dev_session.session_id = "dev_session_id"
-        dev_session.session_type = "dev"
+        dev_session.session_type = "eng"
         dev_session.status = "running"
 
         mock_new_session = MagicMock()
@@ -387,7 +387,7 @@ class TestBridgeShortCircuit:
         # Must NOT return the dev session id; must fall through to create.
         assert result == {"session_id": "sdlc-local-1143", "created": True}
 
-    def test_short_circuit_falls_through_for_terminal_status_pm_session(self, monkeypatch):
+    def test_short_circuit_falls_through_for_terminal_status_eng_session(self, monkeypatch):
         """Env points at a terminal-status PM session (AD1) — fall through."""
         from tools.sdlc_session_ensure import ensure_session
 
@@ -403,7 +403,7 @@ class TestBridgeShortCircuit:
         ):
             terminal_session = MagicMock()
             terminal_session.session_id = "completed_pm_id"
-            terminal_session.session_type = "pm"
+            terminal_session.session_type = "eng"
             terminal_session.status = terminal_status
 
             mock_new_session = MagicMock()
@@ -461,7 +461,7 @@ def _make_orphan_session(
     session_id,
     age_seconds,
     heartbeat=None,
-    session_type="pm",
+    session_type="eng",
     last_activity_seconds=None,
 ):
     """Build a MagicMock AgentSession with orphan-relevant fields.

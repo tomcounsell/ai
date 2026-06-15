@@ -96,7 +96,7 @@ Unit tests in:
 ## Related Features
 
 - [Session Lifecycle](session-lifecycle.md) — `transition_status()`, `_finalize_parent_sync()`, `waiting_for_children` status
-- [PM/Dev Session Architecture](pm-dev-session-architecture.md) — PM session spawning pattern
+- [Eng Session Architecture](eng-session-architecture.md) — PM session spawning pattern
 - [Session Isolation](session-isolation.md) — Project-keyed serialization (sequential child execution)
 - [Session Steering](session-steering.md) — `valor-session` CLI, steering inbox
 - [Bridge/Worker Architecture](bridge-worker-architecture.md) — Worker picks up child sessions from queue

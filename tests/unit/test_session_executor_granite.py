@@ -93,7 +93,7 @@ def _make_session(
     """Build a minimal AgentSession for the executor."""
     return AgentSession.create(
         session_id=session_id,
-        session_type="pm",
+        session_type="eng",
         project_key=project_key,
         working_dir=working_dir,
         status="pending",

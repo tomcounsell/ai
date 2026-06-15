@@ -157,4 +157,4 @@ The following environment variables are injected by `sdk_client.py` for chat-typ
 - Plan: `docs/plans/pm-telegram-tool.md`
 - Prior art on drafter architecture (formerly "summarizer"): PR #275 (semantic session routing), PR #456 (drafter evidence hardening)
 - [Message Drafter](message-drafter.md) -- the medium-aware drafting layer (formerly the "summarizer") that this feature partially bypasses
-- [Chat Dev Session Architecture](pm-dev-session-architecture.md) -- PM/Dev session split that this feature extends
+- [Eng Session Architecture](eng-session-architecture.md) -- PM/Dev session split that this feature extends

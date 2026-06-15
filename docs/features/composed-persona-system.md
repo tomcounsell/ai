@@ -264,8 +264,8 @@ behavior.
   composer ask.
 - Issue [#1227](https://github.com/tomcounsell/ai/issues/1227) — PM
   prompt-cache stability invariant this composer preserves.
-- [`docs/features/pm-dev-session-architecture.md`](pm-dev-session-architecture.md)
-  — the PM/Dev session split that drives the access-level mapping.
+- [`docs/features/eng-session-architecture.md`](eng-session-architecture.md)
+  — the Eng session architecture that drives the access-level mapping.
 - [`docs/plans/composed-persona-system.md`](../plans/composed-persona-system.md)
   — the plan, including the seven resolved architectural questions and the
   per-machine fixture mitigation rationale.

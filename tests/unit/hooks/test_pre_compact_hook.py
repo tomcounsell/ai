@@ -36,7 +36,7 @@ def _make_session(claude_uuid: str) -> AgentSession:
     """Create a minimal AgentSession with a known claude_session_uuid."""
     session = AgentSession(
         session_id=f"test-{claude_uuid[:8]}",
-        session_type="dev",
+        session_type="eng",
         project_key="test-compaction",
         claude_session_uuid=claude_uuid,
     )
@@ -240,7 +240,7 @@ class TestAgentSessionLookup:
 
         session = AgentSession(
             session_id=bridge_session_id,
-            session_type="dev",
+            session_type="eng",
             project_key="test-compaction-b1",
             claude_session_uuid=claude_uuid,
         )

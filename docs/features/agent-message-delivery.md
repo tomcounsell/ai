@@ -101,6 +101,6 @@ The Teammate persona prompt includes a DELIVERY REVIEW section explaining the ch
 
 - [Teammate Conversational Humility](qa-conversational-humility.md) — Teammate prompt design
 - [Config-Driven Chat Mode](config-driven-chat-mode.md) — Persona routing
-- [Chat-Dev Session Architecture](pm-dev-session-architecture.md) — Session types
+- [Eng Session Architecture](eng-session-architecture.md) — Session types
 - [PM Final Delivery](pm-final-delivery.md) — SDLC terminal-turn delivery protocol (bypasses the review gate)
 - Issue [#589](https://github.com/tomcounsell/ai/issues/589) — Tracking issue

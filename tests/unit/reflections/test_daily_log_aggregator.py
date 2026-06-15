@@ -63,7 +63,7 @@ def test_collect_sessions_filters_to_target_date(yesterday_utc):
     two_days_ago = yesterday_noon - timedelta(days=1)
 
     on_target = AgentSession.create(
-        session_type="dev",
+        session_type="eng",
         project_key=f"daily-report-test-{target_str}-on",
         status="completed",
         completed_at=yesterday_noon,
@@ -73,7 +73,7 @@ def test_collect_sessions_filters_to_target_date(yesterday_utc):
         issue_url="https://example.test/issue/1",
     )
     off_target = AgentSession.create(
-        session_type="dev",
+        session_type="eng",
         project_key=f"daily-report-test-{target_str}-off",
         status="completed",
         completed_at=two_days_ago,

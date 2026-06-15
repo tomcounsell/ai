@@ -140,7 +140,7 @@ async def test_build_harness_turn_input_basic():
             chat_title="Test Chat",
             project={"name": "Test", "_key": "test"},
             task_list_id="task-list-1",
-            session_type="dev",
+            session_type="eng",
             sender_id=12345,
         )
 
@@ -659,7 +659,7 @@ class TestColdStartMetrics:
         csm.record_ttft(
             ttft_seconds=12.345,
             session_id="test-session-1",
-            session_type="pm",
+            session_type="eng",
             working_dir="/tmp/project",
             prompt_chars=74769,
             model="opus",
@@ -670,7 +670,7 @@ class TestColdStartMetrics:
         assert len(lines) == 1
         entry = json.loads(lines[0])
         assert entry["session_id"] == "test-session-1"
-        assert entry["session_type"] == "pm"
+        assert entry["session_type"] == "eng"
         assert entry["ttft_seconds"] == 12.345
         assert entry["prompt_chars"] == 74769
         assert entry["model"] == "opus"
@@ -688,7 +688,7 @@ class TestColdStartMetrics:
         csm.record_ttft(
             ttft_seconds=10.0,
             session_id="s1",
-            session_type="pm",
+            session_type="eng",
             working_dir="/tmp",
             prompt_chars=1000,
             model="opus",
@@ -732,7 +732,7 @@ class TestColdStartMetrics:
         csm.record_ttft(
             ttft_seconds=1.0,
             session_id="s",
-            session_type="pm",
+            session_type="eng",
             working_dir="/tmp",
             prompt_chars=0,
             model="opus",

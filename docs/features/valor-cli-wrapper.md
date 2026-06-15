@@ -283,4 +283,4 @@ flagged in the wider suite for a future cleanup pass.
 - [Session Steering](session-steering.md) — `valor-session` CLI for create/steer/status/list/kill
 - [Agent Session Queue](agent-session-queue.md) — Queue dispatch surface underneath the wrapper
 - [Granite PTY Production Cutover](granite-pty-production.md) — The execution substrate the new sessions run on
-- [PM/Dev Session Architecture](pm-dev-session-architecture.md) — How PM and Dev sessions interact
+- [Eng Session Architecture](eng-session-architecture.md) — How PM and Dev sessions interact

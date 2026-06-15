@@ -213,30 +213,6 @@ Blocked:
 3. If `blocked` is `true`: surface the `reason` to the human and wait. Do NOT loop or guess an alternative skill.
 4. If neither key is present (error): log the `error` field and escalate to the human.
 
-### Multi-dev fan-out (BUILD stage, Phase 1)
-
-When BUILD is the dispatched stage and the plan decomposes cleanly into independent work units, the PM may fan out one Dev sub-session per unit instead of running a single Dev session through the plan serially. The pattern:
-
-1. Decompose the plan:
-   ```bash
-   sdlc-decompose docs/plans/{slug}.md
-   ```
-   Emits a JSON array of units (`unit_id`, `description`, `tasks`). Cap is `MAX_PARALLEL_DEVS` (default 3) -- over-cap decompositions exit non-zero and the PM falls back to single-dev BUILD.
-2. If the array has only one unit: dispatch `/do-build` normally (single-dev path).
-3. If the array has 2+ units: for each unit `u_i`, **sequentially** call
-   ```bash
-   valor-session create --role eng --parent $AGENT_SESSION_ID \
-     --slug {slug}-u{i} --message "Implement unit {u_i}: {description}. Tasks: ..."
-   ```
-   Sub-slug worker_keys are distinct, so the worker runs the children concurrently. (Sequential creation only -- timestamp-based ID collision risk for parallel creation.)
-4. Call `valor-session wait-for-children --session-id $AGENT_SESSION_ID`. This transitions the PM to `waiting_for_children`; `_finalize_parent_sync` auto-resumes the PM when every child reaches a terminal status.
-5. On resume:
-   - If any child has non-`completed` terminal status: use `valor-session steer --id <child-id> --message "fix: ..."` to re-drive that child rather than spawning a replacement. Re-wait via `wait-for-children`.
-   - If all children completed: dispatch one merge-integration Dev session with slug `{slug}-merge`. Its message instructs it to `git checkout session/{slug}` then `git merge session/{slug}-u1 session/{slug}-u2 ...` in unit_id order. On conflict, the merge session writes the conflict file list to `last_error` and exits non-zero -- escalate to human (no automated conflict resolution).
-6. After the merge session completes, steer to TEST stage on the parent slug; the single-dev path resumes.
-
-Fan-out is BUILD-only in Phase 1. TEST, REVIEW, DOCS, MERGE remain serial.
-
 **Before recording and dispatching**, also supply `--proposed-skill` when you already know what skill you intend to invoke (enables G3 PR-lock detection):
 ```bash
 sdlc-tool next-skill --issue-number {issue_number} --proposed-skill /do-build

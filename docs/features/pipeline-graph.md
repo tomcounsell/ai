@@ -119,7 +119,7 @@ Stages fall into two tiers based on the cognitive load of the work:
 | BUILD | sonnet | Translation of a detailed plan into code; PATCH is the escape hatch. Mid-build course correction comes from PM steering (see below), not a model swap |
 | TEST | sonnet | Tool-heavy verification. Independence from BUILD is the anti-cheat property; Opus is overkill |
 | PATCH (easy) | sonnet | Targeted fix against a written checklist of failures or review findings |
-| PATCH (hard) | sonnet, resumed from BUILD | PM resumes the original BUILD session's transcript to leverage accumulated context — see "Dev Session Resume" in [pm-dev-session-architecture.md](pm-dev-session-architecture.md) |
+| PATCH (hard) | sonnet, resumed from BUILD | Eng session resumes the original BUILD transcript to leverage accumulated context — see [Eng Session Architecture](eng-session-architecture.md) |
 | REVIEW | opus | Independent adversarial read of the diff; same justification as CRITIQUE |
 | DOCS | sonnet | Content transformation against code + plan; tool-heavy search and update |
 | MERGE | — | Human decision |
@@ -136,7 +136,7 @@ When PM observes a running BUILD going off-plan, the correction path is **steeri
 
 ### Hard PATCH via resume
 
-For PATCH failures that need deep context, PM resumes the original BUILD session's Claude Code transcript rather than starting a fresh PATCH session. The builder already has every file, plan assumption, and implementation decision in its transcript — a resumed session reads that directly instead of re-deriving from the diff + plan artifacts. See "Dev Session Resume" in [pm-dev-session-architecture.md](pm-dev-session-architecture.md) for the mechanism.
+For PATCH failures that need deep context, the Eng session resumes the original BUILD session's Claude Code transcript rather than starting a fresh PATCH session. The builder already has every file, plan assumption, and implementation decision in its transcript — a resumed session reads that directly instead of re-deriving from the diff + plan artifacts. See [Eng Session Architecture](eng-session-architecture.md) for the mechanism.
 
 ## Files
 

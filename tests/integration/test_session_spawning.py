@@ -107,7 +107,7 @@ class TestHarnessEnvPassthrough:
 
         dev_session = AgentSession.create(
             session_id="dev-env-passthrough-002",
-            session_type="dev",
+            session_type="eng",
             project_key="test",
             status="pending",
             chat_id="999",

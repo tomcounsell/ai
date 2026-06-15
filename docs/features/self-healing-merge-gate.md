@@ -176,9 +176,9 @@ one-shot fixes).
   (item 3).
 - `pytest tests/unit/test_do_merge_baseline.py -k
   "apply_decay or quarantine or orphan"` — decay/flake tests (item 4).
-- `pytest tests/unit/test_pm_persona_guards.py -k
+- `pytest tests/unit/test_engineer_persona_guards.py -k
   TestGateRecoveryBehavior` — persona section tests (item 5).
-- `pytest tests/unit/test_pm_persona_guards.py -k
+- `pytest tests/unit/test_engineer_persona_guards.py -k
   TestMergeTroubleshootingDoc` — playbook structure tests (item 6).
 - `pytest tests/unit/test_validate_merge_guard.py` — tokeniser tests
   (item 7).

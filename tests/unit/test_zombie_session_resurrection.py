@@ -27,7 +27,7 @@ def _make_session(
     session_id="tg_proj_chat_123",
     status="running",
     started_at=None,
-    session_type="pm",
+    session_type="eng",
     project_key="test-proj",
     worker_key=None,
     **kwargs,

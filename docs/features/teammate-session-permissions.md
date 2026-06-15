@@ -171,7 +171,7 @@ particular comes from PR #1333 (tool-call contract) and must not drift.
 
 ## See Also
 
-- [PM-Dev Session Architecture](pm-dev-session-architecture.md) — teammate
+- [Eng Session Architecture](eng-session-architecture.md) — teammate
   fits into the broader session-type model alongside PM and Dev.
 - [Composed Persona System](composed-persona-system.md) — composes the
   teammate prompt with the project's persona overlay.

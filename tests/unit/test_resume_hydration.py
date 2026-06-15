@@ -98,9 +98,10 @@ class TestMaybeInjectResumeHydration:
 
     # -- Session type gating --
 
-    def test_dev_session_skipped(self, tmp_path):
-        """Dev sessions never receive hydration regardless of resume state."""
-        session = _make_session(session_type="dev")
+    def test_eng_session_no_resume_files_skips_hydration(self, tmp_path):
+        """Eng sessions with no resume snapshot files skip hydration silently."""
+        session = _make_session(session_type="eng")'
+
         self._run(session)
         # message_text unchanged
         assert session.message_text == "original message"

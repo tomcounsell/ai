@@ -147,14 +147,14 @@ class TestRouteSessionOutput:
         )
         assert action == "nudge_continue"
 
-    def test_non_pm_returns_deliver(self):
+    def test_non_teammate_returns_deliver(self):
         from agent.output_router import route_session_output
 
         action, _cap = route_session_output(
             msg="Task complete",
             stop_reason="end_turn",
             auto_continue_count=0,
-            session_type="dev",
+            session_type="eng",
         )
         assert action == "deliver"
 
