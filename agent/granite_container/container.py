@@ -64,6 +64,21 @@ logger = logging.getLogger(__name__)
 # TUI's parser, not the container's.
 PM_PRIME_SLASH_CMD = "/granite:prime-pm-role"
 DEV_PRIME_SLASH_CMD = "/granite:prime-dev-role"
+TEAMMATE_PRIME_SLASH_CMD = "/granite:prime-teammate-role"
+
+
+def _resolve_pm_prime_cmd(session_type: str | None) -> str:
+    """Return the PM prime slash command for the given session_type.
+
+    - ``"teammate"`` sessions get primed with the teammate prime
+      so they bend toward chitchat / CS / issue-creation behavior.
+    - All other session types (``"eng"``, ``None``, etc.) get the
+      standard PM prime.
+    """
+    if session_type == "teammate":
+        return TEAMMATE_PRIME_SLASH_CMD
+    return PM_PRIME_SLASH_CMD
+
 
 # The trust-folder prompt dismissal (per the F-probe at
 # scripts/probe_slash_arguments.py:243-247).
@@ -387,6 +402,7 @@ class Container:
         on_turn: Callable[[], None] | None = None,
         pm_pty: PTYDriver | None = None,
         dev_pty: PTYDriver | None = None,
+        session_type: str | None = None,
     ) -> None:
         if not user_message.strip():
             raise ValueError("Container.user_message must be non-empty")
@@ -414,6 +430,10 @@ class Container:
         # owns the close.
         self._prewarmed_pm_pty = pm_pty
         self._prewarmed_dev_pty = dev_pty
+        # session_type drives PM prime selection: "teammate" → TEAMMATE_PRIME_SLASH_CMD;
+        # all others → PM_PRIME_SLASH_CMD. Stored as a plain string (StrEnum is str-compatible
+        # so SessionType.TEAMMATE == "teammate" is True; storing str avoids an import cycle).
+        self._session_type = session_type
         self._pm_pty: PTYDriver | None = None
         self._dev_pty: PTYDriver | None = None
         self._sandbox: tuple[str, str] | None = None
@@ -730,7 +750,8 @@ class Container:
             # arrives, without Dev self-starting (issue #1644 guard lives in
             # the prime text, not in the omission of the message).
             logger.info("container: priming PM")
-            self._prime_session(self._pm_pty, PM_PRIME_SLASH_CMD, include_user_message=True)
+            _pm_prime_cmd = _resolve_pm_prime_cmd(self._session_type)
+            self._prime_session(self._pm_pty, _pm_prime_cmd, include_user_message=True)
             logger.info("container: PM prime done")
             logger.info("container: priming Dev")
             self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD, include_user_message=True)
@@ -1266,6 +1287,9 @@ class Container:
             logger.warning("ping_pong spawn failed: %s", e)
             return False
         try:
+            # NOTE: ping-pong is a PTY idle-heuristic test harness, not a production
+            # session. It always uses the standard PM prime (never the teammate prime)
+            # for test isolation — session_type routing does not apply here.
             self._prime_session(self._pm_pty, PM_PRIME_SLASH_CMD, include_user_message=True)
             self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD, include_user_message=False)
             # Ping each in turn.

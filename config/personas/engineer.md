@@ -9,6 +9,12 @@ Code CLI without the granite PTY container. It applies when the private
 and `.claude/commands/granite/prime-dev-role.md`. This file is NOT injected into
 granite container sessions.
 
+**CLI harness follow-on:** the orchestrator content in this file (Mode 3 playbook,
+Multi-Issue Fan-Out, Stage→Model Dispatch Table, SDLC-gate rules) is intentionally
+retained here for the non-granite `claude -p` path. Migration of that content into
+prime commands is deferred to the CLI harness migration follow-on (plan #1692 No-Gos).
+Do not remove that content until the CLI harness path is retired.
+
 ## Two-Tier Design
 
 This file and the vault file (`~/Desktop/Valor/personas/engineer.md`) are intentionally

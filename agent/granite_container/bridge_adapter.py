@@ -172,6 +172,7 @@ class BridgeAdapter:
         session_env: dict[str, str] | None = None,
         pm_system_prompt: str | None = None,
         pm_model: str | None = None,
+        session_type: str | None = None,
     ) -> None:
         self._agent_session = agent_session
         self._project_key = project_key
@@ -200,6 +201,9 @@ class BridgeAdapter:
         # default). The Dev PTY intentionally has no per-session model
         # knob — it stays on GRANITE__DEV_MODEL via the spec default.
         self._pm_model = pm_model
+        # session_type drives PM prime selection in the Container.
+        # "teammate" → TEAMMATE_PRIME_SLASH_CMD; all others → PM_PRIME_SLASH_CMD.
+        self._session_type = session_type
         # The worker's event loop, captured by `run()` on the asyncio
         # thread before the container is handed to `asyncio.to_thread`.
         # The container's callbacks fire on the to_thread worker thread,
@@ -293,6 +297,7 @@ class BridgeAdapter:
                 on_turn=self._bump_last_turn_at,
                 pm_pty=pm,
                 dev_pty=dev,
+                session_type=self._session_type,
             )
             # Compute transcript paths for tailer (known at spawn time since we set the UUIDs).
             pm_path = _transcript_path_from_spec(working_dir, pm_session_id)

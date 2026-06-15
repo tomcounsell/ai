@@ -277,5 +277,105 @@ class TestPrimeSessionUserMessageSeparation(unittest.TestCase):
         )
 
 
+TEAMMATE_PRIME = REPO_ROOT / ".claude" / "commands" / "granite" / "prime-teammate-role.md"
+
+
+class TestSessionTypePrimeSelection(unittest.TestCase):
+    """Container picks the right PM prime command based on session_type.
+
+    Blocker 1 from PR #1694 review: prime-teammate-role.md existed but was
+    never invoked. Container now accepts session_type and calls
+    _resolve_pm_prime_cmd() to select the appropriate command at run time.
+    """
+
+    def _make_idle_mock(self):  # type: ignore[return]
+        from unittest.mock import MagicMock
+
+        m = MagicMock()
+        m.read_until_idle.return_value = MagicMock(
+            saw_idle=True,
+            buffer="startup idle bypass permissions on",
+            idle_marker="bypass permissions on",
+            elapsed_ms=0,
+        )
+        return m
+
+    def test_teammate_session_gets_teammate_prime(self) -> None:
+        """Container with session_type='teammate' primes PM with the teammate prime."""
+        from agent.granite_container.container import (
+            TEAMMATE_PRIME_SLASH_CMD,
+            _resolve_pm_prime_cmd,
+        )
+
+        self.assertEqual(_resolve_pm_prime_cmd("teammate"), TEAMMATE_PRIME_SLASH_CMD)
+
+    def test_eng_session_gets_pm_prime(self) -> None:
+        """Container with session_type='eng' primes PM with the standard PM prime."""
+        from agent.granite_container.container import PM_PRIME_SLASH_CMD, _resolve_pm_prime_cmd
+
+        self.assertEqual(_resolve_pm_prime_cmd("eng"), PM_PRIME_SLASH_CMD)
+
+    def test_none_session_type_gets_pm_prime(self) -> None:
+        """Container with session_type=None primes PM with the standard PM prime."""
+        from agent.granite_container.container import PM_PRIME_SLASH_CMD, _resolve_pm_prime_cmd
+
+        self.assertEqual(_resolve_pm_prime_cmd(None), PM_PRIME_SLASH_CMD)
+
+    def test_container_teammate_prime_written_to_pty(self) -> None:
+        """Container with session_type='teammate' writes the teammate prime to the PM PTY."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.granite_container.container import TEAMMATE_PRIME_SLASH_CMD, Container
+        from agent.granite_container.pty_driver import PTYDriver
+
+        user_msg = "hello"
+        c = Container(user_message=user_msg, max_turns=1, session_type="teammate")
+        pm_mock = self._make_idle_mock()
+        pm_mock.__class__ = PTYDriver  # pass isinstance check if any
+
+        captured_writes: list[str] = []
+        pm_mock.write.side_effect = lambda s: captured_writes.append(s)
+
+        with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
+            c._pm_pty = pm_mock
+            c._dev_pty = MagicMock(spec=PTYDriver)
+            c._prime_session(pm_mock, TEAMMATE_PRIME_SLASH_CMD, include_user_message=True)
+
+        self.assertTrue(
+            any(TEAMMATE_PRIME_SLASH_CMD in w for w in captured_writes),
+            f"Expected teammate prime in PM writes; got {captured_writes}",
+        )
+
+    def test_container_eng_prime_written_to_pty(self) -> None:
+        """Container with session_type='eng' writes the standard PM prime to the PM PTY."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.granite_container.container import PM_PRIME_SLASH_CMD, Container
+        from agent.granite_container.pty_driver import PTYDriver
+
+        user_msg = "hello"
+        c = Container(user_message=user_msg, max_turns=1, session_type="eng")
+        pm_mock = self._make_idle_mock()
+        pm_mock.__class__ = PTYDriver
+
+        captured_writes: list[str] = []
+        pm_mock.write.side_effect = lambda s: captured_writes.append(s)
+
+        with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
+            c._pm_pty = pm_mock
+            c._dev_pty = MagicMock(spec=PTYDriver)
+            c._prime_session(pm_mock, PM_PRIME_SLASH_CMD, include_user_message=True)
+
+        self.assertTrue(
+            any(PM_PRIME_SLASH_CMD in w for w in captured_writes),
+            f"Expected PM prime in PM writes; got {captured_writes}",
+        )
+
+    def test_teammate_prime_file_exists(self) -> None:
+        """The prime-teammate-role.md file exists and is non-empty."""
+        self.assertTrue(TEAMMATE_PRIME.exists(), f"missing {TEAMMATE_PRIME}")
+        self.assertGreater(TEAMMATE_PRIME.stat().st_size, 0, "prime-teammate-role.md is empty")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

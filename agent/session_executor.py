@@ -1647,6 +1647,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             pool=get_pty_pool(),
             session_env=_harness_env,
             pm_model=_effective_model,
+            session_type=_session_type,
         )
 
         # The message the container receives. The container has no

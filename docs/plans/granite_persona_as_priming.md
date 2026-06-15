@@ -216,12 +216,12 @@ This is a bridge-internal change to how container PTYs are primed; no new MCP to
 
 - [ ] spike-1 canary test exists, runs, and its result is recorded before any deletion.
 - [ ] `compose_system_prompt` + `--append-system-prompt` plumbing deleted; no production caller remains (`grep` clean); engineer-overlay drift guards removed.
-- [ ] PM prime = thin driver (no SDLC `/do-*`, no child dispatch; research subagents allowed); obsolete orchestrator content removed from `engineer.md`.
+- [ ] PM prime = thin driver (no SDLC `/do-*`, no child dispatch; research subagents allowed); orchestrator content in `engineer.md` annotated as intentionally retained for the non-granite `claude -p` path (CLI harness migration is a follow-on, per No-Gos; content removal deferred).
 - [ ] Dev prime owns SDLC + carries CRITIQUE/REVIEW/MERGE gates + the Sonnet-subagent recommendation.
 - [ ] WORKER rails verified present via priming; baseline parity confirmed; `CLAUDE.md` not double-injected.
 - [ ] Dev PTY receives the raw prompt as context; a test proves it does not act before the `[/dev]` relay.
 - [ ] `GRANITE__DEV_MODEL` defaults to `opus` (flipped only after the subagent recommendation lands).
-- [ ] `prime-teammate-role` exists and bends teammate toward chitchat/CS/issue-creation; `teammate.md` no longer vault-only.
+- [x] `prime-teammate-role` exists and bends teammate toward chitchat/CS/issue-creation; `teammate.md` no longer vault-only.
 - [ ] Email/customer-service persona resolves to a prime command (not a system prompt); an integration test proves an email-spawned session is primed and never lands persona-less.
 - [ ] WORKER rails live in a single shared `_prime-rails.md` referenced by all three role primes (no inlined duplication across primes).
 - [ ] Integration review of #1691 fixes passes: no `--role dev/pm` strings; `create_dev()` gone; `"developer"` defaults → `"engineer"`; stale dev-type docstrings removed.
