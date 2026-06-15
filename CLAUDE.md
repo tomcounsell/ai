@@ -91,18 +91,18 @@ officecli close report.docx   # Save and release
 Use `valor-telegram` to read messages from any chat. It checks Redis first, then falls back to the Telegram API automatically. Sending routes through the Redis relay (requires bridge to be running).
 
 ```bash
-valor-telegram read --chat "Dev: Valor" --limit 10
+valor-telegram read --chat "Eng: Valor" --limit 10
 valor-telegram read --chat "Tom" --search "deployment"
-valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
+valor-telegram read --chat "Eng: Valor" --since "1 hour ago"
 valor-telegram read --chat-id -1001234567 --limit 10       # numeric bypass
 valor-telegram read --user tom --limit 10                  # DM whitelist bypass
 valor-telegram read --project psyoptimal --limit 20        # union all chats with this project_key
 valor-telegram chats --search "psy"                        # discover by fragment
 valor-telegram chats --project psyoptimal                  # list every chat tagged with the project
-valor-telegram send --chat "Dev: Valor" "Hello world"
+valor-telegram send --chat "Eng: Valor" "Hello world"
 valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
 valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
-valor-telegram send --chat "Dev: Valor" --voice-note --cleanup-after-send --audio /tmp/out.ogg
+valor-telegram send --chat "Eng: Valor" --voice-note --cleanup-after-send --audio /tmp/out.ogg
 ```
 
 `--chat`, `--chat-id`, `--user`, and `--project` on `read` are mutually exclusive. Every successful single-chat read prints a freshness header `[chat_name · chat_id=N · last activity: T]` before the messages; cross-chat `--project` reads print `[project=KEY · N chats: name1, name2, ... · last activity: T]` and tag each line with `[chat_name]` so you can see which chat each message came from — trust those headers over your intuition about which chat you asked for. `--project --json` enriches each message dict with `chat_id` and `chat_name`. If a `--chat` name is ambiguous, the **default** is to pick the most recently active candidate, log a warning listing all candidates to stderr, and proceed (exit 0); pass `--strict` to opt into a non-zero exit with a stderr candidate list instead (see [`docs/features/telegram-messaging.md`](docs/features/telegram-messaging.md) for the disambiguation and project-stitching UX).
@@ -157,7 +157,6 @@ valor-email threads
 | `tail -f logs/worker.log` | Stream worker logs (includes reflection scheduler) |
 | `sdlc-tool stage-query --issue-number {N}` | Query SDLC pipeline state for an issue (cwd-independent — see `docs/features/sdlc-tool-resolver.md`) |
 | `sdlc-tool verdict get --stage CRITIQUE --issue-number {N}` | Read the recorded critique verdict for an issue (also: `--stage REVIEW`) |
-| `sdlc-decompose docs/plans/{slug}.md` | Decompose a plan into independent dev work units for multi-dev fan-out (see `docs/features/sdlc-parallel-execution.md`). Caps at `MAX_PARALLEL_DEVS` (default 3); exits non-zero on over-cap. |
 | `python scripts/sdlc_reflection.py` | Run SDLC reflection manually |
 | `python scripts/sdlc_reflection.py --dry-run` | Preview SDLC reflection without writing |
 | `python scripts/sdlc_reflection.py --days 14` | Run with larger lookback window |
@@ -189,8 +188,7 @@ valor-email threads
 | `python -m tools.valor_session steer --id <ID> --message "..."` | Inject a steering message into a running session |
 | `python -m tools.valor_session kill --id <ID>` | Kill a session |
 | `python -m tools.valor_session kill --all` | Kill all running sessions |
-| `python -m tools.valor_session create --role pm --message "..."` | Create and enqueue a new session. `project_key` determines the repo via `projects.json`; there is no working-directory override flag. Precedence: `--project-key` > `--parent` inheritance > cwd match (raises on no match). Warns to stderr if no worker is running. |
-| `python -m tools.valor_session create --role dev --slug {slug} --message "..."` | Create session with worktree isolation under the project's declared repo. Warns to stderr if no worker is running. |
+| `python -m tools.valor_session create --role eng --message "..."` | Create and enqueue a new Eng session. `project_key` determines the repo via `projects.json`; there is no working-directory override flag. Precedence: `--project-key` > `--parent` inheritance > cwd match (raises on no match). Warns to stderr if no worker is running. |
 | `python -m tools.valor_session resume --id <ID> --message "..."` | Resume a completed, killed, or failed session (hard-PATCH path; accepts session_id or agent_session_id) |
 | `python -m tools.valor_session release --pr <N>` | Clear retain_for_resume after PR merge/close |
 | `python -m tools.memory_search search "query"` | Search memories by query |
@@ -279,7 +277,7 @@ for s in stale: s.delete()
 - Always aggregate results before reporting
 
 ### 9. SDLC PIPELINE
-- A PM-role AgentSession orchestrates; a Dev-role AgentSession executes
+- An Eng-role AgentSession handles both orchestration and execution
 - Bridge uses nudge loop for output routing (no SDLC awareness in bridge)
 - `/sdlc` is a **single-stage router**: it assesses state, invokes ONE sub-skill, and returns
 - NEVER write code, run tests, or create plans directly -- always delegate through sub-skills
@@ -301,7 +299,7 @@ The standard flow from conversation to shipped feature:
 - If it's a real piece of work: create a GitHub issue
 
 ### Phase 2: SDLC (triggered by work request)
-- The PM session steers the pipeline, invoking `/sdlc` skills as needed
+- The Eng session steers the pipeline, invoking `/sdlc` skills as needed
 - `/sdlc` assesses current state, invokes ONE sub-skill, and returns
 - Stages: Plan -> Critique -> Build -> Test -> Patch -> Review -> Patch -> Docs -> Merge
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on stage definitions
@@ -315,9 +313,9 @@ The standard flow from conversation to shipped feature:
 - If there is no question -- just a status update -- the message drafter auto-sends "continue"
 - Status updates without questions or signs of completion are NOT stopping points
 - The agent keeps working until the phase is complete or it's genuinely blocked
-- **SDLC sessions**: the PM session steers pipeline progression between stages
-- **The PM session** orchestrates the Dev session's work; all messages route through the PM session
-- Auto-continue caps are set to 50 as safety backstops (the PM session manages actual routing)
+- **SDLC sessions**: the Eng session handles pipeline progression
+- **The Eng session** handles both orchestration and execution; all messages route through the Eng session
+- Auto-continue caps are set to 50 as safety backstops (the Eng session manages actual routing)
 - The auto-continue counter resets when the human sends a new message
 
 ### Session Continuity
@@ -335,21 +333,18 @@ Telegram → Python Bridge (Telethon) → Enqueues AgentSession to Redis (I/O on
 Standalone Worker (python -m worker) → Sole session execution engine
               (worker/__main__.py)         → Startup: index rebuild → corrupted+orphan cleanup → recovery → register_worker_pid (self-suicide guard)
                                            → Hourly `agent-session-cleanup` reflection: corrupted records + cross-process orphan reap (claude/MCP, PPID==1, heartbeat-gated; issue #1271)
-                                           → Executes PM session (AgentSession session_type=pm, read-only)
-                                               → PM creates Dev session via valor_session CLI
-                                                   → Worker executes session via granite PTY container (interactive claude TUI, PTYPool-bounded)
-                                                     (BridgeAdapter → Container.run; bridge-originated sessions; see docs/features/granite-pty-production.md)
-                                                   → _handle_dev_session_completion() → steers PM
+                                           → Executes Eng session (AgentSession session_type=eng)
+                                               → Eng session handles SDLC work via granite PTY container (interactive claude TUI, PTYPool-bounded)
+                                                 (BridgeAdapter → Container.run; bridge-originated sessions; see docs/features/granite-pty-production.md)
                                            → Uses OutputHandler protocol (agent/output_handler.py)
                                            → TelegramRelayOutputHandler writes to Redis outbox
                                            → FileOutputHandler fallback for non-Telegram / dev environments
 ```
 See `docs/features/bridge-worker-architecture.md` for the full bridge/worker separation design.
 
-**Session Types** (see `docs/features/pm-dev-session-architecture.md`):
-- **PM Session** (`session_type="pm"`) - Orchestrates work, PM persona, read-only
-- **Teammate Session** (`session_type="teammate"`) - Conversational, Teammate persona. Bash is open, audit-logged with `[teammate-audit]`. Writes restricted in code to `docs/`, `.claude/`, `.github/`, `wiki/`, `skills/`, top-level meta files, and `~/work-vault/`; source-code writes get a redirect to spawn a Dev session. See [`docs/features/teammate-session-permissions.md`](docs/features/teammate-session-permissions.md).
-- **Dev Session** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
+**Session Types** (see `docs/features/eng-session-architecture.md`):
+- **Eng Session** (`session_type="eng"`) - Handles both SDLC work and conversational responses, full permissions, engineer persona
+- **Teammate Session** (`session_type="teammate"`) - Conversational, Teammate persona. Bash is open, audit-logged with `[teammate-audit]`. Writes restricted in code to `docs/`, `.claude/`, `.github/`, `wiki/`, `skills/`, top-level meta files, and `~/work-vault/`; source-code writes get a redirect to spawn an Eng session. See [`docs/features/teammate-session-permissions.md`](docs/features/teammate-session-permissions.md).
 - **Nudge loop** - Bridge output routing (deliver or nudge, no SDLC awareness)
 - **Session Steering** (see `docs/features/session-steering.md`): `AgentSession.queued_steering_messages` is the steering inbox — any process writes messages, worker injects at turn boundary. `agent/output_router.py` contains routing decision logic extracted from executor. Use `valor-session steer --id <id> --message "..."` to steer externally.
 
@@ -369,7 +364,7 @@ See `docs/features/bridge-worker-architecture.md` for the full bridge/worker sep
 - `.claude/skills-global/` - **Global skills** — synced to every machine (see below)
 - `.claude/skills/` - **Project-only skills** — work only in this repo's context, NOT synced
 - `.claude/commands/` - Slash command skills
-- `.claude/agents/` - Subagent definitions (builder, validator, code-reviewer; dev-session removed — dev sessions created via valor_session CLI)
+- `.claude/agents/` - Subagent definitions (builder, validator, code-reviewer; eng sessions created via valor_session CLI)
 - `bridge/` - Telegram integration, nudge loop
 - `worker/` - Standalone worker service (`python -m worker`)
 - `agent/` - Session queue, SDK client, output router (`output_router.py`), output handler protocol, constants

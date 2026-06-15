@@ -112,7 +112,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [PM session Teammate Mode](pm-teammate-mode.md) | Haiku-based intent classifier routing informational queries to direct PM session response without Dev session spawn | Shipped |
 | [PM Telegram Tool](pm-telegram-tool.md) | PM session composes and sends its own Telegram messages (text, file attachments, and multi-file albums) via Redis IPC, with message drafter as fallback | Shipped |
 | [PM Voice Refinement](pm-voice-refinement.md) | Naturalized SDLC language, crash message pool, sentence-aware truncation, milestone-selective emoji for PM output | Shipped |
-| [PM/Dev Session Architecture](pm-dev-session-architecture.md) | PM/Dev session split — session type discriminator splitting orchestration from execution | Shipped |
+| [Eng Session Architecture](eng-session-architecture.md) | Eng session type — single role for both SDLC work and conversational responses; teammate session for DM-based Q&A; CLI-only granite for standalone TUI runs | Shipped |
 | [Popoto Index Hygiene](popoto-index-hygiene.md) | Automated cleanup of orphaned Popoto index entries, Meta.ttl on AgentSession, raw Redis migration to Popoto models, daily rebuild_indexes reflection | Shipped |
 | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
 | [Post-Compact Re-Grounding](post-compact-regrounding.md) | Short re-grounding nudge delivered after context compaction: re-read plan, check SDLC stage progress, review PROGRESS.md scratchpad, check TodoWrite task list; degrades gracefully to minimal nudge when no AgentSession context exists | Shipped |
@@ -135,7 +135,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
 | [SDLC Local Supervision](sdlc-local-supervision.md) | `/do-sdlc` loops the `/sdlc` router in local Claude Code sessions — stage subagents on opus/sonnet per the PM persona table, TEST/PATCH marker backfill, exits on merge/blocked/cap | Shipped |
 | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
-| [SDLC Parallel Execution](sdlc-parallel-execution.md) | Phase 1 multi-dev fan-out at BUILD via `sdlc-decompose` + sub-slug `{slug}-u{i}` Dev sessions; Phase 2 `MultiDispatch` for parallel-safe stage pairs (DOCS+PATCH) | Shipped |
+| [SDLC Parallel Execution](sdlc-parallel-execution.md) | Removed — multi-dev fan-out and DAG stage dispatch removed as part of PM/Dev to Eng consolidation (#1633) | Removed |
 | [SDLC Pipeline](sdlc-pipeline.md) | Pipeline routing overview, G1–G7 legal dispatch guards, `_meta` field reference, plan-revising lock (G7), and CLI tool reference | Shipped |
 | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, MERGE pipeline stage, and structured review comment enforcement | Shipped |
 | [SDLC Pipeline Portability](sdlc-pipeline-portability.md) | Seven generic robustness fixes so `/sdlc` runs unattended in any repo: git-root plan resolution + tracking-URL match, finished-PR routing guard, `pr_number` recovery, G4 self-clear + `dispatch reset`, portable `/do-merge` skill, tri-state stage-marker degradation | Shipped |
