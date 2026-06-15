@@ -1787,6 +1787,22 @@ class ValorAgent:
                                         _usage_field(usage_obj, "cache_read_input_tokens"),
                                         msg.total_cost_usd,
                                     )
+                                    # Additive telemetry tap — no behavior change
+                                    from agent.session_telemetry import (
+                                        record_telemetry_event,
+                                    )
+
+                                    record_telemetry_event(
+                                        session_id,
+                                        {
+                                            "type": "turn_end",
+                                            "usage": (
+                                                usage_obj.__dict__
+                                                if hasattr(usage_obj, "__dict__")
+                                                else {}
+                                            ),
+                                        },
+                                    )
                                 if msg.is_error and retries < max_retries:
                                     retries += 1
                                     error_text = msg.result or "(empty)"
@@ -2531,6 +2547,17 @@ async def get_response_via_harness(
             _usage_field(usage, "cache_read_input_tokens"),
             cost_usd,
         )
+        # Additive telemetry tap — no behavior change
+        from agent.session_telemetry import record_telemetry_event
+
+        record_telemetry_event(
+            session_id,
+            {
+                "type": "token_usage",
+                "usage": usage if isinstance(usage, dict) else {},
+                "total_cost_usd": cost_usd,
+            },
+        )
 
     # Issue #1245: persist turn_count + tool_call_count onto the AgentSession
     # via Popoto. Accumulating (`+=`) so primary + fallback subprocess
@@ -2801,9 +2828,22 @@ async def _run_harness_subprocess(
             # event.type=="tool_use" does NOT fire.
             message = data.get("message", {}) or {}
             content_blocks = message.get("content", []) or []
-            tool_call_count += sum(
-                1 for b in content_blocks if isinstance(b, dict) and b.get("type") == "tool_use"
-            )
+            tool_use_blocks = [
+                b for b in content_blocks if isinstance(b, dict) and b.get("type") == "tool_use"
+            ]
+            tool_call_count += len(tool_use_blocks)
+            # Additive telemetry tap — no behavior change
+            if session_id and tool_use_blocks:
+                from agent.session_telemetry import record_telemetry_event
+
+                for _tb in tool_use_blocks:
+                    record_telemetry_event(
+                        session_id,
+                        {
+                            "type": "tool_use",
+                            "name": _tb.get("name", ""),
+                        },
+                    )
             continue
 
         if event_type == "stream_event":
