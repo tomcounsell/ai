@@ -156,12 +156,14 @@ The work-type classifier (`tools/classifier.py` / `classify_request_async`) was 
 
 ## Performance
 
-| Metric | Old (Ollama) | New (Embedding) |
-|--------|-------------|-----------------|
-| Cold start | 2-10 seconds | ~1 second (compute 72 embeddings via API) |
-| Warm lookup | 2-10 seconds | Under 50ms (cosine similarity only) |
-| Emoji coverage | 10 hardcoded | All 72 validated reactions |
-| Timeout fallback | Frequent | Rare (only on API key missing) |
+The two emoji paths have different performance profiles:
+
+| Metric | Old (Ollama) | Receipt-time (action-intent) | Agent-driven (embedding) |
+|--------|-------------|------------------------------|--------------------------|
+| Latency | 2-10 seconds | Synchronous (dict lookup, no API) | Under 50ms warm (cosine similarity) |
+| Cold start | 2-10 seconds | None | ~1 second (compute 72 embeddings via API) |
+| Emoji coverage | 10 hardcoded | 6 action categories, curated | All 72 validated reactions |
+| Timeout risk | Frequent | None | Rare (only on API key missing) |
 
 ## Related Files
 
