@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor
 created: 2026-06-11
 tracking: https://github.com/tomcounsell/ai/issues/1512
-last_comment_id:
+last_comment_id: 4693087535
 ---
 
 # Action-Intent Emoji Reactions
@@ -70,6 +70,12 @@ to `1550-1563` in current HEAD due to surrounding additions. All claims still ho
 
 **Root cause pattern:** Both prior changes addressed symptoms (latency, offensive match) at selection
 time without changing the fundamental approach of embedding message *content* against *sentiment* labels.
+
+- **PR #1651** (merged 2026-06-12) — Improved the *completion-time* reaction in `agent/session_executor.py`
+  by ORing `agent_session.user_facing_routed` into the `communicated` check so `REACTION_COMPLETE` vs
+  `REACTION_SUCCESS` fires correctly for the granite-container path. **Relevance:** this is a *different
+  reaction path* (completion-time, not receipt-time) and is out of scope for this plan, which is scoped
+  strictly to the receipt-time `find_best_emoji_for_message` path. Noted for context — no overlap, no conflict.
 
 ## Research
 
@@ -160,16 +166,33 @@ intent category to emoji candidates → softmax sample → set final reaction
 
 ```python
 ACTION_EMOJI_MAP: dict[str, list[str]] = {
-    "problem_solving": ["🤔", "🔍", "💡"],       # thinking, investigating, insight
-    "investigate_bug": ["🔍", "🛠", "🕸"],        # search, fix, debug (🕸 = spider web)
+    "problem_solving": ["🤔", "🤓", "👨‍💻"],      # thinking, analyzing, working it
+    "investigate_bug": ["🤔", "🤓", "👨‍💻"],      # investigating, debugging, on it
     "acknowledge_task": ["🫡", "👀", "👍"],       # salute, watching, approve
     "receive_praise":  ["🙏", "❤", "🏆"],        # grateful, love, trophy
-    "answer_question": ["🤔", "💡", "🤓"],        # thinking, idea, nerd
+    "answer_question": ["🤔", "🤓", "🤝"],        # thinking, nerd, here-to-help
     "general":         ["🤔", "👀", "🫡"],        # default fallback set
 }
 ```
 
-Note: All candidate emojis must be in `VALIDATED_REACTIONS`. Verify before finalizing the map.
+**CRITICAL Telegram-reaction constraint (verified against `bridge/response.py` HEAD `0d000e59`):**
+Telegram only accepts a fixed whitelist of reaction emojis (`VALIDATED_REACTIONS`, 72 entries).
+The intuitive "investigate/fix" emojis from the issue's examples — **🔍, 🛠, 🔨, 🕸, 💡** — are
+**NOT valid Telegram reactions**. `🔍` and `💡` are explicitly listed in `INVALID_REACTIONS`
+(`bridge/response.py`) and return `ReactionInvalidError`; `🛠`, `🔨`, `🕸` are absent from the
+whitelist entirely. Setting any of them as a reaction throws at runtime.
+
+The map above substitutes whitelist-valid emojis that still read as "I'm working on this":
+`🤔` (thinking), `🤓` (analyzing/nerd), `👨‍💻` (coding/on it), `🤝` (here to help). Every candidate
+in the map above has been verified present in `VALIDATED_REACTIONS`. The builder MUST add a unit
+test asserting `all(e in VALIDATED_REACTIONS for cat in ACTION_EMOJI_MAP for e in ACTION_EMOJI_MAP[cat])`
+so this constraint can never silently regress.
+
+**Implication for the issue's acceptance criteria:** the issue asks for bug reactions in the set
+🔍/🛠/🔨/🕸. Since none are valid Telegram reactions, the plan satisfies the *intent* of that
+criterion (a distinct "investigating" signal) with the closest valid emojis (🤔/🤓/👨‍💻) rather than
+the literal emojis named. This is a forced substitution, not a scope reduction — flagged here so
+the reviewer and critique stage see it explicitly.
 
 **Classification prompt** (Haiku, fast):
 ```
@@ -283,9 +306,10 @@ which does not change.
 
 - [ ] `find_best_emoji_for_message(text)` classifies message intent via LLM and selects from an
   action-vocabulary (`ACTION_EMOJI_MAP`), not content-embedding against sentiment labels.
-- [ ] A reported bug/problem reacts with 🔍, 🛠, or 🕸 (investigate/fix set).
+- [ ] A reported bug/problem reacts with 🤔, 🤓, or 👨‍💻 (investigate/working set — these are the closest *valid* Telegram reactions; the issue's literal 🔍/🛠/🕸 are not on Telegram's whitelist, see Technical Approach).
 - [ ] A task/request message reacts with 🫡, 👀, or 👍 (acknowledge set).
 - [ ] Praise/thanks messages react with 🙏, ❤, or 🏆 (receive-warmly set).
+- [ ] Every emoji in `ACTION_EMOJI_MAP` is present in `VALIDATED_REACTIONS` (asserted by a unit test; guards against `ReactionInvalidError` at runtime).
 - [ ] No content sentiment can produce an offensive reaction (action vocab contains no offensive emojis).
 - [ ] `find_best_emoji(feeling)` callers (`agent/constants.py`, `tools/react_with_emoji.py`,
   `tools/send_telegram.py`) are unaffected.
@@ -345,7 +369,7 @@ which does not change.
 - **Agent Type**: builder
 - **Parallel**: false
 - UPDATE `TestEmojiSelection::test_message_function_uses_snippet`: stub the classifier call instead of the embedding API.
-- ADD `TestActionVocabulary`: verify `ACTION_EMOJI_MAP` candidates are all in `VALIDATED_REACTIONS`, all 6 categories present, no offensive emojis in any candidate list.
+- ADD `TestActionVocabulary`: verify `ACTION_EMOJI_MAP` candidates are all in `VALIDATED_REACTIONS` (HARD assertion — invalid Telegram reactions like 🔍/🛠/💡 throw `ReactionInvalidError` at runtime), all 6 categories present, no offensive emojis in any candidate list, none in `INVALID_REACTIONS`.
 - ADD `TestMessageActionClassification`: mock Haiku response, verify each action category maps to expected emoji candidates, verify empty input returns `EmojiResult` with default emoji, verify classification error falls back to `"general"`.
 - Verify `TestOffensiveEmojiBlocked` still passes unchanged.
 
@@ -378,6 +402,7 @@ which does not change.
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No offensive emoji in action map | `python -c "from tools.emoji_embedding import ACTION_EMOJI_MAP, BLOCKED_REACTION_EMOJIS; blocked = [e for v in ACTION_EMOJI_MAP.values() for e in v if e in BLOCKED_REACTION_EMOJIS]; assert not blocked, blocked"` | exit code 0 |
+| All action emojis are valid Telegram reactions | `python -c "from tools.emoji_embedding import ACTION_EMOJI_MAP; from bridge.response import VALIDATED_REACTIONS; bad = [e for v in ACTION_EMOJI_MAP.values() for e in v if e not in VALIDATED_REACTIONS]; assert not bad, bad"` | exit code 0 |
 | find_best_emoji unchanged callers | `grep -n "find_best_emoji_for_message" tools/react_with_emoji.py tools/send_telegram.py agent/constants.py` | exit code 1 |
 
 ## Critique Results
@@ -388,6 +413,15 @@ which does not change.
 
 ---
 
+## Resolution of Issue's Open Questions
+
+The issue body posed four numbered open questions and required `/do-plan` to resolve them. Each is resolved here:
+
+1. **Where does "intended action" get decided?** → **Option (a): lightweight intent classifier at receipt time.** The reaction fires fire-and-forget at receipt with a *predicted* action category from a fast Haiku call. Option (b) two-phase reaction-editing and (c) hybrid are deferred to **No-Gos** — they require plumbing the agent's actual decision back to a reaction-update call, and the predicted-intent accuracy does not justify that complexity. This preserves the existing snappy 👀-then-contextual UX.
+2. **What is the action vocabulary?** → A closed set of 6 categories (`problem_solving`, `investigate_bug`, `acknowledge_task`, `receive_praise`, `answer_question`, `general`) in `ACTION_EMOJI_MAP`, each mapped to 2-3 *Telegram-valid* candidate emojis. A direct LLM classifier is used, not embedding-over-content. See Technical Approach.
+3. **Does the embedding approach stay?** → **No** for the message-reaction path. `find_best_emoji_for_message` is rewritten to classify-then-map; it no longer embeds content against sentiment labels. `EMOJI_LABELS` and the embedding mechanism remain **only** for the intent-driven `find_best_emoji(feeling)` callers, whose contract is unchanged.
+4. **Backward compatibility?** → The refactor is scoped strictly to `find_best_emoji_for_message` and its bridge call site. `find_best_emoji(feeling)` and its callers (`agent/constants.py`, `tools/send_telegram.py`, `tools/react_with_emoji.py`) are unaffected; a Verification check greps to confirm they still call `find_best_emoji`.
+
 ## Open Questions
 
-None — all architectural choices resolved in recon. Ready for critique.
+None — all four issue open questions resolved above, and the Telegram-reaction-whitelist constraint (🔍/🛠/🕸/💡 are invalid) has been surfaced and worked around. Ready for critique.
