@@ -79,10 +79,10 @@ Worker loop
 
 ```bash
 # Create a new session (project_key derived from cwd via projects.json)
-# PM and dev roles both require --slug, or `issue #N` in the message for auto-derivation.
-valor-session create --role pm --message "Plan issue #735"
-valor-session create --role dev --slug fix-the-bug --message "Fix the bug" --parent abc123
-valor-session create --role pm --slug ad-hoc-task --message "..." --project-key valor  # explicit override
+# The eng role requires --slug, or `issue #N` in the message for auto-derivation.
+valor-session create --role eng --message "Plan issue #735"
+valor-session create --role eng --slug fix-the-bug --message "Fix the bug"
+valor-session create --role eng --slug ad-hoc-task --message "..." --project-key valor  # explicit override
 
 # Steer a running session
 valor-session steer --id abc123 --message "Stop after critique stage"
@@ -93,7 +93,7 @@ valor-session status --id abc123
 # List sessions
 valor-session list
 valor-session list --status running
-valor-session list --role pm
+valor-session list --role eng
 
 # Kill sessions
 valor-session kill --id abc123

@@ -9,7 +9,7 @@ CLI is verbose for the common case. Spinning up a session that "just does this
 thing" requires:
 
 ```bash
-valor-session create --role pm --message "fix the typo in app.py"
+valor-session create --role eng --message "fix the typo in app.py"
 ```
 
 Three flags and a subcommand for the most frequent operation. The shell also
@@ -27,13 +27,13 @@ schema changes.
 The interface:
 
 ```bash
-# Create — single positional prompt, defaults to PM role.
-# PM and dev sessions REQUIRE a slug: pass --slug, or include
+# Create — single positional prompt, defaults to eng role.
+# Eng sessions REQUIRE a slug: pass --slug, or include
 # "issue #N" in the prompt so the slug auto-derives to sdlc-N
 # (issues #1109 / #1272 — slugless invocations exit 1).
 valor "plan issue #1615"
 valor "fix the typo in app.py" --slug typo-fix
-valor agent-session --role dev --model sonnet --slug feature-x "build the feature"
+valor agent-session --role eng --model sonnet --slug feature-x "build the feature"
 
 # Lifecycle
 valor list                          # recent 20 sessions
@@ -90,7 +90,7 @@ shows up in exactly one helper.
 ### 3. Smoke-testable in 10 lines
 
 ```bash
-valor "smoke test: confirm the valor CLI wrapper is on the cutover branch" --role dev --slug valor-smoke
+valor "smoke test: confirm the valor CLI wrapper is on the cutover branch" --role eng --slug valor-smoke
 ```
 
 The dev session appears on the dashboard, the worker picks it up, and the

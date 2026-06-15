@@ -10,7 +10,7 @@ Without stage handoff, each Dev session starts with only the plan document and i
 
 ## How It Works
 
-Two execution paths write stage tracking records: the **worker post-completion path** (for Dev sessions created via `valor_session create --role dev`) and the **Skill path** (for PM Skill tool calls). Both write to `AgentSession.stage_states` via `PipelineStateMachine`, enabling the dashboard to show real progress for all session types.
+Two execution paths write stage tracking records: the **worker post-completion path** (for eng sessions created via `valor_session create --role eng`) and the **Skill path** (for PM Skill tool calls). Both write to `AgentSession.stage_states` via `PipelineStateMachine`, enabling the dashboard to show real progress for all session types.
 
 ### Skill Tool Path (PM Sessions)
 

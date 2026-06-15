@@ -77,7 +77,7 @@ That left a residual hole — a dev session created without a slug (a future deb
 
 Issue [#1272](https://github.com/tomcounsell/ai/issues/1272) closes that hole with two surgical additions:
 
-1. **CLI symmetry guard** (`tools/valor_session.py::cmd_create`): `valor-session create --role dev` now requires `--slug` or `issue #N` in the message, mirroring the existing PM check. Slugless invocations exit 1 with a stderr error referencing #1272. The message format includes the literal substring `dev sessions must be created with --slug` for grep-ability.
+1. **CLI symmetry guard** (`tools/valor_session.py::cmd_create`): `valor-session create --role eng` now requires `--slug` or `issue #N` in the message, mirroring the existing PM check. Slugless invocations exit 1 with a stderr error referencing #1272. The message format includes the literal substring `dev sessions must be created with --slug` for grep-ability.
 
 2. **Synthetic-slug synthesis** (`agent/session_executor.py`): If a slugless dev session somehow reaches the executor (a future programmatic spawn site that bypasses the CLI), the executor synthesizes a slug `dev-{agent_session_id[:8]}` and provisions a worktree the same way slugged sessions do today. The synthesis emits a stable `[synthetic-slug]` log marker so operators can grep post-deploy:
 
@@ -123,7 +123,7 @@ A worktree handed between SDLC stages may still be checked out to the previous s
 The `valor-session create` CLI command accepts a `--slug` flag that provisions a worktree at session creation time, before the session is enqueued:
 
 ```bash
-python -m tools.valor_session create --role dev --slug my-feature --message "Build the feature"
+python -m tools.valor_session create --role eng --slug my-feature --message "Build the feature"
 ```
 
 When `--slug` is provided:

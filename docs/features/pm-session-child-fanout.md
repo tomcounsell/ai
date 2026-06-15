@@ -15,10 +15,10 @@ Fan-out does **not** activate for status queries (e.g., "what's the status of 77
 ## Data Flow
 
 1. **Parent PM session** receives the multi-issue message.
-2. **Fan-out**: PM runs one `valor_session create --role pm` call per issue:
+2. **Fan-out**: PM runs one `valor_session create --role eng` call per issue:
    ```bash
    python -m tools.valor_session create \
-     --role pm \
+     --role eng \
      --parent "$AGENT_SESSION_ID" \
      --message "Run SDLC on issue 777"
    ```
@@ -91,7 +91,7 @@ python -m tools.valor_session kill --all
 
 Unit tests in:
 - `tests/unit/test_agent_session_hierarchy.py` — `TestCmdWaitForChildren`: transitions status, missing session, no session ID, reads env var, terminal status guard.
-- `tests/unit/test_pm_session_factory.py` — `TestPMPersonaFanoutInstruction`: fan-out text present in `sdk_client.py`, `project-manager.md` has the section, references `wait-for-children` and `--role pm`.
+- `tests/unit/test_pm_session_factory.py` — `TestEngPersonaFanoutInstruction`: fan-out text present in `sdk_client.py`, `engineer.md` has the section, references `wait-for-children` and `--role eng`.
 
 ## Related Features
 

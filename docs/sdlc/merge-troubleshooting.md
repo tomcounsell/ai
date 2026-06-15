@@ -89,7 +89,7 @@ after the latest commit's committer date:
 
 ```bash
 python -m tools.valor_session create \
-  --role dev --model opus \
+  --role eng --model opus \
   --slug {slug} --parent "$AGENT_SESSION_ID" \
   --message "Stage: REVIEW / Required skill: /do-pr-review / PR: {pr_url} / ..."
 ```

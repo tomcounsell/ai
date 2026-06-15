@@ -222,7 +222,7 @@ degradation rather than a hard error.
 ### How It Flows
 
 1. PM or human calls
-   `python -m tools.valor_session create --role dev --slug {slug} --model sonnet --message "..."`.
+   `python -m tools.valor_session create --role eng --slug {slug} --model sonnet --message "..."`.
 2. `tools/valor_session.py::cmd_create` constructs the AgentSession via
    `enqueue_agent_session(model="sonnet")`; the value is persisted on the
    Redis record.

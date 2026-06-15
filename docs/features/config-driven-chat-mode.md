@@ -14,7 +14,7 @@ The `persona` field lives inside the `telegram.groups` dictionary of each projec
     "my-project": {
       "telegram": {
         "groups": {
-          "Dev: MyProject": {"persona": "developer"},
+          "Eng: MyProject": {"persona": "engineer"},
           "PM: MyProject": {"persona": "project-manager"},
           "Team: MyProject": {"persona": "teammate"}
         },

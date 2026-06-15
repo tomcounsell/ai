@@ -158,7 +158,7 @@ Project configuration lives at `~/Desktop/Valor/projects.json` (iCloud-synced, p
     "valor": {
       "telegram": {
         "groups": {
-          "Dev: Valor": {"chat_id": -123, "persona": "developer"},
+          "Eng: Valor": {"chat_id": -123, "persona": "engineer"},
           "PM: Valor": {"chat_id": -456, "persona": "project-manager"}
         },
         "dm_persona": "teammate"
@@ -206,7 +206,7 @@ from agent.sdk_client import load_identity, load_persona_prompt, load_system_pro
 identity = load_identity()                    # dict with name, email, timezone, etc.
 
 # Load specific persona
-prompt = load_persona_prompt("developer")     # segments + developer overlay
+prompt = load_persona_prompt("engineer")      # segments + engineer overlay
 prompt = load_persona_prompt("teammate")      # segments + teammate overlay
 
 # System prompt wrappers

@@ -188,7 +188,7 @@ All operations are wrapped in try/except — failures never crash the worker.
 The PM persona at `~/Desktop/Valor/personas/project-manager.md` now dispatches dev sessions via:
 
 ```bash
-python -m tools.valor_session create --role dev --slug {slug} --parent "$AGENT_SESSION_ID" --message "..."
+python -m tools.valor_session create --role eng --slug {slug} --parent "$AGENT_SESSION_ID" --message "..."
 ```
 
 instead of `Agent(subagent_type="dev-session", ...)`. The Agent tool dispatch path for dev sessions has been removed. `--slug` is required (or `issue #N` in the message body for auto-derivation) so the worktree is provisioned at create time — see [Session Isolation](session-isolation.md#synthetic-slugs-for-slugless-dev-sessions-issue-1272) for the slugless-fallback safety net.

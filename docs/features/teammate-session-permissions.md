@@ -81,7 +81,7 @@ exact Dev-session redirect command:
 Blocked: teammate sessions cannot write to '<path>'. This path looks like
 source code, which requires a Dev session. To proceed:
 
-  valor-session create --role dev --slug <slug> --message "<task description>"
+  valor-session create --role eng --slug <slug> --message "<task description>"
 
 Suggest this to the human first and wait for explicit confirmation before
 spawning the Dev session. Teammates may write to: docs/, .claude/,

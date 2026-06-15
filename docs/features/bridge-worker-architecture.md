@@ -290,7 +290,7 @@ Workers are keyed by `worker_key` — a computed property on `AgentSession` that
 
 `chat_id` is a communication topology concept — it tells you which Telegram thread a message came from. But isolation depends on whether sessions share mutable state (the git working tree). Two PM sessions from different threads both write to the same `main` branch at PLAN stage; they must serialize regardless of their `chat_id`.
 
-Similarly, `chat_id` is insufficient for dev sessions — two dev sessions for different work items in the same chat (e.g., two `valor_session create --role dev` calls defaulting to `chat_id=0`) would serialize even though they share no state. Slug is the correct routing key for worktree-isolated dev sessions: each slug has its own worktree and branch.
+Similarly, `chat_id` is insufficient for eng sessions — two eng sessions for different work items in the same chat (e.g., two `valor_session create --role eng` calls defaulting to `chat_id=0`) would serialize even though they share no state. Slug is the correct routing key for worktree-isolated eng sessions: each slug has its own worktree and branch.
 
 ### Three Worker Loop Archetypes
 
