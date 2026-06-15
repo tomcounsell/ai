@@ -104,7 +104,8 @@ No external library research needed — the fix is a two-line change plus a rele
 - **Interface changes:** none. `format_value_pre_save` signature unchanged; only the returned value's tz-awareness changes.
 - **Coupling:** decreases reliance on host timezone — popoto becomes timezone-correct by default.
 - **Data ownership:** unchanged.
-- **Reversibility:** fully reversible — revert the popoto patch + republish, or pin `ai` back to `1.6.1`. The change is additive-correct; existing UTC-host data is unaffected (UTC host already stamped UTC).
+- **Reversibility:** rollback is the **ai-side pin pin-back** (`>=1.7.1` → `==1.6.1`, `uv lock`, merge, `/update`), not a popoto re-release — PyPI versions are immutable, so "revert + republish" means a new forward-fix version, never the same tag. The change is additive-correct; existing UTC-host data is unaffected (UTC host already stamped UTC).
+- **Write-only, non-migrating (mixed-epoch window):** the fix changes only the wall-clock value of **new** writes. On a non-UTC host, pre-fix rows hold naive-**local** strings and post-fix rows hold naive-**UTC** strings, with no offset marker to distinguish them — so cross-boundary ordering/age math is briefly wrong. This is accepted, not migrated: #1645 already healed the only live `auto_now` consumer (`AgentSession.updated_at`, short-lived records), and no other popoto model uses `auto_now`. See Rabbit Holes.
 
 ## Appetite
 
@@ -133,8 +134,8 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/popoto_datetim
 
 ### Key Elements
 
-- **popoto `DatetimeField` patch**: `format_value_pre_save` stamps `datetime.now(UTC)` instead of `datetime.now()` for both the `auto_now_add` and `auto_now` branches. Add `UTC` to the `from datetime import ...` line.
-- **popoto test**: add a test asserting that an `auto_now` / `auto_now_add` field stamps UTC wall-clock (assert the stored/round-tripped value matches `datetime.now(UTC)` within tolerance, NOT naive local), in `~/src/popoto/tests/test_field_types.py`.
+- **popoto `DatetimeField` patch**: `format_value_pre_save` stamps `datetime.now(timezone.utc)` instead of `datetime.now()` for both the `auto_now_add` and `auto_now` branches. Add `timezone` to the `from datetime import ...` line. (`datetime.UTC` is forbidden — 3.11+, breaks popoto's `>=3.10` floor.)
+- **popoto test**: add a test asserting that an `auto_now` / `auto_now_add` field stamps UTC wall-clock via naive-to-naive comparison (the encoder strips tzinfo, so compare against `datetime.now(timezone.utc).replace(tzinfo=None)`, NOT an aware value), in `~/src/popoto/tests/test_auto_timestamps.py`.
 - **popoto version bump + CHANGELOG**: bump `~/src/popoto/pyproject.toml` version (next patch, e.g. `1.7.1`), add a CHANGELOG entry under a new released section.
 - **PyPI release (HUMAN-GATED)**: push the `v{new}` tag → `release.yml` builds and publishes via OIDC. Human pushes the tag (and approves the `release` environment if configured).
 - **ai pin bump + relock**: update `ai/pyproject.toml` popoto specifier to `>={new}` and run `uv lock` to refresh `ai/uv.lock` to the new hash-pinned version.
@@ -142,17 +143,17 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/popoto_datetim
 
 ### Flow
 
-popoto repo → edit `DatetimeField` + test + version + CHANGELOG → open popoto PR → review/merge → **[HUMAN] push `v1.7.1` tag** → `release.yml` publishes to PyPI → ai repo: bump pin + `uv lock` → open ai PR → merge → `/update` propagates to all machines.
+popoto repo → edit `DatetimeField` + test + version + CHANGELOG → open popoto PR → review/merge to main → **[HUMAN] cut `release/1.7.1` from tag `v1.7.0`, cherry-pick only the fix, push `v1.7.1` tag from that branch** → `release.yml` publishes to PyPI (excludes the `[Unreleased]` block) → **[HUMAN] confirm live via `pip index versions popoto`** → ai repo: bump pin to `>=1.7.1` + `uv lock` → open ai PR → merge → `/update` propagates to all machines.
 
 ### Technical Approach
 
-- **The fix** (popoto `datetime_field.py`):
-  - Line 25: `from datetime import datetime` → `from datetime import datetime, UTC`
-  - Line 116 (`auto_now_add` branch): `return datetime.now()` → `return datetime.now(UTC)`
-  - Line 118 (`auto_now` branch): `return datetime.now()` → `return datetime.now(UTC)`
-  - (`UTC` is available from `datetime` on Python 3.11+; popoto's release CI uses 3.12 and `ai` runs 3.14, so `datetime.UTC` is safe. If popoto still supports <3.11, use `from datetime import datetime, timezone` and `datetime.now(timezone.utc)`. Verify popoto's `requires-python` during build.)
-- **Version choice**: bug-fix patch release. Current is `1.7.0` with an unreleased feature block in CHANGELOG; coordinate the version number so the release carries this fix cleanly (likely `1.7.1`, or fold into whatever the next release is — decide at build time, see Open Questions).
-- **Pin bump**: `ai/pyproject.toml:17` `"popoto>=1.6.1"` → `"popoto>={new}"`; then `uv lock` rewrites the `uv.lock` popoto entry (version + hashes).
+- **The fix** (popoto `datetime_field.py`) — use `timezone.utc` **unconditionally** (mandated by critique; `datetime.UTC` is 3.11+ and popoto's `requires-python = ">=3.10"`):
+  - Line 25: `from datetime import datetime` → `from datetime import datetime, timezone`
+  - Line 116 (`auto_now_add` branch): `return datetime.now()` → `return datetime.now(timezone.utc)`
+  - Line 118 (`auto_now` branch): `return datetime.now()` → `return datetime.now(timezone.utc)`
+  - `timezone.utc` is valid Python 3.2+ and functionally identical to `datetime.UTC`. Do **not** use `datetime.UTC` — it would build green on the 3.12 release CI but `ImportError` on any 3.10 install of popoto. No version gate, no build-time check needed.
+- **Version choice**: ship as standalone patch `1.7.1` cut from tag `v1.7.0` (see Flow), so the `[Unreleased]` CHANGELOG block (MemoryLifecycle, ContextAssembler) does **not** ride along. Branch `release/1.7.1` off `v1.7.0`, cherry-pick only the DatetimeField fix commit, tag from that branch.
+- **Pin bump**: `ai/pyproject.toml:17` `"popoto>=1.6.1"` → `"popoto>=1.7.1"` (the fix floor — **not** a loose carryover, so no machine can silently resolve still-buggy 1.7.0); then `uv lock` rewrites the `uv.lock` popoto entry (version + hashes).
 - **Integration points**: none in `ai` beyond the pin — the producer fix is transparent to all `ai` consumers (they already treat decoded datetimes as UTC).
 
 ## Failure Path Test Strategy
@@ -162,14 +163,15 @@ popoto repo → edit `DatetimeField` + test + version + CHANGELOG → open popot
 
 ### Empty/Invalid Input Handling
 - `format_value_pre_save` already guards on `field_value` truthiness for the `auto_now_add` branch (`if self.auto_now_add and not field_value`). The popoto test should cover: (a) `auto_now_add` with no prior value stamps UTC; (b) `auto_now` overwrites on every save with UTC; (c) `skip_auto_now=True` preserves the existing value (regression guard — must not change).
+- **Comparison must be naive-to-naive.** The encoder (`encoding.py:91`) strips tzinfo via `strftime`, so the decoded round-trip value is **naive**. Comparing it against an aware `datetime.now(timezone.utc)` raises `TypeError`. Capture `before = datetime.now(timezone.utc).replace(tzinfo=None)` and `after` the same way, then assert `before <= decoded <= after` (a tolerance window, never exact equality). The real signal: on a non-UTC host the decoded wall-clock now equals UTC-now, not local-now — run the test under `TZ=America/New_York` so a naive-`datetime.now()` regression visibly diverges.
 
 ### Error State Rendering
 - No user-visible output path. The only observable surface is the stored timestamp value, asserted directly in the popoto test.
 
 ## Test Impact
 
-- [ ] `~/src/popoto/tests/test_field_types.py` — ADD: a UTC-stamping assertion for `auto_now`/`auto_now_add` (popoto-side test; not in the `ai` suite). This is the load-bearing regression guard for the fix.
-- [ ] `~/src/popoto/tests/test_field_types.py` — VERIFY/UPDATE: any existing `DatetimeField` test that asserts naive-local behavior must be updated to expect UTC. Audit during the popoto build step.
+- [ ] `~/src/popoto/tests/test_auto_timestamps.py` — ADD: a UTC-stamping assertion for `DatetimeField` `auto_now`/`auto_now_add` (popoto-side test; not in the `ai` suite). This is the authoritative home for auto-now tests — pattern it after the existing `SortedField` round-trip cases, using `datetime.now(timezone.utc)` naive bounds instead of `time.time()`. This is the load-bearing regression guard for the fix.
+- [ ] `~/src/popoto/tests/test_field_types.py` — NO CHANGE: confirmed (critique) to have zero `auto_now` assertions; its single `DatetimeField` reference is non-auto_now and needs no update. The "audit existing naive-local tests" obligation resolves to a no-op.
 
 No existing **ai-repo** tests are affected — the `ai` change is a pin bump only, and #1645's tests (PR #1655) already assert `AgentSession.updated_at` is explicit-UTC via `utc_now()`, independent of popoto's `auto_now` behavior. The `ai` suite continues to pass unchanged against the new popoto version because no `ai` model uses `auto_now` anymore (grep-confirmed in #1645 recon).
 
@@ -177,13 +179,13 @@ No existing **ai-repo** tests are affected — the `ai` change is a pin bump onl
 
 - **Migrating popoto to fully tz-aware datetimes end-to-end** (encoder/decoder carrying tzinfo through serialization). Tempting, but the encoder deliberately stores wall-clock strings; making it tz-aware is a much larger, riskier change with backward-compat concerns for existing stored data. Out of scope — minting UTC at the producer is sufficient and correct given the current encoder.
 - **Re-healing already-stored `ai` data.** #1645 already healed `AgentSession` future-stamped records. No popoto model other than the (now-fixed) `AgentSession.updated_at` ever used `auto_now`, so there is no stale data to heal here.
-- **Folding unrelated popoto `[Unreleased]` CHANGELOG features into this release decision.** Don't gate this bugfix on the ContextAssembler feature work; pick a version that ships the fix cleanly and move on.
+- **Migrating the mixed-epoch transition window.** Re-stamping pre-fix naive-local rows to UTC is tempting but out of scope: the only live `auto_now` consumer is already healed (#1645) and its records are short-lived. Accept the transient window (Architectural Impact) rather than ship a one-time migration.
+- **Folding unrelated popoto `[Unreleased]` CHANGELOG features into this release decision.** Resolved by the release-branch strategy (cut `release/1.7.1` from tag `v1.7.0`, cherry-pick only the fix), so the `[Unreleased]` MemoryLifecycle/ContextAssembler work never enters the 1.7.1 artifact. Don't fold it in; don't gate this bugfix on it.
 
 ## Risks
 
-### Risk 1: popoto `requires-python` is older than 3.11 (no `datetime.UTC`)
-**Impact:** `from datetime import UTC` fails to import on the build/CI runner, breaking the release.
-**Mitigation:** Check `~/src/popoto/pyproject.toml` `requires-python` during build. If `<3.11`, use `from datetime import timezone` + `datetime.now(timezone.utc)` (works on all supported versions, identical result).
+### Risk 1: ~~popoto `requires-python` is older than 3.11 (no `datetime.UTC`)~~ — RESOLVED
+**Closed by critique.** popoto's `requires-python = ">=3.10"` is confirmed and `datetime.UTC` is 3.11+, so the plan mandates `timezone.utc` unconditionally (Technical Approach). There is no remaining version-gate decision — `datetime.UTC` is forbidden by the plan, not merely discouraged.
 
 ### Risk 2: PyPI publish is human-gated and may stall
 **Impact:** The `ai` pin bump cannot land until the new popoto version is on PyPI; an un-pushed tag blocks the whole chain.
@@ -240,11 +242,11 @@ import are needed.
 
 ## Success Criteria
 
-- [ ] `~/src/popoto/src/popoto/fields/datetime_field.py` `format_value_pre_save` returns `datetime.now(UTC)` (or `datetime.now(timezone.utc)`) for both branches; `UTC`/`timezone` imported.
-- [ ] popoto test asserts `auto_now`/`auto_now_add` stamps UTC wall-clock (passes in the popoto suite).
-- [ ] popoto version bumped in `pyproject.toml` and CHANGELOG entry added.
-- [ ] New popoto version published to PyPI (verified via `pip index versions popoto` or PyPI JSON API). **[HUMAN-GATED]**
-- [ ] `ai/pyproject.toml` popoto specifier bumped to `>={new}`; pin comment references #1653.
+- [ ] `~/src/popoto/src/popoto/fields/datetime_field.py` `format_value_pre_save` returns `datetime.now(timezone.utc)` for both branches; `timezone` imported. (`datetime.UTC` is forbidden — see Technical Approach.)
+- [ ] popoto test in `test_auto_timestamps.py` asserts `auto_now`/`auto_now_add` stamps UTC wall-clock via naive-to-naive comparison (passes in the popoto suite).
+- [ ] popoto version bumped to `1.7.1` in `pyproject.toml` and CHANGELOG entry added under a released section.
+- [ ] New popoto version published to PyPI from `release/1.7.1` (verified via `pip index versions popoto`). **[HUMAN-GATED]**
+- [ ] `ai/pyproject.toml` popoto specifier bumped to `>=1.7.1`; pin comment references #1653.
 - [ ] `ai/uv.lock` refreshed via `uv lock` to the new version + hashes.
 - [ ] `ai` test suite passes against the new popoto version (`pytest tests/unit/`).
 - [ ] Propagation path confirmed: new pin rides the existing `/update` `uv sync` (machines adopt it on their next routine update; tracked under No-Gos [ORDERED]).
@@ -258,28 +260,18 @@ sequential phases separated by the human PyPI gate.
 
 ### Team Members
 
+Collapsed per critique (Simplifier, x3): two builders separated only by the unavoidable human PyPI gate. Validation is each builder's own done-check plus the standard SDLC test/review stages — no dedicated validator agents, no standalone validate-all, no separate documentarian.
+
 - **Builder (popoto-fix)**
   - Name: `popoto-builder`
-  - Role: Patch `DatetimeField.format_value_pre_save` to UTC, add test, bump version + CHANGELOG, update docstring — all in `~/src/popoto`.
+  - Role: Patch `DatetimeField.format_value_pre_save` to `timezone.utc`, add the `test_auto_timestamps.py` test, bump version to `1.7.1` + CHANGELOG, update docstring — all in `~/src/popoto`. Self-verifies by running popoto's suite green before handing off.
   - Agent Type: builder
-  - Resume: true
-
-- **Validator (popoto-fix)**
-  - Name: `popoto-validator`
-  - Role: Verify the popoto patch, run popoto's test suite, confirm version bump and CHANGELOG.
-  - Agent Type: validator
   - Resume: true
 
 - **Builder (ai-pin)**
   - Name: `ai-pin-builder`
-  - Role: After the new popoto version is live on PyPI, bump `ai/pyproject.toml` specifier, run `uv lock`, run `ai` unit tests, update the pin comment.
+  - Role: After the new popoto version is live on PyPI, bump `ai/pyproject.toml` specifier to `>=1.7.1`, run `uv lock`, run `ai` unit tests green, update the pin comment to reference #1653, and flip the stale `models/agent_session.py` "do not re-add auto_now" tombstone comment to point at the fixed version (comment only — do NOT remove the manual `save()` UTC override). Self-verifies the lock + suite before handing off.
   - Agent Type: builder
-  - Resume: true
-
-- **Validator (ai-pin)**
-  - Name: `ai-pin-validator`
-  - Role: Verify `uv.lock` carries the new version + hashes and the `ai` suite passes.
-  - Agent Type: validator
   - Resume: true
 
 ### Available Agent Types
@@ -291,71 +283,39 @@ sequential phases separated by the human PyPI gate.
 ### 1. Patch popoto DatetimeField + test + version
 - **Task ID**: build-popoto-fix
 - **Depends On**: none
-- **Validates**: `~/src/popoto/tests/test_field_types.py` (popoto suite, run in the popoto repo)
+- **Validates**: `~/src/popoto/tests/test_auto_timestamps.py` (popoto suite, run in the popoto repo)
 - **Assigned To**: popoto-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `~/src/popoto/src/popoto/fields/datetime_field.py`: import `UTC` (or `timezone`, gated on `requires-python`), change both `datetime.now()` returns at lines 116/118 to UTC, update the docstring to say UTC.
-- Add a popoto test asserting `auto_now`/`auto_now_add` stamps UTC wall-clock and that `skip_auto_now=True` preserves the existing value.
-- Bump `~/src/popoto/pyproject.toml` version (e.g. `1.7.1`) and add a CHANGELOG entry under a released section.
-- Run popoto's own test suite; confirm green.
+- In `~/src/popoto/src/popoto/fields/datetime_field.py`: add `timezone` to the `from datetime import ...` line (line 25), change both `datetime.now()` returns at lines 116/118 to `datetime.now(timezone.utc)`, update the docstring to say UTC. **Do not use `datetime.UTC`.**
+- Add a test in `test_auto_timestamps.py` (pattern after the existing `SortedField` round-trip cases) asserting `auto_now`/`auto_now_add` stamps UTC wall-clock via **naive-to-naive** comparison (`before = datetime.now(timezone.utc).replace(tzinfo=None)`; `before <= decoded <= after`), and that `skip_auto_now=True` preserves the existing value. Run under `TZ=America/New_York` so a naive regression diverges.
+- Bump `~/src/popoto/pyproject.toml` version to `1.7.1` and add a CHANGELOG entry under a released section.
+- Self-check: run popoto's own test suite; confirm green. Open the popoto PR.
 
-### 2. Validate popoto fix
-- **Task ID**: validate-popoto-fix
-- **Depends On**: build-popoto-fix
-- **Assigned To**: popoto-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Confirm both branches return UTC; confirm import is correct for popoto's `requires-python`.
-- Run the popoto test suite; verify the new UTC test passes and no existing `DatetimeField` test regressed.
-- Confirm version + CHANGELOG are consistent. Report pass/fail.
-
-### 3. [HUMAN GATE] Publish popoto to PyPI
+### 2. [HUMAN GATE] Publish popoto to PyPI
 - **Task ID**: publish-popoto (human-gated; see No-Gos [EXTERNAL])
-- **Depends On**: validate-popoto-fix
-- Maintainer merges the popoto PR, pushes the `v{new}` tag, approves the `release` environment if configured. `release.yml` builds + publishes via OIDC.
-- Verify the new version is live: `pip index versions popoto` (or PyPI JSON API).
+- **Depends On**: build-popoto-fix
+- Maintainer (**Valor**) reviews/merges the popoto PR to main, then cuts `release/1.7.1` from tag `v1.7.0`, cherry-picks the fix commit, and pushes the `v1.7.1` tag from that branch (excluding the `[Unreleased]` block). Approves the `release` environment if configured. `release.yml` builds + publishes via OIDC.
+- **Resume Signal**: the pipeline pauses here. Resume Step 3 only after `pip index versions popoto` shows `1.7.1` live on PyPI. (Before tagging, confirm reviewers: `gh api repos/tomcounsell/popoto/environments/release --jq '.protection_rules'`.)
 
-### 4. Bump ai pin + relock
+### 3. Bump ai pin + relock + flip stale comment
 - **Task ID**: build-ai-pin
 - **Depends On**: publish-popoto
 - **Validates**: `pytest tests/unit/` (ai suite)
 - **Assigned To**: ai-pin-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Edit `ai/pyproject.toml:17` specifier to `>={new}`; update the pin comment to reference #1653.
-- Run `uv lock`; confirm `ai/uv.lock` popoto entry shows the new version + refreshed hashes.
-- Run `pytest tests/unit/`; confirm green against the new popoto.
-
-### 5. Validate ai pin
-- **Task ID**: validate-ai-pin
-- **Depends On**: build-ai-pin
-- **Assigned To**: ai-pin-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Confirm `uv.lock` carries the new version + hashes; confirm `ai` unit suite passes. Report pass/fail.
-
-### 6. Documentation
-- **Task ID**: document-feature
-- **Depends On**: validate-ai-pin
-- **Assigned To**: popoto-builder (docstring/CHANGELOG already done in task 1) + ai-pin-builder (pin comment in task 4)
-- **Agent Type**: documentarian
-- **Parallel**: false
-- Verify popoto docstring + CHANGELOG say UTC; verify `ai` pin comment references #1653. No new `docs/features/` page (dependency fix).
-
-### 7. Final Validation
-- **Task ID**: validate-all
-- **Depends On**: validate-ai-pin, document-feature
-- **Assigned To**: ai-pin-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Run all verification checks; confirm every Success Criterion met (popoto fix live, pin bumped, lock refreshed, suite green). Generate final report.
+- Edit `ai/pyproject.toml:17` specifier to `>=1.7.1`; update the pin comment to reference #1653.
+- Flip the stale tombstone comment in `models/agent_session.py` ("do not re-add auto_now") to point at the fixed popoto version. Comment only — do NOT remove the manual `save()` UTC override.
+- Run `uv lock`; confirm `ai/uv.lock` popoto entry shows `1.7.1` + refreshed hashes.
+- Self-check: run `pytest tests/unit/`; confirm green against the new popoto. Open the ai PR. (Final validation against Success Criteria is the standard SDLC review/test stage — no separate validate-all task.)
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| popoto fix present | `grep -c 'datetime.now(UTC)\|datetime.now(timezone.utc)' ~/src/popoto/src/popoto/fields/datetime_field.py` | output > 1 |
+| popoto fix present | `grep -c 'datetime.now(timezone.utc)' ~/src/popoto/src/popoto/fields/datetime_field.py` | output >= 2 |
+| popoto does NOT use 3.11-only UTC alias | `grep -c 'datetime.now(UTC)' ~/src/popoto/src/popoto/fields/datetime_field.py` | output 0 |
 | popoto no naive auto-now | `grep -n 'return datetime.now()' ~/src/popoto/src/popoto/fields/datetime_field.py` | exit code 1 |
 | popoto version live on PyPI | `pip index versions popoto 2>/dev/null \| grep -F "$(grep '^version' ~/src/popoto/pyproject.toml \| head -1 \| sed 's/.*"\(.*\)".*/\1/')"` | output contains version (human-gated) |
 | ai lock updated | `grep -A1 'name = "popoto"' uv.lock \| grep version` | output contains new version |
@@ -364,14 +324,27 @@ sequential phases separated by the human PyPI gate.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+War room run 2026-06-15 (6 personas x 3 rounds). Verdict: **REVISE -> resolved**. All BLOCKERs absorbed into the plan below.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic / Adversary / User / Operator / Consistency / Simplifier (unanimous) | `datetime.UTC` is 3.11+, but popoto `requires-python = ">=3.10"`; release CI builds only on 3.12, so it ships green yet `ImportError`s on any 3.10 install. | Technical Approach now mandates `timezone.utc` unconditionally; Risk 1 closed; Open Q3 resolved. | `from datetime import datetime, timezone` + `datetime.now(timezone.utc)`. Valid 3.2+. Verification grep narrowed to the `timezone.utc` token only. |
+| BLOCKER | Adversary / Skeptic / User | Proposed test compares decoded (naive, encoder strips tzinfo) vs `datetime.now(UTC)` (aware) -> `TypeError`. | Test Impact + Task 1 rewritten for naive-to-naive comparison with tolerance. | Capture `before = datetime.now(timezone.utc).replace(tzinfo=None)`; assert `before <= decoded <= after`. Never compare aware-to-naive. |
+| BLOCKER | Archaeologist / Skeptic (x2) | New auto-now test targeted `test_field_types.py`, which has zero auto_now coverage; the real harness is `test_auto_timestamps.py` (SortedField round-trip pattern). | Test Impact + Task 1 redirect the test to `test_auto_timestamps.py`. | Pattern after the SortedField cases; use `datetime.now(timezone.utc)` bounds instead of `time.time()`. Run under `TZ=America/New_York` so a naive regression visibly diverges. |
+| BLOCKER | Operator (x2) | Tagging from popoto `main` ships the `[Unreleased]` block (MemoryLifecycle recipe + ContextAssembler retrieval_mode) bundled into a "2-line patch", widening blast radius and breaking clean revert. | Solution Flow + Open Q1 resolved: cut `release/1.7.1` from tag `v1.7.0`, cherry-pick only the fix. | `git checkout -b release/1.7.1 v1.7.0 && git cherry-pick <fix>` then tag from that branch; `[Unreleased]` stays on main. |
+| CONCERN | Operator (x2) | ai pin `>=1.6.1` lets any machine silently resolve still-buggy 1.7.0 after publish; revert isn't clean. | Pin bumped to `>=1.7.1` (the fix floor), not a loose carryover. | Optional pre-tighten to `==1.6.1` closes the skew window before publish; treated as a nicety, not required for Small appetite. |
+| CONCERN | Archaeologist | `models/agent_session.py` tombstone comment ("auto_now removed deliberately, do not re-add") becomes stale-but-sticky once popoto is correct. | Documentation task: flip the comment to point at the fixed version. | Do NOT auto-rip the manual `save()` UTC override in this Small plan -- gate removal behind verifying `auto_now` fires on every ai save path. Comment flip only. |
+| CONCERN | Adversary (x2) | Non-UTC hosts get a mixed-epoch field: pre-fix naive-local strings coexist with post-fix naive-UTC strings, no offset marker; cross-boundary ordering silently wrong. | Architectural Impact + Rabbit Holes scope note: fix is write-only / non-migrating. | AgentSession lifetimes are short (already healed in #1645); no other popoto model uses auto_now. Accept the transient window explicitly rather than migrate. |
+| CONCERN | User | PyPI publish is `[HUMAN-GATED]`; pipeline has no defined resume trigger, so the SDLC stalls ambiguously at Step 2. | Step 2 gains an explicit Resume Signal. | Resume when `pip index versions popoto` shows the new version live. |
+| CONCERN | Simplifier (x3) | 4 named agents + 7 tasks (two builder/validator pairs + standalone validate-all + documentarian) is ceremony disproportionate to a 2-line fix. | Orchestration collapsed to 2 builders + the human gate; validation folded into each builder's done-check and the standard SDLC review/test stages. | popoto-builder (patch+test+version+CHANGELOG+docstring), human gate, ai-pin-builder (bump+lock+comment). |
+| NIT | Operator / User | No fleet-version-skew check and no operator-visible (dashboard age) smoke test after the bump. | Noted as optional follow-up; not added to this plan's scope. | `importlib.metadata.version("popoto")` in `tools/doctor.py` is the natural home if pursued later. |
 
 ---
 
 ## Open Questions
 
-1. **Version number / release coordination.** Current popoto is `1.7.0` with an unreleased CHANGELOG block (ContextAssembler features). Should this fix ship as a standalone `1.7.1` patch (cherry-picked / branch from the `v1.7.0` tag to exclude in-flight features), or fold into the next planned popoto release that also carries the `[Unreleased]` work? This determines the tag and what `ai` adopts.
-2. **Who pushes the tag.** The PyPI publish is human-gated via the `release` GitHub environment. Confirm which maintainer/machine pushes the `v{new}` tag so the EXTERNAL no-go has an owner.
-3. **`requires-python` floor.** If popoto must support Python <3.11, use `timezone.utc` instead of `datetime.UTC`. Confirm popoto's `requires-python` at build time so the builder picks the right import (functionally identical either way).
+_All three resolved during critique (2026-06-15); retained for traceability._
+
+1. ~~**Version number / release coordination.**~~ **RESOLVED:** standalone `1.7.1` cut from tag `v1.7.0`, cherry-picking only the fix, so the `[Unreleased]` block is excluded. (Operator critic, BLOCKER.)
+2. **Who pushes the tag.** Owner: **Valor** (holds publish authority on the popoto PyPI project / `release` environment). Before the gate, confirm the environment's required reviewers: `gh api repos/tomcounsell/popoto/environments/release --jq '.protection_rules'`. This is the one remaining genuinely-external dependency.
+3. ~~**`requires-python` floor.**~~ **RESOLVED:** popoto's floor is `>=3.10`; the plan mandates `timezone.utc` unconditionally. `datetime.UTC` is forbidden. (Unanimous, BLOCKER.)
