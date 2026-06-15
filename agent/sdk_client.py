@@ -1523,7 +1523,7 @@ class ValorAgent:
             target_repo: Absolute path to the target project's repo root. For
                 cross-repo SDLC builds this differs from working_dir (the
                 orchestrator). Defaults to working_dir when not specified.
-            session_type: Session type ("pm", "teammate", or "dev"). Injected as
+            session_type: Session type ("eng" or "teammate"). Injected as
                 SESSION_TYPE env var so hooks can enforce write restrictions.
             model: Optional Claude model name (e.g. "sonnet", "opus"). When set,
                 overrides the environment-level model for this session. None inherits

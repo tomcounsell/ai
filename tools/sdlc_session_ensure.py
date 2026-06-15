@@ -263,12 +263,12 @@ def _iter_orphan_sessions():
     now = datetime.now(UTC)
 
     try:
-        pm_running = list(AgentSession.query.filter(session_type="eng", status="running"))
+        eng_running = list(AgentSession.query.filter(session_type="eng", status="running"))
     except Exception as e:
         logger.debug(f"_iter_orphan_sessions: query failed: {e}")
         return
 
-    for s in pm_running:
+    for s in eng_running:
         sid = getattr(s, "session_id", None) or ""
         if not sid.startswith("sdlc-local-"):
             continue
