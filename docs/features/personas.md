@@ -4,17 +4,21 @@
 
 Configurable persona system using composable segments and overlays. Identity data lives in structured JSON (`config/identity.json`), behavioral content is split into three composable segments (`config/personas/segments/`), and role-specific overlays define per-persona behavior.
 
+There are three personas: **engineer** (the default for development work — orchestrates and executes the SDLC pipeline), **teammate** (conversational Q&A in DMs and team chats), and **customer-service** (action-oriented, no code writes, used for email-spawned sessions). A persona decides voice and identity; the orthogonal `AccessLevel` (see `config/enums.py`) decides which safety preamble and appendices wrap it.
+
 ## How It Works
 
 ### Segment + Overlay Architecture
 
 The persona system splits content between the repo (shared) and private storage (iCloud-synced):
 
-**In repo** (`config/personas/segments/` and `config/identity.json`):
+**In repo** (`config/personas/segments/`, `config/personas/*.md`, and `config/identity.json`):
 ```
 config/
   identity.json                  # Structured identity data (name, email, timezone, org)
   personas/
+    engineer.md                  # In-repo engineer overlay (SDLC orchestration + execution)
+    customer-service.md          # In-repo customer-service overlay (email-spawned sessions)
     segments/
       manifest.json              # Universal segment order (all personas render all segments)
       identity.md                # Who I Am, values, voice, communication style
@@ -22,124 +26,69 @@ config/
       tools.md                   # MCP servers, dev tools, browser automation, CLI tools
 ```
 
+There is no in-repo `teammate.md` overlay. The teammate persona is served entirely from the private overlay (below).
+
 **Private** (`~/Desktop/Valor/personas/` and `~/Desktop/Valor/identity.json`):
 ```
 ~/Desktop/Valor/
   identity.json                  # Per-instance identity overrides (shallow merge)
   personas/
-    developer.md                 # Full system access, autonomous execution, self-management
-    project-manager.md           # Triage, routing, GitHub management, communications
+    engineer.md                  # Full system access, SDLC pipeline, autonomous execution
     teammate.md                  # Casual conversation, Q&A, helpful and encouraging
+    customer-service.md          # Professional, action-oriented, no code writes
 ```
 
-Segments stay in the repo because they contain general-purpose identity and behavioral content (not private). Identity data is structured JSON, queryable by code, with per-instance overrides via `~/Desktop/Valor/identity.json`. Overlay files contain role-specific strategic context and capabilities, so they live in `~/Desktop/Valor/` (iCloud-synced, not committed to git).
+Segments stay in the repo because they contain general-purpose identity and behavioral content (not private). Identity data is structured JSON, queryable by code, with per-instance overrides via `~/Desktop/Valor/identity.json`. Overlay files contain role-specific strategic context and capabilities, so the private copies live in `~/Desktop/Valor/` (iCloud-synced, preferred over the in-repo copies).
 
-At load time, `load_persona_prompt(persona)` reads `config/identity.json`, assembles all 3 segments from `config/personas/segments/` per `manifest.json`, injects identity fields via `{{identity.*}}` marker substitution, and concatenates the named overlay (`{persona}.md`) from `~/Desktop/Valor/personas/`. The result is a complete system prompt.
+At load time, `load_persona_prompt(persona)` reads `config/identity.json`, assembles all 3 segments from `config/personas/segments/` per `manifest.json`, injects identity fields via `{{identity.*}}` marker substitution, and concatenates the named overlay (`{persona}.md`). The result is a complete persona prompt. Overlay resolution checks `~/Desktop/Valor/personas/{persona}.md` first, then falls back to `config/personas/{persona}.md` (`_resolve_overlay_path`, `agent/sdk_client.py:878`).
 
 ### Persona Selection
 
-There are two resolution sites — they cover different transports.
+Two resolution sites cover different transports.
 
-**Harness path (the live one)** — `agent/session_executor.py` resolves the persona for every harness invocation in this order:
+**Harness path (the live one)** — `agent/session_executor.py` derives the `(persona, access_level)` pair for every harness invocation via `_resolve_compose_args()` (`agent/sdk_client.py:1118`). The mapping:
 
-1. `session_type=PM` → `"project-manager"` (source = `session_type=pm`)
-2. `transport=email` or `project["email"]["persona"]` set → that persona, with `teammate` as the fallback (source = `project.email.persona` or `email-default`)
-3. `session_type=TEAMMATE` (Telegram DM/teammate) → `"teammate"` (source = `session_type=teammate`)
-4. Otherwise (dev sessions) → no overlay (source = `none`)
+1. `session_type=ENG` → `(engineer, WORKER)` (source = `session_type=eng`).
+2. `transport=email` with `project.email.persona` set → that persona, with `teammate` as the fallback (source = `project.email.persona` or `email-default`). The email override lives only in `_resolve_compose_args`.
+3. `session_type=TEAMMATE` (Telegram DM / teammate) → `(teammate, TEAMMATE)` (source = `session_type=teammate`).
+4. Unknown session type → resolved via `_resolve_persona(project, chat_title, is_dm)` (`agent/sdk_client.py:2084`), which defaults to `engineer` for groups and `teammate` for DMs.
 
-The chosen name is logged at INFO BEFORE any disk read:
+The chosen name is logged at INFO BEFORE any disk read (`agent/session_executor.py:1678`):
 
 ```
 agent.session_executor INFO [<cid|project>] Resolved persona for session=<sid>: <name|<none>> (source=<source>)
 ```
 
-If `project.email.persona` is set but neither the requested overlay nor the fallback can be loaded, the resolver emits an `ERROR [persona-load-failed]` line so the operator can review the queued `email:outbox:` payload before SMTP relay. See [bridge-worker-architecture.md](bridge-worker-architecture.md#persona-overlay-resolution-harness---append-system-prompt) and [email-bridge.md](email-bridge.md#persona-resolution-for-email-spawned-sessions) for the full rule.
+See [bridge-worker-architecture.md](bridge-worker-architecture.md) and [email-bridge.md](email-bridge.md#persona-resolution-for-email-spawned-sessions) for the full rule.
 
-**SDK path** — `_resolve_persona()` in `agent/sdk_client.py` covered Telegram DMs and group chats by reading `dm_persona` and `telegram.groups[chat_title].persona`. The SDK execution branch was removed in issue #912 (the `DEV_SESSION_HARNESS` flag deletion); `_resolve_persona()` is still imported by drafter call sites but is no longer the live persona-selection path for agent sessions.
+**Bridge routing path** — `bridge/routing.py::resolve_persona()` maps an incoming Telegram message to a `PersonaType` for the bridge's chat-mode decision (deliver vs. @mention-only vs. silent). Resolution order (`bridge/routing.py:339`):
+
+1. DMs → per-project `telegram.dm_persona` if configured, else `PersonaType.TEAMMATE`.
+2. Group `persona` field in `projects.json` → that `PersonaType` directly.
+3. Title prefix `Eng:` → `PersonaType.ENGINEER` (`is_team_chat()` treats any title WITHOUT the `Eng:` prefix as a mention-only team chat, `bridge/routing.py:327`).
+4. Otherwise `None` (unconfigured — caller falls through to existing classifier behavior).
+
+**SDK path** — `_resolve_persona()` in `agent/sdk_client.py` is the legacy resolver retained for non-harness callers (e.g. drafter call sites). It is not the live persona-selection path for agent sessions; the harness path above is.
 
 ### System Prompt Composition
 
-Each mode wraps the persona prompt differently:
+`compose_system_prompt(persona, access_level, ...)` (`agent/sdk_client.py:1014`) is the single composer. It assembles the persona prompt (identity + segments + overlay) and then wraps it according to the `AccessLevel`:
 
-| Mode | Prompt Structure |
-|------|-----------------|
-| Developer (default) | `WORKER_RULES` + `---` + persona prompt + principal context + completion criteria |
-| PM mode | persona prompt + work-vault `CLAUDE.md` (no WORKER_RULES) |
-| Teammate (DMs) | persona prompt only (no WORKER_RULES) |
+| Access level | Persona (today) | Prompt structure |
+|--------------|-----------------|------------------|
+| `WORKER` | engineer | `WORKER_RULES` + `---` + persona prompt + principal context + completion criteria (+ work-vault `CLAUDE.md` when a `working_directory` is provided and the file exists) |
+| `TEAMMATE` | teammate | persona prompt only (no rails, no appendices) |
+| `CUSTOMER_SERVICE` | customer-service | persona prompt only (no rails, no appendices) |
+
+`AccessLevel` is prompt-only. Runtime tool restrictions are enforced separately by `agent/hooks/pre_tool_use.py`, keyed on `SessionType`.
 
 ## Available Personas
 
-| Persona | File | Role | Used By |
-|---------|------|------|---------|
-| `developer` | `~/Desktop/Valor/personas/developer.md` | Full developer with system access, git operations, SDLC pipeline | Dev: groups, AgentSDK subprocesses |
-| `project-manager` | `~/Desktop/Valor/personas/project-manager.md` (private) or `config/personas/project-manager.md` (in-repo fallback) | Triage, routing, SDLC gate enforcement, GitHub management | PM: groups, bridge messaging |
-| `teammate` | `~/Desktop/Valor/personas/teammate.md` | Casual Q&A, brainstorming, knowledge sharing | DMs, team chats |
-
-## PM Workflow Announcement
-
-PM intake bucket #3 (coding/feature/bug/automation/config requests) requires the PM to STOP, announce the workflow contract verbatim, and pause for human confirmation before any code, config, or infrastructure work begins. This prevents the failure mode where a PM session silently implements changes without filing a GitHub issue or running the SDLC pipeline. See issue [#1189](https://github.com/tomcounsell/ai/issues/1189) for the original failure case.
-
-### When It Fires
-
-The announcement is required for any message that asks for changes to:
-
-- Source code in any repo (`.py`, `.js`, `.ts`, `.go`, `.sh`, etc.)
-- LaunchAgents (`~/Library/LaunchAgents/*.plist`), launchd daemons, system cron, systemd units
-- Shell scripts, Python scripts, Node scripts (anywhere on disk)
-- Runtime config files (`.env`, `projects.json`, `.mcp.json`, `settings.json`, `.plist`)
-- Infrastructure changes (Vercel/Render/SMTP/DNS/IAM)
-- New dependencies (anything added via `pip`, `npm`, `brew`, `uv add`, etc.)
-- Anything new under `~/Library/LaunchAgents/`, `~/.local/bin/`, `/etc/`, `~/Library/LaunchDaemons/`
-
-The announcement does **not** fire for routine PM work: replying to messages, reading state, sending Telegram messages, GitHub issue management (create/edit/label/close), memory search, status reports, or running existing tools to read state.
-
-### The Announcement Phrase (Verbatim)
-
-The PM must use this literal phrase when bucket #3 fires:
-
-> "Unless you directly instruct me to skip our standard workflow, we need to file an issue to plan all improvements and changes to software."
-
-The PM then asks the human to reply with one of two short tokens:
-
-- `plan` — file an issue and run `/do-plan`
-- `skip` — override SDLC for THIS task only
-
-The response ends with a `## Open Questions` section containing the workflow question verbatim. This populates `session.expectations` (via `bridge/message_drafter.py::_extract_open_questions`) so the unthreaded-message router can match the human's reply back to the dormant session at confidence ≥ 0.80.
-
-### Override Semantics: One-Time, No Persistence
-
-A `skip` reply overrides SDLC for the current bucket-#3 task **only**. The next bucket-#3 message in the same session re-fires the announcement. There is no persistent flag (no `session.skip_sdlc=true`, no in-memory override register). The agent decides per-message based on the most recent `## Open Questions` exchange.
-
-If the human wants session-wide override, they must reply `skip` to each bucket-#3 announcement individually. This avoids the failure mode where a topic shift mid-session ("oh actually let's also work on X") silently inherits a prior override.
-
-### Resume Flow
-
-1. Human asks for a code/automation/config change in a PM-mode chat.
-2. PM agent emits the announcement + `## Open Questions` section, then ends the turn.
-3. The drafter at `bridge/message_drafter.py:1727` extracts the question verbatim and `agent/output_handler.py::_persist_routing_fields` writes it to `session.expectations`.
-4. `bridge/session_transcript.py` transitions the session to `dormant`.
-5. Human replies `plan` or `skip` (no reply-to threading needed).
-6. `bridge/session_router.py::find_matching_session` matches the fresh reply to the dormant session via Haiku at confidence ≥ 0.80 and resumes it via `valor-session resume`.
-7. PM proceeds: on `plan` → file issue and dispatch `/do-plan`; on `skip` → implement directly **for this task only**.
-
-### Loader Guard
-
-`agent/sdk_client.py::load_persona_prompt` emits a WARN log when the PM overlay is loaded without the substring "Unless you directly instruct me to skip". This guards against overlay drift on bridge machines where the private overlay (`~/Desktop/Valor/personas/project-manager.md`, iCloud-synced) could fall out of sync with the in-repo template (`config/personas/project-manager.md`). Mirrors the existing CRITIQUE-substring warning pattern (PR #802).
-
-If you see this warning at PM session startup, hand-edit the private overlay on that machine to add the bucket-#3 announce-and-pause section (or copy from the in-repo template).
-
-### PM Overrides of Shared Defaults
-
-The PM overlay explicitly reverses six developer-flavored defaults from `config/personas/segments/work-patterns.md` (which loads before the overlay):
-
-- "Most work does not require check-ins" → Code changes ALWAYS require an issue + plan + announcement first.
-- "Implementation detail? My call." → Implementation choices belong to the dev session, not the PM.
-- "Should I fix this bug I found? Yes, fix it" → Bugs require a GitHub issue.
-- "Reversible decision? Make it and move on. Git exists." → The PM does not commit code.
-- "YOLO mode — NO APPROVAL NEEDED." → The PM announces the workflow contract and waits for `plan`/`skip`.
-- "Git operations are FULLY autonomous" → The PM only commits docs/plans on main.
-
-The overlay ends the override section with the literal sentence: **"When the shared segment and this overlay disagree, this overlay wins."** This is the load-bearing tiebreaker the agent reads when resolving the contradiction between the shared segment and the PM-specific rules.
+| Persona | In-repo overlay | Private overlay | Role | Used by |
+|---------|-----------------|-----------------|------|---------|
+| `engineer` | `config/personas/engineer.md` | `~/Desktop/Valor/personas/engineer.md` | Full system access, git operations, SDLC pipeline orchestration and execution | Eng sessions; `Eng:` groups; default for unknown group session types |
+| `teammate` | (none) | `~/Desktop/Valor/personas/teammate.md` | Casual Q&A, brainstorming, knowledge sharing | DMs, team chats (non-`Eng:` groups) |
+| `customer-service` | `config/personas/customer-service.md` | `~/Desktop/Valor/personas/customer-service.md` | Professional, action-oriented, no code writes | Email-spawned sessions when `project.email.persona` is set |
 
 ## Configuration
 
@@ -150,16 +99,15 @@ Project configuration lives at `~/Desktop/Valor/projects.json` (iCloud-synced, p
 ```json
 {
   "personas": {
-    "developer": {"name": "Valor"},
-    "project-manager": {"name": "Valor"},
-    "teammate": {"name": "Valor"}
+    "engineer": {"name": "Valor"},
+    "teammate": {"name": "Valor"},
+    "customer-service": {"name": "Valor"}
   },
   "projects": {
     "valor": {
       "telegram": {
         "groups": {
-          "Eng: Valor": {"chat_id": -123, "persona": "engineer"},
-          "PM: Valor": {"chat_id": -456, "persona": "project-manager"}
+          "Eng: Valor": {"chat_id": -123, "persona": "engineer"}
         },
         "dm_persona": "teammate"
       }
@@ -175,52 +123,82 @@ Project configuration lives at `~/Desktop/Valor/projects.json` (iCloud-synced, p
 | `identity.json` | `config/identity.json` (in repo) | Structured identity data, shared defaults |
 | `identity.json` | `~/Desktop/Valor/identity.json` (iCloud) | Per-instance identity overrides |
 | Segments | `config/personas/segments/` (in repo) | Composable behavioral content, shared |
-| `project-manager.md` | `config/personas/project-manager.md` (in repo) | In-repo fallback with hard CRITIQUE/REVIEW gate rules -- loaded when private overlay is absent |
-| Overlay files | `~/Desktop/Valor/personas/` (iCloud) | Private strategic context (preferred over in-repo fallbacks) |
+| `engineer.md` | `config/personas/engineer.md` (in repo) | In-repo engineer overlay with CRITIQUE/REVIEW gate rules — loaded when private overlay is absent |
+| `customer-service.md` | `config/personas/customer-service.md` (in repo) | In-repo customer-service overlay |
+| Overlay files | `~/Desktop/Valor/personas/` (iCloud) | Private strategic context (preferred over in-repo overlays) |
 | `projects.json` | `~/Desktop/Valor/projects.json` (iCloud) | Contains chat IDs, machine names |
 | `projects.example.json` | `config/projects.example.json` (in repo) | Sanitized schema for new setups |
 
+### Engineer Overlay Drift Guards
+
+`load_persona_prompt` (`agent/sdk_client.py:909`) emits WARN logs when the loaded **engineer** overlay is missing load-bearing sections. These guard against overlay drift on bridge machines where the private overlay (`~/Desktop/Valor/personas/engineer.md`, iCloud-synced) could fall out of sync with the in-repo template (`config/personas/engineer.md`). The checks warn when the overlay is missing:
+
+- the `CRITIQUE` gate rules (pipeline integrity);
+- the workflow-announcement clause `"Unless you directly instruct me to skip"` (so coding/automation/config requests are surfaced before being implemented);
+- the `Mode 3` parallel-orchestrator playbook (multi-issue fan-out);
+- the `merge_authorized` stale-baseline bypass section.
+
+It also warns if the overlay still contains the removed `subagent_type="dev-session"` Agent-dispatch pattern (eng sessions are now created via `python -m tools.valor_session create --role eng`).
+
+If you see these warnings at session startup, sync the private overlay on that machine from `config/personas/engineer.md`.
+
 ## Adding a New Persona
 
-1. Create `~/Desktop/Valor/personas/{persona-name}.md` with role-specific instructions
-2. Add the persona entry to `~/Desktop/Valor/projects.json` under `personas`
-3. Reference it in the appropriate group or DM config
-4. The segment content is automatically assembled and prepended -- no need to duplicate shared content
+1. Add a `PersonaType` member to `config/enums.py` (and an `AccessLevel` mapping in `_access_level_for_persona`, `agent/sdk_client.py:1177`, if the new persona should not use `WORKER` rails).
+2. Create `~/Desktop/Valor/personas/{persona-name}.md` (and optionally an in-repo `config/personas/{persona-name}.md` fallback) with role-specific instructions.
+3. Add the persona entry to `~/Desktop/Valor/projects.json` under `personas`.
+4. Reference it in the appropriate group `persona` field or `dm_persona`.
+5. The segment content is automatically assembled and prepended — no need to duplicate shared content.
 
 ## Fallback Behavior
 
 | Scenario | Fallback |
 |----------|----------|
 | Overlay in `~/Desktop/Valor/personas/` missing | Falls back to `config/personas/{persona}.md` (in-repo) |
-| Both overlay locations missing | Raises `FileNotFoundError` (no silent fallback) |
+| Known persona (`engineer`/`teammate`/`customer-service`) with both overlay locations missing | Raises `FileNotFoundError` (no silent fallback) |
+| Unknown persona name | Falls back to `engineer` (warns), provided the engineer overlay exists |
 | Segment file missing | Raises `FileNotFoundError` with segment path for debugging |
-| Unknown persona name | Falls back to `developer` persona with warning |
 | Identity config missing | Raises `FileNotFoundError` (identity.json is required) |
+
+> Note: because there is no in-repo `config/personas/teammate.md`, the `teammate` persona requires the private `~/Desktop/Valor/personas/teammate.md` to exist — it is NOT served from base segments alone. If that file is absent, `load_persona_prompt("teammate")` raises `FileNotFoundError`.
 
 ## API
 
 ```python
-from agent.sdk_client import load_identity, load_persona_prompt, load_system_prompt, load_pm_system_prompt
+from agent.sdk_client import (
+    load_identity,
+    load_persona_prompt,
+    compose_system_prompt,
+    load_system_prompt,
+    load_eng_system_prompt,
+)
+from config.enums import PersonaType, AccessLevel
 
 # Load identity data
-identity = load_identity()                    # dict with name, email, timezone, etc.
+identity = load_identity()                          # dict with name, email, timezone, etc.
 
-# Load specific persona
-prompt = load_persona_prompt("engineer")      # segments + engineer overlay
-prompt = load_persona_prompt("teammate")      # segments + teammate overlay
+# Load a specific persona (segments + overlay, no rails)
+prompt = load_persona_prompt("engineer")            # segments + engineer overlay
+prompt = load_persona_prompt("teammate")            # segments + teammate overlay
+prompt = load_persona_prompt("customer-service")    # segments + customer-service overlay
 
-# System prompt wrappers
-prompt = load_system_prompt()                 # developer persona + WORKER_RULES
-prompt = load_pm_system_prompt("/path")       # PM persona + work-vault CLAUDE.md
+# Single composer (preferred for new code)
+prompt = compose_system_prompt(PersonaType.ENGINEER, AccessLevel.WORKER)
+prompt = compose_system_prompt(PersonaType.TEAMMATE, AccessLevel.TEAMMATE)
+
+# Thin backward-compatible wrappers over compose_system_prompt
+prompt = load_system_prompt()                       # engineer persona + WORKER_RULES
+prompt = load_eng_system_prompt("/path")            # engineer persona + WORKER_RULES + work-vault CLAUDE.md
 ```
 
-`load_pm_system_prompt()` is invoked from `agent/session_executor.py` for PM sessions (issue #1148). The result is passed to `get_response_via_harness(system_prompt=...)` and appended to `claude -p`'s default prompt via `--append-system-prompt`. See `docs/features/harness-abstraction.md#pm-persona-injection-append-system-prompt-issue-1148`.
+`load_eng_system_prompt()` is invoked from `agent/session_executor.py` for WORKER-access sessions. The result is passed to `get_response_via_harness(system_prompt=...)` and appended to `claude -p`'s default prompt via `--append-system-prompt`. See `docs/features/harness-abstraction.md`.
 
 ## Related
 
-- `config/identity.json` -- Structured identity data (name, email, timezone, org)
-- `config/personas/segments/` -- Composable prompt segments (identity, work-patterns, tools)
-- `docs/features/config-architecture.md` -- Unified config system
-- `docs/features/pm-channels.md` -- PM mode channel routing
-- `agent/sdk_client.py` -- `load_identity()`, `load_persona_prompt()`, `_resolve_persona()`
-- `tests/unit/test_persona_loading.py` -- Test coverage
+- `config/enums.py` — `PersonaType` and `AccessLevel` definitions
+- `config/identity.json` — Structured identity data (name, email, timezone, org)
+- `config/personas/segments/` — Composable prompt segments (identity, work-patterns, tools)
+- `docs/features/config-architecture.md` — Unified config system
+- `agent/sdk_client.py` — `load_identity()`, `load_persona_prompt()`, `compose_system_prompt()`, `_resolve_compose_args()`, `_resolve_persona()`
+- `bridge/routing.py` — `resolve_persona()`, `is_team_chat()`
+- `tests/unit/test_persona_loading.py`, `tests/unit/test_compose_system_prompt.py` — Test coverage
