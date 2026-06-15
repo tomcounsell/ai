@@ -239,7 +239,7 @@ class AgentSession(Model):
     # project properties. Populated at enqueue time; empty dict for legacy sessions.
     project_config = DictField(null=True)
 
-    # === Dev session fields (null when session_type="pm" or "teammate") ===
+    # === Slugged session fields (null for unslugged eng or teammate sessions) ===
     # KeyField so `query.filter(slug=...)` is an indexed lookup — required for
     # worker pop to find slugged dev sessions by slug (issue #1085).
     slug = KeyField(null=True)  # Derives branch, plan path, worktree

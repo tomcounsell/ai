@@ -3215,8 +3215,7 @@ async def get_agent_response_sdk(
     logger.debug(f"[{request_id}] Working directory: {working_dir}")
 
     # Resolve session_type FIRST — it determines permission restrictions injected below.
-    # PM session (session_type="pm") gets full pipeline instructions.
-    # PM sessions orchestrate via dev-session subagent
+    # Eng session (session_type="eng") gets full pipeline instructions via granite container.
     _session_type = None
     _session_model = None
     _session_extra_context: dict = {}
