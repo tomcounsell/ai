@@ -140,20 +140,56 @@ Report structural findings with severity:
 - Non-existent file path → CONCERN (could be intentionally new)
 - Orphaned success criterion → CONCERN
 
+### Step 3a: Compute and Freeze Roster Manifest
+
+Before dispatching ANY critic, compute the expected critic roster and **freeze it to a manifest file**. This frozen manifest is the membership set that the Step 3.5 gate checks against — the gate cannot be satisfied by dispatching fewer critics than the manifest lists.
+
+1. **Compute the roster** from CRITICS.md's "Critic Selection" rules:
+   - All **seven** critics by default (Skeptic, Operator, Archaeologist, Adversary, Simplifier, User, Consistency Auditor).
+   - **Six** critics when Archaeologist + User are skipped for a Small, purely-internal plan with no prior-art section (per CRITICS.md "Critic Selection").
+
+2. **Create the per-run directory** `${CRITIQUE_RUN_DIR}`, defaulting to `.critique-runs/{issue-or-slug}-{timestamp}/`, where `{timestamp}` is a **high-resolution** timestamp (`date +%s%N`, nanoseconds). Create it with `mkdir` **WITHOUT** the `-p` flag so a collision **fails loudly** (non-zero exit) instead of silently reusing a stale run dir's result files:
+
+   ```bash
+   ISSUE_OR_SLUG="${ISSUE_NUMBER:-$(basename "$PLAN_PATH" .md)}"
+   CRITIQUE_RUN_DIR=".critique-runs/${ISSUE_OR_SLUG}-$(date +%s%N)"
+   mkdir "$CRITIQUE_RUN_DIR"   # NO -p: a collision must fail loudly, never reuse a stale run dir
+   ```
+
+3. **Write the frozen roster manifest** `${CRITIQUE_RUN_DIR}/_roster.json` **BEFORE any critic is dispatched** — a JSON object with the frozen list of expected critic names and the count:
+
+   ```bash
+   cat > "$CRITIQUE_RUN_DIR/_roster.json" <<'JSON'
+   {"roster": ["Skeptic","Operator","Archaeologist","Adversary","Simplifier","User","Consistency Auditor"], "count": 7}
+   JSON
+   ```
+
+   (Drop `"Archaeologist"` and `"User"` and set `"count": 6` on the Small purely-internal skip path.)
+
+This frozen manifest is the **membership set** that the Step 3.5 gate checks against: for every name in `_roster.json`, the corresponding `{name}.result.md` must exist and carry the terminal completion fence. **The gate cannot be satisfied by dispatching fewer critics than the manifest** — under-dispatch leaves a named roster member's result file missing, so the gate reports incomplete.
+
 ### Step 3: War Room (Parallel Critics)
 
 Read [CRITICS.md](CRITICS.md) for the full critic definitions and prompt templates.
 
-Spawn **six critics in parallel** using the Agent tool. Each critic gets:
+Dispatch **all critics in the frozen roster** (six or seven, per the `_roster.json` written in Step 3a) using the Agent tool. Each critic gets:
 - The full plan text
 - The SOURCE_FILES block (verified file contents from Step 1.5)
 - The issue context (if available)
 - Prior art summaries (if fetched)
 - Their specific lens and instructions from CRITICS.md
+- The `${CRITIQUE_RUN_DIR}` path and its own `{critic_name}` so it knows where to write its result file
 
-**IMPORTANT**: Use `run_in_background: true` for all six. Each critic is a general-purpose Agent with a focused prompt. Use `model: "sonnet"` for each critic — fast enough for 0-3 findings, saves cost.
+Each critic is a general-purpose Agent with a focused prompt. Use `model: "sonnet"` for each critic — fast enough for 0-3 findings, saves cost.
 
-Each critic returns **0-3 findings** in this format:
+**Each critic writes its findings to a result file** `${CRITIQUE_RUN_DIR}/{critic_name}.result.md`:
+- The critic writes its **findings body FIRST** — 0-3 findings (in the format below) or the literal `No findings.`
+- As its **FINAL action**, the critic appends a **two-line terminal completion fence**: the unique delimiter line `<<<CRITIQUE-RESULT-COMPLETE>>>` as the penultimate non-empty line, immediately followed by `STATUS: COMPLETED` as the last non-empty line.
+- The write **MUST be atomic**: write the full content to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md.tmp`, then **rename** it to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md`. The `.tmp` file and the canonical `.result.md` are both inside `${CRITIQUE_RUN_DIR}` (same filesystem), so the rename is **atomic** — a partial or truncated file is **never observed** at the canonical path, and a re-dispatched critic's overwrite can never expose a half-written file.
+
+**Foreground vs. background dispatch is now a LATENCY preference only — it is NOT load-bearing for correctness.** The barrier is the **result-file membership check** in Step 3.5 (each named roster member's `{name}.result.md` must exist with the terminal completion fence), not whether the driver awaited the agents. Foreground single-message dispatch is recommended for latency, but completion is observed on the filesystem regardless of spawn mode. **Future readers: never re-introduce a "the harness awaits, so we're safe" prose-await dependency — that fire-and-forget assumption is exactly the bug this barrier replaces. The gate is the artifact, not the driver's await.**
+
+Each critic returns **0-3 findings** (written into its result-file body) in this format:
 
 ```
 SEVERITY: BLOCKER | CONCERN | NIT
@@ -180,9 +216,11 @@ The six critics from Step 3 were spawned with `run_in_background: true`. Before 
 
 ### Step 4: Aggregate and Deduplicate
 
-You have now collected all six critics' findings (Step 3.5). Aggregate:
+The Step 3.5 gate has confirmed every roster member completed. Now aggregate from the result files.
 
-1. Collect all findings (structural + critic)
+**Aggregation invariant (mandatory): iterate every roster member in `${CRITIQUE_RUN_DIR}/_roster.json` (the frozen manifest) and read each roster member's `{name}.result.md`.** Name and read EVERY roster member listed in the manifest — do NOT "aggregate from the result files that are present" and do NOT skip a member because its file looks absent. A missing file at this point is a **visible gap** (the gate should already have caught it as incomplete and routed to re-dispatch or `CRITIQUE INCOMPLETE`), never a member silently dropped from aggregation. Reading by iterating the manifest — rather than by globbing whatever files happen to exist — is what guarantees an omitted critic surfaces as a gap instead of vanishing.
+
+1. Collect all findings (structural + critic), reading each roster member's `{name}.result.md` by iterating `_roster.json`
 2. **Deduplicate**: If two critics flagged the same issue, keep the higher-severity version and note which critics agreed
 3. **Sort by severity**: BLOCKERs first, then CONCERNs, then NITs
 4. **Cross-validate**: If the Skeptic and Simplifier both flagged the same component, elevate to BLOCKER if not already
@@ -319,6 +357,7 @@ Use **"READY TO BUILD (no concerns)"** when there are zero CONCERN or BLOCKER fi
 
 ## Version history
 
+- v1.4.0 (2026-06-16): Replace fire-and-forget `run_in_background` critic spawn + prose await with an artifact-based roster barrier: each critic atomically writes a result file ending in a two-line terminal fence (`<<<CRITIQUE-RESULT-COMPLETE>>>` then `STATUS: COMPLETED`); synthesis gates on a filesystem membership check against a frozen roster manifest, run before aggregation; incomplete roster after a bounded re-dispatch cap records `MAJOR REWORK (CRITIQUE INCOMPLETE)` (#1690)
 - v1.3.0 (2026-06-13): Add explicit Step 3.5 "Wait and Collect" barrier (block on all six background critics before aggregating); make Step 5.5 a mandatory, self-contained verdict-record + completion-marker block reached on every exit path; reinforce the Stage Marker note so the verdict and marker cannot desync (#1654)
 - v1.2.0 (2026-04-07): Fix Step 5 Verdict template to show both READY TO BUILD variants so critics output the correct form for SDLC routing
 - v1.1.0 (2026-03-23): Add SOURCE_FILES inline context to prevent critic hallucination (Step 1.5)

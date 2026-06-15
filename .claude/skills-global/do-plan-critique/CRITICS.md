@@ -4,7 +4,11 @@ Six expert perspectives for plan critique. Each critic gets the full plan + cont
 
 ## How to Spawn
 
-Each critic is spawned as a parallel Agent tool call with `run_in_background: true`. The prompt for each follows the template:
+Each critic is spawned as an Agent tool call. **Each critic ENDS by atomically writing its findings to a result file**: write the full content to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md.tmp`, then **rename** it to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md`. The file must end with the **two-line terminal fence** `<<<CRITIQUE-RESULT-COMPLETE>>>` then `STATUS: COMPLETED` as the **last two lines** — appended after the findings body, as the critic's deliberate final action. (Foreground vs. background dispatch is a latency preference only; the barrier is the result-file membership check in SKILL.md Step 3.5, not driver-await.)
+
+**IMPORTANT**: Emit the fence token `<<<CRITIQUE-RESULT-COMPLETE>>>` **ONLY** as the terminal completion marker — **never quote** it (or the bare `STATUS: COMPLETED` line) inside your findings text. The two-line fence must appear exactly once, as the last two lines of the file. If you quote either line in your findings prose, the gate can be defeated, so never quote it.
+
+The prompt for each follows the template:
 
 ```
 You are the {ROLE} critic in a plan war room. Your job is to find flaws in this plan from your specific perspective.
@@ -33,6 +37,14 @@ SEVERITY: BLOCKER | CONCERN | NIT
 LOCATION: {section name}
 FINDING: {what's wrong, 1-2 sentences}
 SUGGESTION: {how to fix, 1-2 sentences}
+
+As your FINAL action, write your findings to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md.tmp`,
+then rename it to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md`. The file must end with these
+two lines exactly:
+<<<CRITIQUE-RESULT-COMPLETE>>>
+STATUS: COMPLETED
+NEVER quote the fence token `<<<CRITIQUE-RESULT-COMPLETE>>>` (or the bare `STATUS: COMPLETED`
+line) anywhere inside your findings text — emit the two-line fence ONLY as the terminal marker.
 ```
 
 ---
