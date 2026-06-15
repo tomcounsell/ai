@@ -87,18 +87,17 @@ def triage_local(subject: str, body: str, customer_id: str | None) -> Triage:
         return escalate_triage("empty subject and body — no classifiable signal")
 
     try:
-        import ollama
+        from tools import ollama_client
 
         prompt = _TRIAGE_PROMPT.format(
             subject=(subject or "").strip()[:500],
             body=(body or "").strip()[:_MAX_BODY_CHARS],
         )
-        response = ollama.chat(
-            model=OLLAMA_CLASSIFIER_MODEL,
+        raw = ollama_client.chat(
             messages=[{"role": "user", "content": prompt}],
+            model=OLLAMA_CLASSIFIER_MODEL,
             options={"temperature": 0},
-        )
-        raw = response["message"]["content"].strip()
+        ).strip()
     except Exception as e:
         logger.warning(f"[email_cs.triage] Ollama classification failed, escalating: {e}")
         return escalate_triage(f"tier1 ollama failure: {e}")

@@ -78,32 +78,16 @@ def _split_by_headings(content: str) -> list[tuple[str, str]]:
 
 def _summarize_via_ollama(prompt: str) -> str | None:
     """Try to summarize via local Ollama. Returns None if Ollama is unavailable."""
-    import json
-    import urllib.error
-    import urllib.request
+    from tools import ollama_client
 
-    try:
-        from config.settings import settings
-
-        base_url = settings.models.ollama_host
-        gen_model = settings.models.ollama_generation_model
-    except Exception:
-        base_url = "http://localhost:11434"
-        gen_model = "gemma4:31b-cloud"
-
-    payload = json.dumps({"model": gen_model, "prompt": prompt, "stream": False}).encode()
-    req = urllib.request.Request(
-        f"{base_url.rstrip('/')}/api/generate",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    base_url, gen_model, _ = ollama_client.resolve_config()
+    return ollama_client.generate(
+        prompt,
+        model=gen_model,
+        timeout_s=8.0,
+        base_url=base_url,
+        caller="indexer",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=8.0) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-        return data.get("response", "").strip() or None
-    except (urllib.error.URLError, TimeoutError, OSError, Exception):
-        return None
 
 
 def _summarize_content(content: str, file_path: str) -> str:

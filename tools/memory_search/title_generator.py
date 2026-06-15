@@ -22,11 +22,8 @@ context arrives — most recent save reflects latest understanding.
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
-import urllib.error
-import urllib.request
 
 logger = logging.getLogger(__name__)
 
@@ -41,66 +38,19 @@ _MAX_TITLE_CHARS = 200  # Generous bound; the prompt asks for ~12 words.
 
 
 def _resolve_ollama_config() -> tuple[str, str, float]:
-    """Return (base_url, model, timeout_s).
+    """Return (base_url, model, timeout_s). Delegates to ollama_client."""
+    from tools import ollama_client
 
-    Reads from settings if available; falls back to hardcoded defaults so
-    this module is importable in environments where settings can't load
-    (test fixtures, fresh-shell MCP smoke checks).
-    """
-    base_url = "http://localhost:11434"
-    timeout_s = 5.0
-    try:
-        from config.settings import settings
-
-        base_url = settings.models.ollama_host
-        timeout_s = settings.models.memory_title_timeout_s
-    except Exception:
-        pass
-
-    try:
-        from config.settings import settings
-
-        model = settings.models.ollama_generation_model
-    except Exception:
-        model = "gemma4:31b-cloud"
-
-    return base_url, model, timeout_s
+    return ollama_client.resolve_config()
 
 
 def _post_ollama_generate(base_url: str, model: str, prompt: str, timeout_s: float) -> str | None:
-    """POST to Ollama /api/generate and return the response string.
+    """Delegate to ollama_client.generate(). Returns None on any failure."""
+    from tools import ollama_client
 
-    Returns None on any failure (connection, timeout, bad JSON, missing
-    field). Never raises.
-    """
-    payload = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode("utf-8")
-    url = f"{base_url.rstrip('/')}/api/generate"
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    return ollama_client.generate(
+        prompt, model=model, timeout_s=timeout_s, base_url=base_url, caller="title_generator"
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        logger.debug(f"[title_generator] Ollama unreachable/timeout: {e}")
-        return None
-    except Exception as e:  # noqa: BLE001 — fail-silent by contract
-        logger.debug(f"[title_generator] Ollama call failed: {e}")
-        return None
-
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        logger.debug("[title_generator] Ollama returned non-JSON")
-        return None
-
-    response = data.get("response")
-    if not isinstance(response, str):
-        return None
-    return response
 
 
 def _normalize_title(raw: str) -> str:
