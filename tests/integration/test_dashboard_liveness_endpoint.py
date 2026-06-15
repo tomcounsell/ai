@@ -36,7 +36,7 @@ def alive_session():
     s = AgentSession.create(
         project_key="test-dashboard-liveness-endpoint",
         chat_id="x",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         session_id=f"dashboard-liveness-endpoint-{time.time_ns()}",
