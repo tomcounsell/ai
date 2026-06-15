@@ -69,6 +69,7 @@ def _make_container_result(
     turns: int = 1,
     compliance_misses: int = 0,
     user_facing_routed: bool = False,
+    transcript_fallback_count: int = 0,
 ):
     """Build a ContainerResult-like object (MagicMock) with the
     attributes the BridgeAdapter reads."""
@@ -78,6 +79,7 @@ def _make_container_result(
     result.turns = [MagicMock()] * turns
     result.classification_compliance_misses = compliance_misses
     result.user_facing_routed = user_facing_routed
+    result.transcript_fallback_count = transcript_fallback_count
     return result
 
 
@@ -137,6 +139,7 @@ class TestBridgeAdapterSessionEvents(unittest.TestCase):
             exit_message="Trailing summary.",
             turns=3,
             compliance_misses=1,
+            transcript_fallback_count=2,
         )
 
         def _resolve(project_key: str, transport: str):
@@ -163,6 +166,7 @@ class TestBridgeAdapterSessionEvents(unittest.TestCase):
         self.assertEqual(ev["exit_reason"], "pm_complete")
         self.assertEqual(ev["turns"], 3)
         self.assertEqual(ev["compliance_misses"], 1)
+        self.assertEqual(ev["transcript_fallback_count"], 2)
         self.assertIn("ts", ev)
 
 

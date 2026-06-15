@@ -32,13 +32,29 @@ def _idle_result(buffer_text: str = "fake buffer", saw_idle: bool = True) -> Idl
     )
 
 
-def _mock_driver(buffer_text: str = "fake", saw_idle: bool = True) -> MagicMock:
+def _mock_driver(
+    buffer_text: str = "fake", saw_idle: bool = True, session_id: str = "mock-session-pm"
+) -> MagicMock:
     """Build a mock PTYDriver."""
     mock = MagicMock(spec=PTYDriver)
     mock.read_until_idle.return_value = _idle_result(buffer_text, saw_idle)
     mock.last_resume_uuid.return_value = None
     mock.isalive.return_value = True
+    # Set _session_id so _transcript_path produces a non-None value,
+    # allowing last_assistant_text to be called in the container run path.
+    # PM and Dev get different session IDs so stubs can discriminate.
+    mock._session_id = session_id
     return mock
+
+
+def _mock_pm(buffer_text: str = "fake", saw_idle: bool = True) -> MagicMock:
+    """Build a mock PM PTYDriver."""
+    return _mock_driver(buffer_text, saw_idle, session_id="mock-session-pm")
+
+
+def _mock_dev(buffer_text: str = "fake", saw_idle: bool = True) -> MagicMock:
+    """Build a mock Dev PTYDriver."""
+    return _mock_driver(buffer_text, saw_idle, session_id="mock-session-dev")
 
 
 class TestMakeSandboxCwd(unittest.TestCase):
@@ -80,8 +96,8 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
     """
 
     def _build_mock_pair(self, buffer_text: str) -> tuple[MagicMock, MagicMock]:
-        pm_mock = _mock_driver(buffer_text)
-        dev_mock = _mock_driver(buffer_text)
+        pm_mock = _mock_pm(buffer_text)
+        dev_mock = _mock_dev(buffer_text)
         return pm_mock, dev_mock
 
     def test_classify_complete_exits_loop(self) -> None:
@@ -119,11 +135,27 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
         # Dev is idle for all reads.
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
+        # PM transcript texts: startup (empty → _unknown_classification falls through
+        # before classify), then prime-relay "[/complete]\nShipped PR #42.".
+        pm_transcript_texts = iter(["[/complete]\nShipped PR #42."])
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path or "mock-session-dev" in path:
+                return ""
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
         with (
             patch.object(c, "_spawn_pair") as spawn,
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
         ):
             spawn.return_value = None
             c._pm_pty = pm_mock
@@ -176,17 +208,40 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
             "I added foo to bar.py and ran tests.", saw_idle=True
         )
 
+        # last_assistant_text is called for each PM classify and each Dev read.
+        # PM path contains "mock-session-pm"; Dev path contains "mock-session-dev".
+        pm_transcript_texts = iter(
+            [
+                "",  # prime-relay (unknown, compliance miss)
+                "[/dev]\nturn 0",  # turn 0 steady-state
+                "[/dev]\nturn 1",  # turn 1
+                "[/dev]\nturn 2",  # turn 2
+            ]
+        )
+        dev_transcript_text = "I added foo to bar.py and ran tests."
+
+        def _last_assistant_text_stub(path, *, baseline_text_count=None):
+            if not path:
+                return ""
+            if "mock-session-dev" in path:
+                return dev_transcript_text
+            # PM transcript calls get sequential buffer texts.
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
         with (
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
             patch.object(c, "_run_wrapup_guard"),  # no user_facing callback
-            patch("agent.granite_container.container.extract_dev_prompt") as extract,
-            patch("agent.granite_container.container.summarize_for_pm") as summarize,
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_last_assistant_text_stub,
+            ),
         ):
-            extract.return_value = "add foo to bar.py"
-            summarize.return_value = "Dev added foo to bar.py and ran tests."
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
             result = c.run()
@@ -204,7 +259,7 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
             self.assertEqual(t.classification, "dev")
         # Dev's PTY was written to.
         dev_mock.write.assert_called()
-        # PM's PTY was written to (the summaries).
+        # PM's PTY was written to (the Dev reports).
         pm_mock.write.assert_called()
 
     def test_classify_unknown_compliance_miss_continues(self) -> None:
@@ -247,12 +302,33 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_idle_buffers)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
+        # PM transcript texts (one per PM classify call):
+        # prime-relay → no prefix (unknown), turn 0 → [/complete]\nDone.
+        pm_transcript_texts = iter(
+            [
+                "I'm thinking out loud about the design.",  # prime-relay: unknown
+                "[/complete]\nDone.",  # turn 0: complete
+            ]
+        )
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path or "mock-session-dev" in path:
+                return ""
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
         with (
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
             patch.object(c, "_run_wrapup_guard"),  # no on_complete_payload callback
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
         ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
@@ -295,7 +371,7 @@ class TestContainerUserAddress(unittest.TestCase):
             delivered.append(payload)
 
         c = Container(user_message="hello", max_turns=3, on_user_payload=_on_user)
-        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
 
         # PM reads:
         # [0] startup
@@ -310,11 +386,26 @@ class TestContainerUserAddress(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
+        # PM transcript: only the prime-relay call matters (returns [/user] text).
+        pm_transcript_texts = iter(["[/user]\nstatus update 1"])
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path or "mock-session-dev" in path:
+                return ""
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
         with (
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
         ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
@@ -358,7 +449,7 @@ class TestContainerMaxTurns(unittest.TestCase):
         _run_wrapup_guard is patched out (no user_facing callback).
         """
         c = Container(user_message="hello", max_turns=2)
-        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
 
         buffers = [
             _idle_result("", saw_idle=True),  # startup
@@ -372,17 +463,37 @@ class TestContainerMaxTurns(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("Dev did the work.", saw_idle=True)
 
+        # PM transcript texts: prime-relay (unknown), turn 0, turn 1.
+        # Dev transcript: verbatim dev text.
+        pm_transcript_texts = iter(
+            [
+                "",  # prime-relay: unknown (empty → fallback)
+                "[/dev]\nbuild turn 0",  # turn 0
+                "[/dev]\nbuild turn 1",  # turn 1
+            ]
+        )
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path:
+                return ""
+            if "mock-session-dev" in path:
+                return "Dev did the work."
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
         with (
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
             patch.object(c, "_run_wrapup_guard"),  # patched out; tested separately
-            patch("agent.granite_container.container.extract_dev_prompt") as extract,
-            patch("agent.granite_container.container.summarize_for_pm") as summarize,
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
         ):
-            extract.return_value = "do the work"
-            summarize.return_value = "Dev did the work."
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
             result = c.run()
@@ -412,7 +523,7 @@ class TestContainerStartupHardCeiling(unittest.TestCase):
         # found. With the (patched, tiny) hard ceiling exhausted,
         # the container exits `startup_unresolved` — NOT `pm_hang`.
         c = Container(user_message="hello", max_turns=5)
-        pm_mock, dev_mock = _mock_driver("", saw_idle=False), _mock_driver("", saw_idle=False)
+        pm_mock, dev_mock = _mock_pm("", saw_idle=False), _mock_dev("", saw_idle=False)
 
         with (
             patch.object(c, "_spawn_pair"),
@@ -440,7 +551,7 @@ class TestContainerStartupHardCeiling(unittest.TestCase):
         # The loop must keep polling past the early cycles and then
         # proceed to the steady state (prime-turn relay), not exit early.
         c = Container(user_message="hello", max_turns=3)
-        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
 
         # Buffer sequence with prime-turn relay:
         # [0-1] startup cycles with saw_idle=False (still loading)
@@ -458,12 +569,27 @@ class TestContainerStartupHardCeiling(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_buffers)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
+        # PM transcript: prime-relay returns [/complete]\nDone.
+        pm_transcript_texts = iter(["[/complete]\nDone."])
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path or "mock-session-dev" in path:
+                return ""
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
         with (
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
             patch.object(c, "_run_wrapup_guard"),  # no on_complete_payload
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
         ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
@@ -502,8 +628,8 @@ class TestContainerPrimeHandlesTrustFolder(unittest.TestCase):
 
     def test_trust_folder_dismissed_before_prime(self) -> None:
         c = Container(user_message="hello", max_turns=2)
-        pm_mock = _mock_driver("")
-        dev_mock = _mock_driver("")
+        pm_mock = _mock_pm("")
+        dev_mock = _mock_dev("")
 
         # PM's read sequence with the new prime logic:
         #   1. pre-C5 trust-dismissal loop: sees trust dialog
@@ -545,14 +671,14 @@ class TestContainerPrimeHandlesTrustFolder(unittest.TestCase):
         on first read, no dismissal write is made — the prime
         goes through immediately."""
         c = Container(user_message="hello", max_turns=2)
-        pm_mock = _mock_driver("")
+        pm_mock = _mock_pm("")
         pm_mock.read_until_idle.return_value = _idle_result(
             "welcome ...bypass permissions on >", saw_idle=True
         )
 
         with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
             c._pm_pty = pm_mock
-            c._dev_pty = _mock_driver("")
+            c._dev_pty = _mock_dev("")
             c._prime_session(pm_mock, "/granite:prime-pm-role")
 
         # Only the prime slash command was written — no "1".
@@ -652,7 +778,7 @@ class TestContainerOnTurnHook(unittest.TestCase):
 
     def _run_with_hook(self, on_turn) -> ContainerResult:
         c = Container(user_message="hello", max_turns=3, on_turn=on_turn)
-        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
         # Buffer sequence with prime-turn relay:
         # [0] startup
         # [1] prime-turn relay: "no prefix here" → unknown → on_turn called
@@ -671,12 +797,32 @@ class TestContainerOnTurnHook(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_buffers)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
+        # PM transcript texts: prime-relay (unknown), turn 0 (complete).
+        pm_transcript_texts_hook = iter(
+            [
+                "no prefix here",  # prime-relay: unknown
+                "[/complete]\nDone.",  # turn 0: complete
+            ]
+        )
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if path is None:
+                return ""
+            try:
+                return next(pm_transcript_texts_hook)
+            except StopIteration:
+                return ""
+
         with (
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
             patch.object(c, "_run_wrapup_guard"),  # no on_complete_payload
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
         ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
@@ -702,7 +848,7 @@ class TestContainerHang(unittest.TestCase):
 
     def test_pm_hang_exits(self) -> None:
         c = Container(user_message="hello", max_turns=3)
-        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
 
         # Buffer sequence with prime-turn relay (issue #1644):
         # [0] startup: saw_idle=True (settles)
@@ -742,14 +888,13 @@ class TestContainerResultSerialization(unittest.TestCase):
                     compliance_miss=False,
                     pm_first_line="[/dev]",
                     routed_payload_chars=42,
-                    granite_extract_ms=50,
-                    granite_summarize_ms=30,
                     pm_idle_marker="bypass permissions",
                     dev_idle_marker="bypass permissions",
                 ),
             ],
             exit_reason="pm_max_turns",
             exit_message="reached max_turns=1",
+            transcript_fallback_count=0,
         )
         s = result_to_json(result)
         d = json.loads(s)
@@ -773,7 +918,7 @@ class TestPrimeTurnRelay(unittest.TestCase):
         the Dev must wait for the operator to relay the PM's first [/dev] relay.
         """
         c = Container(user_message="build a feature for me", max_turns=1)
-        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
 
         pm_mock.read_until_idle.return_value = _idle_result("startup", saw_idle=True)
         dev_mock.read_until_idle.return_value = _idle_result("startup", saw_idle=True)
@@ -806,12 +951,12 @@ class TestPrimeTurnRelay(unittest.TestCase):
         dispatched_to_dev: list[str] = []
 
         c = Container(user_message="do the task", max_turns=5)
-        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
 
         # Buffer sequence:
         # [0] startup
         # [1] prime-turn relay: [/dev]\nBuild X → routes to Dev
-        #     Dev cycle runs, summarize_for_pm called, summary written to PM.
+        #     Dev cycle runs, last_assistant_text read, verbatim text written to PM.
         #     _prime_relayed=True (else branch fires for all non-break outcomes
         #     including dev routes).
         # [2] await PM idle for summary write (inside dev routing)
@@ -839,22 +984,42 @@ class TestPrimeTurnRelay(unittest.TestCase):
 
         dev_mock.write.side_effect = _track_dev_write
 
+        # PM transcript texts: prime-relay (dev), then turn 0 steady-state (complete).
+        # Dev transcript: verbatim dev text.
+        pm_transcript_texts = iter(
+            [
+                "[/dev]\nBuild X",  # prime-relay
+                "[/complete]\nDone.",  # turn 0 steady-state
+            ]
+        )
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path:
+                return ""
+            if "mock-session-dev" in path:
+                return "I built X and it works."
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
         with (
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
             patch.object(c, "_run_wrapup_guard"),  # no on_complete_payload
-            patch("agent.granite_container.container.extract_dev_prompt") as extract,
-            patch("agent.granite_container.container.summarize_for_pm") as summarize,
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
         ):
-            extract.return_value = "Build X"
-            summarize.return_value = "Dev built X successfully."
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
             result = c.run()
 
-        # The Dev PTY was written to EXACTLY once (the relayed instruction).
+        # The Dev PTY was written to EXACTLY once (the relayed instruction payload).
+        # The zero-LLM path sends the classification payload verbatim (no extract_dev_prompt).
         # The stale-PM-buffer race guard ensures the steady-state loop does
         # not re-dispatch the same [/dev] a second time.
         self.assertEqual(
@@ -877,7 +1042,7 @@ class TestPrimeTurnRelay(unittest.TestCase):
             delivered.append(payload)
 
         c = Container(user_message="what is the status?", max_turns=3, on_user_payload=_on_user)
-        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
 
         # Buffer: startup, then [/user] at prime-relay → exits pm_user
         pm_buffers = [
@@ -887,11 +1052,26 @@ class TestPrimeTurnRelay(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: pm_buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
+        # PM transcript: prime-relay returns [/user] text.
+        pm_transcript_texts = iter(["[/user]\nStatus: all good."])
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path or "mock-session-dev" in path:
+                return ""
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
         with (
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
         ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
@@ -916,8 +1096,8 @@ class TestWrapupGuard(unittest.TestCase):
     def _build_container_no_callback(self) -> tuple[Container, MagicMock, MagicMock]:
         """Container with no user/complete callbacks (simulates PM silence)."""
         c = Container(user_message="do the work", max_turns=1)
-        pm_mock = _mock_driver("")
-        dev_mock = _mock_driver("")
+        pm_mock = _mock_pm("")
+        dev_mock = _mock_dev("")
         return c, pm_mock, dev_mock
 
     def test_no_user_facing_message_triggers_wrapup(self) -> None:
@@ -930,7 +1110,7 @@ class TestWrapupGuard(unittest.TestCase):
             terminal_deliveries.append(payload)
 
         c = Container(user_message="do the work", max_turns=1, on_user_payload=_on_user)
-        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
 
         # Steady-state exits pm_max_turns (no [/complete]) → wrap-up guard fires.
         # Wrap-up guard writes PM_WRAPUP_PROMPT; PM responds with another [/dev]
@@ -952,16 +1132,36 @@ class TestWrapupGuard(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: pm_buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("Dev finished.", saw_idle=True)
 
+        # PM transcript texts: prime-relay (unknown), turn 0 ([/dev]), wrapup ([/dev] again).
+        # Dev transcript: verbatim dev text.
+        pm_transcript_texts = iter(
+            [
+                "",  # prime-relay: unknown (empty → fallback)
+                "[/dev]\ntask",  # turn 0: dev route
+                "[/dev]\nstill more work",  # wrapup response: still dev (no user-facing)
+            ]
+        )
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path:
+                return ""
+            if "mock-session-dev" in path:
+                return "Dev finished."
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
         with (
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
-            patch("agent.granite_container.container.extract_dev_prompt") as extract,
-            patch("agent.granite_container.container.summarize_for_pm") as summarize,
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
         ):
-            extract.return_value = "do task"
-            summarize.return_value = "Dev finished the task."
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
             result = c.run()
@@ -995,7 +1195,7 @@ class TestWrapupGuard(unittest.TestCase):
             terminal_deliveries.append(payload)
 
         c = Container(user_message="do the work", max_turns=0, on_user_payload=_on_user)
-        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
 
         # max_turns=0 means steady-state never runs → pm_max_turns immediately.
         # No _last_dev_report captured (dev branch never ran).
@@ -1020,18 +1220,37 @@ class TestWrapupGuard(unittest.TestCase):
 
         pm_mock.write.side_effect = _track_pm_write
 
+        # PM transcript: prime-relay (unknown), then wrapup response (still unknown).
+        # Dev transcript: always returns "" so DEV_REPORT_UNAVAILABLE is used.
+        pm_transcript_texts = iter(
+            [
+                "",  # prime-relay: unknown (empty)
+                "",  # wrapup response: still unknown (empty)
+            ]
+        )
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path or "mock-session-dev" in path:
+                return ""
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
         with (
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
-            patch("agent.granite_container.container.summarize_for_pm") as summarize,
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
         ):
-            summarize.return_value = ""  # returns blank even from Dev buffer
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
             # Should not raise NameError or crash.
-            c.run()
+            result = c.run()
 
         # OPERATOR_TERMINAL_MESSAGE delivered (max attempts exhausted).
         self.assertIn(OPERATOR_TERMINAL_MESSAGE, terminal_deliveries)
@@ -1041,6 +1260,14 @@ class TestWrapupGuard(unittest.TestCase):
             wrapup_with_seed,
             f"expected PM_WRAPUP_PROMPT to contain DEV_REPORT_UNAVAILABLE; "
             f"PM writes were: {wrapup_prompts_written!r}",
+        )
+        # Wrap-up seed-build fallback must increment transcript_fallback_count (SDLC tech-debt fix).
+        # The prime-turn and wrapup-response also fall back (both transcript reads return ""),
+        # so the counter is >= 1 from the seed-build site alone.
+        self.assertGreaterEqual(
+            result.transcript_fallback_count,
+            1,
+            "wrap-up seed-build DEV_REPORT_UNAVAILABLE branch must increment transcript_fallback_count",
         )
 
     def test_terminal_message_sent_when_pm_silent(self) -> None:
@@ -1058,7 +1285,7 @@ class TestWrapupGuard(unittest.TestCase):
             terminal_deliveries.append(payload)
 
         c = Container(user_message="do the work", max_turns=0, on_user_payload=_on_user)
-        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
 
         pm_buffers = [
             _idle_result("", saw_idle=True),  # startup
@@ -1070,11 +1297,31 @@ class TestWrapupGuard(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: pm_buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
+        # PM transcript: prime-relay (unknown), wrapup response (still no prefix).
+        pm_transcript_texts = iter(
+            [
+                "",  # prime-relay: unknown (empty → fallback)
+                "no prefix — still silent",  # wrapup response: unknown (no prefix)
+            ]
+        )
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path or "mock-session-dev" in path:
+                return ""
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
         with (
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
         ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
@@ -1096,7 +1343,7 @@ class TestWrapupGuard(unittest.TestCase):
             terminal_deliveries.append(payload)
 
         c = Container(user_message="do the work", max_turns=2, on_user_payload=_on_user)
-        pm_mock, dev_mock = _mock_driver(""), _mock_driver("")
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
 
         pm_buffers = [
             _idle_result("", saw_idle=True),  # startup
@@ -1108,11 +1355,31 @@ class TestWrapupGuard(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: pm_buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
+        # PM transcript: prime-relay (empty [/complete]), wrapup ([/user]\nReal summary.).
+        pm_transcript_texts = iter(
+            [
+                "[/complete]",  # prime-relay: empty complete body (not user-facing)
+                "[/user]\nReal summary.",  # wrapup response: delivers to user
+            ]
+        )
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path or "mock-session-dev" in path:
+                return ""
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
         with (
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
         ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock

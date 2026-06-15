@@ -337,6 +337,7 @@ class BridgeAdapter:
                 "exit_reason": result.exit_reason,
                 "turns": len(result.turns),
                 "compliance_misses": result.classification_compliance_misses,
+                "transcript_fallback_count": result.transcript_fallback_count,
                 "ts": _now_iso(),
             },
         )

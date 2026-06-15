@@ -322,3 +322,113 @@ def read_transcript_telemetry(
             tailer_last_read_at=base.tailer_last_read_at,
             byte_offset=base.byte_offset,
         )
+
+
+def _text_bearing_assistant_texts(transcript_path: str) -> list[str]:
+    """Return the concatenated text of every text-bearing assistant entry, in order.
+
+    A "text-bearing" assistant entry is one with at least one ``text`` content
+    block. The text blocks within a single entry are joined with ``"\\n"`` (not
+    ``""``) so that adjacent blocks are not glued into runwords.
+
+    Reads only COMPLETE lines: a partial (non-newline-terminated) trailing line
+    is excluded, because the file is appended live and the last line may be
+    mid-write.
+
+    Opens with ``encoding="utf-8-sig"`` so a leading UTF-8 BOM is stripped
+    rather than silently corrupting (and dropping) the first line.
+
+    Fail-silent: returns ``[]`` on a missing/unreadable file or when every line
+    fails to parse. Never raises.
+    """
+    if not transcript_path:
+        return []
+    try:
+        with open(transcript_path, encoding="utf-8-sig") as f:
+            content = f.read()
+    except OSError:
+        return []
+    # Read only complete lines (partial trailing line excluded).
+    if content and not content.endswith("\n"):
+        content = content[: content.rfind("\n") + 1]
+    if not content:
+        return []
+    texts: list[str] = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        message = entry.get("message", {})
+        if not isinstance(message, dict):
+            continue
+        content_blocks = message.get("content", [])
+        if not isinstance(content_blocks, list):
+            continue
+        text_parts = [
+            block.get("text", "")
+            for block in content_blocks
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        text = "\n".join(part for part in text_parts if part)
+        if text:
+            texts.append(text)
+    return texts
+
+
+def text_bearing_count(transcript_path: str) -> int:
+    """Return the number of text-bearing assistant entries in the transcript.
+
+    This is the cheap baseline snapshot a caller captures BEFORE an idle read,
+    so that ``last_assistant_text`` can tell whether a genuinely new
+    text-bearing assistant entry flushed this cycle. Returns 0 for a
+    missing/unreadable/empty transcript. Fail-silent.
+    """
+    return len(_text_bearing_assistant_texts(transcript_path))
+
+
+def last_assistant_text(transcript_path: str, *, baseline_text_count: int | None = None) -> str:
+    """Return the concatenated text blocks from the most recent text-bearing
+    assistant entry in the Claude Code JSONL transcript.
+
+    Walks assistant entries newest-first (implicitly, by taking the last
+    text-bearing entry), skipping entries that are pure
+    tool_use/tool_result/thinking with no text blocks, so a tool-only final
+    entry does not collapse to empty when an earlier textual turn exists.
+
+    Freshness guard (content-identity, not mtime)
+    ---------------------------------------------
+    When ``baseline_text_count`` is given, this returns "" unless a NEW
+    text-bearing assistant entry has appeared since the baseline — i.e. the
+    count of text-bearing entries must have grown past the baseline. This
+    replaces the old mtime-advancement guard, which was defeated by intra-turn
+    writes: a tool round-trip (assistant[tool_use] → user[tool_result] →
+    assistant[text]) advances mtime on every line, so an idle read landing
+    between the tool lines and the final text line saw an advanced mtime and
+    wrongly forwarded the PRIOR turn's text. Counting text-bearing entries is
+    immune to that: tool_use / tool_result lines do not increment the count.
+
+    Returns "" when:
+    - file is missing / unreadable
+    - no assistant entry with text blocks exists
+    - all JSONL lines fail to parse
+    - ``baseline_text_count`` is given and no new text-bearing entry appeared
+      this cycle (``len(texts) <= baseline_text_count``)
+
+    Fail-silent: never raises. Tolerates a partial (non-newline-terminated)
+    trailing line by reading only complete lines.
+
+    Residual: an intermediate mid-turn aside (a text-bearing assistant entry
+    flushed AFTER the baseline but BEFORE the turn's closing text) can still be
+    returned, because it does increment the count. The deterministic fix is the
+    hook-driven Stop signal in followup #1688.
+    """
+    texts = _text_bearing_assistant_texts(transcript_path)
+    if baseline_text_count is not None and len(texts) <= baseline_text_count:
+        return ""
+    return texts[-1] if texts else ""
