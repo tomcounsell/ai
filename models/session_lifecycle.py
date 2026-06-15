@@ -223,6 +223,7 @@ def finalize_session(
     skip_checkpoint: bool = False,
     skip_parent: bool = False,
     reject_from_terminal: bool = True,
+    emit_telemetry: bool = True,
 ) -> None:
     """Finalize a session with a terminal status.
 
@@ -283,6 +284,25 @@ def finalize_session(
             f"({', '.join(sorted(TERMINAL_STATUSES))}), got {status!r}. "
             f"Use transition_status() for non-terminal transitions."
         )
+
+    # Additive telemetry tap — no behavior change
+    if emit_telemetry:
+        try:
+            from agent.session_telemetry import record_telemetry_event
+
+            _sid = getattr(session, "session_id", None) or getattr(session, "id", None)
+            record_telemetry_event(
+                _sid,
+                {
+                    "type": "status_transition",
+                    "from": getattr(session, "status", None),
+                    "to": status,
+                    "reason": reason or "",
+                    "kill": None,
+                },
+            )
+        except Exception:
+            pass
 
     # Idempotency: if already in this terminal state, skip side effects
     current_status = getattr(session, "status", None)
@@ -456,6 +476,7 @@ def transition_status(
     reason: str = "",
     *,
     reject_from_terminal: bool = True,
+    emit_telemetry: bool = True,
 ) -> None:
     """Transition a session to a non-terminal status.
 
@@ -504,6 +525,25 @@ def transition_status(
 
     if new_status not in NON_TERMINAL_STATUSES:
         raise ValueError(f"Unknown status {new_status!r}. Known: {', '.join(sorted(ALL_STATUSES))}")
+
+    # Additive telemetry tap — no behavior change
+    if emit_telemetry:
+        try:
+            from agent.session_telemetry import record_telemetry_event
+
+            _sid = getattr(session, "session_id", None) or getattr(session, "id", None)
+            record_telemetry_event(
+                _sid,
+                {
+                    "type": "status_transition",
+                    "from": getattr(session, "status", None),
+                    "to": new_status,
+                    "reason": reason or "",
+                    "kill": None,
+                },
+            )
+        except Exception:
+            pass
 
     # Guard: reject transitions from terminal statuses unless explicitly allowed
     current_status = getattr(session, "status", None)
