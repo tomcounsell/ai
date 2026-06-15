@@ -1549,34 +1549,6 @@ class AgentSession(Model):
         session.save()
         return session
 
-    @classmethod
-    def create_dev(
-        cls,
-        *,
-        session_id: str,
-        project_key: str,
-        working_dir: str,
-        parent_agent_session_id: str | None = None,
-        message_text: str,
-        slug: str | None = None,
-        stage_states: dict | None = None,
-        **kwargs,
-    ) -> "AgentSession":
-        """Create a Dev session (backward-compat wrapper for create_child()).
-
-        Deprecated: Use create_child(...) instead.
-        """
-        return cls.create_child(
-            session_id=session_id,
-            project_key=project_key,
-            working_dir=working_dir,
-            parent_agent_session_id=parent_agent_session_id or "",
-            message_text=message_text,
-            slug=slug,
-            stage_states=stage_states,
-            **kwargs,
-        )
-
     def get_parent_session(self) -> "AgentSession | None":
         """Return the parent session if this is a child session."""
         if not self.parent_agent_session_id:

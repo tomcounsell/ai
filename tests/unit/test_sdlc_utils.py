@@ -387,7 +387,7 @@ class TestFindSessionEnsure:
         # goes through the session_id env path (mocked AgentSession query below).
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [created]
-        type(created).session_type = "pm"
+        type(created).session_type = "eng"
 
         with patch.object(_sdlc_utils, "find_session_by_issue", return_value=None):
             with patch(
@@ -455,7 +455,7 @@ class TestFindSessionEnsure:
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
         issue_session = MagicMock(name="issue_session")
-        issue_session.session_type = "pm"
+        issue_session.session_type = "eng"
 
         ensure_mock = MagicMock()
         with patch.object(_sdlc_utils, "find_session_by_issue", return_value=issue_session):
@@ -475,7 +475,7 @@ class TestFindSessionEnsure:
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
         env_session = MagicMock(name="env_session")
-        env_session.session_type = "pm"
+        env_session.session_type = "eng"
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [env_session]
 
@@ -498,7 +498,7 @@ class TestFindSessionEnsure:
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
         explicit_session = MagicMock(name="explicit_session")
-        explicit_session.session_type = "pm"
+        explicit_session.session_type = "eng"
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [explicit_session]
 
@@ -519,7 +519,7 @@ class TestFindSessionEnsure:
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
         env_session = MagicMock(name="env_session")
-        env_session.session_type = "pm"
+        env_session.session_type = "eng"
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [env_session]
 
@@ -539,7 +539,7 @@ class TestFindSessionEnsure:
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
         env_session = MagicMock(name="env_session")
-        env_session.session_type = "pm"
+        env_session.session_type = "eng"
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [env_session]
 
@@ -560,7 +560,7 @@ class TestFindSessionEnsure:
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
         env_session = MagicMock(name="env_session")
-        env_session.session_type = "pm"
+        env_session.session_type = "eng"
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [env_session]
 

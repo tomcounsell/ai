@@ -7,7 +7,7 @@ shape for the common case. Everything else is an optional refinement.
 
 Examples:
     valor agent-session "fix the typo in app.py"
-    valor agent-session --role dev "build the feature"
+    valor agent-session --role eng "build the feature"
     valor agent-session --id abc123 "follow up: also run tests"
     valor agent-session list
     valor agent-session list --status running

@@ -906,7 +906,7 @@ class _SafeFormatDict(dict):
         return "{" + key + "}"
 
 
-def load_persona_prompt(persona: str = "developer", substitutions: dict | None = None) -> str:
+def load_persona_prompt(persona: str = "engineer", substitutions: dict | None = None) -> str:
     """Load persona prompt from composable segments + overlay.
 
     Segments are assembled from config/personas/segments/ per manifest.json,
@@ -963,8 +963,8 @@ def load_persona_prompt(persona: str = "developer", substitutions: dict | None =
             logger.warning(
                 f"Engineer persona overlay '{overlay_path}' still contains Agent tool dispatch "
                 'instructions (subagent_type="dev-session"). '
-                "Dev sessions are now created via "
-                "`python -m tools.valor_session create --role dev`. "
+                "Eng sessions are now created via "
+                "`python -m tools.valor_session create --role eng`. "
                 "Update ~/Desktop/Valor/personas/engineer.md to remove the Agent tool "
                 "dispatch pattern."
             )
@@ -2090,9 +2090,9 @@ def _resolve_persona(
 
     Resolution order:
     1. DMs: use project's dm_persona config (default: "teammate")
-    2. Group chats: look up persona from project's telegram.groups[chat_title]
-    3. PM mode projects: "project-manager"
-    4. Default: "developer"
+    2. Eng mode projects: "engineer"
+    3. Group chats: look up persona from project's telegram.groups[chat_title]
+    4. Default: "engineer"
 
     Args:
         project: Project configuration dict from projects.json.
@@ -2100,7 +2100,7 @@ def _resolve_persona(
         is_dm: Whether this is a direct message.
 
     Returns:
-        Persona name string (e.g., "developer", "project-manager", "teammate").
+        Persona name string (e.g., "engineer", "teammate").
     """
     if not project:
         return PersonaType.TEAMMATE if is_dm else PersonaType.ENGINEER
@@ -3411,11 +3411,8 @@ async def get_agent_response_sdk(
                 "Google Workspace (gws), memory search "
                 "(python -m tools.memory_search), Office CLI (officecli), "
                 "and session management (python -m tools.valor_session). "
-                "No dev-session needed unless you determine the task requires "
-                "code changes to the repository.\n\n"
-                "If you determine this task actually requires code changes, "
-                "create a dev session via `python -m tools.valor_session create "
-                '--role dev --parent "$AGENT_SESSION_ID" --message "..."` instead.\n\n'
+                "Handle code changes to the repository directly with your full "
+                "engineer toolset; no separate session is needed.\n\n"
                 "**Communicating with the stakeholder:**\n"
                 "You can send Telegram messages directly using:\n"
                 '  `python tools/send_telegram.py "Your message here"`\n'
@@ -3461,7 +3458,7 @@ async def get_agent_response_sdk(
                 "issue number (e.g., 'Run SDLC on issues 777, 775, 776'), you MUST fan out. "
                 "For each issue number N, run:\n"
                 "  python -m tools.valor_session create \\\\\n"
-                "    --role pm \\\\\n"
+                "    --role eng \\\\\n"
                 '    --parent "$AGENT_SESSION_ID" \\\\\n'
                 '    --message "Run SDLC on issue N"\n'
                 "After spawning ALL children, run:\n"
@@ -3478,17 +3475,13 @@ async def get_agent_response_sdk(
                 # Autonomous handoff: proven task type — objective + constraints only.
                 # Skip step-by-step SDLC scaffolding; trust the dev session.
                 enriched_message += (
-                    "You are the PM. This task type is well-proven — delegate efficiently.\n"
-                    "Spawn a dev session with the objective and constraints. "
-                    "No step-by-step scaffolding needed.\n\n"
-                    "  python -m tools.valor_session create \\\\\n"
-                    "    --role dev \\\\\n"
-                    '    --parent "$AGENT_SESSION_ID" \\\\\n'
-                    '    --message "Objective: <what needs to be done>\\n'
-                    "Constraints: <key requirements or acceptance criteria>\\n"
-                    'Context: <any relevant state>"\n\n'
-                    "After spawning, wait for the steering message"
-                    " when the dev session finishes.\n\n"
+                    "You are the engineer. This task type is well-proven — move "
+                    "efficiently.\n"
+                    "Execute the work directly with your full toolset against a clear "
+                    "objective and constraints. No step-by-step scaffolding needed:\n\n"
+                    "  Objective: <what needs to be done>\n"
+                    "  Constraints: <key requirements or acceptance criteria>\n"
+                    "  Context: <any relevant state>\n\n"
                     "**Communicating with the stakeholder:**\n"
                     "You can send Telegram messages directly using:\n"
                     '  `python tools/send_telegram.py "Your message here"`\n'
@@ -3505,40 +3498,23 @@ async def get_agent_response_sdk(
             else:
                 # Structured handoff: novel or error-prone task type — full SDLC guidance.
                 enriched_message += (
-                    "You are the PM. A good PM reads the situation, decides what stage "
-                    "comes next, and gives clear and concise direction to dev sessions — "
-                    "manageable blocks of work with crisp acceptance criteria. The dev "
-                    "session does the hands-on work: running /do-build, /do-test, "
-                    "/do-merge, checking merge gates, running tests. Your job is to "
-                    "direct well and judge the output, not to do the work yourself.\n\n"
-                    "**Spawn vs. resume:** When a dev session recently finished a stage "
-                    "on the same issue, prefer resuming it — it already has the codebase "
-                    "loaded, branch checked out, and full context in its transcript. "
-                    "Use `python -m tools.valor_session resume --id <id> --message '...'` "
-                    "to hand it the next stage. Spawn a fresh dev session when starting "
-                    "a new issue, when the prior session's context would be stale or "
-                    "misleading, or when parallel work on separate issues is needed.\n\n"
-                    "Orchestration loop:\n"
+                    "You are the engineer. Read the situation, decide what stage comes "
+                    "next, and do the hands-on work yourself: running /do-build, "
+                    "/do-test, /do-merge, checking merge gates, running tests. Advance "
+                    "the pipeline one stage at a time with crisp acceptance criteria.\n\n"
+                    "SDLC loop:\n"
                     "1. **Assess** — read the issue, PR, and prior comments to understand "
                     "where the pipeline stands "
                     "(gh issue view, gh pr view, gh pr list, gh pr checks).\n"
                     "1.5. **Gather prior stage context** — if a tracking issue exists, "
                     "fetch the last few comments with "
                     "`gh api repos/{owner}/{repo}/issues/{number}/comments` and look for "
-                    "comments containing `<!-- sdlc-stage-comment -->`. Include a summary "
-                    "of prior stage findings in the dev-session message so the next stage "
+                    "comments containing `<!-- sdlc-stage-comment -->` so the next stage "
                     "has full context.\n"
-                    "2. **Direct a dev session** — resume the prior one if context is "
-                    "still warm, otherwise spawn fresh:\n"
-                    "   python -m tools.valor_session create \\\\\n"
-                    "     --role dev \\\\\n"
-                    '     --parent "$AGENT_SESSION_ID" \\\\\n'
-                    '     --message "Stage: <PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
-                    "Issue: <URL>\\nPR: <URL if exists>\\n"
-                    "Current state: <what's already done>\\n"
-                    'Acceptance criteria: <what done looks like>"\n'
-                    "   The worker steers you back when the dev session finishes — wait.\n"
-                    "3. **Judge the result** — review what the dev session produced and "
+                    "2. **Run the stage** — execute the appropriate stage directly "
+                    "(Stage: <PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>, against the "
+                    "issue/PR, the current state, and the acceptance criteria).\n"
+                    "3. **Judge the result** — review what the stage produced and "
                     "decide whether it clears the bar or needs a patch.\n"
                     "4. **Advance** — move to the next stage or surface a decision to "
                     "the stakeholder if you're genuinely blocked.\n\n"
@@ -3581,20 +3557,20 @@ async def get_agent_response_sdk(
             "stages for any issue other than the one specified.\n"
         )
 
-    # --- Wait-for-children after dev dispatch (Fix 2) ---
-    # Ensure PM stays alive while dev session runs, so steering messages
-    # are received directly rather than requiring a continuation PM.
+    # --- Wait-for-children after child dispatch (Fix 2) ---
+    # Ensure the session stays alive while any child session runs, so steering
+    # messages are received directly rather than requiring a continuation session.
     if _session_type == SessionType.ENG and not _teammate_mode:
         enriched_message += (
-            "\nDEV SESSION WAIT RULE: After dispatching ANY dev session via "
-            "`python -m tools.valor_session create --role dev`, you MUST:\n"
+            "\nCHILD SESSION WAIT RULE: After spawning ANY child session via "
+            "`python -m tools.valor_session create --role eng`, you MUST:\n"
             "1. Call `python -m tools.valor_session wait-for-children "
             '--session-id "$AGENT_SESSION_ID"`\n'
             "2. Output a brief status message (e.g., 'Dispatched BUILD. Waiting.')\n"
             "3. WAIT for the steering response — do NOT produce a final answer or "
-            "closing statement. The worker will steer you when the dev session completes.\n"
-            "This keeps your session alive so the dev session result is delivered "
-            "directly to you instead of requiring a continuation PM.\n"
+            "closing statement. The worker will steer you when the child session completes.\n"
+            "This keeps your session alive so the child session result is delivered "
+            "directly to you instead of requiring a continuation session.\n"
         )
 
     enriched_message += f"\nMESSAGE: {message}"

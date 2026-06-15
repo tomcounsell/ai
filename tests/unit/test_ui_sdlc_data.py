@@ -19,7 +19,7 @@ def _make_mock_session(**overrides):
     defaults = {
         "agent_session_id": "mock-session-1",
         "session_id": "sess-1",
-        "session_type": "dev",
+        "session_type": "eng",
         "status": "running",
         "slug": None,
         "message_text": "test message",
@@ -570,7 +570,7 @@ class TestSessionToPipeline:
         mock_session = MagicMock()
         mock_session.agent_session_id = "old-session"
         mock_session.session_id = "sess-1"
-        mock_session.session_type = "dev"
+        mock_session.session_type = "eng"
         mock_session.status = "completed"
         mock_session.slug = None
         mock_session.message_text = "old message"

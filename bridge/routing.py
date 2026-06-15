@@ -1122,7 +1122,7 @@ async def should_respond_async(
     Decision logic after persona resolution:
     - Reply to Valor -> always respond (continue session, checked before mode)
     - Teammate persona group -> @mention only (passive listener)
-    - Team chat (no Dev:/PM: prefix) -> @mention only
+    - Team chat (no `Eng:` prefix) -> @mention only
     - respond_to_all -> always respond
     - respond_to_unaddressed -> Ollama classifies need
     - @valor -> always respond

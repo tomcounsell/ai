@@ -74,7 +74,7 @@ class TestChildParentLinkage:
             message_text="do work",
         )
 
-        child = AgentSession.create_dev(
+        child = AgentSession.create_child(
             session_id=f"child_{ts}",
             project_key="valor",
             working_dir="/tmp/test/.worktrees/my-feature",
@@ -103,14 +103,14 @@ class TestChildParentLinkage:
             message_text="complex task",
         )
 
-        child1 = AgentSession.create_dev(
+        child1 = AgentSession.create_child(
             session_id=f"dev1_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
             parent_agent_session_id=parent.agent_session_id,
             message_text="/do-build",
         )
-        child2 = AgentSession.create_dev(
+        child2 = AgentSession.create_child(
             session_id=f"dev2_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -125,7 +125,7 @@ class TestChildParentLinkage:
 
     def test_orphan_child_session_returns_none_parent(self):
         ts = int(time.time())
-        child = AgentSession.create_dev(
+        child = AgentSession.create_child(
             session_id=f"orphan_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -141,7 +141,7 @@ class TestDerivedPaths:
 
     def test_slug_derives_branch_name(self):
         ts = int(time.time())
-        child = AgentSession.create_dev(
+        child = AgentSession.create_child(
             session_id=f"slug_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -177,7 +177,7 @@ class TestSDLCStagesPropagation:
     def test_stage_states_persist_as_json(self):
         ts = int(time.time())
         stages = {"PLAN": "completed", "BUILD": "in_progress", "TEST": "pending"}
-        child = AgentSession.create_dev(
+        child = AgentSession.create_child(
             session_id=f"stages_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -223,7 +223,7 @@ class TestSessionTypeDiscriminator:
             telegram_message_id=1,
             message_text="hi",
         )
-        child = AgentSession.create_dev(
+        child = AgentSession.create_child(
             session_id=f"type_child_{ts}",
             project_key="valor",
             working_dir="/tmp",
@@ -244,7 +244,7 @@ class TestSessionTypeDiscriminator:
             telegram_message_id=1,
             message_text="hi",
         )
-        AgentSession.create_dev(
+        AgentSession.create_child(
             session_id=f"qt_child_{ts}",
             project_key="query_test",
             working_dir="/tmp",

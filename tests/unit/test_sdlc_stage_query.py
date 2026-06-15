@@ -158,7 +158,7 @@ class TestFindSessionByIssue:
 
         mock_session = MagicMock()
         mock_session.issue_url = "https://github.com/tomcounsell/ai/issues/704"
-        mock_session.session_type = "pm"
+        mock_session.session_type = "eng"
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [mock_session]
@@ -195,7 +195,7 @@ class TestFindSessionByIssue:
 
         issue_session = MagicMock()
         issue_session.issue_url = "https://github.com/tomcounsell/ai/issues/1672"
-        issue_session.session_type = "pm"
+        issue_session.session_type = "eng"
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [issue_session]

@@ -167,7 +167,7 @@ PERSONA_RESTRICTED_ACTIONS = {
 def _check_persona_permission(action_type: str) -> dict | None:
     """Check if the current persona is allowed to perform the given action.
 
-    Reads persona from PERSONA env var (default: "developer" — permissive).
+    Reads persona from PERSONA env var (default: "engineer" — permissive).
 
     Args:
         action_type: The action being attempted (e.g., "schedule").
@@ -175,7 +175,7 @@ def _check_persona_permission(action_type: str) -> dict | None:
     Returns:
         None if allowed, or a dict with error details if blocked.
     """
-    persona = os.environ.get("PERSONA", "developer").lower()
+    persona = os.environ.get("PERSONA", "engineer").lower()
     restricted = PERSONA_RESTRICTED_ACTIONS.get(persona, set())
 
     if action_type in restricted:

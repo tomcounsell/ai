@@ -1,8 +1,8 @@
 """
 Integration tests for session_type parameter flow through the session queue.
 
-Validates that async_create(session_type=...) and the factory methods
-(create_eng, create_dev) produce AgentSession instances with the correct
+Validates that async_create(session_type=...) and the factory method
+create_eng produce AgentSession instances with the correct
 session_type, and that session_type survives a Redis round-trip.
 
 Requires: Redis running (autouse redis_test_db fixture handles isolation).
@@ -53,28 +53,6 @@ class TestAsyncCreateMatchesFactoryMethods:
         assert via_direct.session_type == via_factory.session_type == SESSION_TYPE_ENG
         assert via_direct.is_eng == via_factory.is_eng is True
         assert via_direct.is_teammate == via_factory.is_teammate is False
-
-    @pytest.mark.asyncio
-    async def test_async_create_dev_produces_eng_session(self):
-        """create_dev() (backward-compat wrapper) produces an eng-type session via create_child."""
-        shared = {
-            "project_key": "test-equiv",
-            "session_id": f"equiv-dev-{time.time_ns()}",
-            "working_dir": "/tmp/test-equiv",
-            "message_text": "equivalence test",
-        }
-
-        via_factory = AgentSession.create_dev(
-            parent_agent_session_id="parent-123",
-            chat_id=str(-time.time_ns() % 999_000),
-            telegram_message_id=2,
-            **shared,
-        )
-
-        # create_dev is a backward-compat alias for create_child which produces eng sessions
-        assert via_factory.session_type == SESSION_TYPE_ENG
-        assert via_factory.is_eng is True
-        assert via_factory.is_teammate is False
 
     @pytest.mark.asyncio
     async def test_async_create_teammate(self):

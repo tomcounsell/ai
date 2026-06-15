@@ -453,7 +453,8 @@ def _recover_interrupted_agent_sessions_startup() -> int:
       the same claude_session_uuid, so resuming would spawn a second harness competing
       with the interactive CLI at that UUID (the #986 hijack rationale).
     - Dev local sessions are re-queued to "pending" like bridge sessions. Dev sessions
-      are worker-owned (spawned via ``valor-session create --role dev`` by the PM) with
+      are worker-owned (spawned via ``valor-session create --role eng`` by the parent
+      session) with
       no human competitor — completion flows via _handle_dev_session_completion, which
       steers the PM and never uses a user-facing send callback (#1092).
     - Legacy records with ``session_type=None`` fall through to the safer abandon path.

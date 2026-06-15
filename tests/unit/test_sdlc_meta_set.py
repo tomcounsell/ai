@@ -28,7 +28,7 @@ class TestMetaSetWriteMeta:
 
         mock_session = MagicMock()
         mock_session.stage_states = "{}"
-        mock_session.session_type = "pm"
+        mock_session.session_type = "eng"
 
         def fake_update_stage_states(session, update_fn, **kwargs):
             # Simulate applying the update to an empty dict
@@ -53,7 +53,7 @@ class TestMetaSetWriteMeta:
 
         mock_session = MagicMock()
         mock_session.stage_states = '{"_plan_revising": true}'
-        mock_session.session_type = "pm"
+        mock_session.session_type = "eng"
 
         def fake_update_stage_states(session, update_fn, **kwargs):
             result = update_fn({"_plan_revising": True})
@@ -77,7 +77,7 @@ class TestMetaSetWriteMeta:
 
         mock_session = MagicMock()
         mock_session.stage_states = "{}"
-        mock_session.session_type = "pm"
+        mock_session.session_type = "eng"
         test_hash = "abc123def456"
 
         def fake_update_stage_states(session, update_fn, **kwargs):
@@ -208,7 +208,7 @@ class TestMetaSetWriteMeta:
         from tools.sdlc_meta_set import write_meta
 
         mock_session = MagicMock()
-        mock_session.session_type = "pm"
+        mock_session.session_type = "eng"
 
         with (
             patch("tools.sdlc_meta_set.find_session", return_value=mock_session) as find_mock,

@@ -445,12 +445,14 @@ def cmd_create(args: argparse.Namespace) -> int:
         # a project root or touching the filesystem.
         # ------------------------------------------------------------------
         slug = getattr(args, "slug", None)
-        # Issue #1272: dev sessions also require a slug. The previous behavior
-        # accepted slugless ``--role dev`` and let the worker fall back to the
-        # main checkout — the residual hole that #887 left open. Apply the
-        # same auto-derive-or-reject path that eng uses; a synthetic slug is
-        # still allocated downstream by the worker if a slugless eng session
-        # somehow reaches the executor (future programmatic spawn site).
+        # Issue #1272: eng sessions also require a slug. An earlier behavior
+        # accepted slugless non-teammate roles and let the worker fall back to
+        # the main checkout — the residual hole that #887 left open. The
+        # argparse layer now rejects ``dev``/``pm`` outright, so the only
+        # non-teammate role reaching here is ``eng``; apply the
+        # auto-derive-or-reject path, and a synthetic slug is still allocated
+        # downstream by the worker if a slugless eng session somehow reaches
+        # the executor (future programmatic spawn site).
         if not slug and role != "teammate":
             derived = _derive_slug_from_message(message)
             if derived:

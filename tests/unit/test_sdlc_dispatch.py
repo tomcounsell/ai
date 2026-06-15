@@ -60,7 +60,7 @@ class TestDispatchRecordEnsures:
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
         issue_session = MagicMock(name="issue_session")
-        issue_session.session_type = "pm"
+        issue_session.session_type = "eng"
         issue_session.session_id = "sdlc-local-1671"
 
         captured = {}
@@ -95,7 +95,7 @@ class TestDispatchRecordEnsures:
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
         created = MagicMock(name="created_session")
-        created.session_type = "pm"
+        created.session_type = "eng"
 
         captured = {}
 
