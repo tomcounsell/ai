@@ -146,8 +146,11 @@ class AgentSession(Model):
     created_at = SortedField(type=datetime, partition_by="project_key")
     started_at = DatetimeField(null=True)  # Cannot be SortedField because it starts as None
     updated_at = DatetimeField(null=True)
-    # auto_now removed deliberately (see #1645) — do not re-add;
-    # popoto auto_now mints naive-local time. UTC stamp is in save() override.
+    # auto_now intentionally not set here. As of popoto>=1.7.1 (#1653) auto_now
+    # mints correct UTC, so re-adding it would be safe — but we keep the explicit
+    # utc_now() stamp in the save() override below, which also covers save paths
+    # that don't route through format_value_pre_save. Only remove the override
+    # after confirming auto_now fires on every save path (see #1653 plan).
     completed_at = DatetimeField(null=True)
     response_delivered_at = DatetimeField(null=True)
     working_dir = Field()

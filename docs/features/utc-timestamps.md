@@ -81,7 +81,7 @@ The CLI uses `_format_ts()` in `tools/valor_session.py` (appends ` UTC` to all o
 - The deprecated `datetime.utcnow()` (which returns naive datetimes) has been eliminated.
 - `time.time()` calls are unchanged -- epoch timestamps are timezone-neutral.
 - Telethon message timestamps were already UTC and are unchanged.
-- `AgentSession.updated_at` is explicitly UTC-stamped in `AgentSession.save()` (issue #1645 — Popoto's `auto_now=True` minted naive local wall-clock time). `created_at` and other `DatetimeField` timestamps are set explicitly at write time using `utc_now()`. **`auto_now=True` must not be used on any new `DatetimeField`** — use explicit `utc_now()` stamps instead.
+- `AgentSession.updated_at` is explicitly UTC-stamped in `AgentSession.save()` (issue #1645 — Popoto's `auto_now=True` historically minted naive local wall-clock time). `created_at` and other `DatetimeField` timestamps are set explicitly at write time using `utc_now()`. As of **popoto >= 1.7.1** (issue #1653, popoto#421) `auto_now`/`auto_now_add` now stamp `datetime.now(timezone.utc)`, so the upstream producer bug is fixed and `auto_now` is safe to use. We nonetheless keep the explicit `utc_now()` stamp in `AgentSession.save()` for now: it also covers save paths that bypass `format_value_pre_save` (e.g. raw/pipeline updates). Removing the override is gated on confirming `auto_now` fires on every save path — until then, prefer explicit `utc_now()` stamps on `AgentSession`.
 - `SortedField` / `DatetimeField` deserialization can return naive datetimes — code that calls `.timestamp()` on values read from Popoto must treat them as UTC. **Use `bridge.utc.to_unix_ts(val)` for all read-path conversions.** It normalizes naive datetimes to UTC before `.timestamp()`, handles `None`/float/ISO-string inputs, and is the single source of truth for this coercion. Rewire sites include `scripts/update/run.py::_cleanup_stale_sessions`, `tools/agent_session_scheduler._to_ts`, `agent/sustainability`, `reflections/memory_management`, `tools/telegram_history._parse_ts`, and `models.agent_session.cleanup_expired`. Three older helpers (`monitoring/session_watchdog._to_timestamp`, `agent/session_health._to_ts`, `ui/data/sdlc._safe_float`) already implement the same `val.tzinfo is None` guard inline — they pre-date the shared helper and are intentionally left untouched. New code must import `to_unix_ts` rather than add a fourth copy (issues #777, hotfix 9e3a64f5).
 
 ## Related
@@ -89,6 +89,6 @@ The CLI uses `_format_ts()` in `tools/valor_session.py` (appends ` UTC` to all o
 - Issue: [#542](https://github.com/tomcounsell/ai/issues/542) — UTC normalization (internal storage)
 - Issue: [#792](https://github.com/tomcounsell/ai/issues/792) — Timestamp display labels (CLI/log surfaces)
 - Issue: [#1645](https://github.com/tomcounsell/ai/issues/1645) — Fix `AgentSession.updated_at` producer bug (`auto_now` minted naive-local time)
-- Issue: [#1653](https://github.com/tomcounsell/ai/issues/1653) — Upstream popoto fix for `auto_now` UTC (defense-in-depth follow-up)
+- Issue: [#1653](https://github.com/tomcounsell/ai/issues/1653) — Upstream popoto fix for `auto_now` UTC, shipped in popoto 1.7.1 (popoto#421); ai pinned to `popoto>=1.7.1`
 - Plan: `docs/plans/542-utc-timestamp-normalization.md`
 - Plan: `docs/plans/timestamp-timezone-labels.md`
