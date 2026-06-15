@@ -299,3 +299,53 @@ def read_session_timeline(session_id: str, limit: int | None = None) -> list[dic
         )
 
     return events
+
+
+def finalize_session(session_id: str) -> None:
+    """Reap all in-memory state for a completed session.
+
+    Safe to call from the terminal ``status_transition`` path (finalize hook).
+    Acquires the per-session lock before reaping to avoid races with concurrent
+    writers, then removes the lock itself last.
+
+    Fail-silent: any exception is caught, logged at DEBUG, and discarded.
+    This function NEVER raises.
+
+    Args:
+        session_id: The session whose entries to evict from the module maps.
+            No-op for unknown or empty session_id values.
+    """
+    if not session_id:
+        return
+    try:
+        lock = _locks.get(session_id)
+        if lock is None:
+            # Session was never recorded — nothing to reap.
+            return
+
+        with lock:
+            # Reap per-session state while holding the lock so no concurrent
+            # writer can sneak in between the checks.
+            _event_counts.pop(session_id, None)
+            _last_event_monotonic.pop(session_id, None)
+            _truncated.discard(session_id)
+
+            # Close and evict any open file handle.
+            fh = _handles.pop(session_id, None)
+            if fh is not None:
+                try:
+                    fh.flush()
+                    fh.close()
+                except Exception:
+                    pass
+
+        # Remove the lock AFTER releasing it.  We use pop() so a concurrent
+        # setdefault() that races here just re-inserts a fresh lock — harmless.
+        _locks.pop(session_id, None)
+
+    except Exception as exc:
+        logger.debug(
+            "finalize_session silently swallowed exception for session %s: %r",
+            session_id,
+            exc,
+        )

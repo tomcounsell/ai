@@ -1305,8 +1305,8 @@ def cmd_telemetry(args) -> int:
                 f"cost=${total_cost:.4f}"
             )
         elif etype == "status_transition":
-            from_s = ev.get("from_status", "?")
-            to_s = ev.get("to_status", "?")
+            from_s = ev.get("from", "?")
+            to_s = ev.get("to", "?")
             reason = ev.get("reason", "") or ""
             summary = f"{from_s} -> {to_s} ({reason[:50]})"
         elif etype == "idle_gap":

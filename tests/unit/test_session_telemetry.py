@@ -341,3 +341,80 @@ class TestLifecycleIntegration:
             transition_status(session, "running", reason="test", emit_telemetry=False)
 
         assert not mock_record.called, "record_telemetry_event should NOT have been called"
+
+
+class TestStatusTransitionTextRenderer:
+    """Verify the CLI text-path renders 'from'/'to' keys correctly."""
+
+    def test_status_transition_renders_states(self):
+        """status_transition events show real states, not '? -> ?'."""
+        import json
+        import subprocess
+        import sys
+
+        from agent.session_telemetry import _get_telemetry_dir
+
+        session_id = "unit-render-status-001"
+        tdir = _get_telemetry_dir()
+        trace = tdir / f"{session_id}.jsonl"
+        tdir.mkdir(parents=True, exist_ok=True)
+        event = {
+            "session_id": session_id,
+            "ts": "2026-01-01T00:00:00Z",
+            "type": "status_transition",
+            "from": "running",
+            "to": "completed",
+            "reason": "finished",
+        }
+        trace.write_text(json.dumps(event) + "\n")
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "tools.valor_session", "telemetry", "--id", session_id],
+                capture_output=True,
+                text=True,
+                cwd="/Users/valorengels/src/ai/.claude/worktrees/agent-a3810b945a05c10e3",
+            )
+            assert result.returncode == 0, f"stderr: {result.stderr}"
+            assert "running" in result.stdout, f"Got: {result.stdout!r}"
+            assert "completed" in result.stdout, f"Got: {result.stdout!r}"
+            assert "? -> ?" not in result.stdout, f"Wrong keys still used: {result.stdout!r}"
+        finally:
+            trace.unlink(missing_ok=True)
+
+
+class TestFinalizeSession:
+    """Verify finalize_session reaps per-session entries from the module maps."""
+
+    def test_finalize_evicts_session_from_all_maps(self, tmp_path, monkeypatch):
+        """After finalize_session, session_id is gone from all module maps."""
+        import agent.session_telemetry as st
+
+        monkeypatch.setattr(st, "_TELEMETRY_DIR_RELATIVE", tmp_path / "telemetry")
+
+        session_id = "unit-finalize-evict-001"
+
+        # Record one event to populate the maps
+        st.record_telemetry_event(session_id, {"type": "turn_start"})
+
+        # Maps should be populated
+        assert session_id in st._locks
+        assert session_id in st._event_counts
+
+        # Finalize the session
+        st.finalize_session(session_id)
+
+        # All per-session entries should be gone
+        assert session_id not in st._locks, "_locks not reaped"
+        assert session_id not in st._event_counts, "_event_counts not reaped"
+        assert session_id not in st._last_event_monotonic, "_last_event_monotonic not reaped"
+        assert session_id not in st._truncated, "_truncated not reaped"
+        assert session_id not in st._handles, "_handles not reaped"
+
+    def test_finalize_unknown_session_is_noop(self):
+        """finalize_session on an unknown session_id is a safe no-op."""
+        import agent.session_telemetry as st
+
+        # Should not raise
+        st.finalize_session("does-not-exist-xyz999")
+        st.finalize_session("")
+        st.finalize_session(None)
