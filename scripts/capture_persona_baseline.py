@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--work-dir",
         default=_default_work_dir(),
-        help="Working directory passed to load_pm_system_prompt(work_dir).",
+        help="Working directory passed to load_eng_system_prompt(work_dir).",
     )
     parser.add_argument(
         "--output-dir",
@@ -62,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # Import lazily so a busted sdk_client doesn't kill `--help`.
-    from agent.sdk_client import load_pm_system_prompt, load_system_prompt
+    from agent.sdk_client import load_eng_system_prompt, load_system_prompt
 
     repo_root = Path(__file__).resolve().parent.parent
     machine = _slug_hostname()
@@ -72,18 +72,18 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     dev_prompt = load_system_prompt()
-    pm_prompt = load_pm_system_prompt(args.work_dir)
+    eng_prompt = load_eng_system_prompt(args.work_dir)
 
     dev_path = out_dir / "dev_system_prompt_baseline.txt"
-    pm_path = out_dir / "pm_system_prompt_baseline.txt"
+    eng_path = out_dir / "eng_system_prompt_baseline.txt"
 
     dev_path.write_text(dev_prompt)
-    pm_path.write_text(pm_prompt)
+    eng_path.write_text(eng_prompt)
 
     print(f"Captured baselines for hostname slug '{machine}':")
     print(f"  {dev_path}  ({len(dev_prompt)} chars)")
-    print(f"  {pm_path}  ({len(pm_prompt)} chars)")
-    print(f"  work_dir used for PM cell: {args.work_dir}")
+    print(f"  {eng_path}  ({len(eng_prompt)} chars)")
+    print(f"  work_dir used for eng cell: {args.work_dir}")
     return 0
 
 

@@ -9,7 +9,7 @@ Covers:
    CUSTOMER_SERVICE cells do not.
 4. Argument-validation contract: TypeError on bad enum.
 5. WORKER cell with working_directory: vault CLAUDE.md appended when present,
-   skipped silently when absent (re-gated from PM_READONLY).
+   skipped silently when absent (re-gated from WORKER branch).
 """
 
 from __future__ import annotations
