@@ -192,11 +192,12 @@ class TestPersonaPrimingSmokeEnvGated(unittest.TestCase):
 
 
 class TestPrimeSessionUserMessageSeparation(unittest.TestCase):
-    """S1 (issue #1644): Dev prime does NOT carry user_message; PM prime does.
+    """Both PM and Dev primes now receive the user_message as $ARGUMENTS.
 
-    The Container._prime_session method now accepts include_user_message=True/False.
-    PM prime uses True (needs the task context); Dev prime uses False (must wait
-    for the operator relay, not self-start on the raw user message).
+    PM: receives the message for immediate routing.
+    Dev: receives the message as labeled background context (issue #1692).
+    Dev must NOT act before the [/dev] relay — this is enforced by the prime
+    text, not by withholding the message.
     """
 
     def test_pm_prime_write_carries_user_message(self) -> None:
@@ -223,8 +224,13 @@ class TestPrimeSessionUserMessageSeparation(unittest.TestCase):
             user_msg, write_arg, f"PM prime write should contain user_message; got {write_arg!r}"
         )
 
-    def test_dev_prime_write_does_not_carry_user_message(self) -> None:
-        """Dev prime writes only the slash command, NOT self.user_message."""
+    def test_dev_prime_write_carries_user_message_as_background_context(self) -> None:
+        """Dev prime writes slash_cmd + user_message (background context, issue #1692).
+
+        Dev receives the raw user prompt as labeled background context so it
+        understands the task when the PM's [/dev] relay arrives. The prime text
+        instructs Dev NOT to act until it receives the [/dev] relay.
+        """
         from unittest.mock import MagicMock, patch
 
         from agent.granite_container.container import DEV_PRIME_SLASH_CMD, Container
@@ -240,28 +246,33 @@ class TestPrimeSessionUserMessageSeparation(unittest.TestCase):
         with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
             c._pm_pty = MagicMock(spec=PTYDriver)
             c._dev_pty = dev_mock
-            c._prime_session(dev_mock, DEV_PRIME_SLASH_CMD, include_user_message=False)
+            c._prime_session(dev_mock, DEV_PRIME_SLASH_CMD, include_user_message=True)
 
         write_arg = dev_mock.write.call_args.args[0]
-        self.assertNotIn(
+        self.assertIn(
             user_msg,
             write_arg,
-            f"Dev prime write must NOT contain user_message "
-            f"(Dev self-start fix, #1644); got {write_arg!r}",
+            f"Dev prime write should contain user_message as background context "
+            f"(issue #1692); got {write_arg!r}",
         )
-        self.assertEqual(write_arg, DEV_PRIME_SLASH_CMD)
 
-    def test_dev_prime_file_says_no_task_yet(self) -> None:
-        """Dev persona file text says no task is present yet (not $ARGUMENTS with task).
+    def test_dev_prime_file_instructs_wait_for_relay(self) -> None:
+        """Dev prime file instructs Dev to wait for the [/dev] relay before acting.
 
-        The persona file must NOT say 'What the user said' or embed a task
-        from $ARGUMENTS — Dev waits for the operator relay.
+        Since Dev now receives the user message as background context (issue #1692),
+        the 'no-task-yet' guard lives in the prime text, not in message omission.
         """
         body = DEV_PRIME.read_text()
         # The updated persona says no task is present and instructs waiting.
         self.assertIn("No task", body, "Dev prime file should say 'No task yet'")
-        # Must not tell Dev 'What the user said' (the old $ARGUMENTS section)
+        # Must not tell Dev 'What the user said' (phrase from old PM prime style)
         self.assertNotIn("What the user said", body)
+        # The background context section must exist
+        self.assertIn(
+            "Background context",
+            body,
+            "Dev prime should have a background context section",
+        )
 
 
 if __name__ == "__main__":

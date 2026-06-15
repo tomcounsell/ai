@@ -722,15 +722,18 @@ class Container:
         try:
             # Persona priming.
             # PM receives the user_message as $ARGUMENTS so it has full
-            # task context immediately. Dev does NOT — it must wait for
-            # the operator to relay the PM's first [/dev] instruction
-            # (issue #1644: Dev self-starting on the raw user message
-            # raced ahead of the PM before any routing decision).
+            # task context immediately. Dev also receives the user_message
+            # as $ARGUMENTS (background context only — prime-dev-role.md
+            # instructs Dev to wait for the operator's [/dev] relay before
+            # acting on it; issue #1692). The background context lets Dev
+            # understand the user's intent when the PM's [/dev] instruction
+            # arrives, without Dev self-starting (issue #1644 guard lives in
+            # the prime text, not in the omission of the message).
             logger.info("container: priming PM")
             self._prime_session(self._pm_pty, PM_PRIME_SLASH_CMD, include_user_message=True)
             logger.info("container: PM prime done")
             logger.info("container: priming Dev")
-            self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD, include_user_message=False)
+            self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD, include_user_message=True)
             logger.info("container: Dev prime done; entering startup loop")
 
             # Startup-phase loop. Watch both PTYs for known startup
