@@ -7,7 +7,7 @@ Error contracts (intentionally split):
   generate() → returns str | None (fail-silent; None on any error OR empty output)
   chat()     → raises on failure (callers rely on exception-to-escalate behavior)
 
-Config literals (localhost:11434, gemma4:31b-cloud, 5.0 timeout) live in
+Config literals (ollama host, generation model, timeout) live in
 config/settings.py ModelSettings field defaults ONLY — not here.
 """
 
@@ -22,9 +22,9 @@ def resolve_config() -> tuple[str, str, float]:
     """Return (base_url, model, timeout_s) from settings or ModelSettings defaults.
 
     Reads from settings.models when available. On import failure, constructs
-    ModelSettings() directly so Pydantic applies its field defaults — no literals
-    here. Config literals (localhost:11434, gemma4:31b-cloud, 5.0) live in
-    config/settings.py field definitions only.
+    ModelSettings() directly so Pydantic applies its field defaults. Config literals
+    (ollama host, generation model name, timeout) live in config/settings.py
+    ModelSettings field definitions only — not here.
     """
     try:
         from config.settings import settings
@@ -34,14 +34,12 @@ def resolve_config() -> tuple[str, str, float]:
     except Exception:
         pass
 
-    try:
-        from config.settings import ModelSettings
+    # Fallback: construct ModelSettings directly so Pydantic applies its field
+    # defaults. This handles import-failure scenarios (test fixtures, fresh shell).
+    from config.settings import ModelSettings
 
-        m = ModelSettings()
-        return m.ollama_host, m.ollama_generation_model, m.memory_title_timeout_s
-    except Exception:
-        # Absolute last resort — should never happen if settings.py is importable.
-        return "http://localhost:11434", "gemma4:31b-cloud", 5.0
+    m = ModelSettings()
+    return m.ollama_host, m.ollama_generation_model, m.memory_title_timeout_s
 
 
 def generate(
@@ -52,7 +50,7 @@ def generate(
     base_url: str | None = None,
     caller: str | None = None,
 ) -> str | None:
-    """POST to Ollama /api/generate. Returns stripped text or None.
+    """Call Ollama generate endpoint. Returns stripped text or None.
 
     Fail-silent: returns None on any transport/parse error AND on empty/whitespace
     output (so callers' None-on-failure fallback chains fire correctly — e.g. the
