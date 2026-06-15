@@ -342,6 +342,36 @@ class TestLifecycleIntegration:
 
         assert not mock_record.called, "record_telemetry_event should NOT have been called"
 
+    def test_terminal_finalize_reaps_telemetry_state(self, tmp_path, monkeypatch):
+        """The lifecycle terminal path reaps the session's in-memory telemetry maps.
+
+        Guards the wiring (not just the reaper function): a real
+        finalize_session() call on the terminal path must evict the session from
+        the module maps, or they grow unbounded over the worker's lifetime.
+        """
+        import agent.session_telemetry as st
+        from models.session_lifecycle import finalize_session
+
+        monkeypatch.setattr(st, "_get_telemetry_dir", lambda: tmp_path)
+
+        session = _make_session()
+        sid = session.session_id
+
+        # Prime the maps by recording an event for this session.
+        st.record_telemetry_event(sid, {"type": "turn_start"})
+        assert sid in st._locks, "precondition: session should be in _locks after a record"
+
+        with patch("models.session_lifecycle.get_authoritative_session") as mock_cas:
+            mock_cas.return_value = None  # skip CAS
+            session.save = MagicMock()
+            # 'completed' is terminal → triggers the reaper hook.
+            finalize_session(session, "completed", reason="done", emit_telemetry=True)
+
+        assert sid not in st._locks, "_locks not reaped by terminal finalize"
+        assert sid not in st._event_counts, "_event_counts not reaped by terminal finalize"
+        assert sid not in st._last_event_monotonic, "_last_event_monotonic not reaped"
+        assert sid not in st._handles, "_handles not reaped by terminal finalize"
+
 
 class TestStatusTransitionTextRenderer:
     """Verify the CLI text-path renders 'from'/'to' keys correctly."""

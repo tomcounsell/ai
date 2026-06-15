@@ -1390,6 +1390,16 @@ async def _apply_recovery_transition(
                 },
             },
         )
+        # Reap the session's in-memory telemetry state when this recovery
+        # transition is terminal. The lifecycle finalize call below runs with
+        # emit_telemetry=False (the kill-enriched event above is the dedup
+        # source), so the lifecycle reaper hook never fires on this path — reap
+        # here instead. ``pending`` is a requeue (non-terminal): the session
+        # keeps running, so its telemetry state must survive.
+        if _dest in ("abandoned", "failed"):
+            from agent.session_telemetry import finalize_session as _finalize_telemetry
+
+            _finalize_telemetry(entry.session_id)
     except Exception as _tel_err:
         logger.debug("[session-health] telemetry emit failed (non-fatal): %s", _tel_err)
 

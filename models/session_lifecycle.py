@@ -301,6 +301,15 @@ def finalize_session(
                     "kill": None,
                 },
             )
+            # Terminal transition: reap the session's in-memory telemetry state.
+            # This is the last telemetry event a session ever emits, so it is the
+            # correct hook to evict per-session locks/counters/handles and prevent
+            # the maps from growing unbounded over the worker's lifetime.
+            from agent.session_telemetry import (
+                finalize_session as _finalize_telemetry,
+            )
+
+            _finalize_telemetry(_sid)
         except Exception:
             pass
 
