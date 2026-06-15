@@ -116,8 +116,10 @@ class TestDevPrimeShape(unittest.TestCase):
         # absence of the usage phrase.
         self.assertNotIn("begin every output", self.body.lower())
 
-    def test_instructs_no_orchestration(self) -> None:
-        self.assertIn("orchestrate", self.body.lower())
+    def test_instructs_pipeline_ownership(self) -> None:
+        # Dev owns the SDLC pipeline and runs /do-* skills directly;
+        # the prime must mention the pipeline and the skill invocation pattern.
+        self.assertIn("pipeline", self.body.lower())
         self.assertIn("/do-", self.body)
 
 

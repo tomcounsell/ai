@@ -46,7 +46,6 @@ import os
 import pathlib
 import re
 import shutil
-import sys
 import time
 
 import pytest
@@ -148,7 +147,7 @@ def test_append_system_prompt_honored_in_interactive_tui() -> None:
         # Using sendline() sends \n and leaves the message in the input box
         # without submitting it. This was discovered empirically in the
         # granite PTY spike (scripts/granite_tui_pty_spike_pexpect.py:_send).
-        child.send(f"what is the secret word?\r")
+        child.send("what is the secret word?\r")
 
         # Collect response until CANARY_WORD found or model response completes.
         # The TUI streams model output as small chunks; a response is complete
@@ -185,25 +184,25 @@ def test_append_system_prompt_honored_in_interactive_tui() -> None:
 
         if canary_found:
             print(
-                f"\n\n{'='*60}\n"
+                f"\n\n{'=' * 60}\n"
                 f"RESULT: HONORED\n"
                 f"--append-system-prompt IS honored in the interactive TUI.\n"
                 f"The model returned '{CANARY_WORD}' as instructed by the appended system prompt.\n"
                 f"Implication: deleting this flag from the granite container is NOT zero-risk;\n"
                 f"prime parity must be confirmed before removal.\n"
-                f"{'='*60}\n"
+                f"{'=' * 60}\n"
             )
             assert CANARY_WORD in response, (
-                f"canary_found=True but CANARY_WORD not in response - logic error"
+                "canary_found=True but CANARY_WORD not in response - logic error"
             )
         else:
             print(
-                f"\n\n{'='*60}\n"
+                f"\n\n{'=' * 60}\n"
                 f"RESULT: NO-OP\n"
                 f"--append-system-prompt appears to be IGNORED in the interactive TUI.\n"
                 f"The model did not return '{CANARY_WORD}' despite the appended prompt.\n"
                 f"Implication: deleting this flag from the granite container is zero-risk.\n"
-                f"{'='*60}\n"
+                f"{'=' * 60}\n"
             )
             clean_response = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", response)
             pytest.fail(
@@ -217,9 +216,7 @@ def test_append_system_prompt_honored_in_interactive_tui() -> None:
             "claude TUI exited before responding — auth issue or unavailable; skipping canary spike"
         )
     except pexpect.TIMEOUT:
-        pytest.skip(
-            f"claude TUI timed out after {RESPONSE_TIMEOUT_S}s — skipping canary spike"
-        )
+        pytest.skip(f"claude TUI timed out after {RESPONSE_TIMEOUT_S}s — skipping canary spike")
     finally:
         if child is not None and child.isalive():
             child.send("\x03")  # Ctrl-C

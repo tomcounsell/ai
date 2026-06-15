@@ -447,8 +447,7 @@ class PTYPool:
                     self._spawned_pids.add(pid)
             self._persist_pids()
         logger.info(
-            "[pty-pool] slot %d: spawned per-session pair (cwd=%s, env_keys=%d, "
-            "pm_model=%s)",
+            "[pty-pool] slot %d: spawned per-session pair (cwd=%s, env_keys=%d, pm_model=%s)",
             slot.idx,
             cwd,
             len(spec.env or {}),

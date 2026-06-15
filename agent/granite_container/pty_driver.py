@@ -333,6 +333,7 @@ class PTYDriver:
         # kept for call-site backward compat but is always ignored.
         if append_system_prompt:
             import warnings
+
             warnings.warn(
                 "append_system_prompt is deprecated and has no effect. "
                 "Persona is delivered via prime commands (issue #1692).",

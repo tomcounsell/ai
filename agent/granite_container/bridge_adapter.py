@@ -189,6 +189,7 @@ class BridgeAdapter:
         # commands (issue #1692). Ignored if passed.
         if pm_system_prompt:
             import warnings
+
             warnings.warn(
                 "pm_system_prompt is deprecated and has no effect. "
                 "Persona is delivered via prime commands (issue #1692).",
