@@ -512,8 +512,9 @@ class TestDefaultSubstrateModel(unittest.TestCase):
     def test_pm_defaults_to_opus(self) -> None:
         self.assertEqual(_default_substrate_model("pm"), "opus")
 
-    def test_dev_defaults_to_sonnet(self) -> None:
-        self.assertEqual(_default_substrate_model("dev"), "sonnet")
+    def test_dev_defaults_to_opus(self) -> None:
+        # Dev now owns the full SDLC pipeline (issue #1692); bumped to opus.
+        self.assertEqual(_default_substrate_model("dev"), "opus")
 
     def test_reads_settings_override(self) -> None:
         """The resolver reflects GRANITE__PM_MODEL / DEV_MODEL via settings."""
@@ -538,7 +539,7 @@ class TestDefaultSubstrateModel(unittest.TestCase):
         from agent.granite_container.pty_driver import _FALLBACK_SUBSTRATE_MODEL
 
         self.assertEqual(_FALLBACK_SUBSTRATE_MODEL["pm"], "opus")
-        self.assertEqual(_FALLBACK_SUBSTRATE_MODEL["dev"], "sonnet")
+        self.assertEqual(_FALLBACK_SUBSTRATE_MODEL["dev"], "opus")
 
 
 class TestLifecycle(unittest.TestCase):

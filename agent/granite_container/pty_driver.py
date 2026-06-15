@@ -191,7 +191,7 @@ DEFAULT_TIMEOUT_S = 60.0
 # import the driver without a Settings instance). The PM/Dev TUIs run on
 # the Claude subscription, NOT ollama — ollama is the granite *classifier*
 # only. Aliases are UNPINNED so the substrate tracks the latest version.
-_FALLBACK_SUBSTRATE_MODEL = {"pm": "opus", "dev": "sonnet"}
+_FALLBACK_SUBSTRATE_MODEL = {"pm": "opus", "dev": "opus"}
 
 
 class PTYDriverError(RuntimeError):
