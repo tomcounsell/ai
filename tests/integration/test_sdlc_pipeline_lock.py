@@ -33,7 +33,7 @@ def _make_session(project_key: str, issue_number: int | None = None):
 
         session = AgentSession()
         session.session_id = f"test-1302-{uuid.uuid4().hex[:8]}"
-        session.session_type = "pm"
+        session.session_type = "eng"
         session.project_key = project_key
         session.status = "active"
         if issue_number:

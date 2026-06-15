@@ -453,7 +453,8 @@ def _recover_interrupted_agent_sessions_startup() -> int:
       the same claude_session_uuid, so resuming would spawn a second harness competing
       with the interactive CLI at that UUID (the #986 hijack rationale).
     - Dev local sessions are re-queued to "pending" like bridge sessions. Dev sessions
-      are worker-owned (spawned via ``valor-session create --role dev`` by the PM) with
+      are worker-owned (spawned via ``valor-session create --role eng`` by the parent
+      session) with
       no human competitor — completion flows via _handle_dev_session_completion, which
       steers the PM and never uses a user-facing send callback (#1092).
     - Legacy records with ``session_type=None`` fall through to the safer abandon path.
@@ -538,11 +539,11 @@ def _recover_interrupted_agent_sessions_startup() -> int:
         is_local = entry.session_id.startswith("local")  # session_id is the reliable discriminator
         session_type = getattr(entry, "session_type", None)
 
-        # Gate the dev re-queue path on explicit equality with SessionType.DEV so that:
+        # Gate the dev re-queue path on explicit equality with SessionType.ENG so that:
         # (a) legacy records with session_type=None fall through to the safer abandon path,
         # (b) any future SessionType member (e.g., REFLECTION, WORKFLOW) also falls through
         #     to abandon rather than being silently re-queued (#1092 Risk 2).
-        if is_local and session_type == SessionType.DEV:
+        if is_local and session_type == SessionType.ENG:
             # Local dev sessions are worker-owned — no human CLI is competing for the
             # claude_session_uuid. Re-queue like a bridge session so the worker resumes
             # the transcript on next pickup (#1092). CAS on expected_status="running"

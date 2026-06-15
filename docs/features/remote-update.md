@@ -73,9 +73,9 @@ if not result.projects_json_check.available:
 
 Bridge code does *not* validate on its own startup — that would crash the live process when a bad config lands on disk via iCloud sync. The gate is exclusively in the update path. See [Single-Machine Ownership](single-machine-ownership.md) for the full validator scope.
 
-### PM persona overlay drift check
+### Engineer persona overlay drift check
 
-Step 4.10 of `scripts/update/run.py` compares the in-repo PM persona template (`config/personas/project-manager.md`) against the private per-machine vault overlay (`~/Desktop/Valor/personas/project-manager.md`). Logic lives in `scripts/update/persona_drift.py::check_pm_persona_drift` so tests exercise the real helper.
+Step 4.10 of `scripts/update/run.py` compares the in-repo engineer persona template (`config/personas/engineer.md`) against the private per-machine vault overlay (`~/Desktop/Valor/personas/engineer.md`). Logic lives in `scripts/update/persona_drift.py::check_pm_persona_drift` so tests exercise the real helper.
 
 The check is **surface only**: it never auto-merges, never mutates files, and never raises (any unexpected error becomes a warning). Behavior:
 

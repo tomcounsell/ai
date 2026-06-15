@@ -46,10 +46,8 @@ from agent.output_router import (
 from agent.session_completion import (  # noqa: F401
     _CONTINUATION_PM_MAX_DEPTH,
     _complete_agent_session,
-    _create_continuation_pm,
     _diagnose_missing_session,
     _extract_issue_number,
-    _handle_dev_session_completion,
     _transition_parent,
 )
 
@@ -220,7 +218,7 @@ async def _push_agent_session(
     scheduled_at: datetime | float | None = None,
     parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.PM,
+    session_type: str = SessionType.ENG,
     scheduling_depth: int = 0,  # ignored, now derived
     depends_on: list[str] | None = None,  # ignored, removed
     project_config: dict | None = None,
@@ -382,7 +380,7 @@ async def _push_agent_session(
         # Compute worker_key inline from the same inputs as AgentSession.worker_key
         if session_type == SessionType.TEAMMATE:
             _wk = chat_id or project_key
-        elif session_type == SessionType.PM:
+        elif session_type == SessionType.ENG:
             _wk = project_key
         elif slug:
             _wk = slug
@@ -1082,7 +1080,7 @@ async def enqueue_agent_session(
     scheduled_at: float | None = None,
     parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.PM,
+    session_type: str = SessionType.ENG,
     scheduling_depth: int = 0,  # ignored, now derived
     project_config: dict | None = None,
     extra_context_overrides: dict | None = None,
@@ -1143,7 +1141,7 @@ async def enqueue_agent_session(
     # Compute worker_key from the same inputs the property uses, without re-querying Redis
     if session_type == SessionType.TEAMMATE:
         wk = chat_id or project_key
-    elif session_type == SessionType.PM:
+    elif session_type == SessionType.ENG:
         wk = project_key
     elif slug:
         wk = slug

@@ -106,7 +106,7 @@ def _fetch_github_title(url: str) -> str | None:
 
 
 _SYSTEM_PROMPT_PREFIXES = ("PROJECT:", "[Prior session context")
-_INTERNAL_SENDERS = {"valor-session (pm)", "valor-session (dev)", "None", ""}
+_INTERNAL_SENDERS = {"valor-session (eng)", "None", ""}
 
 
 def _extract_from_system_prompt(message_text: str) -> str | None:
@@ -682,20 +682,17 @@ def _resolve_persona_display(session) -> str | None:
 
     session_type is the sole discriminator:
       session_type="teammate"  → "Teammate"
-      session_type="pm"        → "Project Manager"
-      session_type="dev"       → "Developer"
+      session_type="eng"       → "Engineer"
     """
     raw = getattr(session, "session_type", None)
     if raw is None:
         return None
     if raw == SessionType.TEAMMATE:
         return "Teammate"
-    if raw == SessionType.PM:
-        return "Project Manager"
-    if raw == SessionType.DEV:
-        return "Developer"
+    if raw == SessionType.ENG:
+        return "Engineer"
     if raw == "chat":
-        return "Project Manager"  # Legacy fallback for pre-migration sessions
+        return "Engineer"  # Legacy fallback for pre-migration sessions
     return _safe_str(raw)
 
 

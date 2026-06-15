@@ -25,7 +25,7 @@ def liveness_session(monkeypatch):
     s = AgentSession.create(
         project_key="test-liveness-hooks",
         chat_id="x",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         session_id=f"liveness-hooks-{id(monkeypatch)}",

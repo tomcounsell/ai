@@ -98,7 +98,7 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
                 if resolved is not None:
                     # Gate on PM session type so PM stage_states never land on
                     # a Dev/Teammate session during cross-role debugging.
-                    if getattr(resolved, "session_type", None) == "pm":
+                    if getattr(resolved, "session_type", None) == "eng":
                         # Gate on non-terminal status (AD1): if the bridge session
                         # finalized between env injection and this call, fall
                         # through so we do not write stage state to a dead record.
@@ -175,7 +175,7 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
             session_id=local_session_id,
             project_key=project_key,
             working_dir=str(repo_root),
-            session_type="pm",
+            session_type="eng",
             **kwargs,
         )
 
@@ -230,7 +230,7 @@ def _iter_orphan_sessions():
     """Yield zombie sdlc-local PM sessions suitable for --kill-orphans.
 
     A session is considered a zombie orphan when ALL of these hold:
-    - ``session_type == "pm"``
+    - ``session_type == "eng"``
     - ``status == "running"``
     - ``session_id`` starts with ``"sdlc-local-"``
     - ``last_heartbeat_at`` is None (never received a worker turn)
@@ -263,12 +263,12 @@ def _iter_orphan_sessions():
     now = datetime.now(UTC)
 
     try:
-        pm_running = list(AgentSession.query.filter(session_type="pm", status="running"))
+        eng_running = list(AgentSession.query.filter(session_type="eng", status="running"))
     except Exception as e:
         logger.debug(f"_iter_orphan_sessions: query failed: {e}")
         return
 
-    for s in pm_running:
+    for s in eng_running:
         sid = getattr(s, "session_id", None) or ""
         if not sid.startswith("sdlc-local-"):
             continue

@@ -9,8 +9,8 @@ retries at 3; anything beyond that escalates to a human.
 
 See also:
 - `.claude/commands/do-merge.md` — the gate script itself.
-- `config/personas/project-manager.md` → **Gate-Recovery Behavior** — the
-  PM persona's dispatch table mapping blockers to remediations.
+- `config/personas/engineer.md` → **Gate-Recovery Behavior** — the
+  engineer persona's dispatch table mapping blockers to remediations.
 - `docs/features/self-healing-merge-gate.md` — feature-level overview.
 
 ---
@@ -89,7 +89,7 @@ after the latest commit's committer date:
 
 ```bash
 python -m tools.valor_session create \
-  --role dev --model opus \
+  --role eng --model opus \
   --slug {slug} --parent "$AGENT_SESSION_ID" \
   --message "Stage: REVIEW / Required skill: /do-pr-review / PR: {pr_url} / ..."
 ```

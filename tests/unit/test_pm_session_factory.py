@@ -1,7 +1,7 @@
-"""Tests for PM/Dev session factory method integration in bridge handler.
+"""Tests for Eng session factory method integration in bridge handler.
 
-Verifies that the bridge handler correctly routes messages to create_pm()
-(default) or create_dev() (for "Dev: X" groups) based on chat title.
+Verifies that the bridge handler correctly routes messages to create_eng()
+based on chat title, and that the factory methods exist on AgentSession.
 """
 
 from pathlib import Path
@@ -12,57 +12,44 @@ from config.enums import ClassificationType, SessionType
 class TestBridgeSessionTypeRouting:
     """Verify bridge handler sets session_type correctly."""
 
-    def test_sdlc_classification_creates_pm_session(self):
-        """SDLC classification should produce session_type='pm'."""
+    def test_sdlc_classification_creates_eng_session(self):
+        """SDLC classification should produce session_type='eng'."""
         _classification = ClassificationType.SDLC
-        _session_type = SessionType.PM  # All SDLC messages go to PM session
-        assert _session_type == SessionType.PM
+        _session_type = SessionType.ENG  # All SDLC messages go to Eng session
+        assert _session_type == SessionType.ENG
 
-    def test_question_classification_creates_pm_session(self):
-        """Question classification should also produce session_type='pm'."""
+    def test_question_classification_creates_eng_session(self):
+        """Question classification should also produce session_type='eng'."""
         _classification = ClassificationType.QUESTION
-        _session_type = SessionType.PM  # All question messages go to PM session
-        assert _session_type == SessionType.PM
+        _session_type = SessionType.ENG  # All question messages go to Eng session
+        assert _session_type == SessionType.ENG
 
-    def test_none_classification_creates_pm_session(self):
-        """No classification (None) should produce session_type='pm'."""
+    def test_none_classification_creates_eng_session(self):
+        """No classification (None) should produce session_type='eng'."""
         _classification = None
-        _session_type = SessionType.PM  # All messages go to PM session
-        assert _session_type == SessionType.PM
-
-    def test_dev_group_routing(self):
-        """'Dev: X' chat title prefix should produce session_type='dev'."""
-        chat_title = "Dev: Valor"
-        if chat_title and chat_title.startswith("Dev:"):
-            _session_type = SessionType.DEV
-        else:
-            _session_type = SessionType.PM
-        assert _session_type == SessionType.DEV
-
-    def test_non_dev_group_routing(self):
-        """Non-dev chat title should produce session_type='pm'."""
-        chat_title = "PM: PsyOptimal"
-        if chat_title and chat_title.startswith("Dev:"):
-            _session_type = SessionType.DEV
-        else:
-            _session_type = SessionType.PM
-        assert _session_type == SessionType.PM
+        _session_type = SessionType.ENG  # All messages go to Eng session
+        assert _session_type == SessionType.ENG
 
     def test_teammate_session_type(self):
         """Teammate persona should produce session_type='teammate'."""
         _session_type = SessionType.TEAMMATE
         assert _session_type == "teammate"
 
+    def test_pm_and_dev_session_types_do_not_exist(self):
+        """SessionType.PM and SessionType.DEV must not exist after ENG consolidation."""
+        assert not hasattr(SessionType, "PM"), "SessionType.PM must have been removed"
+        assert not hasattr(SessionType, "DEV"), "SessionType.DEV must have been removed"
+
 
 class TestFactoryMethodsExist:
     """Verify AgentSession factory methods are available."""
 
-    def test_create_pm_exists(self):
-        """AgentSession.create_pm should be a classmethod."""
+    def test_create_eng_exists(self):
+        """AgentSession.create_eng should be a classmethod."""
         from models.agent_session import AgentSession
 
-        assert hasattr(AgentSession, "create_pm")
-        assert callable(AgentSession.create_pm)
+        assert hasattr(AgentSession, "create_eng")
+        assert callable(AgentSession.create_eng)
 
     def test_create_teammate_exists(self):
         """AgentSession.create_teammate should be a classmethod."""
@@ -71,12 +58,18 @@ class TestFactoryMethodsExist:
         assert hasattr(AgentSession, "create_teammate")
         assert callable(AgentSession.create_teammate)
 
-    def test_create_dev_exists(self):
-        """AgentSession.create_dev should be a classmethod."""
+    def test_create_child_exists(self):
+        """AgentSession.create_child should be a classmethod."""
         from models.agent_session import AgentSession
 
-        assert hasattr(AgentSession, "create_dev")
-        assert callable(AgentSession.create_dev)
+        assert hasattr(AgentSession, "create_child")
+        assert callable(AgentSession.create_child)
+
+    def test_create_pm_does_not_exist(self):
+        """AgentSession should NOT have create_pm (replaced by create_eng)."""
+        from models.agent_session import AgentSession
+
+        assert not hasattr(AgentSession, "create_pm"), "create_pm must be removed; use create_eng"
 
     def test_no_create_simple(self):
         """AgentSession should NOT have create_simple (removed)."""
@@ -85,7 +78,7 @@ class TestFactoryMethodsExist:
         assert not hasattr(AgentSession, "create_simple")
 
     def test_no_create_chat(self):
-        """AgentSession should NOT have create_chat (renamed to create_pm)."""
+        """AgentSession should NOT have create_chat (removed)."""
         from models.agent_session import AgentSession
 
         assert not hasattr(AgentSession, "create_chat")
@@ -100,7 +93,7 @@ class TestBridgeNoClassifyWorkRequest:
         source = bridge_path.read_text()
         assert "classify_work_request" not in source, (
             "Bridge handler should not import or call classify_work_request. "
-            "PM session owns work classification."
+            "Eng session owns work classification."
         )
 
     def test_factory_methods_wired(self):
@@ -117,31 +110,29 @@ class TestBridgeNoClassifyWorkRequest:
         source = bridge_path.read_text()
         assert '"simple"' not in source, (
             "Bridge handler should not reference simple session type. "
-            "All messages route to PM, Teammate, or Dev sessions."
+            "All messages route to Eng, Teammate, or Granite sessions."
         )
 
 
-class TestPMPersonaFanoutInstruction:
-    """Verify fan-out instruction is present in PM persona enriched prompt."""
+class TestEngPersonaFanoutInstruction:
+    """Verify fan-out instruction is present in engineer persona."""
 
-    def test_pm_persona_sdk_client_contains_fanout_instruction(self):
-        """sdk_client.py PM dispatch block must contain MULTI-ISSUE FAN-OUT text."""
+    def test_eng_persona_sdk_client_contains_fanout_instruction(self):
+        """sdk_client.py Eng dispatch block must contain MULTI-ISSUE FAN-OUT text."""
         sdk_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
         source = sdk_path.read_text()
         assert "MULTI-ISSUE FAN-OUT" in source, (
-            "sdk_client.py PM dispatch block must contain 'MULTI-ISSUE FAN-OUT' instruction. "
-            "This triggers child PM session spawning for multi-issue requests."
+            "sdk_client.py Eng dispatch block must contain 'MULTI-ISSUE FAN-OUT' instruction. "
+            "This triggers child Eng session spawning for multi-issue requests."
         )
 
-    def test_pm_persona_overlay_contains_fanout_section(self):
-        """config/personas/project-manager.md must contain Multi-Issue Fan-out section."""
-        persona_path = (
-            Path(__file__).parent.parent.parent / "config" / "personas" / "project-manager.md"
-        )
+    def test_eng_persona_overlay_contains_fanout_section(self):
+        """config/personas/engineer.md must contain Multi-Issue Fan-out section."""
+        persona_path = Path(__file__).parent.parent.parent / "config" / "personas" / "engineer.md"
         source = persona_path.read_text()
         assert "Multi-Issue Fan-out" in source, (
-            "config/personas/project-manager.md must include a 'Multi-Issue Fan-out' section "
-            "describing when and how to spawn child PM sessions."
+            "config/personas/engineer.md must include a 'Multi-Issue Fan-out' section "
+            "describing when and how to spawn child Eng sessions."
         )
 
     def test_sdk_client_fanout_references_wait_for_children(self):
@@ -150,7 +141,7 @@ class TestPMPersonaFanoutInstruction:
         source = sdk_path.read_text()
         assert "wait-for-children" in source, (
             "sdk_client.py fan-out instruction must reference "
-            "'wait-for-children' subcommand so the PM knows how to pause."
+            "'wait-for-children' subcommand so the Eng session knows how to pause."
         )
 
     def test_sdk_client_fanout_references_child_pm_role(self):
@@ -159,5 +150,5 @@ class TestPMPersonaFanoutInstruction:
         source = sdk_path.read_text()
         assert "--role pm" in source, (
             "sdk_client.py fan-out instruction must include '--role pm' "
-            "to create child PM sessions."
+            "to create child sessions (updated to --role eng in a follow-up task)."
         )

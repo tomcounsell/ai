@@ -4,7 +4,7 @@
 
 ## Overview
 
-All session types (PM, Teammate, Dev) now execute via the CLI harness (`claude -p --output-format stream-json`). The original `DEV_SESSION_HARNESS` environment variable is preserved for historical compatibility, but all session types are unconditionally routed to `get_response_via_harness()` — the SDK path (`get_agent_response_sdk()`) is not exercised.
+All session types (Eng, Teammate) now execute via the CLI harness (`claude -p --output-format stream-json`). The original `DEV_SESSION_HARNESS` environment variable is preserved for historical compatibility, but all session types are unconditionally routed to `get_response_via_harness()` — the SDK path (`get_agent_response_sdk()`) is not exercised.
 
 **Phase 6 (end-to-end validation)** is complete — all session types run through the CLI harness in production.
 
@@ -12,13 +12,12 @@ All session types (PM, Teammate, Dev) now execute via the CLI harness (`claude -
 
 ### Harness Selection
 
-All session types are unconditionally routed to `get_response_via_harness()` in `agent/agent_session_queue.py`. The `DEV_SESSION_HARNESS` environment variable is preserved but no longer gates routing for PM or Teammate sessions — they always run via the CLI harness.
+All session types are unconditionally routed to `get_response_via_harness()` in `agent/agent_session_queue.py`. The `DEV_SESSION_HARNESS` environment variable is preserved but no longer gates routing for Eng or Teammate sessions — they always run via the CLI harness.
 
 | Session Type | Execution Path |
 |-------------|---------------|
-| PM | `get_response_via_harness()` — CLI harness, always |
+| Eng | `get_response_via_harness()` — CLI harness, always |
 | Teammate | `get_response_via_harness()` — CLI harness, always |
-| Dev | `get_response_via_harness()` — CLI harness, always |
 
 ### Routing Path
 
@@ -26,7 +25,7 @@ All session types are unconditionally routed to `get_response_via_harness()` in 
 Worker receives pending AgentSession (any session_type)
     |
     v
-get_response_via_harness()   [all types: PM, Teammate, Dev]
+get_response_via_harness()   [all types: Eng, Teammate]
     |
     v
 claude -p subprocess
@@ -63,7 +62,7 @@ The budget remains in place even on resumed turns because a single new user mess
 
 `get_response_via_harness()` does not accept a streaming callback. Intermediate `content_block_delta` chunks are accumulated internally and never forwarded to any output transport mid-session. This applies equally to all transports — Telegram (`TelegramRelayOutputHandler`) and email (`EmailOutputHandler`) — no transport receives real-time streaming output.
 
-Forwarding streaming chunks would bypass the nudge loop and cause mid-sentence message fragments to appear as discrete messages. The final result is delivered by `BackgroundTask` through the nudge loop, ensuring complete, coherent messages reach the user regardless of session type (PM, Teammate, or Dev).
+Forwarding streaming chunks would bypass the nudge loop and cause mid-sentence message fragments to appear as discrete messages. The final result is delivered by `BackgroundTask` through the nudge loop, ensuring complete, coherent messages reach the user regardless of session type (Eng or Teammate).
 
 ### Startup Health Check
 
@@ -79,7 +78,7 @@ When `DEV_SESSION_HARNESS` is set to a non-`sdk` value, the worker runs `verify_
 
 - `ANTHROPIC_API_KEY` is explicitly stripped from the subprocess environment to prevent the CLI from using API billing when a subscription is available
 - `AGENT_SESSION_ID` and `CLAUDE_CODE_TASK_LIST_ID` are passed to all session types for session isolation
-- `VALOR_PARENT_SESSION_ID` is additionally injected for PM and Teammate sessions, enabling child subprocesses (spawned via `valor_session create --parent` or the Agent tool) to link their `AgentSession` records back to the parent session in `user_prompt_submit.py`. Dev sessions do not receive this env var — they are leaf nodes in the hierarchy.
+- `VALOR_PARENT_SESSION_ID` is injected for Eng and Teammate sessions, enabling child subprocesses (spawned via `valor_session create --parent` or the Agent tool) to link their `AgentSession` records back to the parent session in `user_prompt_submit.py`.
 
 ### Session Environment Injection (issue #1148)
 
@@ -89,36 +88,36 @@ The harness path mirrors the env contract that the SDK-era `ValorAgent.env` buil
 |---------|-------|--------|----------|
 | `AGENT_SESSION_ID` | All typed sessions | `session.agent_session_id` | Hooks (`pre_tool_use.py`, `user_prompt_submit.py`); session isolation |
 | `CLAUDE_CODE_TASK_LIST_ID` | All typed sessions | Tier 1 thread-derived or Tier 2 slug | Task list isolation per `docs/features/session-isolation.md` |
-| `SESSION_TYPE` | All typed sessions | `session.session_type` (`pm`/`teammate`/`dev`) | `agent/hooks/pre_tool_use.py::_is_pm_session()` — drives the PM Bash allowlist + write restrictions |
-| `VALOR_PARENT_SESSION_ID` | PM, Teammate | `session.agent_session_id` | Child subprocess linkage (`user_prompt_submit.py`) |
-| `TELEGRAM_CHAT_ID` | PM, Teammate (when `chat_id` set) | `session.chat_id` | `tools/send_telegram.py` for PM-side message sends |
-| `SENTRY_AUTH_TOKEN` | PM, Teammate | `agent/sdk_client.py::_resolve_sentry_auth_token()` | `sentry-cli` (no manual export needed) |
+| `SESSION_TYPE` | All typed sessions | `session.session_type` (`eng`/`teammate`) | `agent/hooks/pre_tool_use.py::_is_teammate_session()` — drives the Teammate Bash allowlist + write restrictions |
+| `VALOR_PARENT_SESSION_ID` | Eng, Teammate | `session.agent_session_id` | Child subprocess linkage (`user_prompt_submit.py`) |
+| `TELEGRAM_CHAT_ID` | Eng, Teammate (when `chat_id` set) | `session.chat_id` | `tools/send_telegram.py` for agent-side message sends |
+| `SENTRY_AUTH_TOKEN` | Eng, Teammate | `agent/sdk_client.py::_resolve_sentry_auth_token()` | `sentry-cli` (no manual export needed) |
 
 Sentry token resolution cascade: `SENTRY_PERSONAL_TOKEN` env var → `SENTRY_AUTH_TOKEN` env var → `~/Desktop/Valor/.env` file read. Under `VALOR_LAUNCHD=1` the file read is skipped (macOS TCC blocks `open()` on `~/Desktop` files under launchd).
 
-### PM Persona Injection — `--append-system-prompt` (issue #1148)
+### Engineer persona injection — `--append-system-prompt` (issue #1148)
 
-PM sessions append the project-manager persona to `claude -p`'s default system prompt via `--append-system-prompt`:
+Eng sessions append the engineer persona to `claude -p`'s default system prompt via `--append-system-prompt`:
 
-1. The executor calls `agent.sdk_client.load_pm_system_prompt(working_dir)` — returns the persona file plus the project-specific work-vault `CLAUDE.md` if present.
+1. The executor calls `agent.sdk_client.load_eng_system_prompt(working_dir)` (the WORKER-access branch in `agent/session_executor.py`) — returns the composed prompt (WORKER_RULES + engineer persona + principal/completion sections) plus the project-specific work-vault `CLAUDE.md` if present.
 2. The result is passed as `system_prompt=` to `get_response_via_harness()`.
 3. `get_response_via_harness()` injects `["--exclude-dynamic-system-prompt-sections", "--append-system-prompt", <text>]` into the harness argv after `--model` and before the positional message.
 
-`--append-system-prompt` (not `--system-prompt`) preserves Claude Code's default tool-handling protocol — the PM persona is additive guidance. Defensive 512KB cap avoids macOS `ARG_MAX` overflows; oversized prompts are dropped with a `logger.warning` and the session continues without the persona (degraded but functional).
+`--append-system-prompt` (not `--system-prompt`) preserves Claude Code's default tool-handling protocol — the engineer persona is additive guidance. Defensive 512KB cap avoids macOS `ARG_MAX` overflows; oversized prompts are dropped with a `logger.warning` and the session continues without the persona (degraded but functional).
 
 Failure modes:
-- Persona load raises (e.g. missing persona file on a fresh machine): logs `[pm-persona-missing]` and proceeds with `system_prompt=None`. Session runs without SDLC orchestration rules — visible to the dashboard via the structured log prefix.
-- Drafter call sites in `agent/session_completion.py` (Pass 1 + Pass 2 of `_deliver_pipeline_completion`) MUST keep `system_prompt=None`. Tainting drafter turns with PM orchestration corrupts the user-facing summary. Enforced by `tests/unit/test_session_completion.py::test_drafter_calls_omit_system_prompt` and the AST/anchor guards alongside it.
+- Persona load raises (e.g. missing persona file on a fresh machine): logs `[eng-persona-missing]` and proceeds with `system_prompt=None`. Session runs without SDLC orchestration rules — visible to the dashboard via the structured log prefix.
+- Drafter call sites in `agent/session_completion.py` (Pass 1 + Pass 2 of `_deliver_pipeline_completion`) MUST keep `system_prompt=None`. Tainting drafter turns with engineer orchestration corrupts the user-facing summary. Enforced by `tests/unit/test_session_completion.py::test_drafter_calls_omit_system_prompt` and the AST/anchor guards alongside it.
 
-Dev and Teammate sessions do not have a harness-side persona loader; they keep the default Claude Code protocol.
+Teammate sessions do not take the WORKER persona-loader branch; they keep the default Claude Code protocol (their persona overlay, when set, is loaded via the non-WORKER path).
 
 ### Prompt Cache Stabilization — `--exclude-dynamic-system-prompt-sections` (issue #1227)
 
-PM sessions include a large system prompt (~74K chars) via `--append-system-prompt`. Prior to issue #1227, every PM session paid a 15–20 minute cold-start TTFT because Anthropic's server-side prompt cache could not reuse the prefix — the default system prompt includes per-machine dynamic sections (cwd, env info, memory paths, git status) that differ between machines and sessions.
+Eng sessions include a large system prompt (~74K chars) via `--append-system-prompt`. Prior to issue #1227, every eng session paid a 15–20 minute cold-start TTFT because Anthropic's server-side prompt cache could not reuse the prefix — the default system prompt includes per-machine dynamic sections (cwd, env info, memory paths, git status) that differ between machines and sessions.
 
-**Fix:** `get_response_via_harness()` now injects `--exclude-dynamic-system-prompt-sections` alongside `--append-system-prompt` for every PM session. This flag (built into the `claude` CLI) moves the dynamic sections into the first user message, leaving the system-prompt prefix stable across consecutive sessions on the same machine in the same `working_directory`.
+**Fix:** `get_response_via_harness()` now injects `--exclude-dynamic-system-prompt-sections` alongside `--append-system-prompt` for every session that carries a system prompt. This flag (built into the `claude` CLI) moves the dynamic sections into the first user message, leaving the system-prompt prefix stable across consecutive sessions on the same machine in the same `working_directory`.
 
-**Result:** The second PM session within a 5-minute window (Anthropic's cache TTL) hits the server-side cache and completes its first turn in < 90 seconds instead of 15–20 minutes. Cache hits are logged via `cache_read_input_tokens` in `logs/cold_start_metrics.jsonl`.
+**Result:** The second eng session within a 5-minute window (Anthropic's cache TTL) hits the server-side cache and completes its first turn in < 90 seconds instead of 15–20 minutes. Cache hits are logged via `cache_read_input_tokens` in `logs/cold_start_metrics.jsonl`.
 
 **Ordering invariant:** `--exclude-dynamic-system-prompt-sections` must precede `--append-system-prompt` in the argv. `get_response_via_harness()` enforces this ordering. Tests in `TestGetResponseViaHarnessSystemPrompt::test_exclude_dynamic_sections_present_when_system_prompt` assert the ordering contract.
 
@@ -129,7 +128,7 @@ Every first-turn harness invocation (no `--resume`) writes a JSONL entry to `log
 - Session metadata: `session_id`, `session_type`, `working_dir`, `prompt_chars`, `model`
 - Cache hit indicator: `cache_read_input_tokens` (from `result` event's usage dict)
 
-All writes are best-effort: any failure is silently swallowed. The instrumentation MUST NOT block the worker or the user. See `agent/cold_start_metrics.py` for the full schema and `docs/features/pm-channels.md#cold-start-ttft-mitigation-issue-1227` for the measurement commands.
+All writes are best-effort: any failure is silently swallowed. The instrumentation MUST NOT block the worker or the user. See `agent/cold_start_metrics.py` for the full schema and `docs/features/pm-channels.md#cold-start-ttft-mitigation-issue-1227` for the measurement commands (the eng-session system-prompt wiring is documented there).
 
 ## Harness Command Registry
 
@@ -142,13 +141,13 @@ _HARNESS_COMMANDS = {
 }
 ```
 
-Setting `DEV_SESSION_HARNESS=opencode` routes dev sessions to the opencode binary with no other code changes.
+Setting `DEV_SESSION_HARNESS=opencode` routes sessions to the opencode binary with no other code changes.
 
 ## Configuration
 
 ```bash
 # In .env or shell environment
-DEV_SESSION_HARNESS=sdk          # Default: use Claude Agent SDK (no change)
+DEV_SESSION_HARNESS=sdk          # Historical default name; SDK path no longer exercised
 DEV_SESSION_HARNESS=claude-cli   # Use claude -p CLI harness
 ```
 
@@ -165,37 +164,20 @@ No changes to the `AgentSession` model are needed. Harness selection is purely a
 | `tests/unit/test_harness_streaming.py` | Unit tests covering NDJSON parsing, text accumulation, error paths, health checks (isolation scope only — no send_cb) |
 | `tests/integration/test_harness_no_op_contract.py` | Integration test asserting the no-op delivery contract: output handler called exactly once (final result), never during streaming |
 
-## Post-Completion SDLC Handler (Phase 3)
+## Completion Handling
 
-After `get_response_via_harness()` returns, the worker calls `complete_transcript()` first (which runs `_finalize_parent_sync()` synchronously), then calls `_handle_dev_session_completion()` in `agent/agent_session_queue.py` to handle SDLC lifecycle. This ordering ensures the re-check guard inside `_handle_dev_session_completion()` reads the PM's post-finalization status (ordering invariant fix for issue #987):
+After `get_response_via_harness()` returns, the worker calls `complete_transcript()`, which runs `_finalize_parent_sync()` synchronously. Under the unified eng-session model that is the whole completion story — there is no second post-completion handler call. The old two-call sequence (`complete_transcript()` then a separate `_handle_dev_session_completion()`) and its associated ordering invariant (issue #987) are gone: the dedicated dev-completion handler (`_handle_dev_session_completion`) and the PM-continuation creator (`_create_continuation_pm`) were deleted when the PM and Dev roles merged into one `eng` session that both orchestrates and executes SDLC work in-process.
 
-1. Looks up the parent PM session via `parent_agent_session_id`
-2. Calls `PipelineStateMachine(parent).classify_outcome()` on the result text
-3. Routes to `complete_stage()` or `fail_stage()` based on outcome
-4. Posts a structured stage comment to the tracking GitHub issue via `utils.issue_comments.post_stage_comment`
-5. Steers the parent PM session with a completion summary via `steer_session()`
+## Engineer persona drift guard
 
-All operations are wrapped in try/except — failures never crash the worker.
+The engineer persona overlay is loaded by `load_persona_prompt("engineer")` and runs through a set of startup drift guards in `agent/sdk_client.py` (around lines 940–980). These greps fire `logger.warning` if the per-machine overlay at `~/Desktop/Valor/personas/engineer.md` has fallen out of sync with the in-repo template:
 
-### Issue Number Resolution
+- Missing `CRITIQUE` gate rules.
+- Missing the bucket-#3 workflow-announcement clause (`"Unless you directly instruct me to skip"`).
+- Stale `subagent_type="dev-session"` dispatch strings — eng sessions are now created via `python -m tools.valor_session create --role eng`, not the Agent tool, so any lingering dev-session dispatch in the overlay is flagged for removal.
+- Missing the `Mode 3` parallel-orchestrator playbook.
 
-`_extract_issue_number()` finds the tracking issue from (in priority order):
-1. `SDLC_TRACKING_ISSUE` or `SDLC_ISSUE_NUMBER` env vars
-2. `issues/NNN` pattern in the dev session's `message_text`
-
-## PM Persona Dispatch (Phase 4)
-
-The PM persona at `~/Desktop/Valor/personas/project-manager.md` now dispatches dev sessions via:
-
-```bash
-python -m tools.valor_session create --role dev --slug {slug} --parent "$AGENT_SESSION_ID" --message "..."
-```
-
-instead of `Agent(subagent_type="dev-session", ...)`. The Agent tool dispatch path for dev sessions has been removed. `--slug` is required (or `issue #N` in the message body for auto-derivation) so the worktree is provisioned at create time — see [Session Isolation](session-isolation.md#synthetic-slugs-for-slugless-dev-sessions-issue-1272) for the slugless-fallback safety net.
-
-`sdk_client.py` contains a startup validation in `load_persona_prompt()` that warns if the PM persona still contains Agent tool dispatch (backward-compat guard).
-
-The actionable signal for stale PM personas lives at `agent/sdk_client.py:940-948` (`_load_overlay_drift_guards`): the PM persona overlay is grepped for `subagent_type="dev-session"` at PM session startup, and a warning is logged if found, directing the operator to update `~/Desktop/Valor/personas/project-manager.md`. A stale dispatch that does reach the SDK fails fast with an "unknown subagent" error.
+The `/update` drift check that compares the in-repo template against the private overlay is `scripts/update/persona_drift.py` (`check_pm_persona_drift`, name retained for historical reasons), targeting `config/personas/engineer.md` vs `~/Desktop/Valor/personas/engineer.md`.
 
 ## Hook Cleanup (Phase 5)
 

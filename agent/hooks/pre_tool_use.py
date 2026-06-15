@@ -1,15 +1,4 @@
-"""PreToolUse hook: blocks sensitive writes, enforces PM limits, tracks SDLC stage starts.
-
-PM Bash enforcement
--------------------
-For PM sessions (``SESSION_TYPE=pm``), the Bash branch of ``pre_tool_use_hook``
-restricts tool access to a read-only allowlist defined by
-``_is_pm_allowed_bash``. Any command not on the allowlist -- or any command that
-contains shell metacharacters that could smuggle mutations -- is blocked with a
-``{"decision": "block", "reason": ...}`` response.
-
-The authoritative list of allowed/blocked commands lives in
-``tests/unit/test_pm_session_permissions.py::TestPMBashRestriction``.
+"""PreToolUse hook: blocks sensitive writes, enforces teammate limits, tracks SDLC stage starts.
 
 Teammate write enforcement
 --------------------------
@@ -26,21 +15,21 @@ Bash is NOT blocked for teammate sessions but every command is audit-logged
 with the ``[teammate-audit]`` tag at INFO level. The audit call is wrapped
 in try/except so an audit failure can never block the user's command.
 
-The block message includes the exact ``valor-session create --role dev``
+The block message includes the exact ``valor-session create --role eng``
 command the teammate should propose to the human, so the redirect is
 self-contained and actionable.
 
 Skill tool stage tracking
 -------------------------
-When a PM session calls the Skill tool (e.g., ``Skill(skill="do-build")``),
+When an ENG session calls the Skill tool (e.g., ``Skill(skill="do-build")``),
 ``_handle_skill_tool_start()`` maps the skill name to an SDLC stage via
 ``_SKILL_TO_STAGE`` and calls ``PipelineStateMachine.start_stage()`` on the
 parent session (resolved via the ``AGENT_SESSION_ID`` env var). This marks
 the stage as ``in_progress`` so the worker post-completion handler can later
 classify the outcome and call ``complete_stage()`` or ``fail_stage()``.
 
-Dev session registration is no longer done in this hook. Dev sessions are
-created as ``AgentSession`` records via ``valor_session create --role dev``
+ENG session registration is no longer done in this hook. ENG sessions are
+created as ``AgentSession`` records via ``valor_session create --role eng``
 and self-register their parent linkage via the ``VALOR_PARENT_SESSION_ID``
 env var (see Phase 4+5 of the harness abstraction in
 ``docs/features/harness-abstraction.md``).
@@ -85,13 +74,6 @@ _STAGE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Paths the PM session is allowed to write to.
-# Everything else is blocked for PM sessions.
-PM_ALLOWED_WRITE_PREFIXES = (
-    "docs/",
-    "/docs/",
-)
-
 # Files that should never be written to by the agent
 SENSITIVE_PATHS = frozenset(
     {
@@ -111,26 +93,6 @@ SENSITIVE_FRAGMENTS = (
     "/.ssh/",
     "/private_key",
 )
-
-
-def _is_pm_session() -> bool:
-    """Check if the current session is a PM session."""
-    return os.environ.get("SESSION_TYPE") == SessionType.PM
-
-
-def _is_pm_allowed_write(file_path: str) -> bool:
-    """Check if the PM is allowed to write to this path.
-
-    PM sessions can only write to docs/ directories.
-    """
-    if not file_path:
-        return False
-    normalized = file_path.replace("\\", "/")
-    # Check against allowed prefixes (relative and absolute)
-    for prefix in PM_ALLOWED_WRITE_PREFIXES:
-        if prefix in normalized:
-            return True
-    return False
 
 
 # --- Teammate session write allowlist ------------------------------------------
@@ -314,162 +276,6 @@ def _is_sensitive_path(file_path: str) -> bool:
     return False
 
 
-# --- PM Bash allowlist ---------------------------------------------------------
-#
-# The PM session is allowed to run only these read-only command prefixes. The
-# entire command string (after stripping whitespace and after ``git -C <token>``
-# normalization) must start with one of these prefixes, optionally followed by
-# a space. ``gh api`` is DELIBERATELY excluded because ``gh api ... --method
-# POST`` is a silent mutation vector that would pass a naive prefix check.
-PM_BASH_ALLOWED_PREFIXES: tuple[str, ...] = (
-    # git (read-only verbs)
-    "git status",
-    "git log",
-    "git diff",
-    "git show",
-    "git branch",
-    "git rev-parse",
-    "git ls-remote",
-    "git stash list",
-    "git config --get",
-    "git remote -v",
-    "git remote show",
-    "git rev-list",
-    "git describe",
-    "git shortlog",
-    # gh CLI (view/list verbs only -- gh api deliberately excluded)
-    "gh issue view",
-    "gh issue list",
-    "gh pr view",
-    "gh pr list",
-    "gh pr diff",
-    "gh pr checks",
-    "gh pr status",
-    "gh run view",
-    "gh run list",
-    "gh repo view",
-    # log/file reading
-    "tail logs/",
-    "tail -n",
-    "tail -f logs/",
-    "cat docs/",
-    "cat config/personas/",
-    "cat CLAUDE.md",
-    "head docs/",
-    "head CLAUDE.md",
-    "ls",
-    "pwd",
-    "wc",
-    "file",
-    # tools (read-only subcommands)
-    "python -m tools.valor_session list",
-    "python -m tools.valor_session status",
-    "python -m tools.agent_session_scheduler status",
-    "python -m tools.agent_session_scheduler list",
-    "python -m tools.memory_search search",
-    "python -m tools.memory_search inspect",
-    "python -m tools.sdlc_stage_query",
-    # SDLC tooling via the cwd-independent wrapper. The wrapper resolves
-    # AI_REPO_ROOT and dispatches into tools.sdlc_*; from the PM session's
-    # standpoint these are still read-mostly state queries (record-level
-    # subcommands also need to be PM-callable so guard recording works).
-    "sdlc-tool stage-query",
-    "sdlc-tool dispatch",
-    "sdlc-tool verdict",
-    "sdlc-tool stage-marker",
-    "sdlc-tool session-ensure",
-    "sdlc-tool next-skill",
-    "python -m tools.code_impact_finder",
-    # scripts (read-only checks invoked by the SDLC skills)
-    "python scripts/check_plan_freshness.py",
-    # grep (read-only search within docs/ only; used by the SDLC skill
-    # dispatch fallback to locate plan docs by issue number)
-    "grep -r",
-    "grep -rl",
-    "grep -n",
-    "grep -l",
-    # pytest collect-only (no execution)
-    "pytest --collect-only",
-    # curl to localhost dashboard
-    "curl -s localhost:8500/dashboard.json",
-    "curl localhost:8500/dashboard.json",
-)
-
-# Shell metacharacters that can smuggle mutations past a prefix check.
-# Any of these in a PM Bash command forces a block, even if the command
-# starts with an allowlisted prefix. ``&`` at any position is also rejected
-# because PM sessions have no legitimate reason to background processes.
-_PM_BASH_FORBIDDEN_METACHARS: tuple[str, ...] = (
-    "|",
-    ">",
-    "<",
-    "&&",
-    "||",
-    ";",
-    "`",
-    "$(",
-    "$((",
-    "&",
-)
-
-# Strip a leading ``git -C <token>`` so cross-repo forms like
-# ``git -C "$REPO" status`` normalize to ``git status`` for allowlist
-# purposes. ``<token>`` may be a double-quoted string, single-quoted string,
-# or a single unquoted word. The metacharacter guard MUST run BEFORE this
-# normalization so an injection like ``git -C "$(rm -rf /)" status`` is
-# caught by the guard (via ``$(``) before the path is stripped.
-_GIT_DASH_C_PATTERN = re.compile(r'^git -C (?:"[^"]*"|\'[^\']*\'|\S+)\s+')
-
-
-def _is_pm_allowed_bash(command: str | None) -> bool:
-    """Return True iff *command* is on the PM session's read-only allowlist.
-
-    Contract:
-      - Empty / whitespace-only / ``None`` commands return ``False``.
-      - A metacharacter guard rejects any command containing pipes, redirects,
-        command substitution, ``&&``/``||``/``;``/``&``/backticks. This runs
-        BEFORE the ``git -C`` normalization so shell-injection via the path
-        argument (``git -C "$(rm -rf /)" status``) is blocked by the guard.
-      - After the metacharacter guard, a leading ``git -C <token>`` is
-        stripped once so cross-repo forms like ``git -C "$REPO" status``
-        are treated as ``git status``.
-      - The normalized command must start with (or exactly match) one of
-        ``PM_BASH_ALLOWED_PREFIXES``. A prefix matches if the command equals
-        it or continues with a space.
-
-    Prefix-matching is deliberately simple; regex parsing is a rabbit hole
-    (see the Rabbit Holes section of docs/plans/pm-bash-discipline.md).
-    """
-    if not command or not command.strip():
-        return False
-
-    stripped = command.strip()
-
-    # 1. Metacharacter guard (runs BEFORE normalization to prevent injection
-    #    via the git -C path argument, e.g. `git -C "$(rm -rf /)" status`).
-    for metachar in _PM_BASH_FORBIDDEN_METACHARS:
-        if metachar in stripped:
-            return False
-
-    # 2. Normalize `git -C <token>` to `git ` so cross-repo invocations
-    #    match the bare `git status` / `git log` / ... prefixes.
-    normalized = _GIT_DASH_C_PATTERN.sub("git ", stripped, count=1)
-
-    # 3. Prefix match: the command must equal an allowlist entry, start with
-    #    one followed by a space, or (for path-style prefixes ending in ``/``)
-    #    start with the prefix directly so entries like ``tail logs/`` match
-    #    ``tail logs/bridge.log`` without requiring a space between them.
-    for prefix in PM_BASH_ALLOWED_PREFIXES:
-        if normalized == prefix:
-            return True
-        if normalized.startswith(prefix + " "):
-            return True
-        if prefix.endswith("/") and normalized.startswith(prefix):
-            return True
-
-    return False
-
-
 def _extract_stage_from_prompt(prompt: str) -> str | None:
     """Extract an SDLC stage name from a dev-session prompt.
 
@@ -496,11 +302,11 @@ def _extract_stage_from_prompt(prompt: str) -> str | None:
 
 
 def _start_pipeline_stage(pm_session_id: str, stage: str) -> None:
-    """Start an SDLC stage on the parent PM session's PipelineStateMachine.
+    """Start an SDLC stage on the parent ENG session's PipelineStateMachine.
 
     Loads the parent AgentSession from Redis, creates a PipelineStateMachine,
-    and calls start_stage(). This marks the stage as in_progress so that
-    _handle_dev_session_completion can later find and complete it.
+    and calls start_stage(). Marks the stage as in_progress in the
+    PipelineStateMachine.
 
     Failures are logged but never raised -- this must not block the Agent tool.
     """
@@ -611,32 +417,21 @@ async def pre_tool_use_hook(
                     "Sensitive files (.env, credentials, secrets) must be managed manually."
                 ),
             }
-        # PM sessions can only write to docs/
-        if _is_pm_session() and not _is_pm_allowed_write(file_path):
-            logger.warning(f"[pre_tool_use] PM blocked from writing to: {file_path}")
-            return {
-                "decision": "block",
-                "reason": (
-                    f"Blocked: PM session cannot write to '{file_path}'. "
-                    "PM can only write to docs/ directories. "
-                    "Spawn a dev-session subagent for code changes."
-                ),
-            }
         # Teammate sessions: writes restricted to docs/, .claude/, .github/,
         # wiki/, skills/, top-level meta files, and ~/work-vault/. Source
-        # code paths require spawning a Dev session.
+        # code paths require spawning an ENG session.
         if _is_teammate_session() and not _teammate_is_allowed_write(file_path):
             logger.warning(f"[pre_tool_use] Teammate blocked from writing to: {file_path}")
             return {
                 "decision": "block",
                 "reason": (
                     f"Blocked: teammate sessions cannot write to '{file_path}'. "
-                    "This path looks like source code, which requires a Dev session. "
+                    "This path looks like source code, which requires an ENG session. "
                     "To proceed:\n\n"
-                    "  valor-session create --role dev --slug <slug> "
+                    "  valor-session create --role eng --slug <slug> "
                     '--message "<task description>"\n\n'
                     "Suggest this to the human first and wait for explicit "
-                    "confirmation before spawning the Dev session. Teammates "
+                    "confirmation before spawning the ENG session. Teammates "
                     "may write to: docs/, .claude/, .github/, wiki/, skills/, "
                     "top-level *.md and meta files, and ~/work-vault/."
                 ),
@@ -671,23 +466,6 @@ async def pre_tool_use_hook(
                             "Sensitive files must be managed manually."
                         ),
                     }
-
-        # PM sessions: restrict Bash to the read-only allowlist. Runs AFTER
-        # the sensitive-file check so sensitive-file violations surface with
-        # their specific error message.
-        if _is_pm_session() and not _is_pm_allowed_bash(command):
-            truncated = (command or "")[:200]
-            logger.warning(f"[pre_tool_use] PM blocked from running Bash command: {truncated!r}")
-            return {
-                "decision": "block",
-                "reason": (
-                    f"Blocked: PM session Bash restricted to a read-only allowlist. "
-                    f"Command: {truncated!r}. "
-                    "PM sessions may only run read-only git/gh/tail/cat/python -m tools "
-                    "commands (see agent/hooks/pre_tool_use.py::PM_BASH_ALLOWED_PREFIXES). "
-                    "Any mutation must be dispatched to a dev-session subagent."
-                ),
-            }
 
         # Teammate sessions: Bash is NOT blocked, but every command is
         # audit-logged so misuse is visible after the fact. Fire-and-forget

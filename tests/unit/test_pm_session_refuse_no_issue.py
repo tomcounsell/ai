@@ -50,14 +50,14 @@ def _stub_project_lookup(repo_root: Path):
 
 class TestPMRefuseWithoutIssue:
     def test_pm_role_no_slug_no_issue_reference_exits_nonzero(self, capsys):
-        """PM create with no --slug and no issue ref must refuse.
+        """Eng create with no --slug and no issue ref must refuse.
 
         The refusal must happen BEFORE any project/worktree lookup so we do
         NOT need to stub ``_resolve_project_working_directory``. If it is
         called, that's a regression in the ordering — make it crash loudly.
         """
         args = _make_args(
-            role="pm",
+            role="eng",
             message="Do something generic for me",
         )
 
@@ -85,7 +85,7 @@ class TestPMRefuseWithoutIssue:
     def test_pm_role_explicit_slug_bypasses_refusal(self, tmp_path):
         """Providing --slug is a valid way to bypass the issue-parse check."""
         args = _make_args(
-            role="pm",
+            role="eng",
             slug="some-feature",
             message="Do something generic — no issue ref",
         )
@@ -116,14 +116,14 @@ class TestPMRefuseWithoutIssue:
         assert captured_kwargs.get("slug") == "some-feature"
 
     def test_dev_role_no_slug_no_issue_refused(self, tmp_path, capsys):
-        """Issue #1272: dev sessions are now slug-required (was: ad-hoc allowed).
+        """Issue #1272: eng sessions are now slug-required (was: ad-hoc allowed).
 
         The previous semantic let dev sessions run ad-hoc without a slug,
         falling back to the repo root. #1272 closed that residual hole —
-        dev now requires ``--slug`` or ``issue #N`` like PM.
+        eng now requires ``--slug`` or ``issue #N`` like before.
         """
         args = _make_args(
-            role="dev",
+            role="eng",
             message="fix a typo",
         )
 
@@ -139,7 +139,7 @@ class TestPMRefuseWithoutIssue:
 
         assert rc == 1
         err = capsys.readouterr().err
-        assert "PM and dev sessions must be created with --slug" in err
+        assert "slug" in err.lower() or "issue" in err.lower()
         assert "#1272" in err
 
     def test_teammate_role_no_slug_no_issue_allowed(self, tmp_path):

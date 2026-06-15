@@ -56,8 +56,8 @@ class TestSessionTypeEnvVarPattern:
 class TestCreateLocalSessionTypeKwarg:
     """AgentSession.create_local() should store whatever session_type is passed."""
 
-    def test_no_session_type_kwarg_defaults_to_dev(self):
-        """When session_type kwarg is absent (env var was None), session_type is 'dev'."""
+    def test_no_session_type_kwarg_defaults_to_eng(self):
+        """When session_type kwarg is absent (env var was None), session_type is 'eng'."""
         with patch("models.agent_session.AgentSession.save"):
             from models.agent_session import AgentSession
 
@@ -69,7 +69,7 @@ class TestCreateLocalSessionTypeKwarg:
                 **({"session_type": session_type_override} if session_type_override else {}),
             )
 
-            assert session.session_type == "dev"
+            assert session.session_type == "eng"
 
     def test_session_type_teammate_stored(self):
         """When session_type='teammate' is passed (from SESSION_TYPE env var), session stores it."""
@@ -86,35 +86,35 @@ class TestCreateLocalSessionTypeKwarg:
 
             assert session.session_type == "teammate"
 
-    def test_session_type_pm_stored(self):
-        """When session_type='pm' is passed (from SESSION_TYPE env var), session stores it."""
+    def test_session_type_eng_stored(self):
+        """When session_type='eng' is passed (from SESSION_TYPE env var), session stores it."""
         with patch("models.agent_session.AgentSession.save"):
             from models.agent_session import AgentSession
 
-            session_type_override = "pm"
+            session_type_override = "eng"
             session = AgentSession.create_local(
-                session_id="local-pm-def",
+                session_id="local-eng-def",
                 project_key="dm",
                 working_dir="/tmp",
                 **({"session_type": session_type_override} if session_type_override else {}),
             )
 
-            assert session.session_type == "pm"
+            assert session.session_type == "eng"
 
-    def test_session_type_dev_explicit_stored(self):
-        """When SESSION_TYPE=dev is explicitly set, session stores 'dev' explicitly."""
+    def test_session_type_eng_explicit_stored(self):
+        """When SESSION_TYPE=eng is explicitly set, session stores 'eng' explicitly."""
         with patch("models.agent_session.AgentSession.save"):
             from models.agent_session import AgentSession
 
-            session_type_override = "dev"
+            session_type_override = "eng"
             session = AgentSession.create_local(
-                session_id="local-dev-def",
+                session_id="local-eng-def2",
                 project_key="dm",
                 working_dir="/tmp",
                 **({"session_type": session_type_override} if session_type_override else {}),
             )
 
-            assert session.session_type == "dev"
+            assert session.session_type == "eng"
 
 
 # ---------------------------------------------------------------------------

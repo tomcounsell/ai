@@ -68,7 +68,7 @@ def _make_pm_session(session_id: str = "pm-session-worker-bypass"):
     """
     return SimpleNamespace(
         session_id=session_id,
-        session_type="pm",
+        session_type="eng",
         session_mode="pm",
     )
 

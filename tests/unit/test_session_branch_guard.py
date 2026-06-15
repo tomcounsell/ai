@@ -100,22 +100,28 @@ def test_main_branch_in_main_checkout_passes(temp_repo: Path) -> None:
     assert "#1288" not in result.stderr
 
 
-def test_session_branch_in_main_checkout_blocks(temp_repo: Path) -> None:
-    """`session/<slug>` from main checkout (no owning worktree) must block."""
+def test_session_branch_in_main_checkout_no_worktree_allowed(temp_repo: Path) -> None:
+    """`session/<slug>` from main checkout when no owning worktree exists must be allowed (#1620).
+
+    Option (a) from #1620: if no `.worktrees/<slug>/` exists, the current
+    checkout is the sole workspace for this slug — nothing to contaminate —
+    so the commit is allowed with an informational note on stderr.
+    """
     _git(temp_repo, "checkout", "-q", "-b", "session/test-feature")
     # Re-stage the benign file after the branch swap.
     _stage_benign_text(temp_repo)
 
     result = _run_hook(temp_repo)
-    assert result.returncode == 1, (
-        f"Hook should have blocked on session branch from main checkout.\n"
+    assert result.returncode == 0, (
+        f"Hook should have allowed session branch commit from main checkout (no worktree).\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    assert "#1288" in result.stderr, "Error message must reference issue #1288"
+    # Informational note should appear on stderr (not a hard block)
+    assert "#1288" in result.stderr, "Informational note must reference issue #1288"
     assert ".worktrees/test-feature" in result.stderr, (
-        "Error message must point at the expected worktree path"
+        "Informational note must mention the expected worktree path"
     )
-    assert "COMMIT BLOCKED" in result.stderr
+    assert "Allowing the commit" in result.stderr
 
 
 def test_session_branch_in_owning_worktree_passes(temp_repo: Path) -> None:

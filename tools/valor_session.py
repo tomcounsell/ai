@@ -3,10 +3,10 @@
 Session management CLI for AgentSession — create, steer, monitor, and kill sessions.
 
 Usage:
-    valor-session create --role pm --chat-id 123 --message "Plan issue #735"
-    valor-session create --role dev --message "Fix the bug" --parent abc123
-    valor-session create --role dev --model sonnet --message "Build feature X" --parent abc123
-    valor-session create --role pm --message "..." --project-key valor
+    valor-session create --role eng --chat-id 123 --message "Plan issue #735"
+    valor-session create --role eng --message "Fix the bug" --parent abc123
+    valor-session create --role eng --model sonnet --message "Build feature X" --parent abc123
+    valor-session create --role eng --message "..." --project-key valor
     valor-session resume --id abc123 --message "Fix: add missing validation"
     valor-session release --pr 900
     valor-session steer --id abc123 --message "Stop after critique stage"
@@ -16,7 +16,7 @@ Usage:
     valor-session children --id abc123
     valor-session list
     valor-session list --status running
-    valor-session list --role pm
+    valor-session list --role eng
     valor-session kill --id abc123
     valor-session kill --all
 
@@ -364,11 +364,11 @@ def cmd_create(args: argparse.Namespace) -> int:
     ``.worktrees/{slug}/`` suffix). Callers who need a different repo pass a
     different ``--project-key``.
 
-    Slug requirement: both ``--role pm`` (issue #1109) and ``--role dev``
-    (issue #1272) require a slug — either via ``--slug <slug>`` or by
-    including ``issue #N`` in the message so the slug auto-derives to
-    ``sdlc-N``. Slugless invocations exit 1 with a stderr error. This
-    prevents the session from inheriting the worker's current branch state
+    Slug requirement: ``--role eng`` (issues #1109, #1272) requires a slug —
+    either via ``--slug <slug>`` or by including ``issue #N`` in the message
+    so the slug auto-derives to ``sdlc-N``. Slugless invocations exit 1 with
+    a stderr error. This prevents the session from inheriting the worker's
+    current branch state
     and ensures dev sessions get worktree isolation.
     """
     _load_env()
@@ -381,11 +381,10 @@ def cmd_create(args: argparse.Namespace) -> int:
         from config.enums import SessionType
 
         _role_to_session_type = {
-            "pm": SessionType.PM,
-            "dev": SessionType.DEV,
+            "eng": SessionType.ENG,
             "teammate": SessionType.TEAMMATE,
         }
-        role = args.role or "pm"
+        role = args.role or "eng"
         if role not in _role_to_session_type:
             raise ValueError(
                 f"Unknown --role value: {role!r}. Allowed values: {sorted(_role_to_session_type)}"
@@ -446,13 +445,15 @@ def cmd_create(args: argparse.Namespace) -> int:
         # a project root or touching the filesystem.
         # ------------------------------------------------------------------
         slug = getattr(args, "slug", None)
-        # Issue #1272: dev sessions also require a slug. The previous behavior
-        # accepted slugless ``--role dev`` and let the worker fall back to the
-        # main checkout — the residual hole that #887 left open. Apply the
-        # same auto-derive-or-reject path that PM uses; a synthetic slug is
-        # still allocated downstream by the worker if a slugless dev session
-        # somehow reaches the executor (future programmatic spawn site).
-        if not slug and role in ("pm", "dev"):
+        # Issue #1272: eng sessions also require a slug. An earlier behavior
+        # accepted slugless non-teammate roles and let the worker fall back to
+        # the main checkout — the residual hole that #887 left open. The
+        # argparse layer now rejects ``dev``/``pm`` outright, so the only
+        # non-teammate role reaching here is ``eng``; apply the
+        # auto-derive-or-reject path, and a synthetic slug is still allocated
+        # downstream by the worker if a slugless eng session somehow reaches
+        # the executor (future programmatic spawn site).
+        if not slug and role != "teammate":
             derived = _derive_slug_from_message(message)
             if derived:
                 slug = derived
@@ -462,7 +463,7 @@ def cmd_create(args: argparse.Namespace) -> int:
                 )
             else:
                 print(
-                    "Error: PM and dev sessions must be created with --slug <slug> "
+                    "Error: Eng sessions must be created with --slug <slug> "
                     "or include 'issue #N' in the message so a worktree can be "
                     "provisioned. Without a slug the session would inherit the "
                     "worker's current branch state (see issues #1109, #1272).",
@@ -1284,9 +1285,9 @@ def main() -> int:
     create_parser.add_argument(
         "--role",
         "-r",
-        default="pm",
-        choices=["pm", "dev", "teammate"],
-        help="Session role/type (default: pm)",
+        default="eng",
+        choices=["eng", "teammate"],
+        help="Session role/type (default: eng)",
     )
     create_parser.add_argument(
         "--message", "-m", required=True, help="Initial message for the session"

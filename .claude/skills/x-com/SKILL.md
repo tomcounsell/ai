@@ -42,7 +42,7 @@ User must be logged into X in that Chrome session.
 X driving real Chrome must be **serialized** against other real-Chrome sessions. Bridge-spawned sessions get the flag automatically via `agent.byob_skill_triggers` (the registry includes X triggers). CLI-spawned sessions must pass `--needs-real-chrome`:
 
 ```bash
-valor-session create --role dev --project-key valor --needs-real-chrome --message "check my X DMs"
+valor-session create --role eng --project-key valor --needs-real-chrome --message "check my X DMs"
 ```
 
 ## Tab discovery (do this first)

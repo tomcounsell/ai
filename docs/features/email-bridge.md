@@ -120,9 +120,9 @@ Without **either** path, a session with `transport=email` would still write to `
 
 Email-spawned sessions resolve their persona on the harness path in `agent/session_executor.py`, not in `agent/sdk_client.py::_resolve_persona` (the SDK path is dead code — `docs/plans/cli_harness_full_migration.md`). The resolution order at the harness call site is:
 
-1. `_session_type == SessionType.PM` → load `project-manager` overlay (source = `session_type=pm`)
+1. `_session_type == SessionType.ENG` → load the `engineer` overlay (source = `session_type=eng`). Eng sessions resolve to `AccessLevel.WORKER`, so the harness loads the engineer system prompt via `load_eng_system_prompt()` rather than a persona overlay file.
 2. `extra_context["transport"] == "email"` **or** `project["email"]["persona"]` is set:
-   - If `project["email"]["persona"]` is set → load that overlay with `teammate` as fallback (source = `project.email.persona`)
+   - If `project["email"]["persona"]` is set → load that overlay with `teammate` as fallback (source = `project.email.persona`). This is how an email override resolves `customer-service`.
    - Otherwise → load `teammate` overlay (source = `email-default`)
 3. `_session_type == SessionType.TEAMMATE` → load `teammate` overlay (source = `session_type=teammate`)
 4. Otherwise → no overlay (source = `none`); the harness runs in default Claude Code voice

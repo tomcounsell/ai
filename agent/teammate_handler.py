@@ -64,7 +64,7 @@ def build_teammate_instructions() -> str:
         "writes to source code (anything outside `docs/`, `.claude/`, `.github/`, `wiki/`, "
         "`skills/`, top-level meta files, and `~/work-vault/`) are blocked.\n"
         "- If you hit a block, suggest spawning a Dev session to the human via: "
-        '`valor-session create --role dev --slug <slug> --message "<task>"`. '
+        '`valor-session create --role eng --slug <slug> --message "<task>"`. '
         "Don't spawn it unilaterally — get human confirmation first.\n"
         "- Bash is open. Every Bash command is audit-logged with the `[teammate-audit]` "
         "tag — assume your shell activity is visible after the fact.\n"
@@ -85,7 +85,7 @@ def build_teammate_instructions() -> str:
         "- Do NOT apologize or treat the block as a permanent stop. The block is a "
         "routing decision, not a refusal.\n"
         "- Your job on a block is to (1) restate what the human asked for in concrete "
-        "terms, (2) propose the exact `valor-session create --role dev --slug <slug> "
+        "terms, (2) propose the exact `valor-session create --role eng --slug <slug> "
         "--message \"<task>\"` command you'd run, (3) wait for the human's go-ahead. "
         "The block message itself contains the command template — surface it to the "
         "human, don't swallow it.\n\n"

@@ -874,9 +874,9 @@ async def _process_inbound_email(
         )
 
     # Derive session type from email.persona (default: teammate for human-facing email)
-    # customer-service maps to TEAMMATE so it never orchestrates dev sessions
-    _non_pm_personas = ("teammate", "customer-service")
-    session_type = SessionType.TEAMMATE if email_persona in _non_pm_personas else SessionType.PM
+    # customer-service maps to TEAMMATE so it never orchestrates eng sessions
+    _non_eng_personas = ("teammate", "customer-service")
+    session_type = SessionType.TEAMMATE if email_persona in _non_eng_personas else SessionType.ENG
 
     working_dir = project.get("working_directory") or config.get("defaults", {}).get(
         "working_directory", "~/src"

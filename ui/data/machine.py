@@ -50,9 +50,8 @@ def get_machine_projects() -> list[dict]:
     from config.enums import PersonaType
 
     persona_order = {
-        PersonaType.PROJECT_MANAGER: 0,
-        PersonaType.DEVELOPER: 1,
-        PersonaType.TEAMMATE: 2,
+        PersonaType.ENGINEER: 0,
+        PersonaType.TEAMMATE: 1,
     }
     rows.sort(key=lambda r: (r["project_name"].lower(), persona_order.get(r["persona"], 99)))
     return rows

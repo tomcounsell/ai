@@ -90,9 +90,9 @@ def _steer_child(session_id: str, message: str, parent_id: str, abort: bool) -> 
         print(f"Error: session '{session_id}' not found", file=sys.stderr)
         return 1
 
-    # Validate it is a Dev session
-    if not child.is_dev:
-        print(f"Error: session '{session_id}' is not a Dev session", file=sys.stderr)
+    # Validate it is an Eng session
+    if not child.is_eng:
+        print(f"Error: session '{session_id}' is not an Eng session", file=sys.stderr)
         return 1
 
     # Validate parent-child relationship

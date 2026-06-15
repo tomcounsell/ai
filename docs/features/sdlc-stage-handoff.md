@@ -10,7 +10,7 @@ Without stage handoff, each Dev session starts with only the plan document and i
 
 ## How It Works
 
-Two execution paths write stage tracking records: the **worker post-completion path** (for Dev sessions created via `valor_session create --role dev`) and the **Skill path** (for PM Skill tool calls). Both write to `AgentSession.stage_states` via `PipelineStateMachine`, enabling the dashboard to show real progress for all session types.
+Two execution paths write stage tracking records: the **worker post-completion path** (for eng sessions created via `valor_session create --role eng`) and the **Skill path** (for PM Skill tool calls). Both write to `AgentSession.stage_states` via `PipelineStateMachine`, enabling the dashboard to show real progress for all session types.
 
 ### Skill Tool Path (PM Sessions)
 
@@ -46,19 +46,19 @@ _SKILL_TO_STAGE = {
 
 All errors are swallowed with `logger.warning` — hooks never crash the PM session.
 
-### On Stage Completion (Worker Post-Completion Handler — Dev-Session Path)
+### On Stage Completion (In-Session Skill Hook)
 
-When a Dev session completes (via SDK or CLI harness), the worker calls `_handle_dev_session_completion()` in `agent/session_completion.py`:
+Stage completion is recorded *in-session* when an SDLC skill returns, not by any worker post-completion handler. The `post_tool_use` hook (`agent/hooks/post_tool_use.py`) detects the returning `Skill` tool call and calls `_complete_pipeline_stage(session_id)`:
 
-1. Looks up the parent PM session via `parent_agent_session_id`
-2. Resolves the tracking issue number from `SDLC_TRACKING_ISSUE` env var, `SDLC_ISSUE_NUMBER` env var, or `issues/NNN` pattern in the session message text
-3. Calls `classify_outcome(stage, None, result)` on the PipelineStateMachine to determine success/fail/ambiguous
-4. Routes to `complete_stage()` (success or ambiguous) or `fail_stage()` (fail or partial) based on the classification
-5. Calls `post_stage_comment()` from `utils/issue_comments.py` to post a structured markdown comment
-6. Steers the parent PM session via `steer_session()` with stage name and outcome summary
-7. All operations are wrapped in try/except -- failures never crash the worker
+1. Loads the Eng session's `AgentSession` from Redis by `session_id`
+2. Builds a `PipelineStateMachine` and reads the current `in_progress` stage via `current_stage()`
+3. Calls `complete_stage(stage)` to advance the pipeline state machine
+4. Avoids storing state between the pre and post hooks — the in_progress stage is read back from Redis directly
+5. All operations are wrapped in try/except — failures are logged and never crash the session
 
-SDLC stage tracking on Dev-session completion lives entirely in `_handle_dev_session_completion()`. The original SDK `subagent_stop_hook` (`agent/hooks/subagent_stop.py`) was stripped to logging-only in the Phase 5 harness migration and then deleted in issue #1024.
+Only `complete_stage()` fires from this hook. `classify_outcome()` and `fail_stage()` remain defined in `agent/pipeline_state.py` but have no production caller on the in-session hook path.
+
+The earlier SDK `SubagentStop` hook (`agent/hooks/subagent_stop.py`) was stripped to logging-only in the Phase 5 harness migration and then deleted in issue #1024. The worker post-completion handler that briefly carried this logic afterward was removed entirely when the PM and Dev session roles merged into the single `eng` role (PR #1691); stage marking now lives solely in the in-session pre/post tool-use Skill hooks.
 
 ### On Stage Start (PM session Prompt Enrichment)
 
@@ -147,16 +147,20 @@ Utility module with four functions:
 
 All GitHub interactions use the `gh` CLI via subprocess with a 10-second timeout. No new Python dependencies.
 
-### `agent/session_completion.py`
+### `agent/hooks/pre_tool_use.py` and `agent/hooks/post_tool_use.py`
 
-Contains the worker post-completion SDLC handling functions (re-exported from `agent_session_queue.py`):
+The in-session Skill hooks that drive stage tracking:
 
-- `_extract_issue_number(session, agent_session)` -- Resolves the tracking issue number from environment variables (`SDLC_TRACKING_ISSUE`, `SDLC_ISSUE_NUMBER`) or `issues/NNN` pattern in session message text. Returns int or None.
-- `_handle_dev_session_completion(session, agent_session, result)` -- Called after `complete_transcript()` runs (which runs `_finalize_parent_sync()` synchronously). Classifies outcome, updates PipelineStateMachine, posts GitHub stage comment, and steers parent PM session. Re-checks parent status after steer — if terminal at re-check, creates a continuation PM (ordering invariant fix, issue #987). Path B: if `agent_session=None`, falls back to `session.parent_agent_session_id` instead of returning silently. All operations non-fatal.
+- `pre_tool_use.py::_start_pipeline_stage(session_id, stage)` -- Invoked from `_handle_skill_tool_start()` when an SDLC `/do-*` skill begins. Looks the skill up in `_SKILL_TO_STAGE` and calls `PipelineStateMachine.start_stage()` to mark the stage `in_progress`. No-ops for non-SDLC skills.
+- `post_tool_use.py::_complete_pipeline_stage(session_id)` -- Invoked when the Skill tool returns. Loads the `AgentSession`, reads the `in_progress` stage via `current_stage()`, and calls `complete_stage()`. Only `complete_stage()` is wired on this path. All operations non-fatal.
+
+### `agent/pipeline_state.py`
+
+Defines the `PipelineStateMachine`. `start_stage()` and `complete_stage()` are the methods the hooks call. `classify_outcome()` and `fail_stage()` remain defined here but are currently orphaned — no production code path calls them since the worker post-completion handler was removed.
 
 ### `agent/hooks/subagent_stop.py` (removed)
 
-Previously the SDK `SubagentStop` hook. All SDLC stage tracking logic (`_register_dev_session_completion`, `_record_stage_on_parent`, `_post_stage_comment_on_completion`) was moved to the worker post-completion handler in Phase 5 cleanup. The file itself was deleted in issue #1024 once the broader SDK execution path was confirmed unreachable.
+Previously the SDK `SubagentStop` hook. It was stripped to logging-only in the Phase 5 harness migration and the file itself was deleted in issue #1024 once the broader SDK execution path was confirmed unreachable.
 
 ### `agent/sdk_client.py`
 

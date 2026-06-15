@@ -2,7 +2,7 @@
 
 ## Overview
 
-Chat mode resolution determines how the system handles messages from each Telegram group: whether to spawn a Dev session (full permissions), a PM session (PM orchestration), or treat the group as a passive teammate listener. Previously, this was inferred solely from chat title prefixes (`Dev:`, `PM:`). Config-driven chat mode adds an explicit `persona` field in `projects.json` group configuration, giving operators direct control over per-group routing without relying on naming conventions.
+Chat mode resolution determines how the system handles messages from each Telegram group: whether to spawn an Eng session (full permissions, handles both SDLC work and conversational responses) or treat the group as a passive teammate listener. Previously, this was inferred solely from chat title prefixes (the single `Eng:` prefix today). Config-driven chat mode adds an explicit `persona` field in `projects.json` group configuration, giving operators direct control over per-group routing without relying on naming conventions.
 
 ## Config Schema
 
@@ -14,8 +14,7 @@ The `persona` field lives inside the `telegram.groups` dictionary of each projec
     "my-project": {
       "telegram": {
         "groups": {
-          "Dev: MyProject": {"persona": "developer"},
-          "PM: MyProject": {"persona": "project-manager"},
+          "Eng: MyProject": {"persona": "engineer"},
           "Team: MyProject": {"persona": "teammate"}
         },
         "mention_triggers": ["@valor", "valor"]
@@ -29,20 +28,20 @@ The `persona` field lives inside the `telegram.groups` dictionary of each projec
 
 | Persona | Resolved Persona | Session Type | Behavior |
 |---------|-----------------|--------------|----------|
-| `"developer"` | `PersonaType.DEVELOPER` | Dev session | Full permissions, dev persona, direct execution |
-| `"project-manager"` | `PersonaType.PROJECT_MANAGER` | PM session | PM persona, SDLC orchestration, spawns Dev sessions |
-| `"teammate"` | `PersonaType.TEAMMATE` | PM session | Passive listener -- only responds on @mention or reply-to-Valor |
+| `"engineer"` | `PersonaType.ENGINEER` | Eng session | Full permissions, engineer persona, handles both SDLC work and conversational responses |
+| `"teammate"` | `PersonaType.TEAMMATE` | Teammate session | Passive listener -- only responds on @mention or reply-to-Valor |
+| `"customer-service"` | `PersonaType.CUSTOMER_SERVICE` | Teammate session | Action-oriented, no code writes; used by the email-spawned customer-service override |
 
-The mapping is handled by `resolve_persona()` in `bridge/routing.py`, which returns a `PersonaType` directly.
+`PersonaType` is defined in `config/enums.py` (`ENGINEER`, `TEAMMATE`, `CUSTOMER_SERVICE`). The group-config mapping is handled by `resolve_persona()` in `bridge/routing.py`, which returns a `PersonaType` directly. Note that `customer-service` is not selected via the Telegram `groups` persona field today -- it is resolved by `agent/sdk_client.py` from an `email.persona` override for email-transport teammate sessions.
 
 ## Mode Resolution Order
 
 The `resolve_persona()` function in `bridge/routing.py` uses the following priority chain:
 
-1. **DMs** -- always resolve to `PersonaType.TEAMMATE` (direct teammate mode, no SDLC overhead)
+1. **DMs** -- use the project's `telegram.dm_persona` if configured (parsed as a `PersonaType`), otherwise default to `PersonaType.TEAMMATE` (direct teammate mode, no SDLC overhead)
 2. **Config persona** -- if the project has a `telegram.groups` dictionary entry matching the chat title with a valid `persona` field, return the corresponding `PersonaType`
-3. **Title prefix fallback** -- if no persona is configured, `"Dev:"` prefix resolves to `PersonaType.DEVELOPER`, `"PM:"` prefix resolves to `PersonaType.PROJECT_MANAGER`
-4. **None (unconfigured)** -- no persona determined; caller falls through to existing behavior (intent classifier for PM sessions, respond_to_all/mention logic for response decisions)
+3. **Title prefix fallback** -- if no persona is configured, the `"Eng:"` prefix resolves to `PersonaType.ENGINEER`
+4. **None (unconfigured)** -- no persona determined; caller falls through to existing behavior (respond_to_all/mention logic for response decisions)
 
 This layered approach ensures full backward compatibility: existing groups that rely on title prefixes continue working without any configuration changes.
 
@@ -64,17 +63,18 @@ This is useful for groups where the agent should observe and learn from conversa
 
 The bridge calls `resolve_persona()` when determining session type for a new session:
 
-- If persona is `PersonaType.DEVELOPER` -> creates a Dev session (session_type="dev")
-- **pm or unconfigured** -> creates a PM session (session_type="pm"). The PM session decides whether to spawn a Dev session.
-- **teammate** -> creates a Teammate session (session_type="teammate"). Handles informational queries directly.
+- If persona is `PersonaType.ENGINEER` (or unconfigured) -> creates an Eng session (`session_type="eng"`). The Eng session handles both SDLC work and conversational responses with full permissions.
+- If persona is `PersonaType.TEAMMATE` -> creates a Teammate session (`session_type="teammate"`). Handles informational queries directly, restricted writes.
 
 ### SDK Client (`agent/sdk_client.py`)
 
-The SDK client calls `resolve_persona()` inside `get_agent_response_sdk()` when routing PM session intent:
+`resolve_persona_and_access` in `agent/sdk_client.py` maps the resolved `session_type` to a `(PersonaType, AccessLevel, persona_override)` tuple:
 
-- If persona is `PersonaType.TEAMMATE` -> skips the Haiku intent classifier, sets `session_mode=PersonaType.TEAMMATE` directly (reducing latency and cost)
-- If persona is `PersonaType.PROJECT_MANAGER` or `PersonaType.DEVELOPER` -> skips the classifier, uses the known persona
-- If persona is `None` -> falls through to the existing intent classifier
+- `SessionType.ENG` -> `(PersonaType.ENGINEER, AccessLevel.WORKER, None)` — full permissions, engineer persona
+- `SessionType.TEAMMATE` (default) -> `(PersonaType.TEAMMATE, AccessLevel.TEAMMATE, None)` — conversational, no rails
+- `SessionType.TEAMMATE` with `transport == "email"` and a project `email.persona` override -> parses that override (e.g. `customer-service` -> `PersonaType.CUSTOMER_SERVICE`)
+
+For teammate routing, the response-decision path in `bridge/routing.py::should_respond_async()` calls `resolve_persona()` directly: a `PersonaType.TEAMMATE` group short-circuits to mention/reply-only without invoking the Ollama classifier.
 
 ### Response Decision (`bridge/routing.py::should_respond_async()`)
 

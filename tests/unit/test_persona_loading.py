@@ -6,10 +6,10 @@ Tests:
 - Fallback to in-repo overlay when Desktop/Valor overlay is missing
 - Missing segments raise FileNotFoundError (no SOUL.md fallback)
 - _resolve_persona() correctly maps project config to persona names
-- load_system_prompt() uses developer persona with WORKER_RULES
-- load_pm_system_prompt() uses project-manager persona
+- load_system_prompt() uses engineer persona with WORKER_RULES
+- load_eng_system_prompt() uses engineer persona with work-vault CLAUDE.md
 - _resolve_overlay_path() checks Desktop/Valor first, then config/personas/
-- PM overlay loader emits WARN when missing the workflow-announcement rule (#1189)
+- Engineer overlay loader emits WARN when missing the workflow-announcement rule (#1189)
 """
 
 import json
@@ -28,9 +28,9 @@ from agent.sdk_client import (
     _load_persona_overlay_with_log,
     _resolve_overlay_path,
     _resolve_persona,
+    load_eng_system_prompt,
     load_identity,
     load_persona_prompt,
-    load_pm_system_prompt,
     load_system_prompt,
 )
 
@@ -39,9 +39,10 @@ class TestResolveOverlayPath:
     """Tests for _resolve_overlay_path()."""
 
     def test_prefers_desktop_valor_when_exists(self):
-        """Should return ~/Desktop/Valor/personas/ path when it exists."""
-        path = _resolve_overlay_path("developer")
-        if PERSONAS_OVERLAY_DIR.exists():
+        """Should return ~/Desktop/Valor/personas/ path when the overlay file exists there."""
+        path = _resolve_overlay_path("engineer")
+        private_overlay = PERSONAS_OVERLAY_DIR / "engineer.md"
+        if private_overlay.exists():
             assert path.parent == PERSONAS_OVERLAY_DIR
         else:
             assert path.parent == PERSONAS_BASE_DIR
@@ -50,13 +51,13 @@ class TestResolveOverlayPath:
         """Should fall back to config/personas/ when ~/Desktop/Valor/ doesn't exist."""
         fake_dir = Path("/nonexistent/path/personas")
         with patch("agent.sdk_client.PERSONAS_OVERLAY_DIR", fake_dir):
-            path = _resolve_overlay_path("developer")
+            path = _resolve_overlay_path("engineer")
             assert path.parent == PERSONAS_BASE_DIR
 
     def test_returns_correct_filename(self):
         """Should use {persona}.md as the filename."""
-        path = _resolve_overlay_path("project-manager")
-        assert path.name == "project-manager.md"
+        path = _resolve_overlay_path("engineer")
+        assert path.name == "engineer.md"
 
 
 class TestLoadIdentity:
@@ -139,17 +140,14 @@ class TestLoadPersonaPrompt:
 
         overlay_dir = tmp_path / "personas"
         overlay_dir.mkdir()
-        (overlay_dir / "developer.md").write_text(
-            "# Developer Persona\n\n"
+        (overlay_dir / "engineer.md").write_text(
+            "# Engineer Persona\n\n"
             "## Permissions\n\nFull System Access granted. You have unrestricted "
             "read/write access to all project files and systems.\n\n"
-            "## Guidelines\n\nFocus on shipping quality code with proper testing."
-        )
-        (overlay_dir / "project-manager.md").write_text(
-            "# Project Manager Persona\n\n"
-            "## Responsibilities\n\nTriage incoming work requests and prioritize "
-            "based on impact and urgency.\n\n"
-            "## Guidelines\n\nCoordinate work across team members effectively."
+            "## Guidelines\n\nFocus on shipping quality code with proper testing.\n\n"
+            "Unless you directly instruct me to skip our standard workflow, "
+            "we need to file an issue to plan all improvements.\n\n"
+            "Mode 3: parallel orchestrator\n\nmerge_authorized bypass"
         )
         (overlay_dir / "teammate.md").write_text(
             "# Teammate Persona\n\n"
@@ -159,17 +157,11 @@ class TestLoadPersonaPrompt:
         )
         monkeypatch.setattr(sdk_mod, "PERSONAS_OVERLAY_DIR", overlay_dir)
 
-    def test_developer_persona_loads(self):
-        """Developer persona should include segments + developer overlay."""
-        prompt = load_persona_prompt("developer")
+    def test_engineer_persona_loads(self):
+        """Engineer persona should include segments + engineer overlay."""
+        prompt = load_persona_prompt("engineer")
         assert "Valor" in prompt
         assert "Full System Access" in prompt
-
-    def test_project_manager_persona_loads(self):
-        """Project-manager persona should include segments + PM overlay."""
-        prompt = load_persona_prompt("project-manager")
-        assert "Valor" in prompt
-        assert "Triage" in prompt
 
     def test_teammate_persona_loads(self):
         """Teammate persona should include segments + teammate overlay."""
@@ -179,11 +171,11 @@ class TestLoadPersonaPrompt:
 
     def test_separator_between_segments_and_overlay(self):
         """Segments and overlay should be separated by ---."""
-        prompt = load_persona_prompt("developer")
+        prompt = load_persona_prompt("engineer")
         assert "\n\n---\n\n" in prompt
 
-    def test_nonexistent_persona_falls_back_to_developer(self):
-        """Unknown persona name should fall back to developer overlay."""
+    def test_nonexistent_persona_falls_back_to_engineer(self):
+        """Unknown persona name should fall back to engineer overlay."""
         prompt = load_persona_prompt("nonexistent")
         assert "Full System Access" in prompt
 
@@ -198,7 +190,7 @@ class TestLoadPersonaPrompt:
                 patch("agent.sdk_client.PERSONAS_BASE_DIR", Path(tmpdir)),
             ):
                 with pytest.raises(FileNotFoundError, match="Persona overlay"):
-                    load_persona_prompt("developer")
+                    load_persona_prompt("engineer")
 
     def test_segment_files_exist_in_repo(self):
         """All segment files should exist in config/personas/segments/."""
@@ -223,14 +215,14 @@ class TestLoadPersonaPrompt:
 
     def test_identity_fields_injected(self):
         """Identity fields should be injected into segment content."""
-        prompt = load_persona_prompt("developer")
+        prompt = load_persona_prompt("engineer")
         assert "{{identity." not in prompt
         assert "Valor Engels" in prompt
         assert "valor@yuda.me" in prompt
 
     def test_overlay_files_exist(self):
         """All persona overlay files should exist."""
-        for name in ["developer.md", "project-manager.md", "teammate.md"]:
+        for name in ["engineer.md", "teammate.md"]:
             path = _resolve_overlay_path(name.replace(".md", ""))
             assert path.exists(), f"{name} not found at {path}"
             content = path.read_text()
@@ -245,7 +237,7 @@ class TestLoadPersonaPrompt:
 
     def test_segments_assembled_in_order(self):
         """Segments should be assembled in manifest order."""
-        prompt = load_persona_prompt("developer")
+        prompt = load_persona_prompt("engineer")
         identity_pos = prompt.find("Who I Am")
         work_pos = prompt.find("How I Work")
         tools_pos = prompt.find("MCP Servers")
@@ -257,7 +249,9 @@ class TestResolvePersona:
 
     def test_dm_no_project(self):
         """DM with no project should use teammate."""
-        assert _resolve_persona(None, None, is_dm=True) == "teammate"
+        from config.enums import PersonaType
+
+        assert _resolve_persona(None, None, is_dm=True) == PersonaType.TEAMMATE
 
     def test_dm_with_project_config(self):
         """DM with project config should use dm_persona."""
@@ -266,27 +260,40 @@ class TestResolvePersona:
 
     def test_dm_custom_persona(self):
         """DM with custom dm_persona should use that."""
-        project = {"telegram": {"dm_persona": "developer"}}
-        assert _resolve_persona(project, None, is_dm=True) == "developer"
+        project = {"telegram": {"dm_persona": "engineer"}}
+        assert _resolve_persona(project, None, is_dm=True) == "engineer"
 
     def test_pm_mode_project(self):
-        """PM mode project should use project-manager."""
-        project = {"mode": "pm", "telegram": {}}
-        assert _resolve_persona(project, "PM: Test", is_dm=False) == "project-manager"
+        """PM mode project (legacy mode='pm') should use engineer persona."""
+        from config.enums import PersonaType
 
-    def test_dev_group_with_persona(self):
-        """Dev group with persona config should use that persona."""
-        project = {"telegram": {"groups": {"Dev: Valor": {"chat_id": 123, "persona": "developer"}}}}
-        assert _resolve_persona(project, "Dev: Valor", is_dm=False) == "developer"
+        project = {"mode": "pm", "telegram": {}}
+        assert _resolve_persona(project, "Eng: Test", is_dm=False) == PersonaType.ENGINEER
+
+    def test_eng_mode_project(self):
+        """Eng mode project should use engineer persona."""
+        from config.enums import PersonaType
+
+        project = {"mode": "eng", "telegram": {}}
+        assert _resolve_persona(project, "Eng: Test", is_dm=False) == PersonaType.ENGINEER
+
+    def test_group_with_engineer_persona(self):
+        """Eng group with persona config should use that persona."""
+        project = {"telegram": {"groups": {"Eng: Valor": {"chat_id": 123, "persona": "engineer"}}}}
+        assert _resolve_persona(project, "Eng: Valor", is_dm=False) == "engineer"
 
     def test_group_no_project(self):
-        """Group with no project should default to developer."""
-        assert _resolve_persona(None, "Some Group", is_dm=False) == "developer"
+        """Group with no project should default to engineer."""
+        from config.enums import PersonaType
+
+        assert _resolve_persona(None, "Some Group", is_dm=False) == PersonaType.ENGINEER
 
     def test_group_no_persona_in_config(self):
-        """Group without persona in config should default to developer."""
-        project = {"telegram": {"groups": {"Dev: Test": {"chat_id": 123}}}}
-        assert _resolve_persona(project, "Dev: Test", is_dm=False) == "developer"
+        """Group without persona in config should default to engineer."""
+        from config.enums import PersonaType
+
+        project = {"telegram": {"groups": {"Eng: Test": {"chat_id": 123}}}}
+        assert _resolve_persona(project, "Eng: Test", is_dm=False) == PersonaType.ENGINEER
 
     def test_dm_default_without_config(self):
         """DM with project but no dm_persona should default to teammate."""
@@ -307,11 +314,11 @@ class TestLoadSystemPromptIntegration:
         prompt = load_system_prompt()
         assert "Valor" in prompt
 
-    def test_load_pm_system_prompt_uses_pm_persona(self):
-        """load_pm_system_prompt should use project-manager persona."""
-        prompt = load_pm_system_prompt("/tmp/nonexistent")
+    def test_load_eng_system_prompt_uses_engineer_persona(self):
+        """load_eng_system_prompt should use engineer persona with WORKER_RULES."""
+        prompt = load_eng_system_prompt("/tmp/nonexistent")
         assert "Valor" in prompt
-        assert "Worker Safety Rails" not in prompt
+        assert "Worker Safety Rails" in prompt
 
     def test_no_soul_md_fallback(self):
         """SOUL.md should not exist -- no fallback available."""
@@ -324,51 +331,48 @@ class TestLoadSystemPromptIntegration:
         assert not base_path.exists(), "_base.md should have been deleted"
 
 
-class TestPMWorkflowAnnouncementWarning:
-    """Issue #1189: PM overlay must contain the workflow-announcement rule.
+class TestEngWorkflowAnnouncementWarning:
+    """Issue #1189: Engineer overlay must contain the workflow-announcement rule.
 
-    The loader at agent/sdk_client.py emits a WARN log when the PM overlay
+    The loader at agent/sdk_client.py emits a WARN log when the engineer overlay
     is missing the substring "Unless you directly instruct me to skip".
     Mirrors the existing CRITIQUE-substring warning pattern (PR #802).
     """
 
     @pytest.fixture
     def _mock_overlay_dir_factory(self, tmp_path, monkeypatch):
-        """Build a per-test PM overlay with custom content."""
+        """Build a per-test engineer overlay with custom content."""
         import agent.sdk_client as sdk_mod
 
         overlay_dir = tmp_path / "personas"
         overlay_dir.mkdir()
-        # Minimum non-PM overlays so the loader doesn't crash on other personas
-        (overlay_dir / "developer.md").write_text(
-            "# Developer\n\n## Permissions\n\nFull System Access\n"
-        )
+        # Minimum non-engineer overlays so the loader doesn't crash on other personas
         (overlay_dir / "teammate.md").write_text(
             "# Teammate\n\n## Communication\n\nFriendly tone\n"
         )
 
-        def _set_pm_overlay(content: str) -> None:
-            (overlay_dir / "project-manager.md").write_text(content)
+        def _set_eng_overlay(content: str) -> None:
+            (overlay_dir / "engineer.md").write_text(content)
             monkeypatch.setattr(sdk_mod, "PERSONAS_OVERLAY_DIR", overlay_dir)
 
-        return _set_pm_overlay
+        return _set_eng_overlay
 
     def test_warns_when_announcement_substring_missing(self, _mock_overlay_dir_factory, caplog):
         """Overlay missing the announcement clause should emit WARN."""
-        # PM overlay with CRITIQUE rules but NO workflow-announcement rule
+        # Engineer overlay with CRITIQUE rules but NO workflow-announcement rule
         _mock_overlay_dir_factory(
-            "# PM Persona\n\n"
+            "# Engineer Persona\n\n"
             "## Hard Rules\n\nCRITIQUE is mandatory after PLAN.\n"
             "REVIEW is mandatory after TEST.\n"
         )
 
         with caplog.at_level(logging.WARNING, logger="agent.sdk_client"):
-            load_persona_prompt("project-manager")
+            load_persona_prompt("engineer")
 
         assert any(
             "missing the workflow-announcement rule" in record.message for record in caplog.records
         ), (
-            "Expected WARN log when PM overlay lacks 'Unless you directly instruct me to skip', "
+            "Expected WARN log when eng overlay lacks 'Unless you directly instruct me to skip', "
             f"got: {[r.message for r in caplog.records]}"
         )
 
@@ -377,7 +381,7 @@ class TestPMWorkflowAnnouncementWarning:
     ):
         """Overlay containing the announcement clause should NOT emit the workflow WARN."""
         _mock_overlay_dir_factory(
-            "# PM Persona\n\n"
+            "# Engineer Persona\n\n"
             "## Intake and Triage\n\n"
             "CRITIQUE is mandatory.\n"
             'Use this phrase: "Unless you directly instruct me to skip our standard '
@@ -386,7 +390,7 @@ class TestPMWorkflowAnnouncementWarning:
         )
 
         with caplog.at_level(logging.WARNING, logger="agent.sdk_client"):
-            load_persona_prompt("project-manager")
+            load_persona_prompt("engineer")
 
         assert not any(
             "missing the workflow-announcement rule" in record.message for record in caplog.records
@@ -396,7 +400,7 @@ class TestPMWorkflowAnnouncementWarning:
         )
 
     def test_warns_on_empty_overlay(self, _mock_overlay_dir_factory, caplog):
-        """Empty PM overlay (zero-length) should emit the workflow WARN.
+        """Empty engineer overlay (zero-length) should emit the workflow WARN.
 
         The substring check returns False for empty content. The loader
         also emits the CRITIQUE warning here; we only assert ours fires.
@@ -404,18 +408,18 @@ class TestPMWorkflowAnnouncementWarning:
         _mock_overlay_dir_factory("")
 
         with caplog.at_level(logging.WARNING, logger="agent.sdk_client"):
-            load_persona_prompt("project-manager")
+            load_persona_prompt("engineer")
 
         assert any(
             "missing the workflow-announcement rule" in record.message for record in caplog.records
         )
 
     def test_warns_on_whitespace_only_overlay(self, _mock_overlay_dir_factory, caplog):
-        """Whitespace-only PM overlay should emit the workflow WARN."""
+        """Whitespace-only engineer overlay should emit the workflow WARN."""
         _mock_overlay_dir_factory("   \n\n\t\n   \n")
 
         with caplog.at_level(logging.WARNING, logger="agent.sdk_client"):
-            load_persona_prompt("project-manager")
+            load_persona_prompt("engineer")
 
         assert any(
             "missing the workflow-announcement rule" in record.message for record in caplog.records
@@ -423,30 +427,30 @@ class TestPMWorkflowAnnouncementWarning:
 
     def test_warns_when_only_partial_substring_present(self, _mock_overlay_dir_factory, caplog):
         """Partial substring (e.g., "Unless you directly" but missing the rest)
-        should still emit the WARN — we want the unique opening clause intact."""
+        should still emit the WARN -- we want the unique opening clause intact."""
         _mock_overlay_dir_factory(
-            "# PM Persona\n\nCRITIQUE rules.\n"
+            "# Engineer Persona\n\nCRITIQUE rules.\n"
             "Unless you directly handle the request differently...\n"
         )
 
         with caplog.at_level(logging.WARNING, logger="agent.sdk_client"):
-            load_persona_prompt("project-manager")
+            load_persona_prompt("engineer")
 
         assert any(
             "missing the workflow-announcement rule" in record.message for record in caplog.records
         )
 
-    def test_repo_pm_template_has_announcement_substring(self):
-        """The in-repo PM template MUST contain the workflow-announcement clause.
+    def test_repo_eng_template_has_announcement_substring(self):
+        """The in-repo engineer template MUST contain the workflow-announcement clause.
 
         This guards against the in-repo template drifting away from the rule.
         It is the source-of-truth fallback when the private overlay is absent.
         """
-        repo_template = PERSONAS_BASE_DIR / "project-manager.md"
-        assert repo_template.exists(), f"In-repo PM template not found at {repo_template}"
+        repo_template = PERSONAS_BASE_DIR / "engineer.md"
+        assert repo_template.exists(), f"In-repo engineer template not found at {repo_template}"
         content = repo_template.read_text()
         assert "Unless you directly instruct me to skip" in content, (
-            "In-repo PM template is missing the workflow-announcement clause "
+            "In-repo engineer template is missing the workflow-announcement clause "
             "(issue #1189). The loader will emit a WARN at session startup."
         )
 
@@ -524,10 +528,10 @@ class TestPersonaOverlayLogging:
 
         # Also redirect PERSONAS_BASE_DIR so the in-repo overlay fallback
         # in _resolve_overlay_path() cannot resolve customer-service or the
-        # unknown-persona developer fallback (config/personas/developer.md
+        # unknown-persona engineer fallback (config/personas/engineer.md
         # exists in-repo as of #1355). Without this, load_persona_prompt
-        # would silently succeed via the developer fallback at sdk_client.py
-        # ~L974 and never raise FileNotFoundError, so the WARN under test
+        # would silently succeed via the engineer fallback at sdk_client.py
+        # and never raise FileNotFoundError, so the WARN under test
         # would not fire. We keep PERSONAS_SEGMENTS_DIR pointing at the real
         # segments dir so segment assembly still works for the fallback load.
         empty_base = tmp_path / "no-base"

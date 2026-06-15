@@ -362,7 +362,7 @@ class TestComposeStructuredDraft:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.session_type = SessionType.PM
+        session.session_type = SessionType.ENG
         session.session_id = None
         session.status = "completed"
 
@@ -391,7 +391,7 @@ class TestNoMessageEcho:
         session.message_text = "continue"
         session.status = "running"
         session.is_sdlc = True
-        session.session_type = SessionType.PM
+        session.session_type = SessionType.ENG
 
         result = _compose_structured_draft(
             "• Built the bypass\n• Tests passing", session=session, is_completion=True
@@ -409,7 +409,7 @@ class TestNoMessageEcho:
         session._get_history_list.return_value = ["[user] What time is it?"]
         session.message_text = "What time is it?"
         session.status = "completed"
-        session.session_type = SessionType.PM
+        session.session_type = SessionType.ENG
         session.get_links.return_value = {}
 
         result = _compose_structured_draft("It's 3pm UTC+7", session=session, is_completion=True)

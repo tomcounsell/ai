@@ -146,7 +146,6 @@ def decide(
         from agent.sdlc_router import (
             Blocked,
             Dispatch,
-            MultiDispatch,
             decide_next_dispatch,
         )
 
@@ -157,22 +156,7 @@ def decide(
 
         result = decide_next_dispatch(stage_states, meta, context)
 
-        if isinstance(result, MultiDispatch):
-            return {
-                "multi": True,
-                "dispatched": True,
-                "skills": [d.skill for d in result.dispatches],
-                "dispatches": [
-                    {
-                        "skill": d.skill,
-                        "reason": d.reason,
-                        "row_id": d.row_id,
-                    }
-                    for d in result.dispatches
-                ],
-                "reason": result.reason,
-            }
-        elif isinstance(result, Dispatch):
+        if isinstance(result, Dispatch):
             return {
                 "skill": result.skill,
                 "reason": result.reason,

@@ -425,7 +425,7 @@ def _send_telegram_notification(message: str) -> None:
     """Best-effort Telegram notification. Swallows all subprocess failures."""
     try:
         subprocess.run(
-            ["valor-telegram", "send", "--chat", "Dev: Valor", message],
+            ["valor-telegram", "send", "--chat", "Eng: Valor", message],
             capture_output=True,
             text=True,
             timeout=10,

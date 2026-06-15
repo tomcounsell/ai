@@ -12,18 +12,19 @@
   - `agent/output_router.py` (marker removal)
   - `agent/session_executor.py` (marker branch removal)
   - `models/session_lifecycle.py` (`_finalize_parent_sync` defers to runner)
-  - `config/personas/project-manager.md` (Rule 5 rewrite, marker references removed)
+  - `config/personas/engineer.md` (Rule 5 rewrite, marker references removed)
 
 ## Problem
 
-PM sessions running the SDLC pipeline previously relied on a string marker
-(`[PIPELINE_COMPLETE]`) to signal that the pipeline had finished and the next
-output should be delivered to Telegram rather than nudged. The router inspected
-every PM output for the marker; if missing, the output was re-enqueued as a nudge.
+The parent eng session running the SDLC pipeline previously relied on a string
+marker (`[PIPELINE_COMPLETE]`) to signal that the pipeline had finished and the
+next output should be delivered to Telegram rather than nudged. The router
+inspected every output for the marker; if missing, the output was re-enqueued as
+a nudge.
 
 Three observed production failure modes:
 
-1. **Marker omission → 50-nudge loop → garbage forced delivery.** The PM
+1. **Marker omission → 50-nudge loop → garbage forced delivery.** The session
    forgot or could not emit the marker — context overflow, stale Claude Code
    UUID triggering a first-turn fallback, or persona drift. The session
    looped until `auto_continue_count >= MAX_NUDGE_COUNT (50)` forced a
@@ -76,7 +77,7 @@ Two distinct pieces replace the marker:
   2. Acquire the Redis CAS lock
      `pipeline_complete_pending:{parent_id}` via SETNX (60s TTL). If already
      held, log at INFO and return.
-  3. Resolve the PM's prior Claude Code UUID via
+  3. Resolve the parent eng session's prior Claude Code UUID via
      `agent.sdk_client._get_prior_session_uuid`. `None` is tolerated — the
      harness falls back to `full_context_message` for a no-UUID first turn.
   4. Invoke `get_response_via_harness` with a dedicated "compose final
@@ -95,28 +96,38 @@ Two distinct pieces replace the marker:
 `asyncio.Task` registered in `_pending_completion_tasks` so the worker
 shutdown sequence can drain it via `drain_pending_completions(timeout=15)`.
 
-### Entry points
+### Trigger
 
-Two paths invoke `schedule_pipeline_completion`:
+`schedule_pipeline_completion` has a single trigger:
 
-1. **`_handle_dev_session_completion`** — after the existing stage-comment
-   and `psm.complete_stage(...)` logic, call the predicate and, if
-   `is_complete` is True, spawn the runner and **return** before the
-   continuation-steer logic fires.
-2. **`_agent_session_hierarchy_health_check`** — when all children of a
-   fan-out parent are terminal and none failed, invoke the runner with a
-   fan-out-specific summary (listing per-child outcomes) instead of pushing
-   a steering message with marker instructions.
+- **`_agent_session_hierarchy_health_check`** (`agent/session_health.py`) —
+  when a `waiting_for_children` parent has all children terminal and none
+  failed (aggregate success), it builds a fan-out summary (listing per-child
+  outcomes) and calls
+  `schedule_pipeline_completion(parent, summary, send_cb, chat_id, telegram_message_id)`.
+  This replaces the deprecated path that pushed a steering message with marker
+  instructions.
 
-Both entry points share the same CAS lock — exactly one runner ever spawns
-per parent, regardless of which entry fires first.
+The old per-child entry point `_handle_dev_session_completion` was deleted
+when the bridge PM and Dev roles merged into the unified `eng` session. Parent
+and child completion is now a status transition only — there is no
+continuation-session creation and no parent-steering nudge. Final delivery
+fires once, from the hierarchy-health check, when the whole fan-out resolves.
 
 ### Finalization deferral
 
-`models/session_lifecycle.py::_finalize_parent_sync` checks
-`pipeline_complete_pending:{parent_id}` before transitioning the parent to
-`"completed"` on the success path. If the lock is held, it returns without
-transitioning — the runner owns the terminal transition.
+`models/session_lifecycle.py::_finalize_parent_sync` is the second half of the
+completion coordination. On the success path (`new_status == "completed"`) it
+checks `pipeline_complete_pending:{parent_id}` before transitioning the parent.
+If the lock is held — i.e., the runner spawned by the hierarchy-health trigger
+is in flight — it returns without transitioning, and the runner owns the
+terminal `"completed"` transition. Failed parents finalize immediately and
+never defer. If Redis is unavailable, the check fails open and finalization
+proceeds (pre-runner behavior).
+
+This is the dedup mechanism: the hierarchy-health trigger spawns the runner
+(which holds the CAS lock); any concurrent `_finalize_parent_sync` call defers
+to it. Exactly one path transitions the parent to `"completed"`.
 
 ### Call-site gating for `_check_pr_open`
 
@@ -124,7 +135,7 @@ Callers only invoke `_check_pr_open(issue_number)` when
 `psm_states["DOCS"] == "completed"` AND `psm_states["MERGE"] != "completed"`.
 For the primary MERGE-success path, `pr_open` is not consulted. For
 non-terminal stages, the predicate is not called. Net effect: at most one
-`gh pr list` subprocess invocation per pipeline, not per dev-session
+`gh pr list` subprocess invocation per pipeline, not per child-session
 completion.
 
 ### CancelledError handler in `_run_work`
@@ -142,8 +153,8 @@ real interruption window, not N.
 
 | # | Scenario | Mitigation |
 |---|---------|------------|
-| 1 | Runner vs `_finalize_parent_sync` | Runner is sole `"completed"` transition. `_finalize_parent_sync` checks `pipeline_complete_pending` lock and defers. |
-| 2 | Concurrent runner invocations (`_handle_dev_session_completion` + `_agent_session_hierarchy_health_check`) | Both paths call `schedule_pipeline_completion`, which acquires the same Redis CAS lock. Only one proceeds. |
+| 1 | Runner (from hierarchy-health trigger) vs `_finalize_parent_sync` | Runner is sole `"completed"` transition. `_finalize_parent_sync` checks `pipeline_complete_pending` lock and defers when it is held. |
+| 2 | Concurrent runner invocations for the same parent | The runner SETNX-acquires `pipeline_complete_pending:{parent_id}`; a second invocation finds the lock held and returns. Only one runner proceeds per parent. |
 | 3 | Harness call while worker shutting down | Runner task tracked in `_pending_completion_tasks`; `drain_pending_completions(15s)` cancels past budget; CancelledError handler delivers interrupted message. |
 | 4 | `response_delivered_at` double-stamped | Runner stamps synchronously before finalizing. Subsequent output hits `deliver_already_completed`. |
 
@@ -162,7 +173,7 @@ Issue #1262 / plan `docs/plans/dedupe-completion-emit.md`.
 
 ### Why it exists
 
-A PM bridge session can finish in two visible steps:
+A parent eng bridge session can finish in two visible steps:
 
 1. A sub-skill (`/do-docs`, `/sdlc`, etc.) calls `valor-telegram send` from
    inside the session and posts an answer to the user (Path B).
@@ -272,11 +283,12 @@ Every layer of the suppression block is fail-open:
 A buggy suppression check MUST NEVER block a legitimate completion
 delivery.
 
-### Scope: SDLC PM sessions only
+### Scope: SDLC eng sessions only
 
 The completion runner is only invoked by the pipeline-completion path,
-which fires for SDLC PM sessions. Non-SDLC PM/teammate sessions take a
-different path and are unaffected by this fix. No new gating is needed.
+which fires for SDLC eng sessions with a fan-out of child sessions. Non-SDLC
+eng/teammate sessions take a different path and are unaffected by this fix.
+No new gating is needed.
 
 ### Tests
 
@@ -298,8 +310,10 @@ The `[PIPELINE_COMPLETE]` marker is fully removed:
 - `agent/output_router.py::PIPELINE_COMPLETE_MARKER` constant — deleted.
 - `deliver_pipeline_complete` action and branch in
   `agent/session_executor.py` — deleted.
-- `config/personas/project-manager.md` marker references at L44, L49, L384,
-  L487 — deleted. Rule 5 rewritten to name the worker as the delivery actor.
+- `config/personas/engineer.md` marker references — deleted. Rule 5 ("MERGE is
+  Mandatory Before Sign-Off") names the worker as the delivery actor: the
+  session does not self-signal pipeline completion; the worker's predicate +
+  runner own delivery once MERGE succeeds.
 - Worker-constructed steering messages at
   `agent/session_completion.py:271, 450` — rewritten to say "signaling
   pipeline completion" instead of "emitting [PIPELINE_COMPLETE]".

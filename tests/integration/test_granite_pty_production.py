@@ -69,7 +69,7 @@ def _patch_spawn():
 def _make_session(session_id: str = "granite-wiring-001") -> AgentSession:
     return AgentSession.create(
         session_id=session_id,
-        session_type="pm",
+        session_type="eng",
         project_key="test",
         working_dir="/tmp",
         status="pending",

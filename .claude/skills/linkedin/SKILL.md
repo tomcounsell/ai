@@ -82,7 +82,7 @@ There are two paths that set the flag:
 
   ```bash
   valor-session create \
-    --role dev \
+    --role eng \
     --project-key valor \
     --needs-real-chrome \
     --message "list my linkedin DMs"

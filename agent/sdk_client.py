@@ -906,7 +906,7 @@ class _SafeFormatDict(dict):
         return "{" + key + "}"
 
 
-def load_persona_prompt(persona: str = "developer", substitutions: dict | None = None) -> str:
+def load_persona_prompt(persona: str = "engineer", substitutions: dict | None = None) -> str:
     """Load persona prompt from composable segments + overlay.
 
     Segments are assembled from config/personas/segments/ per manifest.json,
@@ -915,8 +915,8 @@ def load_persona_prompt(persona: str = "developer", substitutions: dict | None =
     falling back to config/personas/{persona}.md (in-repo, for development).
 
     Args:
-        persona: Persona name — one of "developer", "project-manager", "teammate",
-            "customer-service". Defaults to "developer".
+        persona: Persona name — one of "engineer", "teammate",
+            "customer-service". Defaults to "engineer".
         substitutions: Optional dict of {placeholder: value} pairs applied to the
             assembled prompt via _SafeFormatDict.format_map. Missing keys are
             preserved as literal {key} placeholders (never raise KeyError).
@@ -938,12 +938,12 @@ def load_persona_prompt(persona: str = "developer", substitutions: dict | None =
 
     if overlay_path.exists():
         overlay_content = overlay_path.read_text()
-        if persona == "project-manager" and "CRITIQUE" not in overlay_content:
+        if persona == "engineer" and "CRITIQUE" not in overlay_content:
             logger.warning(
-                f"PM persona overlay '{overlay_path}' is missing CRITIQUE gate rules "
+                f"Engineer persona overlay '{overlay_path}' is missing CRITIQUE gate rules "
                 "— pipeline integrity may be compromised"
             )
-        # Workflow-announcement guard: the PM overlay MUST contain the bucket-#3
+        # Workflow-announcement guard: the engineer overlay MUST contain the bucket-#3
         # announce-and-pause rule so coding/automation/config requests don't get
         # silently implemented. The substring is the unique opening clause of the
         # required announcement phrase. This guards against overlay drift on
@@ -951,44 +951,41 @@ def load_persona_prompt(persona: str = "developer", substitutions: dict | None =
         # fall out of sync with the in-repo template. Mirrors the CRITIQUE check
         # above and PR #802's loader-warning pattern. See issue #1189.
         if (
-            persona == "project-manager"
+            persona == "engineer"
             and "Unless you directly instruct me to skip" not in overlay_content
         ):
             logger.warning(
-                f"PM persona overlay '{overlay_path}' is missing the "
-                "workflow-announcement rule — PM may silently implement "
+                f"Engineer persona overlay '{overlay_path}' is missing the "
+                "workflow-announcement rule — engineer may silently implement "
                 "code/config changes without surfacing the SDLC contract."
             )
-        if persona == "project-manager" and 'subagent_type="dev-session"' in overlay_content:
+        if persona == "engineer" and 'subagent_type="dev-session"' in overlay_content:
             logger.warning(
-                f"PM persona overlay '{overlay_path}' still contains Agent tool dispatch "
+                f"Engineer persona overlay '{overlay_path}' still contains Agent tool dispatch "
                 'instructions (subagent_type="dev-session"). '
-                "Dev sessions are now created via "
-                "`python -m tools.valor_session create --role dev`. "
-                "Update ~/Desktop/Valor/personas/project-manager.md to remove the Agent tool "
+                "Eng sessions are now created via "
+                "`python -m tools.valor_session create --role eng`. "
+                "Update ~/Desktop/Valor/personas/engineer.md to remove the Agent tool "
                 "dispatch pattern."
             )
-        # Developer overlay drift guards: the dev persona was promoted in 2026-05-09
-        # to own full SDLC pipelines via parallel subagent fan-out. The "Mode 3"
-        # multi-issue orchestrator and the stale-baseline `merge_authorized` bypass
-        # are the load-bearing pieces — if either is missing, the overlay has
-        # rolled back to the pre-promotion 34-line single-stage executor and dev
-        # sessions will halt at the first multi-issue or merge-gate friction point.
+        # Engineer overlay drift guards: the engineer persona owns full SDLC pipelines
+        # via parallel subagent fan-out. The "Mode 3" multi-issue orchestrator and the
+        # stale-baseline `merge_authorized` bypass are the load-bearing pieces.
         # Substrings chosen for their stability: "Mode 3" anchors the parallel
         # orchestrator playbook; "merge_authorized" anchors the bypass section.
-        if persona == "developer" and "Mode 3" not in overlay_content:
+        if persona == "engineer" and "Mode 3" not in overlay_content:
             logger.warning(
-                f"Developer persona overlay '{overlay_path}' is missing the "
-                "Mode 3 parallel orchestrator playbook — dev sessions will not "
+                f"Engineer persona overlay '{overlay_path}' is missing the "
+                "Mode 3 parallel orchestrator playbook — eng sessions will not "
                 "fan out across multiple issues. Sync from "
-                "config/personas/developer.md."
+                "config/personas/engineer.md."
             )
-        if persona == "developer" and "merge_authorized" not in overlay_content:
+        if persona == "engineer" and "merge_authorized" not in overlay_content:
             logger.warning(
-                f"Developer persona overlay '{overlay_path}' is missing the "
-                "stale-baseline `merge_authorized` bypass section — dev "
+                f"Engineer persona overlay '{overlay_path}' is missing the "
+                "stale-baseline `merge_authorized` bypass section — eng "
                 "sessions will halt on Full Suite Gate false positives. "
-                "Sync from config/personas/developer.md."
+                "Sync from config/personas/engineer.md."
             )
         logger.info(f"Loaded persona '{persona}' from {overlay_path}")
         result = f"{base_content}\n\n---\n\n{overlay_content}"
@@ -997,12 +994,12 @@ def load_persona_prompt(persona: str = "developer", substitutions: dict | None =
             result = result.format_map(_SafeFormatDict(substitutions))
         return result
 
-    # Invalid persona name — fall back to developer with warning
-    if persona not in ("developer", "project-manager", "teammate", "customer-service"):
-        logger.warning(f"Unknown persona '{persona}', falling back to developer persona")
-        developer_path = _resolve_overlay_path("developer")
-        if developer_path.exists():
-            result = f"{base_content}\n\n---\n\n{developer_path.read_text()}"
+    # Invalid persona name — fall back to engineer with warning
+    if persona not in ("engineer", "teammate", "customer-service"):
+        logger.warning(f"Unknown persona '{persona}', falling back to engineer persona")
+        engineer_path = _resolve_overlay_path("engineer")
+        if engineer_path.exists():
+            result = f"{base_content}\n\n---\n\n{engineer_path.read_text()}"
             if substitutions:
                 result = result.format_map(_SafeFormatDict(substitutions))
             return result
@@ -1024,7 +1021,7 @@ def compose_system_prompt(
 ) -> str:
     """Single composer for agent system prompts — one path for every cell.
 
-    Replaces the hand-coded ``load_system_prompt`` / ``load_pm_system_prompt``
+    Replaces the hand-coded ``load_system_prompt`` / ``load_eng_system_prompt``
     pickers with a structural assembly keyed on ``(persona, access_level)``.
     Channel is reserved for forward-compat (Open Question 1 in
     ``docs/plans/composed-persona-system.md``) and is not consumed today by
@@ -1037,14 +1034,14 @@ def compose_system_prompt(
     2. Persona prompt = identity + segments per ``manifest.json`` + persona overlay.
     3. Principal context (only when ``access_level == AccessLevel.WORKER``).
     4. Completion criteria (only when ``access_level == AccessLevel.WORKER``).
-    5. Work-vault ``CLAUDE.md`` (only when ``access_level == AccessLevel.PM_READONLY``
-       and the file exists at ``Path(working_directory) / "CLAUDE.md"``).
+    5. Work-vault ``CLAUDE.md`` (only when ``access_level == AccessLevel.WORKER``
+       and ``working_directory`` is provided and the file exists at
+       ``Path(working_directory) / "CLAUDE.md"``).
 
     Byte-stability invariant (issue #1227): for the
-    ``(DEVELOPER, WORKER)`` and ``(PROJECT_MANAGER, PM_READONLY, work_dir)``
-    cells, the bytes returned here are identical to the bytes returned by the
-    legacy ``load_system_prompt()`` / ``load_pm_system_prompt(work_dir)`` on
-    the same machine — preserving Anthropic's prompt-cache prefix. Asserted by
+    ``(ENGINEER, WORKER)`` cell, the bytes returned here are stable across
+    consecutive sessions on the same machine in the same ``working_directory``,
+    preserving Anthropic's prompt-cache prefix. Asserted by
     ``tests/unit/test_compose_system_prompt.py`` against per-machine fixtures
     in ``tests/fixtures/{hostname}/``.
 
@@ -1055,8 +1052,9 @@ def compose_system_prompt(
             reads it (per Question 4). Kept for forward-compat.
         project: Project config dict (currently unused; reserved for future
             project-level overlays).
-        working_directory: Required when ``access_level == PM_READONLY`` —
-            path to the work-vault project folder containing ``CLAUDE.md``.
+        working_directory: Optional path to the work-vault project folder
+            containing ``CLAUDE.md``. When provided under ``WORKER`` access
+            and the file exists, it is appended to the composed prompt.
 
     Returns:
         Fully assembled system prompt string ready to pass to ``claude -p``
@@ -1065,8 +1063,6 @@ def compose_system_prompt(
     Raises:
         TypeError: If ``persona`` is not a ``PersonaType`` member or
             ``access_level`` is not an ``AccessLevel`` member.
-        ValueError: If ``access_level == PM_READONLY`` and
-            ``working_directory`` is ``None``.
         FileNotFoundError: If the persona overlay or required identity /
             segment files are missing (re-raised from ``load_persona_prompt``).
     """
@@ -1084,18 +1080,13 @@ def compose_system_prompt(
             f"member, got {type(access_level).__name__}={access_level!r}. "
             f"Valid: {valid}"
         )
-    if access_level == AccessLevel.PM_READONLY and working_directory is None:
-        raise ValueError(
-            "compose_system_prompt: AccessLevel.PM_READONLY requires "
-            "working_directory (work-vault project folder path)."
-        )
 
     # 2. Persona prompt (identity + segments + overlay).
     #    load_persona_prompt() preserves the loader-warning pattern from
     #    sdk_client.py:919–948 (CRITIQUE / workflow-announcement / dev-session).
     persona_prompt = load_persona_prompt(persona.value)
 
-    # 1 + 3 + 4: WORKER rails layer.
+    # 1 + 3 + 4 + 5: WORKER rails layer.
     if access_level == AccessLevel.WORKER:
         criteria = load_completion_criteria()
         criteria_section = f"\n\n---\n\n{criteria}" if criteria else ""
@@ -1104,17 +1095,21 @@ def compose_system_prompt(
         principal_section = f"\n\n---\n\n## Principal Context\n\n{principal}" if principal else ""
 
         # Worker rules FIRST — safety rails take precedence over persona.
-        return f"{WORKER_RULES}\n\n---\n\n{persona_prompt}{principal_section}{criteria_section}"
+        prompt = f"{WORKER_RULES}\n\n---\n\n{persona_prompt}{principal_section}{criteria_section}"
 
-    # 5. PM_READONLY rails layer: append work-vault CLAUDE.md when present.
-    if access_level == AccessLevel.PM_READONLY:
-        project_claude_path = Path(working_directory) / "CLAUDE.md"
-        if project_claude_path.exists():
-            project_instructions = project_claude_path.read_text()
-            logger.info(f"Loaded PM instructions from {project_claude_path}")
-            return f"{persona_prompt}\n\n---\n\n{project_instructions}"
-        logger.info(f"No CLAUDE.md found at {project_claude_path}, using persona only for PM mode")
-        return persona_prompt
+        # 5. Append work-vault CLAUDE.md when a working_directory is provided.
+        if working_directory is not None:
+            project_claude_path = Path(working_directory) / "CLAUDE.md"
+            if project_claude_path.exists():
+                project_instructions = project_claude_path.read_text()
+                logger.info(f"Loaded eng instructions from {project_claude_path}")
+                prompt = f"{prompt}\n\n---\n\n{project_instructions}"
+            else:
+                logger.info(
+                    f"No CLAUDE.md found at {project_claude_path}, using worker prompt only"
+                )
+
+        return prompt
 
     # TEAMMATE / CUSTOMER_SERVICE: no rails, no appendices — return persona as-is.
     return persona_prompt
@@ -1138,22 +1133,21 @@ def _resolve_compose_args(
 
     Mapping (input → output):
 
-    - ``SessionType.PM`` → ``(PROJECT_MANAGER, PM_READONLY, None)``
+    - ``SessionType.ENG`` → ``(ENGINEER, WORKER, None)``
     - ``SessionType.TEAMMATE`` + ``transport=="email"`` + ``project.email.persona``
       set → ``(<email persona>, <access level matching persona>, "email")``
     - ``SessionType.TEAMMATE`` (default) →
       ``(TEAMMATE, TEAMMATE, None)``
-    - ``SessionType.DEV`` (or unknown) → resolved via
+    - Unknown session type → resolved via
       ``_resolve_persona(project, chat_title, is_dm)`` →
       ``(<persona>, <access level matching persona>, None)``
 
     Persona → access-level mapping (today's 1:1; orthogonality preserved for
     future per-project rails):
 
-    - ``PROJECT_MANAGER`` → ``PM_READONLY``
+    - ``ENGINEER`` → ``WORKER``
     - ``TEAMMATE`` → ``TEAMMATE``
     - ``CUSTOMER_SERVICE`` → ``CUSTOMER_SERVICE``
-    - ``DEVELOPER`` (and any other) → ``WORKER``
     """
     # Email override: per-project persona swap for email-spawned sessions.
     if session_type == SessionType.TEAMMATE and transport == "email" and project:
@@ -1165,26 +1159,23 @@ def _resolve_compose_args(
             except ValueError:
                 pass  # Unknown persona value — fall through to default teammate handling.
 
-    if session_type == SessionType.PM:
-        return PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, None
+    if session_type == SessionType.ENG:
+        return PersonaType.ENGINEER, AccessLevel.WORKER, None
 
-    # project_mode == "pm" forces PM rails even for non-PM session types
-    # (e.g. a TEAMMATE session running against a PM-mode project).
-    if project_mode == "pm":
-        return PersonaType.PROJECT_MANAGER, AccessLevel.PM_READONLY, None
+    # project_mode == "eng" forces engineer rails even for non-ENG session types.
+    if project_mode == "eng":
+        return PersonaType.ENGINEER, AccessLevel.WORKER, None
 
     if session_type == SessionType.TEAMMATE:
         return PersonaType.TEAMMATE, AccessLevel.TEAMMATE, None
 
-    # SessionType.DEV (or unknown): resolve from project config.
+    # Unknown session type: resolve from project config.
     persona = _resolve_persona(project, chat_title, is_dm=is_dm)
     return persona, _access_level_for_persona(persona), None
 
 
 def _access_level_for_persona(persona: PersonaType) -> AccessLevel:
     """Default access-level for a persona (today's 1:1 mapping)."""
-    if persona == PersonaType.PROJECT_MANAGER:
-        return AccessLevel.PM_READONLY
     if persona == PersonaType.TEAMMATE:
         return AccessLevel.TEAMMATE
     if persona == PersonaType.CUSTOMER_SERVICE:
@@ -1193,26 +1184,32 @@ def _access_level_for_persona(persona: PersonaType) -> AccessLevel:
 
 
 def load_system_prompt() -> str:
-    """Load developer system prompt with worker rules and completion criteria.
+    """Load engineer system prompt with worker rules and completion criteria.
 
     Thin wrapper that delegates to ``compose_system_prompt``. Preserved for
     backward compatibility with existing call sites; new code should call
     ``compose_system_prompt`` directly.
     """
-    return compose_system_prompt(PersonaType.DEVELOPER, AccessLevel.WORKER)
+    return compose_system_prompt(PersonaType.ENGINEER, AccessLevel.WORKER)
 
 
-def load_pm_system_prompt(working_directory: str) -> str:
-    """Load system prompt for PM (Project Manager) mode channels.
+def load_eng_system_prompt(working_directory: str) -> str:
+    """Load system prompt for engineer mode channels with work-vault context.
 
-    Uses the project-manager persona (base + PM overlay). PM mode skips
-    WORKER_RULES (no branch safety rails) and loads the project-specific
-    CLAUDE.md from the work vault directory if it exists.
+    Uses the engineer persona (base + engineer overlay) with WORKER_RULES and
+    optionally appends the project-specific CLAUDE.md from the work vault
+    directory if it exists.
 
     System prompt structure:
-        [Persona prompt — base + project-manager overlay]
+        [WORKER_RULES]
         ---
-        [Work-vault CLAUDE.md — PM-specific instructions for this project]
+        [Persona prompt — base + engineer overlay]
+        ---
+        [Principal context]
+        ---
+        [Completion criteria]
+        ---
+        [Work-vault CLAUDE.md — eng-specific instructions for this project]
 
     Caching strategy (issue #1227):
         The returned string is passed to ``get_response_via_harness()`` as
@@ -1221,26 +1218,26 @@ def load_pm_system_prompt(working_directory: str) -> str:
         ``claude -p`` argv.  The former flag removes per-machine dynamic
         sections (cwd, env info, memory paths, git status) from the system
         prompt into the first user message, leaving the prefix byte-for-byte
-        stable across consecutive PM sessions on the same machine in the same
+        stable across consecutive eng sessions on the same machine in the same
         ``working_directory``.  This enables Anthropic's server-side prompt
-        cache (5-minute TTL) to serve the ~74K-char prefix on cache hit,
+        cache (5-minute TTL) to serve the prefix on cache hit,
         reducing TTFT from 15–20 min (cold) to < 90 s (warm).
 
     Invariants:
-        - Must NOT include WORKER_RULES (PM mode has no branch safety rails).
-        - Must include the project-manager persona overlay (#1148).
+        - Must include WORKER_RULES (engineer mode has full branch safety rails).
+        - Must include the engineer persona overlay.
         - Must NOT silently swallow FileNotFoundError on persona load — caller
-          catches and logs ``[pm-persona-missing]`` so failures are visible.
+          catches and logs ``[eng-persona-missing]`` so failures are visible.
 
     Args:
         working_directory: Path to the work-vault project folder.
 
     Returns:
-        Combined system prompt for PM mode.
+        Combined system prompt for engineer mode.
     """
     return compose_system_prompt(
-        PersonaType.PROJECT_MANAGER,
-        AccessLevel.PM_READONLY,
+        PersonaType.ENGINEER,
+        AccessLevel.WORKER,
         working_directory=working_directory,
     )
 
@@ -1526,7 +1523,7 @@ class ValorAgent:
             target_repo: Absolute path to the target project's repo root. For
                 cross-repo SDLC builds this differs from working_dir (the
                 orchestrator). Defaults to working_dir when not specified.
-            session_type: Session type ("pm", "teammate", or "dev"). Injected as
+            session_type: Session type ("eng" or "teammate"). Injected as
                 SESSION_TYPE env var so hooks can enforce write restrictions.
             model: Optional Claude model name (e.g. "sonnet", "opus"). When set,
                 overrides the environment-level model for this session. None inherits
@@ -1595,7 +1592,7 @@ class ValorAgent:
         # Only PM/Teammate sessions spawn tracked children — dev sessions are excluded.
         # The env var carries the agent_session_id UUID (agt_xxx), which is the canonical
         # FK stored in parent_agent_session_id on the child's AgentSession record.
-        if self.agent_session_id and self.session_type in (SessionType.PM, SessionType.TEAMMATE):
+        if self.agent_session_id and self.session_type in (SessionType.ENG, SessionType.TEAMMATE):
             env["VALOR_PARENT_SESSION_ID"] = self.agent_session_id
 
         # Customer ID: inject for customer-service sessions so target-repo tools
@@ -1617,14 +1614,14 @@ class ValorAgent:
         # own messages via tools/send_telegram.py (issue #497).
         # chat_id comes from the project config; reply_to is resolved from
         # the AgentSession's telegram_message_id in _extract_sdlc_env_vars below.
-        if self.session_type in (SessionType.PM, SessionType.TEAMMATE) and self.chat_id:
+        if self.session_type in (SessionType.ENG, SessionType.TEAMMATE) and self.chat_id:
             env["TELEGRAM_CHAT_ID"] = str(self.chat_id)
 
         # PM sessions: inject Sentry auth token so sentry-cli works without
         # manual export. Token resolution is delegated to _resolve_sentry_auth_token,
         # which encapsulates the env-var-then-file cascade and the VALOR_LAUNCHD
         # short-circuit (macOS TCC blocks open() on ~/Desktop files under launchd).
-        if self.session_type in (SessionType.PM, SessionType.TEAMMATE):
+        if self.session_type in (SessionType.ENG, SessionType.TEAMMATE):
             sentry_token = _resolve_sentry_auth_token()
             if sentry_token:
                 env["SENTRY_AUTH_TOKEN"] = sentry_token
@@ -1643,7 +1640,7 @@ class ValorAgent:
         # gh credential. SDLC_AGENT_GH_TOKEN is read from the vault .env at startup;
         # see .env.example and docs/features/do-pr-review-bot-identity.md for
         # provisioning instructions.
-        if self.session_type in (SessionType.PM, SessionType.TEAMMATE):
+        if self.session_type in (SessionType.ENG, SessionType.TEAMMATE):
             env["CLAUDE_AGENT_REVIEW"] = "1"
             sdlc_agent_gh_token = os.environ.get("SDLC_AGENT_GH_TOKEN", "")
             if sdlc_agent_gh_token:
@@ -2093,9 +2090,9 @@ def _resolve_persona(
 
     Resolution order:
     1. DMs: use project's dm_persona config (default: "teammate")
-    2. Group chats: look up persona from project's telegram.groups[chat_title]
-    3. PM mode projects: "project-manager"
-    4. Default: "developer"
+    2. Eng mode projects: "engineer"
+    3. Group chats: look up persona from project's telegram.groups[chat_title]
+    4. Default: "engineer"
 
     Args:
         project: Project configuration dict from projects.json.
@@ -2103,10 +2100,10 @@ def _resolve_persona(
         is_dm: Whether this is a direct message.
 
     Returns:
-        Persona name string (e.g., "developer", "project-manager", "teammate").
+        Persona name string (e.g., "engineer", "teammate").
     """
     if not project:
-        return PersonaType.TEAMMATE if is_dm else PersonaType.DEVELOPER
+        return PersonaType.TEAMMATE if is_dm else PersonaType.ENGINEER
 
     telegram_config = project.get("telegram", {})
 
@@ -2114,10 +2111,10 @@ def _resolve_persona(
     if is_dm:
         return telegram_config.get("dm_persona", PersonaType.TEAMMATE)
 
-    # PM mode projects always use project-manager persona
-    project_mode = project.get("mode", "dev")
-    if project_mode == "pm":
-        return PersonaType.PROJECT_MANAGER
+    # Eng mode projects always use engineer persona (only if explicitly configured)
+    project_mode = project.get("mode")
+    if project_mode == "eng":
+        return PersonaType.ENGINEER
 
     # Group chats: look up persona from the groups dict
     if chat_title:
@@ -2130,7 +2127,7 @@ def _resolve_persona(
                         if persona:
                             return persona
 
-    return PersonaType.DEVELOPER
+    return PersonaType.ENGINEER
 
 
 # === CLI Harness Streaming ===
@@ -2318,9 +2315,9 @@ async def get_response_via_harness(
         system_prompt: Optional persona/role text appended to Claude Code's
             default system prompt via ``--append-system-prompt`` (issue #1148).
             Use ``--append`` (not ``--system-prompt``) to preserve the default
-            tool-handling protocol — the persona is additive guidance. PM
-            sessions pass ``load_pm_system_prompt(working_dir)`` here; drafter
-            and dev sessions must keep this ``None``. Strings larger than
+            tool-handling protocol — the persona is additive guidance. Eng
+            sessions pass ``load_eng_system_prompt(working_dir)`` here; drafter
+            sessions must keep this ``None``. Strings larger than
             512KB are dropped with a warning to avoid ARG_MAX overflows.
     """
     # Validate prior_uuid format; treat empty or invalid as None
@@ -2405,7 +2402,7 @@ async def get_response_via_harness(
     # a system_prompt was supplied (PM path) vs. not (dev/teammate path).
     _ttft_meta: dict | None = None
     if not prior_uuid:
-        _session_type_tag = "pm" if system_prompt else "other"
+        _session_type_tag = "eng" if system_prompt else "other"
         _ttft_meta = {
             "session_id": session_id or "",
             "session_type": _session_type_tag,
@@ -3078,8 +3075,7 @@ async def build_harness_turn_input(
     )
 
     # Cross-repo SDLC: inject target repo context
-    project_mode = project.get("mode", "dev") if project else "dev"
-    if project_mode != "pm" and classification == ClassificationType.SDLC and is_cross_repo:
+    if classification == ClassificationType.SDLC and is_cross_repo:
         project_name = project.get("name", "Unknown") if project else "Unknown"
         project_working_dir = project.get("working_directory", "") if project else ""
         github_config = project.get("github", {}) if project else {}
@@ -3154,20 +3150,23 @@ async def get_agent_response_sdk(
         project_working_dir = AI_REPO_ROOT
     is_cross_repo = project_key != "valor"
 
-    # Check project mode: "pm" channels bypass SDLC classification entirely
-    project_mode = project.get("mode", "dev") if project else "dev"
-    # Treat any unrecognized mode as "dev" (safe default)
-    if project_mode not in ("dev", "pm"):
-        logger.warning(f"[{request_id}] Unknown project mode '{project_mode}', treating as 'dev'")
-        project_mode = "dev"
+    # Check project mode: "eng" channels bypass SDLC classification entirely.
+    # Only projects that explicitly set mode="eng" (the main ai repo) skip SDLC.
+    # Cross-repo projects (popoto, psyoptimal, etc.) have no mode field and
+    # fall through to SDLC classification.
+    project_mode = project.get("mode") if project else None
+    # Treat any unrecognized mode as None (run SDLC classification)
+    if project_mode not in (None, "eng"):
+        logger.warning(f"[{request_id}] Unknown project mode '{project_mode}', treating as None")
+        project_mode = None
 
-    if project_mode == "pm":
-        # PM mode: skip classification, always use "question", work in project dir
+    if project_mode == "eng":
+        # Eng mode: skip classification, always use "question", work in project dir
         classification = ClassificationType.QUESTION
         working_dir = project_working_dir
-        logger.info(f"[{request_id}] PM mode: cwd={working_dir}, skipping SDLC classification")
+        logger.info(f"[{request_id}] Eng mode: cwd={working_dir}, skipping SDLC classification")
     else:
-        # Dev mode: use classification from bridge (no re-classification).
+        # Non-eng mode: use classification from bridge (no re-classification).
         # The bridge handler already classified via routing.py and stored
         # classification_type on the AgentSession. Read it from session if
         # available, otherwise fall back to a simple heuristic.
@@ -3216,8 +3215,7 @@ async def get_agent_response_sdk(
     logger.debug(f"[{request_id}] Working directory: {working_dir}")
 
     # Resolve session_type FIRST — it determines permission restrictions injected below.
-    # PM session (session_type="pm") gets full pipeline instructions.
-    # PM sessions orchestrate via dev-session subagent
+    # Eng session (session_type="eng") gets full pipeline instructions via granite container.
     _session_type = None
     _session_model = None
     _session_extra_context: dict = {}
@@ -3274,7 +3272,7 @@ async def get_agent_response_sdk(
     )
 
     # Cross-repo SDLC: inject target repo context
-    if project_mode != "pm" and classification == ClassificationType.SDLC and is_cross_repo:
+    if classification == ClassificationType.SDLC and is_cross_repo:
         github_config = project.get("github", {}) if project else {}
         github_org = github_config.get("org", "")
         github_repo = github_config.get("repo", "")
@@ -3289,7 +3287,7 @@ async def get_agent_response_sdk(
     _teammate_mode = False
     _collaboration_mode = False
     _classification_context = ""  # Advisory routing context for the agent
-    if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+    if _session_type in (SessionType.ENG, SessionType.TEAMMATE):
         # Config-driven persona bypass: skip classifier when persona is already known
         from bridge.routing import resolve_persona as _resolve_persona_mode
 
@@ -3314,7 +3312,7 @@ async def get_agent_response_sdk(
             except Exception:
                 pass  # Best-effort metrics
             # Update session type to Teammate (skip PM sessions — they must stay PM)
-            if session_id and _session_type != SessionType.PM:
+            if session_id and _session_type != SessionType.ENG:
                 try:
                     from models.agent_session import AgentSession as _TMSession
 
@@ -3325,8 +3323,8 @@ async def get_agent_response_sdk(
                             break
                 except Exception:
                     pass  # Best-effort
-        elif _config_persona in (PersonaType.PROJECT_MANAGER, PersonaType.DEVELOPER):
-            # PM/Dev persona groups: skip intent classifier, but check bridge-level
+        elif _config_persona == PersonaType.ENGINEER:
+            # Engineer persona: skip intent classifier, but check bridge-level
             # classification for collaboration/other to avoid unnecessary SDLC overhead
             if classification in (ClassificationType.COLLABORATION, ClassificationType.OTHER):
                 _collaboration_mode = True
@@ -3372,7 +3370,7 @@ async def get_agent_response_sdk(
                     )
                     # Update session type to Teammate so nudge loop uses reduced cap
                     # (skip PM sessions — they must stay PM)
-                    if session_id and _session_type != SessionType.PM:
+                    if session_id and _session_type != SessionType.ENG:
                         try:
                             from models.agent_session import AgentSession as _TMSession
 
@@ -3390,7 +3388,7 @@ async def get_agent_response_sdk(
 
         # PM sessions must never be forced into Teammate mode by DM origin signal.
         # session_type is the authoritative permission signal, not chat_title.
-        if _session_type == SessionType.PM:
+        if _session_type == SessionType.ENG:
             _teammate_mode = False
 
         # Inject classification context as advisory information
@@ -3413,11 +3411,8 @@ async def get_agent_response_sdk(
                 "Google Workspace (gws), memory search "
                 "(python -m tools.memory_search), Office CLI (officecli), "
                 "and session management (python -m tools.valor_session). "
-                "No dev-session needed unless you determine the task requires "
-                "code changes to the repository.\n\n"
-                "If you determine this task actually requires code changes, "
-                "create a dev session via `python -m tools.valor_session create "
-                '--role dev --parent "$AGENT_SESSION_ID" --message "..."` instead.\n\n'
+                "Handle code changes to the repository directly with your full "
+                "engineer toolset; no separate session is needed.\n\n"
                 "**Communicating with the stakeholder:**\n"
                 "You can send Telegram messages directly using:\n"
                 '  `python tools/send_telegram.py "Your message here"`\n'
@@ -3463,7 +3458,7 @@ async def get_agent_response_sdk(
                 "issue number (e.g., 'Run SDLC on issues 777, 775, 776'), you MUST fan out. "
                 "For each issue number N, run:\n"
                 "  python -m tools.valor_session create \\\\\n"
-                "    --role pm \\\\\n"
+                "    --role eng \\\\\n"
                 '    --parent "$AGENT_SESSION_ID" \\\\\n'
                 '    --message "Run SDLC on issue N"\n'
                 "After spawning ALL children, run:\n"
@@ -3480,17 +3475,13 @@ async def get_agent_response_sdk(
                 # Autonomous handoff: proven task type — objective + constraints only.
                 # Skip step-by-step SDLC scaffolding; trust the dev session.
                 enriched_message += (
-                    "You are the PM. This task type is well-proven — delegate efficiently.\n"
-                    "Spawn a dev session with the objective and constraints. "
-                    "No step-by-step scaffolding needed.\n\n"
-                    "  python -m tools.valor_session create \\\\\n"
-                    "    --role dev \\\\\n"
-                    '    --parent "$AGENT_SESSION_ID" \\\\\n'
-                    '    --message "Objective: <what needs to be done>\\n'
-                    "Constraints: <key requirements or acceptance criteria>\\n"
-                    'Context: <any relevant state>"\n\n'
-                    "After spawning, wait for the steering message"
-                    " when the dev session finishes.\n\n"
+                    "You are the engineer. This task type is well-proven — move "
+                    "efficiently.\n"
+                    "Execute the work directly with your full toolset against a clear "
+                    "objective and constraints. No step-by-step scaffolding needed:\n\n"
+                    "  Objective: <what needs to be done>\n"
+                    "  Constraints: <key requirements or acceptance criteria>\n"
+                    "  Context: <any relevant state>\n\n"
                     "**Communicating with the stakeholder:**\n"
                     "You can send Telegram messages directly using:\n"
                     '  `python tools/send_telegram.py "Your message here"`\n'
@@ -3507,40 +3498,23 @@ async def get_agent_response_sdk(
             else:
                 # Structured handoff: novel or error-prone task type — full SDLC guidance.
                 enriched_message += (
-                    "You are the PM. A good PM reads the situation, decides what stage "
-                    "comes next, and gives clear and concise direction to dev sessions — "
-                    "manageable blocks of work with crisp acceptance criteria. The dev "
-                    "session does the hands-on work: running /do-build, /do-test, "
-                    "/do-merge, checking merge gates, running tests. Your job is to "
-                    "direct well and judge the output, not to do the work yourself.\n\n"
-                    "**Spawn vs. resume:** When a dev session recently finished a stage "
-                    "on the same issue, prefer resuming it — it already has the codebase "
-                    "loaded, branch checked out, and full context in its transcript. "
-                    "Use `python -m tools.valor_session resume --id <id> --message '...'` "
-                    "to hand it the next stage. Spawn a fresh dev session when starting "
-                    "a new issue, when the prior session's context would be stale or "
-                    "misleading, or when parallel work on separate issues is needed.\n\n"
-                    "Orchestration loop:\n"
+                    "You are the engineer. Read the situation, decide what stage comes "
+                    "next, and do the hands-on work yourself: running /do-build, "
+                    "/do-test, /do-merge, checking merge gates, running tests. Advance "
+                    "the pipeline one stage at a time with crisp acceptance criteria.\n\n"
+                    "SDLC loop:\n"
                     "1. **Assess** — read the issue, PR, and prior comments to understand "
                     "where the pipeline stands "
                     "(gh issue view, gh pr view, gh pr list, gh pr checks).\n"
                     "1.5. **Gather prior stage context** — if a tracking issue exists, "
                     "fetch the last few comments with "
                     "`gh api repos/{owner}/{repo}/issues/{number}/comments` and look for "
-                    "comments containing `<!-- sdlc-stage-comment -->`. Include a summary "
-                    "of prior stage findings in the dev-session message so the next stage "
+                    "comments containing `<!-- sdlc-stage-comment -->` so the next stage "
                     "has full context.\n"
-                    "2. **Direct a dev session** — resume the prior one if context is "
-                    "still warm, otherwise spawn fresh:\n"
-                    "   python -m tools.valor_session create \\\\\n"
-                    "     --role dev \\\\\n"
-                    '     --parent "$AGENT_SESSION_ID" \\\\\n'
-                    '     --message "Stage: <PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
-                    "Issue: <URL>\\nPR: <URL if exists>\\n"
-                    "Current state: <what's already done>\\n"
-                    'Acceptance criteria: <what done looks like>"\n'
-                    "   The worker steers you back when the dev session finishes — wait.\n"
-                    "3. **Judge the result** — review what the dev session produced and "
+                    "2. **Run the stage** — execute the appropriate stage directly "
+                    "(Stage: <PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>, against the "
+                    "issue/PR, the current state, and the acceptance criteria).\n"
+                    "3. **Judge the result** — review what the stage produced and "
                     "decide whether it clears the bar or needs a patch.\n"
                     "4. **Advance** — move to the next stage or surface a decision to "
                     "the stakeholder if you're genuinely blocked.\n\n"
@@ -3575,7 +3549,7 @@ async def get_agent_response_sdk(
     # --- Single-issue scoping (Fix 3) ---
     # Prevent PM from cross-contaminating pipelines by dispatching work for
     # issues other than the one it was assigned. Only relevant for PM sessions.
-    if _session_type == SessionType.PM and not _teammate_mode:
+    if _session_type == SessionType.ENG and not _teammate_mode:
         enriched_message += (
             "\n\nSINGLE-ISSUE SCOPING: If the message references a specific issue number "
             "(e.g., 'issue 934', '#934', 'issues/934'), you MUST only assess and advance "
@@ -3583,32 +3557,32 @@ async def get_agent_response_sdk(
             "stages for any issue other than the one specified.\n"
         )
 
-    # --- Wait-for-children after dev dispatch (Fix 2) ---
-    # Ensure PM stays alive while dev session runs, so steering messages
-    # are received directly rather than requiring a continuation PM.
-    if _session_type == SessionType.PM and not _teammate_mode:
+    # --- Wait-for-children after child dispatch (Fix 2) ---
+    # Ensure the session stays alive while any child session runs, so steering
+    # messages are received directly rather than requiring a continuation session.
+    if _session_type == SessionType.ENG and not _teammate_mode:
         enriched_message += (
-            "\nDEV SESSION WAIT RULE: After dispatching ANY dev session via "
-            "`python -m tools.valor_session create --role dev`, you MUST:\n"
+            "\nCHILD SESSION WAIT RULE: After spawning ANY child session via "
+            "`python -m tools.valor_session create --role eng`, you MUST:\n"
             "1. Call `python -m tools.valor_session wait-for-children "
             '--session-id "$AGENT_SESSION_ID"`\n'
             "2. Output a brief status message (e.g., 'Dispatched BUILD. Waiting.')\n"
             "3. WAIT for the steering response — do NOT produce a final answer or "
-            "closing statement. The worker will steer you when the dev session completes.\n"
-            "This keeps your session alive so the dev session result is delivered "
-            "directly to you instead of requiring a continuation PM.\n"
+            "closing statement. The worker will steer you when the child session completes.\n"
+            "This keeps your session alive so the child session result is delivered "
+            "directly to you instead of requiring a continuation session.\n"
         )
 
     enriched_message += f"\nMESSAGE: {message}"
 
     # Log prompt summary before sending to agent
-    has_worker_rules = project_mode != "pm"
+    has_worker_rules = project_mode != "eng"
     logger.info(
         f"[{request_id}] Sending to agent: {len(enriched_message)} chars, "
         f"classification={classification}, "
         f"task_list={task_list_id or 'none'}, mode={project_mode}"
     )
-    wr_label = "yes" if has_worker_rules else "no (pm mode)"
+    wr_label = "yes" if has_worker_rules else "no (eng mode)"
     is_dm = chat_title is None
     # Single source of truth for (persona, access_level, channel) resolution.
     # See _resolve_compose_args (~L1050) for the full input → output mapping.
@@ -3634,20 +3608,18 @@ async def get_agent_response_sdk(
         logger.info(f"[{request_id}] Resolved persona: {persona}")
 
         # Build system prompt based on persona and project mode.
-        # PM session (session_type="pm") uses PM persona with read-only permissions.
+        # ENG session (session_type="eng") uses engineer persona with full permissions.
         custom_system_prompt = None
         _permission_mode = "bypassPermissions"  # Default: full permissions
 
         # Compose the system prompt from the resolved (persona, access_level)
-        # tuple. Branches that previously called load_pm_system_prompt or
+        # tuple. Branches that previously called load_eng_system_prompt or
         # _load_persona_overlay_with_log now funnel through compose_system_prompt;
         # the canonical "Persona overlay loaded:" log line is preserved per branch
         # so test-cuttlefish-* and similar log greps continue to work.
-        if _access_level == AccessLevel.PM_READONLY:
-            # PM mode (PM session OR project_mode == "pm"): no WORKER_RULES,
-            # appends work-vault CLAUDE.md. agent/hooks/pre_tool_use.py enforces
-            # tool restrictions (Write/Edit blocked outside docs/, Bash on a
-            # read-only allowlist) for actual PM sessions.
+        if _access_level == AccessLevel.WORKER:
+            # Eng mode (ENG session OR project_mode == "eng"): includes
+            # WORKER_RULES and optionally appends work-vault CLAUDE.md.
             custom_system_prompt = compose_system_prompt(
                 persona,
                 _access_level,
@@ -3660,8 +3632,8 @@ async def get_agent_response_sdk(
                 f"prompt_chars={len(custom_system_prompt) if custom_system_prompt else 0} "
                 f"session_id={session_id}"
             )
-            if _session_type == SessionType.PM:
-                logger.info(f"[{request_id}] PM session mode: PM persona, bypassPermissions")
+            if _session_type == SessionType.ENG:
+                logger.info(f"[{request_id}] Eng session mode: engineer persona, bypassPermissions")
         elif _access_level == AccessLevel.CUSTOMER_SERVICE:
             # Customer-service persona: action-oriented, no code writes. Use
             # the logging adapter for fallback semantics (teammate fallback).
@@ -3689,9 +3661,7 @@ async def get_agent_response_sdk(
         # When classification is "sdlc" and the project targets a non-ai repo,
         # set GH_REPO so all gh commands automatically target the correct repo.
         _gh_repo = None
-        is_cross_repo_sdlc = (
-            project_mode != "pm" and classification == ClassificationType.SDLC and is_cross_repo
-        )
+        is_cross_repo_sdlc = classification == ClassificationType.SDLC and is_cross_repo
         if is_cross_repo_sdlc:
             _github_config = project.get("github", {}) if project else {}
             _gh_org = _github_config.get("org", "")
@@ -3727,7 +3697,7 @@ async def get_agent_response_sdk(
         logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
 
         # Record response time metric for Teammate observability
-        if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+        if _session_type in (SessionType.ENG, SessionType.TEAMMATE):
             try:
                 from agent.teammate_metrics import record_response_time
 

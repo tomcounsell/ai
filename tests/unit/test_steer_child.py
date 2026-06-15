@@ -11,24 +11,22 @@ from scripts.steer_child import main
 
 @pytest.fixture
 def mock_parent():
-    """Create a mock parent PM session."""
+    """Create a mock parent Eng session."""
     parent = MagicMock()
     parent.agent_session_id = "parent-001"
-    parent.session_type = "pm"
-    parent.is_pm = True
-    parent.is_dev = False
+    parent.session_type = "eng"
+    parent.is_eng = True
     return parent
 
 
 @pytest.fixture
 def mock_child():
-    """Create a mock child Dev session."""
+    """Create a mock child Eng session."""
     child = MagicMock()
     child.agent_session_id = "child-001"
     child.session_id = "child-001"
-    child.session_type = "dev"
-    child.is_pm = False
-    child.is_dev = True
+    child.session_type = "eng"
+    child.is_eng = True
     child.parent_agent_session_id = "parent-001"
     child.status = "running"
     child.slug = "my-feature"
@@ -169,10 +167,10 @@ class TestSteerChild:
         assert result == 1
 
     @patch(_AGENT_SESSION)
-    def test_non_dev_session_rejected(self, mock_agent_session_cls):
-        """PM session (not a Dev session) is rejected as steering target."""
+    def test_non_eng_session_rejected(self, mock_agent_session_cls):
+        """Teammate session (not an Eng session) is rejected as steering target."""
         chat = MagicMock()
-        chat.is_dev = False
+        chat.is_eng = False
         mock_agent_session_cls.get_by_id.return_value = chat
 
         result = main(

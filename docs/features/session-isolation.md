@@ -30,7 +30,7 @@ The env var is set in `ValorAgent._create_options()` and passed through `get_age
 
 - `AgentSession.slug` -- Redis model field storing the active slug for a session. Set when `/do-plan {slug}` runs.
 - **Looking up an AgentSession by id** -- Use `AgentSession.get_by_id(agent_session_id)` for any raw-string lookup. Popoto's `AgentSession.query.get()` requires a key kwarg (`db_key=` / `redis_key=`) and raises `AttributeError` on bare strings, which historically got swallowed by silent `except` blocks (issue #765). The `get_by_id` helper handles None/empty/whitespace input, logs warnings on backend failures, and is the canonical entry point for CLI args, parent references, and Redis hash fields.
-- `AgentSession.project_config` -- DictField carrying the full project dict from `projects.json`. Populated at enqueue time so downstream code (queue worker, SDK client, formatting) can read project properties without re-deriving from config files or parallel registries. See [Chat Dev Session Architecture](pm-dev-session-architecture.md#project-config-propagation) for the propagation flow.
+- `AgentSession.project_config` -- DictField carrying the full project dict from `projects.json`. Populated at enqueue time so downstream code (queue worker, SDK client, formatting) can read project properties without re-deriving from config files or parallel registries. See [Eng Session Architecture](eng-session-architecture.md#project-config-propagation) for the propagation flow.
 - `Job.slug` -- Propagated from the session to each session for task list routing.
 - `Job.task_list_id` -- The computed task list ID (either slug or thread-derived).
 
@@ -52,42 +52,42 @@ Each tier 2 work item gets its own git worktree for filesystem isolation:
 
 The worktree manager provides six operations: `get_or_create_worktree()`, `create_worktree()`, `remove_worktree()`, `list_worktrees()`, `prune_worktrees()`, and `cleanup_after_merge()`.
 
-### Worktree Enforcement for Dev Sessions (Issue #887)
+### Worktree Enforcement for Child Eng Sessions (Issue #887)
 
-Dev sessions with a slug are **required** to run inside a worktree. Three enforcement layers prevent contamination of the main checkout:
+Child eng sessions with a slug are **required** to run inside a worktree. Three enforcement layers prevent contamination of the main checkout:
 
-1. **Worktree provisioning failure escalation** (`agent/agent_session_queue.py`): When `get_or_create_worktree()` fails for a dev session, the error is escalated to a `RuntimeError` instead of falling back to the main checkout. Non-dev sessions (PM, teammate) retain the original fallback-to-main-checkout behavior.
+1. **Worktree provisioning failure escalation** (`agent/agent_session_queue.py`): When `get_or_create_worktree()` fails for a slugged eng session, the error is escalated to a `RuntimeError` instead of falling back to the main checkout. Slugless and teammate sessions retain the original fallback-to-main-checkout behavior.
 
-2. **Main-checkout protection guard** (`agent/agent_session_queue.py`): A secondary guard runs after worktree resolution. If a dev session with a slug resolves to a `working_dir` that does not contain `.worktrees`, the session is rejected with a `RuntimeError`. This catches cases where worktree provisioning was silently skipped or the path was overridden.
+2. **Main-checkout protection guard** (`agent/agent_session_queue.py`): A secondary guard runs after worktree resolution. If a slugged eng session resolves to a `working_dir` that does not contain `.worktrees`, the session is rejected with a `RuntimeError`. This catches cases where worktree provisioning was silently skipped or the path was overridden.
 
-3. **PM prompt instruction** (`config/personas/project-manager.md`): The PM persona prompt explicitly instructs the PM to set the worktree path (`.worktrees/{slug}/`) as the working directory when spawning dev sessions via the Agent tool. This is the first line of defense -- the infrastructure guards are the safety net.
+3. **Engineer persona instruction** (`config/personas/engineer.md`): The engineer persona prompt explicitly instructs the agent to allocate a non-overlapping worktree (`.worktrees/{slug}/`) and pass it as the working directory when fanning out to child eng sessions via `valor-session create --role eng`. This is the first line of defense -- the infrastructure guards are the safety net.
 
-**Why this was added:** The 2026-04-10 incident (issue [#887](https://github.com/tomcounsell/ai/issues/887)) demonstrated that `valor-session create` without a prior `/do-plan` step bypassed worktree provisioning entirely, causing dev sub-sessions to run git operations in the main checkout. This contaminated concurrent human and agent work.
+**Why this was added:** The 2026-04-10 incident (issue [#887](https://github.com/tomcounsell/ai/issues/887)) demonstrated that `valor-session create` without a prior `/do-plan` step bypassed worktree provisioning entirely, causing child sessions to run git operations in the main checkout. This contaminated concurrent human and agent work.
 
-### Synthetic Slugs for Slugless Dev Sessions (Issue #1272)
+### Synthetic Slugs for Slugless Eng Sessions (Issue #1272)
 
 The #887 main-checkout protection guard short-circuits when `slug is None`:
 
 ```python
-if _stype == "dev" and slug and WORKTREES_DIR not in str(working_dir):
+if _stype == "eng" and slug and WORKTREES_DIR not in str(working_dir):
     raise RuntimeError(...)
 ```
 
-That left a residual hole — a dev session created without a slug (a future debug harness, a test fixture, or any code path that bypasses the CLI's `--slug` requirement) would skip worktree provisioning AND skip the guard, landing in the main checkout.
+That left a residual hole — an eng session created without a slug (a future debug harness, a test fixture, or any code path that bypasses the CLI's `--slug` requirement) would skip worktree provisioning AND skip the guard, landing in the main checkout.
 
 Issue [#1272](https://github.com/tomcounsell/ai/issues/1272) closes that hole with two surgical additions:
 
-1. **CLI symmetry guard** (`tools/valor_session.py::cmd_create`): `valor-session create --role dev` now requires `--slug` or `issue #N` in the message, mirroring the existing PM check. Slugless invocations exit 1 with a stderr error referencing #1272. The message format includes the literal substring `dev sessions must be created with --slug` for grep-ability.
+1. **CLI symmetry guard** (`tools/valor_session.py::cmd_create`): `valor-session create --role eng` requires `--slug` or `issue #N` in the message. Slugless invocations exit 1 with a stderr error referencing #1272. The message format includes the literal substring `dev sessions must be created with --slug` for grep-ability.
 
-2. **Synthetic-slug synthesis** (`agent/session_executor.py`): If a slugless dev session somehow reaches the executor (a future programmatic spawn site that bypasses the CLI), the executor synthesizes a slug `dev-{agent_session_id[:8]}` and provisions a worktree the same way slugged sessions do today. The synthesis emits a stable `[synthetic-slug]` log marker so operators can grep post-deploy:
+2. **Synthetic-slug synthesis** (`agent/session_executor.py`): If a slugless eng session somehow reaches the executor (a future programmatic spawn site that bypasses the CLI), the executor synthesizes a slug `dev-{agent_session_id[:8]}` and provisions a worktree the same way slugged sessions do today. The synthesis emits a stable `[synthetic-slug]` log marker so operators can grep post-deploy:
 
    ```
    [synthetic-slug] Allocated synthetic slug dev-abcd1234 for slugless dev session abcd1234-... (issue #1272)
    ```
 
-3. **Pre-synthesis precondition**: An executor-guard precondition raises (and finalizes the session as failed) if `agent_session_id is None` for a slugless dev session — without an aid, the synthesis line `dev-{aid[:8]}` would crash with `TypeError`.
+3. **Pre-synthesis precondition**: An executor-guard precondition raises (and finalizes the session as failed) if `agent_session_id is None` for a slugless eng session — without an aid, the synthesis line `dev-{aid[:8]}` would crash with `TypeError`.
 
-4. **Synthetic-slug cleanup hook**: Synthetic-slug worktrees may not have a corresponding PR (the dev session may complete without ever opening one), and `prune_worktrees()` only runs `git worktree prune` (removes references, not directories). The session-completion `finally` block in `_execute_agent_session` calls `cleanup_after_merge(repo_root, slug)` directly when the slug matches the regex `^dev-[0-9a-f]{8}$`. The regex is exact — it must NOT match a real human-chosen slug like `dev-improvements` or `dev-1272`. Cleanup failures are logged at WARNING and do NOT propagate as session failures.
+4. **Synthetic-slug cleanup hook**: Synthetic-slug worktrees may not have a corresponding PR (the eng session may complete without ever opening one), and `prune_worktrees()` only runs `git worktree prune` (removes references, not directories). The session-completion `finally` block in `_execute_agent_session` calls `cleanup_after_merge(repo_root, slug)` directly when the slug matches the regex `^dev-[0-9a-f]{8}$`. The regex is exact — it must NOT match a real human-chosen slug like `dev-improvements` or `dev-1272`. Cleanup failures are logged at WARNING and do NOT propagate as session failures.
 
    **Unmerged-branch guard (issue #1646):** `cleanup_after_merge` now verifies the merged
    precondition before deleting the branch, using the squash-safe `merged_via_tree` oracle
@@ -116,14 +116,14 @@ The three #887 layers above all live on the worker / agent code path. Nothing pr
 
 ### Branch verification on worktree reuse (#1377)
 
-A worktree handed between SDLC stages may still be checked out to the previous stage's branch (e.g. BUILD leaves `.worktrees/{slug}/` on `session/{slug}`; a follow-up MERGE dev session expects `main`). The executor calls `verify_worktree_branch` after the #887 main-checkout guard and before launching the Claude Code subprocess. Clean worktrees are auto-checked-out to the expected branch with an INFO `[worktree-branch-recovery]` log; dirty worktrees raise `WorktreeBranchMismatchError` so the session fails loudly with `last_error` populated instead of hanging silently. See `docs/features/worktree-manager.md` for the full behavior table and rationale.
+A worktree handed between SDLC stages may still be checked out to the previous stage's branch (e.g. BUILD leaves `.worktrees/{slug}/` on `session/{slug}`; a follow-up MERGE eng session expects `main`). The executor calls `verify_worktree_branch` after the #887 main-checkout guard and before launching the Claude Code subprocess. Clean worktrees are auto-checked-out to the expected branch with an INFO `[worktree-branch-recovery]` log; dirty worktrees raise `WorktreeBranchMismatchError` so the session fails loudly with `last_error` populated instead of hanging silently. See `docs/features/worktree-manager.md` for the full behavior table and rationale.
 
 ### Early Worktree Provisioning via `--slug`
 
 The `valor-session create` CLI command accepts a `--slug` flag that provisions a worktree at session creation time, before the session is enqueued:
 
 ```bash
-python -m tools.valor_session create --role dev --slug my-feature --message "Build the feature"
+python -m tools.valor_session create --role eng --slug my-feature --message "Build the feature"
 ```
 
 When `--slug` is provided:
@@ -240,9 +240,9 @@ Experiments validated the approach before implementation:
 | `scripts/post_merge_cleanup.py` | CLI script for post-merge worktree and branch cleanup |
 | `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs for hook-side resolution |
 | `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment; registers/unregisters sessions in the hook registry |
-| `agent/agent_session_queue.py` | Computes task list ID in `_execute_agent_session()` and passes to SDK; worktree enforcement guards for dev sessions |
+| `agent/agent_session_queue.py` | Computes task list ID in `_execute_agent_session()` and passes to SDK; worktree enforcement guards for slugged eng sessions |
 | `tools/valor_session.py` | CLI for session management; `--slug` flag provisions worktree at creation time |
-| `config/personas/project-manager.md` | PM prompt with worktree CWD instruction for dev-session Agent calls |
+| `config/personas/engineer.md` | Engineer prompt with worktree CWD instruction for child eng sessions spawned via `valor-session create --role eng` |
 | `models/agent_session.py` | `AgentSession` model with `slug` field |
 | `docs/features/task-list-isolation.md` | Experiment results for CLAUDE_CODE_TASK_LIST_ID behavior |
 | `docs/features/worktree-sdk-compatibility.md` | Experiment results for SDK + worktree compatibility |
@@ -293,9 +293,9 @@ The registry also tracks per-session tool activity (tool count and last 3 tool n
 
 **Hook call sites using the registry**:
 - `agent/health_check.py` -- watchdog tool count tracking
-- `agent/hooks/pre_tool_use.py` -- pipeline stage start on dev-session spawn
+- `agent/hooks/pre_tool_use.py` -- pipeline stage start on in-session SDLC Skill invocation (e.g. a `/sdlc` stage), tracked within the running eng session rather than at child spawn
 
-(Historical: `agent/hooks/subagent_stop.py` previously used the registry for completion tracking and a two-lookup pattern for the child AgentSession. The hook was stripped in the Phase 5 harness migration and then deleted in issue #1024; the equivalent logic now lives in `_handle_dev_session_completion()` in `agent/agent_session_queue.py`.)
+(Historical: `agent/hooks/subagent_stop.py` previously used the registry for completion tracking and a two-lookup pattern for the child AgentSession. The hook was stripped in the Phase 5 harness migration and then deleted in issue #1024. Child-session completion is no longer driven by a stop hook: when a child eng session finalizes, `complete_transcript()` runs `_finalize_parent_sync()` (`agent/session_completion.py`) synchronously, which re-enqueues the waiting parent. SDLC stage tracking now happens in-session via the `pre_tool_use` / `post_tool_use` hooks on Skill invocations, not at child spawn.)
 
 Note: The `VALOR_SESSION_ID` env var injection in `sdk_client.py` is retained for code running inside the Claude Code subprocess (shell scripts, Python tools via Bash). The registry is only for parent-process hook resolution.
 

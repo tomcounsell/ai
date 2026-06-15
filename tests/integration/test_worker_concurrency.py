@@ -349,7 +349,7 @@ class TestPMProjectKeySerialization:
                 chat_id=cid,
                 session_id=f"pm-serial-{i}",
                 project_key=project_key,
-                session_type=SessionType.PM,
+                session_type=SessionType.ENG,
                 created_at=time.time() + i * 0.001,
             )
 
@@ -402,7 +402,7 @@ class TestDevWorktreeParallelism:
                 chat_id=cid,
                 session_id=f"dev-parallel-{i}",
                 project_key=project_key,
-                session_type=SessionType.DEV,
+                session_type=SessionType.ENG,
                 slug=slugs[i],
                 created_at=time.time() + i * 0.001,
             )
@@ -462,7 +462,7 @@ class TestDevWorktreeParallelism:
                 chat_id=shared_chat_id,
                 session_id=f"dev-same-chat-{i}",
                 project_key=project_key,
-                session_type=SessionType.DEV,
+                session_type=SessionType.ENG,
                 slug=sl,
                 created_at=time.time() + i * 0.001,
             )
@@ -515,7 +515,7 @@ class TestDevWorktreeParallelism:
             chat_id=chat_id,
             session_id="slug-pop-1",
             project_key=project_key,
-            session_type=SessionType.DEV,
+            session_type=SessionType.ENG,
             slug=slug,
         )
         try:

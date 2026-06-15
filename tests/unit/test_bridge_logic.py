@@ -418,15 +418,15 @@ class TestBuildContextPrefix:
         result = build_context_prefix(None, session_type=None)
         assert result == ""
 
-    def test_pm_session_without_project(self):
-        """PM session without project should get no restriction."""
-        result = build_context_prefix(None, session_type="pm")
+    def test_eng_session_without_project(self):
+        """Eng session without project should get no restriction."""
+        result = build_context_prefix(None, session_type="eng")
         assert result == ""
         assert "RESTRICTION" not in result
 
-    def test_dev_session_without_project(self):
-        """Dev session without project should get no restriction."""
-        result = build_context_prefix(None, session_type="dev")
+    def test_eng_session_without_project2(self):
+        """Eng session (from dev role) without project should get no restriction."""
+        result = build_context_prefix(None, session_type="eng")
         assert result == ""
         assert "RESTRICTION" not in result
 
@@ -468,9 +468,9 @@ class TestBuildContextPrefix:
         assert "TECH:" not in result  # No context.tech_stack
         assert "REPO:" not in result  # No github.repo
 
-    def test_pm_session_no_restriction(self, valor_project):
-        """PM session should never receive Teammate read-only restriction."""
-        result = build_context_prefix(valor_project, session_type="pm")
+    def test_eng_session_no_restriction(self, valor_project):
+        """Eng session should never receive Teammate read-only restriction."""
+        result = build_context_prefix(valor_project, session_type="eng")
         assert "RESTRICTION" not in result
         assert "PROJECT: Valor AI" in result
 

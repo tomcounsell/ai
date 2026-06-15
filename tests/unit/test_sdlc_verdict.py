@@ -23,7 +23,7 @@ class _FakeSession:
 
     def __init__(self, session_id="fake-1", stage_states=None):
         self.session_id = session_id
-        self.session_type = "pm"
+        self.session_type = "eng"
         if stage_states is None:
             self.stage_states = "{}"
         elif isinstance(stage_states, dict):

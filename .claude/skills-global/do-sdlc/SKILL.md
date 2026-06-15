@@ -20,7 +20,7 @@ You are the supervisor, not the worker. You assess, dispatch, and track. The sta
 
 ## Stage→Model Dispatch Table
 
-Mirrors the PM persona's table (`config/personas/project-manager.md`) — the local equivalent of `valor-session create --model`.
+Mirrors the engineer persona's table (`config/personas/engineer.md`) — the local equivalent of `valor-session create --model`.
 
 | Stage | Skill | `model:` | Rationale |
 |-------|-------|----------|-----------|

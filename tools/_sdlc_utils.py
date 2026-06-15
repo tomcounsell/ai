@@ -112,21 +112,21 @@ def _git_toplevel(cwd: Path | None = None) -> Path | None:
 
 
 def find_session_by_issue(issue_number: int):
-    """Find a PM session tracking the given issue number.
+    """Find an eng session tracking the given issue number.
 
-    Two-pass match over PM sessions:
+    Two-pass match over eng sessions:
 
     1. Primary pass: ``issue_url`` endswith ``/issues/{issue_number}``.
     2. Fallback pass: ``message_text`` matches the case-insensitive regex
        ``\\bissue\\s*#?\\s*{issue_number}\\b``. This catches Telegram-
-       originated PM sessions that have no ``issue_url`` (the bridge builds
+       originated eng sessions that have no ``issue_url`` (the bridge builds
        sessions from message text, not URLs) so operators running SDLC over
        the bridge are still findable by issue number.
 
     Resolution order (tightened for #1671/#1672 — concern C2):
 
-    1. **issue_url ownership pass**: scan PM sessions for one whose
-       ``issue_url`` endswith ``/issues/{issue_number}``. A live bridge PM
+    1. **issue_url ownership pass**: scan eng sessions for one whose
+       ``issue_url`` endswith ``/issues/{issue_number}``. A live bridge eng
        session that owns the issue via its URL wins over a stale deterministic
        ``sdlc-local-{N}`` record. This pass runs FIRST so a leftover
        ``sdlc-local-{N}`` from an earlier local run can never shadow the
@@ -137,7 +137,7 @@ def find_session_by_issue(issue_number: int):
        Match it by its deterministic id so the READ path (verdict get,
        stage-query, next-skill) finds the same record a prior WRITE created.
        This is the fallback for the sessionless-local case it was built for
-       (#1558) — only reached when no PM session owns the issue via
+       (#1558) — only reached when no eng session owns the issue via
        ``issue_url``.
     3. **message_text fallback pass**: match by message_text for bridge-
        originated sessions that have no ``issue_url``.
@@ -164,17 +164,17 @@ def find_session_by_issue(issue_number: int):
         # record. Compute this FIRST so the deterministic-id fallback never
         # shadows the authoritative bridge session.
         #
-        # NOTE: Linear scan of PM sessions — acceptable for current scale (typically
-        # <100 PM sessions). If PM session count grows significantly, consider adding
+        # NOTE: Linear scan of eng sessions — acceptable for current scale (typically
+        # <100 eng sessions). If session count grows significantly, consider adding
         # an indexed lookup by issue_url or caching issue->session mappings.
-        pm_sessions = list(AgentSession.query.filter(session_type="pm"))
+        eng_sessions = list(AgentSession.query.filter(session_type="eng"))
         target_suffix = f"/issues/{issue_number}"
-        for s in pm_sessions:
+        for s in eng_sessions:
             issue_url = getattr(s, "issue_url", None) or ""
             if issue_url.endswith(target_suffix):
                 return s
 
-        # Deterministic-id pass: only reached when no PM session owns the issue
+        # Deterministic-id pass: only reached when no eng session owns the issue
         # via issue_url. Matches the sdlc-local-{N} record a prior sessionless
         # WRITE created so the subsequent READ finds it (#1558).
         local_id = f"sdlc-local-{issue_number}"
@@ -184,7 +184,7 @@ def find_session_by_issue(issue_number: int):
             # (or test mock) that ignores the filter must not yield a false hit.
             local = [s for s in local if getattr(s, "session_id", None) == local_id]
             for s in local:
-                if getattr(s, "session_type", None) == "pm":
+                if getattr(s, "session_type", None) == "eng":
                     return s
             if local:
                 return local[0]
@@ -195,7 +195,7 @@ def find_session_by_issue(issue_number: int):
         # have no issue_url. Word boundaries prevent matches like
         # "tissue 1147" — only "issue 1147", "issue #1147", "SDLC issue 1147".
         pattern = re.compile(rf"\bissue\s*#?\s*{issue_number}\b", re.IGNORECASE)
-        for s in pm_sessions:
+        for s in eng_sessions:
             message_text = getattr(s, "message_text", None) or ""
             if message_text and pattern.search(message_text):
                 return s
@@ -271,7 +271,7 @@ def find_session(
             sessions = list(AgentSession.query.filter(session_id=session_id))
             if sessions:
                 for s in sessions:
-                    if getattr(s, "session_type", None) == "pm":
+                    if getattr(s, "session_type", None) == "eng":
                         return s
                 return sessions[0]
         except Exception as e:
@@ -296,7 +296,7 @@ def find_session(
             sessions = list(AgentSession.query.filter(session_id=env_id))
             if sessions:
                 for s in sessions:
-                    if getattr(s, "session_type", None) == "pm":
+                    if getattr(s, "session_type", None) == "eng":
                         return s
                 return sessions[0]
         except Exception as e:

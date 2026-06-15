@@ -1,13 +1,13 @@
-"""PM persona overlay drift check.
+"""Engineer persona overlay drift check.
 
-Compares the in-repo PM persona template against the private per-machine
+Compares the in-repo engineer persona template against the private per-machine
 vault overlay and returns a list of human-readable warnings. The check is
 purely a surface — it never auto-merges, never mutates files, and never
 raises (any unexpected error becomes a warning).
 
 The default template path matches the actual file in the repo
-(`config/personas/project-manager.md`); the `config/personas/segments/`
-directory holds universal segments only and has no `project-manager.md`.
+(`config/personas/engineer.md`); the `config/personas/segments/`
+directory holds universal segments only and has no `engineer.md`.
 
 Used by `scripts/update/run.py` Step 4.10 and exercised end-to-end by
 `tests/unit/test_update_persona_drift.py`.
@@ -18,8 +18,8 @@ from __future__ import annotations
 import difflib
 from pathlib import Path
 
-DEFAULT_TEMPLATE_REL = Path("config/personas/project-manager.md")
-DEFAULT_OVERLAY_PATH = Path.home() / "Desktop" / "Valor" / "personas" / "project-manager.md"
+DEFAULT_TEMPLATE_REL = Path("config/personas/engineer.md")
+DEFAULT_OVERLAY_PATH = Path.home() / "Desktop" / "Valor" / "personas" / "engineer.md"
 
 
 def check_pm_persona_drift(
@@ -28,7 +28,7 @@ def check_pm_persona_drift(
     template_rel: Path = DEFAULT_TEMPLATE_REL,
     overlay_path: Path | None = None,
 ) -> list[str]:
-    """Return warnings produced by the PM persona drift check.
+    """Return warnings produced by the engineer persona drift check.
 
     Parameters
     ----------
@@ -37,10 +37,10 @@ def check_pm_persona_drift(
         check is independent of the caller's current working directory.
     template_rel:
         Repo-relative path to the in-repo template. Defaults to
-        ``config/personas/project-manager.md``.
+        ``config/personas/engineer.md``.
     overlay_path:
         Absolute path to the private vault overlay. Defaults to
-        ``~/Desktop/Valor/personas/project-manager.md``.
+        ``~/Desktop/Valor/personas/engineer.md``.
 
     Returns
     -------

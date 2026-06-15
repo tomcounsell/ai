@@ -96,7 +96,7 @@ def _reload_session(session: AgentSession):
             return session
         # Prefer a PM session (canonical owner of stage_states)
         for candidate in matches:
-            if getattr(candidate, "session_type", None) == "pm":
+            if getattr(candidate, "session_type", None) == "eng":
                 return candidate
         return matches[0]
     except Exception as e:

@@ -11,7 +11,7 @@ Every shape that can route an incoming bridge message to a session:
 | Identifier shape | Where it lives in `projects.json` | Example |
 |-----|-----|-----|
 | Telegram DM contact id | `dms.whitelist[].id` | `179144806` (Tom) |
-| Telegram group name | `projects.<key>.telegram.groups.<name>` | `"Dev: Valor"` |
+| Telegram group name | `projects.<key>.telegram.groups.<name>` | `"Eng: Valor"` |
 | Email contact (explicit address) | `projects.<key>.email.contacts[]` | `alice@example.com` |
 | Email domain (wildcard) | `projects.<key>.email.domains[]` | `psyoptimal.com` |
 

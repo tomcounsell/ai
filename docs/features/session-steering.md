@@ -79,10 +79,10 @@ Worker loop
 
 ```bash
 # Create a new session (project_key derived from cwd via projects.json)
-# PM and dev roles both require --slug, or `issue #N` in the message for auto-derivation.
-valor-session create --role pm --message "Plan issue #735"
-valor-session create --role dev --slug fix-the-bug --message "Fix the bug" --parent abc123
-valor-session create --role pm --slug ad-hoc-task --message "..." --project-key valor  # explicit override
+# The eng role requires --slug, or `issue #N` in the message for auto-derivation.
+valor-session create --role eng --message "Plan issue #735"
+valor-session create --role eng --slug fix-the-bug --message "Fix the bug"
+valor-session create --role eng --slug ad-hoc-task --message "..." --project-key valor  # explicit override
 
 # Steer a running session
 valor-session steer --id abc123 --message "Stop after critique stage"
@@ -93,7 +93,7 @@ valor-session status --id abc123
 # List sessions
 valor-session list
 valor-session list --status running
-valor-session list --role pm
+valor-session list --role eng
 
 # Kill sessions
 valor-session kill --id abc123
@@ -162,7 +162,7 @@ See [Message Drafter](message-drafter.md) for the current feature doc covering t
 ## Watchdog-Authored Steering (issue #1128)
 
 The session watchdog (`monitoring/session_watchdog.py`) is now an active
-steering-message **sender** alongside humans, the PM session, and the
+steering-message **sender** alongside humans, parent Eng sessions, and the
 drafter fallback. When one of three conditions fires, the watchdog
 enqueues a targeted message via
 `_inject_watchdog_steer(session_id, reason, message)`, which calls
@@ -191,43 +191,44 @@ not suppress a parallel `error_cascade` or `token_alert` steer.
 **Feature gate.** `WATCHDOG_AUTO_STEER_ENABLED=false` disables the push
 without disabling the detection (still logged at WARNING).
 
-## Parent-Child Steering (PM session to Dev session)
+## Parent-Child Steering (parent Eng session to child Eng session)
 
-In addition to Telegram reply-thread steering (user to agent), the steering queue supports **parent-child steering** where a PM session (PM persona) pushes steering messages to its spawned Dev sessions.
+In addition to Telegram reply-thread steering (user to agent), the steering queue supports **parent-child steering**. Parent and child sessions are both Eng sessions (`session_type="eng"`); a parent created its child via `AgentSession.create_child()` for parallel work, and steers it while it runs.
 
 ### How It Works
 
-The PM session invokes `scripts/steer_child.py` via bash to push steering messages to a running child Dev session. The script validates the parent-child relationship before pushing to the same Redis steering queue used by bridge steering.
+The parent Eng session invokes `scripts/steer_child.py` via bash to push steering messages to a running child Eng session. The script validates the parent-child relationship, then routes through one of two paths depending on whether the message is an abort.
 
 ```
-PM session decides to steer
+Parent Eng session decides to steer
     |
     v
 python scripts/steer_child.py --session-id <child_id> --message "focus on tests" --parent-id <parent_id>
     |
     v
-Script validates: child exists, is a Dev session, parent_agent_session_id matches, status is "running"
+Script validates: child exists, is an Eng session (is_eng), parent_agent_session_id matches, status is "running"
     |
-    v
-push_steering_message(child_session_id, text, sender="PM session")
+    +-- non-abort --> steer_session(session_id, message)
+    |                   → AgentSession.queued_steering_messages (turn-boundary inbox)
+    |                   → child consumes at its next turn boundary
     |
-    v
-Child's watchdog picks up on next tool call (existing _handle_steering in health_check.py)
-    |
-    v
-Dev session adjusts behavior
+    +-- --abort -----> push_steering_message(session_id, text, sender="pm", is_abort=True)
+                        → Redis abort queue; the watchdog hook delivers immediately
+                          via additionalContext injection
 ```
+
+The non-abort path uses the turn-boundary inbox (`queued_steering_messages`) via `steer_session()`, which works for both SDK-harness and CLI-harness sessions. The abort path uses the Redis list (`push_steering_message(..., is_abort=True)`) so the watchdog hook can deliver the stop signal immediately rather than waiting for a turn boundary.
 
 ### CLI Usage
 
 ```bash
-# Steer a child Dev session
+# Steer a running child Eng session
 python scripts/steer_child.py --session-id <child_id> --message "skip docs, focus on tests" --parent-id <parent_id>
 
 # Send abort signal to a child
 python scripts/steer_child.py --session-id <child_id> --message "stop" --parent-id <parent_id> --abort
 
-# List active child Dev sessions
+# List active child Eng sessions
 python scripts/steer_child.py --list --parent-id <parent_id>
 ```
 
@@ -235,11 +236,11 @@ The `--parent-id` can also be read from the `VALOR_SESSION_ID` environment varia
 
 ### Validation
 
-The script enforces strict parent-child relationship validation:
+The script enforces strict parent-child relationship validation in `_steer_child()`:
 
 - Target must be an existing AgentSession
-- Target must be a Dev session (`is_dev` check)
-- Target's `parent_agent_session_id` must match the caller's ID
+- Target must be an Eng session (`child.is_eng` check)
+- Target's `parent_agent_session_id` must match the caller's parent ID
 - Target must be in `running` status
 
 All validation failures exit with non-zero code and print an error to stderr.
@@ -248,14 +249,14 @@ All validation failures exit with non-zero code and print an error to stderr.
 
 | Aspect | Bridge Steering | Parent-Child Steering |
 |--------|----------------|----------------------|
-| Caller | Telegram user (via reply thread) | PM session (via bash script) |
+| Caller | Telegram user (via reply thread) | Parent Eng session (via bash script) |
 | Entry point | `bridge/telegram_bridge.py` | `scripts/steer_child.py` |
-| Validation | Session ID match + running status | Parent-child relationship + running status |
-| Redis queue | Same (`steering:{session_id}`) | Same (`steering:{session_id}`) |
-| Consumption | Same (watchdog `_handle_steering`) | Same (watchdog `_handle_steering`) |
-| Sender field | User's name | "PM session" |
+| Validation | Session ID match + running status | Parent-child relationship (`is_eng` + `parent_agent_session_id`) + running status |
+| Non-abort path | Turn-boundary inbox (`queued_steering_messages`) | Turn-boundary inbox (`queued_steering_messages`) via `steer_session()` |
+| Abort path | n/a | Redis abort queue via `push_steering_message(..., is_abort=True)` |
+| Sender field | User's name | `"pm"` (abort path) |
 
-Both paths converge on the same `push_steering_message()` function in `agent/steering.py` and the same consumption path in the watchdog hook.
+The non-abort path converges on `steer_session()` in `agent/agent_session_queue.py` and the same turn-boundary inbox documented above. The abort path uses `push_steering_message()` in `agent/steering.py` with `sender="pm"`.
 
 ## No-Gos
 

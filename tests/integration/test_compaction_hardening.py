@@ -39,7 +39,7 @@ def _make_transcript(tmp_path: Path, lines: int = 5) -> Path:
 def _make_session(claude_uuid: str, project_key: str = "test-compaction-int") -> AgentSession:
     session = AgentSession(
         session_id=f"int-{claude_uuid[:8]}",
-        session_type="dev",
+        session_type="eng",
         project_key=project_key,
         claude_session_uuid=claude_uuid,
     )

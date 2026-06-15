@@ -181,24 +181,13 @@ get_response_via_harness(prior_uuid=..., session_id=..., full_context_message=..
     v
 complete_transcript(session_id, status=final_status)
     |   -- synchronous call: calls finalize_session() → _finalize_parent_sync() inline
-    |   -- transitions PM parent: running → waiting_for_children → completed
-    |   -- ORDERING INVARIANT: must complete before _handle_dev_session_completion runs
-    |
-    v
-_handle_dev_session_completion()  [dev sessions only, called AFTER complete_transcript]
-    |-- PipelineStateMachine.classify_outcome()
-    |-- complete_stage() or fail_stage()
-    |-- post_stage_comment() -> GitHub issue
-    |-- steer_session(parent_pm_session)
-    |-- re-check: if PM terminal at re-check → _create_continuation_pm()
-    |   (steer was accepted but PM finalized before it could process the message)
-    |-- Path B fallback: if agent_session=None, uses session.parent_agent_session_id
-    |   to look up parent and create continuation PM (no silent skip)
+    |   -- for a child session, transitions the parent: running →
+    |      waiting_for_children → completed/failed once all children are terminal
 ```
 
-**Dev session completion ordering** (fix for issue #987): `complete_transcript()` is called first (synchronously invoking `_finalize_parent_sync()` to transition the PM parent to its terminal status), then `_handle_dev_session_completion()` runs. This ordering ensures the re-check guard inside `_handle_dev_session_completion` reads the PM's post-finalization status correctly. If the PM is already terminal at re-check time, a continuation PM is created immediately. Calling `_handle_dev_session_completion` before `complete_transcript()` causes a race: the steer is accepted, then `_finalize_parent_sync` runs and orphans the steering message (the PM is terminal and will never consume it).
+**Child-to-parent completion**: when a session has a `parent_agent_session_id`, `complete_transcript()` → `finalize_session()` synchronously calls `_finalize_parent_sync()` (in `models/session_lifecycle.py`). That function moves the parent into `waiting_for_children`, then — once every child is terminal — transitions it to `completed` (all children succeeded) or `failed` (any child failed). It is idempotent and a no-op if the parent is already terminal. If the completion-turn runner is in flight for the parent (the `pipeline_complete_pending:{parent_id}` Redis lock is held), `_finalize_parent_sync` defers the success-path transition to that runner so the final summary is delivered exactly once (issue #1058). There is no separate post-completion SDLC handler — eng, teammate, and granite sessions all finalize through this single path.
 
-PM and teammate sessions skip the post-completion SDLC handler. See [Harness Abstraction](harness-abstraction.md) for stream-json parsing, chunk suppression, health checks, and configuration, and [Harness Session Continuity](harness-session-continuity.md) for the `--resume` UUID persistence mechanism.
+See [Harness Abstraction](harness-abstraction.md) for stream-json parsing, chunk suppression, health checks, and configuration, and [Harness Session Continuity](harness-session-continuity.md) for the `--resume` UUID persistence mechanism.
 
 At runtime, the worker processes sessions via `_worker_loop(worker_key)` until the queue is empty, then waits for new enqueue events.
 
@@ -206,10 +195,9 @@ At runtime, the worker processes sessions via `_worker_loop(worker_key)` until t
 
 `agent/session_executor.py` resolves which persona overlay to pass as the harness `system_prompt` (`--append-system-prompt`) for each session. The order is:
 
-1. `session_type=PM` → `project-manager` overlay (loaded via `load_pm_system_prompt`)
-2. `transport=email` or `project["email"]["persona"]` set → that persona, with `teammate` as fallback when the requested overlay file is missing
+1. `transport=email` or `project["email"]["persona"]` set → that persona overlay (e.g. `customer-service`), with `teammate` as fallback when the requested overlay file is missing
+2. `session_type=ENG` → `engineer` overlay (loaded via `load_eng_system_prompt`)
 3. `session_type=TEAMMATE` (Telegram DM/teammate) → `teammate` overlay
-4. Otherwise (dev sessions) → no overlay; the harness keeps the default Claude Code protocol
 
 The resolution emits a single canonical INFO line BEFORE any disk read so absence-vs-fallback is visible in `logs/worker.log` without triangulating against the downstream "Persona overlay loaded" or "Appending N-char system prompt" lines:
 
@@ -284,13 +272,13 @@ Workers are keyed by `worker_key` — a computed property on `AgentSession` that
 | `dev` | no | any (main repo) | `project_key` | Serialized per project |
 | `teammate` | N/A | N/A | `chat_id` | Always parallel-safe |
 
-**PM routing note:** Slugged PM sessions use an allowlist (`_PM_WORKTREE_STAGES = {"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"}`) to determine when slug-based routing is safe. Stages not in this allowlist — including PLAN, ISSUE, CRITIQUE, MERGE, unknown/future stages — fall back to `project_key` so they serialize on the main checkout. Unknown stages fail closed (serialize) rather than accidentally parallelizing on an unaudited stage. The lazy `_ensure_worker` call in `session_pickup.py`'s project-keyed pop handles the routing gap: when a PM session advances to a worktree stage and the project-keyed filter rejects it, the correct slug-keyed worker is started automatically.
+**Eng routing note:** Slugged eng sessions use an allowlist (`_ENG_WORKTREE_STAGES = {"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"}`) to determine when slug-based routing is safe. Stages not in this allowlist — including PLAN, ISSUE, CRITIQUE, MERGE, unknown/future stages — fall back to `project_key` so they serialize on the main checkout. Unknown stages fail closed (serialize) rather than accidentally parallelizing on an unaudited stage. The lazy `_ensure_worker` call in `session_pickup.py`'s project-keyed pop handles the routing gap: when an eng session advances to a worktree stage and the project-keyed filter rejects it, the correct slug-keyed worker is started automatically.
 
 ### Why `chat_id` Is Not the Isolation Key
 
 `chat_id` is a communication topology concept — it tells you which Telegram thread a message came from. But isolation depends on whether sessions share mutable state (the git working tree). Two PM sessions from different threads both write to the same `main` branch at PLAN stage; they must serialize regardless of their `chat_id`.
 
-Similarly, `chat_id` is insufficient for dev sessions — two dev sessions for different work items in the same chat (e.g., two `valor_session create --role dev` calls defaulting to `chat_id=0`) would serialize even though they share no state. Slug is the correct routing key for worktree-isolated dev sessions: each slug has its own worktree and branch.
+Similarly, `chat_id` is insufficient for eng sessions — two eng sessions for different work items in the same chat (e.g., two `valor_session create --role eng` calls defaulting to `chat_id=0`) would serialize even though they share no state. Slug is the correct routing key for worktree-isolated eng sessions: each slug has its own worktree and branch.
 
 ### Three Worker Loop Archetypes
 
@@ -432,12 +420,12 @@ When the worker process is killed mid-execution, the `asyncio.CancelledError` ha
 
 ### Local session recovery is `session_type`-aware (#1092)
 
-A session whose `session_id` starts with `local` was spawned from a local Claude Code CLI rather than the Telegram bridge. Startup recovery handles these by `session_type`:
+A session whose `session_id` starts with `local` was spawned from a local Claude Code CLI rather than the Telegram bridge. Startup recovery handles these by `session_type` (the gate is `session_type == SessionType.ENG` at `agent/session_health.py:546`):
 
-- **Local dev sessions** (`session_type == DEV`) are re-queued to `pending` just like bridge sessions. Dev sessions are worker-owned (spawned by the PM via `valor-session create --role dev`) with no human competitor holding the same `claude_session_uuid`. Completion flows through `_handle_dev_session_completion`, which steers the parent PM and never invokes a user-facing send callback — so the worker does not need to be able to deliver output to a chat. This lets long-running PM-orchestrated pipelines (build + test + review + docs + merge) survive scheduled worker restarts on skills-only machines.
-- **Local PM and Teammate sessions** continue to be abandoned. A live human CLI may hold the same `claude_session_uuid`; resuming would spawn a second harness competing at that UUID (the #986 hijack rationale).
-- **Local Granite sessions** (`session_type == GRANITE`) are abandoned. These are created by the standalone `valor-granite-loop` CLI (not the worker), so the worker must never re-execute them. The `local-` prefix ensures they reach this abandon path rather than the bridge re-queue path (line 629). A CLI run that is still in flight when the worker restarts will have its session finalized `abandoned`; the CLI's own `reject_from_terminal=False` except-block guard makes a subsequent CLI finalize a safe no-op.
-- **Pre-migration records with `session_type == None`** fall through to the abandon path — a conservative default that also catches any future `SessionType` member added without explicit handling here.
+- **Local eng sessions** (`session_type == ENG`) are re-queued to `pending` just like bridge sessions. These are worker-owned child sessions spawned by a parent eng session via `valor-session create --role eng`, so no human CLI is competing for the same `claude_session_uuid`. The worker can safely resume the transcript on next pickup. This lets long-running eng-orchestrated pipelines (build + test + review + docs + merge) survive scheduled worker restarts on skills-only machines. When the recovered child finalizes, parent finalization flows through `finalize_session` → `_finalize_parent_sync` (in `models/session_lifecycle.py`), which transitions the parent through `waiting_for_children` to `completed`/`failed` once all children are terminal — no user-facing send callback is involved on this path.
+- **Local Teammate sessions** continue to be abandoned. A live human CLI may hold the same `claude_session_uuid`; resuming would spawn a second harness competing at that UUID (the #986 hijack rationale).
+- **Local Granite sessions** (`session_type == GRANITE`) are abandoned. These are created by the standalone `valor-granite-loop` CLI (not the worker), so the worker must never re-execute them. The `local-` prefix ensures they reach this abandon path rather than the bridge re-queue path. A CLI run that is still in flight when the worker restarts will have its session finalized `abandoned`; the CLI's own `reject_from_terminal=False` except-block guard makes a subsequent CLI finalize a safe no-op.
+- **Pre-migration records with `session_type == None`** fall through to the abandon path — a conservative default that also catches any future `SessionType` member added without explicit handling here (the gate uses explicit equality with `SessionType.ENG`).
 
 ### Summary
 
@@ -445,8 +433,8 @@ A session whose `session_id` starts with `local` was spawned from a local Claude
 |--------------------------|--------------|
 | `pending` | Left untouched; new worker picks it up naturally |
 | `running` (bridge) | Stays `running`; new worker startup re-queues it to `pending` |
-| `running` (local `dev`) | Re-queued to `pending` (#1092); worker resumes via `claude --resume <UUID>` |
-| `running` (local `pm`/`teammate`/`granite`/pre-migration) | Finalized as `abandoned`; human CLI may reclaim |
+| `running` (local `eng`) | Re-queued to `pending` (#1092); worker resumes via `claude --resume <UUID>` |
+| `running` (local `teammate`/`granite`/pre-migration) | Finalized as `abandoned`; human CLI may reclaim |
 | `complete` / `failed` / `killed` | Terminal — no action taken |
 
 ### Own-progress fields are heartbeat-gated (#1614)

@@ -81,7 +81,7 @@ exact Dev-session redirect command:
 Blocked: teammate sessions cannot write to '<path>'. This path looks like
 source code, which requires a Dev session. To proceed:
 
-  valor-session create --role dev --slug <slug> --message "<task description>"
+  valor-session create --role eng --slug <slug> --message "<task description>"
 
 Suggest this to the human first and wait for explicit confirmation before
 spawning the Dev session. Teammates may write to: docs/, .claude/,
@@ -171,7 +171,7 @@ particular comes from PR #1333 (tool-call contract) and must not drift.
 
 ## See Also
 
-- [PM-Dev Session Architecture](pm-dev-session-architecture.md) — teammate
+- [Eng Session Architecture](eng-session-architecture.md) — teammate
   fits into the broader session-type model alongside PM and Dev.
 - [Composed Persona System](composed-persona-system.md) — composes the
   teammate prompt with the project's persona overlay.

@@ -92,10 +92,10 @@ class TestTelegramEnvInjection:
     """Tests for TELEGRAM_CHAT_ID and TELEGRAM_REPLY_TO env var injection (issue #497)."""
 
     def test_chat_session_injects_telegram_chat_id(self):
-        """PM session should inject TELEGRAM_CHAT_ID from chat_id."""
+        """Eng session should inject TELEGRAM_CHAT_ID from chat_id."""
         agent = ValorAgent(
             chat_id="12345",
-            session_type="pm",
+            session_type="eng",
         )
         options = agent._create_options(session_id=None)
         assert options.env.get("TELEGRAM_CHAT_ID") == "12345"
@@ -110,19 +110,19 @@ class TestTelegramEnvInjection:
         assert "TELEGRAM_CHAT_ID" not in options.env
 
     def test_chat_session_without_chat_id_no_injection(self):
-        """PM session without chat_id should not inject TELEGRAM_CHAT_ID."""
+        """Eng session without chat_id should not inject TELEGRAM_CHAT_ID."""
         agent = ValorAgent(
             chat_id=None,
-            session_type="pm",
+            session_type="eng",
         )
         options = agent._create_options(session_id=None)
         assert "TELEGRAM_CHAT_ID" not in options.env
 
     def test_session_type_injected(self):
         """SESSION_TYPE env var should be set for chat sessions."""
-        agent = ValorAgent(session_type="pm")
+        agent = ValorAgent(session_type="eng")
         options = agent._create_options(session_id=None)
-        assert options.env.get("SESSION_TYPE") == "pm"
+        assert options.env.get("SESSION_TYPE") == "eng"
 
 
 @pytest.mark.asyncio
@@ -140,7 +140,7 @@ async def test_build_harness_turn_input_basic():
             chat_title="Test Chat",
             project={"name": "Test", "_key": "test"},
             task_list_id="task-list-1",
-            session_type="dev",
+            session_type="eng",
             sender_id=12345,
         )
 
@@ -659,7 +659,7 @@ class TestColdStartMetrics:
         csm.record_ttft(
             ttft_seconds=12.345,
             session_id="test-session-1",
-            session_type="pm",
+            session_type="eng",
             working_dir="/tmp/project",
             prompt_chars=74769,
             model="opus",
@@ -670,7 +670,7 @@ class TestColdStartMetrics:
         assert len(lines) == 1
         entry = json.loads(lines[0])
         assert entry["session_id"] == "test-session-1"
-        assert entry["session_type"] == "pm"
+        assert entry["session_type"] == "eng"
         assert entry["ttft_seconds"] == 12.345
         assert entry["prompt_chars"] == 74769
         assert entry["model"] == "opus"
@@ -688,7 +688,7 @@ class TestColdStartMetrics:
         csm.record_ttft(
             ttft_seconds=10.0,
             session_id="s1",
-            session_type="pm",
+            session_type="eng",
             working_dir="/tmp",
             prompt_chars=1000,
             model="opus",
@@ -732,7 +732,7 @@ class TestColdStartMetrics:
         csm.record_ttft(
             ttft_seconds=1.0,
             session_id="s",
-            session_type="pm",
+            session_type="eng",
             working_dir="/tmp",
             prompt_chars=0,
             model="opus",

@@ -34,7 +34,7 @@ def wedged_session(monkeypatch):
     s = AgentSession.create(
         project_key=f"test-tool-timeout-{id(monkeypatch)}",
         chat_id="local-test-tool-timeout",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         session_id=f"tool-timeout-int-{id(monkeypatch)}",
@@ -125,7 +125,7 @@ async def test_subloop_no_op_on_fresh_session(monkeypatch):
     s = AgentSession.create(
         project_key=f"test-tool-timeout-fresh-{id(monkeypatch)}",
         chat_id="local-test-tool-timeout-fresh",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         session_id=f"tool-timeout-fresh-{id(monkeypatch)}",

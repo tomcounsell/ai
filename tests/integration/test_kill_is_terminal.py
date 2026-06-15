@@ -36,7 +36,7 @@ def killed_parent(redis_test_db):
         agent_session_id="agt_kit_killed_parent",
         project_key="kit-test",
         status="killed",
-        session_type="pm",
+        session_type="eng",
         created_at=datetime.now(tz=UTC),
     )
     yield parent
@@ -50,7 +50,7 @@ def waiting_parent(redis_test_db):
         agent_session_id="agt_kit_waiting_parent",
         project_key="kit-test",
         status="waiting_for_children",
-        session_type="pm",
+        session_type="eng",
         created_at=datetime.now(tz=UTC),
     )
     yield parent
@@ -225,7 +225,7 @@ class TestRunnerEntryGuard:
             agent_session_id="agt_kit_completed_parent",
             project_key="kit-test",
             status="completed",
-            session_type="pm",
+            session_type="eng",
             created_at=datetime.now(tz=UTC),
         )
 

@@ -58,7 +58,7 @@ Provides teammate-specific instructions that replace the PM dispatch block when 
 - **Research-first behavior**: instructions prioritize evidence gathering before answering -- search code with Grep/Glob, query memory system, consult docs, then cite findings
 - **Tools available**: Read, Glob, Grep, Bash (all commands, audit-logged via `[teammate-audit]`), GitHub issue/PR operations, knowledge base writes (`~/work-vault/`), memory system
 - **Write enforcement**: `pre_tool_use.py` code-blocks Write/Edit/MultiEdit to source code paths; allowed paths are `docs/`, `.claude/`, `.github/`, `wiki/`, `skills/`, top-level `.md` files, and `~/work-vault/`. See [Teammate Session Permissions](teammate-session-permissions.md).
-- **Dev session delegation**: when source code changes are needed, the teammate surfaces `valor-session create --role dev --slug <slug> --message "<task>"` and waits for human go-ahead rather than refusing
+- **Eng session delegation**: when source code changes are needed, the teammate surfaces `valor-session create --role eng --slug <slug> --message "<task>"` and waits for human go-ahead rather than refusing
 - **Nudge cap**: 10 (vs 50 for normal sessions), set via `TEAMMATE_MAX_NUDGE_COUNT`
 - **Persona**: same PM persona with teammate-specific additions (conversational tone, cite file paths, direct answers)
 - **Delivery**: teammate sessions use the [stop-hook review gate](agent-message-delivery.md) when Telegram-triggered, giving the agent final say over output (SEND/EDIT/REACT/SILENT/CONTINUE). Falls through to the message drafter when no delivery instruction is set.

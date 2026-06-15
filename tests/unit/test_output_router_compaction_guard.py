@@ -35,7 +35,7 @@ class TestLastCompactionTsNone:
             stop_reason="end_turn",
             auto_continue_count=0,
             max_nudge_count=MAX_NUDGE_COUNT,
-            session_type="pm",
+            session_type="eng",
             classification_type="sdlc",
             last_compaction_ts=None,
         )
@@ -73,7 +73,7 @@ class TestLastCompactionTsFresh:
             stop_reason="end_turn",
             auto_continue_count=0,
             max_nudge_count=MAX_NUDGE_COUNT,
-            session_type="pm",
+            session_type="eng",
             classification_type="sdlc",
             last_compaction_ts=time.time() - 5.0,
         )

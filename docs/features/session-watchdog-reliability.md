@@ -123,6 +123,6 @@ detection paths — they extend the actuator surface.
 - [Bridge Worker Architecture](bridge-worker-architecture.md) - Process topology for idle teardown
 - [Bridge Self-Healing](bridge-self-healing.md) - Broader crash recovery system
 - [Stall Retry](stall-retry.md) - Retry mechanism for stalled sessions
-- [Chat Dev Session Architecture](pm-dev-session-architecture.md) - Session routing architecture
+- [Eng Session Architecture](eng-session-architecture.md) - Session routing architecture
 - [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) - Worker post-completion stage state injection and pipeline state feedback
 - [Session Isolation: Raw-String Session Lookup](session-isolation.md#model-fields) - Canonical `AgentSession.get_by_id()` pattern (issue #765 systemic fix)

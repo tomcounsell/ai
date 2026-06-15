@@ -248,8 +248,8 @@ class TestTeammateHookBlocks:
         result = asyncio.run(pre_tool_use_hook(input_data, "tu-tm-1", mock_context))
 
         assert result.get("decision") == "block"
-        # Block message must include the Dev-session redirect command.
-        assert "valor-session create --role dev" in result.get("reason", "")
+        # Block message must include the Eng-session redirect command.
+        assert "valor-session create --role eng" in result.get("reason", "")
 
     def test_teammate_blocked_from_source_code_edit(self, fake_project, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "teammate")
@@ -270,7 +270,7 @@ class TestTeammateHookBlocks:
         result = asyncio.run(pre_tool_use_hook(input_data, "tu-tm-3", mock_context))
 
         assert result.get("decision") == "block"
-        assert "valor-session create --role dev" in result.get("reason", "")
+        assert "valor-session create --role eng" in result.get("reason", "")
 
     def test_teammate_allowed_docs_write(self, fake_project, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "teammate")

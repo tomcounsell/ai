@@ -48,7 +48,7 @@ class TestExecutorGuardWorkingDirNone:
         """``working_dir=None`` → session marked ``failed``, no exception, no Path()."""
         session = AgentSession.create(
             session_id="exec-guard-wd-001",
-            session_type="pm",
+            session_type="eng",
             project_key="test",
             # working_dir intentionally omitted (defaults to None on save).
             status="pending",
@@ -89,7 +89,7 @@ class TestExecutorGuardSessionIdNone:
         # field, mirroring the historical broken-spawn shape from #1195.
         session = AgentSession.create(
             session_id="exec-guard-sid-001",
-            session_type="pm",
+            session_type="eng",
             project_key="test",
             working_dir="/tmp",
             status="pending",
@@ -127,7 +127,7 @@ class TestExecutorGuardLogStructure:
         parent_uuid = "parent-uuid-for-guard-test"
         session = AgentSession.create(
             session_id="exec-guard-both-001",
-            session_type="pm",
+            session_type="eng",
             project_key="test",
             working_dir="/tmp",  # set initially so create() succeeds
             status="pending",
@@ -151,4 +151,4 @@ class TestExecutorGuardLogStructure:
         assert guard_records, "Expected at least one [executor-guard] error log"
         joined = " ".join(r.message for r in guard_records)
         assert parent_uuid in joined
-        assert "session_type=pm" in joined
+        assert "session_type=eng" in joined

@@ -2,7 +2,7 @@
 
 Every first-turn harness invocation appends a JSON line to
 ``logs/cold_start_metrics.jsonl`` so we can track the before/after
-distribution of PM session cold-start latency.
+distribution of Eng session cold-start latency.
 
 All writes are best-effort: any failure is silently ignored so that a
 permissions error or a full disk NEVER blocks the worker or the user.
@@ -14,7 +14,7 @@ Schema of each JSONL line:
     {
         "timestamp": "2026-04-30T12:34:56.789Z",
         "session_id": "tg_valor_-5051653062_9413",
-        "session_type": "pm",
+        "session_type": "eng",
         "working_dir": "/path/to/project",
         "prompt_chars": 74769,
         "model": "opus",
@@ -34,7 +34,7 @@ Usage::
     record_ttft(
         ttft_seconds=elapsed,
         session_id="...",
-        session_type="pm",
+        session_type="eng",
         working_dir="/path/to/project",
         prompt_chars=74769,
         model="opus",
@@ -75,7 +75,7 @@ def record_ttft(
             stdout line.
         session_id: Bridge/Telegram session ID (may be empty string for local
             dev invocations).
-        session_type: ``"pm"``, ``"dev"``, ``"teammate"``, or ``"other"``.
+        session_type: ``"eng"``, ``"teammate"``, or ``"other"``.
         working_dir: Absolute path of the working directory used for the
             subprocess.  For cross-project analysis (which project pays which
             TTFT).

@@ -116,16 +116,16 @@ class TestTeammateGroupPassiveListener:
 
 
 # =============================================================================
-# Backward compatibility: title-prefix groups without explicit persona
+# Eng: title-prefix groups without explicit persona
 # =============================================================================
 
 
-class TestBackwardCompatibility:
-    """Groups without explicit persona config should work via title prefix."""
+class TestEngPrefixRouting:
+    """Groups without explicit persona config should work via Eng: title prefix."""
 
     @pytest.mark.asyncio
-    async def test_dev_prefix_group_still_responds(self):
-        """Dev: prefix group without persona config should still respond."""
+    async def test_eng_prefix_group_still_responds(self):
+        """Eng: prefix group without persona config should still respond."""
         # Project has the group listed but with no persona
         project = {
             "telegram": {
@@ -141,25 +141,25 @@ class TestBackwardCompatibility:
             event,
             "fix the bug",
             is_dm=False,
-            chat_title="Dev: MyProject",
+            chat_title="Eng: MyProject",
             project=project,
         )
-        # resolve_persona returns DEVELOPER from title prefix
-        # is_team_chat returns False for "Dev:" prefix
+        # resolve_persona returns ENGINEER from title prefix
+        # is_team_chat returns False for "Eng:" prefix
         # respond_to_all=True so it responds
         assert should is True
 
-    def test_dev_prefix_session_type(self):
-        """Dev: prefix without persona still resolves to Developer."""
+    def test_eng_prefix_session_type(self):
+        """Eng: prefix without persona resolves to Engineer."""
         project = {"telegram": {"groups": {}}}
-        persona = resolve_persona(project, "Dev: MyProject", is_dm=False)
-        assert persona == PersonaType.DEVELOPER
+        persona = resolve_persona(project, "Eng: MyProject", is_dm=False)
+        assert persona == PersonaType.ENGINEER
 
-    def test_pm_prefix_session_type(self):
-        """PM: prefix without persona still resolves to Project Manager."""
+    def test_unknown_prefix_returns_none(self):
+        """Unknown prefixes return None (unconfigured)."""
         project = {"telegram": {"groups": {}}}
-        persona = resolve_persona(project, "PM: MyProject", is_dm=False)
-        assert persona == PersonaType.PROJECT_MANAGER
+        persona = resolve_persona(project, "Random: MyProject", is_dm=False)
+        assert persona is None
 
 
 # =============================================================================
@@ -170,25 +170,20 @@ class TestBackwardCompatibility:
 class TestSessionTypeDerivation:
     """Verify persona-to-session-type mapping logic."""
 
-    def test_dev_persona_gives_dev_session(self):
-        persona = resolve_persona(None, "Dev: X", is_dm=False)
-        assert persona == PersonaType.DEVELOPER
-        # In telegram_bridge.py: Developer persona -> session_type = "dev"
-
-    def test_pm_persona_gives_pm_session(self):
-        persona = resolve_persona(None, "PM: X", is_dm=False)
-        assert persona == PersonaType.PROJECT_MANAGER
-        # In telegram_bridge.py: PM persona -> session_type = "pm"
+    def test_eng_persona_gives_eng_session(self):
+        persona = resolve_persona(None, "Eng: X", is_dm=False)
+        assert persona == PersonaType.ENGINEER
+        # In telegram_bridge.py: Engineer persona -> session_type = "eng"
 
     def test_teammate_persona_gives_teammate_session(self):
         persona = resolve_persona(None, None, is_dm=True)
         assert persona == PersonaType.TEAMMATE
         # In telegram_bridge.py: Teammate persona -> session_type = "teammate"
 
-    def test_none_persona_gives_pm_session(self):
+    def test_none_persona_gives_eng_session(self):
         persona = resolve_persona(None, "Random Group", is_dm=False)
         assert persona is None
-        # In telegram_bridge.py: None persona -> session_type = "pm"
+        # In telegram_bridge.py: None persona -> session_type = "eng"
 
 
 # =============================================================================
@@ -213,23 +208,14 @@ class TestClassifierBypass:
         persona = resolve_persona(project, "Team: Project", is_dm=False)
         assert persona == PersonaType.TEAMMATE
 
-    def test_configured_pm_group_should_bypass(self):
+    def test_configured_eng_group_should_bypass(self):
         project = {
             "telegram": {
-                "groups": {"PM: Project": {"persona": "project-manager"}},
+                "groups": {"Eng: Project": {"persona": "engineer"}},
             }
         }
-        persona = resolve_persona(project, "PM: Project", is_dm=False)
-        assert persona == PersonaType.PROJECT_MANAGER
-
-    def test_configured_dev_group_should_bypass(self):
-        project = {
-            "telegram": {
-                "groups": {"Dev: Project": {"persona": "developer"}},
-            }
-        }
-        persona = resolve_persona(project, "Dev: Project", is_dm=False)
-        assert persona == PersonaType.DEVELOPER
+        persona = resolve_persona(project, "Eng: Project", is_dm=False)
+        assert persona == PersonaType.ENGINEER
 
     def test_unconfigured_group_should_not_bypass(self):
         """Groups with no config should NOT bypass -- classifier runs."""
@@ -265,7 +251,7 @@ class TestReplyToAnyThreadMessage:
             event,
             "follow-up thought",
             is_dm=False,
-            chat_title="Dev: Project",
+            chat_title="Eng: Project",
             project=project,
         )
         assert should is True
@@ -312,7 +298,7 @@ class TestReplyToAnyThreadMessage:
 
         Regression guard: the `elif replied_msg` branch used to short-circuit with
         `return True, True`, bypassing the mention-only gate for team chats
-        (no Dev:/PM: prefix). That caused Valor to reply to unrelated threads.
+        (no Eng: prefix). That caused Valor to reply to unrelated threads.
         """
         project = self._project()
         event = _make_event("replying to my own note", reply_to_msg_id=555)
@@ -323,7 +309,7 @@ class TestReplyToAnyThreadMessage:
             event,
             "replying to my own note",
             is_dm=False,
-            chat_title="Agent Builders Chat",  # no Dev:/PM: prefix → team chat
+            chat_title="Agent Builders Chat",  # no Eng: prefix → team chat
             project=project,
         )
         assert should is False, (
@@ -401,7 +387,7 @@ class TestReplyToAnyThreadMessage:
                 event,
                 "can you elaborate?",
                 is_dm=False,
-                chat_title="Dev: Project",
+                chat_title="Eng: Project",
                 project=project,
             )
         finally:

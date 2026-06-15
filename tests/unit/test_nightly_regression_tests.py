@@ -148,13 +148,13 @@ class TestRunTtftGate:
         log = tmp_path / "logs" / "cold_start_metrics.jsonl"
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(
-            json.dumps({"session_type": "pm", "ttft_seconds": 30.0})
+            json.dumps({"session_type": "eng", "ttft_seconds": 30.0})
             + "\n"
-            + json.dumps({"session_type": "pm", "ttft_seconds": 50.0})
+            + json.dumps({"session_type": "eng", "ttft_seconds": 50.0})
             + "\n"
         )
         nrt.LOG_FILE = tmp_path / "nightly.log"
-        msg = nrt.run_ttft_gate(log_file=log, session_type="pm", last=10, threshold=120.0)
+        msg = nrt.run_ttft_gate(log_file=log, session_type="eng", last=10, threshold=120.0)
         assert msg is None
 
     def test_fail_returns_alert_message(self, tmp_path: Path) -> None:
@@ -162,13 +162,13 @@ class TestRunTtftGate:
         log = tmp_path / "logs" / "cold_start_metrics.jsonl"
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(
-            json.dumps({"session_type": "pm", "ttft_seconds": 200.0})
+            json.dumps({"session_type": "eng", "ttft_seconds": 200.0})
             + "\n"
-            + json.dumps({"session_type": "pm", "ttft_seconds": 250.0})
+            + json.dumps({"session_type": "eng", "ttft_seconds": 250.0})
             + "\n"
         )
         nrt.LOG_FILE = tmp_path / "nightly.log"
-        msg = nrt.run_ttft_gate(log_file=log, session_type="pm", last=10, threshold=120.0)
+        msg = nrt.run_ttft_gate(log_file=log, session_type="eng", last=10, threshold=120.0)
         assert msg is not None
         # Plan: report as a "regression" not a test failure
         assert "TTFT" in msg
@@ -178,7 +178,7 @@ class TestRunTtftGate:
         """Missing JSONL is not a failure — first runs may have no data yet."""
         log = tmp_path / "logs" / "absent.jsonl"
         nrt.LOG_FILE = tmp_path / "nightly.log"
-        msg = nrt.run_ttft_gate(log_file=log, session_type="pm", last=10, threshold=120.0)
+        msg = nrt.run_ttft_gate(log_file=log, session_type="eng", last=10, threshold=120.0)
         assert msg is None
 
     def test_swallows_exceptions(self, tmp_path: Path) -> None:
@@ -187,7 +187,7 @@ class TestRunTtftGate:
         with patch.object(nrt, "_invoke_check_ttft", side_effect=RuntimeError("boom")):
             msg = nrt.run_ttft_gate(
                 log_file=tmp_path / "anything.jsonl",
-                session_type="pm",
+                session_type="eng",
                 last=10,
                 threshold=120.0,
             )
