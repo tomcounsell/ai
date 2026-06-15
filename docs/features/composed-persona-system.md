@@ -1,9 +1,17 @@
 # Composed Persona System
 
+> **Granite PTY path retired (issue #1692):** The `compose_system_prompt`
+> composition model described here is retired for the granite PTY container path.
+> All granite sessions (Eng, Teammate) now receive persona entirely via prime
+> commands (`.claude/commands/granite/prime-*-role.md`) — no `--append-system-prompt`
+> flag is set at spawn. The `compose_system_prompt` function and the
+> `get_response_via_harness` non-granite path are preserved for backward compat
+> but are no longer the production persona delivery mechanism.
+
 Single composer (`compose_system_prompt`) that assembles the agent's system
 prompt from three orthogonal axes — **persona**, **access level**, and
 (reserved) **channel** — replacing the hand-coded picker ladders that used to
-live in two parallel sites.
+live in two parallel sites. Applies to non-granite (direct `claude -p`) sessions.
 
 ## Problem this solves
 
