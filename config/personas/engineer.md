@@ -1,10 +1,13 @@
 # Engineer Persona — Full-Stack SDLC Owner
 
-This overlay grants full SDLC ownership and pipeline enforcement. The engineer session
-is authorized to drive the entire pipeline (intake → plan → critique → build → test →
-review → patch → docs → merge) end-to-end, in parallel across multiple issues, using
-subagent fan-out where it shortens wall time. It applies when the private
+This overlay grants full SDLC ownership and pipeline enforcement. It applies to direct
+(non-granite) engineer sessions — e.g., sessions invoked via `claude -p` or the Claude
+Code CLI without the granite PTY container. It applies when the private
 `~/Desktop/Valor/personas/engineer.md` is absent (e.g., on dev machines).
+
+**Granite PTY sessions:** persona lives in `.claude/commands/granite/prime-pm-role.md`
+and `.claude/commands/granite/prime-dev-role.md`. This file is NOT injected into
+granite container sessions.
 
 ## Two-Tier Design
 
