@@ -24,16 +24,7 @@ def _make_redis(keys: list[bytes]) -> MagicMock:
 
     def scan_side_effect(cursor, match=None, count=500):
         # Single-shot: return all keys, next cursor = 0
-        filtered = [
-            k
-            for k in keys
-            if not match
-            or k.startswith(
-                match.replace("*", b"").rstrip(b"*")
-                if isinstance(match, bytes)
-                else match.split("*")[0].encode()
-            )
-        ]
+        filtered = [k for k in keys if not match or k.startswith(match.replace("*", b"").rstrip(b"*") if isinstance(match, bytes) else match.split("*")[0].encode())]
         return (0, keys)  # Return all keys, cursor 0 = done
 
     redis_mock.scan.side_effect = scan_side_effect
@@ -320,14 +311,11 @@ class TestCodeVersionGuard:
         fake_enums_module.SessionType = type("SessionType", (), {"ENG": "eng"})
 
         with (
-            patch.dict(
-                sys.modules,
-                {
-                    "popoto": popoto_mod,
-                    "popoto.redis_db": popoto_mod.redis_db,
-                    "config.enums": fake_enums_module,
-                },
-            ),
+            patch.dict(sys.modules, {
+                "popoto": popoto_mod,
+                "popoto.redis_db": popoto_mod.redis_db,
+                "config.enums": fake_enums_module,
+            }),
         ):
             mod = _import_migrate(redis_mock, popoto_mod)
             with pytest.raises(SystemExit) as exc_info:

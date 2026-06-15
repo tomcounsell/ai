@@ -79,19 +79,15 @@ def _latest_issue_comment_id(issue_number: str) -> str | None:
         return None
 
     last = comments[-1]
-    # ``gh issue view`` returns comments with a ``url`` field that ends with
-    # ``#issuecomment-<numeric-id>``. Plans store the numeric ID extracted from
-    # the URL (recorded by ``/do-plan``). Some ``gh`` versions also return a
-    # GraphQL node ``id`` field (e.g. ``IC_kwDOEYGa088...``) which is a
-    # different format -- prefer the URL-based numeric ID so the comparison is
-    # consistent with what ``/do-plan`` records in frontmatter.
+    # ``gh issue view`` returns comments with a ``url`` field; the comment
+    # id is the trailing path segment. Some gh versions also return an
+    # ``id`` field directly -- try it first.
     if isinstance(last, dict):
+        if "id" in last and last["id"]:
+            return str(last["id"])
         url = last.get("url") or ""
         if "#issuecomment-" in url:
             return url.rsplit("#issuecomment-", 1)[-1]
-        # Fallback: use the id field if no URL-based numeric id is available.
-        if "id" in last and last["id"]:
-            return str(last["id"])
     return None
 
 

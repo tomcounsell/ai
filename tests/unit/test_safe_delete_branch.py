@@ -278,9 +278,9 @@ class TestSafeDeleteBranch:
             "Branch session/dev-ec1e7c6e should be preserved after unmerged guard"
         )
         # Log line must be greppable
-        assert any("[unmerged-branch-guard]" in record.message for record in caplog.records), (
-            f"Expected [unmerged-branch-guard] log line, got: {[r.message for r in caplog.records]}"
-        )
+        assert any(
+            "[unmerged-branch-guard]" in record.message for record in caplog.records
+        ), f"Expected [unmerged-branch-guard] log line, got: {[r.message for r in caplog.records]}"
 
     def test_deletes_squash_merged_branch_via_tree(self, tmp_path):
         """merged_via_tree: a squash-merged >=2-commit branch gets deleted."""
@@ -417,9 +417,7 @@ class TestIncidentRegression:
             )
 
         # The branch must be preserved
-        assert result["deleted"] is False, (
-            "Guard failed: branch was deleted despite unmerged commits"
-        )
+        assert result["deleted"] is False, "Guard failed: branch was deleted despite unmerged commits"
         assert result["skipped_unmerged"] is True
         assert _branch_exists(repo, branch), (
             f"Branch {branch} was deleted — incident would have recurred"
