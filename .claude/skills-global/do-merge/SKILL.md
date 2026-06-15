@@ -22,6 +22,35 @@ If PR_ARG is empty, resolve it from the conversation context or the pipeline
 state (`sdlc-tool stage-query --issue-number N` → `_meta.pr_number`). If it
 still cannot be resolved, STOP and ask the caller for the PR number.
 
+## Dependabot Exemption
+
+Before Step 0, detect whether this PR qualifies for the dependabot fast-path.
+Include `author` and `labels` in the Step 1 `gh pr view` call:
+
+```bash
+gh pr view {PR} --json author,labels,state,mergeable,mergeStateStatus,statusCheckRollup,body,headRefName
+```
+
+A PR is a **dependabot PR** when ALL of:
+- `author.is_bot == true` AND `author.login` matches `app/dependabot` or `dependabot`
+- At least one label has `name == "dependencies"`
+
+If both conditions hold, apply the exemption path:
+- **Skip Step 0** (no tracking issue — no substrate marker).
+- **Skip Step 2** (no SDLC pipeline — no REVIEW verdict required).
+- **Skip Step 3** (no tracking issue — no `Closes #N` link required).
+- **Skip Step 5** (no issue number to record completion against).
+- **Skip Step 6** addenda that reference `{issue_number}` (plan migration, post-merge scripts).
+- Still **run the mergeability/CI checks in Step 1** and **Step 4** (authorize + squash-merge).
+
+> **mergeable "UNKNOWN" handling (dependabot only):** GitHub computes mergeability
+> asynchronously. If `mergeable == "UNKNOWN"`, wait 8 seconds, re-fetch once,
+> and check again. If still `"UNKNOWN"` after the retry, FAIL the gate and ask
+> the user to try again shortly. Never treat `"UNKNOWN"` as a pass.
+
+Announce the exemption at the top of your run:
+> "Dependabot PR detected — skipping pipeline steps (REVIEW verdict, issue link). Running mergeability and CI gate only."
+
 ## Step 0: Substrate Probe (degraded-mode awareness)
 
 Before anything else, probe whether the orchestration substrate (PM session +
