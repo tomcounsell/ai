@@ -48,8 +48,8 @@ _process_inbound_email()  (bridge/email_bridge.py)
 ### Tier 1 — `tools/email_cs/triage.py`
 
 Mirrors `reflections/memory_management.py::_gemma_classify`: one
-`ollama.chat(model=OLLAMA_CLASSIFIER_MODEL, options={"temperature": 0})` call
-(where `OLLAMA_CLASSIFIER_MODEL = "granite4.1:3b"` from `config/models.py`) with
+`ollama_client.chat(messages=..., model=OLLAMA_CLASSIFIER_MODEL, options={"temperature": 0})` call
+via `tools/ollama_client` (where `OLLAMA_CLASSIFIER_MODEL = "granite4.1:3b"` from `config/models.py`) with
 tolerant post-hoc JSON extraction (`extract_json_payload`), **not**
 `format=json`. Fail-safe by contract: every error path (Ollama down, parse
 failure, validation failure, empty input, `customer_id is None`)
