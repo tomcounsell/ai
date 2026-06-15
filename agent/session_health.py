@@ -2667,6 +2667,36 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
         )
         orphans_reaped = 0
 
+    # === Telemetry retention sweep ===
+    # Delete JSONL trace files older than 14 days.  Wrapped in try/except so
+    # a filesystem error never aborts the main cleanup function.
+    try:
+        from agent.session_telemetry import _get_telemetry_dir
+
+        retention_days = 14
+        cutoff = datetime.now(tz=UTC) - timedelta(days=retention_days)
+        telemetry_dir = _get_telemetry_dir()
+        stale_count = 0
+        for jsonl_file in telemetry_dir.glob("*.jsonl"):
+            try:
+                mtime = datetime.fromtimestamp(jsonl_file.stat().st_mtime, tz=UTC)
+                if mtime < cutoff:
+                    jsonl_file.unlink()
+                    stale_count += 1
+            except Exception:
+                pass
+        if stale_count:
+            logger.info(
+                "[session-health] Deleted %d stale telemetry traces (older than %d days)",
+                stale_count,
+                retention_days,
+            )
+    except Exception as sweep_err:
+        logger.warning(
+            "[session-health] Telemetry retention sweep failed (non-fatal): %s",
+            sweep_err,
+        )
+
     return {"corrupted": cleaned, "orphans": orphans_reaped}
 
 
