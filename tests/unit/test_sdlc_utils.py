@@ -88,25 +88,25 @@ class TestDeterministicIdVsIssueUrl:
     """C2 (#1671): issue_url ownership must beat a stale sdlc-local-{N}."""
 
     def test_live_bridge_session_wins_over_stale_local(self):
-        """When both a stale sdlc-local-N record and a live bridge PM session
+        """When both a stale sdlc-local-N record and a live bridge eng session
         owning the issue via issue_url exist, the bridge session wins."""
         from tools._sdlc_utils import find_session_by_issue
 
         stale_local = MagicMock(name="stale_local")
         stale_local.session_id = "sdlc-local-1147"
-        stale_local.session_type = "pm"
+        stale_local.session_type = "eng"
         stale_local.issue_url = None
         stale_local.message_text = None
 
         live_bridge = MagicMock(name="live_bridge")
         live_bridge.session_id = "tg_valor_-100_42"
-        live_bridge.session_type = "pm"
+        live_bridge.session_type = "eng"
         live_bridge.issue_url = "https://github.com/tomcounsell/ai/issues/1147"
         live_bridge.message_text = None
 
         def _filter(**kwargs):
-            # session_type="pm" pass returns both; session_id pass returns the local.
-            if kwargs.get("session_type") == "pm":
+            # session_type="eng" pass returns both; session_id pass returns the local.
+            if kwargs.get("session_type") == "eng":
                 return [stale_local, live_bridge]
             if kwargs.get("session_id") == "sdlc-local-1147":
                 return [stale_local]
@@ -123,18 +123,18 @@ class TestDeterministicIdVsIssueUrl:
         assert result is live_bridge
 
     def test_deterministic_local_used_when_no_issue_url_owner(self):
-        """When no PM session owns the issue via issue_url, the deterministic
+        """When no eng session owns the issue via issue_url, the deterministic
         sdlc-local-N record is the fallback (preserves #1558)."""
         from tools._sdlc_utils import find_session_by_issue
 
         local = MagicMock(name="local")
         local.session_id = "sdlc-local-1148"
-        local.session_type = "pm"
+        local.session_type = "eng"
         local.issue_url = None
         local.message_text = None
 
         def _filter(**kwargs):
-            if kwargs.get("session_type") == "pm":
+            if kwargs.get("session_type") == "eng":
                 return [local]
             if kwargs.get("session_id") == "sdlc-local-1148":
                 return [local]
