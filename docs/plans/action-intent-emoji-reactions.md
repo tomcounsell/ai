@@ -207,7 +207,8 @@ The intuitive "investigate/fix" emojis from the issue's examples — **🔍, �
 whitelist entirely. Setting any of them as a reaction throws at runtime.
 
 The map above substitutes whitelist-valid emojis that still read as "I'm working on this":
-`🤔` (thinking), `🤓` (analyzing/nerd), `👨‍💻` (coding/on it), `🤝` (here to help). Every candidate
+`👨‍💻` (coding/on it), `🤝` (here to help), `👀` (watching/on it), with `🤔` (thinking) reserved for
+`answer_question`. (`🤓` was dropped entirely per C5 — see the retune note above.) Every candidate
 in the map above has been verified present in `VALIDATED_REACTIONS`. The builder MUST add a unit
 test asserting `all(e in VALIDATED_REACTIONS for cat in ACTION_EMOJI_MAP for e in ACTION_EMOJI_MAP[cat])`
 so this constraint can never silently regress.
