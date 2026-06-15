@@ -1,12 +1,14 @@
 ---
-status: Ready
+status: Planning
 type: feature
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-01
 tracking: https://github.com/tomcounsell/ai/issues/1536
 last_comment_id:
-revision_applied: true
+revision_applied: false
+refreshed: 2026-06-15
+freshness_disposition: Major drift
 ---
 
 # Session Telemetry Recorder (v1 of epic #1536)
@@ -45,7 +47,35 @@ A human watching a terminal Claude Code TUI can tell "stuck" from "still working
 
 **Active plans in `docs/plans/` overlapping this area:** none found touching session telemetry/health.
 
-**Notes:** Issue and plan authored in the same session; freshness is effectively trivial but recorded for the record.
+**Notes:** Issue and plan authored in the same session; freshness was effectively trivial at authoring time.
+
+---
+
+### Freshness re-check — 2026-06-15 (refresh pass, baseline `0d000e59`)
+
+**Disposition: Major drift.** Two weeks elapsed since authoring; multiple commits landed on main that invalidate this plan's load-bearing premises. The v1 feature (a per-event telemetry recorder) is still wanted — epic #1536 remains OPEN — but the plan's motivating narrative, its recovery call-site design, and its #1487 schema-compatibility thesis are all stale and must be reworked before build.
+
+**Commits on main since baseline `215aca3ed` touching referenced files:** 12, including:
+- **`4ca97abe` PR #1557 — "Liveness recovery confirms subprocess death before requeue (#1537)" — closes the motivating bug.**
+- `dd926192` PR #1691 — merged PM/Dev into single Eng role; collapsed SessionType to {eng, teammate, granite}.
+- `e702cf9c` PR #1662 — gated own-progress fields on heartbeat freshness (zombie-recovery).
+- `09313109`/`971b77d6`/`d005aaa2` — granite **PTY** container production cutover + persona-priming refactor (the direction PR #1487 actually shipped).
+
+**Stale premises (must be revised before this plan is BUILD-ready):**
+
+1. **#1537 is FIXED (closed 2026-06-03, PR #1557).** The plan's Problem statement, Spike-1, Prior Art, Risks, No-Gos, and Success Criteria all treat #1537 as an *open* recovery blind spot and frame `status_transition` as "the telemetry that makes it diagnosable." That framing is now retrospective. The bug the plan was built around no longer exists. The v1 value proposition must be re-justified on the still-valid grounds (durable per-event trace for any future hang / behavioral learning), not on diagnosing #1537.
+
+2. **Recovery call-site restructured — kill outcome is now structured, not hand-threaded.** The plan's Data Flow #4, Solution, and Task 2 thread `kill_issued`/`subprocess_exited`/`pid` down from `agent/session_health.py:1184` via an "optional kwarg / the `reason` string." That call site is gone. PR #1557 introduced `_confirm_subprocess_dead(pid, *, timeout)` returning a `SubprocessKillResult` (`agent/session_health.py:1020-1132`), and the recovery transition now lives in `_apply_recovery_transition` (`:1132`, kill confirmation at `:1318-1341`). The telemetry `status_transition` event should *consume `SubprocessKillResult`* at this new site rather than invent a kwarg-threading mechanism. **Spike-1's entire finding is obsolete and must be re-run or struck.**
+
+3. **#1487 event-vocabulary thesis is unfounded.** PR #1487 **merged 2026-06-01** — but as the *granite PTY PoC*, which took a PTY/TUI direction, NOT the stream-json `ClaudeSession` line-reader the plan productionizes. `grep -rn 'decode_error\|broken_pipe' agent/` now returns **zero hits** — the synthetic-event vocabulary the schema claims to be "#1487-compatible with" is not in the codebase. The "reuse #1487's `timeout`/`decode_error`/`broken_pipe` payloads verbatim" requirement (Solution, Technical Approach, Risk 3, Success Criteria) rests on code that did not land. This must be dropped or re-grounded (e.g. define the schema standalone, or source the vocabulary from the granite PTY trace format that actually shipped).
+
+**File:line anchors re-verified (symbols survive; line numbers drifted):**
+- `models/session_lifecycle.py` — `finalize_session` now `:217`, `transition_status` now `:453` — both still free functions. ✔ (these two tap points are intact and remain correct.)
+- `agent/sdk_client.py` — `accumulate_session_tokens` `:286`, harness `usage` tap region ~`:2768`, SDK `ResultMessage` handler ~`:1760` — all present; the per-event dispatch loop is intact, so the additive-tap approach still works. ✔
+- `agent/session_health.py` — `cleanup_corrupted_agent_sessions` now `:2418` (plan says `:2144`); budget constants `NO_OUTPUT_BUDGET_SECONDS`/`SDK_PROGRESS_FRESHNESS_WINDOW` present. Retention-sweep anchor is valid but renumbered.
+- `tools/valor_session.py` — `main()` now `:1273` (plan says `:1185`), `__main__` `:1442`; still NOT a declared console script (Agent Integration claim holds). ✔
+
+**Required action:** Re-run /do-plan revision (or re-spike) to: (a) re-base the value proposition off #1536's durable-trace goal rather than the now-fixed #1537; (b) consume `SubprocessKillResult` at `_apply_recovery_transition` instead of kwarg-threading; (c) drop or re-ground the #1487 schema-compatibility requirement; (d) refresh all drifted file:line numbers. The two `session_lifecycle.py` tap points and the additive `sdk_client.py` taps survive unchanged.
 
 ## Prior Art
 
