@@ -1392,5 +1392,40 @@ class TestWrapupGuard(unittest.TestCase):
         self.assertTrue(result.user_facing_routed)
 
 
+class TestContainerResultPtySlot(unittest.TestCase):
+    """ContainerResult.pty_slot field (issue #1663).
+
+    pty_slot is stamped by BridgeAdapter from acquire_pair's slot.idx
+    AFTER the container run completes. The ContainerResult field must
+    default to None (it is not populated by the container itself) and
+    must accept an integer value so BridgeAdapter can assign it.
+    """
+
+    def test_pty_slot_defaults_none(self) -> None:
+        """ContainerResult.pty_slot is None on a freshly-built result."""
+        result = ContainerResult(
+            session_id="abc",
+            user_message="hello",
+            turns=[],
+            exit_reason="pm_complete",
+            exit_message="",
+            transcript_fallback_count=0,
+        )
+        self.assertIsNone(result.pty_slot)
+
+    def test_pty_slot_roundtrips(self) -> None:
+        """Setting ContainerResult.pty_slot to a value returns that value."""
+        result = ContainerResult(
+            session_id="abc",
+            user_message="hello",
+            turns=[],
+            exit_reason="pm_complete",
+            exit_message="",
+            transcript_fallback_count=0,
+        )
+        result.pty_slot = 2
+        self.assertEqual(result.pty_slot, 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

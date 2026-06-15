@@ -72,6 +72,20 @@ The dashboard exposes session liveness as state-of-truth so operators can answer
 - `recovery_attempts`, `reprieve_count`
 - `watchdog_unhealthy` reason (when set)
 
+### Modal Granite PTY block (issue #1663)
+
+For sessions that ran through the granite PTY path, the modal also renders a **Granite PTY** block (below the Liveness section) gated by a Jinja guard — rendered only when at least one of the five fields is non-null:
+
+| Field | Description |
+|-------|-------------|
+| `pm_pid` | PM PTY process PID |
+| `dev_pid` | Dev PTY process PID |
+| `pm_transcript_path` | Absolute path to PM JSONL transcript; rendered as a click-to-copy chip (`copyPtyPath()` JS, `pty-transcript-chip` CSS class) |
+| `dev_transcript_path` | Absolute path to Dev JSONL transcript; same copy affordance |
+| `pty_slot` | 0-based `PTYPool` slot index the session pair occupied |
+
+Non-granite (SDK-path) sessions show no Granite PTY block. See [Granite PTY Container: Production Path](granite-pty-production.md#session-modal-issue-1663) for field semantics and the `pty_slot` data-flow diagram.
+
 ### Process-alive probe
 
 `ui/data/sdlc._check_process_alive(pid)` is a non-blocking `os.kill(pid, 0)` with tri-state return: `True` (alive), `False` (`ProcessLookupError` — ghost), or `None` (PID is None or `<= 0` to dodge process-group semantics, or `PermissionError`/`OSError`). The probe is gated to non-terminal probe statuses (`running`, `active`, `paused`, `paused_circuit`) — terminal sessions never trigger a probe.
@@ -112,6 +126,8 @@ The `PipelineProgress` Pydantic model is the serialization layer between Redis d
 **SDLC:** `stages`, `current_stage`, `events`
 
 **Links:** `issue_url`, `plan_url`, `pr_url`
+
+**Granite identity** (null for non-granite sessions): `pm_pid`, `dev_pid`, `pm_transcript_path`, `dev_transcript_path`, `pty_slot`
 
 ## JSON API
 

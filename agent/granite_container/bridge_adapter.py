@@ -278,7 +278,7 @@ class BridgeAdapter:
             pm_session_id=pm_session_id,
             dev_session_id=dev_session_id,
         )
-        async with self._pool.acquire_pair(spawn_spec=spawn_spec) as (pm, dev):
+        async with self._pool.acquire_pair(spawn_spec=spawn_spec) as (pm, dev, pty_slot):
             # Hand the pool's pre-warmed pair to Container so it
             # reuses them instead of spawning a fresh pair. The
             # pre-warm is the pool's whole point — discarding it
@@ -324,6 +324,9 @@ class BridgeAdapter:
                     await tailer_task
                 except asyncio.CancelledError:
                     pass
+            # Stamp the PTYPool slot index onto the result so it propagates
+            # through _publish_exit_summary into agent_session.pty_slot.
+            result.pty_slot = pty_slot
             self._publish_exit_summary(result)
             self._maybe_publish_exit_anomaly(result)
         return ""
@@ -382,6 +385,16 @@ class BridgeAdapter:
                 if result.dev_transcript_path is not None:
                     self._agent_session.dev_transcript_path = result.dev_transcript_path
                     update_fields.append("dev_transcript_path")
+                if result.pty_slot is not None:
+                    self._agent_session.pty_slot = result.pty_slot
+                    update_fields.append("pty_slot")
+                # Partial-data guard: if pm_pid is set but pty_slot is None,
+                # the slot capture in acquire_pair may have regressed.
+                if result.pm_pid is not None and result.pty_slot is None:
+                    logger.warning(
+                        "[bridge-adapter] pm_pid set but pty_slot is None — "
+                        "slot capture may have regressed"
+                    )
                 save = getattr(self._agent_session, "save", None)
                 if callable(save):
                     save(update_fields=update_fields)

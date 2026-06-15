@@ -341,10 +341,44 @@ shuttle"), which replaces idle-poll heuristics with hook-driven turn boundaries.
 | `dev_pid` | `IntField(null=True)` | Dev PTY OS process ID |
 | `pm_transcript_path` | `Field(null=True)` | Absolute path to PM Claude Code JSONL transcript |
 | `dev_transcript_path` | `Field(null=True)` | Absolute path to Dev Claude Code JSONL transcript |
+| `pty_slot` | `IntField(null=True)` | Stable physical PTYPool slot index (0-based, issue #1663) |
 
-All four are nullable: non-granite sessions and pre-deploy granite sessions
+All five are nullable: non-granite sessions and pre-deploy granite sessions
 leave them as `None`. The dashboard uses them to surface active PTY processes
 and link to transcript files.
+
+#### `pty_slot` semantics
+
+`pty_slot` is the 0-based index of the `PTYPool` slot that ran the session. The
+slot index is **stable** for the lifetime of the slot (it does not change across
+respawns). It does **not** identify a specific PTY process — use the co-persisted
+`pm_pid` / `dev_pid` to correlate the actual OS processes that ran in that slot.
+
+The slot index is stamped onto `ContainerResult.pty_slot` by `BridgeAdapter.run`
+immediately after `acquire_pair` exits, then propagated to `AgentSession.pty_slot`
+by `_publish_exit_summary`.
+
+**Flow:**
+```
+PTYPool.acquire_pair() → yields (pm, dev, slot.idx)
+  ↓ BridgeAdapter stamps result.pty_slot = slot.idx
+  ↓ _publish_exit_summary persists AgentSession.pty_slot
+  ↓ _session_to_pipeline copies to PipelineProgress.pty_slot
+  ↓ dashboard.json / session modal renders it
+```
+
+The **partial-data guard** in `_publish_exit_summary` logs a `WARNING` when
+`pm_pid` is set but `pty_slot` is `None` — a signal that the
+`acquire_pair` 3-tuple yield has regressed to a 2-tuple.
+
+#### Session modal (issue #1663)
+
+The dashboard session modal surfaces five granite PTY fields in a dedicated
+block: `pm_pid`, `dev_pid`, `pm_transcript_path`, `dev_transcript_path`, and
+`pty_slot`. The block is rendered only when at least one of these fields is
+non-null (granite-path sessions only). `pty_slot` is shown as "PTY pool slot N"
+alongside the PID values to give operators a quick correlation between pool slot
+occupancy and the running session.
 
 ### `exit_reason` and reaction gating
 

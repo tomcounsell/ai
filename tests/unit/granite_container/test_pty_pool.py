@@ -133,13 +133,15 @@ class TestAcquireRelease(unittest.TestCase):
         with _patch_spawn_to_succeed():
             asyncio.run(pool.initialize())
 
-            # An acquire should yield (pm, dev). With spawn mocked
+            # An acquire should yield (pm, dev, slot_idx). With spawn mocked
             # to a no-op, both are PTYDriver instances whose
-            # _child is None. Just assert tuple shape.
+            # _child is None. Just assert tuple shape and slot index type.
             async def _runner() -> None:
                 async with pool.acquire_pair() as pair:
                     self.assertIsInstance(pair, tuple)
-                    self.assertEqual(len(pair), 2)
+                    self.assertEqual(len(pair), 3)
+                    pm, dev, slot_idx = pair
+                    self.assertIsInstance(slot_idx, int)
 
             asyncio.run(_runner())
 
@@ -324,7 +326,7 @@ class TestSpawnOnAcquire(unittest.TestCase):
             await pool.initialize(cwd="/x")
             prewarmed = pool._slots[0].pty_pair
             spec = self.PairSpawnSpec(cwd="/x", env={"SESSION_TYPE": "pm"})
-            async with pool.acquire_pair(spawn_spec=spec) as (pm, dev):
+            async with pool.acquire_pair(spawn_spec=spec) as (pm, dev, _slot_idx):
                 # Fresh pair, not the prewarmed one.
                 self.assertIsNot(pm, prewarmed[0])
                 self.assertIsNot(dev, prewarmed[1])
@@ -344,7 +346,7 @@ class TestSpawnOnAcquire(unittest.TestCase):
             pool = self._patched_pool()
             await pool.initialize(cwd="/pool-cwd")
             spec = self.PairSpawnSpec(cwd="/worktree")
-            async with pool.acquire_pair(spawn_spec=spec) as (pm, dev):
+            async with pool.acquire_pair(spawn_spec=spec) as (pm, dev, _slot_idx):
                 self.assertEqual(pm.cwd, "/worktree")
                 self.assertEqual(dev.cwd, "/worktree")
             await pool.drain_respawns()
@@ -361,7 +363,7 @@ class TestSpawnOnAcquire(unittest.TestCase):
             pool = self._patched_pool()
             await pool.initialize(cwd="/x")
             spec = self.PairSpawnSpec(cwd="/x", pm_model="opus", dev_model="sonnet")
-            async with pool.acquire_pair(spawn_spec=spec) as (pm, dev):
+            async with pool.acquire_pair(spawn_spec=spec) as (pm, dev, _slot_idx):
                 self.assertEqual(pm.model, "opus")
                 self.assertEqual(dev.model, "sonnet")
             await pool.drain_respawns()
@@ -375,7 +377,7 @@ class TestSpawnOnAcquire(unittest.TestCase):
             await pool.initialize(cwd="/x")
             prewarmed = pool._slots[0].pty_pair
             spec = self.PairSpawnSpec(cwd="/x")  # no env/persona/model
-            async with pool.acquire_pair(spawn_spec=spec) as (pm, dev):
+            async with pool.acquire_pair(spawn_spec=spec) as (pm, dev, _slot_idx):
                 self.assertIs(pm, prewarmed[0])
                 self.assertIs(dev, prewarmed[1])
             await pool.drain_respawns()
@@ -406,7 +408,7 @@ class TestSpawnOnAcquire(unittest.TestCase):
             fail_next["on"] = False
             await pool.drain_respawns()
             # The slot recovered: a plain acquire succeeds.
-            async with pool.acquire_pair() as (pm, dev):
+            async with pool.acquire_pair() as (pm, dev, _slot_idx):
                 self.assertIsNotNone(pm)
                 self.assertIsNotNone(dev)
             await pool.drain_respawns()

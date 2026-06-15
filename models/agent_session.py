@@ -315,6 +315,11 @@ class AgentSession(Model):
     pm_transcript_path = Field(null=True)
     # Absolute path to the Dev Claude Code JSONL transcript file.
     dev_transcript_path = Field(null=True)
+    # Stable physical PTYPool slot index (0-based). Correlated to a specific
+    # (pm_pid, dev_pid) pair only via co-persisted fields — the slot itself is
+    # recycled after each session. The dashboard uses this to show which pool
+    # slot the session occupied.
+    pty_slot = IntField(null=True)
 
     # === Continuation PM depth tracking ===
     # Tracks how many continuation PMs have been chained from the original PM.
