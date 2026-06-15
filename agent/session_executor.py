@@ -1544,13 +1544,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
         from agent.granite_container.bridge_adapter import BridgeAdapter
         from agent.granite_container.pty_pool import get_pty_pool
         from agent.sdk_client import (
-            _load_persona_overlay_with_log,
             _resolve_compose_args,
             _resolve_sentry_auth_token,
             build_harness_turn_input,
-            load_eng_system_prompt,
         )
-        from config.enums import AccessLevel, PersonaType
 
         project_key = project_config.get("_key", "valor") if project_config else "valor"
         _classification = (
@@ -1608,47 +1605,13 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Dev PTY stays on GRANITE__DEV_MODEL.
         _effective_model = _resolve_session_model(agent_session)
 
-        # Persona overlay resolution for the granite container path. The
-        # composed overlay is passed to the PM PTY spawn as
-        # `--append-system-prompt` via the BridgeAdapter's spawn spec.
-        #
-        # PM sessions get the SDLC orchestration overlay (issue #1148). Email-
-        # spawned sessions get the persona named in `project.email.persona`
-        # (default "teammate"), with `teammate` as the fallback overlay if the
-        # requested file is missing. Telegram TEAMMATE sessions get the
-        # `teammate` overlay. Dev sessions still keep the default Claude Code
-        # protocol (no overlay). Drafter call sites in session_completion.py
-        # MUST continue to leave system_prompt at None — see Risk 4 in
-        # docs/plans/sdlc-1148.md.
-        #
-        # Without this branch, email-spawned customer-service sessions ran with
-        # NO system prompt and the harness replied in the default voice — see
-        # docs/features/email-bridge.md "Persona resolution for email-spawned
-        # sessions".
-        _pm_system_prompt: str | None = None
-        _resolved_persona: str | None = None
-        _persona_source: str = "none"
-        _email_persona_requested: str | None = None
-        _email_persona_fallback: str | None = None
-
-        _email_cfg = (project_config or {}).get("email") or {}
-        if isinstance(_email_cfg, dict) and _email_cfg.get("persona"):
-            _email_persona_requested = str(_email_cfg["persona"])
-
-        # Determine persona via the single source of truth in sdk_client.
-        # _persona_source is local-only (for log line below); the actual
-        # persona/access-level mapping comes from _resolve_compose_args.
-        if _session_type == SessionType.ENG:
-            _persona_source = "session_type=eng"
-        elif _transport == "email" or _email_persona_requested:
-            if _email_persona_requested:
-                _persona_source = "project.email.persona"
-                _email_persona_fallback = "teammate"
-            else:
-                _persona_source = "email-default"
-        elif _session_type == SessionType.TEAMMATE:
-            _persona_source = "session_type=teammate"
-
+        # Persona is now delivered entirely via the prime commands
+        # (.claude/commands/granite/prime-pm-role.md and prime-dev-role.md).
+        # The compose_system_prompt / --append-system-prompt path has been
+        # removed (issue #1692). Email-spawned sessions receive the
+        # prime-teammate-role prime; session_type drives the prime selection
+        # inside the container. The _resolve_compose_args resolver is
+        # preserved for future prime-command selection keyed on email.persona.
         _composed_persona, _composed_access_level, _ = _resolve_compose_args(
             session_type=_session_type,
             project=project_config,
@@ -1656,61 +1619,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
             chat_title=None,
             is_dm=False,
         )
-        # Email path with no project.email.persona but transport=="email"
-        # historically falls through to the teammate overlay. The resolver
-        # only triggers the email override when project.email.persona is set;
-        # the bare email-default case is handled by leaving the resolver's
-        # default (TEAMMATE) intact for SessionType.TEAMMATE.
-        if (
-            _session_type != SessionType.ENG
-            and _transport == "email"
-            and not _email_persona_requested
-        ):
-            _composed_persona = PersonaType.TEAMMATE
-            _composed_access_level = AccessLevel.TEAMMATE
-
-        _resolved_persona = _composed_persona.value if _composed_persona else None
-
-        # Canonical pre-load resolution log line. Emitted before any file I/O
-        # so absence-vs-fallback is visible without triangulating against the
-        # downstream "Persona overlay loaded" / "Appending N-char system
-        # prompt" lines from sdk_client.
         logger.info(
             f"{log_prefix} Resolved persona for session={session.session_id}: "
-            f"{_resolved_persona or '<none>'} (source={_persona_source})"
+            f"{_composed_persona.value if _composed_persona else '<none>'} "
+            f"(source=prime-command; no system-prompt injection)"
         )
-
-        if _composed_access_level == AccessLevel.WORKER:
-            try:
-                _pm_system_prompt = load_eng_system_prompt(str(working_dir))
-            except Exception as e:
-                logger.warning(
-                    f"{log_prefix} [eng-persona-missing] Failed to load engineer persona: {e}; "
-                    "session will run without SDLC orchestration rules"
-                )
-        elif _resolved_persona:
-            _pm_system_prompt = _load_persona_overlay_with_log(
-                _resolved_persona,
-                request_id=cid or session.project_key,
-                session_id=session.session_id,
-                fallback=_email_persona_fallback,
-            )
-            # Louder failure mode: if email.persona was explicitly set on the
-            # project dict but neither the requested overlay nor the fallback
-            # could be loaded, the harness will run in the default voice. The
-            # outbound email reply may answer the customer in the wrong voice
-            # — this surfaces it at ERROR before the email:outbox: payload is
-            # relayed.
-            if _pm_system_prompt is None and _email_persona_requested:
-                logger.error(
-                    f"{log_prefix} [persona-load-failed] "
-                    f"project.email.persona='{_email_persona_requested}' is set, "
-                    f"but neither the requested overlay nor fallback="
-                    f"'{_email_persona_fallback}' could be loaded. Session "
-                    f"{session.session_id} will run with NO system prompt and the "
-                    "harness will respond in default voice. Outbound email reply "
-                    "may be wrong-voice — review email:outbox: payload before relay."
-                )
 
         # Build the BridgeAdapter for the granite PTY container path.
         # The adapter is single-shot (one BridgeAdapter, one Container.run,
@@ -1724,18 +1637,15 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # The adapter receives the per-session env (SESSION_TYPE for the
         # pre_tool_use PM Bash restrictions, AGENT_SESSION_ID for hook
         # attribution, CLAUDE_CODE_TASK_LIST_ID for task-list isolation,
-        # VALOR_PARENT_SESSION_ID for child-session linking), the composed
-        # persona overlay, and the D1-resolved model. It forwards them to
-        # the PTYPool as a spawn spec; the pool spawns a fresh pair with
-        # them at acquire time (env and system prompt can only be injected
-        # at process spawn — PR #1612 review B1+B2).
+        # VALOR_PARENT_SESSION_ID for child-session linking) and the
+        # D1-resolved model. No pm_system_prompt is passed — persona arrives
+        # via the prime commands only (issue #1692).
         _bridge_adapter = BridgeAdapter(
             agent_session=agent_session,
             project_key=project_key,
             transport=_transport or "telegram",
             pool=get_pty_pool(),
             session_env=_harness_env,
-            pm_system_prompt=_pm_system_prompt,
             pm_model=_effective_model,
         )
 

@@ -608,16 +608,18 @@ class _SpecFakeDriver:
 
 
 class TestBridgeAdapterSpawnOnAcquire(unittest.TestCase):
-    """PR #1612 review B1+B2: per-session env / persona / model can
-    only be injected at process spawn, so the adapter's spawn spec
-    must trigger a fresh per-session pair at acquire time — and the
-    spec must carry the session's cwd, env, persona overlay, and
-    model override."""
+    """PR #1612 review B1+B2: per-session env / model can only be
+    injected at process spawn, so the adapter's spawn spec must trigger
+    a fresh per-session pair at acquire time — and the spec must carry
+    the session's cwd, env, and model override.
+
+    Note: pm_system_prompt / --append-system-prompt is removed (issue #1692).
+    Persona is now delivered via prime commands inside the TUI."""
 
     def setUp(self) -> None:
         _SpecFakeDriver.instances = []
 
-    def test_session_env_and_persona_reach_the_spawn(self) -> None:
+    def test_session_env_and_model_reach_the_spawn(self) -> None:
         session = _FakeSession()
         session_env = {
             "SESSION_TYPE": "pm",
@@ -635,7 +637,6 @@ class TestBridgeAdapterSpawnOnAcquire(unittest.TestCase):
                 pool=pool,
                 resolve_callbacks=lambda p, t: (None, None),
                 session_env=session_env,
-                pm_system_prompt="You are the PM persona.",
                 pm_model="haiku",
             )
             with _patch_container_run_with_result(lambda: _make_container_result()):
@@ -649,15 +650,12 @@ class TestBridgeAdapterSpawnOnAcquire(unittest.TestCase):
         session_dev = next(
             d for d in _SpecFakeDriver.instances if d.role == "dev" and d.env is not None
         )
-        # The session pair carries the per-session cwd + env; the PM
-        # PTY additionally carries the persona overlay and the
-        # D1-resolved model.
+        # The session pair carries the per-session cwd + env and model.
+        # No --append-system-prompt is set (persona comes from prime commands).
         self.assertEqual(session_pm.cwd, "/worktrees/slug")
         self.assertEqual(session_dev.cwd, "/worktrees/slug")
         self.assertEqual(session_pm.env, session_env)
-        self.assertEqual(session_pm.append_system_prompt, "You are the PM persona.")
         self.assertEqual(session_pm.model, "haiku")
-        self.assertIsNone(session_dev.append_system_prompt)
         # The prewarmed pair was closed when it was replaced.
         prewarmed = [d for d in _SpecFakeDriver.instances if d.env is None]
         self.assertEqual(len(prewarmed), 2)

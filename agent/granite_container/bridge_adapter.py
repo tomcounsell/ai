@@ -185,7 +185,16 @@ class BridgeAdapter:
         # to the pool as a `PairSpawnSpec`; the pool spawns a fresh pair
         # at acquire time when they differ from its spawn-time defaults.
         self._session_env = dict(session_env) if session_env else None
-        self._pm_system_prompt = pm_system_prompt
+        # pm_system_prompt is no longer used — persona is delivered via prime
+        # commands (issue #1692). Ignored if passed.
+        if pm_system_prompt:
+            import warnings
+            warnings.warn(
+                "pm_system_prompt is deprecated and has no effect. "
+                "Persona is delivered via prime commands (issue #1692).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         # D1-resolved PM model (session.model > settings > codebase
         # default). The Dev PTY intentionally has no per-session model
         # knob — it stays on GRANITE__DEV_MODEL via the spec default.
@@ -261,7 +270,6 @@ class BridgeAdapter:
             cwd=working_dir,
             env=self._session_env,
             pm_model=self._pm_model,
-            pm_system_prompt=self._pm_system_prompt,
             pm_session_id=pm_session_id,
             dev_session_id=dev_session_id,
         )

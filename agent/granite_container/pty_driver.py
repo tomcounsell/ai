@@ -328,11 +328,17 @@ class PTYDriver:
         # ANTHROPIC_* blanking in `_build_env` is applied first and is not
         # expected to be overridden by callers.
         self._extra_env = dict(env) if env else None
-        # Composed persona overlay passed to `claude --append-system-prompt`
-        # at spawn time (spawn-on-acquire path, PR #1612 review B2). The
-        # interactive TUI supports the flag, so the persona is a real
-        # system-prompt append rather than user-visible prime text.
-        self._append_system_prompt = append_system_prompt
+        # append_system_prompt is no longer used — persona is now delivered
+        # entirely via the prime commands (issue #1692). The parameter is
+        # kept for call-site backward compat but is always ignored.
+        if append_system_prompt:
+            import warnings
+            warnings.warn(
+                "append_system_prompt is deprecated and has no effect. "
+                "Persona is delivered via prime commands (issue #1692).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         # UUID passed via `claude --session-id <uuid>` so Claude Code names
         # its transcript `~/.claude/projects/{cwd-slug}/{session_id}.jsonl`.
         # When set, the transcript path is deterministically known at spawn
@@ -373,8 +379,6 @@ class PTYDriver:
         model = self._explicit_model or _default_substrate_model(self.role)
 
         args = ["--model", model, "--permission-mode", "bypassPermissions"]
-        if self._append_system_prompt:
-            args += ["--append-system-prompt", self._append_system_prompt]
         if self._session_id:
             args += ["--session-id", self._session_id]
 
