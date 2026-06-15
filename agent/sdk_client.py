@@ -2832,18 +2832,6 @@ async def _run_harness_subprocess(
                 b for b in content_blocks if isinstance(b, dict) and b.get("type") == "tool_use"
             ]
             tool_call_count += len(tool_use_blocks)
-            # Additive telemetry tap — no behavior change
-            if session_id and tool_use_blocks:
-                from agent.session_telemetry import record_telemetry_event
-
-                for _tb in tool_use_blocks:
-                    record_telemetry_event(
-                        session_id,
-                        {
-                            "type": "tool_use",
-                            "name": _tb.get("name", ""),
-                        },
-                    )
             continue
 
         if event_type == "stream_event":
