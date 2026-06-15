@@ -160,6 +160,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Session Recovery Mechanisms](session-recovery-mechanisms.md) | Catalogue of all 10 recovery mechanisms with terminal status safety audit, guards, CAS conflict detection for concurrent status mutations, race condition analysis, and regression tests | Shipped |
 | [Session Steering](session-steering.md) | Externalized steering via `AgentSession.queued_steering_messages` — any process can steer a running session; worker injects messages at turn boundaries; `valor-session` CLI for create/steer/status/list/kill | Shipped |
 | [Session Tagging](session-tagging.md) | Auto-tagging and CRUD for session categorization based on activity, classification, and transcript patterns | Shipped |
+| [Session Telemetry](session-telemetry.md) | Per-event JSONL telemetry trace for agent sessions (v1 of #1536) | Shipped |
 | [Session Transcripts](session-transcripts.md) | Append-only session transcript files with AgentSession Redis model for metadata | Shipped |
 | [Session Watchdog](session-watchdog.md) | Active session monitoring with proper cleanup and state management | Shipped |
 | [Session Watchdog Reliability](session-watchdog-reliability.md) | Type guards, activity-based stall detection, observer circuit breaker with escalating backoff | Shipped |

@@ -45,6 +45,8 @@ For terminal transitions. Executes all completion side effects in order:
 4. **Parent finalization** -- `_finalize_parent_sync(parent_id, ...)` (unless `skip_parent=True` or no parent)
 5. **Status + timestamp + save** -- sets `session.status`, `session.completed_at`, calls `session.save()`
 
+**Telemetry**: emits a `status_transition` event to the session's JSONL telemetry file (see [Session Telemetry](session-telemetry.md)), then calls `agent.session_telemetry.finalize_session()` to flush the file handle and evict in-memory state. Pass `emit_telemetry=False` to suppress the event (used by `session_health._apply_recovery_transition`, which emits its own kill-enriched `status_transition` first to avoid duplicate events).
+
 **Idempotent**: if the session is already in the target terminal state, logs and returns without re-executing side effects.
 
 **Kill-is-terminal guard** (`reject_from_terminal`, default `True`): When the session is already in a terminal state and the caller is trying to transition it to a *different* terminal status (e.g., `killed -> completed`), raises `StatusConflictError` instead of overwriting. This mirrors the symmetric guard on `transition_status()` and enforces the rule that **once terminal, always terminal — unless the caller has explicitly documented why they need to re-classify**. Callers with legitimate re-classification needs (rare; e.g., escalating `abandoned -> failed` on timeout) must pass `reject_from_terminal=False` explicitly. See the *Kill-is-Terminal Invariant* section below for the full rationale and the audit of catch-and-log call sites.
@@ -62,6 +64,8 @@ For non-terminal transitions. Logs the lifecycle transition and updates the stat
 3. **Status + save** -- sets `session.status`, calls `session.save()`
 
 **Idempotent**: if the session is already in the target state, logs and returns.
+
+**Telemetry**: emits a `status_transition` event to the session's JSONL telemetry file (see [Session Telemetry](session-telemetry.md)). Pass `emit_telemetry=False` to suppress the event when the caller is already emitting a richer telemetry record.
 
 **Lazy-load safety**: Before saving, `transition_status()` backfills `session._saved_field_values["status"]` with the current status. This mirrors the same backfill in `finalize_session()` — both functions share the same Popoto lazy-load coupling. See `finalize_session()` above for the full explanation.
 
