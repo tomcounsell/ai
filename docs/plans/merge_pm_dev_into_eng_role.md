@@ -1,10 +1,11 @@
 ---
-status: Ready
+status: In Review
 type: chore
 appetite: Large
 owner: Valor Engels
 created: 2026-06-12
 tracking: https://github.com/tomcounsell/ai/issues/1633
+pr: https://github.com/tomcounsell/ai/pull/1691
 last_comment_id: IC_kwDOEYGa088AAAABFx7oMw
 revision_applied: true
 ---
