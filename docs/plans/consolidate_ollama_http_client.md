@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor Engels
 created: 2026-06-15
 tracking: https://github.com/tomcounsell/ai/issues/1693
 last_comment_id:
+revision_applied: true
 ---
 
 # Consolidate Ollama HTTP Transport into One Internal Client
@@ -146,9 +147,9 @@ stdlib. The refactor needs no live Ollama server (all tests stub transport).
 ### Key Elements
 
 - **`tools/ollama_client.py`** (new): the single owner of Ollama HTTP transport and config resolution.
-  - `resolve_config() -> tuple[str, str, float]` — returns `(base_url, model, timeout_s)`, reading `settings.models.ollama_host`, `settings.models.ollama_generation_model`, `settings.models.memory_title_timeout_s`, with the existing hardcoded fallbacks (`http://localhost:11434`, `gemma4:31b-cloud`, `5.0`) for environments where settings can't load. Single home for the `localhost:11434` and `gemma4:31b-cloud` literals.
-  - `generate(prompt, *, model, timeout_s, base_url=None) -> str | None` — builds `ollama.Client(host=base_url-or-resolved, timeout=timeout_s)`, calls `.generate(model=model, prompt=prompt, stream=False)`, returns the response text. **Fail-silent**: returns `None` on any connection/timeout/parse error (logged at DEBUG). Replaces the urllib transport in `_post_ollama_generate` and `_summarize_via_ollama`.
-  - `chat(messages, *, model, options=None, base_url=None, timeout_s=None) -> str` — builds a `Client` and calls `.chat(...)`, returning `response["message"]["content"]`. **Raises** on any failure (does NOT swallow), preserving triage's escalate-on-exception contract.
+  - `resolve_config() -> tuple[str, str, float]` — returns `(base_url, model, timeout_s)` by reading them from a `ModelSettings` instance: in the happy path from `settings.models`; on settings-import failure, by constructing `ModelSettings()` directly (Pydantic applies its field defaults) and reading `.ollama_host` / `.ollama_generation_model` / `.memory_title_timeout_s`. **The `localhost:11434`, `gemma4:31b-cloud`, and `5.0` literals are NOT re-hardcoded here** — they live in `config/settings.py` ModelSettings field defaults ONLY (CRITIQUE item 3, verified: `config/settings.py:172/185/193` already own them as Pydantic defaults). `resolve_config()` therefore contains zero model/host/timeout string literals; it only references the field names. This keeps `test_no_gemma_literal_in_indexer` green AND prevents literal drift between settings.py and the new module.
+  - `generate(prompt, *, model, timeout_s, base_url=None, caller=None) -> str | None` — builds `ollama.Client(host=base_url-or-resolved, timeout=timeout_s)` **inside a `with` block** (`with ollama.Client(...) as client:` — `Client` inherits `__enter__`/`__exit__` from httpx, and httpx's `Client` has NO `__del__`, so the `with` block closes the connection pool / sockets deterministically; this matters under the title-gen daemon-thread burst path — CRITIQUE item 4), calls `client.generate(model=model, prompt=prompt, stream=False)`, then extracts and **empty-string-coalesces** the response: `text = response.response; return (text.strip() or None)`. **CRITICAL (CRITIQUE BLOCKER 2):** `GenerateResponse.response` is annotated `str`, required, NEVER `None` — an empty model output yields `""`, not `None`. The indexer currently does `data.get("response","").strip() or None`, so empty/whitespace output coalesces to `None` and triggers the Haiku fallback. `generate()` MUST replicate this coalescing; without it an empty Ollama response returns `""` and the indexer SKIPS its Haiku fallback (a silent behavior change). **Fail-silent**: returns `None` on any connection/timeout/parse error AND on empty/whitespace output, logged at DEBUG with the exception class name and optional `caller=` label (CRITIQUE item 6 — preserve per-failure-class grep-ability). Replaces the urllib transport in `_post_ollama_generate` and `_summarize_via_ollama`.
+  - `chat(messages, *, model, options=None, base_url=None, timeout_s=None) -> str` — builds a `Client` **inside a `with` block** (same deterministic-socket-close rationale as `generate()`) and calls `client.chat(...)`. **Return-shape access (CRITIQUE BLOCKER 1):** use attribute access — `response.message.content` — as the canonical path. VERIFIED: `ChatResponse.message.content` is the attribute path AND `ChatResponse` is subscriptable (`__getitem__` present), so triage's pre-existing `response["message"]["content"]` parsing is NOT silently broken — but the plan canonicalizes on attribute access and a test asserts the extracted string. **Raises** on any failure (does NOT swallow), preserving triage's escalate-on-exception contract.
 - **Caller-local adapters stay** (minimize test churn):
   - `title_generator._resolve_ollama_config()` → delegates to `ollama_client.resolve_config()`.
   - `title_generator._post_ollama_generate(base_url, model, prompt, timeout_s)` → delegates to `ollama_client.generate(...)`.
@@ -173,6 +174,28 @@ Inbound email → triage_local → ollama_client.chat() → text-or-raise → cl
   exception-to-escalate; its existing `except Exception` block is unchanged and
   catches whatever the package/Client raises). This preserves each caller's existing
   observable behavior without forcing one contract on the other.
+- **Empty-output coalescing (CRITIQUE BLOCKER 2).** `generate()` must coalesce empty
+  /whitespace model output to `None`: `text = response.response; return (text.strip()
+  or None)`. `GenerateResponse.response` is `str` and required — it is never `None`,
+  and an empty generation yields `""`. The indexer's current
+  `data.get("response","").strip() or None` already collapses `""`/whitespace to
+  `None`, which is what fires its Haiku fallback. If `generate()` returned the raw
+  `""` instead, the indexer would treat empty output as a successful summary and SKIP
+  Haiku — a silent regression. The coalescing lives in the shared `generate()` so both
+  callers inherit it identically.
+- **Client lifecycle (CRITIQUE item 4).** Wrap every `ollama.Client(...)` construction
+  in `with ollama.Client(host=..., timeout=...) as client:` in BOTH `generate()` and
+  `chat()`. Each `Client` builds an httpx connection pool and has NO `__del__`; the
+  `with` block (httpx `Client.__enter__`/`__exit__`) closes sockets deterministically
+  at call end. This matters because title-gen runs in a daemon-thread burst path where
+  relying on GC to close pools could leak sockets under load.
+- **Observability (CRITIQUE item 6).** `title_generator._post_ollama_generate`
+  currently logs DISTINCT DEBUG messages per failure class (unreachable/timeout vs.
+  non-JSON vs. generic). Collapsing all failures into one generic DEBUG in `generate()`
+  would lose that grep signal. `generate()` therefore logs the **exception class name**
+  (and accepts an optional `caller=` label) at DEBUG, so per-class / per-caller grep
+  still works after consolidation. The shared log line format is e.g.
+  `[ollama_client] <caller> generate failed: <ExceptionClassName>`.
 - **Timeout sourcing.** `resolve_config()` returns the configurable
   `memory_title_timeout_s` (default 5.0). The title caller passes that through. The
   indexer currently hardcodes `8.0`; to preserve its observable behavior exactly,
@@ -180,15 +203,36 @@ Inbound email → triage_local → ollama_client.chat() → text-or-raise → cl
   (the centralization is in transport + config-literal ownership, not in unifying the
   two timeouts — unifying them would be a behavior change, out of scope). The `8.0`
   thus appears once, at the indexer caller, as an explicit argument rather than buried
-  in a urllib call. Triage uses the package default timeout (preserved) unless we pass
-  one; keep it unspecified to avoid changing triage timing behavior.
+  in a urllib call.
+- **Triage timeout semantics (CRITIQUE item 5 — RESOLVED with empirical correction).**
+  The critique worried that "no timeout" might silently regress triage to an
+  infinite wait, on the assumption that the ollama package default is a finite httpx
+  timeout. **Verified against the installed package: that assumption is false for this
+  version.** Both the module-level `ollama.chat()` singleton client AND a fresh
+  `ollama.Client(host=...)` (no `timeout=`) construct with `httpx.Timeout(timeout=None)`
+  — i.e., **NO timeout / infinite wait** is ALREADY the package default. Triage's
+  current code calls module-level `ollama.chat(...)`, so triage is ALREADY running with
+  no timeout today. Therefore constructing `ollama.Client(host=...)` with NO `timeout=`
+  argument in `chat()` PRESERVES triage's exact current timing behavior (still infinite)
+  — it does NOT introduce a new infinite-wait regression, because the regression the
+  critique feared is the pre-existing status quo. **Decision:** `chat()` does NOT pass a
+  `timeout_s` for the triage path (`timeout_s` defaults to `None` → the `Client` is
+  built without a `timeout=` kwarg → httpx default `Timeout(None)`), exactly matching
+  today. The "package default" referenced throughout this plan means specifically
+  `httpx.Timeout(None)` for this `ollama` version — documented here so a future reader
+  does not mistake it for a finite value.
 - **Caller-specific safety stays at the caller.** The `<private>`-tag strip and the
   `ensure_generation_model()` gate in `title_generator._do_generate` are NOT moved
   into the shared client (per the issue — caller-specific safety policy).
-- **JSON/response parsing** for `/api/generate` moves into `ollama_client.generate()`
-  (the package returns a typed `GenerateResponse`, so `.response` access replaces the
-  manual `json.loads(...).get("response")`); the `None`-on-missing-field guard is
-  preserved.
+- **Response parsing (CRITIQUE BLOCKER 1 + 2).** For `generate()`, the package returns
+  a typed `GenerateResponse`; `response.response` (attribute access) replaces the manual
+  `json.loads(...).get("response")`, then `.strip() or None` coalesces empty output to
+  `None` (see Empty-output coalescing above). For `chat()`, the canonical access path is
+  `response.message.content` (attribute). VERIFIED both `GenerateResponse` and
+  `ChatResponse` ALSO expose `__getitem__`, so the legacy subscript paths
+  (`response["response"]`, `response["message"]["content"]`) still work — triage's
+  existing subscript parsing is not silently broken — but the new module standardizes on
+  attribute access and tests assert the extracted string from the typed objects.
 
 ## Failure Path Test Strategy
 
@@ -215,7 +259,11 @@ Inbound email → triage_local → ollama_client.chat() → text-or-raise → cl
 - [ ] `tests/unit/test_email_cs_triage.py` — UPDATE: `_stub_ollama()` stubs `sys.modules["ollama"]` and triage calls `ollama.chat`. Re-point the stub to patch the new seam (`tools.ollama_client.chat`, or the name triage imports). All eight escalation/parse/validation cases must stay green.
 - [ ] `tests/integration/test_email_cs_handler.py` — UPDATE (likely no change): stubs `triage_local` at the handler level, above the transport seam. Confirm green; transport change is invisible here.
 - [ ] `tests/unit/test_ollama_consolidation.py` — NO CHANGE (verify green): covers #1636 config layer only (`OLLAMA_CLASSIFIER_MODEL`, `ensure_generation_model`, settings defaults, /update gate). This transport refactor must not break it. Note: `test_no_gemma_literal_in_indexer` asserts no `gemma4` literal in the indexer — keep the `gemma4:31b-cloud` fallback literal in `ollama_client.resolve_config()` only, NOT in the indexer, so this test stays green.
-- [ ] NEW: `tests/unit/test_ollama_client.py` — CREATE: unit tests for `resolve_config()` (settings-present and settings-absent fallback), `generate()` (success returns text, failure returns `None` + DEBUG log), `chat()` (success returns content, failure re-raises). All stub the `ollama.Client` — no live server.
+- [ ] NEW: `tests/unit/test_ollama_client.py` — CREATE: unit tests for `resolve_config()` (settings-present and settings-absent fallback — the absent case asserts the values equal `ModelSettings()` field defaults, NOT hardcoded literals, proving no literal lives in the module), `generate()` (success returns text via `response.response`; failure returns `None` + DEBUG log naming the exception class), `chat()` (success returns content via `response.message.content`; failure re-raises). All stub the `ollama.Client` — no live server. **BLOCKER-class assertions (mandatory):**
+  - [ ] `test_generate_returns_none_on_empty_response` — stub `Client.generate` to return `GenerateResponse(response="")`; assert `generate()` returns `None` (proves the empty-string → `None` coalescing that keeps the indexer's Haiku fallback alive — CRITIQUE BLOCKER 2).
+  - [ ] `test_generate_extracts_string` — stub returns `GenerateResponse(response="  hello  ")`; assert `generate()` returns `"hello"` (strip applied, non-empty preserved).
+  - [ ] `test_chat_extracts_content` — stub `Client.chat` to return a `ChatResponse` with `message.content == "spam"`; assert `chat()` returns the extracted string `"spam"` via attribute access (CRITIQUE BLOCKER 1).
+  - [ ] `test_client_context_managed` — assert the stubbed `Client.__exit__` is invoked (or the `with` block is entered/exited) for both `generate()` and `chat()`, proving deterministic socket close (CRITIQUE item 4).
 
 ## Rabbit Holes
 
@@ -230,8 +278,19 @@ Inbound email → triage_local → ollama_client.chat() → text-or-raise → cl
 - **Switching triage's `chat` to a `None`-returning contract** to "match" generate.
   Triage's escalate-on-exception is individually tested; keep `chat()` raising.
 - **Deleting the caller-local adapter functions** to force every test to patch the
-  new module. Keeping the thin adapters preserves existing patch targets and
-  minimizes test churn — that is the lower-risk path for a behavior-preserving refactor.
+  new module. Keeping the thin adapters (`_resolve_ollama_config`,
+  `_post_ollama_generate`, `_summarize_via_ollama`) as pass-through delegators is a
+  **deliberate, documented tradeoff** (CRITIQUE item 8), NOT residual legacy
+  indirection. The justification is **test patch-target stability**: existing tests
+  patch these exact symbol names (e.g. `patch("tools.knowledge.indexer._summarize_via_ollama")`),
+  and ~10 patch sites across `test_memory_title_generator.py`,
+  `test_knowledge_indexer.py`, and the title-writer-paths tests would otherwise need
+  re-pointing. The adapters carry ZERO transport logic — each is a one-line `return
+  ollama_client.<fn>(...)` delegation — so they do not violate NO-LEGACY (there is no
+  duplicated or dead logic to remove; the transport lives in exactly one place). This
+  is an acknowledged "won't change" decision recorded in Critique Results, not a defect.
+  A reviewer who reads a one-line delegator and an unchanged patch target gets a
+  smaller, safer diff than one who must audit ~10 re-pointed mocks.
 
 ## Risks
 
@@ -241,11 +300,15 @@ Inbound email → triage_local → ollama_client.chat() → text-or-raise → cl
 
 ### Risk 2: Triage timing behavior changes if the shared `chat()` imposes a timeout the module-level `ollama.chat()` did not.
 **Impact:** Triage could start timing out (and escalating) on slow-but-valid classifications it previously waited on.
-**Mitigation:** Do not pass a `timeout_s` for the triage path — leave the `Client` at the package default, matching today's `ollama.chat()` default. Documented in Technical Approach.
+**Mitigation:** Do not pass a `timeout_s` for the triage path — build the `Client` with no `timeout=` kwarg. VERIFIED (CRITIQUE item 5): both the module-level `ollama.chat()` singleton and a fresh `ollama.Client(host=...)` default to `httpx.Timeout(None)` (NO timeout). Triage runs on the module-level path today, so it is ALREADY at infinite wait; building the new `Client` without a timeout PRESERVES that exactly. There is no new infinite-wait regression — the feared infinite wait is the pre-existing status quo, not a change introduced here. Documented in Technical Approach.
 
 ### Risk 3: `test_no_gemma_literal_in_indexer` breaks if the `gemma4:31b-cloud` fallback literal lands in the indexer adapter.
 **Impact:** Red unit test, blocks merge.
-**Mitigation:** The literal lives ONLY in `ollama_client.resolve_config()`. The indexer adapter calls `resolve_config()` for its model; no literal in `indexer.py`.
+**Mitigation:** The `gemma4:31b-cloud`, `localhost:11434`, and `5.0` literals live ONLY in `config/settings.py` ModelSettings field defaults (CRITIQUE item 3 — verified `config/settings.py:172/185/193`). `resolve_config()` reads them via `ModelSettings()` and contains NO such literal; the indexer adapter calls `resolve_config()` for host/model. No literal in `indexer.py` OR in `ollama_client.py`.
+
+### Risk 4: Empty/whitespace Ollama output silently bypasses the indexer's Haiku fallback (CRITIQUE BLOCKER 2).
+**Impact:** An empty model generation (`GenerateResponse(response="")`) would be treated as a successful summary, skipping the Haiku fallback and storing an empty/garbage summary — a silent quality regression.
+**Mitigation:** `generate()` coalesces empty/whitespace to `None` (`text.strip() or None`), exactly replicating the indexer's current `data.get("response","").strip() or None`. Unit test `test_generate_returns_none_on_empty_response` asserts this.
 
 ## Race Conditions
 
@@ -301,9 +364,12 @@ change.
 ## Success Criteria
 
 - [ ] A single internal module (`tools/ollama_client.py`) owns Ollama HTTP transport + config resolution.
-- [ ] `localhost:11434` literal and `/api/generate` URL each appear in exactly one place (`grep -rn "localhost:11434\|/api/generate" tools/` shows a single source — the new module).
-- [ ] `gemma4:31b-cloud` fallback literal appears in exactly one place (`resolve_config()`); `test_no_gemma_literal_in_indexer` stays green.
+- [ ] `/api/generate` URL string disappears entirely from `tools/` (the `ollama` package owns the endpoint; no caller hardcodes it). `grep -rn "/api/generate" tools/` returns nothing.
+- [ ] `localhost:11434`, `gemma4:31b-cloud`, and the `5.0` timeout literal each appear in exactly one place — `config/settings.py` ModelSettings field defaults (CRITIQUE item 3). They do NOT appear in `resolve_config()` / `tools/ollama_client.py` NOR in `indexer.py`. `grep -rn "localhost:11434\|gemma4:31b-cloud" tools/` returns nothing; `test_no_gemma_literal_in_indexer` stays green.
 - [ ] `title_generator.py`, `indexer.py`, and `email_cs/triage.py` all delegate transport to the new module.
+- [ ] `generate()` returns `None` on empty/whitespace output (CRITIQUE BLOCKER 2), so the indexer's Haiku fallback still fires — asserted by `test_generate_returns_none_on_empty_response`.
+- [ ] `chat()` extracts via `response.message.content` attribute access (CRITIQUE BLOCKER 1) — asserted by `test_chat_extracts_content`.
+- [ ] Both `generate()` and `chat()` construct `ollama.Client` inside a `with` block for deterministic socket close (CRITIQUE item 4).
 - [ ] Each caller's existing fallback/escalation behavior is preserved (title: skip-on-None; indexer: Haiku fallback on None; triage: escalate-on-exception).
 - [ ] No dependency added, removed, or version-bumped (`git diff pyproject.toml` shows no dependency line change).
 - [ ] Tests pass (`/do-test`) — including unchanged `test_ollama_consolidation.py`.
@@ -350,9 +416,11 @@ See template list. This Small refactor uses `builder`, `validator`, `documentari
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `tools/ollama_client.py` with `resolve_config()`, `generate()` (fail-silent → `None`), `chat()` (raises).
-- Construct `ollama.Client(host=..., timeout=...)` per call; extract `.response` / `["message"]["content"]`.
-- House the `localhost:11434`, `gemma4:31b-cloud`, and default-timeout literals here ONLY.
-- Write `tests/unit/test_ollama_client.py` stubbing `ollama.Client` (no live server).
+- Construct `ollama.Client(host=..., timeout=...)` per call INSIDE a `with` block for deterministic socket close (CRITIQUE item 4).
+- `generate()`: extract `response.response` (attribute), then `text.strip() or None` to coalesce empty/whitespace output to `None` (CRITIQUE BLOCKER 2 — keeps indexer Haiku fallback alive). Log exception class name + optional `caller=` at DEBUG (CRITIQUE item 6).
+- `chat()`: extract `response.message.content` (attribute, CRITIQUE BLOCKER 1); pass NO `timeout=` when `timeout_s is None` (preserves triage's infinite-wait status quo, CRITIQUE item 5).
+- `resolve_config()`: read host/model/timeout from `settings.models`, falling back to a fresh `ModelSettings()` on import failure. Do NOT hardcode `localhost:11434` / `gemma4:31b-cloud` / `5.0` here — those live in `config/settings.py` field defaults ONLY (CRITIQUE item 3).
+- Write `tests/unit/test_ollama_client.py` stubbing `ollama.Client` (no live server), including the four BLOCKER-class assertions listed in Test Impact.
 
 ### 2. Re-point title_generator
 - **Task ID**: build-title-generator
@@ -373,8 +441,9 @@ See template list. This Small refactor uses `builder`, `validator`, `documentari
 - **Assigned To**: ollama-client-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Make `_summarize_via_ollama()` delegate to `ollama_client.generate(...)`, passing `timeout_s=8.0` explicitly (preserve behavior).
-- Ensure NO `gemma4`/`localhost:11434`/`/api/generate` literal remains in `indexer.py` (keep `test_no_gemma_literal_in_indexer` green).
+- Make `_summarize_via_ollama()` delegate to `ollama_client.generate(...)`, passing `timeout_s=8.0` explicitly and `caller="indexer"` (preserve behavior + DEBUG signal).
+- Rely on `generate()`'s built-in empty-string coalescing to `None` (CRITIQUE BLOCKER 2) — the indexer no longer needs its own `.strip() or None`; the Haiku fallback still fires on empty output.
+- Ensure NO `gemma4`/`localhost:11434`/`/api/generate` literal remains in `indexer.py` (keep `test_no_gemma_literal_in_indexer` green); model/host come from `resolve_config()`.
 - Remove inline `urllib`/`json` imports from `_summarize_via_ollama`.
 
 ### 4. Re-point triage
@@ -389,14 +458,15 @@ See template list. This Small refactor uses `builder`, `validator`, `documentari
 - Keep the existing try/except → `escalate_triage(...)` (chat raises, caller catches).
 - Re-point the test stub from `sys.modules["ollama"]` to the new seam.
 
-### 5. Validate refactor
+### 5. Validate refactor (behavior + literal-dedup gate)
 - **Task ID**: validate-ollama-client
 - **Depends On**: build-title-generator, build-indexer, build-triage
 - **Assigned To**: ollama-client-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run all five affected test files + the new test; confirm green.
-- `grep -rn "localhost:11434\|/api/generate" tools/` returns a single source file.
+- **Scope (distinct from task 7):** this is the post-BUILD code gate, run BEFORE docs exist. Verify behavior-preservation and literal de-duplication only; do NOT check doc artifacts here.
+- Run all five affected test files + the new `test_ollama_client.py`; confirm green — including the BLOCKER-class cases (`test_generate_returns_none_on_empty_response`, `test_chat_extracts_content`).
+- `grep -rln "/api/generate\|localhost:11434\|gemma4:31b-cloud" tools/` returns nothing (all three literals/endpoint gone from `tools/`; they live in `config/settings.py` and the package).
 - `git diff pyproject.toml` shows no dependency change.
 - `python -m ruff check` and `python -m ruff format --check` clean.
 
@@ -409,13 +479,15 @@ See template list. This Small refactor uses `builder`, `validator`, `documentari
 - Create `docs/features/ollama-client.md`; add index entry in `docs/features/README.md`.
 - Surgically update any transport descriptions in memory/indexer/email-CS docs to point at the new module.
 
-### 7. Final Validation
+### 7. Final Validation (Definition-of-Done gate, incl. docs)
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: ollama-client-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run full affected-test set + ruff; verify every Success Criterion; confirm doc exists and is indexed.
+- **Scope (distinct from task 5):** this is the final DoD gate run AFTER docs land. Its unique additions over task 5 are: (a) confirm `docs/features/ollama-client.md` exists and is indexed in `docs/features/README.md`; (b) walk EVERY Success Criterion checkbox and the Verification table end-to-end; (c) produce the final report. Task 5 is the code-only gate; task 7 is the whole-plan gate that also covers documentation. The overlap in re-running tests is intentional (a final green re-confirmation after the docs commit), not redundant scope.
+- Re-run the full affected-test set + ruff as a final green check after the docs commit.
+- Verify every Success Criterion and every Verification-table row.
 - Generate final report.
 
 ## Verification
@@ -423,18 +495,31 @@ See template list. This Small refactor uses `builder`, `validator`, `documentari
 | Check | Command | Expected |
 |-------|---------|----------|
 | Affected tests pass | `pytest tests/unit/test_ollama_client.py tests/unit/test_memory_title_generator.py tests/unit/test_memory_title_writer_paths.py tests/unit/test_knowledge_indexer.py tests/unit/test_email_cs_triage.py tests/integration/test_email_cs_handler.py tests/unit/test_ollama_consolidation.py -q` | exit code 0 |
-| Single transport source | `grep -rln "/api/generate" tools/ \| wc -l` | output contains 1 |
-| Single host literal source | `grep -rln "localhost:11434" tools/ \| wc -l` | output contains 1 |
-| No gemma literal in indexer | `grep -c "gemma4" tools/knowledge/indexer.py` | output contains 0 |
+| No /api/generate literal in tools | `grep -rln "/api/generate" tools/ \| wc -l` | output contains 0 (package owns endpoint) |
+| No host literal in tools | `grep -rln "localhost:11434" tools/ \| wc -l` | output contains 0 (lives in config/settings.py only) |
+| No gemma literal in tools | `grep -rln "gemma4:31b-cloud" tools/ \| wc -l` | output contains 0 (lives in config/settings.py only) |
+| Host/model literals in settings only | `grep -c "localhost:11434\|gemma4:31b-cloud" config/settings.py` | output > 0 |
 | No dependency change | `git diff --stat pyproject.toml` | output contains 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns). Revision pass folded every finding below
+into the plan. Two BLOCKER-class findings nailed down (chat return-shape access,
+generate empty-string coalescing), six concerns embedded, one acknowledged-won't-change
+(adapter indirection) with explicit rationale.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Archaeologist | `chat()` return shape: `ChatResponse.message.content` is the attribute path; `ChatResponse` is also subscriptable so triage's `response["message"]["content"]` still works — but the plan must SPECIFY the access path and test the extracted string. | Solution (`chat()` bullet), Technical Approach (Response parsing), Test Impact (`test_chat_extracts_content`), Success Criteria, Risk 1 | Canonical path = attribute access `response.message.content`. Subscript path verified still working (`__getitem__` present on both response types), so triage's existing parsing is NOT silently broken. New module standardizes on attribute access; `test_chat_extracts_content` asserts the string. |
+| BLOCKER | Skeptic | `generate()` empty-string coalescing: `GenerateResponse.response` is `str`/required (never `None`); empty output = `""`. Indexer currently does `.get("response","").strip() or None`, so empty → `None` → Haiku fallback. New `generate()` must replicate or it returns `""` and indexer SKIPS Haiku (silent regression). | Solution (`generate()` bullet), Technical Approach (Empty-output coalescing), Test Impact (`test_generate_returns_none_on_empty_response`), Success Criteria, Risk 4 | `text = response.response; return (text.strip() or None)`. Mandatory unit test asserts `generate()` returns `None` on `GenerateResponse(response="")`. VERIFIED: `GenerateResponse.response` annotation=`str`, required=True. |
+| CONCERN | Operator | `gemma4:31b-cloud` / `localhost:11434` literals: `config/settings.py` ModelSettings ALREADY owns these as Pydantic field defaults; `resolve_config()` should NOT re-hardcode them. | Solution (`resolve_config()` bullet), Technical Approach, Risk 3, Success Criteria, Verification table, Step 5 | On settings-import failure, construct `ModelSettings()` directly (Pydantic applies defaults) and read `.ollama_host`/`.ollama_generation_model`/`.memory_title_timeout_s`. Literals live in `config/settings.py:172/185/193` ONLY — zero literals in `tools/ollama_client.py`. Success criterion updated to name `config/settings.py` as the one place. |
+| CONCERN | Operator | Client lifecycle: `ollama.Client` builds an httpx pool with NO `__del__`; sockets may leak under the title-gen daemon-thread burst path. | Solution (`generate()`/`chat()` bullets), Technical Approach (Client lifecycle), Test Impact (`test_client_context_managed`), Success Criteria | Wrap construction in `with ollama.Client(...) as client:` in BOTH `generate()` and `chat()` (httpx `__enter__`/`__exit__`) for deterministic socket close. |
+| CONCERN | Skeptic | triage `timeout=None` semantics: critique feared "no timeout" = infinite-wait regression on the assumption the package default is finite. | Technical Approach (Triage timeout semantics — RESOLVED), Risk 2 | EMPIRICAL CORRECTION: verified both module-level `ollama.chat()` AND fresh `ollama.Client(host=...)` default to `httpx.Timeout(None)` (infinite). Triage runs the module-level path TODAY, so it is already at infinite wait. Building `Client` with no `timeout=` PRESERVES that exactly — no new regression. The feared infinite wait is the pre-existing status quo. |
+| CONCERN | Operator | Observability: `title_generator` logs distinct DEBUG per failure class; one generic DEBUG in `generate()` loses that grep signal. | Solution (`generate()` bullet), Technical Approach (Observability) | `generate()` logs the exception class name + optional `caller=` label at DEBUG so per-class / per-caller grep still works: `[ollama_client] <caller> generate failed: <ExceptionClassName>`. |
+| CONCERN | Simplifier | Redundant validate tasks 5 and 7 overlap. | Step 5 (validate refactor), Step 7 (final validation) | Given distinct scopes: task 5 = post-BUILD code-only gate (behavior + literal-dedup, BEFORE docs); task 7 = final DoD gate AFTER docs (adds doc-existence/index check + full Success-Criteria walk + report). Test re-run overlap is an intentional final green re-confirmation, not duplicate scope. |
+| ACKNOWLEDGED (won't change) | Adversary | Adapter indirection (`_resolve_ollama_config`/`_post_ollama_generate`/`_summarize_via_ollama` kept as pass-throughs) flagged as potential NO-LEGACY violation. | Rabbit Holes ("Deleting the caller-local adapter functions") | KEPT by deliberate decision. Rationale: test patch-target stability (~10 patch sites stay valid); adapters carry ZERO transport logic (one-line delegators), so no duplicated/dead logic exists to violate NO-LEGACY. Smaller, safer diff than re-pointing ~10 mocks. Documented tradeoff, not a defect. |
 
 ---
 
@@ -448,10 +533,13 @@ All open questions from the issue were resolved by spikes against the installed
    do not accept a `timeout`, but `Client(timeout=...)` honors it (httpx passthrough,
    spike-1). Hand-rolled urllib is removed.
 2. **Error contract?** → RESOLVED: Split. Shared `generate()` returns `None` on
-   failure (both generate callers want this); shared `chat()` raises (triage's
-   escalate-on-exception is preserved by its existing try/except, spike-2).
+   failure AND on empty/whitespace output (`text.strip() or None` — preserves the
+   indexer's Haiku-fallback trigger, CRITIQUE BLOCKER 2); shared `chat()` raises
+   (triage's escalate-on-exception is preserved by its existing try/except, spike-2).
 3. **Where does the module live?** → RESOLVED: `tools/ollama_client.py`.
 4. **`<private>` strip + `ensure_generation_model()` gate?** → Stay at the title
    caller (per the issue; not moved into the shared client).
 
-No outstanding questions require supervisor input. Ready for critique.
+No outstanding questions require supervisor input. Critique complete (READY TO BUILD
+with concerns); revision pass applied — all critique findings folded into the plan
+sections above and recorded in Critique Results. Ready to build.
