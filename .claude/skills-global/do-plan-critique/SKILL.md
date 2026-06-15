@@ -27,7 +27,7 @@ Do NOT write the completion marker before the verdict is recorded, and do NOT re
 
 ## What this skill does
 
-Critiques a plan document from six expert perspectives plus automated structural validation. Each critic has a defined lens and returns severity-rated findings. The skill aggregates, deduplicates, and produces a verdict: READY TO BUILD, NEEDS REVISION, or MAJOR REWORK.
+Critiques a plan document from a frozen roster of expert perspectives (six or seven per CRITICS.md selection rules) plus automated structural validation. Each critic has a defined lens and returns severity-rated findings. The skill aggregates, deduplicates, and produces a verdict: READY TO BUILD, NEEDS REVISION, or MAJOR REWORK.
 
 ## When to load sub-files
 
@@ -38,8 +38,8 @@ Critiques a plan document from six expert perspectives plus automated structural
 1. Resolve the plan path from `$ARGUMENTS` (issue number or file path)
 2. Read the plan and fetch linked issue/prior art context
 3. Run automated structural checks (Step 2)
-4. Spawn six parallel critics with the plan text (Step 3)
-5. Aggregate findings and output the report (Steps 4-5)
+4. Freeze the critic roster manifest (Step 3a), then dispatch the frozen roster of critics — each writes a result file (Step 3)
+5. Gate on the roster membership check before aggregating, then aggregate and output the report (Steps 3.5-5)
 
 ## Plan Resolution
 
@@ -204,15 +204,65 @@ IMPLEMENTATION NOTE: [Required for CONCERN and BLOCKER severity. Exempt for NIT.
 
 NITs are exempt from the Implementation Note field. For CONCERN and BLOCKER findings, the note must be concrete: a specific guard condition (e.g., `if event: event.set()`), a call signature, or a "why" explanation that prevents naive application of the fix.
 
-### Step 3.5: Wait and Collect (mandatory)
+### Step 3.5: Roster Membership Barrier (mandatory, runs BEFORE Step 4)
 
-The six critics from Step 3 were spawned with `run_in_background: true`. Before doing ANY aggregation, you MUST **wait and collect**: block on every one of the six background critic agents and retrieve each critic's complete findings.
+This is the **barrier**. Completion is **observed on the filesystem** — a membership check against the frozen `_roster.json` manifest written in Step 3a — **independent of whether the driver awaited the critics**. You do NOT proceed to Step 4 (aggregation) until the gate reports the full roster complete, OR you record the `CRITIQUE INCOMPLETE` fallback after exhausting the re-dispatch cap.
 
-- Poll/await all six background agents until each has returned (use the Agent tool's blocking retrieval, e.g. `TaskOutput(block: true)` per critic, or await every background task). Do not proceed while any critic is still running.
-- Collect the full findings text from all six. A critic that returned zero findings still counts as collected — record it as "0 findings", do not skip it.
-- If a critic failed or returned nothing retrievable, re-spawn it and wait again. Never aggregate a partial set.
+**1. Invoke the gate.** Call `critique-roster-check` via the Bash tool against the run dir:
 
-**This skill owns finalization end to end.** It does NOT yield to a supervisor for aggregation or verdict recording. The wait-and-collect barrier here is precisely the synchronization that the old "After all critics complete" wording assumed but never enforced — without it, Steps 4, 5, 5.5 silently never run and the critique stalls at `in_progress`. Only after all six are collected do you proceed to Step 4.
+```bash
+critique-roster-check --run-dir "$CRITIQUE_RUN_DIR"
+```
+
+It prints a JSON gate decision and sets its exit code:
+
+```json
+{"complete": false, "missing": ["Adversary","User"], "present": ["Skeptic","Operator","Archaeologist","Simplifier","Consistency Auditor"], "roster_count": 7, "completed_count": 5}
+```
+
+It exits `0` when `complete: true` (every frozen-roster member wrote a `{name}.result.md` carrying the terminal two-line completion fence), and **non-zero** otherwise. The gate is a **filesystem membership check against the frozen `_roster.json` manifest** — a missing or fence-less result file means that named roster member did not complete. Because completion is read off the filesystem, the barrier holds whether or not the driver chose to await the critic agents.
+
+**2. Bounded re-dispatch.** Define:
+
+```
+MAX_CRITIC_REDISPATCH = 2
+```
+
+If the gate reports `complete: false`, **re-dispatch ONLY the critics named in `missing`** — re-run each missing critic so it writes its `{name}.result.md` using the exact same atomic `.tmp`→rename + two-line terminal-fence convention from Step 3 (`<<<CRITIQUE-RESULT-COMPLETE>>>` then `STATUS: COMPLETED` as the last two lines). Then re-run `critique-roster-check`. Repeat up to `MAX_CRITIC_REDISPATCH` rounds.
+
+The total attempt budget is pinned explicitly: **1 initial dispatch (Step 3) + up to 2 re-dispatches = 3 attempts maximum per critic.** There is **NO unbounded retry loop** — the cap is named and fixed.
+
+> **CRITICAL — re-dispatch is FOREGROUND.** The re-dispatch block must NEVER contain `run_in_background: true`. Re-run each missing critic in the foreground. Spawn mode is irrelevant to correctness (the gate is the artifact, not the await), and a background re-dispatch would re-introduce exactly the fire-and-forget assumption this barrier replaces.
+
+**3. STOP-grade verdict on a still-incomplete roster.** If the roster is **STILL incomplete after `MAX_CRITIC_REDISPATCH` rounds**, do NOT aggregate and do NOT loop further. Jump to **Step 5.5** and record the verdict string:
+
+```
+MAJOR REWORK (CRITIQUE INCOMPLETE: roster N/M — missing: {names})
+```
+
+Substitute `N` = the gate's `completed_count`, `M` = the gate's `roster_count`, and `{names}` = the gate's `missing` list (the critic names that never reported). Because the substring `MAJOR REWORK` matches the SDLC router's guard **G1** verbatim, this is a **router-consumable STOP** that routes back to `/do-plan` — the human sees exactly which critics never reported. The stage **ALWAYS produces a verdict**; it never returns empty and never lingers at `in_progress`. Then set the `plan_revising` lock per **Step 5.6** (a `CRITIQUE INCOMPLETE` verdict is revision-grade).
+
+**Invariants (must hold on every path):**
+
+- **Never aggregate a partial set.** Step 4 runs only after the gate reports `complete: true`.
+- **Never record an empty verdict.** Every exit path records a concrete verdict string in Step 5.5.
+- **The verdict (Step 5.5) is recorded only when the gate reports `complete: true`, OR as the `CRITIQUE INCOMPLETE` fallback after the re-dispatch cap.** There is no third path.
+- **The incomplete-roster STOP is a recorded `MAJOR REWORK` verdict (G1-consumable), not a silent exit.**
+- **Only after the gate reports `complete: true` do you proceed to Step 4.**
+
+**Run-dir cleanup gating.** After Step 5.5/5.6, clean up `${CRITIQUE_RUN_DIR}` **ONLY on the `complete: true` path**. On the incomplete / `CRITIQUE INCOMPLETE` path, **PRESERVE** `${CRITIQUE_RUN_DIR}` for forensics — the partial/missing result files are the diagnostic evidence of which critics never reported, and deleting them would destroy exactly what the STOP exists to surface.
+
+```bash
+# After the verdict is recorded (Step 5.5/5.6): clean up ONLY on the complete path.
+# On the incomplete path, PRESERVE the run dir for forensics — do NOT delete it.
+case "$VERDICT_STRING" in
+  *"CRITIQUE INCOMPLETE"*)
+    : ;;  # incomplete path — PRESERVE "$CRITIQUE_RUN_DIR" as forensic evidence
+  *)
+    # gate reported complete: true — safe to remove the ephemeral run dir
+    rm -rf "$CRITIQUE_RUN_DIR" ;;
+esac
+```
 
 ### Step 4: Aggregate and Deduplicate
 
