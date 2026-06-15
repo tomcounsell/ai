@@ -42,6 +42,7 @@ def _make_mock_session(**overrides):
         "watchdog_unhealthy": None,
         "priority": "normal",
         "extra_context": None,
+        "pty_slot": None,
     }
     defaults.update(overrides)
     mock = MagicMock()
@@ -428,6 +429,37 @@ class TestExtractGithubLinks:
         assert p2.pm_transcript_path == "/tmp/pm.jsonl"
         assert p2.dev_transcript_path == "/tmp/dev.jsonl"
         assert p2.user_facing_routed is True
+
+    def test_pty_slot_defaults_none(self):
+        """PipelineProgress.pty_slot is None when not provided (issue #1663)."""
+        from ui.data.sdlc import PipelineProgress
+
+        p = PipelineProgress(agent_session_id="x")
+        assert p.pty_slot is None
+
+    def test_pty_slot_roundtrips(self):
+        """PipelineProgress.pty_slot carries through a non-None value (issue #1663)."""
+        from ui.data.sdlc import PipelineProgress
+
+        p = PipelineProgress(agent_session_id="x", pty_slot=2)
+        assert p.pty_slot == 2
+
+    def test_session_to_pipeline_propagates_pty_slot(self):
+        """_session_to_pipeline populates pty_slot from AgentSession (issue #1663)."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        session = _make_mock_session(pty_slot=1)
+        pipeline = _session_to_pipeline(session)
+        assert pipeline.pty_slot == 1
+
+    def test_session_to_pipeline_pty_slot_none_when_absent(self):
+        """_session_to_pipeline yields pty_slot=None for sessions without a slot
+        (SDK-path and pre-deploy granite sessions) (issue #1663)."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        session = _make_mock_session(pty_slot=None)
+        pipeline = _session_to_pipeline(session)
+        assert pipeline.pty_slot is None
 
 
 class TestSessionToPipeline:
