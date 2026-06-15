@@ -113,13 +113,13 @@ consumes ~200 MB resident. See
 
 ## Per-session spawn (spawn-on-acquire)
 
-Environment variables and the `--append-system-prompt` overlay can only be
-injected at process spawn, so `BridgeAdapter.run` passes a `PairSpawnSpec` to
-`PTYPool.acquire_pair`. When the spec's cwd/env/persona/model differ from the
-pool's spawn-time defaults, the pool closes the slot's pre-warmed pair and
-spawns a fresh per-session pair in the **same slot** — the bounded-slot
-invariant and the normal release/respawn lifecycle are preserved, at the cost
-of spawn latency on acquire. The spec carries:
+Environment variables can only be injected at process spawn, so
+`BridgeAdapter.run` passes a `PairSpawnSpec` to `PTYPool.acquire_pair`. When
+the spec's cwd/env/model differ from the pool's spawn-time defaults, the pool
+closes the slot's pre-warmed pair and spawns a fresh per-session pair in the
+**same slot** — the bounded-slot invariant and the normal release/respawn
+lifecycle are preserved, at the cost of spawn latency on acquire. The spec
+carries:
 
 - **`cwd`** — the session's `working_dir`. Dev sessions with tier-2 worktree
   isolation run their TUIs inside `.worktrees/{slug}/`, and cross-project
@@ -131,14 +131,14 @@ of spawn latency on acquire. The spec carries:
   liveness writers), `CLAUDE_CODE_TASK_LIST_ID` (task-list isolation),
   `VALOR_PARENT_SESSION_ID` (child-session linking), and Telegram/Sentry auth
   for PM/Teammate sessions.
-- **`pm_system_prompt`** — the composed persona overlay (PM SDLC orchestration
-  overlay, email persona, or teammate overlay), applied to the PM PTY via
-  `claude --append-system-prompt`. This is the SAME persona composition the
-  executor resolves for every session type.
 - **`pm_model`** — the D1 precedence cascade (`session.model` > settings >
   codebase default), applied to the PM PTY. The Dev PTY has no per-session
-  model knob; it stays on `GRANITE__DEV_MODEL` (`PairSpawnSpec.dev_model`
-  exists at the pool layer but the adapter never sets it).
+  model knob; it stays on `GRANITE__DEV_MODEL` (defaults to `opus` since
+  issue #1692, when Dev became the full SDLC owner).
+
+**Persona** is no longer in the `PairSpawnSpec`. As of issue #1692, persona
+arrives entirely via the prime commands (`.claude/commands/granite/prime-*-role.md`)
+that each PTY receives at startup. The `--append-system-prompt` flag is gone.
 
 In production every bridge-originated session carries a non-empty env, so
 **every production acquire takes the spawn-on-acquire path**; the pre-warmed
@@ -153,15 +153,22 @@ production bugs that stem from blurring them.
 
 ### Phase 1 — Persona priming
 
-Each PTY receives a persona-priming slash command (`/granite:prime-pm-role`
-and `/granite:prime-dev-role`). The key asymmetry (issue #1644 fix):
+Each PTY receives a persona-priming slash command (`/granite:prime-pm-role`,
+`/granite:prime-dev-role`, or `/granite:prime-teammate-role`). Both PM and Dev
+receive the user message as `$ARGUMENTS` (issue #1692):
 
 - **PM prime** carries `$ARGUMENTS = user_message`. PM gets full task context
-  immediately so it can start planning before the Dev prime even completes.
-- **Dev prime does NOT carry user_message.** Dev's persona file says explicitly
-  "no task is present yet — wait for the operator relay." This prevents Dev
-  from self-starting on the raw user prompt, which races ahead of any PM
-  routing decision.
+  immediately so it can start routing.
+- **Dev prime also carries `$ARGUMENTS = user_message`** as labeled background
+  context. Dev reads it when the PM's `[/dev]` relay arrives — but the prime
+  text explicitly instructs Dev NOT to act until it receives that relay (the
+  anti-self-start guard from issue #1644 now lives in the prime text, not in
+  message omission).
+
+Persona is delivered entirely via these prime commands. No `--append-system-prompt`
+flag is set at spawn time (removed in issue #1692). The shared WORKER rails
+(no-push-to-main, principal context, completion criteria) live in
+`.claude/commands/granite/_prime-rails.md` and each role prime references it.
 
 ### Prime-turn relay
 

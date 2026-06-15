@@ -911,11 +911,12 @@ class TestPrimeTurnRelay(unittest.TestCase):
     after both primes complete) ensures the PM's first instruction is not lost.
     """
 
-    def test_dev_prime_has_no_user_message(self) -> None:
-        """Dev prime is sent without self.user_message (S1, issue #1644).
+    def test_both_primes_carry_user_message(self) -> None:
+        """Both PM and Dev primes are sent with self.user_message (issue #1692).
 
-        The PM prime gets the user task so it can plan; the Dev prime does NOT —
-        the Dev must wait for the operator to relay the PM's first [/dev] relay.
+        PM receives the message for immediate routing. Dev receives it as labeled
+        background context so it has task context when the [/dev] relay arrives.
+        Dev must NOT act before the relay — this is enforced by the prime text.
         """
         c = Container(user_message="build a feature for me", max_turns=1)
         pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
@@ -926,19 +927,18 @@ class TestPrimeTurnRelay(unittest.TestCase):
         with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
-            # Call _prime_session for PM (include_user_message=True) and Dev (False).
+            # Both primes now carry the user message.
             from agent.granite_container.container import DEV_PRIME_SLASH_CMD, PM_PRIME_SLASH_CMD
 
             c._prime_session(pm_mock, PM_PRIME_SLASH_CMD, include_user_message=True)
-            c._prime_session(dev_mock, DEV_PRIME_SLASH_CMD, include_user_message=False)
+            c._prime_session(dev_mock, DEV_PRIME_SLASH_CMD, include_user_message=True)
 
         # PM's write contains the user message.
         pm_write_arg = pm_mock.write.call_args.args[0]
         self.assertIn("build a feature for me", pm_write_arg)
-        # Dev's write does NOT contain the user message.
+        # Dev's write also contains the user message (background context, issue #1692).
         dev_write_arg = dev_mock.write.call_args.args[0]
-        self.assertNotIn("build a feature for me", dev_write_arg)
-        self.assertEqual(dev_write_arg, DEV_PRIME_SLASH_CMD)
+        self.assertIn("build a feature for me", dev_write_arg)
 
     def test_prime_turn_dev_instruction_relayed_once(self) -> None:
         """PM emits [/dev] during prime → exactly ONE Dev dispatch (S2 + race guard, #1644).

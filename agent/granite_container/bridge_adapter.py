@@ -172,6 +172,7 @@ class BridgeAdapter:
         session_env: dict[str, str] | None = None,
         pm_system_prompt: str | None = None,
         pm_model: str | None = None,
+        session_type: str | None = None,
     ) -> None:
         self._agent_session = agent_session
         self._project_key = project_key
@@ -185,11 +186,24 @@ class BridgeAdapter:
         # to the pool as a `PairSpawnSpec`; the pool spawns a fresh pair
         # at acquire time when they differ from its spawn-time defaults.
         self._session_env = dict(session_env) if session_env else None
-        self._pm_system_prompt = pm_system_prompt
+        # pm_system_prompt is no longer used — persona is delivered via prime
+        # commands (issue #1692). Ignored if passed.
+        if pm_system_prompt:
+            import warnings
+
+            warnings.warn(
+                "pm_system_prompt is deprecated and has no effect. "
+                "Persona is delivered via prime commands (issue #1692).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         # D1-resolved PM model (session.model > settings > codebase
         # default). The Dev PTY intentionally has no per-session model
         # knob — it stays on GRANITE__DEV_MODEL via the spec default.
         self._pm_model = pm_model
+        # session_type drives PM prime selection in the Container.
+        # "teammate" → TEAMMATE_PRIME_SLASH_CMD; all others → PM_PRIME_SLASH_CMD.
+        self._session_type = session_type
         # The worker's event loop, captured by `run()` on the asyncio
         # thread before the container is handed to `asyncio.to_thread`.
         # The container's callbacks fire on the to_thread worker thread,
@@ -261,7 +275,6 @@ class BridgeAdapter:
             cwd=working_dir,
             env=self._session_env,
             pm_model=self._pm_model,
-            pm_system_prompt=self._pm_system_prompt,
             pm_session_id=pm_session_id,
             dev_session_id=dev_session_id,
         )
@@ -284,6 +297,7 @@ class BridgeAdapter:
                 on_turn=self._bump_last_turn_at,
                 pm_pty=pm,
                 dev_pty=dev,
+                session_type=self._session_type,
             )
             # Compute transcript paths for tailer (known at spawn time since we set the UUIDs).
             pm_path = _transcript_path_from_spec(working_dir, pm_session_id)

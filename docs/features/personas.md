@@ -26,7 +26,8 @@ config/
       tools.md                   # MCP servers, dev tools, browser automation, CLI tools
 ```
 
-There is no in-repo `teammate.md` overlay. The teammate persona is served entirely from the private overlay (below).
+As of issue #1692, `teammate.md` is now also tracked in the repo at
+`config/personas/teammate.md` and is no longer vault-only.
 
 **Private** (`~/Desktop/Valor/personas/` and `~/Desktop/Valor/identity.json`):
 ```
@@ -191,7 +192,7 @@ prompt = load_system_prompt()                       # engineer persona + WORKER_
 prompt = load_eng_system_prompt("/path")            # engineer persona + WORKER_RULES + work-vault CLAUDE.md
 ```
 
-`load_eng_system_prompt()` is invoked from `agent/session_executor.py` for WORKER-access sessions. The result is passed to `get_response_via_harness(system_prompt=...)` and appended to `claude -p`'s default prompt via `--append-system-prompt`. See `docs/features/harness-abstraction.md`.
+`load_eng_system_prompt()` is invoked for non-granite sessions (direct `claude -p` via `get_response_via_harness`). **Granite PTY sessions** no longer use `load_eng_system_prompt()` or `--append-system-prompt` — persona is delivered via prime commands (`.claude/commands/granite/prime-*-role.md`) since issue #1692. See `docs/features/granite-pty-production.md`.
 
 ## Related
 
