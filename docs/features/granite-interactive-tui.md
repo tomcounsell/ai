@@ -68,22 +68,36 @@ literal prefix tokens on a line of its own:
 - `[/complete]` — followed by a one-sentence completion summary
 
 The Dev persona body instructs Dev to wait for the PM and report
-naturally; Dev's output is summarized by granite, not classified.
+naturally; Dev's final assistant message each turn is forwarded to PM
+**verbatim** (read from the JSONL transcript), not summarized.
 
-## Granite classification + translation taxonomy
+## Granite classification taxonomy (zero-LLM shuttle)
 
-`agent/granite_container/granite_classifier.py` ships 3 tools (down
-from 5 in the earlier granite-agent-loop):
+As of #1681, the granite PTY operator is a **zero-LLM shuttle** on the
+PM↔Dev channel: it classifies by deterministic regex and moves the
+sessions' own authored text between them, doing no LLM rewriting. The
+two former ollama "translation" calls (`extract_dev_prompt`,
+`summarize_for_pm`) and their tool schemas are deleted.
+
+`agent/granite_container/granite_classifier.py` now ships a single
+routing tool:
 
 | Tool | Caller | Type | Purpose |
 |------|--------|------|---------|
 | `classify_pm_prefix` | container | deterministic regex | Parse PM's first non-empty line for the `[/dev]/[/user]/[/complete]` convention. **Not** an LLM call. |
-| `extract_dev_prompt` | container | ollama | Translate PM's tail into a developer instruction. |
-| `summarize_for_pm` | container | ollama | Summarize Dev's output for PM's next turn. |
 
-The classification is a parse, not an LLM call. The two translation
-calls remain LLM calls because the translation quality is what granite
-adds.
+- **PM→Dev:** the verbatim text after `[/dev]` (`classification.payload`)
+  is written directly to Dev. No rewrite.
+- **Dev→PM:** `last_assistant_text()` (`agent/granite_container/transcript_tailer.py`)
+  reads Dev's final authored assistant message from the JSONL transcript
+  and writes it to PM verbatim. No summary. A content-identity freshness
+  baseline (count of text-bearing assistant entries) ensures the current
+  turn — not a stale prior turn — is forwarded; the deterministic
+  hook-driven fix is followup #1688.
+
+`ensure_granite_model` and its worker-startup gate are retained — granite
+remains required for the separate **classification** role
+(`OLLAMA_CLASSIFIER_MODEL`), independent of this now-zero-LLM routing role.
 
 The 3 judgment tools from the earlier granite-agent-loop (`handle_choice`,
 `probe_session`, `signal_done`) are dropped. That earlier results
@@ -91,7 +105,7 @@ doc at `docs/plans/completed/granite-agent-loop-poc-results.md` shows
 those tools were validated by synthetic smoke tests only, not in a
 live 4-turn run. Routing judgment calls to PM (a real Claude
 session) is the right level of abstraction; granite is a
-translator, not a judge.
+shuttle, not a judge.
 
 ## Steady-state loop
 
@@ -105,12 +119,12 @@ PM→granite→Dev→granite→PM cycle per tick:
    - complete: emit turn record, exit
    - user:     emit turn record, continue (PM may have more to say)
    - dev:      await_idle(dev_pty), then
-                 extract_dev_prompt(pm_buf)  # ollama
-                 write(dev_pty, dev_prompt)   # \r terminator
+                 write(dev_pty, classification.payload)  # verbatim, \r terminator
+                 baseline = text_bearing_count(dev_transcript)
                  await_idle(dev_pty)         # wait for Dev's response
-                 summarize_for_pm(dev_buf)   # ollama
+                 dev_text = last_assistant_text(dev_transcript, baseline)  # verbatim from JSONL
                  await_idle(pm_pty)          # PM must be idle
-                 write(pm_pty, summary)      # \r terminator
+                 write(pm_pty, dev_text)     # verbatim, \r terminator
    - unknown:  compliance miss; log + continue
 4. loop until destination == "complete" or max_turns reached
 ```
