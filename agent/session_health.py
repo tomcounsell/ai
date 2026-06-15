@@ -1358,6 +1358,41 @@ async def _apply_recovery_transition(
     except Exception as _m_err:
         logger.debug("[session-health] kill counter failed: %s", _m_err)
 
+    # Additive telemetry tap — no behavior change
+    # Emit kill-enriched status_transition before the actual finalize/requeue.
+    # Destination status is determined by the branches below; we emit one rich
+    # event here so finalize_session() suppresses its plain duplicate via
+    # emit_telemetry=False on every call in this recovery path.
+    try:
+        from agent.session_telemetry import record_telemetry_event as _rte
+
+        _dest = (
+            "abandoned"
+            if is_local
+            else (
+                "failed"
+                if entry.recovery_attempts >= MAX_RECOVERY_ATTEMPTS
+                or not _subprocess_confirmed_dead
+                else "pending"
+            )
+        )
+        _rte(
+            entry.session_id,
+            {
+                "type": "status_transition",
+                "from": "running",
+                "to": _dest,
+                "reason": reason or "recovery",
+                "kill": {
+                    "confirmed_dead": _kill_result.confirmed_dead if _kill_result else False,
+                    "signal_sent": _kill_result.signal_sent if _kill_result else False,
+                    "pid": getattr(entry, "claude_pid", None),
+                },
+            },
+        )
+    except Exception as _tel_err:
+        logger.debug("[session-health] telemetry emit failed (non-fatal): %s", _tel_err)
+
     try:
         if is_local:
             finalize_session(
@@ -1368,6 +1403,7 @@ async def _apply_recovery_transition(
                     f"(chat={worker_key}, attempts={entry.recovery_attempts}, kind={reason_kind})"
                 ),
                 skip_auto_tag=True,
+                emit_telemetry=False,
             )
             logger.info(
                 "[session-health] Marked local session %s as abandoned (chat=%s, attempts=%s)",
@@ -1383,6 +1419,7 @@ async def _apply_recovery_transition(
                     f"health check: {entry.recovery_attempts} recovery "
                     f"attempts, never progressed (kind={reason_kind})"
                 ),
+                emit_telemetry=False,
             )
             logger.warning(
                 "[session-health] Finalized session %s as failed after %s recovery attempts",
@@ -1406,6 +1443,7 @@ async def _apply_recovery_transition(
                     f"orphan reaper owns cleanup (chat={worker_key}, "
                     f"attempt {entry.recovery_attempts}, kind={reason_kind})"
                 ),
+                emit_telemetry=False,
             )
             logger.warning(
                 "[session-health] Escalated session %s to failed — subprocess "
@@ -1455,6 +1493,7 @@ async def _apply_recovery_transition(
                     f"health check: recovered session "
                     f"(chat={worker_key}, attempt {entry.recovery_attempts}, kind={reason_kind})"
                 ),
+                emit_telemetry=False,
             )
             logger.info(
                 "[session-health] Recovered session %s (chat=%s, attempt %s, kind=%s)",
