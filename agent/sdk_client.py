@@ -1162,8 +1162,8 @@ def _resolve_compose_args(
     if session_type == SessionType.ENG:
         return PersonaType.ENGINEER, AccessLevel.WORKER, None
 
-    # project_mode in ("eng", "pm") forces engineer rails even for non-ENG session types.
-    if project_mode in ("eng", "pm"):
+    # project_mode == "eng" forces engineer rails even for non-ENG session types.
+    if project_mode == "eng":
         return PersonaType.ENGINEER, AccessLevel.WORKER, None
 
     if session_type == SessionType.TEAMMATE:
@@ -3642,7 +3642,7 @@ async def get_agent_response_sdk(
         # the canonical "Persona overlay loaded:" log line is preserved per branch
         # so test-cuttlefish-* and similar log greps continue to work.
         if _access_level == AccessLevel.WORKER:
-            # Eng mode (ENG session OR project_mode == "eng"/"pm"): includes
+            # Eng mode (ENG session OR project_mode == "eng"): includes
             # WORKER_RULES and optionally appends work-vault CLAUDE.md.
             custom_system_prompt = compose_system_prompt(
                 persona,

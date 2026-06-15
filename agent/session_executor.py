@@ -1635,7 +1635,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # _persona_source is local-only (for log line below); the actual
         # persona/access-level mapping comes from _resolve_compose_args.
         if _session_type == SessionType.ENG:
-            _persona_source = "session_type=pm"
+            _persona_source = "session_type=eng"
         elif _transport == "email" or _email_persona_requested:
             if _email_persona_requested:
                 _persona_source = "project.email.persona"

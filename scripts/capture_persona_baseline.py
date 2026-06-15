@@ -1,8 +1,8 @@
 """Capture per-machine byte-stability baselines for persona system prompts.
 
 Reads the local hostname and writes the current `load_system_prompt()` and
-`load_pm_system_prompt(work_dir)` outputs verbatim to
-`tests/fixtures/{machine_name}/{dev,pm}_system_prompt_baseline.txt`.
+`load_eng_system_prompt(work_dir)` outputs verbatim to
+`tests/fixtures/{machine_name}/eng_system_prompt_baseline.txt`.
 
 These fixtures protect issue #1227's prompt-cache invariant: after the composed
 persona refactor lands, `compose_system_prompt(...)` for the

@@ -2,8 +2,8 @@
 Integration tests for session_type parameter flow through the session queue.
 
 Validates that async_create(session_type=...) and the factory methods
-(create_pm, create_dev) produce equivalent AgentSession instances, and
-that session_type survives a Redis round-trip.
+(create_eng, create_dev) produce AgentSession instances with the correct
+session_type, and that session_type survives a Redis round-trip.
 
 Requires: Redis running (autouse redis_test_db fixture handles isolation).
 """
@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from models.agent_session import SESSION_TYPE_DEV, SESSION_TYPE_PM, AgentSession
+from models.agent_session import SESSION_TYPE_ENG, SESSION_TYPE_TEAMMATE, AgentSession
 
 # ---------------------------------------------------------------------------
 # async_create vs factory method equivalence
@@ -24,17 +24,17 @@ class TestAsyncCreateMatchesFactoryMethods:
     """Sessions from async_create(session_type=...) must match factory-method results."""
 
     @pytest.mark.asyncio
-    async def test_async_create_dev_matches_create_dev(self):
-        """async_create(session_type='dev') has same flags as create_dev()."""
+    async def test_async_create_eng_matches_create_eng(self):
+        """async_create(session_type='eng') has same flags as create_eng()."""
         shared = {
             "project_key": "test-equiv",
-            "session_id": f"equiv-dev-{time.time_ns()}",
+            "session_id": f"equiv-eng-{time.time_ns()}",
             "working_dir": "/tmp/test-equiv",
             "message_text": "equivalence test",
         }
 
         via_direct = await AgentSession.async_create(
-            session_type="dev",
+            session_type="eng",
             status="pending",
             priority="normal",
             created_at=datetime.now(tz=UTC),
@@ -43,6 +43,27 @@ class TestAsyncCreateMatchesFactoryMethods:
             telegram_message_id=1,
             **shared,
         )
+        via_factory = AgentSession.create_eng(
+            chat_id=str(-time.time_ns() % 999_000),
+            telegram_message_id=2,
+            sender_name="Test",
+            **shared,
+        )
+
+        assert via_direct.session_type == via_factory.session_type == SESSION_TYPE_ENG
+        assert via_direct.is_eng == via_factory.is_eng is True
+        assert via_direct.is_teammate == via_factory.is_teammate is False
+
+    @pytest.mark.asyncio
+    async def test_async_create_dev_produces_eng_session(self):
+        """create_dev() (backward-compat wrapper) produces an eng-type session via create_child."""
+        shared = {
+            "project_key": "test-equiv",
+            "session_id": f"equiv-dev-{time.time_ns()}",
+            "working_dir": "/tmp/test-equiv",
+            "message_text": "equivalence test",
+        }
+
         via_factory = AgentSession.create_dev(
             parent_agent_session_id="parent-123",
             chat_id=str(-time.time_ns() % 999_000),
@@ -50,35 +71,10 @@ class TestAsyncCreateMatchesFactoryMethods:
             **shared,
         )
 
-        assert via_direct.session_type == via_factory.session_type == SESSION_TYPE_DEV
-        assert via_direct.is_dev == via_factory.is_dev is True
-        assert via_direct.is_pm == via_factory.is_pm is False
-
-    @pytest.mark.asyncio
-    async def test_async_create_pm_matches_create_pm(self):
-        """async_create(session_type='pm') has same flags as create_pm()."""
-        shared = {
-            "project_key": "test-equiv",
-            "session_id": f"equiv-pm-{time.time_ns()}",
-            "working_dir": "/tmp/test-equiv",
-            "message_text": "equivalence test",
-            "sender_name": "Test",
-            "chat_id": str(-time.time_ns() % 999_000),
-            "telegram_message_id": 1,
-        }
-
-        via_direct = await AgentSession.async_create(
-            session_type="pm",
-            status="pending",
-            priority="normal",
-            created_at=datetime.now(tz=UTC),
-            **shared,
-        )
-        via_factory = AgentSession.create_pm(**shared)
-
-        assert via_direct.session_type == via_factory.session_type == SESSION_TYPE_PM
-        assert via_direct.is_pm == via_factory.is_pm is True
-        assert via_direct.is_dev == via_factory.is_dev is False
+        # create_dev is a backward-compat alias for create_child which produces eng sessions
+        assert via_factory.session_type == SESSION_TYPE_ENG
+        assert via_factory.is_eng is True
+        assert via_factory.is_teammate is False
 
     @pytest.mark.asyncio
     async def test_async_create_teammate(self):
@@ -105,8 +101,7 @@ class TestAsyncCreateMatchesFactoryMethods:
 
         assert session.session_type == SessionType.TEAMMATE
         assert session.is_teammate is True
-        assert session.is_pm is False
-        assert session.is_dev is False
+        assert session.is_eng is False
 
 
 # ---------------------------------------------------------------------------
@@ -117,27 +112,27 @@ class TestAsyncCreateMatchesFactoryMethods:
 class TestSessionTypeRoundTrip:
     """session_type must survive Redis write -> read cycle."""
 
-    def test_pm_session_type_survives_roundtrip(self):
-        """Create with session_type='pm', re-fetch -> still 'pm'."""
+    def test_eng_session_type_survives_roundtrip(self):
+        """Create with session_type='eng', re-fetch -> still 'eng'."""
         session = AgentSession.create(
             project_key="test-rt",
             status="pending",
             priority="normal",
             created_at=datetime.now(tz=UTC),
-            session_id=f"rt-pm-{time.time_ns()}",
+            session_id=f"rt-eng-{time.time_ns()}",
             working_dir="/tmp/test",
-            message_text="roundtrip pm",
+            message_text="roundtrip eng",
             sender_name="Test",
             chat_id=str(-time.time_ns() % 999_000),
             telegram_message_id=1,
-            session_type="pm",
+            session_type="eng",
         )
 
         fetched = AgentSession.query.filter(session_id=session.session_id)
         results = list(fetched)
         assert len(results) >= 1
-        assert results[0].session_type == "pm"
-        assert results[0].is_pm is True
+        assert results[0].session_type == "eng"
+        assert results[0].is_eng is True
 
     def test_teammate_session_type_survives_roundtrip(self):
         """Create with session_type='teammate', re-fetch -> still 'teammate'."""
@@ -161,28 +156,6 @@ class TestSessionTypeRoundTrip:
         assert results[0].session_type == "teammate"
         assert results[0].is_teammate is True
 
-    def test_dev_session_type_survives_roundtrip(self):
-        """Create with session_type='dev', re-fetch -> still 'dev'."""
-        session = AgentSession.create(
-            project_key="test-rt",
-            status="pending",
-            priority="normal",
-            created_at=datetime.now(tz=UTC),
-            session_id=f"rt-dev-{time.time_ns()}",
-            working_dir="/tmp/test",
-            message_text="roundtrip dev",
-            sender_name="Test",
-            chat_id=str(-time.time_ns() % 999_000),
-            telegram_message_id=1,
-            session_type="dev",
-        )
-
-        fetched = AgentSession.query.filter(session_id=session.session_id)
-        results = list(fetched)
-        assert len(results) >= 1
-        assert results[0].session_type == "dev"
-        assert results[0].is_dev is True
-
 
 # ---------------------------------------------------------------------------
 # Only valid session types
@@ -192,46 +165,46 @@ class TestSessionTypeRoundTrip:
 class TestValidSessionTypes:
     """Document and enforce the allowed session_type values."""
 
-    def test_valid_types_are_pm_teammate_and_dev(self):
+    def test_valid_types_are_eng_and_teammate(self):
         """The module constants define the session types."""
-        assert SESSION_TYPE_PM == "pm"
-        assert SESSION_TYPE_DEV == "dev"
+        assert SESSION_TYPE_ENG == "eng"
+        assert SESSION_TYPE_TEAMMATE == "teammate"
 
-    def test_is_pm_false_for_dev(self):
-        """is_pm property is False when session_type='dev'."""
+    def test_is_eng_true_for_eng_session(self):
+        """is_eng property is True when session_type='eng'."""
         session = AgentSession.create(
             project_key="test",
             status="pending",
             priority="normal",
             created_at=datetime.now(tz=UTC),
-            session_id=f"type-check-{time.time_ns()}",
+            session_id=f"type-check-eng-{time.time_ns()}",
             working_dir="/tmp/test",
             message_text="test",
             sender_name="Test",
             chat_id="999",
             telegram_message_id=1,
-            session_type="dev",
+            session_type="eng",
         )
-        assert session.is_pm is False
-        assert session.is_dev is True
+        assert session.is_eng is True
+        assert session.is_teammate is False
 
-    def test_is_dev_false_for_pm(self):
-        """is_dev property is False when session_type='pm'."""
+    def test_is_eng_false_for_teammate(self):
+        """is_eng property is False when session_type='teammate'."""
         session = AgentSession.create(
             project_key="test",
             status="pending",
             priority="normal",
             created_at=datetime.now(tz=UTC),
-            session_id=f"type-check-{time.time_ns()}",
+            session_id=f"type-check-tm-{time.time_ns()}",
             working_dir="/tmp/test",
             message_text="test",
             sender_name="Test",
             chat_id="999",
             telegram_message_id=1,
-            session_type="pm",
+            session_type="teammate",
         )
-        assert session.is_dev is False
-        assert session.is_pm is True
+        assert session.is_eng is False
+        assert session.is_teammate is True
 
     def test_is_teammate(self):
         """is_teammate property is True when session_type='teammate'."""
@@ -249,5 +222,4 @@ class TestValidSessionTypes:
             session_type="teammate",
         )
         assert session.is_teammate is True
-        assert session.is_pm is False
-        assert session.is_dev is False
+        assert session.is_eng is False
