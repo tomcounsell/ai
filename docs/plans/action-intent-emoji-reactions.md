@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Small
 owner: Valor
@@ -417,9 +417,9 @@ which does not change.
 
 ## Documentation
 
-- [ ] Update `docs/features/emoji-embedding-reactions.md` to describe the action-intent vocabulary
+- [x] Update `docs/features/emoji-embedding-reactions.md` to describe the action-intent vocabulary
   replacing the content-sentiment approach in `find_best_emoji_for_message`.
-- [ ] Update `docs/features/reaction-semantics.md` to note that receipt-time reactions now reflect
+- [x] Update `docs/features/reaction-semantics.md` to note that receipt-time reactions now reflect
   predicted agent action, not content sentiment.
 
 ## Success Criteria
