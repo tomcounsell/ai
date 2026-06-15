@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Large
 owner: Valor
 created: 2026-06-15
 tracking: https://github.com/tomcounsell/ai/issues/1692
 last_comment_id:
+revision_applied: true
 ---
 
 # Granite PTY: Persona-as-Priming Refactor
@@ -27,19 +28,35 @@ After PR #1691 (issue #1633) collapses the bridge to a single Eng role, the pers
 
 ## Freshness Check
 
-**Baseline commit:** `add07678e28deaf912f9fd5e87062b2a77bbf47d`
+**Baseline commit:** `777570c5` (current `main` HEAD after PR #1691 merge `dd926192`)
 **Issue filed at:** 2026-06-15T08:54:44Z (same session as this plan)
-**Disposition:** Unchanged (gated on an unmerged dependency)
+**Re-verified at:** 2026-06-15 (revision pass, post-#1691-merge)
+**Disposition:** Minor drift — prerequisite cleared; two file:line pointers shifted, claims hold.
 
-**File:line references re-verified:** All recon file:line pointers were verified directly against the PR #1691 branch (`session/merge_pm_dev_into_eng_role` @ `0cc2bdf9`) by the 6-agent audit immediately before this plan. They reflect the post-#1633 target tree, not current main.
+**Prerequisite cleared:** PR #1691 (#1633) **MERGED at 2026-06-15T10:39:13Z** (merge commit `dd926192`). The eng/persona surface this plan edits now exists on `main`. The plan is no longer dependency-gated.
+
+**File:line references re-verified against merged main (commit `777570c5`):** A re-audit confirmed all ten core pointers. Eight are exact; two drifted but the underlying claim holds:
+
+| Claim | Disposition | Current pointer |
+|-------|-------------|-----------------|
+| PM PTY `--append-system-prompt`; assertion comment | CONFIRMED | `pty_driver.py:375-377`; comment `331-335` |
+| Dev PTY persona via priming only (no append arg) | CONFIRMED | `pty_pool.py:435-441` (PM gets append at `:432`) |
+| `engineer.md` PM-orchestrator content (fan-out, Stage→Model table, `/do-merge`) | CONFIRMED | `config/personas/engineer.md` (fan-out `99-148`, table `395-409`, merge `138-147`) |
+| `prime-pm-role.md` "no child dispatch / no `/do-*` / no `/sdlc`" | CONFIRMED | `.claude/commands/granite/prime-pm-role.md:10` |
+| Dev defaults to Sonnet | CONFIRMED | `config/settings.py:278` (`dev_model: str = Field(default="sonnet", …)`) |
+| Dev PTY does not see raw prompt; priming dispatch | CONFIRMED | `container.py:658-667` (gate), `722-734` (PM `include_user_message=True` at `:730`, Dev `False` at `:733`) |
+| All session types route to container; eng-prompt load | CONFIRMED | `session_executor.py:1539` (routing), `1685` (`load_eng_system_prompt`) |
+| `compose_system_prompt` in `sdk_client.py` | **DRIFTED** | now `sdk_client.py:1014` (was cited `~`); `load_eng_system_prompt` at `:1196`, `load_persona_prompt` at `:909` |
+| Engineer-overlay drift guards | **DRIFTED** | now `sdk_client.py:949-988` (cited `941-989`; range shifted, guards intact) |
+| `PairSpawnSpec.pm_system_prompt` field + `append_system_prompt` PTYDriver arg | CONFIRMED | `pty_pool.py:117` (field), `pty_driver.py:318` (arg), `pty_pool.py:432` (use) |
 
 **Cited sibling issues/PRs re-checked:**
-- #1633 / PR #1691 — OPEN, "In Review". **Hard prerequisite; this plan cannot build until it merges.**
+- #1633 / PR #1691 — **MERGED** 2026-06-15T10:39:13Z. Prerequisite satisfied.
 - #1612, #1570, #1651, #1664 — merged; the container, prime/work separation (#1644), and legacy-purge they delivered are the foundation this plan builds on.
 
-**Active plans overlapping this area:** `docs/plans/merge_pm_dev_into_eng_role.md` — this is the #1633 prerequisite, not a conflict. Expected coordination, not overlap to resolve. Older granite/persona plans (`composed-persona-system.md`, `pm-persona-hardening.md`, `unify-persona-vocabulary.md`) describe the system-prompt-composition model this plan dismantles; they are superseded for the granite path.
+**Active plans overlapping this area:** `docs/plans/merge_pm_dev_into_eng_role.md` — the #1633 prerequisite, now Complete (migrated by commit `777570c5`). No conflict. Older granite/persona plans (`composed-persona-system.md`, `pm-persona-hardening.md`, `unify-persona-vocabulary.md`) describe the system-prompt-composition model this plan dismantles; they are superseded for the granite path.
 
-**Notes:** Because the prerequisite is unmerged, every file:line in this plan is a target-state pointer. Build must re-confirm them against merged main before editing.
+**Notes:** Pointers above are now confirmed against merged `main`, not a target branch. Build should still spot-check the two drifted ranges before editing, since `sdk_client.py` line numbers may shift further if interim commits land.
 
 ## Prior Art
 
@@ -93,7 +110,7 @@ No relevant external findings — proceeding with codebase context. The single e
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| PR #1691 merged | `gh pr view 1691 --json state -q .state` (expect `MERGED`) | The entire eng/persona surface this plan edits is created by that PR |
+| PR #1691 merged ✓ | `gh pr view 1691 --json state -q .state` (returns `MERGED` as of 2026-06-15T10:39Z) | The entire eng/persona surface this plan edits is created by that PR — **satisfied** |
 | Granite container present | `python -c "import agent.granite_container.pty_driver"` | spike-1 + all PTY edits need the harness |
 | Baseline fixtures exist | `ls tests/fixtures/Mac-local/eng_system_prompt_baseline.txt` | Rails-parity verification (task 4) |
 
@@ -137,7 +154,7 @@ Eng message → container spawn → PM primed as thin driver (sees prompt) + Dev
 - [ ] `tests/unit/test_compose_system_prompt.py` — DELETE or REPLACE: `compose_system_prompt` is removed; if any helper survives, replace with a thin test, else delete.
 - [ ] `tests/fixtures/Mac-local/eng_system_prompt_baseline.txt` — REPLACE: regenerate or retire once persona moves to priming; used in task 4 for rails-parity before retirement.
 - [ ] `tests/integration/test_harness_env_pm_injection.py` — UPDATE: `VALOR_PARENT_SESSION_ID`/persona injection assertions change when the system-prompt path is removed.
-- [ ] `scripts/capture_persona_baseline.py` / `scripts/update/persona_drift.py` — UPDATE: drift guards over `engineer.md` (`sdk_client.py:941-989`) are removed; the drift-capture tooling must target the prime commands instead, or be retired.
+- [ ] `scripts/capture_persona_baseline.py` / `scripts/update/persona_drift.py` — UPDATE: drift guards over `engineer.md` (`sdk_client.py:949-988`) are removed; the drift-capture tooling must target the prime commands instead, or be retired.
 - [ ] Any test asserting `--append-system-prompt` in spawn args — UPDATE/DELETE to assert its absence.
 
 ## Rabbit Holes
@@ -158,9 +175,8 @@ Eng message → container spawn → PM primed as thin driver (sees prompt) + Dev
 **Impact:** Changes the behavioral delta of the migration; a "live" persona means deletion alters runtime behavior.
 **Mitigation:** spike-1 runs first and gates the rest; if live, capture baselines and confirm prime parity before deletion.
 
-### Risk 3: Building before PR #1691 merges
-**Impact:** The edited surface (engineer.md, enums, routing) does not exist or differs; wasted/conflicting work.
-**Mitigation:** Prerequisite check blocks build; No-Gos tags the dependency `[ORDERED]`.
+### Risk 3: Building before PR #1691 merges — RETIRED
+**Status:** Closed. PR #1691 merged 2026-06-15T10:39Z; the edited surface now exists on `main` (verified in the Freshness Check). No ordering risk remains.
 
 ### Risk 4: Teammate keeps a live Dev PTY behind only the SESSION_TYPE write-hook
 **Impact:** If `SESSION_TYPE` fails to propagate, a teammate session becomes a full engineer.
@@ -172,7 +188,7 @@ No race conditions identified. The changes are to spawn-time priming content and
 
 ## No-Gos (Out of Scope)
 
-- [ORDERED] Building any of this before PR #1691 merges — the eng/persona surface is created by that PR (gated by `gh pr view 1691`).
+- [RESOLVED] The PR #1691 ordering gate is satisfied — #1691 merged 2026-06-15T10:39Z, so the eng/persona surface this plan edits exists on `main`. No longer a blocker.
 - [SEPARATE-SLUG #1633] The P1/P2/P3 go-live fixes (stale `--role dev/pm` strings, dead `create_dev()`, `"developer"` defaults) — folded into PR #1691 directly; this plan only *reviews* their integration (task 8), it does not author them.
 - Router / zero-LLM shuttle changes — settled by #1689, untouched here.
 
@@ -191,6 +207,7 @@ This is a bridge-internal change to how container PTYs are primed; no new MCP to
 - [ ] Update `docs/features/composed-persona-system.md` — mark the system-prompt-composition model retired for the granite path (or supersede it).
 - [ ] Update `docs/features/personas.md` and any `pm-dev-session-architecture.md` successor for the PM-driver / Dev-SDLC split.
 - [ ] Add a `prime-teammate-role` reference to the relevant docs.
+- [ ] Update `docs/features/email-bridge.md` "Persona resolution for email-spawned sessions" — the email persona now selects a prime command, not a composed system prompt (Resolved Decision 1).
 
 ### Inline Documentation
 - [ ] Update `pty_driver.py:331-335` comment (the `--append-system-prompt` assertion) per the canary result, or remove it with the flag.
@@ -205,6 +222,8 @@ This is a bridge-internal change to how container PTYs are primed; no new MCP to
 - [ ] Dev PTY receives the raw prompt as context; a test proves it does not act before the `[/dev]` relay.
 - [ ] `GRANITE__DEV_MODEL` defaults to `opus` (flipped only after the subagent recommendation lands).
 - [ ] `prime-teammate-role` exists and bends teammate toward chitchat/CS/issue-creation; `teammate.md` no longer vault-only.
+- [ ] Email/customer-service persona resolves to a prime command (not a system prompt); an integration test proves an email-spawned session is primed and never lands persona-less.
+- [ ] WORKER rails live in a single shared `_prime-rails.md` referenced by all three role primes (no inlined duplication across primes).
 - [ ] Integration review of #1691 fixes passes: no `--role dev/pm` strings; `create_dev()` gone; `"developer"` defaults → `"engineer"`; stale dev-type docstrings removed.
 - [ ] Tests pass (`/do-test`); Documentation updated (`/do-docs`).
 
@@ -247,7 +266,7 @@ This is a bridge-internal change to how container PTYs are primed; no new MCP to
 - **Assigned To**: prime-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Move no-push-to-main, principal context, completion criteria into the prime commands; do NOT re-inject `CLAUDE.md`.
+- Create a shared `.claude/commands/granite/_prime-rails.md` partial holding no-push-to-main, principal context, and completion criteria (Resolved Decision 2). Have each role prime (`prime-pm-role`, `prime-dev-role`, `prime-teammate-role`) instruct the TUI to read-and-apply that partial. Single source of truth, no inlined duplication. Do NOT re-inject `CLAUDE.md`.
 
 ### 4. Rails-parity validation (deletion gate)
 - **Task ID**: validate-rails
@@ -264,7 +283,8 @@ This is a bridge-internal change to how container PTYs are primed; no new MCP to
 - **Assigned To**: sysprompt-deleter
 - **Agent Type**: builder
 - **Parallel**: false
-- Remove `compose_system_prompt`, `load_eng_system_prompt`, the `--append-system-prompt` plumbing (`pty_driver`, `pty_pool`, `bridge_adapter`, `session_executor:1681`), and drift guards (`sdk_client.py:941-989`).
+- Remove `compose_system_prompt` (`sdk_client.py:1014`), `load_eng_system_prompt` (`sdk_client.py:1196`), `load_persona_prompt` (`sdk_client.py:909`), the `--append-system-prompt` plumbing (`pty_driver`, `pty_pool`, `bridge_adapter`, the `_pm_system_prompt` resolution + `load_eng_system_prompt` call at `session_executor.py:1611-1700` / `:1685`), and the engineer-overlay drift guards (`sdk_client.py:949-988`).
+- **Email/customer-service persona path (see Resolved Decision 1):** the same block at `session_executor.py:1611-1700` resolves the email-spawned persona overlay into `_pm_system_prompt`. Deleting the system-prompt path removes this overlay mechanism, so this task MUST also re-route the email/teammate persona resolution through priming (a `prime-teammate-role`/`prime-customer-service` command selected by `project.email.persona`) rather than leaving email sessions persona-less.
 
 ### 6. Dev PTY context + Opus flip
 - **Task ID**: build-dev-context-model
@@ -320,14 +340,22 @@ This is a bridge-internal change to how container PTYs are primed; no new MCP to
 | Dev model opus | `python -c "from config.settings import settings; assert settings.granite.dev_model=='opus'"` | exit code 0 |
 | Teammate prime exists | `ls .claude/commands/granite/prime-teammate-role.md` | exit code 0 |
 
+## Resolved Decisions
+
+These three questions were open at first draft and are settled here (revision pass, post-#1691-merge). They are no longer blocking and the answers are folded into the tasks above.
+
+1. **Email/customer-service persona path after deletion — RESOLVED: route through priming.**
+   The email/customer-service persona is resolved today at `session_executor.py:1611-1700`: `_resolve_compose_args` + `project.email.persona` produce `(persona, access_level)`, then `load_persona_prompt`/`load_eng_system_prompt` builds `_pm_system_prompt`, which the BridgeAdapter passes to the PM PTY as `--append-system-prompt`. That entire path is deleted by task 5. The surviving design: the email-resolved persona selects a **prime command** (teammate sessions → `prime-teammate-role`; an explicit `project.email.persona` → a matching prime, defaulting to `prime-teammate-role` when no specific one exists), so the PM PTY is primed rather than system-prompted. Task 5 now explicitly carries this re-routing, and a success criterion + integration test guard against email sessions landing persona-less (the exact regression `session_executor.py:1624` warns about). **Implementation note:** the `(persona, access_level)` resolver stays — only its *consumer* changes from "compose a system prompt" to "select a prime command"; do not delete `_resolve_compose_args`.
+
+2. **Rails relocation mechanism — RESOLVED: shared snippet, referenced by each role prime.**
+   Factor the WORKER rails (no-push-to-main, principal context, completion criteria) into one shared `.claude/commands/granite/_prime-rails.md` partial that `prime-pm-role`, `prime-dev-role`, and `prime-teammate-role` each reference, rather than inlining (which would drift across three files — the exact `engineer.md` drift this plan exists to kill). Slash commands cannot transclude, so the "reference" is an explicit instruction in each prime to read-and-apply the rails partial (the TUI reads the file itself), keeping a single source of truth. Task 3 implements this.
+
+3. **Baseline retirement — RESOLVED: repurpose for one parity pass, then retire.**
+   Keep `tests/fixtures/Mac-local/eng_system_prompt_baseline.txt` only through task 4 (capture the composed PM system prompt and diff its load-bearing content against the prime-provided content to prove rails parity). Once task 5 deletes the system-prompt path, the baseline has no producer, so retire the fixture and any test that asserts against it (already captured as a REPLACE/DELETE in Test Impact). Do not invest in a new "prime-output baseline" capture harness — the prime commands are repo-tracked markdown reviewed in PR; a captured fixture adds drift surface without value.
+
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-
----
-
-## Open Questions
-
-1. **Email/customer-service persona path after deletion:** once `compose_system_prompt` is gone, where do the email-resolved `customer-service` persona and the `(persona, access_level)` resolution land? Confirm they also route through priming, or define the surviving path.
-2. **Rails relocation mechanism:** should the WORKER rails be inlined into each prime command, or factored into a shared `prime-rails` snippet the role primes reference? (Affects duplication vs. single-source-of-truth.)
-3. **Baseline retirement:** keep the `*_system_prompt_baseline.txt` fixtures (repurposed to capture prime output) or retire them entirely once the system-prompt path is gone?
+**Revision pass (2026-06-15, post-#1691-merge).** Prior CRITIQUE verdict: **NEEDS REVISION** (recorded 2026-06-15T09:39Z). The recorded verdict carried no persisted findings file, so this revision addressed the verifiable blocking conditions:
+- **Stale hard dependency:** the plan was dependency-gated on the unmerged PR #1691. That PR merged at 10:39Z; the Freshness Check, Prerequisites table, and No-Gos now reflect a cleared prerequisite (Disposition: Minor drift, not "gated on unmerged dependency").
+- **Target-state pointers unverified against merged main:** re-audited all ten core file:line references against `main` HEAD `777570c5`; corrected the two that drifted (`compose_system_prompt` → `sdk_client.py:1014`; drift guards → `sdk_client.py:949-988`) in the Freshness, Solution, and Test Impact sections.
+- **Unresolved Open Questions on a build-bound plan:** all three open questions are now settled above with concrete decisions and folded into the tasks (esp. the email/customer-service persona re-routing, which was a genuine gap — deleting the system-prompt path would have orphaned the email persona overlay).
