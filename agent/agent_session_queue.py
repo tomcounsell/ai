@@ -134,6 +134,12 @@ from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
 
+# Sentinel for enqueue_agent_session(session_type=...) so we can distinguish a
+# caller that explicitly passed SessionType.ENG (intentional eng) from one that
+# omitted the kwarg entirely (likely dropped persona resolution). The effective
+# default remains SessionType.ENG.
+_SESSION_TYPE_UNSET = object()
+
 # 4-tier priority ranking: lower number = higher priority
 PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 
@@ -1080,7 +1086,7 @@ async def enqueue_agent_session(
     scheduled_at: float | None = None,
     parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.ENG,
+    session_type: str = _SESSION_TYPE_UNSET,  # type: ignore[assignment]
     scheduling_depth: int = 0,  # ignored, now derived
     project_config: dict | None = None,
     extra_context_overrides: dict | None = None,
@@ -1107,6 +1113,19 @@ async def enqueue_agent_session(
     Returns queue depth after push.
     """
     from tools.field_utils import log_large_field
+
+    # Greppable warning when a caller omits BOTH session_type and project_config:
+    # this is the signature of a scanner that dropped persona resolution and would
+    # silently default a teammate-configured chat to an eng PM<->Dev loop. The
+    # effective default stays SessionType.ENG; intentional eng callers that pass
+    # session_type=SessionType.ENG explicitly do not trip this.
+    if session_type is _SESSION_TYPE_UNSET and project_config is None:
+        logger.warning(
+            "[enqueue] session_type omitted AND project_config omitted; "
+            "defaulting to eng — caller may have dropped persona resolution"
+        )
+    if session_type is _SESSION_TYPE_UNSET:
+        session_type = SessionType.ENG
 
     log_large_field("message_text", message_text)
     if revival_context:

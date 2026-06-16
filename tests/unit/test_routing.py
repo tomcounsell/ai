@@ -21,7 +21,28 @@ from bridge.routing import (
     get_valor_usernames,
     is_message_for_others,
     is_message_for_valor,
+    persona_to_session_type,
 )
+from config.enums import PersonaType, SessionType
+
+
+@pytest.mark.parametrize(
+    "persona, expected",
+    [
+        (PersonaType.TEAMMATE, SessionType.TEAMMATE),
+        (PersonaType.ENGINEER, SessionType.ENG),
+        (None, SessionType.ENG),
+        (PersonaType.CUSTOMER_SERVICE, SessionType.ENG),
+    ],
+)
+def test_persona_to_session_type(persona, expected):
+    """TEAMMATE persona -> TEAMMATE session; ENGINEER/None/other -> ENG session.
+
+    This mapping is the single source of truth shared by the live handler and
+    the catchup/reconciler scanners; a regression here is exactly the bug that
+    let teammate chats default to an eng PM<->Dev loop.
+    """
+    assert persona_to_session_type(persona) == expected
 
 
 def _install_fake_ollama(monkeypatch, content: str):

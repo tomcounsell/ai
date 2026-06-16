@@ -519,3 +519,78 @@ class TestReconcileOnceSilentStream:
         # Recovery still succeeded despite the silent-gap check raising.
         assert result == 1
         enqueue_fn.assert_called_once()
+
+
+class TestReconcilePersonaSessionType:
+    """Reconciler resolves persona -> session_type for parity with the live handler."""
+
+    @pytest.mark.asyncio
+    async def test_teammate_persona_enqueues_teammate(self):
+        """A teammate-configured chat enqueues session_type=teammate + project_config."""
+        from config.enums import SessionType
+
+        dialog = _make_dialog("Cyndra Dev Team", entity_id=210)
+        msg = _make_message(601, text="@valor please look")
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[msg])
+
+        enqueue_fn = AsyncMock()
+        project = {
+            "_key": "cyndra",
+            "working_directory": "/tmp/cyndra",
+            "telegram": {"groups": {"Cyndra Dev Team": {"persona": "teammate"}}},
+        }
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
+            ),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["cyndra dev team"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=enqueue_fn,
+                find_project_fn=MagicMock(return_value=project),
+            )
+
+        assert result == 1
+        call_kwargs = enqueue_fn.call_args[1]
+        assert call_kwargs["session_type"] == SessionType.TEAMMATE
+        assert call_kwargs["project_config"] is project
+
+    @pytest.mark.asyncio
+    async def test_default_persona_enqueues_eng(self):
+        """A chat with no teammate persona enqueues an eng session."""
+        from config.enums import SessionType
+
+        dialog = _make_dialog("Test Group", entity_id=220)
+        msg = _make_message(602, text="fix the build")
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[msg])
+
+        enqueue_fn = AsyncMock()
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
+            ),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["test group"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=enqueue_fn,
+                find_project_fn=MagicMock(return_value=_make_project()),
+            )
+
+        assert result == 1
+        assert enqueue_fn.call_args[1]["session_type"] == SessionType.ENG

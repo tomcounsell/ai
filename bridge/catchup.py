@@ -8,6 +8,9 @@ any messages that should have triggered a response.
 import logging
 from datetime import UTC, datetime, timedelta
 
+from bridge.routing import persona_to_session_type, resolve_persona
+from config.enums import SessionType
+
 logger = logging.getLogger(__name__)
 
 # How far back to look for missed messages (default: 1 hour)
@@ -232,6 +235,25 @@ async def scan_for_missed_messages(
                 # Build session ID for this message
                 session_id = f"tg_{project_key}_{chat_id}_{message.id}"
 
+                # Resolve persona here for parity with the live handler
+                # (bridge/telegram_bridge.py). Without this, the scanner would
+                # let session_type default to eng and a teammate-configured chat
+                # would wrongly run as an eng PM<->Dev loop. The try/except is
+                # NARROW (per-message): a persona failure falls back to the eng
+                # default and continues the scan rather than aborting the chat.
+                try:
+                    persona = resolve_persona(project, chat_title, is_dm=False)
+                    session_type = persona_to_session_type(persona)
+                except Exception as e:
+                    logger.warning(
+                        "[catchup] persona resolution failed for chat %s (%s); "
+                        "defaulting to eng: %s",
+                        chat_id,
+                        chat_title,
+                        e,
+                    )
+                    session_type = SessionType.ENG
+
                 await enqueue_agent_session_fn(
                     project_key=project_key,
                     session_id=session_id,
@@ -243,6 +265,8 @@ async def scan_for_missed_messages(
                     chat_title=chat_title,
                     priority="low",  # Lower priority than real-time messages
                     sender_id=sender_id,
+                    session_type=session_type,
+                    project_config=project,
                 )
 
                 # Record in Redis dedup to prevent re-enqueue on next scan,

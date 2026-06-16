@@ -7,7 +7,7 @@ import logging
 import re
 from pathlib import Path
 
-from config.enums import ClassificationType, PersonaType
+from config.enums import ClassificationType, PersonaType, SessionType
 from config.models import OLLAMA_CLASSIFIER_MODEL
 from utils.api_keys import get_anthropic_api_key
 
@@ -392,6 +392,27 @@ def resolve_persona(
 
     # Unconfigured -- caller should fall through to existing behavior
     return None
+
+
+def persona_to_session_type(persona: str | None) -> str:
+    """Map a resolved persona to the AgentSession session_type.
+
+    Single source of truth for the persona -> session_type mapping, shared by
+    the live Telegram handler and the catchup / reconciler scanners so the
+    scanners cannot silently regress to an eng-only default (see the
+    granite_canned_fallback_persona_resolve bug: scanners defaulted every
+    teammate-configured chat to an eng PM<->Dev loop).
+
+    Args:
+        persona: A PersonaType member or None (unconfigured).
+
+    Returns:
+        SessionType.TEAMMATE for PersonaType.TEAMMATE; SessionType.ENG for
+        PersonaType.ENGINEER, any other persona, or None.
+    """
+    if persona == PersonaType.TEAMMATE:
+        return SessionType.TEAMMATE
+    return SessionType.ENG
 
 
 # =============================================================================

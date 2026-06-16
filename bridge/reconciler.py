@@ -17,7 +17,9 @@ from bridge.dedup import (
     record_last_processed,
     record_message_processed,
 )
+from bridge.routing import persona_to_session_type, resolve_persona
 from bridge.silent_stream import SilentStreamState, check_silent_chat
+from config.enums import SessionType
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +210,25 @@ async def reconcile_once(
                     text[:80],
                 )
 
+                # Resolve persona here for parity with the live handler
+                # (bridge/telegram_bridge.py). Without this, the scanner would
+                # let session_type default to eng and a teammate-configured chat
+                # would wrongly run as an eng PM<->Dev loop. The try/except is
+                # NARROW (per-message): a persona failure falls back to the eng
+                # default and continues the scan rather than aborting the chat.
+                try:
+                    persona = resolve_persona(project, chat_title, is_dm=False)
+                    session_type = persona_to_session_type(persona)
+                except Exception as e:
+                    logger.warning(
+                        "[reconciler] persona resolution failed for chat %s (%s); "
+                        "defaulting to eng: %s",
+                        chat_id,
+                        chat_title,
+                        e,
+                    )
+                    session_type = SessionType.ENG
+
                 await enqueue_agent_session_fn(
                     project_key=project_key,
                     session_id=session_id,
@@ -219,6 +240,8 @@ async def reconcile_once(
                     chat_title=chat_title,
                     priority="low",
                     sender_id=sender_id,
+                    session_type=session_type,
+                    project_config=project,
                 )
 
                 await record_message_processed(chat_id, message.id)
