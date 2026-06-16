@@ -132,7 +132,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
 | [Scale Agent Session Queue (Popoto + Worktrees)](scale-agent-session-queue-with-popoto-and-worktrees.md) | Redis persistence and git worktrees for parallel build execution | Shipped |
 | [SDK Modernization](sdk-modernization.md) | Upgrade to SDK v0.1.35 with programmatic agents and expanded hooks | Shipped |
-| [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics and inline source file verification | Shipped |
+| [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics, inline source file verification, and an artifact-based roster membership gate (`critique-roster-check`) that verifies all critics delivered complete result files before aggregation (#1690) | Shipped |
 | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
 | [SDLC Local Supervision](sdlc-local-supervision.md) | `/do-sdlc` loops the `/sdlc` router in local Claude Code sessions — stage subagents on opus/sonnet per the PM persona table, TEST/PATCH marker backfill, exits on merge/blocked/cap | Shipped |
 | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |

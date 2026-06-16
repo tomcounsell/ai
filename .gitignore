@@ -461,6 +461,9 @@ data/doc_embeddings.json
 .worktrees/
 .claude/worktrees/
 
+# Ephemeral war-room critique run artifacts (do-plan-critique roster barrier, #1690)
+.critique-runs/
+
 # Happy path test evidence (screenshots, runtime artifacts)
 tests/happy-paths/evidence/
 
