@@ -268,7 +268,7 @@ behavior.
 | Drafter medium split | [`bridge/message_drafter.py`](../../bridge/message_drafter.py) (`BASE_DRAFTER_PROMPT`, `MEDIUM_RULES`, `_compose_drafter_prompt`) |
 | Baseline capture script | [`scripts/capture_persona_baseline.py`](../../scripts/capture_persona_baseline.py) |
 | Per-machine fixtures | `tests/fixtures/{hostname-slug}/{dev,eng}_system_prompt_baseline.txt` |
-| Tests | `tests/unit/test_compose_system_prompt.py`, `tests/unit/test_resolve_compose_args.py`, `tests/unit/test_drafter_medium_split.py` |
+| Tests | `tests/unit/test_compose_system_prompt.py`, `tests/unit/test_resolve_compose_args.py` |
 
 ## See also
 

@@ -261,5 +261,5 @@ Both layers queue a 👀 reaction on suppress (with an anchor) and emit `session
 - `tests/unit/test_output_handler.py::TestDrafterInHandler` — drafter-at-the-handler wiring: flag read at init, drafter invoked when enabled, bypassed when disabled, file_paths propagated, exception fallback.
 - `tests/unit/test_relay_length_guard.py` — 4096-char pass-through, 4097-char `.txt` conversion, no splitting, conversion-failure fallback.
 - `tests/unit/test_tool_call_delivery.py` — stop-hook classification for send / react / silent / edit+send / continue outcomes via `tool_use` pattern match on the CLI delivery tools.
-- `tests/unit/test_message_drafter_integration.py` — pass-through validation: narration strip, composition, validator surface, self-draft steering path.
+- `tests/integration/test_message_drafter_integration.py` — pass-through validation: narration strip, composition, validator surface, self-draft steering path.
 - `tests/integration/test_reply_delivery.py` — end-to-end reaction paths (PM self-message bypass, completion emoji, error emoji).

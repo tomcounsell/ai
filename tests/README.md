@@ -314,10 +314,10 @@ tests/
 | `redis_test_db` | autouse | `conftest.py` | Per-worker Redis db isolation |
 | `sample_config` | function | `conftest.py` | 3-project sample configuration |
 | `valor_project` | function | `conftest.py` | Single project config |
-| `mock_telegram_client` | function | `e2e/conftest.py` | AsyncMock Telethon client |
-| `make_telegram_event` | function | `e2e/conftest.py` | Telegram event factory |
-| `mock_agent_response` | function | `e2e/conftest.py` | Canned agent response |
-| `e2e_config` | function | `e2e/conftest.py` | Config with test overrides |
+| `mock_telegram_client` | function | `tests/e2e/conftest.py` | AsyncMock Telethon client |
+| `make_telegram_event` | function | `tests/e2e/conftest.py` | Telegram event factory |
+| `mock_agent_response` | function | `tests/e2e/conftest.py` | Canned agent response |
+| `e2e_config` | function | `tests/e2e/conftest.py` | Config with test overrides |
 | `perplexity_api_key` | function | `tools/conftest.py` | Perplexity API key (skip if missing) |
 | `anthropic_api_key` | function | `tools/conftest.py` | Anthropic API key (skip if missing) |
 

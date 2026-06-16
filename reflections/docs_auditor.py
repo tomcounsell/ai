@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -700,6 +701,34 @@ def _normalize_title(title: str) -> str:
     return " ".join(title.split())
 
 
+def _filing_machine_name() -> str:
+    """Human-facing name of the machine filing the issue, for multi-machine triage.
+
+    Matches the ``machine`` field used by the single-machine-ownership system
+    (macOS ComputerName via ``scutil``), falling back to the OS hostname. This
+    is stamped into every issue body so duplicates fanned across hosts — or a
+    host still running this reflection after it was disabled in the synced
+    config — name themselves instead of being anonymous.
+    """
+    try:
+        result = subprocess.run(
+            ["scutil", "--get", "ComputerName"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        name = result.stdout.strip()
+        if name:
+            return name
+    except Exception:
+        pass
+    try:
+        return socket.gethostname()
+    except Exception:
+        return "unknown"
+
+
 def _open_issue_exists(title: str, repo_root: Path) -> bool:
     """Return True if an open `documentation` issue already has this exact title.
 
@@ -795,6 +824,13 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
                 pass
         return False
 
+    # Stamp the filing machine into the body (not the title — title is the dedup
+    # key and must stay stable). Lets duplicates fanned across hosts, or a host
+    # still running this reflection after it was disabled in synced config, name
+    # themselves for triage.
+    body = finding.get("body", "")
+    body = f"{body}\n\n---\n*Filed by docs-auditor reflection on `{_filing_machine_name()}`.*"
+
     try:
         result = subprocess.run(
             [
@@ -804,7 +840,7 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
                 "--title",
                 title,
                 "--body",
-                finding.get("body", ""),
+                body,
                 "--label",
                 "documentation",
             ],
@@ -946,20 +982,28 @@ def audit(
                 total_fixes += applied
                 touched.append(str(path))
 
-        # File-as-issue detectors (advisory)
-        issue_findings.extend(_detect_deleted_target_issues(path, content, root))
-        stub = _detect_stub_doc(path, content)
-        if stub is not None:
-            issue_findings.append(stub)
+        # File-as-issue detectors (advisory). Editorial, not auto-fixable — a
+        # deleted-target reference has no rename to correct to. These are
+        # rotation-only: Caller B (/do-docs, scope=pr-changed-files) runs on
+        # every PR's docs stage, so filing advisory issues there re-files the
+        # same unfixable findings per-PR (and re-files any that were closed
+        # without fixing the doc, since the dedup gate only sees open issues),
+        # which is the documentation-label duplicate flood. Auto-fix detectors
+        # above still run per-PR; only issue-filing is gated to rotation.
+        if scope_mode == "rotation":
+            issue_findings.extend(_detect_deleted_target_issues(path, content, root))
+            stub = _detect_stub_doc(path, content)
+            if stub is not None:
+                issue_findings.append(stub)
 
     # Orphan plans (repo-wide, run once)
     if scope_mode == "rotation":
         issue_findings.extend(_detect_orphan_plan_issues(root))
 
-    # File issues (deduped); only when applying.
-    # Hard per-run cap prevents flood: rotation allows up to 5, pr-changed-files up to 3.
+    # File issues (deduped); only when applying in rotation scope.
+    # Hard per-run cap prevents flood: rotation allows up to 5.
     per_run_cap = 5 if scope_mode == "rotation" else 3
-    if apply_mode == "apply":
+    if apply_mode == "apply" and scope_mode == "rotation":
         for finding in issue_findings:
             if issues_filed >= per_run_cap:
                 logger.warning(

@@ -46,6 +46,7 @@ reflections:
 | `callable` | string | Dotted Python path (for function type) |
 | `command` | string | Natural-language prompt for PM session (for agent type) |
 | `enabled` | bool | Whether this reflection is active (default: true) |
+| `project_key` | string | Optional repo-specific gate. Only the machine that owns this project in `projects.json` runs the reflection. See [Repo-Specific Reflections](#repo-specific-reflections-single-machine-ownership). |
 | `output_sink` | string | Where to deliver completion summaries: `log_only` (default), `dashboard_only`, `memory:<importance>`, or `telegram:<chat>`. See [Output Sinks](#output-sinks). |
 | `auto_delete_after_run` | bool | One-shot reflections (`at:` schedule) — record self-cleans on success. Default: `false`. |
 | `retry_policy` | dict | Optional override of `{max_retries, backoff_seconds, max_consecutive_failures_before_pause}`. See [Failure Tracking](#failure-tracking). |
@@ -84,6 +85,52 @@ The scheduler resolves `config/reflections.yaml` via a three-level fallback:
 On live machines, `config/reflections.yaml` is a symlink to `~/Desktop/Valor/reflections.yaml`.
 The symlink is created by `sync_reflections_yaml()` in `scripts/update/env_sync.py` during
 each update run. This ensures the scheduler always reads the vault version.
+
+Under launchd (`VALOR_LAUNCHD=1`), the worker instead reads a **real copy** at
+`config/reflections.yaml` that `install_worker.sh` writes from the vault (macOS TCC blocks
+launchd agents from reading `~/Desktop`). That copy step is where repo-specific ownership is
+applied — see below.
+
+### Repo-Specific Reflections (Single-Machine Ownership)
+
+The registry is **one iCloud-synced file shared verbatim across every machine**. Reflections
+that audit a single repo — chiefly the `audits` group, which file GitHub issues against
+`tomcounsell/ai` — would therefore run on all N machines and each file its own copy of every
+finding. This is what produced the recurring `documentation`-label duplicate flood (and the
+same hazard applies to every other issue-filing audit).
+
+The fix extends [single-machine ownership](single-machine-ownership.md) to reflections, and
+applies it at **update time, not run time**:
+
+1. A reflection declares `project_key: <key>` in the shared registry (e.g. `project_key: valor`).
+2. `install_worker.sh`, right after copying the vault `reflections.yaml` into the launchd-safe
+   `config/reflections.yaml`, runs `python -m tools.reflection_machine_filter`. For each entry
+   with a `project_key`, if `projects.<key>.machine` (from `projects.json`) is **not** this
+   machine, it forces `enabled: false` in the local copy.
+3. The scheduler needs **zero runtime ownership logic** — it already skips `enabled: false`
+   entries (`load_registry`), and it never reads `projects.json` on the launchd hot path (where
+   TCC would hang on the iCloud copy).
+
+Ownership semantics (`tools/reflection_machine_filter.py`):
+
+| Condition | Result |
+|-----------|--------|
+| `project_key` unset | Unscoped — runs on every machine (unchanged) |
+| owner machine == this machine | Left enabled (authored state preserved) |
+| owner machine != this machine | Forced `enabled: false` in the local copy |
+| `project_key` not in `projects.json` | Fail-open (left as-is) with a warning — a typo never silently disables an audit everywhere |
+
+The filter only **disables**; it never re-enables (so an owned-but-authored-`enabled: false`
+reflection like a paused `docs-auditor` stays off). It refuses to write through a symlink, so a
+manual run against the symlinked `config/reflections.yaml` can never corrupt the shared vault —
+it only ever rewrites the real per-machine copy that `install_worker.sh` produces.
+
+> **Note on `docs-auditor` filing:** issue-filing is **rotation-only**. The `audit()` substrate
+> files advisory issues (deleted-target, stub-doc) only under `scope_mode="rotation"` (Caller A,
+> the daily reflection). The `/do-docs` SDLC stage (Caller B, `scope_mode="pr-changed-files"`)
+> runs `audit()` on every PR but performs auto-fixes only — it does **not** file issues, since a
+> deleted-target reference is unfixable and re-detecting it per-PR re-files duplicates. Combined
+> with `project_key`-gating, repo audits file issues from exactly one machine, on rotation only.
 
 ### Registered Reflections
 
@@ -250,7 +297,7 @@ Per-run rows carry a tiered TTL keyed off the parent's frequency (7d for `every:
 
 ### Output Sinks
 
-`output_sink` controls where a reflection's per-run summary lands. The runtime delivery hook (`agent/reflection_output.py`) is shipped on a rolling basis — the field is honored by every sink kind that has shipped, and unshipped sinks degrade to `log_only` until their delivery path lands.
+`output_sink` controls where a reflection's per-run summary lands. The field is defined on `models/reflection.py` (`output_sink`, default `log_only`) and honored by every sink kind that has shipped; unshipped sinks degrade to `log_only` until their delivery path lands.
 
 | Sink | Behavior | Status |
 |------|----------|--------|
@@ -540,7 +587,7 @@ Three audit reflections (`tech-debt-scan`, `skills-audit`, `hooks-audit`) run on
 | Audit | Skipped when |
 |-------|--------------|
 | `tech-debt-scan` | Never — always runs |
-| `skills-audit` | `.claude/skills/do-skills-audit/scripts/audit_skills.py` absent |
+| `skills-audit` | `.claude/skills-global/do-skills-audit/scripts/audit_skills.py` absent |
 | `hooks-audit` | Both `logs/hooks.log` and `.claude/settings.json` absent |
 
 **Timeout budgets** (per-project iteration linearly scales wall-clock; YAML overrides in `~/Desktop/Valor/reflections.yaml` sized for an N=20-project worst case):
