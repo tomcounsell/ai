@@ -822,25 +822,22 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"WARN: generation model {ollama_model}: {gen_detail}", v, always=True)
             result.warnings.append(f"generation model {ollama_model}: {gen_detail}")
         # Cloud-signin precondition: a cloud tag needs the host signed in.
+        # Ollama persists signin via SSH keypair at ~/.ollama/id_ed25519 —
+        # there is no ":cloud" model entry in `ollama list`.
         from config.models import _is_cloud_tag
 
         if _is_cloud_tag(ollama_model):
-            try:
-                import subprocess as _sp_signin
+            import pathlib as _pathlib
 
-                _list = _sp_signin.run(
-                    ["ollama", "list"], capture_output=True, text=True, timeout=30
+            _key = _pathlib.Path.home() / ".ollama" / "id_ed25519"
+            if not _key.exists():
+                msg = (
+                    "Ollama Cloud not signed in (no ~/.ollama/id_ed25519) — "
+                    f"generation model {ollama_model} will be unreachable. "
+                    "Run: ollama signin"
                 )
-                if _list.returncode == 0 and ":cloud" not in _list.stdout:
-                    msg = (
-                        "Ollama Cloud not signed in (no :cloud entry in 'ollama list') — "
-                        f"generation model {ollama_model} will be unreachable. "
-                        "Run: ollama signin"
-                    )
-                    log(f"WARN: {msg}", v, always=True)
-                    result.warnings.append(msg)
-            except Exception:
-                pass
+                log(f"WARN: {msg}", v, always=True)
+                result.warnings.append(msg)
 
     # Step 4.5: Machine identity verification
     log("Verifying machine identity...", v)
