@@ -35,7 +35,7 @@ The `/do-plan-critique` stage routinely takes **2+ hours**, and a minor mid-run 
 - `do-plan-critique/SKILL.md` Step 4 sub-bullet 5 (lines ~277-280) — Implementation-Note re-run loop — **still holds**.
 - `agent/pipeline_graph.py:35` — `MAX_CRITIQUE_CYCLES = 2` — **still holds**.
 - `tools/critique_roster_check.py` — roster-name-agnostic gate — **confirmed by prototype spike** (N=1/3/7 identical code path).
-- `agent/sdlc_verdict.py` `compute_plan_hash()` / `_compute_artifact_hash()` — sha256 of plan file, used by G5 — **confirmed by code-read spike**.
+- `tools/sdlc_verdict.py` `compute_plan_hash()` / `_compute_artifact_hash()` — sha256 of plan file, used by G5 — **confirmed by code-read spike**.
 
 **Cited sibling issues/PRs re-checked:**
 - #1628 (effort-tiering E1–E5) — open; this plan is the CRITIQUE-only slice, explicitly out of its scope.
@@ -61,10 +61,10 @@ No relevant external findings — this is a change to a bespoke in-repo SDLC ski
 
 ### spike-1: Resume insertion points and re-run-loop location (code-read)
 - **Assumption**: "Resume and re-run-loop removal can be localized to a few SKILL.md steps without touching the gate tool."
-- **Method**: code-read (`SKILL.md`, `CRITICS.md`, `tools/critique_roster_check.py`, `agent/sdlc_verdict.py`)
+- **Method**: code-read (`SKILL.md`, `CRITICS.md`, `tools/critique_roster_check.py`, `tools/sdlc_verdict.py`)
 - **Finding**:
   - Run dir created in Step 3a (lines 151-157, no `-p`); read by critics (Step 3), the gate (Step 3.5), aggregation (Step 4); cleaned with `rm -rf` **only on the `complete: true` path** (Step 5.5/5.6) — **the incomplete path already PRESERVES the dir**. So a crashed run's artifacts already survive on disk; the only missing piece is *finding and reusing* that dir on the next invocation.
-  - `agent/sdlc_verdict.py` exposes `compute_plan_hash(plan_path)` → `"sha256:<hex>"` (CRLF-normalized full plan file), already used by G5. Directly reusable as the stale-resume guard.
+  - `tools/sdlc_verdict.py` exposes `compute_plan_hash(plan_path)` → `"sha256:<hex>"` (CRLF-normalized full plan file), already used by G5. Directly reusable as the stale-resume guard.
   - The Implementation-Note re-run lives in Step 4 sub-bullet 5 ("Re-run that critic with the finding and a directive to add a concrete Implementation Note"). Deleting those lines and moving the requirement into each critic's CRITICS.md prompt removes the loop while preserving the note.
 - **Confidence**: high
 - **Impact on plan**: Resume = a new "resume probe" before Step 3a + a `.plan_hash` written next to `_roster.json` + a per-critic skip-if-complete in dispatch. No gate-tool change.
@@ -110,7 +110,7 @@ No relevant external findings — this is a change to a bespoke in-repo SDLC ski
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Repo venv active | `python -c "import agent.sdlc_verdict"` | Resume probe imports `compute_plan_hash` |
+| Repo venv active | `python -c "import tools.sdlc_verdict"` | Resume probe imports `compute_plan_hash` |
 | Gate CLI installed | `critique-roster-check --help` | Confirms `[project.scripts]` wiring present |
 
 Run all checks: `python scripts/check_prerequisites.py docs/plans/triage_first_critique.md`
@@ -132,9 +132,9 @@ CRITIQUE dispatched → **Resume probe** → (reusable dir? reuse it, skip triag
 
 **1. New module `tools/critique_resume.py` → CLI `critique-resume-probe`.**
 - Args: `--plan PATH`, `--issue N` (or `--slug S`), `--base-dir .critique-runs` (default).
-- Computes `want = compute_plan_hash(plan)` (imported from `agent.sdlc_verdict`).
+- Computes `want = compute_plan_hash(plan)` (imported from `tools.sdlc_verdict`).
 - Globs `{base}/{issue-or-slug}-*` newest-first (parse the trailing `%s%N` for ordering). For each:
-  - read `{dir}/.plan_hash`; if it equals `want` AND `critique_roster_check.evaluate(dir)` is not complete → print `dir`, exit 0.
+  - read `{dir}/.plan_hash`; if it equals `want` AND the dir's gate is not complete → print `dir`, exit 0. **`critique_roster_check.evaluate(dir)` returns a `(dict, int)` tuple** (`tools/critique_roster_check.py:125`), so the guard is `decision, _rc = evaluate(dir); if not decision["complete"]:` — never `if not evaluate(dir):` (a non-empty tuple is always truthy).
   - if `.plan_hash` mismatches → it's stale; ignore (and emit its path on stderr so the skill can GC it).
 - If none reusable → print nothing, exit 1.
 - Register in `pyproject.toml [project.scripts]`: `critique-resume-probe = "tools.critique_resume:main"`.
@@ -290,7 +290,7 @@ The critique skill lives in `.claude/skills-global/do-plan-critique/`, which `/u
 - **Assigned To**: resume-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `tools/critique_resume.py` with `main()` implementing the probe (glob newest-first, `.plan_hash` match via `agent.sdlc_verdict.compute_plan_hash`, completeness check via `critique_roster_check.evaluate`, GC-stale on stderr).
+- Create `tools/critique_resume.py` with `main()` implementing the probe (glob newest-first, `.plan_hash` match via `tools.sdlc_verdict.compute_plan_hash`, completeness check via `decision, _rc = critique_roster_check.evaluate(dir); not decision["complete"]`, GC-stale on stderr).
 - Register `critique-resume-probe` in `pyproject.toml [project.scripts]`.
 - Write `tests/unit/test_critique_resume.py` covering match/mismatch/missing/complete/garbage/None-hash cases + CLI subprocess.
 
@@ -350,10 +350,11 @@ The critique skill lives in `.claude/skills-global/do-plan-critique/`, which `/u
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- LIGHT critique (single Consolidated Critic, dogfooding the plan's own LITE path) — 2026-06-16. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| | | | | |
+| BLOCKER | Consolidated (Risk&Robustness) | Plan cited `agent.sdlc_verdict` but module is `tools/sdlc_verdict.py`; the Prerequisites import check and `critique_resume.py` import would fail on first install. | FIXED: all 6 refs + prereq check updated to `tools.sdlc_verdict`. Verified `from tools.sdlc_verdict import compute_plan_hash` succeeds. | Signature `compute_plan_hash(plan_path: Path \| str) -> str \| None` at `tools/sdlc_verdict.py:94` — drop-in; only the import path was wrong. |
+| CONCERN | Consolidated (Risk&Robustness) | `critique_roster_check.evaluate()` returns `(dict, int)`, not a bool; a literal `if not evaluate(dir):` is always truthy. | FIXED: Technical Approach §1 + Task 1 now specify `decision, _rc = evaluate(dir); if not decision["complete"]:`. | `evaluate(run_dir: str) -> tuple[dict, int]` at `tools/critique_roster_check.py:125`; dict key `"complete": bool`. |
 
 ---
 
