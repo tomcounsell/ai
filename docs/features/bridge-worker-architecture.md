@@ -111,6 +111,8 @@ When a project does have an explicit `EmailOutputHandler` registered (via `regis
 7. Run `KnowledgeWatcher` for work-vault file change monitoring
 8. Run message catchup scan and reconciler on startup
 
+The mechanical catchup (`bridge/catchup.py`) and reconciler (`bridge/reconciler.py`) cover **ingestion gaps** — messages that never got a session enqueued. They cannot recover **response failures** (session enqueued, hung/killed, no reply) because the `DedupRecord` entry already exists. The [Agent-Judgment Catchup](agent-judgment-catchup.md) is the response-failure complement: it reads the actual chat thread (including Valor's own `out` replies), uses an LLM judge to classify unanswered messages, and enqueues recovery sessions. It runs out-of-band via `valor-catchup` and as the final best-effort step of `/update`.
+
 The bridge does **not**:
 - Call `_ensure_worker()`, `_recover_interrupted_agent_sessions_startup()`, `_agent_session_health_loop()`, `_session_notify_listener()`, `_cleanup_orphaned_claude_processes()`, `_reap_orphan_session_processes()`, or `register_worker_pid()`
 - Call `AgentSession.rebuild_indexes()`
