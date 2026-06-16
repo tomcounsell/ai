@@ -328,6 +328,56 @@ by an mtime snapshot before each idle poll, but not fully eliminated. The determ
 complement is followup issue **#1688** ("Hook-driven turn returns for granite PTY
 shuttle"), which replaces idle-poll heuristics with hook-driven turn boundaries.
 
+### Transcript-read diagnostic (issue #1708)
+
+When the steady-state loop, prime-turn read, or wrap-up-guard read finds no
+new PM output, a `WARNING` is emitted to `logs/worker.log` (the granite
+container's `logging.getLogger(__name__)` output). The warning names one of
+three greppable branches:
+
+| Substring | Meaning |
+|-----------|---------|
+| `transcript read: path-None` | `pm_transcript` is `None` — the path was never resolved (session-id absent at spawn) |
+| `transcript read: file-missing` | path was resolved but the file does not exist on disk |
+| `transcript read: no-new-entry` | file exists but `last_assistant_text()` returned empty (valid file, no new text-bearing entry past the baseline count) |
+
+Each warning also logs the fully-resolved attempted path string,
+`spec.pm_session_id` / `spec.dev_session_id` presence, and
+`pty._session_id`, so an on-call can distinguish a spawn-threading gap (spec
+carried IDs, PTY did not) from a slug mismatch.
+
+`grep "transcript read:" logs/worker.log` is the primary triage command for
+empty-read investigations.
+
+**The `no-new-entry` branch is the only legitimate path to `OPERATOR_TERMINAL_MESSAGE`.**
+The other two branches (`path-None`, `file-missing`) indicate a configuration
+or spawn-threading defect rather than a PM that genuinely produced no output.
+
+#### `_needs_session_spawn` session-id invariant
+
+`PTYPool._needs_session_spawn()` returns `True` whenever the spec carries any
+per-session identity: `env`, `pm_model`, `cwd` override, OR `pm_session_id` /
+`dev_session_id`. This ensures that a spec carrying explicit session-ids always
+forces a per-session spawn — even if `env` happens to be empty — preventing a
+prewarmed pair (which has no `--session-id` binding) from being reused for a
+session that needs a deterministic transcript path.
+
+#### Realpath-resolved transcript slug
+
+Both `_transcript_path()` in `container.py` and the slug computation in
+`bridge_adapter.py` apply `os.path.realpath(cwd)` (only when `cwd` is truthy)
+before `cwd.replace("/", "-")`. This matches the slug that `claude` itself
+computes for its project directory, which also resolves symlinks. Without this
+step, a working directory that crosses a symlink (e.g. a `.worktrees/` path
+under a symlinked checkout root) would produce a slug that does not match the
+transcript file `claude` actually writes, and every steady-state read would
+return empty (`transcript read: file-missing`).
+
+Note: `os.path.realpath("")` returns the process CWD, which would corrupt the
+slug for falsy values. The `if not session_id: return None` guard in
+`_transcript_path` is checked *before* the realpath call, so the path-None
+diagnostic branch is never bypassed.
+
 ### Granite identity fields
 
 `AgentSession` now carries four first-class granite identity fields (issue
