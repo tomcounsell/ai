@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-06-16
 tracking: https://github.com/tomcounsell/ai/issues/1714
 last_comment_id:
+revision_applied: true
 ---
 
 # Triage-First CRITIQUE: Consolidate the War Room, Add Crash-Resume, Kill the Re-Run Amplifiers
