@@ -1267,7 +1267,8 @@ class TestWrapupGuard(unittest.TestCase):
         self.assertGreaterEqual(
             result.transcript_fallback_count,
             1,
-            "wrap-up seed-build DEV_REPORT_UNAVAILABLE branch must increment transcript_fallback_count",
+            "wrap-up seed-build DEV_REPORT_UNAVAILABLE branch must increment "
+            "transcript_fallback_count",
         )
 
     def test_terminal_message_sent_when_pm_silent(self) -> None:
@@ -1425,6 +1426,141 @@ class TestContainerResultPtySlot(unittest.TestCase):
         )
         result.pty_slot = 2
         self.assertEqual(result.pty_slot, 2)
+
+
+class TestTranscriptPathRealpath(unittest.TestCase):
+    """`_transcript_path` realpath-resolves the cwd slug and guards on session_id.
+
+    Finding 1, latent bug 2: Claude Code names transcript dirs from the
+    realpath-resolved cwd. A symlink-crossing cwd must slug to the
+    resolved path, and the None-guard must precede the realpath so a
+    falsy session_id still yields None (never a wrong path).
+    """
+
+    def test_none_session_id_returns_none_even_with_symlink_cwd(self) -> None:
+        """None-guard precedes realpath: falsy session_id always returns None."""
+        import os
+        import tempfile
+
+        from agent.granite_container.container import _transcript_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            real = os.path.join(tmp, "real")
+            link = os.path.join(tmp, "link")
+            os.mkdir(real)
+            os.symlink(real, link)
+            self.assertIsNone(_transcript_path(link, None))
+            self.assertIsNone(_transcript_path(link, ""))
+
+    def test_symlink_cwd_slug_is_realpath_resolved(self) -> None:
+        """A symlink-crossing cwd produces the realpath slug, not the link slug."""
+        import os
+        import tempfile
+
+        from agent.granite_container.container import _transcript_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Resolve tmp itself (macOS /var -> /private/var) so the
+            # expected slug is computed from the same realpath base.
+            real = os.path.realpath(os.path.join(tmp, "real"))
+            link = os.path.join(tmp, "link")
+            os.mkdir(real)
+            os.symlink(real, link)
+
+            path = _transcript_path(link, "sess-uuid")
+            self.assertIsNotNone(path)
+            expected_slug = real.replace("/", "-")
+            link_slug = os.path.realpath(link)  # same as real, sanity
+            self.assertEqual(link_slug, real)
+            self.assertIn(expected_slug, path)
+            self.assertTrue(path.endswith("sess-uuid.jsonl"))
+
+    def test_empty_cwd_does_not_crash_and_skips_realpath(self) -> None:
+        """Empty cwd is not realpath'd (would return process CWD); slug stays empty-rooted."""
+        from agent.granite_container.container import _transcript_path
+
+        path = _transcript_path("", "sess-uuid")
+        # cwd == "" -> realpath skipped -> slug "" -> path ends with the file.
+        self.assertIsNotNone(path)
+        self.assertTrue(path.endswith("sess-uuid.jsonl"))
+
+
+class TestTranscriptReadDiagnostic(unittest.TestCase):
+    """The three-way transcript-read diagnostic (Finding 1 lead change).
+
+    A single 'PM transcript read empty' message hid three distinct
+    failure modes. The split must emit stable, greppable substrings:
+    path-None / file-missing / no-new-entry.
+    """
+
+    def test_branch_classifier_path_none(self) -> None:
+        from agent.granite_container.container import _transcript_read_branch
+
+        self.assertEqual(_transcript_read_branch(None), "transcript read: path-None")
+
+    def test_branch_classifier_file_missing(self) -> None:
+        from agent.granite_container.container import _transcript_read_branch
+
+        self.assertEqual(
+            _transcript_read_branch("/no/such/transcript.jsonl"),
+            "transcript read: file-missing",
+        )
+
+    def test_branch_classifier_no_new_entry(self) -> None:
+        import tempfile
+
+        from agent.granite_container.container import _transcript_read_branch
+
+        with tempfile.NamedTemporaryFile(suffix=".jsonl") as fh:
+            self.assertEqual(
+                _transcript_read_branch(fh.name),
+                "transcript read: no-new-entry",
+            )
+
+    def test_log_diagnostic_path_none_substring(self) -> None:
+        from agent.granite_container.container import _log_transcript_read_diagnostic
+
+        pm = MagicMock()
+        pm._session_id = "pm-uuid"
+        dev = MagicMock()
+        dev._session_id = "dev-uuid"
+        with self.assertLogs("agent.granite_container.container", level="WARNING") as cm:
+            _log_transcript_read_diagnostic("prime-turn", None, pm, dev)
+        joined = "\n".join(cm.output)
+        self.assertIn("transcript read: path-None", joined)
+        self.assertIn("prime-turn", joined)
+        self.assertIn("pm-uuid", joined)
+
+    def test_log_diagnostic_file_missing_substring(self) -> None:
+        from agent.granite_container.container import _log_transcript_read_diagnostic
+
+        pm = MagicMock()
+        pm._session_id = "pm-uuid"
+        dev = MagicMock()
+        dev._session_id = "dev-uuid"
+        with self.assertLogs("agent.granite_container.container", level="WARNING") as cm:
+            _log_transcript_read_diagnostic(
+                "steady-state turn 3", "/no/such/transcript.jsonl", pm, dev
+            )
+        joined = "\n".join(cm.output)
+        self.assertIn("transcript read: file-missing", joined)
+        self.assertIn("steady-state turn 3", joined)
+
+    def test_log_diagnostic_no_new_entry_substring(self) -> None:
+        import tempfile
+
+        from agent.granite_container.container import _log_transcript_read_diagnostic
+
+        pm = MagicMock()
+        pm._session_id = "pm-uuid"
+        dev = MagicMock()
+        dev._session_id = "dev-uuid"
+        with tempfile.NamedTemporaryFile(suffix=".jsonl") as fh:
+            with self.assertLogs("agent.granite_container.container", level="WARNING") as cm:
+                _log_transcript_read_diagnostic("wrap-up guard", fh.name, pm, dev)
+        joined = "\n".join(cm.output)
+        self.assertIn("transcript read: no-new-entry", joined)
+        self.assertIn("wrap-up guard", joined)
 
 
 if __name__ == "__main__":

@@ -192,5 +192,48 @@ class TestPidRegistryLoadOrder(_PoolTestBase):
         self.assertIn(987654, on_disk)
 
 
+class TestNeedsSessionSpawn(_PoolTestBase):
+    """`_needs_session_spawn` forces a per-session spawn for any per-session identity."""
+
+    def _spec(self, **kwargs):
+        from agent.granite_container.pty_pool import PairSpawnSpec
+
+        return PairSpawnSpec(**kwargs)
+
+    def test_session_ids_force_spawn_even_with_empty_env(self) -> None:
+        """A spec carrying session-ids but EMPTY env must still spawn.
+
+        This is the Finding-1 latent bug: the prewarmed pair has no
+        session-id, so reusing it for a spec that names specific
+        session-ids would produce a transcript at the wrong slug.
+        """
+        pool = PTYPool(pool_size=1, pid_registry_path=self.registry)
+        spec = self._spec(
+            env={},  # empty env — the masking condition
+            pm_session_id="pm-uuid-1234",
+            dev_session_id="dev-uuid-5678",
+        )
+        self.assertTrue(pool._needs_session_spawn(spec))
+
+    def test_only_pm_session_id_forces_spawn(self) -> None:
+        pool = PTYPool(pool_size=1, pid_registry_path=self.registry)
+        spec = self._spec(env={}, pm_session_id="pm-uuid-1234")
+        self.assertTrue(pool._needs_session_spawn(spec))
+
+    def test_only_dev_session_id_forces_spawn(self) -> None:
+        pool = PTYPool(pool_size=1, pid_registry_path=self.registry)
+        spec = self._spec(env={}, dev_session_id="dev-uuid-5678")
+        self.assertTrue(pool._needs_session_spawn(spec))
+
+    def test_bare_spec_does_not_force_spawn(self) -> None:
+        """A spec with no per-session identity at all reuses the prewarmed pair."""
+        pool = PTYPool(pool_size=1, pid_registry_path=self.registry)
+        self.assertFalse(pool._needs_session_spawn(self._spec()))
+
+    def test_none_spec_does_not_force_spawn(self) -> None:
+        pool = PTYPool(pool_size=1, pid_registry_path=self.registry)
+        self.assertFalse(pool._needs_session_spawn(None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

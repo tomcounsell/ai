@@ -95,6 +95,11 @@ def _transcript_path_from_spec(cwd: str, session_id: str) -> str:
     Claude Code names transcripts: ~/.claude/projects/{cwd.replace("/", "-")}/{uuid}.jsonl
     This is deterministic because we set the UUID via `claude --session-id`.
     """
+    # Resolve symlinks before slugging so the slug matches Claude Code's
+    # own realpath-based naming. Guard on truthiness: os.path.realpath("")
+    # returns the process CWD, which would silently corrupt the slug.
+    if cwd:
+        cwd = os.path.realpath(cwd)
     slug = cwd.replace("/", "-")
     home = os.path.expanduser("~")
     return os.path.join(home, ".claude", "projects", slug, f"{session_id}.jsonl")

@@ -27,6 +27,33 @@ Session type derivation from resolved persona:
 
 There are three session types: `eng`, `teammate`, and `granite`. The first two are bridge-originated and worker-executed. `granite` is exclusively for standalone `valor-granite-loop` CLI runs -- it is created and finalized by the CLI itself, never by the worker or bridge. `session_type` is the **sole discriminator** for routing, permission injection, summarizer formatting, and nudge cap selection. See [Config-Driven Chat Mode](config-driven-chat-mode.md) for the config schema and resolution order.
 
+### Persona resolution on all ingest paths (issue #1708)
+
+Persona resolution applies on **every** ingest path, not just the live Telegram handler:
+
+| Path | Location | Persona-resolved since |
+|------|----------|------------------------|
+| Live handler | `bridge/telegram_bridge.py` | original |
+| Catchup scanner | `bridge/catchup.py` | issue #1708 |
+| Reconciler scanner | `bridge/reconciler.py` | issue #1708 |
+
+All three paths call `resolve_persona(project, chat_title)` →
+`persona_to_session_type(persona)` (a shared helper in `bridge/routing.py`) and
+pass `session_type=` + `project_config=project` to `enqueue_agent_session`.
+
+**Practical consequence:** a chat configured `persona: teammate` in
+`projects.json` now runs as `teammate` on *every* ingest path. Before issue
+#1708, catchup- and reconciler-re-ingested messages defaulted to
+`SessionType.ENG` regardless of the chat's configured persona, causing an
+eng PM↔Dev work-loop to run for conversational teammate chats. The fix removes
+this asymmetry — the persona the bridge resolves for a live message is
+identical to the one resolved for any re-ingested or reconciled message from
+the same chat.
+
+A `logger.warning` is emitted at `agent_session_queue.py` when a caller omits
+both `session_type` and `project_config` (so the silent `ENG` default remains
+but is no longer invisible).
+
 ## Enforcement -- Teammate Session Write Restrictions
 
 Teammate sessions (`SESSION_TYPE=teammate`) get the following shape:

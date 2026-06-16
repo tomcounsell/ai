@@ -2199,18 +2199,15 @@ async def main():
         # ENGINEER persona → Eng session (full permissions, engineer persona)
         # TEAMMATE persona → Teammate session (read-only, no orchestration)
         # None/other → Eng session (default)
-        from bridge.routing import resolve_persona
+        from bridge.routing import persona_to_session_type, resolve_persona
 
         _classification = classification_result.get("type")
         _persona = resolve_persona(project, chat_title, is_dm=is_dm)
-        if _persona == PersonaType.TEAMMATE:
-            _session_type = SessionType.TEAMMATE  # Teammate session — read-only, no orchestration
-        else:
-            _session_type = SessionType.ENG  # Eng session — engineer persona, full permissions
-            if _persona == PersonaType.ENGINEER:
-                logger.info(
-                    f"[{project_name}] Eng mode (config-driven): {chat_title!r} → session_type=eng"
-                )
+        _session_type = persona_to_session_type(_persona)
+        if _persona == PersonaType.ENGINEER:
+            logger.info(
+                f"[{project_name}] Eng mode (config-driven): {chat_title!r} → session_type=eng"
+            )
 
         # Refresh the coalescing guard timestamp right before enqueue.
         # The initial guard was set early (before awaits) to close the race window;

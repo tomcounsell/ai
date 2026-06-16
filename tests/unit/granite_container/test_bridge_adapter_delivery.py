@@ -81,7 +81,8 @@ class TestDeliverFromWorkerThread(unittest.TestCase):
 
         class _Ctx:
             async def __aenter__(self):
-                return (pm, dev)
+                # acquire_pair yields a 3-tuple (pm, dev, pty_slot) since #1663.
+                return (pm, dev, 0)
 
             async def __aexit__(self, *a):
                 return False
