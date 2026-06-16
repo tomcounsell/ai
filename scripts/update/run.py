@@ -325,6 +325,90 @@ def _cleanup_duplicate_sessions(project_dir: Path) -> int:
     return killed
 
 
+# Tight per-invocation timeout for the best-effort valor-catchup final step.
+# valor-catchup reads recent threads + runs an LLM judge per owned chat; the
+# CLI itself already exits 0 on partial failure, but a hung Telethon connect or
+# a stalled LLM call must NEVER stall /update. This ceiling bounds the worst
+# case and is enforced via subprocess timeout (the subprocess is killed on
+# expiry and the TimeoutExpired is swallowed).
+CATCHUP_STEP_TIMEOUT_SECONDS = 90
+
+
+def run_catchup_step(
+    project_dir: Path,
+    log_fn=log,
+    timeout: int = CATCHUP_STEP_TIMEOUT_SECONDS,
+) -> None:
+    """Best-effort final ``/update`` step: invoke ``valor-catchup`` if healthy.
+
+    Runs strictly LAST in ``run_update`` (after all service-management and
+    health checks). Gated on BOTH the bridge AND the worker reporting
+    ``running`` — if either is down, the step logs a skip and returns without
+    invoking anything.
+
+    When the gate passes, ``valor-catchup`` is invoked as a SUBPROCESS (clean
+    isolation, killable on timeout) with a tight per-invocation ``timeout``.
+    The invocation is wrapped in a best-effort try/except: any failure,
+    non-zero exit, or timeout is logged and swallowed. ``/update`` completion
+    is wholly independent of ``valor-catchup``'s outcome — this function never
+    raises and returns ``None`` regardless of what happens.
+
+    Args:
+        project_dir: Project root (passed through to the status checks).
+        log_fn: Logging callback (defaults to the module ``log``); injectable
+            so unit tests can capture emitted lines.
+        timeout: Per-invocation subprocess timeout in seconds.
+    """
+    import subprocess
+
+    try:
+        bridge_status = service.get_service_status(project_dir)
+        worker_status = service.get_worker_status(project_dir)
+    except Exception as exc:
+        # Even the health gate must never raise out of this step.
+        log_fn(f"catchup: skipped — health-gate check failed ({exc})")
+        return
+
+    if not (bridge_status.running and worker_status.running):
+        which = []
+        if not bridge_status.running:
+            which.append("bridge")
+        if not worker_status.running:
+            which.append("worker")
+        log_fn(
+            f"catchup: skipped — {', '.join(which)} not running "
+            "(agent-judgment catchup requires both bridge and worker)"
+        )
+        return
+
+    log_fn("catchup: running valor-catchup (best-effort, agent-judgment recovery)...")
+    try:
+        proc = subprocess.run(
+            ["valor-catchup"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if proc.returncode == 0:
+            log_fn("catchup: valor-catchup completed")
+        else:
+            # valor-catchup exits 0 even on partial failure, so a non-zero exit
+            # means the CLI itself failed to start/parse. Log and continue.
+            log_fn(
+                f"catchup: valor-catchup exited {proc.returncode} "
+                f"(swallowed): {proc.stderr.strip() or 'no stderr'}"
+            )
+    except subprocess.TimeoutExpired:
+        log_fn(
+            f"catchup: valor-catchup timed out after {timeout}s (swallowed — "
+            "/update completion is unaffected)"
+        )
+    except Exception as exc:
+        log_fn(f"catchup: valor-catchup invocation failed (swallowed): {exc}")
+    # Returns None unconditionally — outcome cannot influence UpdateResult.
+
+
 def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     """Run update with given configuration."""
     result = UpdateResult()
@@ -1573,6 +1657,18 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log(f"  {server}", v)
         else:
             log("No MCP servers configured", v)
+
+    # Step 9 (strictly last): best-effort agent-judgment catchup.
+    #
+    # Runs AFTER every service-management and health check above so the
+    # bridge+worker health gate reflects this run's final state. Invokes
+    # valor-catchup as a subprocess only when BOTH bridge and worker report
+    # running; failure/timeout is logged and swallowed — /update completion is
+    # wholly independent of valor-catchup's outcome (issue #1709). Gated on
+    # do_service_restart so verify-only and follower-skip runs (which don't
+    # bring services up) never trigger recovery enqueues.
+    if config.do_service_restart:
+        run_catchup_step(project_dir, log_fn=lambda m: log(m, v))
 
     # Final summary
     if v:
