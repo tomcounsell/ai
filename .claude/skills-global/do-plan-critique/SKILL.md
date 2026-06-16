@@ -1,6 +1,6 @@
 ---
 name: do-plan-critique
-description: "Use when reviewing a plan before build. Spawns parallel war-room critics (Skeptic, Operator, Archaeologist, Adversary, Simplifier, User) plus automated structural checks. Triggered by 'critique this plan', 'review the plan', 'war room', or 'do-plan-critique'."
+description: "Use when reviewing a plan before build. Runs 1 (LITE) or 3 (FULL) critics selected by a triage step plus automated structural checks. Triggered by 'critique this plan', 'review the plan', 'war room', or 'do-plan-critique'."
 argument-hint: "<plan-path-or-issue-number>"
 context: fork
 ---
@@ -27,7 +27,7 @@ Do NOT write the completion marker before the verdict is recorded, and do NOT re
 
 ## What this skill does
 
-Critiques a plan document from a frozen roster of expert perspectives (six or seven per CRITICS.md selection rules) plus automated structural validation. Each critic has a defined lens and returns severity-rated findings. The skill aggregates, deduplicates, and produces a verdict: READY TO BUILD, NEEDS REVISION, or MAJOR REWORK.
+Critiques a plan document from a frozen roster of expert perspectives (1 (LITE) or 3 (FULL) critics selected by a triage step) plus automated structural validation. Each critic has a defined lens and returns severity-rated findings. The skill aggregates, deduplicates, and produces a verdict: READY TO BUILD, NEEDS REVISION, or MAJOR REWORK.
 
 ## When to load sub-files
 
@@ -140,13 +140,61 @@ Report structural findings with severity:
 - Non-existent file path → CONCERN (could be intentionally new)
 - Orphaned success criterion → CONCERN
 
+### Step 2b: Resume Probe
+
+Before triage or roster freeze, check for a reusable incomplete run dir from a prior crash:
+
+```bash
+RESUME_DIR=$(critique-resume-probe --plan "$PLAN_PATH" --issue "$ISSUE_NUMBER" 2>/tmp/critique-resume-stale.txt)
+PROBE_EXIT=$?
+```
+
+If `$PROBE_EXIT == 0` (a reusable dir was found):
+- Set `CRITIQUE_RUN_DIR="$RESUME_DIR"` and `RESUMED=1`
+- GC any stale-hash sibling dirs printed on stderr: `cat /tmp/critique-resume-stale.txt | xargs -r rm -rf`
+- **Skip Step 2.6 (triage) and Step 3a (roster freeze)** — the surviving `_roster.json` defines the chosen path
+- Proceed directly to Step 3 (dispatch only missing critics)
+
+If `$PROBE_EXIT != 0` (no reusable dir):
+- Set `RESUMED=0`
+- Continue to Step 2.6 (triage) → Step 3a (roster freeze) → Step 3 (dispatch all critics)
+
+### Step 2.6: Triage (fresh path only — skip if RESUMED=1)
+
+Determine LITE (1 consolidated critic) or FULL (3 merged critics):
+
+**Deterministic force-FULL** — use FULL without an LLM call if ANY of:
+- The plan touches doctrine paths: `config/personas/`, `.claude/skills/`, `.claude/skills-global/`, `agent/sdlc_router.py`, `agent/pipeline_graph.py`, `.claude/hooks/`
+- The plan frontmatter has `appetite: Large`
+
+A LITE vote can never override force-FULL.
+
+**LLM triage** (when force-FULL does not apply):
+Spawn a single short-lived `sonnet` Agent with a brief classification prompt:
+
+```
+You are a plan triage agent. Classify this plan as LITE or FULL critique depth.
+LITE = purely internal, non-doctrine, small scope change (one bug fix, one CLI flag, one config key).
+FULL = anything touching critical paths, cross-component changes, new abstractions, architectural decisions.
+Bias to FULL on any ambiguity.
+Reply with exactly one line: "LITE: <one-line reason>" or "FULL: <one-line reason>".
+
+PLAN:
+{plan frontmatter + first 1000 chars}
+```
+
+Set `CRITIQUE_DEPTH` to `LITE` or `FULL` based on the result.
+
 ### Step 3a: Compute and Freeze Roster Manifest
 
-Before dispatching ANY critic, compute the expected critic roster and **freeze it to a manifest file**. This frozen manifest is the membership set that the Step 3.5 gate checks against — the gate cannot be satisfied by dispatching fewer critics than the manifest lists.
+(Skip this step if RESUMED=1 — the surviving run dir already has `_roster.json` and `.plan_hash`.)
 
-1. **Compute the roster** from CRITICS.md's "Critic Selection" rules:
-   - All **seven** critics by default (Skeptic, Operator, Archaeologist, Adversary, Simplifier, User, Consistency Auditor).
-   - **Six** critics when Archaeologist + User are skipped for a Small, purely-internal plan with no prior-art section (per CRITICS.md "Critic Selection").
+Before dispatching ANY critic, freeze the expected critic roster to a manifest file. This frozen manifest is the membership set that the Step 3.5 gate checks against — the gate cannot be satisfied by dispatching fewer critics than the manifest lists.
+
+1. **Compute the plan hash** for the stale-resume guard:
+   ```bash
+   PLAN_HASH=$(python -c "from tools.sdlc_verdict import compute_plan_hash; print(compute_plan_hash('$PLAN_PATH') or '')")
+   ```
 
 2. **Create the per-run directory** `${CRITIQUE_RUN_DIR}`, defaulting to `.critique-runs/{issue-or-slug}-{timestamp}/`, where `{timestamp}` is a **high-resolution** timestamp (`date +%s%N`, nanoseconds). Create it with `mkdir` **WITHOUT** the `-p` flag so a collision **fails loudly** (non-zero exit) instead of silently reusing a stale run dir's result files:
 
@@ -156,15 +204,23 @@ Before dispatching ANY critic, compute the expected critic roster and **freeze i
    mkdir "$CRITIQUE_RUN_DIR"   # NO -p: a collision must fail loudly, never reuse a stale run dir
    ```
 
-3. **Write the frozen roster manifest** `${CRITIQUE_RUN_DIR}/_roster.json` **BEFORE any critic is dispatched** — a JSON object with the frozen list of expected critic names and the count:
+3. **Write the frozen roster manifest and plan hash**:
 
+   LITE path (CRITIQUE_DEPTH=LITE):
    ```bash
    cat > "$CRITIQUE_RUN_DIR/_roster.json" <<'JSON'
-   {"roster": ["Skeptic","Operator","Archaeologist","Adversary","Simplifier","User","Consistency Auditor"], "count": 7}
+   {"roster": ["Consolidated Critic"], "count": 1}
    JSON
+   echo "$PLAN_HASH" > "$CRITIQUE_RUN_DIR/.plan_hash"
    ```
 
-   (Drop `"Archaeologist"` and `"User"` and set `"count": 6` on the Small purely-internal skip path.)
+   FULL path (CRITIQUE_DEPTH=FULL):
+   ```bash
+   cat > "$CRITIQUE_RUN_DIR/_roster.json" <<'JSON'
+   {"roster": ["Risk & Robustness", "Scope & Value", "History & Consistency"], "count": 3}
+   JSON
+   echo "$PLAN_HASH" > "$CRITIQUE_RUN_DIR/.plan_hash"
+   ```
 
 This frozen manifest is the **membership set** that the Step 3.5 gate checks against: for every name in `_roster.json`, the corresponding `{name}.result.md` must exist and carry the terminal completion fence. **The gate cannot be satisfied by dispatching fewer critics than the manifest** — under-dispatch leaves a named roster member's result file missing, so the gate reports incomplete.
 
@@ -172,7 +228,7 @@ This frozen manifest is the **membership set** that the Step 3.5 gate checks aga
 
 Read [CRITICS.md](CRITICS.md) for the full critic definitions and prompt templates.
 
-Dispatch **all critics in the frozen roster** (six or seven, per the `_roster.json` written in Step 3a) using the Agent tool. Each critic gets:
+Dispatch **only critics whose `{name}.result.md` is absent or lacks the terminal fence** (on a fresh run, all roster members; on a resume, only those not yet completed). Read CRITICS.md for the 3 FULL critics and 1 Consolidated Critic (LITE). Each critic gets:
 - The full plan text
 - The SOURCE_FILES block (verified file contents from Step 1.5)
 - The issue context (if available)
@@ -274,10 +330,9 @@ The Step 3.5 gate has confirmed every roster member completed. Now aggregate fro
 2. **Deduplicate**: If two critics flagged the same issue, keep the higher-severity version and note which critics agreed
 3. **Sort by severity**: BLOCKERs first, then CONCERNs, then NITs
 4. **Cross-validate**: If the Skeptic and Simplifier both flagged the same component, elevate to BLOCKER if not already
-5. **Structural Implementation Note check** — for each finding with SEVERITY = CONCERN or BLOCKER:
-   - If IMPLEMENTATION NOTE is missing or empty: downgrade the finding to NEEDS_REVISION and report: "Finding [title] missing Implementation Note — returned to critic for revision"
-   - Re-run that critic with the finding and a directive to add a concrete Implementation Note before proceeding
-   - Only issue the final verdict after all CONCERN/BLOCKER findings have a non-empty Implementation Note
+5. **Implementation Note validation** — for each finding with SEVERITY = CONCERN or BLOCKER:
+   - If IMPLEMENTATION NOTE is missing or empty: mark the finding as malformed, exclude it from the report, and log: "Finding [title] missing Implementation Note — excluded (critic should have included it in first pass)"
+   - **Do NOT re-run the critic.** The note requirement is enforced in CRITICS.md; a missing note means the finding is not yet specific enough to ship. Exclude and move on.
 
 ### Step 5: Report
 
@@ -290,7 +345,7 @@ Output the final report in this format:
 
 **Plan**: {plan_path}
 **Issue**: #{issue_number} (if applicable)
-**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Critics**: {roster members from _roster.json} ({LITE or FULL} depth)
 **Findings**: {N} total ({blockers} blockers, {concerns} concerns, {nits} nits)
 
 ## Blockers
@@ -407,6 +462,7 @@ Use **"READY TO BUILD (no concerns)"** when there are zero CONCERN or BLOCKER fi
 
 ## Version history
 
+- v1.5.0 (2026-06-16): Triage-first LITE/FULL routing (1 consolidated vs 3 merged critics), crash-resume via critique-resume-probe, first-pass Implementation Note requirement (no re-run loop) (#1714)
 - v1.4.0 (2026-06-16): Replace fire-and-forget `run_in_background` critic spawn + prose await with an artifact-based roster barrier: each critic atomically writes a result file ending in a two-line terminal fence (`<<<CRITIQUE-RESULT-COMPLETE>>>` then `STATUS: COMPLETED`); synthesis gates on a filesystem membership check against a frozen roster manifest, run before aggregation; incomplete roster after a bounded re-dispatch cap records `MAJOR REWORK (CRITIQUE INCOMPLETE)` (#1690)
 - v1.3.0 (2026-06-13): Add explicit Step 3.5 "Wait and Collect" barrier (block on all six background critics before aggregating); make Step 5.5 a mandatory, self-contained verdict-record + completion-marker block reached on every exit path; reinforce the Stage Marker note so the verdict and marker cannot desync (#1654)
 - v1.2.0 (2026-04-07): Fix Step 5 Verdict template to show both READY TO BUILD variants so critics output the correct form for SDLC routing

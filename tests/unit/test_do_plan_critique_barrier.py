@@ -114,6 +114,9 @@ class TestProseInvariants:
         # A "before dispatch" / "freeze" notion must be present.
         lowered = step3a.lower()
         assert "before" in lowered and "freeze" in lowered
+        # Roster content must be triage-selected (LITE or FULL), not hardcoded to 7.
+        assert '"count": 7' not in step3a
+        assert "LITE" in step3a or "FULL" in step3a
 
     # (c) result-file + two-line terminal fence mandated ------------------
 
@@ -159,6 +162,44 @@ class TestProseInvariants:
         assert "complete: true" in skill_text
         # "preserve" appears (case-insensitive) on the incomplete path.
         assert "preserve" in skill_text.lower()
+
+    # (f) Step 2b resume probe present ------------------------------------
+
+    def test_step_2b_resume_probe_present(self, skill_text: str) -> None:
+        """Step 2b must exist and reference critique-resume-probe."""
+        assert "Step 2b" in skill_text
+        step2b = _section(skill_text, "### Step 2b", "### Step 2.6")
+        assert "critique-resume-probe" in step2b
+
+    # (g) Step 2.6 triage and force-FULL present --------------------------
+
+    def test_step_2_6_triage_and_force_full_present(self, skill_text: str) -> None:
+        """Step 2.6 must exist and list doctrine force-FULL paths."""
+        assert "Step 2.6" in skill_text
+        step26 = _section(skill_text, "### Step 2.6", "### Step 3a")
+        assert "FULL" in step26
+        assert "LITE" in step26
+        # Doctrine paths that trigger force-FULL must be listed
+        assert "agent/sdlc_router.py" in step26 or "doctrine" in step26.lower()
+
+    # (h) Step 4 has no re-run directive ----------------------------------
+
+    def test_step_4_has_no_rerun_directive(self, skill_text: str) -> None:
+        """Step 4 must NOT contain the re-run directive (deleted in this plan)."""
+        step4 = _section(skill_text, "### Step 4", "### Step 5")
+        assert "Re-run that critic" not in step4
+        # Validation-only replacement must be present
+        assert "exclude" in step4.lower() or "excluded" in step4.lower()
+
+    # (i) LITE and FULL roster shapes documented --------------------------
+
+    def test_roster_lite_full_shapes_documented(self, skill_text: str) -> None:
+        """SKILL.md must document both LITE (1 critic) and FULL (3 critics) roster shapes."""
+        assert "Consolidated Critic" in skill_text
+        # FULL roster names
+        assert "Risk & Robustness" in skill_text
+        assert "Scope & Value" in skill_text
+        assert "History & Consistency" in skill_text
 
 
 # ===========================================================================
