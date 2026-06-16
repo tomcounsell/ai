@@ -164,3 +164,84 @@ class TestPerChatCatchupCutoff:
 
         assert queued == 0
         enqueue_fn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_teammate_chat_recovered_with_teammate_session_type(self):
+        """A recovered message in a teammate-configured chat enqueues teammate + project_config.
+
+        Finding 2: the per-chat catchup path must resolve persona like the live
+        handler. A teammate chat recovered here must NOT default to an eng
+        PM<->Dev loop.
+        """
+        from config.enums import SessionType
+
+        cursor_dt = datetime.now(UTC) - timedelta(minutes=10)
+        await record_last_processed(TEST_CHAT_ID, 1000, cursor_dt)
+
+        dialog = _make_dialog(TEST_CHAT_ID, "Cyndra Dev Team")
+        client = AsyncMock()
+        client.get_dialogs.return_value = [dialog]
+        missed = _make_message(1005, "@valor please look", minutes_ago=8)
+        client.get_messages.return_value = [missed]
+
+        enqueue_fn = AsyncMock()
+        project = {
+            "_key": "cyndra",
+            "working_directory": "/tmp/cyndra",
+            "telegram": {"groups": {"Cyndra Dev Team": {"persona": "teammate"}}},
+        }
+
+        with (
+            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock, return_value=False),
+            patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock, return_value=False),
+        ):
+            queued = await scan_for_missed_messages(
+                client=client,
+                monitored_groups=["cyndra dev team"],
+                projects_config={},
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=enqueue_fn,
+                find_project_fn=MagicMock(return_value=project),
+                lookback_override=timedelta(minutes=3),
+            )
+
+        assert queued == 1
+        call_kwargs = enqueue_fn.call_args[1]
+        assert call_kwargs["session_type"] == SessionType.TEAMMATE
+        assert call_kwargs["project_config"] is project
+
+    @pytest.mark.asyncio
+    async def test_default_chat_recovered_with_eng_session_type(self):
+        """A recovered message in a non-teammate chat still enqueues an eng session."""
+        from config.enums import SessionType
+
+        cursor_dt = datetime.now(UTC) - timedelta(minutes=10)
+        await record_last_processed(TEST_CHAT_ID, 1000, cursor_dt)
+
+        dialog = _make_dialog(TEST_CHAT_ID, "Cyndra Dev")
+        client = AsyncMock()
+        client.get_dialogs.return_value = [dialog]
+        missed = _make_message(1005, "fix the build", minutes_ago=8)
+        client.get_messages.return_value = [missed]
+
+        enqueue_fn = AsyncMock()
+        project = {"_key": "cyndra", "working_directory": "/tmp/cyndra"}
+
+        with (
+            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock, return_value=False),
+            patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock, return_value=False),
+        ):
+            queued = await scan_for_missed_messages(
+                client=client,
+                monitored_groups=["cyndra dev"],
+                projects_config={},
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=enqueue_fn,
+                find_project_fn=MagicMock(return_value=project),
+                lookback_override=timedelta(minutes=3),
+            )
+
+        assert queued == 1
+        call_kwargs = enqueue_fn.call_args[1]
+        assert call_kwargs["session_type"] == SessionType.ENG
+        assert call_kwargs["project_config"] is project
