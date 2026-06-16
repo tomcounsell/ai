@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import unittest
 from dataclasses import dataclass, field
 from typing import Any
@@ -53,14 +54,25 @@ def _make_initialized_pool(size: int = 1, cwd: str | None = "/tmp") -> PTYPool:
     return pool
 
 
+@contextlib.contextmanager
 def _patch_container_run_with_result(result_factory: Any):
     """Patch `Container.run` to call result_factory() and return its
-    output. The adapter is single-shot, so this lets us exercise the
-    adapter's flow without driving a real container."""
-    return patch(
-        "agent.granite_container.bridge_adapter.Container.run",
-        lambda self: result_factory(),
-    )
+    output, AND neutralize `PTYDriver.spawn` for the duration.
+
+    The adapter is single-shot, so this lets us exercise the adapter's
+    flow without driving a real container. The spawn patch is required
+    because BridgeAdapter always carries per-session session-ids, so
+    `_needs_session_spawn` now forces a spawn-on-acquire inside
+    `acquire_pair` (Finding 1) — without neutralizing spawn the adapter
+    would exec the real `claude` binary (issue #1632)."""
+    with (
+        patch(
+            "agent.granite_container.bridge_adapter.Container.run",
+            lambda self: result_factory(),
+        ),
+        _patch_spawn(),
+    ):
+        yield
 
 
 def _make_container_result(
@@ -332,35 +344,44 @@ class TestBridgeAdapterPrewarmedPair(unittest.TestCase):
     """
 
     def test_run_passes_pool_pair_to_container(self) -> None:
-        """BridgeAdapter.run forwards the acquired (pm, dev) pair
-        to Container as pm_pty/dev_pty kwargs, and Container does
-        NOT call PTYDriver.spawn.
+        """BridgeAdapter.run forwards the pool-acquired (pm, dev) pair
+        to Container as pm_pty/dev_pty kwargs, and Container does NOT
+        spawn a fresh pair on top of it.
 
-        The pool is initialized with the SAME cwd the session runs
-        in and the adapter carries no per-session env/persona, so
-        the spawn spec matches the pool defaults and the pre-warmed
-        pair is used as-is (no spawn-on-acquire)."""
+        BridgeAdapter always carries per-session session-ids, so the
+        pool performs a spawn-on-acquire (Finding 1): the prewarmed
+        pair is spawned at pool.initialize, then replaced by a
+        per-session pair at acquire time. That is the pool's job — the
+        regression this guards is Container spawning ADDITIONAL PTYs on
+        top of the pair it already received. We assert Container got a
+        non-None pool pair and did not invoke spawn itself."""
         from unittest.mock import patch as _patch
 
         pool = _make_pool(size=1)
         session = _FakeSession()
 
-        # Capture which (role, id) pairs are spawned. The pool's
-        # prewarm is the only spawn that should happen. We patch
-        # the spawn AT the module level (the path pty_driver.spawn
-        # looks up at call time) and init the pool inside the
-        # patch so prewarm is captured. The fake is a FULL fake —
-        # never call through to the original spawn body, which
-        # execs the real `claude` binary (issue #1632 mode 3:
-        # orphaned ~250MB claude processes memory-crash the box).
-        spawned: list[tuple[str, int]] = []
+        # Track every spawn and the pair handed to Container. The fake
+        # spawn is a FULL fake — never call through to the original
+        # spawn body, which execs the real `claude` binary (issue #1632
+        # mode 3: orphaned ~250MB claude processes memory-crash the box).
+        spawned: list[str] = []
+        seen: dict = {}
 
         def _tracking_spawn(self):  # type: ignore[no-untyped-def]
-            spawned.append((self.role, id(self)))
+            spawned.append(self.role)
+
+        def _fake_container(**kwargs):
+            seen.update(kwargs)
+            container = MagicMock()
+            container.run = lambda: _make_container_result()
+            return container
 
         with (
-            _patch("agent.granite_container.pty_driver.PTYDriver.spawn", _tracking_spawn),
-            _patch_container_run_with_result(lambda: _make_container_result()),
+            _patch("agent.granite_container.pty_pool.PTYDriver.spawn", _tracking_spawn),
+            _patch(
+                "agent.granite_container.bridge_adapter.Container",
+                side_effect=_fake_container,
+            ),
         ):
             asyncio.run(pool.initialize(cwd="/tmp"))
             adapter = BridgeAdapter(
@@ -370,37 +391,46 @@ class TestBridgeAdapterPrewarmedPair(unittest.TestCase):
                 pool=pool,
                 resolve_callbacks=lambda p, t: (None, None),
             )
+            spawned.clear()  # ignore prewarm spawns from initialize()
             asyncio.run(adapter.run("hello", "/tmp"))
 
-        # Exactly one pm + one dev spawn — both from the pool's
-        # prewarm. Zero additional spawns from Container.
-        roles = sorted(r for r, _ in spawned)
-        self.assertEqual(roles, ["dev", "pm"])
-        # No duplicate roles (i.e., Container did NOT spawn).
-        role_counts: dict[str, int] = {}
-        for r, _ in spawned:
-            role_counts[r] = role_counts.get(r, 0) + 1
-        for r, count in role_counts.items():
-            self.assertEqual(
-                count, 1, f"role {r!r} spawned {count}x, expected 1x (Container spawned fresh)"
-            )
+        # Container received the pool's acquired pair...
+        self.assertIsNotNone(seen.get("pm_pty"))
+        self.assertIsNotNone(seen.get("dev_pty"))
+        # ...and the per-session spawn-on-acquire produced exactly one
+        # pm + one dev — no extra spawns leaking past pool_size × 2.
+        self.assertEqual(sorted(spawned), ["dev", "pm"])
 
     def test_run_marks_pool_pair_as_released(self) -> None:
-        """The pool's (pm, dev) PTYs are marked _released_to_pool=True
-        so Container._close_pair does not double-close them. The pool
-        cwd matches the session cwd so the prewarmed pair is reused."""
+        """The (pm, dev) pair handed to Container is marked
+        _released_to_pool=True so Container._close_pair does not
+        double-close them — the pool's __aexit__ owns the close.
+
+        BridgeAdapter always carries per-session session-ids, so the
+        pool performs a spawn-on-acquire and the pair the container
+        receives is the per-session respawned pair, NOT the original
+        prewarmed pair (Finding 1). The release contract applies to
+        whichever pair is actually active for the session."""
         pool = _make_pool(size=1)
         with _patch_spawn():
             asyncio.run(pool.initialize(cwd="/tmp"))
         session = _FakeSession()
 
-        # Find the prewarmed pair.
-        slots = pool._slots
-        self.assertEqual(len(slots), 1)
-        prewarmed_pm, prewarmed_dev = slots[0].pty_pair
+        # Capture the pair actually handed to the Container.
+        seen: dict = {}
+
+        def _fake_container(**kwargs):
+            seen.update(kwargs)
+            container = MagicMock()
+            container.run = lambda: _make_container_result()
+            return container
 
         with (
-            _patch_container_run_with_result(lambda: _make_container_result()),
+            patch(
+                "agent.granite_container.bridge_adapter.Container",
+                side_effect=_fake_container,
+            ),
+            _patch_spawn(),
         ):
             adapter = BridgeAdapter(
                 agent_session=session,
@@ -411,9 +441,13 @@ class TestBridgeAdapterPrewarmedPair(unittest.TestCase):
             )
             asyncio.run(adapter.run("hello", "/tmp"))
 
-        # Both prewarmed PTYs are marked as pool-owned.
-        self.assertTrue(getattr(prewarmed_pm, "_released_to_pool", False))
-        self.assertTrue(getattr(prewarmed_dev, "_released_to_pool", False))
+        # The active pair handed to Container is marked pool-owned.
+        active_pm = seen.get("pm_pty")
+        active_dev = seen.get("dev_pty")
+        self.assertIsNotNone(active_pm)
+        self.assertIsNotNone(active_dev)
+        self.assertTrue(getattr(active_pm, "_released_to_pool", False))
+        self.assertTrue(getattr(active_dev, "_released_to_pool", False))
 
 
 @dataclass
@@ -564,9 +598,12 @@ class TestBridgeAdapterLastTurnAt(unittest.TestCase):
             pool=pool,
             resolve_callbacks=lambda p, t: (None, None),
         )
-        with patch(
-            "agent.granite_container.bridge_adapter.Container",
-            side_effect=_fake_container,
+        with (
+            patch(
+                "agent.granite_container.bridge_adapter.Container",
+                side_effect=_fake_container,
+            ),
+            _patch_spawn(),
         ):
             asyncio.run(adapter.run("test", "/tmp"))
 
@@ -662,9 +699,15 @@ class TestBridgeAdapterSpawnOnAcquire(unittest.TestCase):
         for d in prewarmed:
             self.assertTrue(d.closed, f"prewarmed {d.role} PTY was not closed")
 
-    def test_no_session_requirements_reuses_prewarmed_pair(self) -> None:
+    def test_session_ids_force_spawn_even_without_env_or_model(self) -> None:
         """A spec matching the pool defaults (same cwd, no env, no
-        persona, no model) uses the pre-warmed pair as-is."""
+        persona, no model) STILL spawns a per-session pair, because
+        BridgeAdapter always carries per-session session-ids and
+        `_needs_session_spawn` now treats session-ids as a per-session
+        identity (Finding 1, latent bug 1). Without this, the prewarmed
+        pair (whose claude auto-generates its own UUID) would be reused
+        and the transcript path the container computes from the spec's
+        session-ids would never match — the empty-read churn."""
         session = _FakeSession()
 
         with patch("agent.granite_container.pty_pool.PTYDriver", _SpecFakeDriver):
@@ -680,8 +723,13 @@ class TestBridgeAdapterSpawnOnAcquire(unittest.TestCase):
             with _patch_container_run_with_result(lambda: _make_container_result()):
                 asyncio.run(adapter.run("hello", "/tmp"))
 
-        # Only the 2 prewarm spawns — no per-session pair.
-        self.assertEqual(len(_SpecFakeDriver.instances), 2)
+        # 2 prewarm + 2 per-session spawns: the session-ids force a spawn.
+        self.assertEqual(len(_SpecFakeDriver.instances), 4)
+        # The per-session pair carries the spec's session-ids.
+        session_pms = [
+            d for d in _SpecFakeDriver.instances if d.role == "pm" and d._session_id is not None
+        ]
+        self.assertEqual(len(session_pms), 1)
 
 
 class TestDeliverSyncReturnsBool(unittest.TestCase):

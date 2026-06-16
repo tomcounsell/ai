@@ -389,11 +389,16 @@ class PTYPool:
     def _needs_session_spawn(self, spec: PairSpawnSpec | None) -> bool:
         """Whether `spec` requires a fresh per-session spawn.
 
-        Env vars and the system-prompt overlay can only be injected at
-        process spawn, and a cwd differing from the pool's spawn cwd
-        means the pre-warmed pair is running in the wrong directory
-        (the #887 worktree-contamination class). Conservative: any
-        per-session requirement triggers spawn-on-acquire.
+        Returns True if the spec carries ANY per-session identity: env,
+        model, cwd-override, OR session-id. Env vars and the system-prompt
+        overlay can only be injected at process spawn; a cwd differing from
+        the pool's spawn cwd means the pre-warmed pair is running in the
+        wrong directory (the #887 worktree-contamination class); and a spec
+        carrying pm/dev session-ids must spawn so the PTYs resume those exact
+        sessions (otherwise the transcript path the container computes from
+        the spec's session-ids would never match the prewarmed pair's own
+        ids). Conservative: any per-session requirement triggers
+        spawn-on-acquire.
         """
         if spec is None:
             return False
@@ -402,6 +407,8 @@ class PTYPool:
             or spec.pm_model
             or spec.dev_model
             or (spec.cwd is not None and spec.cwd != self._cwd)
+            or spec.pm_session_id
+            or spec.dev_session_id
         )
 
     async def _spawn_session_pair(self, slot: _Slot, spec: PairSpawnSpec) -> None:

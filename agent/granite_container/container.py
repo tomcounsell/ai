@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -214,7 +215,9 @@ DEV_REPORT_UNAVAILABLE = "The developer did not produce a captured report."
 # Fallback user-visible message delivered directly (bypassing PM) when
 # the wrap-up guard exhausts MAX_WRAPUP_ATTEMPTS without PM emitting a
 # user-facing prefix. Guarantees the human always gets some message.
-OPERATOR_TERMINAL_MESSAGE = "Your request was completed; a summary could not be generated."
+OPERATOR_TERMINAL_MESSAGE = (
+    "I wasn't able to produce a response to this — please rephrase or follow up."
+)
 
 
 @dataclass
@@ -293,6 +296,11 @@ def _transcript_path(cwd: str, session_id: str | None) -> str | None:
     """
     if not session_id:
         return None
+    # Resolve symlinks before slugging so the slug matches Claude Code's
+    # own realpath-based naming. Guard on truthiness: os.path.realpath("")
+    # returns the process CWD, which would silently corrupt the slug.
+    if cwd:
+        cwd = os.path.realpath(cwd)
     cwd_slug = cwd.replace("/", "-")
     return str(Path.home() / ".claude" / "projects" / cwd_slug / f"{session_id}.jsonl")
 
@@ -330,6 +338,55 @@ def _truncate_exit_message(text: str) -> str:
     if len(text) <= EXIT_MESSAGE_MAX_CHARS:
         return text
     return text[: EXIT_MESSAGE_MAX_CHARS - 3] + "..."
+
+
+def _transcript_read_branch(pm_transcript: str | None) -> str:
+    """Classify why a PM transcript read produced no text into a greppable branch.
+
+    Returns one of three STABLE, greppable substrings:
+      - ``transcript read: path-None``     — the resolved path is None.
+      - ``transcript read: file-missing``  — path set but file absent on disk.
+      - ``transcript read: no-new-entry``  — file present but no new text-bearing
+        entry past baseline (valid file, PM emitted nothing this cycle).
+
+    These substrings are load-bearing for log-grep diagnostics; do not rename.
+    """
+    if not pm_transcript:
+        return "transcript read: path-None"
+    if not os.path.exists(pm_transcript):
+        return "transcript read: file-missing"
+    return "transcript read: no-new-entry"
+
+
+def _log_transcript_read_diagnostic(
+    site: str,
+    pm_transcript: str | None,
+    pm_pty: Any,
+    dev_pty: Any,
+) -> None:
+    """Emit a WARNING explaining why a PM transcript read came back empty.
+
+    `site` labels the read site (prime-turn / steady-state / wrap-up guard).
+    Logs the greppable branch substring plus the fully-resolved attempted
+    path, the presence of `spec.pm_session_id` / `spec.dev_session_id`
+    (sourced from each PTY driver's `_session_id`), and the live PM PTY's
+    `_session_id` — the trio needed to root-cause a path/slug or session-id
+    mismatch.
+    """
+    branch = _transcript_read_branch(pm_transcript)
+    pm_session_id = getattr(pm_pty, "_session_id", None)
+    dev_session_id = getattr(dev_pty, "_session_id", None)
+    logger.warning(
+        "[granite-container] %s: %s; path=%r "
+        "pm_session_id=%r dev_session_id=%r pty_session_id=%r; "
+        "using unknown classification",
+        site,
+        branch,
+        pm_transcript,
+        pm_session_id,
+        dev_session_id,
+        pm_session_id,
+    )
 
 
 def _unknown_classification() -> ClassificationResult:
@@ -848,9 +905,8 @@ class Container:
                 if pm_prime_text:
                     prime_classification = classify_pm_prefix(pm_prime_text)
                 else:
-                    logger.warning(
-                        "[granite-container] prime-turn: PM transcript read empty; "
-                        "using unknown classification"
+                    _log_transcript_read_diagnostic(
+                        "prime-turn", pm_transcript, self._pm_pty, self._dev_pty
                     )
                     result.transcript_fallback_count += 1
                     prime_classification = _unknown_classification()
@@ -920,10 +976,11 @@ class Container:
                     if pm_text:
                         classification = classify_pm_prefix(pm_text)
                     else:
-                        logger.warning(
-                            "[granite-container] steady-state turn %d: PM transcript read empty; "
-                            "using unknown classification",
-                            turn,
+                        _log_transcript_read_diagnostic(
+                            f"steady-state turn {turn}",
+                            pm_transcript,
+                            self._pm_pty,
+                            self._dev_pty,
                         )
                         result.transcript_fallback_count += 1
                         classification = _unknown_classification()
@@ -1243,9 +1300,8 @@ class Container:
                 if pm_text:
                     wrapup_classification = classify_pm_prefix(pm_text)
                 else:
-                    logger.warning(
-                        "[granite-container] wrap-up guard: PM transcript read empty; "
-                        "using unknown classification"
+                    _log_transcript_read_diagnostic(
+                        "wrap-up guard", pm_transcript, self._pm_pty, self._dev_pty
                     )
                     result.transcript_fallback_count += 1
                     wrapup_classification = _unknown_classification()
