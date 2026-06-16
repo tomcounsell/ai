@@ -14,8 +14,11 @@ and the REAL ``bridge.dedup`` write path:
 1. A dedup-marked, reply-less message is DETECTED and enqueued EXACTLY ONCE — with
    NO manual ``DedupRecord`` surgery (the pre-existing dedup entry is left intact;
    ``/catchup`` reads the thread, not the dedup set, to decide).
-2. A SECOND run does NOT double-enqueue: the dedup write after the first enqueue
-   plus the double-reply guard (once the recovery reply lands) keep it to one.
+2. A SECOND run does NOT double-enqueue. Idempotency comes from the landed-reply
+   guard — the snapshot check plus the fresh pre-enqueue re-read — once the
+   recovery reply lands in the thread, NOT from a dedup read (this module never
+   reads the dedup set). The dedup write after enqueue only keeps the mechanical
+   scanners' bookkeeping consistent; it does not gate this module's enqueue.
 
 The LLM judge is STUBBED for determinism (it is the one nondeterministic external
 dependency); everything else — the dedup ORM, the sweep/guard logic, the enqueue

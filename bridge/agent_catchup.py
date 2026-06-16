@@ -15,9 +15,19 @@ the ground truth for what's been said. We read the recent thread (including
 Valor's replies), ask an LLM judge which inbound human messages are genuinely
 unanswered, and enqueue recovery sessions only for those. We do **not** add a new
 "answered-ness" watermark or store (forbidden by #948); we read the thread, and
-on actual recovery we write through the existing
-``record_message_processed`` / ``record_last_processed`` dedup path so the next
-mechanical scan does not double-enqueue.
+on actual recovery we ALSO write through the existing
+``record_message_processed`` / ``record_last_processed`` dedup path so the
+*mechanical* scanners stay consistent with what we recovered.
+
+**Idempotency is provided by the landed-reply guard, NOT by a dedup read.** This
+module never reads the dedup set (``is_duplicate_message``) to decide whether to
+enqueue — the thread is the source of truth. What keeps recovery to AT MOST one
+reply per message is the two-layer landed-reply guard: the snapshot check
+(``_has_valor_reply_after`` on the thread read at the top of the sweep) plus a
+FRESH, targeted re-read IMMEDIATELY before enqueue (``_valor_replied_since``).
+Once a recovery session's reply lands in the thread, every subsequent sweep sees
+it and skips. The dedup write after enqueue is for the *mechanical* scanners'
+bookkeeping; it is not what makes this module idempotent.
 
 **Conservative by construction.** Any error, ambiguity, empty/garbage/None judge
 output → ``ANSWERED`` (no reply). The acceptance bar is: a thread whose recent
@@ -366,6 +376,44 @@ def _has_valor_reply_after(thread: list[ThreadMessage], inbound_id: int) -> bool
     return False
 
 
+async def _valor_replied_since(client, entity, inbound_id: int) -> bool:
+    """Fresh, targeted re-read: did a Valor ``out`` reply land after ``inbound_id``?
+
+    This is the Race-1 mitigation (plan: "Race Conditions" → Race 1, Risk 1). The
+    judge loop runs one LLM call per message (up to ``MAX_MESSAGES_PER_CHAT``), so
+    many seconds can elapse between the single snapshot read at the top of
+    ``sweep_chat`` and an actual enqueue. A customer reply may land in that window.
+    We therefore re-check IMMEDIATELY before enqueue, with a cheap targeted read
+    (newest ``MAX_MESSAGES_PER_CHAT`` messages, filtered to ids strictly greater
+    than ``inbound_id``). Mirrors ``bridge.catchup._check_if_handled``'s
+    ``get_messages``-since pattern, but position/id-based rather than
+    threaded-reply-based (most replies are not threaded).
+
+    Returns True if a fresh Valor ``out`` message with ``id > inbound_id`` now
+    exists. On ANY re-read error this returns False (greppable WARNING logged):
+    the conservative pre-existing snapshot guard already ran, so returning False
+    preserves current behavior rather than making it worse — it never crashes the
+    sweep. ``min_id`` is intentionally NOT passed to ``get_messages`` so in-memory
+    fake clients (which accept only ``limit``) can serve the re-read; filtering is
+    done in Python on ``m.id``.
+    """
+    try:
+        raw = await client.get_messages(entity, limit=MAX_MESSAGES_PER_CHAT)
+    except Exception as e:
+        logger.warning(
+            "%s pre-enqueue re-read failed for msg=%s; falling back to snapshot guard: %s",
+            LOG_PREFIX,
+            inbound_id,
+            e,
+        )
+        return False
+
+    for m in raw:
+        if getattr(m, "out", False) and getattr(m, "id", 0) > inbound_id:
+            return True
+    return False
+
+
 # =============================================================================
 # Per-chat sweep
 # =============================================================================
@@ -385,10 +433,15 @@ async def sweep_chat(
 
     For each inbound human message (skipping Valor's own and whitespace-only
     text), run ``judge_fn`` against the rendered transcript. On
-    ``UNANSWERED_NEEDS_REPLY``: apply the double-reply guard (re-check for a fresh
-    Valor reply after the message), resolve persona, enqueue exactly one recovery
-    session with the ORIGINAL inbound text (never composed reply text), then write
-    dedup immediately.
+    ``UNANSWERED_NEEDS_REPLY``: apply the landed-reply guard in TWO layers — the
+    snapshot check (``_has_valor_reply_after`` on the thread read at the top of
+    the sweep) and a FRESH targeted re-read immediately before enqueue
+    (``_valor_replied_since``, the Race-1 mitigation: a reply may have landed
+    during the multi-second judge loop). If either sees a Valor reply after the
+    message, skip. Otherwise resolve persona, enqueue exactly one recovery session
+    with the ORIGINAL inbound text (never composed reply text), then write dedup
+    immediately (for the mechanical scanners' bookkeeping — the landed-reply guard,
+    not the dedup write, is what makes this idempotent).
 
     ``judge_fn`` and ``enqueue_fn`` are injectable so unit tests can stub the
     judge and assert enqueues. ``record_processed_fn`` / ``record_last_fn``
@@ -442,12 +495,26 @@ async def sweep_chat(
         if verdict != UNANSWERED_NEEDS_REPLY:
             continue
 
-        # Double-reply guard: if a Valor reply already appears after this message
-        # in the freshly-read thread, do not enqueue.
+        # Double-reply guard (snapshot): if a Valor reply already appears after
+        # this message in the thread read at the top of the sweep, do not enqueue.
         if _has_valor_reply_after(thread, m.message_id):
             logger.info(
                 "%s chat=%s msg=%s judged UNANSWERED but a Valor reply exists "
                 "after it — skipping (double-reply guard)",
+                LOG_PREFIX,
+                chat.chat_id,
+                m.message_id,
+            )
+            continue
+
+        # Race-1 mitigation (defense in depth): the judge loop may have run for
+        # many seconds since the snapshot above. Do a FRESH, targeted re-read
+        # IMMEDIATELY before enqueue and skip if a Valor reply has landed in the
+        # meantime — this is the guard that prevents a customer double-reply.
+        if await _valor_replied_since(client, chat.entity, m.message_id):
+            logger.warning(
+                "%s chat=%s msg=%s judged UNANSWERED but a Valor reply landed "
+                "during judgment — skipping enqueue (Race-1 pre-enqueue re-read)",
                 LOG_PREFIX,
                 chat.chat_id,
                 m.message_id,
@@ -537,7 +604,10 @@ async def _enqueue_recovery(
         project_config=project,
     )
 
-    # Dedup write immediately after enqueue (idempotency, same as the scanners).
+    # Dedup write immediately after enqueue — same as the mechanical scanners, to
+    # keep THEIR bookkeeping consistent with what we recovered. This is NOT what
+    # makes this module idempotent: the landed-reply guard (snapshot +
+    # pre-enqueue re-read) is. This module never reads the dedup set.
     await record_processed_fn(chat.chat_id, inbound.message_id)
     await record_last_fn(chat.chat_id, inbound.message_id, inbound.date)
 

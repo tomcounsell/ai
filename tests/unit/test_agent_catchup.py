@@ -505,6 +505,100 @@ async def test_double_reply_guard_blocks_enqueue_when_valor_replied_after():
 
 
 @pytest.mark.asyncio
+async def test_fresh_pre_enqueue_reread_blocks_when_reply_lands_during_judgment(caplog):
+    """Race-1: a reply that lands AFTER the snapshot but BEFORE enqueue blocks it.
+
+    The snapshot read at the top of the sweep shows NO Valor reply, so the
+    position-based snapshot guard does not fire and the judge returns
+    UNANSWERED_NEEDS_REPLY. But by the time we reach the pre-enqueue re-read, a
+    fresh Valor ``out`` reply has landed in the thread. ``_valor_replied_since``
+    re-reads and sees it → NO enqueue. This is the exact double-reply this feature
+    exists to prevent, and the snapshot guard alone cannot catch it.
+    """
+    chat = _owned_chat()
+    inbound = _make_msg(1, "the question", out=False, minutes_ago=5)
+
+    class RaceClient:
+        """First read: snapshot (no reply). Subsequent reads: reply has landed."""
+
+        def __init__(self):
+            self._reads = 0
+
+        async def get_messages(self, entity, limit=None):
+            self._reads += 1
+            if self._reads == 1:
+                # Snapshot at top of sweep: ONLY the inbound message, no reply.
+                return [inbound]
+            # Pre-enqueue re-read: a fresh Valor reply has now landed (newest-first).
+            return [_make_msg(2, "Just replied.", out=True, minutes_ago=0), inbound]
+
+    client = RaceClient()
+    enqueue = SpyEnqueue()
+    judge = CountingJudge(UNANSWERED_NEEDS_REPLY)
+
+    with caplog.at_level("WARNING"):
+        result = await sweep_chat(
+            client,
+            chat,
+            enqueue_fn=enqueue,
+            judge_fn=judge,
+            record_processed_fn=_noop_record,
+            record_last_fn=_noop_record,
+        )
+
+    assert judge.call_count == 1, "the inbound message was judged (snapshot showed no reply)"
+    assert enqueue.calls == [], "fresh pre-enqueue re-read must block the enqueue"
+    assert result.enqueued == 0
+    assert any(ac.LOG_PREFIX in rec.message for rec in caplog.records), (
+        "expected a greppable [agent-catchup] WARNING when a reply lands during judgment"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pre_enqueue_reread_failure_falls_back_to_snapshot_and_enqueues(caplog):
+    """A failing pre-enqueue re-read does not crash and preserves current behavior.
+
+    The snapshot read succeeds (no reply → judge says NEEDS_REPLY, snapshot guard
+    passes). The pre-enqueue re-read then RAISES. ``_valor_replied_since`` swallows
+    the error, logs a greppable WARNING, and returns False — so the enqueue
+    proceeds (we do not make behavior worse than the snapshot-only guard) and the
+    sweep never crashes.
+    """
+    chat = _owned_chat()
+    inbound = _make_msg(1, "still need an answer", out=False, minutes_ago=5)
+
+    class RereadFailsClient:
+        def __init__(self):
+            self._reads = 0
+
+        async def get_messages(self, entity, limit=None):
+            self._reads += 1
+            if self._reads == 1:
+                return [inbound]  # snapshot OK
+            raise RuntimeError("telethon flaked on the re-read")
+
+    client = RereadFailsClient()
+    enqueue = SpyEnqueue()
+    judge = CountingJudge(UNANSWERED_NEEDS_REPLY)
+
+    with caplog.at_level("WARNING"):
+        result = await sweep_chat(
+            client,
+            chat,
+            enqueue_fn=enqueue,
+            judge_fn=judge,
+            record_processed_fn=_noop_record,
+            record_last_fn=_noop_record,
+        )
+
+    assert result.enqueued == 1, "re-read failure must not block the enqueue (no regression)"
+    assert len(enqueue.calls) == 1
+    assert any(ac.LOG_PREFIX in rec.message for rec in caplog.records), (
+        "a greppable [agent-catchup] WARNING must be logged on re-read failure"
+    )
+
+
+@pytest.mark.asyncio
 async def test_at_most_one_enqueue_per_message_across_two_sweeps():
     """A message is enqueued AT MOST once even if two sweeps both judge it.
 
