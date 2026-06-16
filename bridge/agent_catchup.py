@@ -1,0 +1,696 @@
+"""Agent-judgment ``/catchup``: recover sessioned-but-unanswered messages.
+
+The mechanical catchup (``bridge/catchup.py::scan_for_missed_messages``) and the
+periodic reconciler (``bridge/reconciler.py::reconcile_once``) both key recovery
+on **"did a session get enqueued"** — gated by ``is_duplicate_message`` (a
+~50-ID-per-chat ``DedupRecord``) plus the ``LastProcessedRecord`` cursor. Neither
+keys on **"did a reply actually reach the chat."** So a message whose session
+hung or was killed *without replying* is dedup-marked **processed** and skipped
+**forever** by both scanners — bookkeeping-indistinguishable from a message that
+was answered correctly.
+
+This module answers a different question: *did Valor actually reply in the
+thread?* The **thread is the source of truth** — Valor's own ``out`` messages are
+the ground truth for what's been said. We read the recent thread (including
+Valor's replies), ask an LLM judge which inbound human messages are genuinely
+unanswered, and enqueue recovery sessions only for those. We do **not** add a new
+"answered-ness" watermark or store (forbidden by #948); we read the thread, and
+on actual recovery we write through the existing
+``record_message_processed`` / ``record_last_processed`` dedup path so the next
+mechanical scan does not double-enqueue.
+
+**Conservative by construction.** Any error, ambiguity, empty/garbage/None judge
+output → ``ANSWERED`` (no reply). The acceptance bar is: a thread whose recent
+messages were already answered produces NO reply. A missed reply is recoverable
+on the next sweep; a spurious double-reply to a customer is not.
+
+This is an additive layer. It does NOT modify ``scan_for_missed_messages`` or
+``reconcile_once``, does NOT make ``_check_if_handled`` thread-aware, and does NOT
+wire a scheduler — it is a standalone CLI (``valor-catchup``) invoked out-of-band
+(and, separately, as ``/update``'s best-effort final step).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+
+from bridge.routing import persona_to_session_type, resolve_persona
+from config.enums import SessionType
+from config.models import HAIKU, OLLAMA_CLASSIFIER_MODEL
+from utils.api_keys import get_anthropic_api_key
+
+logger = logging.getLogger(__name__)
+
+# Greppable marker for every WARNING this module emits, so a single
+# `grep '\[agent-catchup\]' logs/*.log` surfaces the whole sweep.
+LOG_PREFIX = "[agent-catchup]"
+
+# Judge verdict classes.
+ANSWERED = "ANSWERED"
+UNANSWERED_NEEDS_REPLY = "UNANSWERED_NEEDS_REPLY"
+UNANSWERED_NO_REPLY_NEEDED = "UNANSWERED_NO_REPLY_NEEDED"
+_VALID_VERDICTS = frozenset({ANSWERED, UNANSWERED_NEEDS_REPLY, UNANSWERED_NO_REPLY_NEEDED})
+
+# Lookback bound per chat: min(last N messages, last H hours), capped.
+# Mirrors the reconciler's bounded get_messages call (#1408).
+MAX_MESSAGES_PER_CHAT = 20
+LOOKBACK_HOURS = 2
+
+# Per-message transcript truncation for the judge prompt (keep tokens bounded).
+_MAX_MSG_CHARS = 400
+_SENDER_VALOR = "Valor"
+
+
+# =============================================================================
+# Data shapes
+# =============================================================================
+
+
+@dataclass
+class ThreadMessage:
+    """A single message in a chat thread, normalized for the judge.
+
+    ``is_valor`` is True for Valor's own ``out`` replies (the ground truth for
+    what has been said). ``message_id``, ``sender_name`` and ``date`` carry the
+    inbound-message metadata needed to enqueue a recovery session.
+    """
+
+    message_id: int
+    text: str
+    is_valor: bool
+    sender_name: str
+    sender_id: int | None
+    date: datetime
+
+
+@dataclass
+class OwnedChat:
+    """An owned chat to sweep: the Telethon entity plus its project config."""
+
+    chat_id: int
+    chat_title: str
+    project: dict
+    entity: object  # Telethon entity (opaque here)
+
+
+@dataclass
+class ChatResult:
+    """Per-chat sweep outcome for the CLI summary.
+
+    A chat that errored has ``errored=True`` and ``error`` set; it MUST still
+    appear in the summary (never silently dropped).
+    """
+
+    chat_title: str
+    chat_id: int
+    messages_scanned: int = 0
+    enqueued: int = 0
+    errored: bool = False
+    error: str | None = None
+    verdicts: list[tuple[int, str]] = field(default_factory=list)
+
+
+# =============================================================================
+# LLM judge (Ollama-first, Haiku fallback)
+# =============================================================================
+
+
+def _build_judge_prompt(transcript: str, inbound_text: str, inbound_id: int) -> str:
+    """Render the judge prompt for one inbound message against the thread."""
+    return (
+        "You are judging whether a specific inbound human message in a Telegram "
+        "thread has been ANSWERED by Valor (an AI agent).\n\n"
+        "Valor's own messages are tagged 'Valor:'. They are the ground truth for "
+        "what has actually been said in the chat.\n\n"
+        "Recent thread (oldest first):\n"
+        f"{transcript}\n\n"
+        f"The message in question (id={inbound_id}):\n"
+        f"{inbound_text[:_MAX_MSG_CHARS]}\n\n"
+        "Classify with EXACTLY one of these labels:\n"
+        "- ANSWERED = Valor already replied to this message in the thread, OR the "
+        "message needs no reply.\n"
+        "- UNANSWERED_NEEDS_REPLY = this is a genuine question/request that Valor "
+        "has NOT yet replied to and clearly should.\n"
+        "- UNANSWERED_NO_REPLY_NEEDED = no Valor reply yet, but none is warranted "
+        "(acknowledgment, social chatter, directed at someone else).\n\n"
+        "Be CONSERVATIVE: only choose UNANSWERED_NEEDS_REPLY when you are confident "
+        "a reply is genuinely missing and genuinely needed. When in doubt, choose "
+        "ANSWERED.\n\n"
+        "Reply with ONLY one of: ANSWERED, UNANSWERED_NEEDS_REPLY, "
+        "UNANSWERED_NO_REPLY_NEEDED."
+    )
+
+
+def _parse_verdict(raw: str | None) -> str | None:
+    """Extract a valid verdict token from raw LLM output, or None.
+
+    Returns a member of ``_VALID_VERDICTS`` only on an unambiguous match.
+    Empty/garbage/None → None (caller maps None to the conservative ANSWERED).
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    normalized = raw.strip().upper()
+    # Exact match first (the well-behaved case).
+    if normalized in _VALID_VERDICTS:
+        return normalized
+    # The two UNANSWERED_* tokens share a prefix; match the most specific first
+    # so "UNANSWERED_NEEDS_REPLY" is never shadowed by a substring scan.
+    for verdict in (UNANSWERED_NEEDS_REPLY, UNANSWERED_NO_REPLY_NEEDED, ANSWERED):
+        if verdict in normalized:
+            return verdict
+    return None
+
+
+def _judge_ollama(prompt: str) -> str | None:
+    """Run the judge prompt through Ollama. Returns a verdict or None."""
+    import ollama
+
+    response = ollama.chat(
+        model=OLLAMA_CLASSIFIER_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        options={"temperature": 0, "num_predict": 20},
+    )
+    return _parse_verdict(response["message"]["content"])
+
+
+def _judge_haiku(prompt: str) -> str | None:
+    """Run the judge prompt through Haiku (Anthropic). Returns a verdict or None."""
+    import anthropic
+
+    api_key = get_anthropic_api_key()
+    if not api_key:
+        return None
+    client = anthropic.Anthropic(api_key=api_key)
+    resp = client.messages.create(
+        model=HAIKU,
+        max_tokens=20,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return _parse_verdict(resp.content[0].text)
+
+
+def judge_message(transcript: str, inbound_text: str, inbound_id: int) -> str:
+    """Classify whether one inbound message is answered, by reading the thread.
+
+    Returns one of three classes:
+
+    - ``ANSWERED`` — Valor already replied in the thread, OR no reply is warranted.
+    - ``UNANSWERED_NEEDS_REPLY`` — a genuine question/request with no Valor reply
+      yet that clearly should be answered. This is the ONLY class that triggers a
+      recovery enqueue.
+    - ``UNANSWERED_NO_REPLY_NEEDED`` — no Valor reply yet, but none is warranted
+      (acknowledgment, social chatter, directed elsewhere).
+
+    Backend: Ollama-first, Haiku fallback (mirrors
+    ``bridge.routing.classify_conversation_terminus``).
+
+    CONSERVATIVE CONTRACT: any error, ambiguity, or empty/garbage/None judge
+    output maps to ``ANSWERED`` (no reply). A missed reply is recoverable on the
+    next sweep; a spurious double-reply is not. This function NEVER raises — every
+    failure path returns ``ANSWERED``.
+    """
+    prompt = _build_judge_prompt(transcript, inbound_text, inbound_id)
+
+    # Ollama first.
+    try:
+        verdict = _judge_ollama(prompt)
+        if verdict is not None:
+            return verdict
+    except Exception as e:
+        logger.debug("%s ollama judge failed: %s", LOG_PREFIX, e)
+
+    # Haiku fallback.
+    try:
+        verdict = _judge_haiku(prompt)
+        if verdict is not None:
+            return verdict
+    except Exception as e:
+        logger.debug("%s haiku judge failed: %s", LOG_PREFIX, e)
+
+    # Conservative default on any error/ambiguity/empty output.
+    return ANSWERED
+
+
+# =============================================================================
+# Owner scoping
+# =============================================================================
+
+
+async def resolve_owned_chats(
+    client,
+    monitored_groups: list[str],
+    find_project_fn,
+) -> list[OwnedChat]:
+    """Resolve this machine's owned chats from the live Telethon dialogs.
+
+    Reuses the existing owner-scoping (``ALL_MONITORED_GROUPS``, already filtered
+    to this machine's projects via ``ACTIVE_PROJECTS``) and the case-insensitive
+    title match + duplicate-dialog guard that ``scan_for_missed_messages`` uses.
+    Composes the existing helpers rather than reinventing owner scoping.
+
+    Returns a list of ``OwnedChat`` (chat_id, chat_title, project, entity).
+    """
+    owned: list[OwnedChat] = []
+    seen_chat_ids: set[int] = set()
+
+    dialogs = await client.get_dialogs()
+    for dialog in dialogs:
+        chat_title = getattr(dialog.entity, "title", None)
+        if not chat_title:
+            continue
+        # monitored_groups holds lowercase names; titles may have capitals.
+        if chat_title.lower() not in monitored_groups:
+            continue
+        # Telethon can return the same supergroup twice (channel + linked group).
+        if dialog.id in seen_chat_ids:
+            logger.warning(
+                "%s skipping duplicate dialog for %s (id=%s)",
+                LOG_PREFIX,
+                chat_title,
+                dialog.id,
+            )
+            continue
+        seen_chat_ids.add(dialog.id)
+
+        project = find_project_fn(chat_title)
+        if not project:
+            logger.warning("%s no project config for %s", LOG_PREFIX, chat_title)
+            continue
+
+        owned.append(
+            OwnedChat(
+                chat_id=dialog.id,
+                chat_title=chat_title,
+                project=project,
+                entity=dialog.entity,
+            )
+        )
+    return owned
+
+
+# =============================================================================
+# Thread read
+# =============================================================================
+
+
+async def read_thread(client, entity, lookback: timedelta | None = None) -> list[ThreadMessage]:
+    """Read the recent thread for a chat INCLUDING Valor's own ``out`` replies.
+
+    Bounded read: min(last ``MAX_MESSAGES_PER_CHAT`` messages, last
+    ``LOOKBACK_HOURS`` hours). Returns messages oldest-first so the judge sees a
+    natural transcript. ``m.out`` maps to Valor (same mapping that backs
+    ``valor-telegram read``).
+    """
+    effective = lookback if lookback is not None else timedelta(hours=LOOKBACK_HOURS)
+    cutoff = datetime.now(UTC) - effective
+
+    raw = await client.get_messages(entity, limit=MAX_MESSAGES_PER_CHAT)
+
+    out: list[ThreadMessage] = []
+    for m in raw:
+        if m.date < cutoff:
+            break  # get_messages returns newest-first; older than cutoff → stop.
+        text = m.text or ""
+        is_valor = bool(m.out)
+        sender_name = _SENDER_VALOR
+        sender_id = None
+        if not is_valor:
+            try:
+                sender = await m.get_sender()
+            except Exception:
+                sender = None
+            sender_name = getattr(sender, "first_name", None) or "Unknown"
+            sender_id = getattr(sender, "id", None)
+        out.append(
+            ThreadMessage(
+                message_id=m.id,
+                text=text,
+                is_valor=is_valor,
+                sender_name=sender_name,
+                sender_id=sender_id,
+                date=m.date,
+            )
+        )
+
+    out.reverse()  # oldest-first
+    return out
+
+
+def _render_transcript(thread: list[ThreadMessage]) -> str:
+    """Render a thread as a 'Sender: text' transcript for the judge prompt."""
+    lines = []
+    for m in thread:
+        who = _SENDER_VALOR if m.is_valor else m.sender_name
+        lines.append(f"{who}: {m.text[:_MAX_MSG_CHARS]}")
+    return "\n".join(lines)
+
+
+def _has_valor_reply_after(thread: list[ThreadMessage], inbound_id: int) -> bool:
+    """True if any Valor ``out`` message appears after the given inbound message.
+
+    The thread is oldest-first. A Valor reply that lands later in the transcript
+    than the inbound message is treated as a fresh reply for the double-reply
+    guard. This is intentionally position-based (not threaded-reply-based),
+    because most replies are not threaded.
+    """
+    seen_inbound = False
+    for m in thread:
+        if m.message_id == inbound_id:
+            seen_inbound = True
+            continue
+        if seen_inbound and m.is_valor:
+            return True
+    return False
+
+
+# =============================================================================
+# Per-chat sweep
+# =============================================================================
+
+
+async def sweep_chat(
+    client,
+    chat: OwnedChat,
+    *,
+    enqueue_fn,
+    judge_fn=judge_message,
+    record_processed_fn=None,
+    record_last_fn=None,
+    lookback: timedelta | None = None,
+) -> ChatResult:
+    """Judge one owned chat's recent thread and enqueue genuine misses.
+
+    For each inbound human message (skipping Valor's own and whitespace-only
+    text), run ``judge_fn`` against the rendered transcript. On
+    ``UNANSWERED_NEEDS_REPLY``: apply the double-reply guard (re-check for a fresh
+    Valor reply after the message), resolve persona, enqueue exactly one recovery
+    session with the ORIGINAL inbound text (never composed reply text), then write
+    dedup immediately.
+
+    ``judge_fn`` and ``enqueue_fn`` are injectable so unit tests can stub the
+    judge and assert enqueues. ``record_processed_fn`` / ``record_last_fn``
+    default to the real ``bridge.dedup`` writers.
+
+    NARROW try/except: a per-message failure logs a greppable WARNING and
+    continues; the per-chat caller (``run_sweep``) wraps this whole call so a
+    chat-level failure is recorded and the sweep proceeds to the next chat.
+    """
+    if record_processed_fn is None or record_last_fn is None:
+        from bridge.dedup import record_last_processed, record_message_processed
+
+        record_processed_fn = record_processed_fn or record_message_processed
+        record_last_fn = record_last_fn or record_last_processed
+
+    result = ChatResult(chat_title=chat.chat_title, chat_id=chat.chat_id)
+
+    thread = await read_thread(client, chat.entity, lookback=lookback)
+    result.messages_scanned = len(thread)
+
+    # Empty thread → judge not called, zero enqueues.
+    if not thread:
+        return result
+
+    transcript = _render_transcript(thread)
+
+    for m in thread:
+        # Skip Valor's own messages — only inbound human messages are judged.
+        if m.is_valor:
+            continue
+        # Skip whitespace-only / empty text BEFORE the judge (mirror the scanners).
+        if not m.text.strip():
+            continue
+
+        try:
+            verdict = judge_fn(transcript, m.text, m.message_id)
+        except Exception as e:
+            # Defensive: judge_fn already swallows errors and returns ANSWERED,
+            # but a stubbed/injected judge might raise. Conservative default.
+            logger.warning(
+                "%s judge raised for chat=%s msg=%s; defaulting ANSWERED: %s",
+                LOG_PREFIX,
+                chat.chat_id,
+                m.message_id,
+                e,
+            )
+            verdict = ANSWERED
+
+        result.verdicts.append((m.message_id, verdict))
+
+        if verdict != UNANSWERED_NEEDS_REPLY:
+            continue
+
+        # Double-reply guard: if a Valor reply already appears after this message
+        # in the freshly-read thread, do not enqueue.
+        if _has_valor_reply_after(thread, m.message_id):
+            logger.info(
+                "%s chat=%s msg=%s judged UNANSWERED but a Valor reply exists "
+                "after it — skipping (double-reply guard)",
+                LOG_PREFIX,
+                chat.chat_id,
+                m.message_id,
+            )
+            continue
+
+        try:
+            await _enqueue_recovery(
+                chat=chat,
+                inbound=m,
+                enqueue_fn=enqueue_fn,
+                record_processed_fn=record_processed_fn,
+                record_last_fn=record_last_fn,
+            )
+            result.enqueued += 1
+        except Exception as e:
+            logger.warning(
+                "%s enqueue failed for chat=%s msg=%s; continuing: %s",
+                LOG_PREFIX,
+                chat.chat_id,
+                m.message_id,
+                e,
+            )
+            continue
+
+    return result
+
+
+async def _enqueue_recovery(
+    *,
+    chat: OwnedChat,
+    inbound: ThreadMessage,
+    enqueue_fn,
+    record_processed_fn,
+    record_last_fn,
+) -> None:
+    """Enqueue one recovery session, then write dedup immediately.
+
+    Mirrors ``scan_for_missed_messages`` / ``reconcile_once`` exactly: same
+    ``session_id`` shape (``tg_{project_key}_{chat_id}_{message_id}``), same
+    ``enqueue_agent_session`` signature, same dedup write right after enqueue.
+    Persona is resolved via ``resolve_persona`` → ``persona_to_session_type``
+    (the #1708 helpers) with the same narrow per-message fallback to eng.
+
+    NEVER composes reply text — only the ORIGINAL inbound message text is
+    enqueued; the worker session produces the persona-correct reply.
+    """
+    project = chat.project
+    project_key = project.get("_key", "unknown")
+    working_dir = project.get("working_directory", "")
+    session_id = f"tg_{project_key}_{chat.chat_id}_{inbound.message_id}"
+
+    try:
+        persona = resolve_persona(project, chat.chat_title, is_dm=False)
+        session_type = persona_to_session_type(persona)
+    except Exception as e:
+        logger.warning(
+            "%s persona resolution failed for chat %s (%s); defaulting to eng: %s",
+            LOG_PREFIX,
+            chat.chat_id,
+            chat.chat_title,
+            e,
+        )
+        session_type = SessionType.ENG
+
+    logger.warning(
+        "%s recovering unanswered message in %s: msg %d from %s: '%s'",
+        LOG_PREFIX,
+        chat.chat_title,
+        inbound.message_id,
+        inbound.sender_name,
+        inbound.text[:80],
+    )
+
+    await enqueue_fn(
+        project_key=project_key,
+        session_id=session_id,
+        working_dir=working_dir,
+        message_text=inbound.text,  # ORIGINAL inbound text only — never composed.
+        sender_name=inbound.sender_name,
+        chat_id=str(chat.chat_id),
+        telegram_message_id=inbound.message_id,
+        chat_title=chat.chat_title,
+        priority="low",
+        sender_id=inbound.sender_id,
+        session_type=session_type,
+        project_config=project,
+    )
+
+    # Dedup write immediately after enqueue (idempotency, same as the scanners).
+    await record_processed_fn(chat.chat_id, inbound.message_id)
+    await record_last_fn(chat.chat_id, inbound.message_id, inbound.date)
+
+
+# =============================================================================
+# Full sweep
+# =============================================================================
+
+
+async def run_sweep(
+    client,
+    owned_chats: list[OwnedChat],
+    *,
+    enqueue_fn,
+    judge_fn=judge_message,
+    record_processed_fn=None,
+    record_last_fn=None,
+    lookback: timedelta | None = None,
+) -> list[ChatResult]:
+    """Sweep every owned chat, returning a per-chat result list.
+
+    Each chat's sweep is wrapped in a NARROW try/except: on failure, a greppable
+    WARNING is logged and a ``ChatResult`` with ``errored=True`` is appended — the
+    chat appears in the summary, the sweep never aborts. Best-effort contract.
+    """
+    results: list[ChatResult] = []
+    for chat in owned_chats:
+        try:
+            result = await sweep_chat(
+                client,
+                chat,
+                enqueue_fn=enqueue_fn,
+                judge_fn=judge_fn,
+                record_processed_fn=record_processed_fn,
+                record_last_fn=record_last_fn,
+                lookback=lookback,
+            )
+        except Exception as e:
+            logger.warning(
+                "%s sweep failed for chat=%s (%s); continuing: %s",
+                LOG_PREFIX,
+                chat.chat_id,
+                chat.chat_title,
+                e,
+            )
+            result = ChatResult(
+                chat_title=chat.chat_title,
+                chat_id=chat.chat_id,
+                errored=True,
+                error=str(e),
+            )
+        results.append(result)
+    return results
+
+
+def format_summary(results: list[ChatResult]) -> str:
+    """Render a per-chat summary, INCLUDING chats that errored.
+
+    Errored chats are never silently dropped — they appear with an ERROR tag.
+    """
+    lines = ["[agent-catchup] sweep summary:"]
+    total_enqueued = 0
+    for r in results:
+        if r.errored:
+            lines.append(f"  {r.chat_title} (id={r.chat_id}): ERROR — {r.error}")
+            continue
+        total_enqueued += r.enqueued
+        lines.append(
+            f"  {r.chat_title} (id={r.chat_id}): "
+            f"scanned={r.messages_scanned}, recovered={r.enqueued}"
+        )
+    errored = sum(1 for r in results if r.errored)
+    lines.append(f"  total: {len(results)} chat(s), {total_enqueued} recovered, {errored} errored")
+    return "\n".join(lines)
+
+
+# =============================================================================
+# CLI entry point
+# =============================================================================
+
+
+async def _run_async(lookback: timedelta | None = None) -> list[ChatResult]:
+    """Resolve owned chats against a live Telethon client and run the sweep.
+
+    Composes the production wiring: the ``valor-telegram`` Telethon client, the
+    bridge's owner-scoping globals (``ALL_MONITORED_GROUPS`` /
+    ``find_project_for_chat``), and the real ``enqueue_agent_session``.
+    """
+    # Import the bridge module for its side effect of populating owner-scoping
+    # globals (ACTIVE_PROJECTS → GROUP_TO_PROJECT → ALL_MONITORED_GROUPS) and
+    # propagating them into bridge.routing.
+    import bridge.telegram_bridge as tb
+    from agent.agent_session_queue import enqueue_agent_session
+    from bridge.routing import find_project_for_chat
+    from tools.valor_telegram import _telethon_client
+
+    monitored_groups = list(tb.ALL_MONITORED_GROUPS)
+    if not monitored_groups:
+        logger.warning("%s no monitored groups for this machine — nothing to sweep", LOG_PREFIX)
+        return []
+
+    client = _telethon_client()
+    await client.start()
+    try:
+        owned = await resolve_owned_chats(client, monitored_groups, find_project_for_chat)
+        return await run_sweep(
+            client,
+            owned,
+            enqueue_fn=enqueue_agent_session,
+            lookback=lookback,
+        )
+    finally:
+        await client.disconnect()
+
+
+def main() -> int:
+    """``valor-catchup`` entry point.
+
+    Resolves this machine's owned chats, runs the agent-judgment sweep, prints a
+    per-chat summary (including errored chats), and ALWAYS exits 0 — even on
+    partial failure (best-effort contract; ``/update`` ignores the exit code).
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="valor-catchup",
+        description=(
+            "Agent-judgment catchup: read each owned chat's thread, judge which "
+            "inbound messages are genuinely unanswered, and enqueue recovery "
+            "sessions. Strongly biased toward NOT replying. Always exits 0."
+        ),
+    )
+    parser.add_argument(
+        "--lookback-hours",
+        type=float,
+        default=None,
+        help=f"Lookback window in hours (default: {LOOKBACK_HOURS}).",
+    )
+    args = parser.parse_args()
+
+    lookback = timedelta(hours=args.lookback_hours) if args.lookback_hours is not None else None
+
+    try:
+        results = asyncio.run(_run_async(lookback=lookback))
+    except Exception as e:
+        # Best-effort contract: never crash, never non-zero exit.
+        logger.warning("%s sweep aborted at top level: %s", LOG_PREFIX, e)
+        print(f"[agent-catchup] sweep aborted: {e}")
+        return 0
+
+    print(format_summary(results))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
