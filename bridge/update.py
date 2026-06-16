@@ -123,24 +123,44 @@ async def handle_update_command(tg_client, event):
         stdout = result.stdout.strip()
         stderr = result.stderr.strip()
 
-        # Extract short status from first line of stdout (skip <<FILE:>> markers)
+        # First non-marker stdout line — used only for warning detection below.
         status_lines = [
             line
             for line in (stdout or "").split("\n")
             if line.strip() and not line.strip().startswith("<<FILE:")
         ]
-        status = status_lines[0] if status_lines else "(no output)"
+        first_line = status_lines[0] if status_lines else "(no output)"
 
         failed = result.returncode != 0
+
+        # Resulting commit SHA — concrete proof the pull actually landed. Derive
+        # the outcome from the return code, not from stdout's banner first line
+        # (which says nothing about success/failure).
+        try:
+            sha = (
+                subprocess.run(
+                    ["git", "-C", str(_PROJECT_DIR), "rev-parse", "--short", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                ).stdout.strip()
+                or "?"
+            )
+        except Exception:
+            sha = "?"
+
         if failed:
-            status = f"update failed: {stderr.split(chr(10))[0]}" if stderr else status
+            first_err = stderr.split(chr(10))[0] if stderr else first_line
+            status = f"❌ update FAILED @ {sha}: {first_err}"
+        else:
+            status = f"✅ update OK @ {sha}"
 
         if running_count > 0:
             plural = "s" if running_count != 1 else ""
             status += f" ({running_count} session{plural} running; restart queued)"
 
         # If update had warnings or failed, queue agent session to fix
-        has_warnings = "warning" in status.lower()
+        has_warnings = "warning" in first_line.lower()
         if failed or has_warnings:
             status += " — spawning agent session to fix"
             await _queue_fix_session(event, machine, stdout, stderr, failed)
