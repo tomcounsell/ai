@@ -357,3 +357,53 @@ class TestUnknownMergeStateBlocked:
         assert "UNKNOWN" in result.reason
         # Placeholder should appear since no repo was resolved
         assert "none" in result.reason.lower() or "cwd" in result.reason.lower()
+
+
+# ---------------------------------------------------------------------------
+# G5 artifact-hash cache — defers once build has produced a PR (#1710)
+# ---------------------------------------------------------------------------
+
+
+class TestG5DefersAfterBuild:
+    """G5 must not re-dispatch /do-build once BUILD is done or a PR exists.
+
+    Regression for the #1710 pipeline: a cached READY TO BUILD verdict on an
+    unchanged plan hash caused G5 to fire /do-build forever after the PR was
+    already open, never letting the downstream PR-stage rows (review/docs/merge)
+    run.
+    """
+
+    def _g5_inputs(self, **state_overrides):
+        from agent.sdlc_router import guard_g5_artifact_hash_cache
+
+        states = _base_states(
+            _verdicts={
+                "CRITIQUE": {
+                    "verdict": "READY TO BUILD (WITH CONCERNS)",
+                    "artifact_hash": "sha256:abc",
+                }
+            },
+            **state_overrides,
+        )
+        context = {"current_plan_hash": "sha256:abc"}
+        return guard_g5_artifact_hash_cache, states, context
+
+    def test_dispatches_build_before_pr(self):
+        """With no PR and BUILD pending, G5 routes straight to /do-build."""
+        g5, states, context = self._g5_inputs(BUILD="pending")
+        meta = _base_meta(pr_number=None)
+        result = g5(states, meta, context)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_BUILD
+
+    def test_defers_when_pr_open(self):
+        """With a PR open, G5 returns None so PR-stage rows take over."""
+        g5, states, context = self._g5_inputs(BUILD="pending")
+        meta = _base_meta(pr_number=1717)
+        assert g5(states, meta, context) is None
+
+    def test_defers_when_build_completed(self):
+        """With BUILD completed, G5 returns None even before a PR is recorded."""
+        g5, states, context = self._g5_inputs(BUILD="completed")
+        meta = _base_meta(pr_number=None)
+        assert g5(states, meta, context) is None

@@ -394,6 +394,12 @@ def guard_g5_artifact_hash_cache(
         )
 
     if CRITIQUE_READY_TO_BUILD in verdict_text:
+        # D3: once BUILD has completed or a PR exists, the cached READY TO BUILD
+        # verdict has already been consumed — defer to the downstream PR-stage
+        # rows (TEST/REVIEW/PATCH/MERGE) instead of re-dispatching /do-build
+        # forever on a finished build. Mirrors the D3 guard in rows 4a/4b/4c.
+        if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:
+            return None
         # Plan-hash unchanged AND cached verdict says READY TO BUILD — route
         # straight to build.
         return Dispatch(

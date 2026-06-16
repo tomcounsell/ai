@@ -59,6 +59,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
+import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -82,6 +84,139 @@ DEFAULT_DELIVERY_TIMEOUT_S = 30.0
 # since last tick (O(Δbytes)). Bounded by PTY pool size — total save
 # volume is pool_size × 1 diff-gated save per tick. ~5s matches _bump_last_turn_at cadence.
 _TAILER_INTERVAL_S: float = 5.0
+
+# Cooldown window for startup-failure alerts. Per-machine Redis TTL key
+# (cross-process layer) + process-local monotonic gate (Redis-down layer).
+# Two layers: (1) Redis SET NX EX suppresses a cross-process alert storm
+# on the same machine; (2) process-local dict is the fallback when Redis
+# is itself the co-casualty of the outage.
+_STARTUP_ALERT_COOLDOWN_S = 300  # 5 minutes
+_STARTUP_ALERT_REDIS_KEY_PREFIX = "granite:startup_alert_cooldown"
+# Process-local last-alert monotonic timestamps keyed by machine name.
+# Module-level so it persists across calls within the same worker process.
+_startup_alert_last_sent: dict[str, float] = {}
+
+
+def _get_machine_name() -> str:
+    """Return the machine name for cooldown key scoping."""
+    try:
+        from config.settings import settings
+
+        return getattr(settings, "machine_name", None) or os.uname().nodename
+    except Exception:
+        return os.uname().nodename
+
+
+def _should_alert(machine: str) -> bool:
+    """Return True when a startup-failure alert is permitted for this machine.
+
+    Inverted contract vs _dedup_set: returns True = send is permitted.
+    Docstring states the inverted contract explicitly.
+
+    Two-layer cooldown:
+    (1) Process-local monotonic gate (checked FIRST -- always available).
+        Returns False if last alert was within _STARTUP_ALERT_COOLDOWN_S.
+        Updates the timestamp when returning True.
+    (2) Cross-process Redis TTL key (only attempted if layer 1 permits).
+        SET key NX EX <ttl>: if key already existed, suppress (return False).
+        Redis unavailable: fall through to the layer-1 decision (send anyway --
+        better a duplicate than a silenced outage). Redis-down does NOT log
+        the suppression tag (the alert still sends, so suppression did not occur).
+    """
+    now = time.monotonic()
+    last = _startup_alert_last_sent.get(machine, 0.0)
+    if now - last < _STARTUP_ALERT_COOLDOWN_S:
+        # Layer 1 (process-local): within cooldown window -- suppress.
+        return False
+
+    # Layer 1 permits. Try Redis cross-process gate.
+    redis_key = f"{_STARTUP_ALERT_REDIS_KEY_PREFIX}:{machine}"
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB  # noqa: N811
+
+        set_result = POPOTO_REDIS_DB.set(redis_key, "1", nx=True, ex=_STARTUP_ALERT_COOLDOWN_S)
+        if not set_result:
+            # Redis key already existed: another process already sent the alert.
+            return False
+        # Won the Redis gate. Update process-local timestamp.
+        _startup_alert_last_sent[machine] = now
+        return True
+    except Exception:
+        # Redis unavailable: fall through to process-local decision (send anyway).
+        # Log a warning but NOT the suppression tag -- the alert still sends.
+        logger.warning(
+            "[bridge-adapter] Redis unavailable for startup alert cooldown check "
+            "(machine=%s); proceeding with process-local gate only",
+            machine,
+        )
+        _startup_alert_last_sent[machine] = now
+        return True
+
+
+def _send_startup_alert(session_id: str, failure_kind: str, frame_excerpt: str) -> None:
+    """Best-effort valor-telegram notification for startup_unresolved exits.
+
+    Fail-silent: all failure modes are swallowed so the notification never
+    crashes the run. Fired only for startup_unresolved (not other anomalies)
+    to avoid alert fatigue. Gated by _should_alert (two-layer cooldown).
+
+    Subprocess call uses timeout=3 (NOT the precedent's timeout=10) to bound
+    worker-thread blocking: during a fleet-wide outage this runs once per
+    hung session, so a 10s block per session would compound the outage.
+    The cooldown gate bounds this to one 3s subprocess per 5min per machine
+    on the fast path; suppressed calls skip the subprocess entirely.
+
+    Uses check=False (no CalledProcessError branch -- that exception is
+    never raised under check=False; testing it would assert against
+    unreachable code).
+    """
+    machine = _get_machine_name()
+    if not _should_alert(machine):
+        logger.error(
+            "[granite-alert-suppressed] startup alert suppressed by cooldown "
+            "(machine=%s session=%s kind=%s)",
+            machine,
+            session_id,
+            failure_kind,
+        )
+        return
+
+    # Truncate frame excerpt for the alert message.
+    excerpt = frame_excerpt[:500].strip() if frame_excerpt else "(no frame)"
+    message = (
+        f"[granite-startup-failure] session={session_id} kind={failure_kind}\n"
+        f"Frame excerpt:\n{excerpt}"
+    )
+    try:
+        subprocess.run(
+            ["valor-telegram", "send", "--chat", "Eng: Valor", message],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except FileNotFoundError:
+        logger.error(
+            "[granite-alert-suppressed] valor-telegram not on PATH; "
+            "startup alert not sent (session=%s kind=%s)",
+            session_id,
+            failure_kind,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error(
+            "[granite-alert-suppressed] valor-telegram timed out; "
+            "startup alert not sent (session=%s kind=%s)",
+            session_id,
+            failure_kind,
+        )
+    except Exception as exc:
+        logger.error(
+            "[granite-alert-suppressed] valor-telegram failed: %s; "
+            "startup alert not sent (session=%s kind=%s)",
+            exc,
+            session_id,
+            failure_kind,
+        )
 
 
 def _now_iso() -> str:
@@ -393,6 +528,15 @@ class BridgeAdapter:
                 if result.pty_slot is not None:
                     self._agent_session.pty_slot = result.pty_slot
                     update_fields.append("pty_slot")
+                # Persist startup failure diagnostic (issue #1710).
+                if result.startup_failure_kind is not None:
+                    self._agent_session.startup_failure_kind = result.startup_failure_kind
+                    update_fields.append("startup_failure_kind")
+                if result.startup_diagnostic_frame is not None:
+                    # Size-cap the persisted frame to keep the Redis hash bounded.
+                    _frame = result.startup_diagnostic_frame[:6000]
+                    self._agent_session.startup_captured_frame = _frame
+                    update_fields.append("startup_captured_frame")
                 # Partial-data guard: if pm_pid is set but pty_slot is None,
                 # the slot capture in acquire_pair may have regressed.
                 if result.pm_pid is not None and result.pty_slot is None:
@@ -443,14 +587,30 @@ class BridgeAdapter:
                 result.exit_reason,
                 result.exit_message,
             )
-        _append_session_event(
-            self._agent_session,
-            {
-                "type": "exit_anomaly",
-                "exit_reason": result.exit_reason,
-                "ts": _now_iso(),
-            },
-        )
+        # Build exit_anomaly event payload. For startup_unresolved, include
+        # the diagnostic frame and failure kind so the dashboard shows the
+        # diagnosis without needing to open the AgentSession record separately.
+        anomaly_event: dict = {
+            "type": "exit_anomaly",
+            "exit_reason": result.exit_reason,
+            "ts": _now_iso(),
+        }
+        if result.exit_reason == "startup_unresolved":
+            if result.startup_failure_kind is not None:
+                anomaly_event["startup_failure_kind"] = result.startup_failure_kind
+            if result.startup_diagnostic_frame is not None:
+                # Truncate the frame to ~1KB for the session_events payload.
+                anomaly_event["startup_diagnostic_frame"] = result.startup_diagnostic_frame[:1000]
+        _append_session_event(self._agent_session, anomaly_event)
+
+        # Fire a direct operator alert for startup_unresolved (fail-silent).
+        if result.exit_reason == "startup_unresolved":
+            session_id = getattr(self._agent_session, "session_id", "<no-id>")
+            _send_startup_alert(
+                session_id=str(session_id),
+                failure_kind=result.startup_failure_kind or "unknown",
+                frame_excerpt=result.startup_diagnostic_frame or "",
+            )
 
     # -- Liveness (two-tier no-progress detector, TD1) ---------------------
 

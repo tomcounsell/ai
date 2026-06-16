@@ -105,6 +105,19 @@ DEFAULT_MAX_TURNS = 10
 # make the extended wait cheap.
 STARTUP_HARD_CEILING_S = 600.0
 
+# Number of consecutive identical startup-loop fingerprints (keyed on
+# parser verdict response ALONE -- not idle bools) before declaring a
+# confirmed plateau and bailing early. At STARTUP_CYCLE_TIMEOUT_S=3s
+# per cycle, 10 identical cycles ~ 30s of confirmed zero-progress --
+# clears transient cold-start jitter but saves ~95% of the 600s ceiling.
+STARTUP_PLATEAU_CYCLES = 10
+
+# Maximum bytes captured from each PTY buffer in the startup diagnostic
+# frame. Keeps the AgentSession field bounded and avoids ANSI noise.
+_STARTUP_FRAME_BUF_CAP = 4000
+# Maximum total persisted frame length (PM + Dev combined).
+_STARTUP_FRAME_TOTAL_CAP = 6000
+
 # Per-cycle idle timeout. If a PTY doesn't reach idle within this
 # many seconds, the container treats it as a hang (pm_hang /
 # dev_hang) and exits the loop.
@@ -277,6 +290,15 @@ class ContainerResult:
     # the slot itself is recycled after each session. Surfaced here so
     # the dashboard can show which pool slot a session occupied.
     pty_slot: int | None = None
+    # === Startup failure diagnostic fields (issue #1710) ===
+    # Populated on startup_unresolved exits (plateau and ceiling both).
+    # startup_failure_kind: "plateau" or "ceiling".
+    startup_failure_kind: str | None = None
+    # startup_diagnostic_frame: stripped PM+Dev buffer snapshot at failure.
+    startup_diagnostic_frame: str | None = None
+    # startup_plateau_cycles: number of consecutive identical fingerprint cycles
+    # that triggered the plateau bail (None for ceiling exits).
+    startup_plateau_cycles: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +360,51 @@ def _truncate_exit_message(text: str) -> str:
     if len(text) <= EXIT_MESSAGE_MAX_CHARS:
         return text
     return text[: EXIT_MESSAGE_MAX_CHARS - 3] + "..."
+
+
+def _capture_startup_frame(
+    pm_level_tail: str,
+    dev_level_tail: str,
+    kind: str,
+    cycles: int,
+) -> str:
+    """Capture a diagnostic frame string from PM+Dev level-triggered buffer tails.
+
+    Pure helper (no PTY or IO). Strips printable text, caps each buffer tail and
+    the combined total, and formats a human-readable artifact for the AgentSession
+    field. Falls back from level_tail to edge_buffer: callers pass
+    ``level_tail.strip() or edge_buffer`` so the frame is never blank when the
+    level-triggered capture is empty but the edge-triggered delta is not.
+
+    Returns a non-empty string even when both inputs are empty/None. The frame
+    always includes kind + cycle count so the record is never a blank artifact.
+    """
+    import re as _re
+
+    _printable_re = _re.compile(r"[^\x20-\x7e\n\r\t]")
+
+    def _clean(text):
+        if not text:
+            return ""
+        # Strip non-printable bytes (ANSI was already stripped by pty_driver).
+        cleaned = _printable_re.sub("", text)
+        # Cap per-buffer size.
+        if len(cleaned) > _STARTUP_FRAME_BUF_CAP:
+            cleaned = "..." + cleaned[-_STARTUP_FRAME_BUF_CAP + 3 :]
+        return cleaned.strip()
+
+    pm_clean = _clean(pm_level_tail)
+    dev_clean = _clean(dev_level_tail)
+
+    header = f"[startup-failure kind={kind} cycles={cycles}]\n"
+    pm_section = f"--- PM ---\n{pm_clean}\n" if pm_clean else "--- PM ---\n(no content)\n"
+    dev_section = f"--- Dev ---\n{dev_clean}\n" if dev_clean else "--- Dev ---\n(no content)\n"
+
+    frame = header + pm_section + dev_section
+    # Cap total size.
+    if len(frame) > _STARTUP_FRAME_TOTAL_CAP:
+        frame = frame[: _STARTUP_FRAME_TOTAL_CAP - 3] + "..."
+    return frame
 
 
 def _transcript_read_branch(pm_transcript: str | None) -> str:
@@ -666,18 +733,25 @@ class Container:
 
     # -- Startup phase ----------------------------------------------------
 
-    def _startup_cycle_idle(self, pty: PTYDriver) -> tuple[bool, str, str, int]:
+    def _startup_cycle_idle(self, pty: PTYDriver) -> tuple[bool, str, str, str, int]:
         """Startup-phase idle read with a short per-cycle budget.
 
-        Same return shape as `_cycle_idle`. The startup phase is a
-        poll for transient events, not a wait for a model turn, so
-        3s per cycle is enough to catch an event the moment the
-        TUI paints it without blocking the loop on persona-load
-        latency. saw_idle=False here is expected and benign — the
-        outer loop keeps cycling.
+        Returns (saw_idle, edge_buffer, level_tail, idle_marker, elapsed_ms).
+
+        - edge_buffer = result.buffer: text read during THIS call only (edge-
+          triggered). Fed to _handle_startup so a startup event is not re-
+          detected and re-answered on every poll cycle.
+        - level_tail = result.turn_buffer: level-triggered capture since the
+          last write(). Used ONLY for frame capture at failure time -- never
+          for the startup-event parser or the plateau fingerprint.
+
+        The plateau fingerprint does NOT read either buffer -- it reads the
+        parser's verdict (response) and the idle bools, both stable across
+        oscillating-event cycles where write() would reset turn_buffer.
         """
         result = pty.read_until_idle(min_content_bytes=0, timeout_s=STARTUP_CYCLE_TIMEOUT_S)
-        return (result.saw_idle, result.buffer, result.idle_marker, result.elapsed_ms)
+        level_tail = result.turn_buffer or result.buffer
+        return (result.saw_idle, result.buffer, level_tail, result.idle_marker, result.elapsed_ms)
 
     def _prime_session(
         self, pty: PTYDriver, slash_cmd: str, *, include_user_message: bool = True
@@ -834,21 +908,81 @@ class Container:
             startup_settled = False
             startup_deadline = time.monotonic() + STARTUP_HARD_CEILING_S
             cycle = 0
+            # Plateau detection state.
+            # Fingerprint is the parser's verdict (response) ALONE. The idle bools
+            # are NOT included in the fingerprint key because they can flicker on
+            # an oscillating event path (write() resets turn_buffer so the next
+            # edge read may not see idle immediately), which would break N-consecutive
+            # accumulation. Silent-start detection uses a separate explicit sentinel
+            # below (response is None and BOTH idle bools are False).
+            _plateau_last_response: object = object()  # sentinel: "not set yet"
+            _plateau_count: int = 0
+            # Last-seen level tails for frame capture (updated every cycle).
+            _last_pm_level_tail: str = ""
+            _last_dev_level_tail: str = ""
+
             while time.monotonic() < startup_deadline:
                 pm_idle = self._startup_cycle_idle(self._pm_pty)
                 dev_idle = self._startup_cycle_idle(self._dev_pty)
-                response = self._handle_startup(pm_idle[1], dev_idle[1])
+                pm_saw_idle, pm_edge, pm_level, pm_marker, pm_ms = pm_idle
+                dev_saw_idle, dev_edge, dev_level, dev_marker, dev_ms = dev_idle
+
+                # Update level tails for frame capture at any exit point.
+                _last_pm_level_tail = pm_level.strip() or pm_edge
+                _last_dev_level_tail = dev_level.strip() or dev_edge
+
+                response = self._handle_startup(pm_edge, dev_edge)
                 logger.info(
                     "container: startup cycle=%d pm_idle=%s dev_idle=%s response=%r",
                     cycle,
-                    pm_idle[0],
-                    dev_idle[0],
+                    pm_saw_idle,
+                    dev_saw_idle,
                     response,
                 )
+
+                # --- Plateau fingerprint (keyed on response ALONE) ---
+                # Accumulate consecutive identical response values.
+                # Reset on any change. This captures:
+                #   (a) oscillating event: same non-None response every cycle
+                #   (b) silent-start: see explicit sentinel below
+                if response == _plateau_last_response:
+                    _plateau_count += 1
+                else:
+                    _plateau_last_response = response
+                    _plateau_count = 1
+
+                # Explicit silent-start sentinel: response is None but neither
+                # PTY has reached idle -- the startup loop is spinning with no
+                # progress AND no recognized event.
+                _silent_start = response is None and not pm_saw_idle and not dev_saw_idle
+
+                if _plateau_count >= STARTUP_PLATEAU_CYCLES and _silent_start:
+                    # Confirmed plateau: N consecutive identical response=None
+                    # cycles with no idle. Bail early.
+                    frame = _capture_startup_frame(
+                        _last_pm_level_tail, _last_dev_level_tail, "plateau", _plateau_count
+                    )
+                    logger.error(
+                        "[granite-container] startup plateau detected: "
+                        "cycle=%d plateau_cycles=%d bailing early",
+                        cycle,
+                        _plateau_count,
+                    )
+                    result.exit_reason = "startup_unresolved"
+                    result.exit_message = (
+                        f"startup plateau: {_plateau_count} consecutive identical "
+                        f"no-progress cycles (response=None, neither PTY idle); "
+                        f"bailed at cycle {cycle}"
+                    )
+                    result.startup_failure_kind = "plateau"
+                    result.startup_diagnostic_frame = frame
+                    result.startup_plateau_cycles = _plateau_count
+                    return result
+
                 if response is None:
-                    # No startup event in this window — break if
+                    # No startup event in this window -- break if
                     # both PTYs are idle, otherwise keep watching.
-                    if pm_idle[0] and dev_idle[0]:
+                    if pm_saw_idle and dev_saw_idle:
                         logger.info("container: startup both idle, breaking")
                         startup_settled = True
                         break
@@ -867,11 +1001,17 @@ class Container:
                 result.startup_events.append({"cycle": cycle, "response": response})
                 cycle += 1
             if not startup_settled:
+                # Ceiling exit: capture the frame for the diagnostic artifact.
+                frame = _capture_startup_frame(
+                    _last_pm_level_tail, _last_dev_level_tail, "ceiling", cycle
+                )
                 result.exit_reason = "startup_unresolved"
                 result.exit_message = (
                     f"startup did not settle within {STARTUP_HARD_CEILING_S:.0f}s "
                     f"hard ceiling ({cycle} cycles)"
                 )
+                result.startup_failure_kind = "ceiling"
+                result.startup_diagnostic_frame = frame
                 return result
 
             # Prime-turn relay (issue #1644): after both primes complete,
