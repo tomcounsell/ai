@@ -56,6 +56,11 @@
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_design_system_sync.py",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/no_plan_commits_on_main.py",
+            "timeout": 5
           }
         ]
       },

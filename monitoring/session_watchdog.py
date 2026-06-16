@@ -85,6 +85,13 @@ STALL_THRESHOLD_RUNNING = 2700  # 45 minutes
 # for sessions without activity data.
 STALL_THRESHOLD_ACTIVE = int(os.environ.get("STALL_TIMEOUT_SECONDS", 600))  # 10 min default
 
+# === PM session extended threshold for long-running stages (issue #1394) ===
+# PM sessions running TEST or DEPLOY can block for >10 minutes while pytest
+# suites run or Render auto-deploys settle. Use 1-hour threshold for these
+# stages so the watchdog does not kill a healthy PM mid-pipeline.
+STALL_THRESHOLD_PM_LONG_STAGE = 3600  # 1 hour
+PM_LONG_STAGES = frozenset({"TEST", "DEPLOY"})
+
 STALL_THRESHOLDS = {
     "pending": STALL_THRESHOLD_PENDING,
     "running": STALL_THRESHOLD_RUNNING,
@@ -315,6 +322,13 @@ def check_stalled_sessions() -> list[dict]:
         threshold = STALL_THRESHOLDS[status_val]
 
         for session in sessions:
+            # Per-stage override for active PM sessions in long-running stages
+            # (issue #1394): TEST and DEPLOY can legitimately block for >10 min
+            # while pytest suites run or Render auto-deploys settle.
+            if status_val == "active" and getattr(session, "is_pm", False):
+                stage = getattr(session, "current_stage", None)
+                if stage in PM_LONG_STAGES:
+                    threshold = STALL_THRESHOLD_PM_LONG_STAGE
             try:
                 session_id = session.session_id or session.agent_session_id or "unknown"
 

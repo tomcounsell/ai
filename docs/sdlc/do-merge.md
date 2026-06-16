@@ -15,7 +15,32 @@ These run in the worktree, not main.
 
 ## Plan Migration
 
-After merge, move the plan from `docs/plans/{slug}.md` to `docs/plans/completed/{slug}.md` on `main`. The plan stays on `main` (not the branch) throughout the lifecycle — migrate it on `main` post-merge.
+After merge, archive the plan via `migrate_completed_plan.py`. Migration is a
+**hard gate**: only remove the plan file if migration succeeds (exit 0). If
+migration fails, leave the plan in place as a visible warning — do NOT silently
+delete it.
+
+```bash
+BRANCH=$(gh pr view $PR_NUMBER --json headRefName -q .headRefName 2>/dev/null || echo "")
+SLUG=$(echo "$BRANCH" | sed 's|^session/||')
+PLAN_PATH="docs/plans/${SLUG}.md"
+
+# Migrate plan to completed/ — gate deletion on success
+if python scripts/migrate_completed_plan.py "$PLAN_PATH"; then
+  echo "Plan migrated: $PLAN_PATH"
+else
+  echo "ERROR: Plan migration failed for $PLAN_PATH — file left in place for manual review"
+  echo "Do NOT delete the plan manually until migration root-cause is understood."
+  exit 1
+fi
+```
+
+**Never use unconditional `rm -f "$PLAN_PATH"`** after calling
+`migrate_completed_plan.py`. Migration itself moves the file; a second
+unconditional deletion would silently destroy the plan if migration failed.
+
+Plans are now committed on `session/{slug}` (not `main`), so migration reads
+from the worktree rather than `origin/main`.
 
 ## Post-Merge Memory Extraction
 
