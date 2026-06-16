@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-16
 tracking: https://github.com/tomcounsell/ai/issues/1708
 last_comment_id:
+revision_applied: true
 ---
 
 # Granite Canned Fallback (pm_no_user_message) + Eng-vs-Teammate Persona on Catchup Re-ingest
@@ -146,8 +147,12 @@ tailer" would not touch the real defect.
 - **Coupling:** Finding 2 fix increases catchup/reconciler coupling to `bridge.routing.resolve_persona`
   — but this is the same dependency the live handler already has, so it removes an asymmetry
   rather than adding net coupling.
-- **Data ownership:** unchanged. `session_type` was always meant to be set at enqueue; the
-  scanner paths were silently defaulting it.
+- **Data ownership:** `session_type` is set at enqueue for the catchup and reconciler scanner
+  paths fixed here (matching the live handler). The residual `SessionType.ENG` fallback at
+  `agent_session_queue.py:1083` is a **separate, deliberate default** whose disposition is Open
+  Question 2 — this plan keeps it (so intentional eng callers are unaffected) but adds a greppable
+  WARNING when a caller omits both `session_type` and `project_config`, so the default's silence is
+  no longer what hides a dropped persona signal.
 - **Reversibility:** all changes are small, local, and trivially revertible.
 
 ## Appetite
@@ -174,25 +179,36 @@ modules and their tests.
 
 ### Key Elements
 
-- **Diagnostic disambiguation (Finding 1, lead change):** Split the single
-  `"PM transcript read empty"` log into three observable branches — *path is None*,
-  *file missing on disk*, *file present but no new text-bearing entry* — emitting a WARNING
-  for the first two. This is the highest-value change: it identifies which branch the live
-  cyndra session actually hits without guessing.
-- **`_needs_session_spawn` predicate fix (Finding 1, latent bug 1):** Add
+- **Diagnostic disambiguation (Finding 1, lead change, lands FIRST):** Split the single
+  `"PM transcript read empty"` log into three stably-named, greppable branches —
+  `transcript read: path-None`, `transcript read: file-missing`, `transcript read: no-new-entry` —
+  each WARNING also logging the resolved attempted path, `spec.pm_session_id`/`dev_session_id`
+  presence, and `pty._session_id`. This is the highest-value change: it identifies which branch the
+  live cyndra session actually hits without guessing, and distinguishes a spawn-threading gap from a
+  slug mismatch. The two path fixes are gated on what this reveals (see Technical Approach).
+- **`_needs_session_spawn` predicate fix (Finding 1, latent bug 1, gated on diagnostic):** Add
   `or spec.pm_session_id or spec.dev_session_id` so a spec carrying session-ids always forces
   a per-session spawn — even if some future session shape has an empty env. Closes the
-  prewarmed-pair-reuse-without-session-id path that yields a None/auto-UUID transcript.
-- **Symlink-resolved slug (Finding 1, latent bug 2):** Resolve `cwd` via `os.path.realpath`
-  before `.replace("/","-")` in `_transcript_path` (and the matching computation in
-  `bridge_adapter.py`) so the slug matches claude's symlink-resolved slug for any
-  symlink-crossing working directory.
-- **Catchup persona resolution (Finding 2):** In `bridge/catchup.py`, resolve the chat's
-  persona via `bridge.routing.resolve_persona(project, chat_title)`, map TEAMMATE →
-  `SessionType.TEAMMATE` else `SessionType.ENG`, and pass `session_type=` + `project_config=project`
-  to `enqueue_agent_session_fn` — mirroring `telegram_bridge.py:2205-2209, 2394-2395`.
-- **Reconciler persona resolution (Finding 2):** Identical fix in `bridge/reconciler.py`
-  (`:211-222`) — it shares the omission.
+  prewarmed-pair-reuse-without-session-id path that yields a None/auto-UUID transcript. Update the
+  docstring to state the full per-session-identity invariant. (Production no-op today — masked
+  because every real bridge spec already sets `env`/`pm_model`; ships as correct-regardless
+  hardening.)
+- **Symlink-resolved slug (Finding 1, latent bug 2, gated on diagnostic):** Apply
+  `os.path.realpath(cwd)` (only when `cwd` is truthy) before `.replace("/","-")` in
+  `_transcript_path` (after its `if not session_id: return None` guard) and the matching
+  computation in `bridge_adapter.py`, so the slug matches claude's symlink-resolved slug for any
+  symlink-crossing working directory. Two separate one-line inserts — NOT a merge of the two
+  functions (they have divergent None-handling). (Production no-op today — no current project
+  crosses a symlink; ships as correct-regardless hardening.)
+- **Persona resolution (Finding 2) — shared helper:** Add `persona_to_session_type` to
+  `bridge/routing.py`; call it from the live handler, `bridge/catchup.py`, and
+  `bridge/reconciler.py`. Each scanner resolves `resolve_persona(project, chat_title)` →
+  `persona_to_session_type(...)` and passes `session_type=` + `project_config=project` to
+  `enqueue_agent_session_fn`, mirroring the live path. Wrapped in a narrow per-message try/except
+  with a greppable WARNING on failure.
+- **Greppable WARNING on silent ENG default (Finding 2, defense-in-depth):** at
+  `agent_session_queue.py:1083`, warn (greppable) when both `session_type` and `project_config` are
+  omitted; keep the default behavior.
 
 ### Flow
 
@@ -206,24 +222,65 @@ When a path is still None/missing → **WARNING names the exact branch**.
 
 ### Technical Approach
 
-- **Diagnostic first.** Land the log split (`container.py:922-929` and the prime-turn /
-  wrap-up read sites) early so a re-run of the live cyndra repro confirms the failing branch.
-  The two latent path fixes are correct regardless, but the diagnostic tells us whether
-  path-None (predicate fix) or wrong-slug (realpath fix) is the actual live trigger — and
-  whether anything else (a third branch) is at play.
+- **Diagnostic FIRST, fixes gated on what it reveals.** This is the critical sequencing point.
+  Recon eliminated all three named suspects as the *live* cause and could not pin the live cyndra
+  symptom to a specific branch — so the two path fixes are **admitted production no-ops today**
+  (`_needs_session_spawn` is masked because every real bridge spec already sets `env`/`pm_model`
+  so the predicate already returns True; the realpath slug changes nothing because no current
+  project crosses a symlink). Therefore:
+  1. **Land the log split first** (`container.py:922-929`, the prime-turn read at `:844-852`, and
+     the wrap-up-guard read at `:1239-1247`), splitting `"PM transcript read empty"` into three
+     **stably-named, greppable** branches:
+     - `[granite-container] transcript read: path-None` — `pm_transcript` is None.
+     - `[granite-container] transcript read: file-missing` — path is set but the file does not
+       exist on disk (`os.path.exists()` is False).
+     - `[granite-container] transcript read: no-new-entry` — file exists but
+       `last_assistant_text(...)` returns empty (valid file, no new text-bearing entry past
+       baseline).
+     Each WARNING also logs the **fully-resolved attempted path string**, `spec.pm_session_id`/
+     `spec.dev_session_id` presence, and `getattr(pty, "_session_id", None)` so an on-call can tell
+     a spawn-threading gap (spec had IDs, pty did not) apart from a slug mismatch.
+  2. **Observe the live firing branch** on a real failing cyndra run (re-run the repro, or read the
+     next live cyndra container log) BEFORE declaring Finding 1 closed.
+  3. **Fix only the branch that fires.** The predicate fix targets path-None; the realpath fix
+     targets file-missing/wrong-slug. The `no-new-entry` branch has **no fix in this plan** — it is
+     a distinct failure mode (the PM genuinely wrote nothing new past baseline) whose explicit exit
+     condition is: *the wrap-up guard correctly ships `OPERATOR_TERMINAL_MESSAGE` only here*; if the
+     live branch turns out to be `no-new-entry`, that is a **separate follow-up issue** with the
+     now-disambiguated evidence, not a fix smuggled into this PR.
+  Both latent path fixes still ship in this PR (they are correct-regardless hardening), but
+  "Finding 1 closed" is **fail-closed**: it requires the diagnostic firing on a real failing run
+  AND one fix demonstrably converting that run to a delivered PM reply (see Success Criteria).
 - **`_needs_session_spawn`:** extend the existing `bool(...)` expression with the two session-id
-  terms; no signature change. Mirrors the conservative "any per-session requirement triggers
-  spawn-on-acquire" intent already documented in its docstring.
-- **Realpath slug:** centralize the slug computation so `_transcript_path` and the
-  `bridge_adapter.py` equivalent cannot drift; apply `os.path.realpath(cwd)` before slugging.
-- **Persona resolution in scanners:** import and call the same `resolve_persona` the live
-  handler uses; do not duplicate the TEAMMATE→session_type mapping logic divergently — extract
-  a tiny shared helper if the mapping appears in three places (live + catchup + reconciler),
-  otherwise inline the two-line map to match the live handler exactly.
-- **Defense-in-depth (optional, gate on review):** the silent `SessionType.ENG` default at
-  `agent_session_queue.py:1083` is what made the omission invisible. The primary fix is at the
-  two call sites; do not change the default unless review explicitly wants it (it would alter
-  behavior for every other caller that intentionally relies on the eng default).
+  terms; no signature change. Update the docstring to state the **full invariant** — "returns True
+  if the spec carries ANY per-session identity: env, model, cwd-override, OR session-id" — rather
+  than a term-by-term list, since term-by-term editing is the churn that produced the latent bug.
+- **Realpath slug:** apply `cwd = os.path.realpath(cwd)` **only when `cwd` is truthy** (raw
+  `os.path.realpath("")` returns the process CWD, which would corrupt the slug), and keep
+  `_transcript_path`'s `if not session_id: return None` guard **BEFORE** the realpath/slug so the
+  path-None diagnostic branch is never regressed into a wrong path. Do **not** merge
+  `_transcript_path` and the `bridge_adapter.py` slug into one function — they have divergent
+  None-handling (`_transcript_path` returns None for falsy session_id; `bridge_adapter.py` has no
+  None branch). The fix is a one-line `realpath` insert at each site, not a refactor; duplicating
+  the single line is lower-risk than reconciling two signatures.
+- **Persona resolution in scanners — EXTRACT a shared helper.** The TEAMMATE→`session_type`
+  mapping currently lives inline at the live handler (`telegram_bridge.py:2206-2210`). Adding
+  catchup and reconciler makes **three** sites — the live site counts toward the threshold, so
+  the "extract if it appears in three places" rule fires. Extract a single helper
+  `persona_to_session_type(persona: PersonaType) -> SessionType` in `bridge/routing.py` (next to
+  `resolve_persona`), returning `SessionType.TEAMMATE` for `PersonaType.TEAMMATE` else
+  `SessionType.ENG`. Refactor the live handler to call it, and call it from catchup + reconciler.
+  This removes the asymmetry the bug exploited rather than duplicating the two-liner twice more.
+  (The live handler's extra `logger.info` for the ENGINEER-config case stays at the call site —
+  the helper returns only the type.)
+- **Defense-in-depth — greppable WARNING on the silent ENG default.** The silent
+  `SessionType.ENG` default at `agent_session_queue.py:1083` is what made the omission invisible.
+  Keep the default (changing it would alter behavior for every intentional eng caller), but emit a
+  greppable `logger.warning("[enqueue] session_type omitted AND project_config omitted; "
+  "defaulting to eng — caller may have dropped persona resolution")` when a caller omits **both**
+  `session_type` and `project_config`. This surfaces future omissions without changing behavior
+  for intentional eng callers. (Disposition of changing the default itself remains Open Question 2,
+  but the WARNING is non-optional and lands in this PR.)
 
 ## Failure Path Test Strategy
 
@@ -232,10 +289,14 @@ When a path is still None/missing → **WARNING names the exact branch**.
   broad `except Exception`). The diagnostic change is in `container.py` at the read site, NOT
   inside the tailer — assert the new WARNING fires (path-None / file-missing) via caplog rather
   than letting it be swallowed.
-- [ ] Catchup/reconciler: the `enqueue_agent_session_fn` call is inside the scan loop. Assert
-  that a persona-resolution failure (e.g. `resolve_persona` raising) does not abort the whole
-  scan — wrap defensively and fall back to the existing eng default with a logged warning, and
-  test that fallback path.
+- [ ] Catchup/reconciler: the `enqueue_agent_session_fn` call is inside the scan loop. Wrap the
+  persona resolution in a **narrow per-message try/except** (NOT the outer scan-level
+  `except Exception → logger.error("Error scanning")`, which aborts the whole chat scan) so a single
+  bad message degrades only itself. On failure, emit a stable greppable WARNING —
+  `logger.warning("[catchup] persona resolution failed for chat %s (%s); defaulting to eng: %s", chat_id, chat_title, e)`
+  (and the reconciler equivalent) — then fall back to the eng default. This is the exact
+  silent-degradation pattern Prior Art #827 warns about; the WARNING makes the degradation visible
+  instead of silent. Test that the WARNING fires and the scan continues.
 
 ### Empty/Invalid Input Handling
 - [ ] `_transcript_path(cwd, None)` already returns None — add a test asserting the new
@@ -262,11 +323,14 @@ When a path is still None/missing → **WARNING names the exact branch**.
 - [ ] `tests/unit/granite_container/test_transcript_tailer.py` — UPDATE (if needed): add a
   symlink-crossing cwd case asserting `_transcript_path` resolves to the realpath slug. (May
   live in `test_container.py` if that is where `_transcript_path` is exercised.)
-- [ ] `tests/unit/test_catchup_revival.py` and `tests/unit/test_per_chat_catchup_cutoff.py` —
-  UPDATE: assert a teammate-configured chat enqueues with `session_type=SessionType.TEAMMATE`
-  and `project_config` set; assert an eng/default chat still enqueues eng.
-- [ ] `tests/unit/test_reconciler.py` (and `tests/integration/test_reconciler.py` if present) —
+- [ ] `tests/integration/test_catchup_revival.py` and
+  `tests/integration/test_per_chat_catchup_cutoff.py` — UPDATE: assert a teammate-configured chat
+  enqueues with `session_type=SessionType.TEAMMATE` and `project_config` set; assert an eng/default
+  chat still enqueues eng. (These live in `tests/integration/`, NOT `tests/unit/` — verified.)
+- [ ] `tests/unit/test_reconciler.py` and `tests/integration/test_reconciler.py` (both exist) —
   UPDATE: same teammate-vs-eng enqueue assertions for the reconciler path.
+- [ ] `bridge/routing.py` test coverage (`tests/unit/test_routing.py` if present, else add) —
+  UPDATE/ADD: assert `persona_to_session_type` maps TEAMMATE→TEAMMATE and ENGINEER/None→ENG.
 - [ ] `tests/unit/test_agent_session_scheduler_persona.py` / `test_persona_loading.py` —
   REVIEW (likely no change): confirm they don't assert the old eng-default behavior for scanner
   paths; UPDATE only if they encode the bug.
@@ -275,15 +339,21 @@ When a path is still None/missing → **WARNING names the exact branch**.
 
 - **Do NOT rewrite the tailer or baseline counting.** Recon proved both are correct against
   2.1.178. Touching them re-introduces risk for zero benefit.
-- **Do NOT change the `OPERATOR_TERMINAL_MESSAGE` text or the wrap-up guard's trigger
-  condition.** The fallback is correct *as a last resort*; the bug is that the loop reaches it
-  spuriously. Fix the cause, not the fallback.
+- **Do NOT change the wrap-up guard's TRIGGER condition.** The fallback is correct *as a last
+  resort*; the bug is that the loop reaches it spuriously. Fix the cause, not the trigger.
+  *Permitted (low-risk, orthogonal):* reword the `OPERATOR_TERMINAL_MESSAGE` **string literal**
+  (`container.py:217`) so it no longer falsely claims completion (e.g. "I wasn't able to produce a
+  response to this — please rephrase or follow up.") — the misleading text is part of the user
+  complaint. The trigger condition stays untouched.
 - **Do NOT broaden the `SessionType.ENG` default change** at `agent_session_queue.py:1083`
-  beyond what review approves — it affects every direct caller.
+  beyond adding the greppable WARNING — changing the default itself (Open Question 2) affects every
+  direct caller and is out of scope unless review approves.
 - **Do NOT chase a hypothetical claude 2.1.178 format change.** Confirmed unchanged. Resist
   re-investigating the schema.
-- **Do NOT build a generic "persona resolution service" abstraction.** Mirror the live
-  handler's two-line mapping; extract a helper only if the exact mapping triplicates.
+- **Do NOT build a generic "persona resolution service" abstraction.** The shared helper is a
+  single `persona_to_session_type(persona) -> SessionType` mapping function next to
+  `resolve_persona` — nothing more. (The mapping triplicates across live + catchup + reconciler, so
+  extraction is the resolved decision, not duplication.)
 
 ## Risks
 
@@ -342,7 +412,9 @@ catchup/reconciler/granite test suites (see Test Impact).
 
 ### Feature Documentation
 - [ ] Update `docs/features/granite-pty-production.md` — document the three-way transcript-read
-  diagnostic, the `_needs_session_spawn` session-id requirement, and the realpath-slug rule.
+  diagnostic (including that the WARNINGs land in `logs/worker.log` and the three greppable
+  substrings `transcript read: path-None` / `file-missing` / `no-new-entry`), the
+  `_needs_session_spawn` session-id requirement, and the realpath-slug rule.
 - [ ] Update `docs/features/eng-session-architecture.md` (or `teammate-session-permissions.md`)
   — note that catchup and reconciler now resolve the chat's configured persona, matching the
   live path; a teammate chat runs teammate on every ingest path.
@@ -357,20 +429,40 @@ catchup/reconciler/granite test suites (see Test Impact).
 
 ## Success Criteria
 
-- [ ] A re-run of the live cyndra repro (or the next live cyndra container log) shows the
-  diagnostic naming the exact empty-read branch (path-None / file-missing / no-new-entry),
-  no longer the conflated generic message.
+**Finding 1 — FAIL-CLOSED. Finding 1 is NOT "closed" until BOTH of these hold:**
+- [ ] (1a) The diagnostic fires on a **real failing run** (re-run the live cyndra repro, or the
+  next live cyndra container log) and names the exact empty-read branch — `path-None` /
+  `file-missing` / `no-new-entry` — no longer the conflated generic message. The WARNING line is
+  greppable in the **worker log** (`logs/worker.log`, where the granite container's
+  `logging.getLogger(__name__)` output lands) by the substrings
+  `transcript read: path-None` / `transcript read: file-missing` / `transcript read: no-new-entry`.
+- [ ] (1b) The fix targeting the observed branch **demonstrably converts that run to a delivered
+  PM reply** — the `OPERATOR_TERMINAL_MESSAGE` canned fallback is NOT shipped for it. If the
+  observed branch is `no-new-entry` (no fix in this plan), Finding 1 is **escalated to a follow-up
+  issue** with the disambiguated evidence rather than marked closed; do not declare it fixed.
+
+**Finding 1 — supporting (correct-regardless hardening, verified by unit tests):**
+- [ ] `_needs_session_spawn` returns True for a spec carrying session-ids with empty env.
+- [ ] `_transcript_path` produces a realpath-resolved slug for a symlink-crossing cwd, AND still
+  returns None when `session_id` is falsy (None-guard precedes realpath).
+- [ ] The three diagnostic branches are unit-tested via caplog (path-None / file-missing /
+  no-new-entry each log their distinct substring).
+
+**Finding 2:**
 - [ ] A catchup-re-ingested message for a `teammate`-configured chat resolves persona
   `teammate` (not `engineer`); a default chat still resolves `eng`.
 - [ ] The reconciler path resolves persona identically.
-- [ ] `_needs_session_spawn` returns True for a spec carrying session-ids with empty env.
-- [ ] `_transcript_path` produces a realpath-resolved slug for a symlink-crossing cwd.
-- [ ] With a correct transcript path, a PM that produced a reply delivers the PM's text — the
-  `OPERATOR_TERMINAL_MESSAGE` canned fallback is NOT shipped.
+- [ ] `persona_to_session_type` exists in `bridge/routing.py` and is called from all three sites
+  (live handler + catchup + reconciler).
+- [ ] `enqueue_agent_session` emits a greppable WARNING when both `session_type` and
+  `project_config` are omitted (unit-tested via caplog).
+- [ ] grep confirms `bridge/catchup.py` and `bridge/reconciler.py` reference
+  `persona_to_session_type` (or `resolve_persona`) and pass `session_type=` + `project_config=` to
+  `enqueue_agent_session`.
+
+**Both:**
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] grep confirms `bridge/catchup.py` and `bridge/reconciler.py` reference `resolve_persona`
-  and pass `session_type=` + `project_config=` to `enqueue_agent_session`.
 
 ## Team Orchestration
 
@@ -429,29 +521,41 @@ debugging-specialist available if the live diagnostic surfaces a third branch.)
 - **Agent Type**: builder
 - **Parallel**: true
 - Split the `"PM transcript read empty"` log at the steady-state read (`container.py:922-929`),
-  the prime-turn read, and the wrap-up-guard read into path-None / file-missing / no-new-entry
-  branches; emit WARNING for the first two.
+  the prime-turn read (`:844-852`), and the wrap-up-guard read (`:1239-1247`) into three
+  stably-named branches with greppable substrings `transcript read: path-None` /
+  `transcript read: file-missing` / `transcript read: no-new-entry`; each WARNING logs the resolved
+  attempted path, `spec.pm_session_id`/`dev_session_id` presence, and `pty._session_id`.
 - Extend `_needs_session_spawn` (`pty_pool.py:389-405`) with
-  `or spec.pm_session_id or spec.dev_session_id`.
-- Apply `os.path.realpath(cwd)` before `.replace("/","-")` in `_transcript_path`
-  (`container.py:284-297`) and the matching slug computation in `bridge_adapter.py:92-100`.
-- Add/extend unit tests for all three.
+  `or spec.pm_session_id or spec.dev_session_id`; update its docstring to the full invariant.
+- Apply `os.path.realpath(cwd)` (only when `cwd` truthy) before `.replace("/","-")` in
+  `_transcript_path` (`container.py:284-297`, AFTER the `if not session_id: return None` guard) and
+  the matching slug computation in `bridge_adapter.py:92-100`. Do not merge the two functions.
+- Add/extend unit tests: three diagnostic branches via caplog; predicate True for session-id +
+  empty env; realpath slug for symlink-crossing cwd; None-guard still precedes realpath.
 
 ### 2. Finding 2 persona resolution in scanners
 - **Task ID**: build-persona-scanners
 - **Depends On**: none
-- **Validates**: `tests/unit/test_catchup_revival.py`, `tests/unit/test_per_chat_catchup_cutoff.py`,
-  `tests/unit/test_reconciler.py`
+- **Validates**: `tests/integration/test_catchup_revival.py`,
+  `tests/integration/test_per_chat_catchup_cutoff.py`, `tests/unit/test_reconciler.py`,
+  `tests/integration/test_reconciler.py`
 - **Informed By**: recon (catchup + reconciler omit session_type/project_config; live path at
   telegram_bridge.py:2205-2209,2394-2395 is the template)
 - **Assigned To**: persona-scanner-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `bridge/catchup.py:235-246` and `bridge/reconciler.py:211-222`: resolve
-  `resolve_persona(project, chat_title)`, map TEAMMATE→`SessionType.TEAMMATE` else
-  `SessionType.ENG`, and pass `session_type=` + `project_config=project`. Wrap in a defensive
-  fallback to the eng default on resolution failure (logged).
-- Add unit tests asserting teammate-vs-eng enqueue for both paths.
+- Add `persona_to_session_type(persona) -> SessionType` to `bridge/routing.py`; refactor the live
+  handler (`telegram_bridge.py:2206-2210`) to call it (keeping its ENGINEER-config `logger.info` at
+  the call site).
+- In `bridge/catchup.py:235-246` and `bridge/reconciler.py:211-222`: call
+  `resolve_persona(project, chat_title)` → `persona_to_session_type(...)`, and pass
+  `session_type=` + `project_config=project`. Wrap the resolution in a **narrow per-message
+  try/except** (not the outer scan-level catch) that falls back to the eng default and emits a
+  greppable `logger.warning("[catchup] persona resolution failed ...")` / reconciler equivalent.
+- Add a greppable `logger.warning` at `agent_session_queue.py:1083` when both `session_type` and
+  `project_config` are omitted (keep the eng default behavior).
+- Add tests: teammate-vs-eng enqueue for both scanner paths; `persona_to_session_type` mapping;
+  per-message try/except WARNING fires and scan continues; enqueue-default WARNING fires via caplog.
 
 ### 3. Validate Finding 1
 - **Task ID**: validate-granite-transcript
@@ -494,19 +598,34 @@ debugging-specialist available if the live diagnostic surfaces a third branch.)
 | Check | Command | Expected |
 |-------|---------|----------|
 | Granite container tests | `pytest tests/unit/granite_container/ -q` | exit code 0 |
-| Catchup + reconciler tests | `pytest tests/unit/test_catchup_revival.py tests/unit/test_per_chat_catchup_cutoff.py tests/unit/test_reconciler.py -q` | exit code 0 |
+| Catchup + reconciler tests | `pytest tests/integration/test_catchup_revival.py tests/integration/test_per_chat_catchup_cutoff.py tests/unit/test_reconciler.py tests/integration/test_reconciler.py -q` | exit code 0 |
 | Full unit suite | `pytest tests/unit/ -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Catchup resolves persona | `grep -n "resolve_persona" bridge/catchup.py` | output contains resolve_persona |
-| Reconciler resolves persona | `grep -n "resolve_persona" bridge/reconciler.py` | output contains resolve_persona |
+| Catchup resolves persona | `grep -n "persona_to_session_type\|resolve_persona" bridge/catchup.py` | output contains a persona resolver |
+| Reconciler resolves persona | `grep -n "persona_to_session_type\|resolve_persona" bridge/reconciler.py` | output contains a persona resolver |
+| Shared helper exists | `grep -n "def persona_to_session_type" bridge/routing.py` | output contains the helper def |
 | Predicate covers session-ids | `grep -n "pm_session_id" agent/granite_container/pty_pool.py` | output contains pm_session_id |
+| Diagnostic branches named | `grep -n "transcript read: path-None\|transcript read: file-missing\|transcript read: no-new-entry" agent/granite_container/container.py` | all three substrings present |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Critique 1 (war room, 7 critics): **NEEDS REVISION** — 2 blockers + 1 structural blocker. All addressed in this revision pass.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Consistency Auditor | Plan contradicted itself on persona-helper extraction (three-places rule vs "inline") | Technical Approach + Solution + Rabbit Holes + OQ3 | Resolved to EXTRACT `persona_to_session_type` in `bridge/routing.py`; live site counts toward the three-place threshold. |
+| BLOCKER | Skeptic/Simplifier/User/Adversary | Two path fixes are admitted production no-ops while live cause is unconfirmed; synthetic criteria presented as proof of fix | Technical Approach (diagnostic-first sequencing) + Success Criteria (fail-closed 1a/1b) + Risk 1 | Diagnostic lands first; "Finding 1 closed" requires the diagnostic firing on a real run AND a fix converting it to a delivered reply; `no-new-entry` branch has explicit follow-up exit condition. |
+| BLOCKER (structural) | Structural check | Test files cited as `tests/unit/` are actually `tests/integration/` | Test Impact + Task 1/2 Validates + Verification table | Corrected `test_catchup_revival.py` and `test_per_chat_catchup_cutoff.py` to `tests/integration/`; both `test_reconciler.py` paths listed. |
+| CONCERN | Operator | Diagnostic WARNING had no grep-able destination | Success Criteria 1a + Documentation | Named `logs/worker.log` + three stable greppable substrings. |
+| CONCERN | Operator/Archaeologist | Silent teammate→eng degradation in scanner fallback (#827 pattern) | Failure Path Test Strategy + Task 2 | Narrow per-message try/except with greppable WARNING; not the outer scan-level catch; unit-tested. |
+| CONCERN | Archaeologist | Silent ENG default (root mechanism) deferred | Solution + Architectural Impact + Task 2 | Greppable WARNING added at `agent_session_queue.py:1083` when both kwargs omitted; default kept (OQ2). |
+| CONCERN | Archaeologist | `_needs_session_spawn` term churn with no invariant | Technical Approach + Task 1 | Docstring updated to state the full per-session-identity invariant. |
+| CONCERN | Adversary | realpath slug asymmetric / `realpath("")` returns CWD | Technical Approach + Solution + Task 1 | `realpath` only when cwd truthy; `if not session_id: return None` precedes realpath. |
+| CONCERN | Simplifier | "Centralize the slug computation" smuggled a refactor | Technical Approach + Rabbit Holes | Dropped the merge; two one-line realpath inserts, functions stay separate. |
+| CONCERN | Consistency Auditor | Architectural Impact framing contradicted keep-the-default decision | Architectural Impact | Reworded data-ownership sentence per the auditor's suggested phrasing. |
+| CONCERN | User | Known-misleading fallback text left in place | Rabbit Holes | Permitted rewording the `OPERATOR_TERMINAL_MESSAGE` string literal (truthful) while keeping the trigger condition untouched. |
+| CONCERN | Skeptic | Transcript-naming contract version-fragile | Technical Approach + Task 1 | All three read sites log the fully-resolved attempted path + IDs, not just category labels. |
 
 ---
 
@@ -521,6 +640,7 @@ debugging-specialist available if the live diagnostic surfaces a third branch.)
 2. **`SessionType.ENG` default:** keep the unsafe default at `agent_session_queue.py:1083`
    (fix only the two call sites, as planned) or harden the default to require an explicit
    `session_type` (affects every direct caller)? Plan defaults to the former.
-3. **Shared persona-mapping helper:** inline the TEAMMATE→session_type two-liner at each of the
-   three sites (live + catchup + reconciler), or extract a single shared helper? Plan inlines to
-   match the live handler unless review prefers extraction.
+3. **Shared persona-mapping helper:** RESOLVED — the mapping triplicates (live + catchup +
+   reconciler), so the plan extracts a single `persona_to_session_type` helper in
+   `bridge/routing.py` and calls it from all three sites. (No longer an open question; recorded here
+   for traceability.)
