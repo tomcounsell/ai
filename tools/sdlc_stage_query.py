@@ -467,6 +467,16 @@ def query_enriched(
     except Exception:
         stages = {k: v for k, v in raw_states.items() if not k.startswith("_")}
 
+    # Thread the router-helper underscore keys into the stages dict. The router's
+    # staleness rules (``_critique_verdict_is_stale`` / ``_latest_dispatch_at`` →
+    # row 2b/8b) read ``_verdicts`` and ``_sdlc_dispatches`` directly off the
+    # ``stage_states`` arg. Without them here, those rules are structurally inert
+    # in the CLI path: a revised plan with a stale NEEDS REVISION verdict can never
+    # route to re-critique and dead-ends on ``/do-plan`` until G4 oscillation fires.
+    for _router_key in ("_verdicts", "_sdlc_dispatches"):
+        if _router_key in raw_states:
+            stages[_router_key] = raw_states[_router_key]
+
     meta = _compute_meta(raw_states, session, issue_number)
     return {"stages": stages, "_meta": meta}
 

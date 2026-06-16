@@ -367,6 +367,49 @@ class TestEnrichedPayload:
         assert result["_meta"]["latest_review_verdict"] == "APPROVED"
         assert result["_meta"]["pr_number"] == 42
 
+    def test_stages_exposes_router_underscore_keys(self):
+        """Enriched ``stages`` must carry ``_verdicts``/``_sdlc_dispatches``.
+
+        The router's staleness rules (``_critique_verdict_is_stale`` →
+        row 2b, ``_latest_dispatch_at``) read these underscore keys directly
+        off the ``stage_states`` arg. If ``query_enriched`` filters them out,
+        a revised plan with a stale NEEDS REVISION verdict can never route to
+        re-critique and dead-ends on ``/do-plan`` until G4 oscillation fires.
+        """
+        from tools.sdlc_stage_query import query_enriched
+
+        dispatches = [{"skill": "/do-plan", "at": "2026-06-16T05:27:16+00:00"}]
+        verdicts = {
+            "CRITIQUE": {
+                "verdict": "NEEDS REVISION",
+                "recorded_at": "2026-06-16T05:16:03+00:00",
+                "artifact_hash": "sha256:abc",
+            }
+        }
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "CRITIQUE": "in_progress",
+                "_verdicts": verdicts,
+                "_sdlc_dispatches": dispatches,
+            }
+        )
+        mock_session.pr_number = None
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+                with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                    result = query_enriched(session_id="sid")
+
+        assert result["stages"]["_verdicts"] == verdicts
+        assert result["stages"]["_sdlc_dispatches"] == dispatches
+        # And the router's staleness helper must see the verdict as stale.
+        from agent.sdlc_router import _critique_verdict_is_stale
+
+        assert _critique_verdict_is_stale(result["stages"]) is True
+
     def test_pr_number_resolved_from_meta_key(self):
         """D4: _compute_meta resolves pr_number from the _pr_number meta key."""
         from tools.sdlc_stage_query import query_enriched
