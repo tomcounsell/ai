@@ -191,6 +191,7 @@ valor-email threads
 | `python -m tools.valor_session create --role eng --message "..."` | Create and enqueue a new Eng session. `project_key` determines the repo via `projects.json`; there is no working-directory override flag. Precedence: `--project-key` > `--parent` inheritance > cwd match (raises on no match). Warns to stderr if no worker is running. |
 | `python -m tools.valor_session resume --id <ID> --message "..."` | Resume a completed, killed, or failed session (hard-PATCH path; accepts session_id or agent_session_id) |
 | `python -m tools.valor_session release --pr <N>` | Clear retain_for_resume after PR merge/close |
+| `python -m tools.valor_session telemetry --id <ID>` | Show session telemetry timeline (turn events, token usage, status transitions) |
 | `python -m tools.memory_search search "query"` | Search memories by query |
 | `python -m tools.memory_search search "query" --category correction` | Search filtered by category |
 | `python -m tools.memory_search search "query" --tag redis` | Search filtered by tag |

@@ -337,6 +337,7 @@ class PipelineProgress(BaseModel):
     dev_pid: int | None = None
     pm_transcript_path: str | None = None
     dev_transcript_path: str | None = None
+    pty_slot: int | None = None
 
     # Output routing state (issue #1647)
     # True once a user-facing message has been routed for this session.
@@ -945,6 +946,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
         dev_pid=_safe_nullable_int(getattr(session, "dev_pid", None)),
         pm_transcript_path=_safe_str(getattr(session, "pm_transcript_path", None)),
         dev_transcript_path=_safe_str(getattr(session, "dev_transcript_path", None)),
+        pty_slot=_safe_nullable_int(getattr(session, "pty_slot", None)),
         user_facing_routed=bool(getattr(session, "user_facing_routed", False)),
     )
 

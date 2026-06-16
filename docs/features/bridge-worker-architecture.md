@@ -124,7 +124,7 @@ The worker's startup sequence is deterministic:
 | Step | Function | Purpose |
 |------|----------|---------|
 | 1 | `AgentSession.rebuild_indexes()` | Repair stale/corrupt Redis index entries |
-| 2 | `cleanup_corrupted_agent_sessions()` | Remove malformed session records and reap cross-process orphan `claude`/MCP processes; phantom-filter guarded and calls `repair_indexes()` to clear orphan `$IndexF` members (issues #1069, #1271). Returns `{"corrupted": int, "orphans": int}`. |
+| 2 | `cleanup_corrupted_agent_sessions()` | Remove malformed session records and reap cross-process orphan `claude`/MCP processes; phantom-filter guarded and calls `repair_indexes()` to clear orphan `$IndexF` members (issues #1069, #1271). Returns `{"corrupted": int, "orphans": int}`. Also prunes JSONL telemetry files under `logs/session_telemetry/` older than 14 days (see [Session Telemetry](session-telemetry.md)). |
 | 3 | `_recover_interrupted_agent_sessions_startup()` | Reset running sessions to pending (orphaned from prior process) |
 | 3.5 | `register_worker_pid()` | Write `worker:registered_pid:{hostname}:{pid}` (TTL 24h) so the cross-process reaper's skip-set excludes this worker (issue #1271 self-suicide guard) |
 | 4 | `_cleanup_orphaned_claude_processes()` | Backward-compat shim — delegates to `_reap_orphan_session_processes()`. The hourly `agent-session-cleanup` reflection now covers the same OS-table scan, so startup is no longer the only call site (issue #1271). |
@@ -183,6 +183,9 @@ complete_transcript(session_id, status=final_status)
     |   -- synchronous call: calls finalize_session() → _finalize_parent_sync() inline
     |   -- for a child session, transitions the parent: running →
     |      waiting_for_children → completed/failed once all children are terminal
+    |   -- telemetry: turn_end/token_usage events tapped in sdk_client.py; status_transition
+    |      event emitted by finalize_session(); JSONL written to logs/session_telemetry/
+    |      (see Session Telemetry)
 ```
 
 **Child-to-parent completion**: when a session has a `parent_agent_session_id`, `complete_transcript()` → `finalize_session()` synchronously calls `_finalize_parent_sync()` (in `models/session_lifecycle.py`). That function moves the parent into `waiting_for_children`, then — once every child is terminal — transitions it to `completed` (all children succeeded) or `failed` (any child failed). It is idempotent and a no-op if the parent is already terminal. If the completion-turn runner is in flight for the parent (the `pipeline_complete_pending:{parent_id}` Redis lock is held), `_finalize_parent_sync` defers the success-path transition to that runner so the final summary is delivered exactly once (issue #1058). There is no separate post-completion SDLC handler — eng, teammate, and granite sessions all finalize through this single path.

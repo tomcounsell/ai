@@ -872,5 +872,114 @@ class TestExitAnomalyAllowlist(unittest.TestCase):
         self.assertNotIn("exit_anomaly", types)
 
 
+class TestPtySlotPersistence(unittest.TestCase):
+    """Issue #1663 regression guard: pty_slot from acquire_pair must reach
+    AgentSession.pty_slot via _publish_exit_summary.
+
+    The BLOCKER was that the 3-tuple `(pm, dev, slot.idx)` from acquire_pair
+    was unpacked but slot.idx was never stamped onto ContainerResult before the
+    exit-summary path ran. These tests drive the REAL acquire_pair context
+    manager (not a mocked tuple) to ensure the regression cannot return silently.
+    """
+
+    def test_real_acquire_pair_stamps_pty_slot_on_session(self) -> None:
+        """End-to-end regression: pty_slot from the real acquire_pair context
+        manager reaches AgentSession.pty_slot after a successful run.
+
+        Uses the real PTYPool.acquire_pair (not a mocked tuple), so any future
+        regression that breaks the 3-tuple yield or the slot-index stamp will
+        fail here instead of silently passing with a mock that always returns
+        the right shape.
+        """
+        session = _SavingFakeSession()
+        pool = _make_initialized_pool(size=1)
+
+        # Peek at the slot index before the run so we can assert it reaches
+        # agent_session.pty_slot. The slot is still idle — we only read idx.
+        expected_slot_idx = pool._slots[0].idx  # always 0 for a 1-slot pool
+
+        result = _make_container_result(exit_reason="pm_complete")
+        adapter = BridgeAdapter(
+            agent_session=session,
+            project_key="test-project",
+            transport="telegram",
+            pool=pool,
+            resolve_callbacks=lambda p, t: (None, None),
+        )
+
+        with _patch_container_run_with_result(lambda: result):
+
+            async def _runner() -> str:
+                return await adapter.run("hello", "/tmp")
+
+            asyncio.run(_runner())
+
+        # The slot index must have been stamped onto the session.
+        self.assertEqual(
+            session.pty_slot,
+            expected_slot_idx,
+            f"expected pty_slot={expected_slot_idx!r}, got {session.pty_slot!r} — "
+            "slot index did not flow from acquire_pair through to AgentSession.pty_slot",
+        )
+        # The save call must have included pty_slot in update_fields.
+        pty_slot_saves = [c for c in session.saved_calls if "pty_slot" in c]
+        self.assertTrue(
+            pty_slot_saves,
+            f"pty_slot was never included in a save(update_fields=...) call; "
+            f"saved_calls: {session.saved_calls!r}",
+        )
+
+    def test_partial_data_warning_when_pm_pid_set_but_pty_slot_none(self) -> None:
+        """When result.pm_pid is set but result.pty_slot is None, the adapter
+        logs a warning containing '[bridge-adapter] pm_pid set but pty_slot is None'.
+
+        This guards the slot-capture regression path: if acquire_pair stops
+        yielding slot.idx (e.g. reverted to a 2-tuple), pm_pid will be populated
+        by Container but pty_slot will be absent — the warning fires so the
+        operator knows to look at the acquire_pair yield shape.
+        """
+        import logging
+
+        session = _SavingFakeSession()
+        pool = _make_initialized_pool(size=1)
+
+        # Build a result with pm_pid set but pty_slot explicitly None.
+        # This simulates a regression where slot.idx is no longer stamped.
+        result = _make_container_result(exit_reason="pm_complete")
+        result.pm_pid = 12345  # type: ignore[attr-defined]
+        result.pty_slot = None  # type: ignore[attr-defined]
+
+        adapter = BridgeAdapter(
+            agent_session=session,
+            project_key="test-project",
+            transport="telegram",
+            pool=pool,
+            resolve_callbacks=lambda p, t: (None, None),
+        )
+
+        warning_messages: list[str] = []
+
+        class _CapturingHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                if record.levelno == logging.WARNING:
+                    warning_messages.append(self.format(record))
+
+        handler = _CapturingHandler()
+        adapter_logger = logging.getLogger("agent.granite_container.bridge_adapter")
+        adapter_logger.addHandler(handler)
+        try:
+            # Call _publish_exit_summary directly — no full run needed.
+            adapter._publish_exit_summary(result)
+        finally:
+            adapter_logger.removeHandler(handler)
+
+        matching = [m for m in warning_messages if "pm_pid set but pty_slot is None" in m]
+        self.assertTrue(
+            matching,
+            f"expected a warning containing 'pm_pid set but pty_slot is None'; "
+            f"warnings captured: {warning_messages!r}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

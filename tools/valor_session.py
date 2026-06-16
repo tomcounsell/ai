@@ -1270,6 +1270,62 @@ def cmd_release(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_telemetry(args) -> int:
+    """Show recorded telemetry events for a session."""
+    import json as _json
+
+    from agent.session_telemetry import read_session_timeline
+
+    session_id = args.id
+    events = read_session_timeline(session_id)
+
+    if not events:
+        print(f"No telemetry recorded for {session_id}")
+        return 0
+
+    if args.tail:
+        events = events[-args.tail :]
+
+    if args.json:
+        for ev in events:
+            print(_json.dumps(ev))
+        return 0
+
+    # Human-readable timeline
+    for ev in events:
+        ts = ev.get("ts", "")
+        etype = ev.get("type", "unknown")
+
+        if etype == "token_usage":
+            usage = ev.get("usage", {})
+            total_cost = ev.get("total_cost_usd", 0.0) or 0.0
+            summary = (
+                f"in={usage.get('input_tokens', 0)} "
+                f"out={usage.get('output_tokens', 0)} "
+                f"cost=${total_cost:.4f}"
+            )
+        elif etype == "status_transition":
+            from_s = ev.get("from", "?")
+            to_s = ev.get("to", "?")
+            reason = ev.get("reason", "") or ""
+            summary = f"{from_s} -> {to_s} ({reason[:50]})"
+        elif etype == "idle_gap":
+            gap = ev.get("gap_seconds", 0)
+            summary = f"{gap}s idle"
+        elif etype == "telemetry_truncated":
+            summary = "*** TRUNCATED ***"
+        elif etype == "tool_use":
+            name = ev.get("name", "?")
+            duration = ev.get("duration_seconds")
+            summary = f"{name}" + (f" ({duration:.2f}s)" if duration is not None else "")
+        else:
+            summary = ""
+
+        print(f"{ts}  {etype:<22}  {summary}")
+
+    return 0
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -1417,6 +1473,18 @@ def main() -> int:
     )
     release_parser.add_argument("--json", action="store_true", help="Output JSON")
 
+    # telemetry subcommand
+    telemetry_parser = subparsers.add_parser(
+        "telemetry", help="Show recorded telemetry events for a session"
+    )
+    telemetry_parser.add_argument("--id", required=True, help="Session ID to show telemetry for")
+    telemetry_parser.add_argument(
+        "--json", action="store_true", help="Emit raw JSON events (one per line)"
+    )
+    telemetry_parser.add_argument(
+        "--tail", type=int, metavar="N", help="Show only the last N events"
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1434,6 +1502,7 @@ def main() -> int:
         "release": cmd_release,
         "inspect": cmd_inspect,
         "children": cmd_children,
+        "telemetry": cmd_telemetry,
     }
 
     return dispatch[args.command](args)

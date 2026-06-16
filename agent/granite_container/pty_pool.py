@@ -319,7 +319,11 @@ class PTYPool:
             if self._needs_session_spawn(spawn_spec):
                 await self._spawn_session_pair(slot, spawn_spec)
             pm, dev = slot.pty_pair
-            yield (pm, dev)
+            # Surface the slot index so callers (BridgeAdapter) can stamp it
+            # onto ContainerResult for dashboard observability. The index is
+            # stable for the slot's lifetime; it does NOT identify the pair —
+            # use co-persisted pm_pid/dev_pid to correlate the specific process.
+            yield (pm, dev, slot.idx)
         finally:
             if slot is not None:
                 # Release: close old PTYs, schedule respawn.

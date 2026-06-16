@@ -276,27 +276,149 @@ class TestEmojiSelection:
 
         clear_cache()
 
-    def test_message_function_uses_snippet(self):
-        """find_best_emoji_for_message should work with message text."""
-        from tools.emoji_embedding import EmojiResult, clear_cache, find_best_emoji_for_message
+    def test_message_function_uses_work_type(self):
+        """find_best_emoji_for_message uses work_type→action mapping, not content embedding."""
+        from tools.emoji_embedding import ACTION_EMOJI_MAP, find_best_emoji_for_message
 
-        clear_cache()
+        result = find_best_emoji_for_message("Bug report: login fails", work_type="bug")
+        assert result.emoji in ACTION_EMOJI_MAP["investigate_bug"], (
+            f"Expected emoji from investigate_bug candidates, got {result.emoji}"
+        )
 
-        fake_cache = {
-            "\U0001f44d": [1.0, 0.0],
+
+class TestActionVocabulary:
+    """Tests for the ACTION_EMOJI_MAP action vocabulary."""
+
+    def test_all_action_emojis_are_valid_telegram_reactions(self):
+        """Every emoji in ACTION_EMOJI_MAP must be a valid Telegram reaction."""
+        from bridge.response import INVALID_REACTIONS, VALIDATED_REACTIONS
+        from tools.emoji_embedding import ACTION_EMOJI_MAP
+
+        invalid = [e for v in ACTION_EMOJI_MAP.values() for e in v if e not in VALIDATED_REACTIONS]
+        assert not invalid, f"These emojis are NOT valid Telegram reactions: {invalid}"
+
+        in_invalid = [e for v in ACTION_EMOJI_MAP.values() for e in v if e in INVALID_REACTIONS]
+        assert not in_invalid, f"These emojis are in INVALID_REACTIONS: {in_invalid}"
+
+    def test_all_six_categories_present(self):
+        """All 6 action categories must be present."""
+        from tools.emoji_embedding import ACTION_EMOJI_MAP
+
+        expected = {
+            "investigate_bug",
+            "problem_solving",
+            "acknowledge_task",
+            "receive_praise",
+            "answer_question",
+            "general",
         }
+        assert set(ACTION_EMOJI_MAP.keys()) == expected
 
-        with (
-            patch("tools.emoji_embedding._embedding_cache", fake_cache),
-            patch("tools.emoji_embedding._custom_embedding_cache", {}),
-            patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
-            patch(
-                "tools.emoji_embedding._compute_embedding",
-                return_value=[0.9, 0.1],
-            ),
-        ):
-            result = find_best_emoji_for_message("This is a great message about programming")
-            assert isinstance(result, EmojiResult)
-            assert str(result) == "\U0001f44d"
+    def test_thinking_emoji_only_in_answer_question(self):
+        """🤔 must appear ONLY in answer_question category (C6)."""
+        from tools.emoji_embedding import ACTION_EMOJI_MAP
 
-        clear_cache()
+        for category, emojis in ACTION_EMOJI_MAP.items():
+            if category == "answer_question":
+                # answer_question MAY have 🤔
+                pass
+            else:
+                assert "🤔" not in emojis, (
+                    f"🤔 found in {category} — it must be reserved for answer_question only (C6)"
+                )
+
+    def test_nerd_emoji_absent_from_all_categories(self):
+        """🤓 must not appear in any action category (C5)."""
+        from tools.emoji_embedding import ACTION_EMOJI_MAP
+
+        for category, emojis in ACTION_EMOJI_MAP.items():
+            assert "🤓" not in emojis, f"🤓 found in {category} (C5: must be absent)"
+
+    def test_general_is_distinct_neutral_fallback(self):
+        """general category must be ['👀'] (C6)."""
+        from tools.emoji_embedding import ACTION_EMOJI_MAP
+
+        assert ACTION_EMOJI_MAP["general"] == ["👀"], (
+            f"general must be ['👀'], got {ACTION_EMOJI_MAP['general']}"
+        )
+
+    def test_no_offensive_emojis_in_action_map(self):
+        """No blocked/offensive emojis in ACTION_EMOJI_MAP."""
+        from tools.emoji_embedding import ACTION_EMOJI_MAP, BLOCKED_REACTION_EMOJIS
+
+        blocked = [e for v in ACTION_EMOJI_MAP.values() for e in v if e in BLOCKED_REACTION_EMOJIS]
+        assert not blocked, f"Blocked emojis found in ACTION_EMOJI_MAP: {blocked}"
+
+
+class TestWorktypeToAction:
+    """Tests for WORKTYPE_TO_ACTION mapping and find_best_emoji_for_message."""
+
+    def test_bug_maps_to_investigate_bug(self):
+        from tools.emoji_embedding import WORKTYPE_TO_ACTION
+
+        assert WORKTYPE_TO_ACTION["bug"] == "investigate_bug"
+
+    def test_task_types_map_to_acknowledge_task(self):
+        from tools.emoji_embedding import WORKTYPE_TO_ACTION
+
+        assert WORKTYPE_TO_ACTION["feature"] == "acknowledge_task"
+        assert WORKTYPE_TO_ACTION["chore"] == "acknowledge_task"
+        assert WORKTYPE_TO_ACTION["sdlc"] == "acknowledge_task"
+
+    def test_bug_message_returns_investigate_bug_emoji(self):
+        from tools.emoji_embedding import ACTION_EMOJI_MAP, find_best_emoji_for_message
+
+        result = find_best_emoji_for_message("Login is broken", work_type="bug")
+        assert result.emoji in ACTION_EMOJI_MAP["investigate_bug"]
+
+    def test_feature_message_returns_acknowledge_task_emoji(self):
+        from tools.emoji_embedding import ACTION_EMOJI_MAP, find_best_emoji_for_message
+
+        result = find_best_emoji_for_message("Add dark mode", work_type="feature")
+        assert result.emoji in ACTION_EMOJI_MAP["acknowledge_task"]
+
+    def test_none_work_type_returns_general_emoji(self):
+        from tools.emoji_embedding import ACTION_EMOJI_MAP, find_best_emoji_for_message
+
+        result = find_best_emoji_for_message("hello", work_type=None)
+        assert result.emoji in ACTION_EMOJI_MAP["general"]
+
+    def test_unknown_work_type_falls_back_to_general(self):
+        from tools.emoji_embedding import ACTION_EMOJI_MAP, find_best_emoji_for_message
+
+        result = find_best_emoji_for_message("hello", work_type="nonexistent_type")
+        assert result.emoji in ACTION_EMOJI_MAP["general"]
+
+    def test_empty_text_returns_default_emoji(self):
+        from tools.emoji_embedding import DEFAULT_EMOJI, find_best_emoji_for_message
+
+        result = find_best_emoji_for_message("")
+        assert result.emoji == DEFAULT_EMOJI
+
+    def test_whitespace_only_text_returns_default_emoji(self):
+        from tools.emoji_embedding import DEFAULT_EMOJI, find_best_emoji_for_message
+
+        result = find_best_emoji_for_message("   ")
+        assert result.emoji == DEFAULT_EMOJI
+
+    def test_uses_random_choice_not_softmax(self):
+        """Verify random.choice is used (not _softmax_sample which would TypeError on str list)."""
+        import inspect
+
+        from tools import emoji_embedding as m
+
+        src = inspect.getsource(m.find_best_emoji_for_message)
+        assert "random.choice" in src, "Must use random.choice"
+        assert "_softmax_sample" not in src, (
+            "_softmax_sample must not be used (would TypeError on bare strings)"
+        )
+
+    def test_function_is_synchronous(self):
+        """find_best_emoji_for_message must be synchronous (not a coroutine)."""
+        import asyncio
+
+        from tools.emoji_embedding import find_best_emoji_for_message
+
+        assert not asyncio.iscoroutinefunction(find_best_emoji_for_message), (
+            "find_best_emoji_for_message must be synchronous (B2) — bridge uses asyncio.to_thread"
+        )

@@ -20,6 +20,12 @@ All constants are canonically defined in `agent/constants.py` (re-exported from 
 
 ## Key Design Decisions
 
+### Receipt-Time Reactions Reflect Agent Action Intent
+
+When a Telegram message arrives, the bridge sets an initial 👀 reaction (eyes), then updates it to an action-intent emoji after classification. The intent is a first-person statement from the bot: "here is what I am about to do."
+
+The emoji is chosen from `ACTION_EMOJI_MAP` in `tools/emoji_embedding.py`, keyed by `work_type` (bug/feature/chore/sdlc). A bug report gets 👨‍💻 or 👀 (investigating). A task gets 🫡 or 👍 (will do). Unclassified messages fall back to 👀 (general). This replaces the previous content-sentiment approach that mirrored the user's mood back at them and was vulnerable to offensive emoji matches.
+
 ### Success vs. Complete
 
 The distinction between `REACTION_SUCCESS` and `REACTION_COMPLETE` is critical:

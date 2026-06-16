@@ -276,4 +276,3 @@ class TestSkillMarkdownParity:
             "Verdict/dispatch invocations must NOT silence failures — drop "
             "2>/dev/null and || true:\n" + "\n".join(f"  {p}:{n}: {ln}" for p, n, ln in offenders)
         )
-

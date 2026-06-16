@@ -269,6 +269,11 @@ class ContainerResult:
     pm_transcript_path: str | None = None
     dev_pid: int | None = None
     dev_transcript_path: str | None = None
+    # Stable physical PTYPool slot index (0-based). Correlated to a
+    # specific (pm_pid, dev_pid) pair only via co-persisted fields —
+    # the slot itself is recycled after each session. Surfaced here so
+    # the dashboard can show which pool slot a session occupied.
+    pty_slot: int | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -1554,11 +1554,13 @@ async def main():
 
                 # Let 👀 stay visible for a natural "reading" moment
                 await asyncio.sleep(2)
-                emoji = await asyncio.to_thread(find_best_emoji_for_message, clean_text)
+                emoji = await asyncio.to_thread(
+                    find_best_emoji_for_message, clean_text, classification_result.get("type")
+                )
                 await set_reaction(client, event.chat_id, message.id, emoji)
                 logger.debug(f"Embedding emoji selected: {emoji}")
             except Exception as e:
-                logger.debug(f"Embedding emoji selection failed (non-fatal): {e}")
+                logger.warning(f"Emoji reaction selection failed (non-fatal): {e}")
 
         asyncio.create_task(select_and_set_emoji_reaction())
 

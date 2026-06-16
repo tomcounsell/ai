@@ -1358,6 +1358,51 @@ async def _apply_recovery_transition(
     except Exception as _m_err:
         logger.debug("[session-health] kill counter failed: %s", _m_err)
 
+    # Additive telemetry tap — no behavior change
+    # Emit kill-enriched status_transition before the actual finalize/requeue.
+    # Destination status is determined by the branches below; we emit one rich
+    # event here so finalize_session() suppresses its plain duplicate via
+    # emit_telemetry=False on every call in this recovery path.
+    try:
+        from agent.session_telemetry import record_telemetry_event as _rte
+
+        _dest = (
+            "abandoned"
+            if is_local
+            else (
+                "failed"
+                if entry.recovery_attempts >= MAX_RECOVERY_ATTEMPTS
+                or not _subprocess_confirmed_dead
+                else "pending"
+            )
+        )
+        _rte(
+            entry.session_id,
+            {
+                "type": "status_transition",
+                "from": "running",
+                "to": _dest,
+                "reason": reason or "recovery",
+                "kill": {
+                    "confirmed_dead": _kill_result.confirmed_dead if _kill_result else False,
+                    "signal_sent": _kill_result.signal_sent if _kill_result else False,
+                    "pid": getattr(entry, "claude_pid", None),
+                },
+            },
+        )
+        # Reap the session's in-memory telemetry state when this recovery
+        # transition is terminal. The lifecycle finalize call below runs with
+        # emit_telemetry=False (the kill-enriched event above is the dedup
+        # source), so the lifecycle reaper hook never fires on this path — reap
+        # here instead. ``pending`` is a requeue (non-terminal): the session
+        # keeps running, so its telemetry state must survive.
+        if _dest in ("abandoned", "failed"):
+            from agent.session_telemetry import finalize_session as _finalize_telemetry
+
+            _finalize_telemetry(entry.session_id)
+    except Exception as _tel_err:
+        logger.debug("[session-health] telemetry emit failed (non-fatal): %s", _tel_err)
+
     try:
         if is_local:
             finalize_session(
@@ -1368,6 +1413,7 @@ async def _apply_recovery_transition(
                     f"(chat={worker_key}, attempts={entry.recovery_attempts}, kind={reason_kind})"
                 ),
                 skip_auto_tag=True,
+                emit_telemetry=False,
             )
             logger.info(
                 "[session-health] Marked local session %s as abandoned (chat=%s, attempts=%s)",
@@ -1383,6 +1429,7 @@ async def _apply_recovery_transition(
                     f"health check: {entry.recovery_attempts} recovery "
                     f"attempts, never progressed (kind={reason_kind})"
                 ),
+                emit_telemetry=False,
             )
             logger.warning(
                 "[session-health] Finalized session %s as failed after %s recovery attempts",
@@ -1406,6 +1453,7 @@ async def _apply_recovery_transition(
                     f"orphan reaper owns cleanup (chat={worker_key}, "
                     f"attempt {entry.recovery_attempts}, kind={reason_kind})"
                 ),
+                emit_telemetry=False,
             )
             logger.warning(
                 "[session-health] Escalated session %s to failed — subprocess "
@@ -1455,6 +1503,7 @@ async def _apply_recovery_transition(
                     f"health check: recovered session "
                     f"(chat={worker_key}, attempt {entry.recovery_attempts}, kind={reason_kind})"
                 ),
+                emit_telemetry=False,
             )
             logger.info(
                 "[session-health] Recovered session %s (chat=%s, attempt %s, kind=%s)",
@@ -2627,6 +2676,36 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
             exc_info=True,
         )
         orphans_reaped = 0
+
+    # === Telemetry retention sweep ===
+    # Delete JSONL trace files older than 14 days.  Wrapped in try/except so
+    # a filesystem error never aborts the main cleanup function.
+    try:
+        from agent.session_telemetry import _get_telemetry_dir
+
+        retention_days = 14
+        cutoff = datetime.now(tz=UTC) - timedelta(days=retention_days)
+        telemetry_dir = _get_telemetry_dir()
+        stale_count = 0
+        for jsonl_file in telemetry_dir.glob("*.jsonl"):
+            try:
+                mtime = datetime.fromtimestamp(jsonl_file.stat().st_mtime, tz=UTC)
+                if mtime < cutoff:
+                    jsonl_file.unlink()
+                    stale_count += 1
+            except Exception:
+                pass
+        if stale_count:
+            logger.info(
+                "[session-health] Deleted %d stale telemetry traces (older than %d days)",
+                stale_count,
+                retention_days,
+            )
+    except Exception as sweep_err:
+        logger.warning(
+            "[session-health] Telemetry retention sweep failed (non-fatal): %s",
+            sweep_err,
+        )
 
     return {"corrupted": cleaned, "orphans": orphans_reaped}
 

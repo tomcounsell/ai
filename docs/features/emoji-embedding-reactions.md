@@ -1,12 +1,14 @@
 # Emoji Embedding Reactions
 
-Embedding-based emoji reaction selection for Telegram messages, replacing the previous Ollama intent classification approach. Supports both standard Unicode reactions and Telegram Premium custom emoji.
+Emoji reaction selection for Telegram messages. Uses action-intent vocabulary at receipt time and embedding-based sentiment matching for agent-driven reactions.
 
 ## Overview
 
-When a Telegram message arrives, the bridge selects a contextual reaction emoji by embedding the message text and comparing it against pre-computed embeddings for the 72 validated Telegram reaction emojis via cosine similarity. This replaces the previous Ollama-based intent classifier that mapped messages to 10 hardcoded emojis with 2-10 second latency.
+The system has two distinct emoji selection paths:
 
-The same embedding index powers the `send_telegram --react` flag, allowing the agent to set emoji reactions on messages by describing a feeling word.
+**Receipt-time reactions** (`find_best_emoji_for_message`): When a Telegram message arrives, the bridge reacts with an emoji that reflects the **agent's intended handling action**, not the message's content sentiment. The reaction is chosen from a small pre-defined vocabulary keyed by `work_type` (bug/feature/chore/sdlc), which the bridge derives from `classify_work_type()`. No embedding call is made; the selection is immediate and synchronous.
+
+**Agent-driven reactions** (`find_best_emoji`): The agent can set a reaction by feeling word (e.g. `--react "excited"`). This still uses content embedding and cosine similarity against the 72 validated Telegram emoji labels.
 
 Premium accounts gain access to thousands of custom emoji (animated sticker-based emoji) in addition to the 72 standard reactions. The system indexes available custom emoji packs and includes them in the similarity search, with automatic fallback to standard emoji when custom emoji are unavailable.
 
@@ -15,11 +17,11 @@ Premium accounts gain access to thousands of custom emoji (animated sticker-base
 ### Message Reaction Flow
 
 1. Message arrives in `bridge/telegram_bridge.py` handler
-2. `mark_read()` is called immediately (new: messages are now marked as read on receipt)
+2. `mark_read()` is called immediately
 3. Eyes emoji set as initial acknowledgment
-4. `find_best_emoji_for_message(text)` embeds the first 100 characters and finds the nearest emoji by cosine similarity (under 50ms after cache warm-up)
-5. Reaction updated to the contextual emoji
-6. Work-type classification (`classify_request_async`) runs as a separate async task
+4. `find_best_emoji_for_message(text, work_type)` maps `work_type` to an action category via `WORKTYPE_TO_ACTION` and selects from `ACTION_EMOJI_MAP[action]` via `random.choice` -- no API call, no embedding, synchronous
+5. Reaction updated to the action-intent emoji
+6. The `work_type` comes from `classification_result["type"]` already computed by `classify_work_type()` before the reaction update
 
 ### Agent Reaction Flow
 
@@ -53,14 +55,25 @@ Backward compatibility is preserved: `str(result)` returns the Unicode emoji cha
 The core module that maps feelings to emojis.
 
 **Key functions:**
-- `find_best_emoji(feeling: str) -> EmojiResult` -- embeds a feeling word and returns the nearest emoji (standard or custom) by cosine similarity
-- `find_best_emoji_for_message(text: str) -> EmojiResult` -- extracts a 100-char snippet from a message and delegates to `find_best_emoji`
+- `find_best_emoji(feeling: str) -> EmojiResult` -- embeds a feeling word and returns the nearest emoji (standard or custom) by cosine similarity (agent-driven reactions)
+- `find_best_emoji_for_message(text: str, work_type: str | None) -> EmojiResult` -- maps `work_type` to an action category and selects a random emoji from `ACTION_EMOJI_MAP`; ignores text content at selection time
 - `clear_cache()` -- clears the in-memory cache (for testing)
 - `rebuild_custom_emoji_index(client)` -- async function to query Telethon for available custom emoji packs and rebuild the custom embedding cache
 
-**Standard emoji labels:** Each of the 72 validated Telegram reaction emojis has a descriptive label string (e.g., "fire, hot, trending, lit, exciting, impressive, awesome" for the fire emoji). These labels are embedded and compared against input text.
+**Action vocabulary:** `WORKTYPE_TO_ACTION` maps work-type labels to action intent categories. `ACTION_EMOJI_MAP` maps each category to a list of valid Telegram reaction emoji candidates. All candidates are confirmed in `VALIDATED_REACTIONS`.
 
-**Blocked reactions:** `BLOCKED_REACTION_EMOJIS` is a frozenset of emojis that must never be selected as a reaction, even if a stale on-disk cache still contains their embedding. The middle finger 🖕 is blocked here — Telegram accepts it as a valid reaction, but reacting to a user's message with it is offensive. `find_best_emoji()` skips any emoji in this set at selection time, so the guarantee holds regardless of cache state: production machines may carry a `data/emoji_embeddings.json` that predates the label's removal, and the picker iterates that cached dict, so the blocklist (not just the absent label) is what keeps the emoji from ever being chosen.
+| Category | Trigger | Emoji candidates |
+|----------|---------|-----------------|
+| `investigate_bug` | `work_type=bug` | 👨‍💻, 👀 |
+| `problem_solving` | (not currently auto-triggered) | 👨‍💻, 🤝 |
+| `acknowledge_task` | `work_type` in feature/chore/sdlc | 🫡, 👍 |
+| `receive_praise` | (not currently auto-triggered) | 🙏, ❤, 🏆 |
+| `answer_question` | (not currently auto-triggered) | 🤔, 🤝 |
+| `general` | `work_type` is None or unrecognized | 👀 |
+
+**Standard emoji labels:** Each of the 72 validated Telegram reaction emojis has a descriptive label string used by `find_best_emoji()` (the agent-driven path). These labels are embedded and compared against input text.
+
+**Blocked reactions:** `BLOCKED_REACTION_EMOJIS` is a frozenset of emojis that must never be selected as a reaction. The middle finger 🖕 is blocked here. `find_best_emoji()` skips any emoji in this set at selection time. Offensive reactions are structurally impossible from `find_best_emoji_for_message` because the `ACTION_EMOJI_MAP` action vocabulary never contains them.
 
 **Custom emoji labels:** Custom emoji from Premium sticker packs are labeled using the associated emoji character plus the sticker set title (e.g., "party celebration confetti" for a party popper custom emoji). These are embedded with the same model and stored separately.
 
@@ -143,12 +156,14 @@ The work-type classifier (`tools/classifier.py` / `classify_request_async`) was 
 
 ## Performance
 
-| Metric | Old (Ollama) | New (Embedding) |
-|--------|-------------|-----------------|
-| Cold start | 2-10 seconds | ~1 second (compute 72 embeddings via API) |
-| Warm lookup | 2-10 seconds | Under 50ms (cosine similarity only) |
-| Emoji coverage | 10 hardcoded | All 72 validated reactions |
-| Timeout fallback | Frequent | Rare (only on API key missing) |
+The two emoji paths have different performance profiles:
+
+| Metric | Old (Ollama) | Receipt-time (action-intent) | Agent-driven (embedding) |
+|--------|-------------|------------------------------|--------------------------|
+| Latency | 2-10 seconds | Synchronous (dict lookup, no API) | Under 50ms warm (cosine similarity) |
+| Cold start | 2-10 seconds | None | ~1 second (compute 72 embeddings via API) |
+| Emoji coverage | 10 hardcoded | 6 action categories, curated | All 72 validated reactions |
+| Timeout risk | Frequent | None | Rare (only on API key missing) |
 
 ## Related Files
 

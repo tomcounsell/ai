@@ -426,23 +426,55 @@ def find_best_emoji(feeling: str) -> EmojiResult:
     return result
 
 
-def find_best_emoji_for_message(text: str) -> EmojiResult:
-    """Find the best reaction emoji for a message.
+# Maps work type labels (from issue/task classification) to action intent categories.
+# Used by find_best_emoji_for_message to select the appropriate emoji candidates.
+WORKTYPE_TO_ACTION: dict[str, str] = {
+    "bug": "investigate_bug",
+    "feature": "acknowledge_task",
+    "chore": "acknowledge_task",
+    "sdlc": "acknowledge_task",
+}
 
-    Extracts a short snippet from the message and finds the nearest emoji.
+# Emoji candidates per action intent. All entries must be in VALIDATED_REACTIONS.
+# Categories:
+#   investigate_bug  -- on it / debugging
+#   problem_solving  -- working it / here to help
+#   acknowledge_task -- salute / will do
+#   receive_praise   -- grateful / love / trophy
+#   answer_question  -- thinking (ONLY category with 🤔) / here to help
+#   general          -- distinct neutral fallback
+ACTION_EMOJI_MAP: dict[str, list[str]] = {
+    "investigate_bug": ["👨‍💻", "👀"],
+    "problem_solving": ["👨‍💻", "🤝"],
+    "acknowledge_task": ["🫡", "👍"],
+    "receive_praise": ["🙏", "❤", "🏆"],
+    "answer_question": ["🤔", "🤝"],
+    "general": ["👀"],
+}
+
+
+def find_best_emoji_for_message(text: str, work_type: str | None = None) -> EmojiResult:
+    """Find the best reaction emoji for a message based on action intent.
+
+    Selects an emoji from a pre-defined set of candidates for the given work_type,
+    rather than computing embeddings. This is synchronous and requires no API calls.
 
     Args:
         text: The message text to select a reaction for.
+        work_type: Optional work type label (e.g. "bug", "feature", "chore", "sdlc").
+                   Maps to an action intent category that determines emoji candidates.
+                   Defaults to "general" when None or unrecognized.
 
     Returns:
-        An EmojiResult with the best matching emoji.
+        An EmojiResult with the selected emoji.
     """
     if not text or not isinstance(text, str) or not text.strip():
         return EmojiResult(emoji=DEFAULT_EMOJI)
-
-    # Use first 100 chars as the sentiment/topic snippet
-    snippet = text.strip()[:100]
-    return find_best_emoji(snippet)
+    action = WORKTYPE_TO_ACTION.get(work_type, "general")
+    if action not in ACTION_EMOJI_MAP:
+        action = "general"
+    candidates = ACTION_EMOJI_MAP[action]
+    return EmojiResult(emoji=random.choice(candidates))
 
 
 def _load_custom_embeddings() -> dict[str, list[float]]:
