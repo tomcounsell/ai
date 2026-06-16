@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -81,7 +81,7 @@ No relevant external findings — this is a change to a bespoke in-repo SDLC ski
 1. **Entry point**: SDLC router dispatches `/do-plan-critique {issue-or-plan}` (CRITIQUE stage).
 2. **Resume probe (NEW, Step 2b)**: `critique-resume-probe --plan PLAN --issue N` globs `.critique-runs/{issue-or-slug}-*`, returns the newest dir whose `.plan_hash` matches `compute_plan_hash(PLAN)` and whose gate is not yet `complete`. → reuse path, or empty → fresh path.
 3. **Structural checks (Step 2)**: unchanged automated checks (sections, task integrity, references). Run regardless of LITE/FULL.
-4. **Triage (NEW, Step 2.6)**: deterministic force-FULL guard (doctrine paths / Large appetite / oversized plan) → else a single cheap triage classification → emits `LITE` or `FULL`. Skipped entirely on the resume path (the surviving `_roster.json` already encodes the chosen path).
+4. **Triage (NEW, Step 2.6)**: deterministic force-FULL guard (doctrine paths / Large appetite) → else a single cheap triage critic (one short-lived `sonnet` agent) → emits `LITE` or `FULL`. Skipped entirely on the resume path (the surviving `_roster.json` already encodes the chosen path).
 5. **Roster freeze (Step 3a)**: writes `_roster.json` (1-name LITE or 3-name FULL) **and** `.plan_hash`. On resume, this dir already exists — skip mint.
 6. **Dispatch (Step 3)**: dispatch in one parallel message **only** critics whose `{name}.result.md` is absent or fence-less. Each writes its result atomically with the terminal fence.
 7. **Gate (Step 3.5)**: `critique-roster-check` membership barrier (unchanged); bounded re-dispatch of only missing names.
@@ -142,8 +142,8 @@ CRITIQUE dispatched → **Resume probe** → (reusable dir? reuse it, skip triag
 **2. `SKILL.md` edits.**
 - **New Step 2b "Resume Probe"** (before Step 2.6 triage / Step 3a): call `critique-resume-probe`. On a hit, set `CRITIQUE_RUN_DIR` to the returned dir, set `RESUMED=1`, and **skip triage + roster freeze** (the surviving `_roster.json` defines the path). GC any stale-hash sibling dirs reported on stderr.
 - **New Step 2.6 "Triage"** (fresh path only):
-  - Deterministic force-FULL if the change touches doctrine paths (`config/personas/`, `.claude/skills/`, `.claude/skills-global/`, `agent/sdlc_router.py`, `agent/pipeline_graph.py`, `.claude/hooks/`), or `appetite: Large`, or the plan body exceeds a size threshold. No LLM needed for the override.
-  - Else a single cheap triage classification (model `sonnet`) emitting `LITE` or `FULL` + a one-line reason, **biased to FULL on ambiguity**. A LITE vote never overrides a force-FULL.
+  - Deterministic force-FULL if the change touches doctrine paths (`config/personas/`, `.claude/skills/`, `.claude/skills-global/`, `agent/sdlc_router.py`, `agent/pipeline_graph.py`, `.claude/hooks/`) or `appetite: Large`. No LLM needed for the override. (No plan-body size threshold — appetite + doctrine paths are the only overrides.)
+  - Else a single cheap triage critic — one short-lived `sonnet` Agent — emitting `LITE` or `FULL` + a one-line reason, **biased to FULL on ambiguity**. A LITE vote never overrides a force-FULL. Keep it cheap: a short classification prompt, not a fourth heavyweight critic.
 - **Step 3a (roster freeze)** becomes path-aware: LITE → `{"roster":["Consolidated Critic"],"count":1}`; FULL → `{"roster":["Risk & Robustness","Scope & Value","History & Consistency"],"count":3}`. Write `.plan_hash` (= `compute_plan_hash`) next to `_roster.json`. The fresh-mint `mkdir` keeps **no `-p`** (collision still fails loudly); reuse is the explicit Step-2b branch, never a silent `mkdir -p`. Replace the old 6-vs-7 "Small purely-internal skip" with the triage selection.
 - **Step 3 (dispatch)**: dispatch **only** roster members whose `{name}.result.md` is absent or fails the terminal-fence check (skip already-complete ones). On a fresh run all are dispatched; on resume only the missing ones.
 - **Step 4 sub-bullet 5**: delete the re-run directive; replace with validation-only — a CONCERN/BLOCKER missing its Implementation Note is reported malformed and excluded from the report (logged), never re-dispatched.
@@ -204,7 +204,7 @@ CRITIQUE dispatched → **Resume probe** → (reusable dir? reuse it, skip triag
 
 ### Risk 3: Triage misclassifies a risky change as LITE
 **Impact:** A change that deserved the war room gets one critic.
-**Mitigation:** Deterministic force-FULL override (doctrine paths, Large appetite, oversized plan) runs *before* and *cannot be overridden by* the LLM triage; triage is biased to FULL on ambiguity. The author's `appetite` is an input, never the final say.
+**Mitigation:** Deterministic force-FULL override (doctrine paths, Large appetite) runs *before* and *cannot be overridden by* the LLM triage; triage is biased to FULL on ambiguity. The author's `appetite` is an input, never the final say.
 
 ## Race Conditions
 
@@ -357,15 +357,12 @@ The critique skill lives in `.claude/skills-global/do-plan-critique/`, which `/u
 
 ---
 
-## Open Questions
+## Resolved Design Decisions
 
-The three load-bearing design decisions were resolved in the originating conversation (recorded here so critique has the rationale):
+All design decisions were resolved with the supervisor before finalizing (recorded here so critique has the rationale):
 
-1. **Roster consolidation** — RESOLVED: 7 → 3 merged critics for FULL, 1 consolidated critic for LITE. (User noted the real fan-out is 20+, not 7; the dominant fixes are resume + deleting the re-run loop.)
-2. **LITE trigger** — RESOLVED: independent triage step assesses each plan; `appetite` is an input, not the deciding vote ("not up to the planner"). Deterministic force-FULL override on doctrine paths.
-3. **Relationship to #1628** — RESOLVED: ship standalone now, reusing `appetite`; shape the LITE/FULL signal so #1628 can later generalize it.
-
-Residual questions for the supervisor:
-
-1. **Triage mechanism** — single cheap `sonnet` classification (one extra short-lived agent) vs. inline classification by the critique driver itself (zero extra agents)? The plan assumes a single cheap classification; confirm whether zero-extra-agent inline is preferred.
-2. **Oversized-plan threshold** — what plan-body size (lines or chars) should auto-force FULL alongside the doctrine-path and Large-appetite overrides? Proposed default: force FULL above ~400 lines of plan body.
+1. **Roster consolidation** — 7 → 3 merged critics for FULL, 1 consolidated critic for LITE. (The real fan-out is 20+, not 7; the dominant fixes are resume + deleting the re-run loop.)
+2. **LITE trigger** — an independent triage step assesses each plan; `appetite` is an input, not the deciding vote ("not up to the planner"). Deterministic force-FULL override on doctrine paths / Large appetite.
+3. **Relationship to #1628** — ship standalone now, reusing `appetite`; shape the LITE/FULL signal so #1628 can later generalize it.
+4. **Triage mechanism** — a single cheap `sonnet` triage Agent (one short-lived classification call), not inline driver classification.
+5. **Force-FULL overrides** — doctrine paths + Large appetite only. No plan-body size threshold.
