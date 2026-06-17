@@ -1,4 +1,4 @@
-"""Bridge-level liveness signals for the stale-update-stream detector (#1538).
+"""Bridge-level liveness signals for the stale-update-stream detector (#1712).
 
 Writes two **positive** liveness keys to Redis.  Positive signals record that
 something good *happened* — they do not infer health from absence of bad events.

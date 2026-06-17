@@ -283,18 +283,19 @@ def test_g_within_grace_stale_signals_no_restart():
 
 
 # ---------------------------------------------------------------------------
-# Secondary accelerator: warn window fires before ceiling
+# Secondary accelerator: per-chat-gated warn window
 # ---------------------------------------------------------------------------
 
 
-def test_secondary_accelerator_warn_window():
-    """Silence past WARN threshold but below ceiling triggers early warning."""
+def test_secondary_accelerator_no_per_chat_corroboration():
+    """Secondary accelerator does NOT fire without per-chat bridge:last_event corroboration."""
     now = time.time()
-    # last_update in the warn window
-    last_update = now - (UPDATE_STALENESS_WARN + 300)  # 35 minutes
+    last_update = now - (UPDATE_STALENESS_WARN + 300)  # 35 minutes — in warn window
     last_probe = now - 60  # very fresh
 
     r = _make_redis(last_update, last_probe)
+    # No bridge:last_event:* keys — scan_iter returns empty iterator
+    r.scan_iter.return_value = iter([])
 
     start_ts = now - (STARTUP_GRACE_SECONDS + 3600)
     with patch(
@@ -303,7 +304,46 @@ def test_secondary_accelerator_warn_window():
     ):
         is_live, issue = assess_update_flow(r, bridge_pid=12345)
 
-    assert is_live is False, "Secondary accelerator should fire in warn window"
+    # Without per-chat corroboration, secondary accelerator must NOT fire
+    # (below the ceiling, no per-chat evidence of a wedged handler)
+    assert is_live is True, (
+        f"Secondary accelerator must NOT fire without per-chat corroboration (issue={issue!r})"
+    )
+
+
+def test_secondary_accelerator_with_per_chat_corroboration():
+    """Secondary accelerator fires when per-chat bridge:last_event shows a chat went quiet.
+
+    A bridge:last_event:{chat_id} key within the warn window is required for
+    the secondary accelerator to trip.
+    """
+    now = time.time()
+    last_update = now - (UPDATE_STALENESS_WARN + 300)  # 35 minutes — in warn window
+    last_probe = now - 60  # very fresh
+
+    chat_key = "bridge:last_event:12345678"
+    chat_last_event_ts = now - (UPDATE_STALENESS_WARN + 300)  # same age as last_update
+
+    r = _make_redis(last_update, last_probe)
+    # Inject a per-chat key showing a chat that went quiet ~35 min ago
+    r.scan_iter.return_value = iter([chat_key])
+    original_get = r.get.side_effect
+
+    def _get_with_chat(key):
+        if key == chat_key:
+            return str(int(chat_last_event_ts))
+        return original_get(key)
+
+    r.get.side_effect = _get_with_chat
+
+    start_ts = now - (STARTUP_GRACE_SECONDS + 3600)
+    with patch(
+        "monitoring.bridge_watchdog.get_bridge_process_start_ts",
+        return_value=start_ts,
+    ):
+        is_live, issue = assess_update_flow(r, bridge_pid=12345)
+
+    assert is_live is False, "Secondary accelerator should fire with per-chat corroboration"
     assert "early warning" in issue.lower() or "possibly wedged" in issue.lower()
 
 

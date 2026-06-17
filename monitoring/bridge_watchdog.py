@@ -160,7 +160,8 @@ def get_bridge_process_start_ts(pid: int) -> float | None:
             except ValueError:
                 logger.warning("get_bridge_process_start_ts: unparseable lstart=%r", raw)
                 return None
-        # ps lstart is in local time; convert to UTC-aware then to timestamp
+        # ps lstart is local time; mktime() interprets it as local and returns a
+        # Unix timestamp (seconds since UTC epoch) — no explicit UTC conversion needed.
         import time as _time
 
         local_ts = _time.mktime(dt.timetuple())
@@ -268,17 +269,49 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
         return False, issue
 
     # --- SECONDARY accelerator ---
-    # Only fires if probe is fresh AND update went quiet within UPDATE_STALENESS_WARN
-    # but NOT yet at the ceiling (that would have been caught above).
+    # Fires only when a per-chat bridge:last_event key confirms a recently-active
+    # chat has gone quiet — corroborating that the account-wide update silence is
+    # anomalous, not just a quiet period.  Without this per-chat gate the accelerator
+    # would fire for any 30-min lull (since last_probe_ok is refreshed every ~180s
+    # by the reconciler, it is always "fresh" when connected) — re-inheriting the
+    # silence=failure anti-pattern from issue #1172.
+    #
+    # Per the plan: "if a respond_to_unaddressed chat had a bridge:last_event inside
+    # the window and has since gone quiet past UPDATE_STALENESS_WARN".
     if probe_is_fresh and last_update is not None:
         update_age = now - last_update
         if UPDATE_STALENESS_WARN <= update_age < UPDATE_STALENESS_CEILING:
-            issue = (
-                f"update loop possibly wedged (early warning): "
-                f"last_update_received={update_age / 60:.0f}m ago "
-                f"(>{UPDATE_STALENESS_WARN // 60}m), last_probe_ok fresh"
-            )
-            return False, issue
+            # Check per-chat corroboration: scan bridge:last_event:* for a chat
+            # that was recently active but has gone quiet.
+            try:
+                per_chat_corroborated = False
+                for key in r.scan_iter("bridge:last_event:*", count=100):
+                    raw_ts = r.get(key)
+                    if raw_ts is None:
+                        continue
+                    try:
+                        chat_last_event = float(raw_ts)
+                    except (ValueError, TypeError):
+                        continue
+                    chat_silence = now - chat_last_event
+                    if UPDATE_STALENESS_WARN <= chat_silence < UPDATE_STALENESS_CEILING:
+                        per_chat_corroborated = True
+                        break
+            except Exception as e:
+                logger.warning(
+                    "assess_update_flow: per-chat scan failed, skipping secondary accelerator: %s",
+                    e,
+                )
+                per_chat_corroborated = False
+
+            if per_chat_corroborated:
+                issue = (
+                    f"update loop possibly wedged (early warning): "
+                    f"last_update_received={update_age / 60:.0f}m ago "
+                    f"(>{UPDATE_STALENESS_WARN // 60}m), last_probe_ok fresh, "
+                    f"per-chat corroboration confirms recently-active chat went quiet"
+                )
+                return False, issue
 
     return True, ""
 

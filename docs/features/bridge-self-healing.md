@@ -85,7 +85,7 @@ The `--check-only` output includes zombie count, PIDs, memory usage, and active 
 
 Zombie cleanup is integrated into recovery levels 2+ to free memory before restarting.
 
-### 3a. Update-Loop Wedged Detector (issue #1538)
+### 3a. Update-Loop Wedged Detector (issue #1712)
 
 **Problem**: Telethon can stop delivering `NewMessage` events silently — the bridge process is alive, TCP is connected (the reconciler's `get_dialogs()` succeeds), but the update loop has stopped firing. No error, no disconnect, no log. Messages are silently dropped until the bridge is manually restarted.
 
