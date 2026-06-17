@@ -223,9 +223,8 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
         logger.warning(
             "assess_update_flow: bridge_update_flow_signal_unreadable — Redis error: %s", e
         )
-        if within_grace:
-            return True, ""
-        return True, ""  # inconclusive — treat as live
+        # Inconclusive — treat as live regardless of grace window (fail-safe C3)
+        return True, "bridge_update_flow_signal_unreadable — Redis error, treating as live"
 
     # Cold start: no signal yet
     if last_update is None and last_probe is None:
