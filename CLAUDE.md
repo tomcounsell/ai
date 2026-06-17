@@ -192,6 +192,8 @@ valor-email threads
 | `python -m tools.valor_session resume --id <ID> --message "..."` | Resume a completed, killed, or failed session (hard-PATCH path; accepts session_id or agent_session_id) |
 | `python -m tools.valor_session release --pr <N>` | Clear retain_for_resume after PR merge/close |
 | `python -m tools.valor_session telemetry --id <ID>` | Show session telemetry timeline (turn events, token usage, status transitions) |
+| `valor-session crash-signatures` | Show crash signatures in the library (project-scoped) |
+| `valor-session crash-policy list` | Show derived auto-resume policy entries |
 | `python -m tools.memory_search search "query"` | Search memories by query |
 | `python -m tools.memory_search search "query" --category correction` | Search filtered by category |
 | `python -m tools.memory_search search "query" --tag redis` | Search filtered by tag |

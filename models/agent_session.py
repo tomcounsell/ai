@@ -335,6 +335,24 @@ class AgentSession(Model):
     #   and #1538's recorder show the diagnosis without re-deriving it.
     startup_captured_frame = Field(null=True, default=None)
 
+    # === Crash-recovery reflection fields (issue #1539) ===
+    # crash_signature: write-once stamp set at resume time, recording the
+    # crash signature of the session this resume recovers. Used by the
+    # crash-recovery reflection to attribute outcomes back to the originating
+    # signature. Never overwritten after initial write.
+    # Coordination surface for #1539 auto-resume policy.
+    crash_signature = Field(null=True, default=None)
+
+    # crash_outcome_attributed: idempotency key for the outcome-attribution loop.
+    # Set True after the reflection has credited/debited the originating
+    # CrashSignature record for this session's terminal outcome.
+    # Read via _truthy() — Popoto stores bools as "True"/"False" strings.
+    crash_outcome_attributed = Field(null=True, default=None)
+
+    # auto_resume_attempts: count of times the crash-recovery reflection has
+    # auto-resumed this session. Enforces per-session cap.
+    auto_resume_attempts = Field(null=True, default=None)
+
     # === Continuation PM depth tracking ===
     # Tracks how many continuation PMs have been chained from the original PM.
     # Stored directly on the session (O(1)) rather than walking the parent chain
