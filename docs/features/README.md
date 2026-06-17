@@ -173,6 +173,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Skills Dependency Map](skills-dependency-map.md) | Visual map of skill-to-skill, skill-to-agent, and sub-file relationships for cleanup planning | Shipped |
 | [Skills Global](skills-global.md) | Global skill library in `.claude/skills-global/` — 42 skills synced to `~/.claude/skills/` via hardlinks; includes 6 new skills added in #1319: ontologies, grill-me, deepen, observability, zoom-out, tdd | Shipped |
 | [Skills Reorganization](skills-reorganization.md) | Canonical SKILL.md template, progressive disclosure, command consolidation, hardlink scoping | Shipped |
+| [Stall Advisory Classifier](stall-advisory-classifier.md) | Live healthy/suspect/stalled verdict for running sessions from telemetry; dashboard badge + periodic reflection (Pillar 1 of #1536) | Shipped |
 | [Stall Retry](stall-retry.md) | Automatic retry of stalled agent sessions with exponential backoff, process cleanup, and Telegram notification on final failure | Shipped |
 | [Standardized Enums](standardized-enums.md) | StrEnum definitions for session types, personas, classifications, and chat modes replacing magic strings | Shipped |
 | [Steering Queue: Historical Spec](steering-implementation-spec.md) | Original Redis list design, watchdog hook, and SDK client registry for mid-execution course correction (historical design spec) | Shipped |
