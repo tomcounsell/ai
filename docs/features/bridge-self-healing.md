@@ -78,12 +78,56 @@ The `--check-only` output includes zombie count, PIDs, memory usage, and active 
 | Level | Condition | Action |
 |-------|-----------|--------|
 | 1 | Process not running | Log crash event via `crash_tracker.log_crash("bridge_dead_on_watchdog_check")` + simple restart (launchd) |
-| 2 | Process running but logs stale | Kill stale + kill zombies + restart |
+| 2 | Process running but logs stale — or update loop wedged | Kill stale + kill zombies + restart (with `catch_up=True` for wedge restarts — see below) |
 | 3 | Lock files present | Kill stale + kill zombies + clear locks + restart |
 | 4 | Crash pattern detected | Kill stale + kill zombies + revert HEAD + restart (if enabled) |
 | 5 | Recovery exhausted | Alert human via Telegram |
 
 Zombie cleanup is integrated into recovery levels 2+ to free memory before restarting.
+
+### 3a. Update-Loop Wedged Detector (issue #1712)
+
+**Problem**: Telethon can stop delivering `NewMessage` events silently — the bridge process is alive, TCP is connected (the reconciler's `get_dialogs()` succeeds), but the update loop has stopped firing. No error, no disconnect, no log. Messages are silently dropped until the bridge is manually restarted.
+
+**Solution**: Two positive liveness signals written to Redis, read by the watchdog on every 60-second tick:
+
+| Redis Key | Writer | Meaning |
+|-----------|--------|---------|
+| `bridge:last_update_received` | NewMessage handler in `bridge/telegram_bridge.py`, before dedup | A Telethon update event was delivered to the bridge |
+| `bridge:last_probe_ok` | Reconciler in `bridge/reconciler.py`, after successful `get_dialogs()` | The Telegram API/TCP layer is reachable |
+
+Both keys are managed by `bridge/liveness.py` (freeform Redis keys, not Popoto-managed; raw get/set is correct). Both writers are best-effort — any exception logs a WARNING and never raises, matching the safety contract from `bridge.dedup.record_last_event`.
+
+**Detection logic** (`assess_update_flow()` in `monitoring/bridge_watchdog.py`):
+
+The PRIMARY rule fires when all four conditions are true simultaneously:
+1. Bridge process is alive
+2. `bridge:last_probe_ok` is fresh (API/TCP layer is healthy)
+3. `bridge:last_update_received` is older than `UPDATE_STALENESS_CEILING` (or absent)
+4. Bridge is past the startup grace window (`STARTUP_GRACE_SECONDS`)
+
+When these conditions hold, `last_probe_ok` being fresh rules out the simple disconnect case — the API layer is up, but Telethon has stopped delivering events. This is the wedge signature.
+
+A SECONDARY accelerator fires at `UPDATE_STALENESS_WARN` (before the ceiling) to give an earlier signal on clearly active bridges.
+
+**Key design decisions**:
+- **PRIMARY ceiling-based trigger**: no per-chat precondition. The ceiling fires regardless of whether any specific group has seen traffic. This avoids false negatives on quiet-but-monitored bridges.
+- **`last_probe_ok` as disconfirmation guard**: if the probe itself is stale, the bridge may be disconnected. A disconnect should be recovered by level 1 (process dead) or resolved by Telethon's reconnect — not treated as a wedge. Restarting on disconnect when Telethon is mid-reconnect would interrupt the reconnection attempt. The wedge detector only fires when probe is fresh.
+- **Startup grace window**: `bridge:last_update_received` is absent on cold start (bridge has not received any messages yet). The grace window prevents false wedge verdicts during startup before Telegram delivers the first event.
+- **`None` process-start = fail-safe**: if `get_bridge_process_start_ts()` returns `None` (process info unavailable), the detector treats the verdict as inconclusive and suppresses the restart. This avoids a restart based on incomplete information.
+
+**Recovery**: when `update_flow_live=False`, the watchdog sets `recovery_level = max(recovery_level, 2)` and calls the standard `restart_bridge(catch_up=True)`. The level cap of 2 is hard — the wedge detector never escalates to level 4 (auto-revert), regardless of how many consecutive wedge ticks occur. The `catch_up=True` flag ensures the bridge performs a full catchup scan on restart, recovering any messages that arrived during the wedge window.
+
+**Log signals**:
+```
+[WARNING] bridge_update_loop_wedged: update loop stopped delivering events while process is running and API layer is healthy. Issue: update loop wedged: last_update_received=2.3h ago, last_probe_ok=2m ago — Telethon stopped delivering events while API layer is healthy
+```
+
+**Observable via**:
+```bash
+python monitoring/bridge_watchdog.py --check-only
+# Output includes: Update flow live: True/False
+```
 
 **Auto-Revert** (Level 4):
 - Disabled by default
@@ -792,7 +836,8 @@ The runner-entry guard in `agent/session_completion.py` (`_deliver_pipeline_comp
 | File | Purpose |
 |------|---------|
 | `monitoring/crash_tracker.py` | Crash event logging and pattern detection |
-| `monitoring/bridge_watchdog.py` | External health monitor (bridge process) |
+| `monitoring/bridge_watchdog.py` | External health monitor (bridge process); includes `assess_update_flow()` and wedged-update-loop recovery |
+| `bridge/liveness.py` | Positive liveness signal writers/readers: `record_update_received()`, `get_last_update_received()`, `record_probe_ok()`, `get_last_probe_ok()` |
 | `monitoring/worker_watchdog.py` | External health monitor (worker process — heartbeat-based hung detection + active recovery via launchctl kickstart) |
 | `bridge/hibernation.py` | Auth-expiry hibernation: classifier, flag file, replay |
 | `scripts/auto-revert.sh` | Git revert and restart |
