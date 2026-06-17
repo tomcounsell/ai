@@ -233,6 +233,60 @@ class FeatureSettings(BaseModel):
         ),
     )
 
+    # --- Crash auto-resume policy (issue #1539) ---
+    # Enable ONLY on the one designated auto-resume machine; off everywhere else
+    # (propose-only mode). Env: FEATURES__CRASH_AUTORESUME_ENABLED.
+    crash_autoresume_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable automatic session resume by the crash-recovery reflection. "
+            "Off by default — enable on exactly ONE designated machine. "
+            "All other machines run in propose-only mode (log, no action). "
+            "Env: FEATURES__CRASH_AUTORESUME_ENABLED. See issue #1539."
+        ),
+    )
+    crash_autoresume_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description=(
+            "Per-session cap on automatic resume attempts. Once a session has been "
+            "auto-resumed this many times without recovering, it is left terminal "
+            "for human review. Env: FEATURES__CRASH_AUTORESUME_MAX_ATTEMPTS."
+        ),
+    )
+    crash_autoresume_run_budget: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description=(
+            "Maximum number of sessions that can be auto-resumed in a single "
+            "reflection run. Guards against a misfiring policy causing a flood "
+            "of resumes. Env: FEATURES__CRASH_AUTORESUME_RUN_BUDGET."
+        ),
+    )
+    crash_autoresume_min_occurrences: int = Field(
+        default=3,
+        ge=1,
+        le=100,
+        description=(
+            "Minimum number of times a crash signature must be observed before "
+            "auto-resume is considered eligible for that pattern. Ensures the "
+            "policy has enough data to be statistically meaningful. "
+            "Env: FEATURES__CRASH_AUTORESUME_MIN_OCCURRENCES."
+        ),
+    )
+    crash_autoresume_min_success_ratio: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum recovery success ratio (recovered / attempts) required "
+            "before auto-resume is eligible for a crash pattern. "
+            "Env: FEATURES__CRASH_AUTORESUME_MIN_SUCCESS_RATIO."
+        ),
+    )
+
 
 class GraniteSettings(BaseModel):
     """Granite PTY container configuration (plan #1572).

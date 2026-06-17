@@ -60,6 +60,10 @@ class StatusConflictError(Exception):
 # Terminal statuses -- sessions in these states are "done"
 TERMINAL_STATUSES = frozenset({"completed", "failed", "killed", "abandoned", "cancelled"})
 
+# Statuses from which a session can be resumed (TERMINAL_STATUSES minus "cancelled").
+# "cancelled" is an intentional human stop and must never be auto-resumed.
+RESUMABLE_STATUSES: frozenset[str] = frozenset({"completed", "killed", "failed", "abandoned"})
+
 # Non-terminal statuses -- sessions in these states are still active or paused
 NON_TERMINAL_STATUSES = frozenset(
     {
