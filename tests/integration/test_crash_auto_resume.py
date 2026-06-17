@@ -12,6 +12,7 @@ and signatures. Popoto cleanup via .delete() after each test.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -136,6 +137,25 @@ def _cleanup_telemetry(session_id: str) -> None:
         pass
 
 
+@contextlib.contextmanager
+def _patch_settings(**overrides):
+    """Patch config.settings.settings.features attributes for the test duration.
+
+    run_crash_recovery() reads the enable flag and thresholds from the pydantic
+    settings singleton (config.settings.settings.features) at run time — that
+    singleton is instantiated at import, so tests cannot set env after import
+    and must patch the object directly. This drives the REAL production config
+    path, not a bypass. The lookback window is still env-read (set via
+    patch.dict on os.environ alongside this).
+    """
+    from config.settings import settings
+
+    with contextlib.ExitStack() as stack:
+        for attr, value in overrides.items():
+            stack.enter_context(patch.object(settings.features, attr, value))
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Test class
 # ---------------------------------------------------------------------------
@@ -162,12 +182,9 @@ class TestCrashAutoResume:
         _write_telemetry(session_id, _standard_trace())
 
         try:
-            with patch.dict(
-                os.environ,
-                {
-                    "CRASH_AUTORESUME_ENABLED": "0",
-                    "CRASH_AUTORESUME_LOOKBACK_HOURS": "9999",
-                },
+            with (
+                _patch_settings(crash_autoresume_enabled=False),
+                patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
             ):
                 from reflections.crash_recovery import run_crash_recovery
 
@@ -242,13 +259,8 @@ class TestCrashAutoResume:
 
         try:
             with (
-                patch.dict(
-                    os.environ,
-                    {
-                        "CRASH_AUTORESUME_ENABLED": "1",
-                        "CRASH_AUTORESUME_LOOKBACK_HOURS": "9999",
-                    },
-                ),
+                _patch_settings(crash_autoresume_enabled=True),
+                patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
                 caplog.at_level("WARNING", logger="reflections.crash_recovery"),
             ):
                 from reflections.crash_recovery import run_crash_recovery
@@ -313,12 +325,9 @@ class TestCrashAutoResume:
         _write_telemetry(session_id, _no_turn_start_trace())
 
         try:
-            with patch.dict(
-                os.environ,
-                {
-                    "CRASH_AUTORESUME_ENABLED": "1",
-                    "CRASH_AUTORESUME_LOOKBACK_HOURS": "9999",
-                },
+            with (
+                _patch_settings(crash_autoresume_enabled=True),
+                patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
             ):
                 from reflections.crash_recovery import run_crash_recovery
 
@@ -376,12 +385,10 @@ class TestCrashAutoResume:
         )
 
         try:
-            env = {
-                "CRASH_AUTORESUME_ENABLED": "0",
-                "CRASH_AUTORESUME_LOOKBACK_HOURS": "9999",
-            }
-
-            with patch.dict(os.environ, env):
+            with (
+                _patch_settings(crash_autoresume_enabled=False),
+                patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
+            ):
                 from reflections.crash_recovery import run_crash_recovery
 
                 result1 = run_crash_recovery()
@@ -409,7 +416,10 @@ class TestCrashAutoResume:
             )
 
             # Run again — must NOT double-count
-            with patch.dict(os.environ, env):
+            with (
+                _patch_settings(crash_autoresume_enabled=False),
+                patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
+            ):
                 result2 = run_crash_recovery()
 
             assert result2["status"] == "ok"
@@ -431,17 +441,46 @@ class TestCrashAutoResume:
     # ------------------------------------------------------------------
 
     def test_below_confidence_not_auto_resumed(self, redis_test_db):
-        """With CRASH_AUTORESUME_ENABLED=1 but a signature that has NOT cleared the
-        confidence gate (first occurrence: occurrence_count < MIN_OCCURRENCES, and
-        zero recorded outcomes so success ratio is 0.0), the reflection must NOT
-        auto-resume the session. Status stays terminal; a 'proposed:' finding
+        """Demotion negative (demotion-gate model): with auto-resume enabled and
+        a signature that HAS recorded failing attempts whose success ratio is
+        below MIN_SUCCESS_RATIO, the reflection must NOT auto-resume the session.
+
+        Under the demotion-gate model a zero-attempt signature is eligible
+        (bootstrap), so the valid negative case is a signature that has demoted
+        itself: occurrences >= MIN_OCCURRENCES AND attempts > 0 with
+        ratio < MIN_SUCCESS_RATIO. Status stays terminal; a 'proposed:' finding
         appears; no auto-resume fires.
 
-        This guards Blocker 1: the confidence gate (is_auto_eligible) must run
+        This guards Blocker 1: the demotion gate (is_auto_eligible) must run
         before any resume. A resumable signature is necessary but NOT sufficient —
-        it must also be statistically warranted.
+        once it accrues failing attempts it must demote out of eligibility.
         """
+        from agent.crash_signature import extract_signature
+
         trace = _standard_trace(to_status="abandoned")
+        sig_key = extract_signature(trace)
+        sig_hash = sig_key.hash
+
+        # Pre-warm the library so this signature has DEMOTED itself: enough
+        # occurrences but a success ratio (1/3 ≈ 0.33) below the 0.7 threshold.
+        sig_record = CrashSignature.get_or_create_by_hash(
+            sig_hash,
+            human_form=sig_key.human_form,
+            signature_class=sig_key.signature_class,
+            resumable=sig_key.resumable,
+        )
+        sig_record.project_key = _TEST_PROJECT
+        sig_record.save()
+        for i in range(3):
+            sig_record.upsert_occurrence(
+                f"warmup-below-{i}",
+                terminal_status="abandoned",
+                has_uuid=True,
+                project_key=_TEST_PROJECT,
+            )
+        sig_record.record_outcome("auto_resume", recovered=True)
+        sig_record.record_outcome("auto_resume", recovered=False)
+        sig_record.record_outcome("auto_resume", recovered=False)
 
         session_id = "test-car-sess-below-conf"
         session = _make_session(
@@ -452,14 +491,13 @@ class TestCrashAutoResume:
         _write_telemetry(session_id, trace)
 
         try:
-            with patch.dict(
-                os.environ,
-                {
-                    "CRASH_AUTORESUME_ENABLED": "1",
-                    "CRASH_AUTORESUME_LOOKBACK_HOURS": "9999",
-                    "CRASH_AUTORESUME_MIN_OCCURRENCES": "3",
-                    "CRASH_AUTORESUME_MIN_SUCCESS_RATIO": "0.7",
-                },
+            with (
+                _patch_settings(
+                    crash_autoresume_enabled=True,
+                    crash_autoresume_min_occurrences=3,
+                    crash_autoresume_min_success_ratio=0.7,
+                ),
+                patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
             ):
                 from reflections.crash_recovery import run_crash_recovery
 
@@ -467,7 +505,7 @@ class TestCrashAutoResume:
 
             assert result["status"] == "ok", f"Unexpected error: {result}"
 
-            # Session must still be 'abandoned' — the confidence gate blocked resume.
+            # Session must still be 'abandoned' — the demotion gate blocked resume.
             sessions = list(AgentSession.query.filter(session_id=session_id))
             assert sessions, f"Session {session_id!r} not found after reflection"
             assert sessions[0].status == "abandoned", (
@@ -549,14 +587,13 @@ class TestCrashAutoResume:
         _write_telemetry(session_id, trace)
 
         try:
-            with patch.dict(
-                os.environ,
-                {
-                    "CRASH_AUTORESUME_ENABLED": "1",
-                    "CRASH_AUTORESUME_LOOKBACK_HOURS": "9999",
-                    "CRASH_AUTORESUME_MIN_OCCURRENCES": "3",
-                    "CRASH_AUTORESUME_MIN_SUCCESS_RATIO": "0.7",
-                },
+            with (
+                _patch_settings(
+                    crash_autoresume_enabled=True,
+                    crash_autoresume_min_occurrences=3,
+                    crash_autoresume_min_success_ratio=0.7,
+                ),
+                patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
             ):
                 from reflections.crash_recovery import run_crash_recovery
 
@@ -576,6 +613,88 @@ class TestCrashAutoResume:
             stored_sig = getattr(sessions[0], "crash_signature", None)
             assert stored_sig == sig_hash, (
                 f"Expected crash_signature={sig_hash!r}, got {stored_sig!r}"
+            )
+
+        finally:
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            _cleanup_sessions(*sessions)
+            _cleanup_signatures(sig_hash)
+            _cleanup_telemetry(session_id)
+
+    # ------------------------------------------------------------------
+    # Test 5: bootstrap — zero-attempt eligible signature IS auto-resumed
+    # ------------------------------------------------------------------
+
+    def test_bootstrap_auto_resume_zero_attempts(self, redis_test_db):
+        """Cold-start proof (demotion-gate model): a resumable signature seen at
+        least MIN_OCCURRENCES times with ZERO prior auto_resume attempts is
+        auto-resumed when crash_autoresume_enabled=True via the REAL settings
+        path. The session transitions terminal -> 'pending' with no human action.
+
+        This is the case the previous promotion-gate deadlock made impossible
+        (0 attempts -> ratio 0.0 -> never eligible -> never resumed). It proves
+        the "zero-human-action auto-resume" Success Criterion is reachable
+        through the documented FEATURES__CRASH_AUTORESUME_ENABLED config.
+        """
+        from agent.crash_signature import extract_signature
+
+        trace = _standard_trace(to_status="abandoned")
+        sig_key = extract_signature(trace)
+        sig_hash = sig_key.hash
+
+        # Pre-warm occurrences ONLY — no record_outcome, so zero attempts.
+        sig_record = CrashSignature.get_or_create_by_hash(
+            sig_hash,
+            human_form=sig_key.human_form,
+            signature_class=sig_key.signature_class,
+            resumable=sig_key.resumable,
+        )
+        sig_record.project_key = _TEST_PROJECT
+        sig_record.save()
+        for i in range(3):
+            sig_record.upsert_occurrence(
+                f"bootstrap-warmup-{i}",
+                terminal_status="abandoned",
+                has_uuid=True,
+                project_key=_TEST_PROJECT,
+            )
+        # Sanity: zero attempts recorded — this is the bootstrap precondition.
+        assert sig_record.policy_confidence("auto_resume") == 0.0
+
+        session_id = "test-car-sess-bootstrap"
+        _make_session(
+            session_id,
+            "abandoned",
+            claude_session_uuid="test-uuid-bootstrap",
+        )
+        _write_telemetry(session_id, trace)
+
+        try:
+            with (
+                _patch_settings(
+                    crash_autoresume_enabled=True,
+                    crash_autoresume_min_occurrences=3,
+                    crash_autoresume_min_success_ratio=0.7,
+                ),
+                patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
+            ):
+                from reflections.crash_recovery import run_crash_recovery
+
+                result = run_crash_recovery()
+
+            assert result["status"] == "ok", f"Unexpected error: {result}"
+
+            # Zero-human-action auto-resume: session transitioned to 'pending'.
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            assert sessions, f"Session {session_id!r} not found after reflection"
+            assert sessions[0].status == "pending", (
+                f"Bootstrap auto-resume failed: expected 'pending', got "
+                f"{sessions[0].status!r}. Findings: {result['findings']}"
+            )
+
+            # The run must report at least one auto-resume.
+            assert "auto_resumed=0" not in result["summary"], (
+                f"Expected auto_resumed>=1 in summary, got: {result['summary']!r}"
             )
 
         finally:

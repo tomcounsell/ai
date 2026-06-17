@@ -122,23 +122,46 @@ Primary key: `signature_hash` (sha256[:16] of `human_form`).
 
 Records are upserted on every terminal session scan: `get_or_create_by_hash()` followed by `upsert_occurrence()`.
 
-## Policy Thresholds
+## Policy Thresholds (Demotion-Gate Model)
 
-A signature is auto-eligible when all three conditions are met:
+Auto-eligibility follows a **demotion-gate** model, not a promotion gate. The success ratio only *demotes* a signature once it has earned real attempt data. A signature with zero recorded attempts is "not yet demoted" and remains eligible (provided the structural gates pass). A promotion gate would deadlock the cold-start case: zero attempts produces a 0.0 ratio, which would never clear a minimum ratio, so the signature would never be resumed and never accrue attempts.
 
-1. Not `NON_RESUMABLE_DETERMINISTIC`
-2. `occurrence_count >= MIN_OCCURRENCES` (default 3, env: `CRASH_AUTORESUME_MIN_OCCURRENCES`)
-3. `policy_confidence("auto_resume") >= MIN_SUCCESS_RATIO` (default 0.7, env: `CRASH_AUTORESUME_MIN_SUCCESS_RATIO`)
+`is_auto_eligible` evaluates, in order:
+
+1. `NON_RESUMABLE_DETERMINISTIC` -> never eligible (determinism guardrail wins unconditionally).
+2. Not `is_resumable` -> never eligible.
+3. `occurrence_count < MIN_OCCURRENCES` (default 3, settings: `crash_autoresume_min_occurrences`) -> not eligible.
+4. Zero recorded attempts for the strategy -> **eligible** (bootstrap; not yet demoted).
+5. Attempts > 0 -> eligible iff `policy_confidence("auto_resume") >= MIN_SUCCESS_RATIO` (default 0.7, settings: `crash_autoresume_min_success_ratio`). A signature that starts failing auto-demotes itself out of eligibility.
 
 `policy_confidence` is `recovered / attempts` from the `outcome_tallies_json` for the `"auto_resume"` strategy. Returns 0.0 when no attempts exist.
 
 The library is cold at first ship. The INFO log line "crash-signature library is cold" will appear on each run until the first signatures are recorded. Observable via `valor-session crash-signatures --project <key>`.
 
+## Scheduling / Registration
+
+The reflection ships as a callable but is **not scheduled by default**. `config/reflections.yaml` is a gitignored symlink to the iCloud-synced vault file, so its registration cannot be committed here. To activate the reflection, an operator adds the following entry to `~/Desktop/Valor/reflections.yaml` (the vault file the symlink points at):
+
+```yaml
+  - name: crash-recovery
+    group: agents
+    description: "Extract crash signatures from terminal sessions; propose/auto-resume eligible ones"
+    every: 300s # 5 minutes — mirrors agent-session-cleanup cadence
+    priority: normal
+    execution_type: function
+    callable: "reflections.crash_recovery.run_crash_recovery"
+    enabled: true
+```
+
+Field names match the live `reflections.yaml` schema (`name`, `group`, `description`, `every`, `priority`, `execution_type`, `callable`, `enabled`).
+
+With `enabled: true` the reflection runs and operates in **propose-only mode** on every machine. Auto-apply (actually resuming sessions) additionally requires `FEATURES__CRASH_AUTORESUME_ENABLED=1` set in the environment on **exactly one** designated machine. Every other machine logs proposals but never resumes — this prevents two machines from double-resuming the same session.
+
 ## Propose vs Auto-Apply Modes
 
 By default the reflection runs in **propose mode**: it logs which sessions it would resume but does not act.
 
-Set `CRASH_AUTORESUME_ENABLED=1` to enable **auto mode**. Auto mode should only be activated on one designated machine. Running it on multiple machines concurrently risks double-resume.
+Set `FEATURES__CRASH_AUTORESUME_ENABLED=1` to enable **auto mode**. The enable flag and all four thresholds are read from the pydantic settings object (`config.settings.settings.features`) at run time inside `run_crash_recovery()`, so the documented `FEATURES__` env prefix is the single source of truth. Auto mode should only be activated on one designated machine. Running it on multiple machines concurrently risks double-resume.
 
 In auto mode the reflection calls `resume_session(session, "continue", source="auto-resume")` and tags the session with `crash_signature = sig.hash` and `auto_resume_attempts = N` for outcome attribution on the next run.
 
@@ -197,15 +220,20 @@ For incomplete telemetry (no terminal `status_transition` event yet, or `unclass
 
 ## Configuration Reference
 
-All thresholds are overridable via environment variables:
+The enable flag and four thresholds are pydantic settings fields on `settings.features`, read at run time. Their env prefix is `FEATURES__`:
 
-| Variable | Default | Description |
+| Env var | Settings field | Default | Description |
+|---|---|---|---|
+| `FEATURES__CRASH_AUTORESUME_ENABLED` | `crash_autoresume_enabled` | `0` | Set to `1` to enable auto mode on this machine |
+| `FEATURES__CRASH_AUTORESUME_MIN_OCCURRENCES` | `crash_autoresume_min_occurrences` | `3` | Min observations before a signature is auto-eligible |
+| `FEATURES__CRASH_AUTORESUME_MIN_SUCCESS_RATIO` | `crash_autoresume_min_success_ratio` | `0.7` | Min success ratio (recovered / attempts) once attempts exist (demotion threshold) |
+| `FEATURES__CRASH_AUTORESUME_MAX_ATTEMPTS` | `crash_autoresume_max_attempts` | `3` | Per-session auto-resume attempt cap |
+| `FEATURES__CRASH_AUTORESUME_RUN_BUDGET` | `crash_autoresume_run_budget` | `5` | Max auto-resumes per reflection run |
+
+The lookback window has no settings field and is read from a bare env var at run time:
+
+| Env var | Default | Description |
 |---|---|---|
-| `CRASH_AUTORESUME_ENABLED` | `0` | Set to `1` to enable auto mode on this machine |
-| `CRASH_AUTORESUME_MIN_OCCURRENCES` | `3` | Min observations before a signature is auto-eligible |
-| `CRASH_AUTORESUME_MIN_SUCCESS_RATIO` | `0.7` | Min success ratio (recovered / attempts) for auto-eligibility |
-| `CRASH_AUTORESUME_MAX_ATTEMPTS` | `3` | Per-session auto-resume attempt cap |
-| `CRASH_AUTORESUME_RUN_BUDGET` | `5` | Max auto-resumes per reflection run |
 | `CRASH_AUTORESUME_LOOKBACK_HOURS` | `2.0` | How far back to scan for recently-terminal sessions |
 
 ## CLI Reference

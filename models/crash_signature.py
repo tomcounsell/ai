@@ -196,23 +196,46 @@ class CrashSignature(Model):
     ) -> bool:
         """Return True if this signature is eligible for automatic recovery.
 
-        Eligibility requires:
-        - Not ``NON_RESUMABLE_DETERMINISTIC``
-        - ``occurrence_count >= min_occurrences``
-        - ``policy_confidence(strategy) >= min_success_ratio``
+        Eligibility follows a **demotion-gate** model, not a promotion gate.
+        The success ratio only *demotes* a signature once it has earned real
+        attempt data; a signature with zero recorded attempts is "not yet
+        demoted" and remains eligible (provided the structural gates pass).
+        This is the bootstrap path that makes zero-human-action auto-resume
+        reachable: a promotion gate would deadlock (0 attempts -> ratio 0.0 ->
+        never eligible -> never resumed -> never accrues attempts).
+
+        Eligibility logic, in order:
+        - ``NON_RESUMABLE_DETERMINISTIC`` -> never eligible (determinism
+          guardrail wins unconditionally).
+        - Not ``is_resumable`` -> never eligible.
+        - ``occurrence_count < min_occurrences`` -> not eligible (occurrence
+          gate ensures the pattern is recurring before we act).
+        - Zero attempts for ``strategy`` -> ELIGIBLE (bootstrap: not yet
+          demoted).
+        - Attempts > 0 -> eligible iff
+          ``policy_confidence(strategy) >= min_success_ratio`` (a signature
+          that starts failing auto-demotes itself out of eligibility).
 
         Args:
             strategy: Recovery strategy name to check.
             min_occurrences: Minimum observations before auto-eligibility.
-            min_success_ratio: Minimum success ratio for the strategy.
+            min_success_ratio: Minimum success ratio for the strategy once
+                attempt data exists (demotion threshold).
 
         Returns:
-            True if all conditions are met, False otherwise.
+            True if eligible under the demotion-gate model, False otherwise.
         """
         if self.is_non_resumable_deterministic:
             return False
+        if not self.is_resumable:
+            return False
         if self.occurrence_count_int < min_occurrences:
             return False
+
+        attempts = int(self._load_tallies().get(strategy, {}).get("attempts") or 0)
+        if attempts == 0:
+            # Not yet demoted — bootstrap case. Eligible.
+            return True
         return self.policy_confidence(strategy) >= min_success_ratio
 
     # ------------------------------------------------------------------

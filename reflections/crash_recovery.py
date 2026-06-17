@@ -9,10 +9,16 @@ Periodic reflection that:
 2. Extracts and upserts crash signatures into the library
 3. Attributes outcomes for already-resumed sessions (crash_outcome_attributed idempotency)
 4. In propose mode (default): logs proposals only, no resume
-5. In auto mode (CRASH_AUTORESUME_ENABLED=1): resumes eligible sessions with safety gates:
-   - per-session attempt cap (CRASH_AUTORESUME_MAX_ATTEMPTS, default 3)
-   - global per-run budget (CRASH_AUTORESUME_RUN_BUDGET, default 5)
+5. In auto mode (FEATURES__CRASH_AUTORESUME_ENABLED=1): resumes eligible sessions with safety gates:
+   - per-session attempt cap (settings.features.crash_autoresume_max_attempts, default 3)
+   - global per-run budget (settings.features.crash_autoresume_run_budget, default 5)
    - determinism guardrail: NON_RESUMABLE_DETERMINISTIC sessions are escalated, not resumed
+
+The enable flag and all four thresholds are read from the pydantic settings
+object (config.settings.settings.features) at RUN TIME inside
+run_crash_recovery() — env prefix FEATURES__. The lookback window
+(CRASH_AUTORESUME_LOOKBACK_HOURS) has no settings field and is still env-read
+at run time.
 
 Race 1 mitigation: if the extracted signature is the unclassifiable sentinel OR the trace
 has no terminal status_transition event, skip the session and retry next tick. The SOLE
@@ -32,16 +38,6 @@ import os
 from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger("reflections.crash_recovery")
-
-# ---------------------------------------------------------------------------
-# Thresholds (all overridable via env vars)
-# ---------------------------------------------------------------------------
-
-_MIN_OCCURRENCES = int(os.environ.get("CRASH_AUTORESUME_MIN_OCCURRENCES", "3"))
-_MIN_SUCCESS_RATIO = float(os.environ.get("CRASH_AUTORESUME_MIN_SUCCESS_RATIO", "0.7"))
-_MAX_AUTO_ATTEMPTS = int(os.environ.get("CRASH_AUTORESUME_MAX_ATTEMPTS", "3"))
-_RUN_BUDGET = int(os.environ.get("CRASH_AUTORESUME_RUN_BUDGET", "5"))
-_LOOKBACK_HOURS = float(os.environ.get("CRASH_AUTORESUME_LOOKBACK_HOURS", "2.0"))
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +69,20 @@ def run_crash_recovery() -> dict:
         Dict with keys: status ("ok"|"error"), findings (list of strings), summary (str).
     """
     findings: list[str] = []
-    auto_enabled = bool(int(os.environ.get("CRASH_AUTORESUME_ENABLED", "0") or "0"))
+
+    # Read enable flag + thresholds from the pydantic settings object at RUN
+    # TIME (not import time). The documented config surface is the
+    # FEATURES__CRASH_AUTORESUME_* env prefix -> settings.features.*; reading
+    # them here is the single source of truth. The lookback window has no
+    # settings field, so it is still env-read (run-time) below.
+    from config.settings import settings
+
+    auto_enabled = bool(settings.features.crash_autoresume_enabled)
+    min_occurrences = int(settings.features.crash_autoresume_min_occurrences)
+    min_success_ratio = float(settings.features.crash_autoresume_min_success_ratio)
+    max_auto_attempts = int(settings.features.crash_autoresume_max_attempts)
+    run_budget = int(settings.features.crash_autoresume_run_budget)
+    lookback_hours = float(os.environ.get("CRASH_AUTORESUME_LOOKBACK_HOURS", "2.0"))
 
     try:
         from agent.crash_signature import NON_RESUMABLE_DETERMINISTIC, extract_signature
@@ -105,7 +114,7 @@ def run_crash_recovery() -> dict:
     auto_resumed = 0
     escalated = 0
     re_crashed = 0
-    run_budget_remaining = _RUN_BUDGET
+    run_budget_remaining = run_budget
 
     # Warm-up honesty (concern 4): log if library is cold
     try:
@@ -119,7 +128,7 @@ def run_crash_recovery() -> dict:
         pass
 
     # Scan recently-terminal sessions
-    cutoff = datetime.now(UTC) - timedelta(hours=_LOOKBACK_HOURS)
+    cutoff = datetime.now(UTC) - timedelta(hours=lookback_hours)
 
     try:
         all_resumable = list(AgentSession.query.filter(status__in=list(RESUMABLE_STATUSES)))
@@ -293,8 +302,8 @@ def run_crash_recovery() -> dict:
             # and in models/crash_signature.py.
             if not sig_record.is_auto_eligible(
                 strategy="auto_resume",
-                min_occurrences=_MIN_OCCURRENCES,
-                min_success_ratio=_MIN_SUCCESS_RATIO,
+                min_occurrences=min_occurrences,
+                min_success_ratio=min_success_ratio,
             ):
                 proposed += 1
                 logger.info(
@@ -303,9 +312,9 @@ def run_crash_recovery() -> dict:
                     "observed but not resuming session=%s",
                     sig.human_form,
                     sig_record.occurrence_count_int,
-                    _MIN_OCCURRENCES,
+                    min_occurrences,
                     sig_record.policy_confidence("auto_resume"),
-                    _MIN_SUCCESS_RATIO,
+                    min_success_ratio,
                     session_id,
                 )
                 findings.append(
@@ -322,11 +331,11 @@ def run_crash_recovery() -> dict:
                 except (TypeError, ValueError):
                     attempt_count = 0
 
-                if attempt_count >= _MAX_AUTO_ATTEMPTS:
+                if attempt_count >= max_auto_attempts:
                     logger.warning(
                         "max auto-resume attempts (%d) reached for session %s "
                         "(signature %s); leaving terminal for human",
-                        _MAX_AUTO_ATTEMPTS,
+                        max_auto_attempts,
                         session_id,
                         sig.human_form,
                     )

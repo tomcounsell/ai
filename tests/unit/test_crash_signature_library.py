@@ -257,15 +257,47 @@ class TestAutoEligibility:
         finally:
             _cleanup(*([record] if record else []))
 
-    def test_not_eligible_below_min_success_ratio(self):
+    def test_demotion_below_min_success_ratio(self):
+        """Demotion path: once a signature has recorded attempts whose success
+        ratio falls below min_success_ratio, it is NOT eligible — it has
+        demoted itself out of auto-eligibility."""
         record = None
         try:
             record = _make_record("elig-low-ratio")
             for _ in range(5):
                 record.upsert_occurrence(f"s{_}", "failed")
-            # 1 out of 2 = 0.5, below 0.7
+            # 1 out of 2 = 0.5, below 0.7 — has attempts, so demotion applies
             record.record_outcome("auto_resume", recovered=True)
             record.record_outcome("auto_resume", recovered=False)
+            assert record.is_auto_eligible(min_occurrences=3, min_success_ratio=0.7) is False
+        finally:
+            _cleanup(*([record] if record else []))
+
+    def test_bootstrap_zero_attempts_is_eligible(self):
+        """Bootstrap path (demotion-gate model): a resumable signature seen at
+        least min_occurrences times with ZERO recorded attempts is NOT yet
+        demoted and IS eligible. This is the cold-start case a promotion gate
+        would deadlock (0 attempts -> ratio 0.0 -> never eligible)."""
+        record = None
+        try:
+            record = _make_record("elig-bootstrap-zero")
+            for i in range(3):
+                record.upsert_occurrence(f"s{i}", "failed")
+            # No record_outcome calls — zero attempts.
+            assert record.policy_confidence("auto_resume") == 0.0
+            assert record.is_auto_eligible(min_occurrences=3, min_success_ratio=0.7) is True
+        finally:
+            _cleanup(*([record] if record else []))
+
+    def test_not_eligible_when_not_resumable(self):
+        """A signature flagged resumable=False (but not deterministic) is never
+        auto-eligible, even at zero attempts with occurrences met."""
+        record = None
+        try:
+            record = _make_record("elig-not-resumable", resumable=False)
+            for i in range(3):
+                record.upsert_occurrence(f"s{i}", "failed")
+            assert record.is_resumable is False
             assert record.is_auto_eligible(min_occurrences=3, min_success_ratio=0.7) is False
         finally:
             _cleanup(*([record] if record else []))
