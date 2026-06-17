@@ -27,6 +27,7 @@ from agent.reflection_scheduler import (
     ReflectionScheduler,
     _get_memory_rss,
     _resolve_registry_path,
+    execute_function_reflection,
     is_reflection_due,
     is_reflection_running,
     load_registry,
@@ -885,3 +886,87 @@ class TestEnqueueAgentReflectionTypedErrors:
         warnings_logged = [str(c) for c in mock_logger.warning.call_args_list]
         assert any("could not resolve project_key" in w for w in warnings_logged)
         assert captured["project_key"] == "env-fallback-key"
+
+
+class TestExecuteFunctionReflectionParams:
+    """Verify that params in ReflectionEntry are threaded through to the callable.
+
+    This covers the dead-config fix: the `params:` block in reflections.yaml was
+    parsed but never forwarded because ReflectionEntry had no params field and
+    execute_function_reflection always called func() with no args.
+    """
+
+    def _make_entry(self, callable_path: str, params: dict | None = None) -> ReflectionEntry:
+        return ReflectionEntry(
+            name="test-reflection",
+            description="test",
+            priority="low",
+            execution_type="function",
+            schedule="every: 3600s",
+            callable=callable_path,
+            params=params or {},
+        )
+
+    def test_params_forwarded_to_callable_that_accepts_params(self):
+        """Params are passed as kwargs when the callable declares `params`."""
+        received: dict = {}
+
+        def fake_func(params: dict | None = None) -> None:
+            received["params"] = params
+
+        entry = self._make_entry(
+            "some.module.fake_func", params={"stall_advisory_telegram_enabled": True}
+        )
+
+        with patch("agent.reflection_scheduler._resolve_callable", return_value=fake_func):
+            asyncio.run(execute_function_reflection(entry))
+
+        assert received["params"] == {"stall_advisory_telegram_enabled": True}
+
+    def test_zero_arg_callable_receives_no_params(self):
+        """Zero-arg callables continue to be called without arguments (backward compat)."""
+        call_count = {"n": 0}
+
+        def zero_arg_func() -> None:
+            call_count["n"] += 1
+
+        entry = self._make_entry("some.module.zero_arg_func", params={"ignored": True})
+
+        with patch("agent.reflection_scheduler._resolve_callable", return_value=zero_arg_func):
+            asyncio.run(execute_function_reflection(entry))
+
+        assert call_count["n"] == 1
+
+    def test_params_field_default_is_empty_dict(self):
+        """ReflectionEntry.params defaults to an empty dict when not supplied."""
+        entry = ReflectionEntry(
+            name="no-params",
+            description="test",
+            priority="low",
+            execution_type="function",
+            schedule="every: 3600s",
+            callable="some.module.func",
+        )
+        assert entry.params == {}
+
+    def test_load_registry_populates_params_from_yaml(self, tmp_path):
+        """load_registry threads `params:` from YAML into ReflectionEntry.params."""
+        yaml_content = """
+reflections:
+  - name: stall-advisory
+    description: test
+    priority: low
+    execution_type: function
+    every: 3600s
+    callable: reflections.stall_advisory.run_stall_advisory
+    enabled: true
+    params:
+      stall_advisory_telegram_enabled: true
+"""
+        registry_file = tmp_path / "reflections.yaml"
+        registry_file.write_text(yaml_content)
+
+        entries = load_registry(path=registry_file)
+
+        assert len(entries) == 1
+        assert entries[0].params == {"stall_advisory_telegram_enabled": True}

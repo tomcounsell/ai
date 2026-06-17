@@ -19,7 +19,7 @@ import inspect
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +100,7 @@ class ReflectionEntry:
     command: str | None = None  # shell command for agent type
     enabled: bool = True
     timeout: int | None = None  # per-reflection timeout in seconds (None = use default)
+    params: dict = field(default_factory=dict)  # arbitrary kwargs forwarded to the callable
 
     def __post_init__(self) -> None:
         """Normalize legacy ``interval=N`` to ``schedule='every: Ns'``."""
@@ -243,6 +244,7 @@ def load_registry(path: Path | None = None) -> list[ReflectionEntry]:
                 command=raw.get("command"),
                 enabled=raw.get("enabled", True),
                 timeout=int(raw_timeout) if raw_timeout is not None else None,
+                params=raw.get("params") or {},
             )
         except (TypeError, ValueError) as e:
             logger.warning("Skipping malformed registry entry %s: %s", raw.get("name", "?"), e)
@@ -390,12 +392,19 @@ async def execute_function_reflection(entry: ReflectionEntry) -> Any:
     """
     func = _resolve_callable(entry.callable)
 
+    # Check whether this callable accepts a `params` keyword argument.
+    # Only `run_stall_advisory` (and future opt-in callables) declare it;
+    # all other zero-arg reflections must continue to be called with no args.
+    sig = inspect.signature(func)
+    accepts_params = "params" in sig.parameters
+
     if inspect.iscoroutinefunction(func):
-        return await func()
+        return await func(params=entry.params) if accepts_params else await func()
     else:
         # Run sync functions in a thread to avoid blocking the event loop
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, func)
+        call = (lambda: func(params=entry.params)) if accepts_params else func
+        return await loop.run_in_executor(None, call)
 
 
 def _get_memory_rss() -> int | None:

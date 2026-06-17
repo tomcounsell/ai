@@ -8,6 +8,12 @@ Before this feature, every crashed session required a human operator to notice, 
 
 This reflection closes that loop: it watches terminal sessions, extracts normalized crash signatures, stores them in a library, and — once a pattern has been seen enough times with a sufficient recovery success rate — either proposes auto-resume or performs it automatically.
 
+## Pillar Boundary: Running vs. Terminal Sessions
+
+This feature (Pillar 2, #1539) operates on **terminal** sessions only — completed, failed, killed, abandoned. It extracts crash signatures from the closed telemetry trace and gates automatic resumption behind statistical confidence.
+
+Live advisory classification for **running** sessions is handled by the [Stall Advisory Classifier](stall-advisory-classifier.md) (Pillar 1, #1538). The moment a session transitions to a terminal status it leaves Pillar 1's scope and enters Pillar 2's.
+
 ## Ownership Boundary with #1537
 
 Issue #1537 (`session_health.py`) drives crashed sessions to terminal state. Issue #1539 (this feature) begins after that transition.
