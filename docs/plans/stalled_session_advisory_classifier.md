@@ -1,12 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-17
 tracking: https://github.com/tomcounsell/ai/issues/1538
 last_comment_id: 4715101146
-revision_applied: false
+revision_applied: true
 ---
 
 # Stalled-Session Advisory Classifier (Pillar 1 of epic #1536)
@@ -40,6 +40,10 @@ A pure, advisory classifier that, given a running session's recent telemetry win
 - `agent/reflection_scheduler.py:270` `_resolve_callable`, `:391-394` sync/async function-callable invocation — confirmed; callable returns a `{status, findings, summary}` dict (pattern from `reflections/crash_recovery.py:65`).
 - `agent/crash_signature.py` `extract_signature` / `CrashSignatureKey` — confirmed shipped (Pillar 2); `_has_turn_start` never-started detection and `startup_failure_kind` ("plateau"/"ceiling") consumption present.
 - `agent/granite_container/bridge_adapter.py:532` sets `session.startup_failure_kind`; `tools/granite_loop/cli.py:172` finalizes `startup_unresolved` via `finalize_session(... "failed", reason="startup_unresolved")`.
+- `models/session_lifecycle.py:60-79` — `TERMINAL_STATUSES` and `NON_TERMINAL_STATUSES` confirmed. **Critical for revision:** `NON_TERMINAL_STATUSES` includes `pending`, `dormant`, `waiting_for_children`, `superseded` — a `pending` session has not begun execution and has **no trace file**. The never-started branch must NOT key on this broad set (see Technical Approach: running-probe gate). There is no pre-existing `_NON_TERMINAL_PROBE_STATUSES` constant in the codebase; this plan defines a narrow running-probe set in the new module.
+- `models/agent_session.py:146-147` — `created_at` (always set, `SortedField`) and `started_at` (`DatetimeField(null=True)`, None until execution begins) confirmed; `started_at` clears the never-started elapsed-field ambiguity (see Technical Approach).
+- `bridge/utc.py:38` `to_unix_ts(val) -> float | None` — confirmed; normalizes naive/aware datetimes to a unix float, the tz-guard the elapsed math uses.
+- `monitoring/session_watchdog.py:304` iterates `("pending", "running", "active")` — confirms #1313's watchdog owns the `pending`-stall surface; Pillar 1 deliberately excludes `pending` to avoid colliding with it.
 
 **Cited sibling issues/PRs re-checked:**
 - #1536 (epic) — OPEN.
@@ -85,16 +89,17 @@ No relevant external findings — proceeding with codebase context. The classifi
 ## Data Flow
 
 1. **Entry point A — dashboard (live, per-request):** `ui/data/sdlc.py::_session_to_pipeline(session)` (`:746`) runs for each session being rendered. **New:** for a *non-terminal* session, call `classify_session_stall(read_session_timeline(session.session_id), session=session)` and attach the resulting verdict + reason to a new `PipelineProgress` advisory field. Terminal sessions skip the call (verdict stays `None`).
-2. **Entry point B — reflection (periodic):** a new `reflections/stall_advisory.py::run_stall_advisory()` callable, registered in `config/reflections.yaml` (`execution_type: function`, every ~5 min, project-scoped or global). It queries running sessions, classifies each, and collects `suspect`/`stalled` verdicts into `findings`. Returns the `{status, findings, summary}` dict the scheduler expects. Error/anomaly-only Telegram surfacing (no all-clear spam, #1292).
-3. **Classifier core (`agent/session_stall_classifier.py`, new, pure):** `classify_session_stall(events, *, session, project_counters=None)` → `StallVerdict(level: "healthy"|"suspect"|"stalled", reason: str, signals: dict)`. It (a) handles the **live never-started** case (running session, no `turn_start`, elapsed pressure), (b) reads the recent event window for idle-gap / tool-timeout / kill-bearing status_transition density, (c) optionally folds in per-project counter pressure (`tool_timeouts`, `recoveries`) as a weak corroborating signal, and (d) returns a verdict. Fail-soft: any exception yields `StallVerdict("healthy", reason="unclassifiable", ...)` so the advisory never blocks rendering or a reflection.
+2. **Entry point B — reflection (periodic):** a new `reflections/stall_advisory.py::run_stall_advisory()` callable, registered in `config/reflections.yaml` (`execution_type: function`, every ~5 min, project-scoped or global). It queries running-probe sessions, classifies each, and collects `suspect`/`stalled` verdicts into `findings`. Returns the `{status, findings, summary}` dict the scheduler expects. **v1 always computes and logs the findings; the Telegram *send* is gated behind a config flag `stall_advisory_telegram_enabled` (default OFF / `false`).** With the flag off, the reflection logs suspect/stalled findings and returns them in `findings` (visible in reflection logs and the dashboard), but emits no Telegram message — deferring the user-visible surface until #1313 coordination is resolved. Even when the flag is on, surfacing stays error/anomaly-only (no all-clear spam, #1292).
+3. **Classifier core (`agent/session_stall_classifier.py`, new, pure):** `classify_session_stall(events, *, session, project_counters=None)` → `StallVerdict(level: "healthy"|"suspect"|"stalled", reason: str, signals: dict)`. It (a) handles the **live never-started** case ONLY for a session whose `status in _RUNNING_PROBE_STATUSES` (`{"running","active","paused","paused_circuit"}` — has begun execution, has a trace), with no `turn_start` and elapsed > startup grace; a `pending` session (no trace, #1313's domain) short-circuits to `healthy/not_started_probe`. Elapsed uses `started_ref = session.started_at or session.created_at`, tz-guarded via `bridge.utc.to_unix_ts`. (b) reads the recent event window for idle-gap / tool-timeout / kill-bearing status_transition density, (c) optionally folds in per-project counter pressure (`tool_timeouts`, `recoveries`) as a weak corroborating signal, and (d) returns a verdict. Fail-soft: any exception yields `StallVerdict("healthy", reason="unclassifiable", ...)` so the advisory never blocks rendering or a reflection.
 4. **Counters reader (`agent/session_stall_classifier.py` helper, optional):** read-only `POPOTO_REDIS_DB.get` of the `{project_key}:session-health:{metric}` integers (never `.incr`/`.delete`). These are *corroborating* signals only.
 5. **Output A:** dashboard renders the advisory badge (e.g. a colored dot + reason tooltip) on the session row/modal — purely informational.
-6. **Output B:** the reflection logs the suspect/stalled list and, only when something looks wrong, sends one concise Telegram note via the reflection's send path. Never kills, never resumes.
+6. **Output B:** the reflection always logs the suspect/stalled list. The concise Telegram note is sent **only when `stall_advisory_telegram_enabled` is true** (default false in v1) AND something looks wrong. With the flag off, v1 surfaces via logs + dashboard badge only. Never kills, never resumes.
 
 ## Architectural Impact
 
 - **New dependencies**: none (stdlib + existing `read_session_timeline` + existing `POPOTO_REDIS_DB` read).
-- **Interface changes**: one new pure module `agent/session_stall_classifier.py` (`classify_session_stall`, `StallVerdict`); one new reflection module `reflections/stall_advisory.py`; one new nullable field on `PipelineProgress` in `ui/data/sdlc.py`; one new entry in `config/reflections.yaml`. No signature change to any existing function.
+- **Interface changes**: one new pure module `agent/session_stall_classifier.py` (`classify_session_stall`, `StallVerdict`); one new reflection module `reflections/stall_advisory.py`; one new nullable field on `PipelineProgress` in `ui/data/sdlc.py`; one new entry in `config/reflections.yaml` carrying a `stall_advisory_telegram_enabled` flag (default `false`). No signature change to any existing function.
+- **Config flag (Telegram gate)**: `stall_advisory_telegram_enabled` defaults OFF. v1 ships it disabled — the reflection computes + logs findings and the dashboard badge renders, but no Telegram is sent until #1313 coordination lands. Carried in the `stall-advisory` reflections.yaml entry's params (read by `run_stall_advisory`); no `config/settings.py` change required.
 - **Coupling**: low and one-directional — the classifier *reads* the telemetry stream and counters; nothing in the kill/recovery path depends on it. It imports vocabulary helpers from `agent.crash_signature` (read-only reuse).
 - **Data ownership**: no new persisted data. The verdict is computed on demand (dashboard) or transiently (reflection). Nothing written to Popoto/Redis/disk.
 - **Reversibility**: high — delete the two new modules, the `PipelineProgress` field, and the reflections.yaml entry. No schema migration, no backfill.
@@ -124,8 +129,8 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/stalled_sessio
 
 ### Key Elements
 
-- **`agent/session_stall_classifier.py` (new, pure)**: `classify_session_stall(events, *, session, project_counters=None) -> StallVerdict`. A fail-soft, side-effect-free function returning a 3-level advisory verdict (`healthy | suspect | stalled`) plus a short reason and a `signals` dict for debuggability. Reuses idle/kill normalization vocabulary from `agent.crash_signature` rather than re-deriving it. Includes the **live never-started** rule: a running session with zero `turn_start` and elapsed-time pressure toward its ceiling is `stalled` with reason `"never_started"`.
-- **`reflections/stall_advisory.py` (new)**: `run_stall_advisory() -> dict` — queries running sessions, classifies each via the core, returns `{status, findings, summary}`. Error/anomaly-only Telegram surfacing. Read-only; never kills or resumes.
+- **`agent/session_stall_classifier.py` (new, pure)**: `classify_session_stall(events, *, session, project_counters=None) -> StallVerdict`. A fail-soft, side-effect-free function returning a 3-level advisory verdict (`healthy | suspect | stalled`) plus a short reason and a `signals` dict for debuggability. Reuses idle/kill normalization vocabulary from `agent.crash_signature` rather than re-deriving it. Defines `_RUNNING_PROBE_STATUSES = frozenset({"running","active","paused","paused_circuit"})`. Includes the **live never-started** rule: a session in `_RUNNING_PROBE_STATUSES` with zero `turn_start` and elapsed-time pressure (computed from `started_at or created_at`, tz-guarded via `bridge.utc.to_unix_ts`) is `stalled` with reason `"never_started"`. `pending` and all other non-probe statuses never trigger never-started.
+- **`reflections/stall_advisory.py` (new)**: `run_stall_advisory() -> dict` — queries running-probe sessions, classifies each via the core, returns `{status, findings, summary}`. Always logs findings; Telegram send gated behind config flag `stall_advisory_telegram_enabled` (default OFF in v1) and, when enabled, error/anomaly-only. Read-only; never kills or resumes.
 - **`config/reflections.yaml` entry**: `stall-advisory`, `execution_type: function`, `callable: reflections.stall_advisory.run_stall_advisory`, schedule ~`every: 300s`, `group: agents`, `enabled: true`.
 - **Dashboard advisory field**: a new nullable `stall_advisory: str | None` (or a small struct) on `PipelineProgress`, populated inline in `_session_to_pipeline` for non-terminal sessions, rendered as an unobtrusive per-session badge with the reason in a tooltip.
 - **Read-only counter helper**: optional `read_project_health_counters(project_key) -> dict[str,int]` doing `POPOTO_REDIS_DB.get` on the `session-health:*` keys — corroborating signals only, never a sole verdict driver.
@@ -139,8 +144,10 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/stalled_sessio
 - **Pure reader, never a writer or actor.** The classifier only reads `read_session_timeline`, AgentSession fields, and (optionally) counter integers. It imports nothing from the kill/recovery path. This structurally guarantees the hard constraint: the advisory can never be a kill trigger.
 - **3-level verdict, not a binary.** `healthy` (recent turn/tool evidence, no concerning pattern), `suspect` (e.g. a single long idle gap mid-task, rising tool-timeout count, one recovery attempt), `stalled` (live never-started; or sustained idle past a generous window with no offsetting evidence; or repeated kill-bearing transitions). Thresholds are constants with placeholder defaults, documented and PM-tunable (do not hardcode magic numbers in prompts/descriptions per repo convention).
 - **Reuse Pillar 2 vocabulary, not its abstraction.** Import `_bucket_idle_gap` and the kill/idle token shapes from `agent.crash_signature` so the advisory's reason strings line up with crash signatures operators already see. Do NOT call `extract_signature` — that yields a *terminal* resume key, the wrong abstraction for a live read.
-- **Live never-started rule.** For a *running* session: if `read_session_timeline` has zero `turn_start` events AND the session has been running longer than a generous startup grace, return `stalled` with reason `"never_started"`. This is the new detection the scope amendment asked for, on the live side (Pillar 2 covers the terminal side).
+- **Live never-started rule — gated on the running-probe status set, NOT the broad non-terminal set.** The classifier defines a narrow module-level constant `_RUNNING_PROBE_STATUSES = frozenset({"running", "active", "paused", "paused_circuit"})` — the statuses in which a session has *begun execution and therefore has a trace file*. The never-started branch fires **only** when `session.status in _RUNNING_PROBE_STATUSES`. This deliberately **excludes** `pending` (worker has not started the subprocess → no trace → owned by #1313's watchdog, `monitoring/session_watchdog.py:304`), `dormant`/`waiting_for_children`/`superseded` (transitional or child-blocked, not stalled). A `pending` session passed to the classifier is therefore never classified `stalled`/`never_started` — it returns `healthy` (reason `"not_started_probe"`), keeping Pillar 1 from double-keying #1313's `pending`-stall surface. Rule body: for a session in `_RUNNING_PROBE_STATUSES`, if `read_session_timeline` has zero `turn_start` events AND elapsed > startup grace, return `stalled/never_started`.
+- **Never-started elapsed field + naive-datetime/requeue guard.** Elapsed is computed from `started_ref = session.started_at or session.created_at` (`started_at` is `None` until execution begins; `created_at` is the always-present fallback). The subtraction is tz-guarded via `bridge.utc.to_unix_ts(started_ref)` — which normalizes naive *and* aware datetimes to a unix float — then `bridge.utc.utc_now()`'s unix value minus that. If `to_unix_ts` returns `None` (unparseable), the never-started branch is skipped (returns `healthy/unclassifiable` for that signal), never a spurious `stalled`. This avoids the naive-datetime footgun and the requeue case where a resumed session's `started_at` could otherwise produce a negative or huge elapsed.
 - **Idle gaps are facts, not kill signals (#1172).** A long idle window can raise the *advisory* level but is explicitly documented as never feeding a kill decision; the docstring and feature doc state this.
+- **Verdict thresholds are pre-supplied defaults, tunable post-ship.** The threshold constants ship with concrete documented defaults (live never-started grace; sustained-idle window; tool-timeout/recovery corroboration counts) — they are NOT an open blocker. Defaults are pinned by unit tests so any later tuning is a deliberate, test-visible change. Threshold tuning is post-ship work, not a gate on build.
 - **Fail-soft everywhere.** Any exception in classification (malformed trace, missing field, Redis read error) yields `StallVerdict("healthy", reason="unclassifiable")` and logs at debug — the dashboard render and the reflection must never break because of the advisory.
 
 ## Failure Path Test Strategy
@@ -151,19 +158,22 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/stalled_sessio
 - [ ] `run_stall_advisory` never propagates an exception from any single session's classification — a bad session is skipped, the run continues; test with one session whose trace read raises.
 
 ### Empty/Invalid Input Handling
-- [ ] `classify_session_stall([], session=<running>)` → if zero `turn_start` and past startup grace → `stalled/never_started`; otherwise `healthy` (no events yet, just started). Both branches tested.
+- [ ] `classify_session_stall([], session=<status="running">)` → if zero `turn_start` and past startup grace → `stalled/never_started`; otherwise `healthy` (no events yet, just started). Both branches tested.
+- [ ] `classify_session_stall([], session=<status="pending">)` → `healthy/not_started_probe` (NOT never_started) — a pending session has no trace and is #1313's domain; asserted to never collide with the watchdog surface.
+- [ ] Never-started elapsed uses `started_at or created_at` and is tz-guarded: a session with naive `created_at` and `started_at=None` is classified without raising; an unparseable timestamp (`to_unix_ts` → None) skips the never-started branch rather than emitting a spurious `stalled`. Both tested.
 - [ ] `classify_session_stall(events, session=None)` → no raise; falls back to event-only signals (no never-started elapsed check). Tested.
 - [ ] A terminal session passed to the dashboard path is skipped (verdict `None`), not classified. Tested.
 
 ### Error State Rendering
 - [ ] Dashboard: a session with a `stalled` advisory renders a visible badge + reason; a session with `None` advisory renders nothing (no empty badge). Both asserted (data-level test on `PipelineProgress`).
-- [ ] Reflection: an all-`healthy` run sends NO Telegram message (no all-clear spam, #1292); a run with a `stalled` session produces exactly one concise note. Both asserted.
+- [ ] Reflection (flag OFF, the v1 default): a run with a `stalled` session logs + returns the finding in `findings` but sends NO Telegram message. Asserted.
+- [ ] Reflection (flag ON): an all-`healthy` run sends NO Telegram message (no all-clear spam, #1292); a run with a `stalled` session produces exactly one concise note. Both asserted.
 
 ## Test Impact
 
 - [ ] `tests/unit/` coverage of `ui/data/sdlc.py::_session_to_pipeline` — UPDATE: assert the new `stall_advisory` field is populated for a non-terminal session and `None` for a terminal one (mock `read_session_timeline`/`classify_session_stall`; don't re-test the classifier here).
-- [ ] New `tests/unit/test_session_stall_classifier.py` — CREATE: full coverage of `classify_session_stall` — healthy/suspect/stalled verdicts, live never-started rule, idle-gap and kill-transition signals, fail-soft on malformed input, `session=None` fallback, counter corroboration.
-- [ ] New `tests/unit/test_stall_advisory_reflection.py` — CREATE: `run_stall_advisory` return shape `{status, findings, summary}`, per-session exception isolation, error-only Telegram surfacing, skips terminal sessions.
+- [ ] New `tests/unit/test_session_stall_classifier.py` — CREATE: full coverage of `classify_session_stall` — healthy/suspect/stalled verdicts, live never-started rule gated on `_RUNNING_PROBE_STATUSES` (running→never_started, pending→not_started_probe), `started_at or created_at` elapsed + naive/unparseable tz guard, idle-gap and kill-transition signals, pinned threshold defaults, fail-soft on malformed input, `session=None` fallback, counter corroboration.
+- [ ] New `tests/unit/test_stall_advisory_reflection.py` — CREATE: `run_stall_advisory` return shape `{status, findings, summary}`, per-session exception isolation, Telegram-flag gate (OFF default → no send, findings still logged/returned; ON → error-only send), skips non-running-probe sessions (`pending`, terminal).
 - [ ] New `tests/integration/test_stall_advisory_e2e.py` — CREATE: write a synthetic running-session trace to `logs/session_telemetry/`, run the classifier + reflection, assert the verdict and that no kill/recovery function is invoked (assert `agent.session_health` transition functions are never called — guards the hard constraint).
 
 No existing tests in `agent/session_health.py` or `agent/crash_signature.py` coverage are affected — this work is purely additive (new modules, one new nullable dashboard field, one new reflection entry) and changes no existing behavior or signature.
@@ -185,7 +195,7 @@ No existing tests in `agent/session_health.py` or `agent/crash_signature.py` cov
 
 ### Risk 2: Per-request dashboard classification adds latency
 **Impact:** Calling `read_session_timeline` per session per dashboard load could slow rendering for many sessions.
-**Mitigation:** `read_session_timeline` is a bounded local file read (per-session cap 10k events); the classifier inspects only the recent window (tail), not the whole trace. Classify only non-terminal sessions (a small set). If measurable, cap the read with the reader's `limit` arg and read only the tail. Benchmark in the e2e test.
+**Mitigation:** `read_session_timeline` is a bounded local file read (per-session cap 10k events). **Correction (was a wrong mitigation):** the reader's `limit=N` arg returns the **FIRST** N events (head break at `agent/session_telemetry.py:292`), *not* the tail — so it cannot be used to cheaply read only the recent window, and the plan does NOT claim it can. The classifier instead reads the full event list once (a single bounded sequential file read, capped at 10k lines) and slices the recent window in memory; for the live signals it cares about (presence of any `turn_start`, the last idle gap, recent kill-bearing transitions) a whole-list read at the 10k cap is the cost to beat. Classify only the running-probe sessions (a small set), and only once per dashboard render / once per reflection tick. **Benchmark near the cap** in the e2e test: write a ~10k-event synthetic trace and assert single-session classify latency stays within a documented budget; if it ever exceeds budget, the follow-up is an explicit-scope **tail reader** (`read_session_timeline_tail`) added to `agent/session_telemetry.py` — called out here as deferred scope, not silently assumed to exist.
 
 ### Risk 3: Boundary drift against Pillar 2 (the two reflections overlap or contradict)
 **Impact:** `stall-advisory` (live) and `crash-recovery` (terminal) could both speak about the same session near its terminal moment, producing confusing or duplicate signals.
@@ -229,7 +239,7 @@ The advisory is consumed by the **dashboard** and the **reflection scheduler**, 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/stall-advisory-classifier.md` — the 3-level verdict model, the signals it reads (idle gaps, tool-timeouts, kill-bearing transitions, live never-started), the explicit non-goal that the advisory NEVER feeds the kill path (#1172), the terminal/non-terminal partition against Pillar 2 (#1539), the dashboard badge, and the reflection's error-only surfacing.
+- [ ] Create `docs/features/stall-advisory-classifier.md` — the 3-level verdict model, the signals it reads (idle gaps, tool-timeouts, kill-bearing transitions, live never-started gated on `_RUNNING_PROBE_STATUSES` and why `pending` is excluded → #1313's watchdog), the explicit non-goal that the advisory NEVER feeds the kill path (#1172), the terminal/non-terminal partition against Pillar 2 (#1539), the dashboard badge, the `stall_advisory_telegram_enabled` flag (default OFF in v1, why it's gated pending #1313 coordination), and the reflection's error-only surfacing.
 - [ ] Add an entry to `docs/features/README.md` index table.
 - [ ] Cross-link from `docs/features/session-telemetry.md` (v1) and from Pillar 2's `docs/features/crash-signature-auto-resume.md` so the three-pillar boundary is discoverable.
 
@@ -240,14 +250,14 @@ The advisory is consumed by the **dashboard** and the **reflection scheduler**, 
 ## Success Criteria
 
 - [ ] `classify_session_stall(events, *, session)` returns a `healthy | suspect | stalled` verdict + reason; pinned thresholds covered by unit tests.
-- [ ] A *running* session with zero `turn_start` past startup grace classifies `stalled/never_started` (the live never-started detection the scope amendment asked for); a terminal never-started session is left to Pillar 2 (skipped here).
+- [ ] A session in `_RUNNING_PROBE_STATUSES` with zero `turn_start` past startup grace classifies `stalled/never_started` (the live never-started detection the scope amendment asked for); a `pending` session classifies `healthy/not_started_probe` (no trace, #1313's domain); a terminal never-started session is left to Pillar 2 (skipped here).
 - [ ] The dashboard shows an advisory badge for non-terminal suspect/stalled sessions and nothing for healthy/terminal ones (`PipelineProgress.stall_advisory` populated correctly).
 - [ ] The `stall-advisory` reflection is resolvable, returns `{status, findings, summary}`, and surfaces only on anomaly (no all-clear Telegram spam).
 - [ ] The classifier imports nothing from `agent/session_health.py`'s kill/recovery path, and the e2e test asserts no transition/recovery function is invoked during classification (hard-constraint guard).
 - [ ] Fail-soft: malformed trace / Redis error / `session=None` never raises and yields a safe `healthy/unclassifiable` verdict (asserted).
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
-- [ ] grep confirms `ui/data/sdlc.py` references `classify_session_stall`, `config/reflections.yaml` contains `stall-advisory`, and `agent/session_stall_classifier.py` contains no `import` from `agent.session_health`.
+- [ ] grep confirms `ui/data/sdlc.py` references `classify_session_stall`, `config/reflections.yaml` contains `stall-advisory`, and `agent/session_stall_classifier.py` contains no `import` from `agent.session_health` (verified by the import-only regex `grep -cE '^(from|import).*session_health'` → 0, which does not false-positive on prose mentions).
 
 ## Team Orchestration
 
@@ -293,7 +303,7 @@ The advisory is consumed by the **dashboard** and the **reflection scheduler**, 
 - **Assigned To**: classifier-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `agent/session_stall_classifier.py`: `StallVerdict` dataclass, `classify_session_stall(events, *, session, project_counters=None)`, the live never-started rule, the recent-window idle/tool-timeout/kill-transition signal logic, optional `read_project_health_counters(project_key)` (read-only `POPOTO_REDIS_DB.get`), and the fail-soft wrapper.
+- Create `agent/session_stall_classifier.py`: `StallVerdict` dataclass, `_RUNNING_PROBE_STATUSES` constant, `classify_session_stall(events, *, session, project_counters=None)`, the live never-started rule (gated on `_RUNNING_PROBE_STATUSES`, elapsed from `started_at or created_at` tz-guarded via `bridge.utc.to_unix_ts`), the recent-window idle/tool-timeout/kill-transition signal logic, pinned threshold-default constants, optional `read_project_health_counters(project_key)` (read-only `POPOTO_REDIS_DB.get`), and the fail-soft wrapper.
 - Reuse `_bucket_idle_gap` and idle/kill token vocabulary from `agent.crash_signature`. Import NOTHING from `agent.session_health`.
 
 ### 2. Surfaces (reflection + dashboard)
@@ -303,8 +313,8 @@ The advisory is consumed by the **dashboard** and the **reflection scheduler**, 
 - **Assigned To**: surface-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `reflections/stall_advisory.py::run_stall_advisory()` returning `{status, findings, summary}`; query running sessions only; per-session exception isolation; error-only Telegram surfacing.
-- Add the `stall-advisory` entry to `config/reflections.yaml` (`execution_type: function`, `callable: reflections.stall_advisory.run_stall_advisory`, `every: 300s`, `group: agents`, `enabled: true`).
+- Create `reflections/stall_advisory.py::run_stall_advisory()` returning `{status, findings, summary}`; query running-probe sessions only; per-session exception isolation; always log/return findings; Telegram send gated behind `stall_advisory_telegram_enabled` (read from the reflection params, default false in v1) and error-only when enabled.
+- Add the `stall-advisory` entry to `config/reflections.yaml` (`execution_type: function`, `callable: reflections.stall_advisory.run_stall_advisory`, `every: 300s`, `group: agents`, `enabled: true`, with a params flag `stall_advisory_telegram_enabled: false`). `run_stall_advisory` reads the flag; with it false, it logs/returns findings but sends no Telegram.
 - Add nullable `stall_advisory` field to `PipelineProgress` and populate it in `_session_to_pipeline` for non-terminal sessions only; render an unobtrusive badge + reason tooltip in the dashboard template.
 
 ### 3. Tests
@@ -342,20 +352,27 @@ The advisory is consumed by the **dashboard** and the **reflection scheduler**, 
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Classifier wired (dashboard) | `grep -n classify_session_stall ui/data/sdlc.py` | output > 0 |
 | Reflection registered | `grep -n 'stall-advisory' config/reflections.yaml` | output contains stall-advisory |
-| Hard constraint: no kill-path import | `grep -c 'session_health' agent/session_stall_classifier.py` | output contains 0 |
+| Hard constraint: no kill-path import | `grep -cE '^(from\|import).*session_health' agent/session_stall_classifier.py` | 0 (import-only regex; prose mentions of session_health do not false-positive) |
 | Reflection resolvable | `python -c "from reflections.stall_advisory import run_stall_advisory"` | exit code 0 |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | critique | Unpinned "non-terminal" boundary mis-keys pending/waiting_for_children; never-started must gate on a running-probe set, not `NON_TERMINAL_STATUSES` | Technical Approach (live never-started rule), Solution, Data Flow #3, Freshness Check | Defined `_RUNNING_PROBE_STATUSES = {"running","active","paused","paused_circuit"}` in the new module (no such constant pre-exists). `pending` → `healthy/not_started_probe`, never `stalled`; avoids colliding with #1313's watchdog (`session_watchdog.py:304`). |
+| CONCERN | critique | Never-started elapsed field unspecified + naive-datetime/requeue footgun | Technical Approach (elapsed guard), Data Flow #3, Empty/Invalid Input tests | `started_ref = session.started_at or session.created_at`; tz-guarded via `bridge.utc.to_unix_ts` (handles naive+aware). Unparseable → skip never-started branch (no spurious stalled). Verified fields at `models/agent_session.py:146-147`. |
+| CONCERN | critique | Risk 2 tail-read mitigation unimplementable — `read_session_timeline(limit=N)` returns FIRST N (head break at `session_telemetry.py:292`), not tail | Risk 2 (rewritten) | Dropped the tail-read claim. Read full list once (10k cap), slice recent window in memory; benchmark near-cap in e2e; a `read_session_timeline_tail` is named as explicit deferred scope if budget is exceeded. |
+| CONCERN | critique | Premature Telegram surface vs unresolved #1313 coordination | Data Flow #2/#6, Solution, Architectural Impact, reflection task, Error State tests, Open Q1/Q3 | Telegram send gated behind `stall_advisory_telegram_enabled` (default OFF in v1). v1 keeps dashboard badge + compute/log path; no user-visible Telegram until #1313 lands. |
+| NIT | critique | `grep -c 'session_health'` false-positives on prose | Verification table, Success Criteria | Switched to import-only regex `grep -cE '^(from\|import).*session_health'` → 0. |
+| NIT | critique | Open Q2 threshold "blocker" overstates the gap; defaults already supplied | Technical Approach (thresholds-are-defaults bullet), Open Q2 | Promoted defaults to Technical Approach (pinned by unit tests); demoted threshold tuning to post-ship. |
 
 ---
 
 ## Open Questions
 
-1. **Surface emphasis:** Both a dashboard badge AND a reflection are planned. Is the dashboard badge sufficient for v1 (reflection deferred), or are both required from the start? (Plan currently ships both; the reflection is the lower-effort half.)
-2. **Verdict thresholds:** Proposed defaults — `stalled` on live never-started past a ~120s grace, or sustained idle past ~10 min with no offsetting evidence; `suspect` on a single multi-minute idle gap or rising tool-timeout count. Right balance of sensitivity vs noise, given the false-positive trust risk?
-3. **Telegram coordination with #1313:** The watchdog `pending`-stall alert (#1313) and this advisory could both notify about an overlapping symptom. Should the advisory reflection suppress Telegram entirely when #1313's watchdog already covers `pending`, surfacing only the cases #1313 misses (running-but-stalled, live never-started)?
+All prior open questions are resolved by this revision (critique findings 4 and 6):
+
+1. **Surface emphasis — RESOLVED.** v1 ships the dashboard badge + the reflection's compute/log path. The reflection's Telegram *send* is gated OFF by default (`stall_advisory_telegram_enabled: false`), so v1 is fully dashboard/log-surfaced with no user-visible Telegram until #1313 coordination lands. Both surfaces are built; only the Telegram emission is deferred behind a flag.
+2. **Verdict thresholds — RESOLVED (promoted to Technical Approach, demoted to post-ship tuning).** Concrete defaults ship and are pinned by unit tests: `stalled` on live never-started past a ~120s grace, or sustained idle past ~10 min with no offsetting evidence; `suspect` on a single multi-minute idle gap or rising tool-timeout count. These are tunable constants, not a build gate; tuning is deliberate, test-visible post-ship work.
+3. **Telegram coordination with #1313 — RESOLVED by the flag.** Because the Telegram send is OFF by default in v1, there is no double-alert risk at ship time. When #1313 lands and the coordination story is settled, flipping the flag on (and scoping the advisory to surface only the running-but-stalled / live never-started cases #1313's `pending`-stall watchdog misses) is a small, isolated follow-up.
