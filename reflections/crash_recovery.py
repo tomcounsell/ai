@@ -131,15 +131,28 @@ def run_crash_recovery() -> dict:
             "summary": f"crash-recovery query error: {e}",
         }
 
-    # Filter to recently-updated sessions
+    # Filter to recently-updated sessions.
+    # Popoto's DatetimeField round-trips values as NAIVE datetimes (tzinfo
+    # stripped on read), so normalize to UTC before comparing against the
+    # tz-aware cutoff — otherwise every comparison raises TypeError and the
+    # session is silently dropped, leaving the reflection a no-op.
     recent = []
     for s in all_resumable:
         try:
             updated = getattr(s, "updated_at", None)
-            if updated and hasattr(updated, "__gt__") and updated > cutoff:
+            if updated is None:
+                continue
+            if getattr(updated, "tzinfo", None) is None:
+                updated = updated.replace(tzinfo=UTC)
+            if updated > cutoff:
                 recent.append(s)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "crash_recovery: skipping session %s — bad updated_at %r: %s",
+                getattr(s, "session_id", "?"),
+                getattr(s, "updated_at", None),
+                e,
+            )
 
     # --- Phase 1: Attribute outcomes for sessions that were resumed ---
     # These sessions have crash_signature set but crash_outcome_attributed not set,
