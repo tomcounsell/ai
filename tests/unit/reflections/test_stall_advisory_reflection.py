@@ -9,14 +9,13 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 # We import the module — not the function — so we can monkeypatch its internals.
 import reflections.stall_advisory as stall_advisory_mod
 from reflections.stall_advisory import run_stall_advisory
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -155,9 +154,7 @@ class TestTelegramFlagOff:
     def test_params_empty_dict_no_telegram_sent(self, monkeypatch):
         sess = _fake_session("stalled-s2", status="running")
         with patch.object(stall_advisory_mod, "_send_alert") as mock_alert:
-            _run_with_patched_imports(
-                monkeypatch, [sess], timeline_fn=lambda _: [], params={}
-            )
+            _run_with_patched_imports(monkeypatch, [sess], timeline_fn=lambda _: [], params={})
             mock_alert.assert_not_called()
 
     def test_telegram_enabled_false_no_telegram_sent(self, monkeypatch):
@@ -240,8 +237,8 @@ class TestSessionFiltering:
             [sess_terminal],
             timeline_fn=_track_timeline,
         )
-        # completed is in TERMINAL_STATUSES — reflection filters it out.
-        assert not call_tracker["called"], "terminal-status session should be filtered before classification"
+        # completed is in TERMINAL_STATUSES — reflection filters it out before classification.
+        assert not call_tracker["called"]
 
     def test_running_sessions_are_classified(self, monkeypatch):
         call_tracker = {"called": False}
@@ -276,7 +273,9 @@ def _run_with_patched_imports(
     - _RUNNING_PROBE_STATUSES / classify_session_stall → real imports (not mocked)
     """
     if timeline_fn is None:
-        timeline_fn = lambda _: []
+
+        def timeline_fn(_):
+            return []
 
     # We need to intercept the function-level imports inside run_stall_advisory.
     # Strategy: patch sys.modules entries so the `from X import Y` lines inside

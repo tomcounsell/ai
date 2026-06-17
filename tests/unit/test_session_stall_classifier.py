@@ -9,17 +9,15 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from agent.session_stall_classifier import (
+    _RUNNING_PROBE_STATUSES,
     IDLE_STALL_SECS,
     IDLE_SUSPECT_SECS,
     NEVER_STARTED_GRACE_SECS,
     RECOVERY_SUSPECT_COUNT,
     TOOL_TIMEOUT_SUSPECT_COUNT,
-    _RUNNING_PROBE_STATUSES,
     classify_session_stall,
 )
 
@@ -163,7 +161,7 @@ class TestNeverStartedRule:
         now = time.time()
         session = SimpleNamespace(
             status="running",
-            started_at=now - 10,   # within grace
+            started_at=now - 10,  # within grace
             created_at=now - 700,  # outside grace
         )
         verdict = classify_session_stall([], session=session)
@@ -191,6 +189,7 @@ class TestNeverStartedRule:
 class TestElapsedTimezoneGuard:
     def test_naive_datetime_created_at_no_exception(self):
         import datetime
+
         now_naive = datetime.datetime.utcnow()  # naive — no tzinfo
         session = SimpleNamespace(
             status="running",
@@ -203,7 +202,8 @@ class TestElapsedTimezoneGuard:
 
     def test_aware_datetime_created_at_no_exception(self):
         import datetime
-        now_aware = datetime.datetime.now(datetime.timezone.utc)
+
+        now_aware = datetime.datetime.now(datetime.UTC)
         session = SimpleNamespace(
             status="running",
             started_at=None,

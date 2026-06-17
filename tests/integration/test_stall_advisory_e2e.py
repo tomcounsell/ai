@@ -30,7 +30,6 @@ import pytest
 from agent.session_stall_classifier import (
     IDLE_STALL_SECS,
     IDLE_SUSPECT_SECS,
-    NEVER_STARTED_GRACE_SECS,
     classify_session_stall,
 )
 from agent.session_telemetry import read_session_timeline
@@ -85,7 +84,6 @@ def _fake_session(
 @pytest.fixture()
 def trace_file(request):
     """Create a telemetry trace file and clean it up after the test."""
-    test_id = f"{_TEST_PREFIX}-{request.node.name}"
     paths: list[Path] = []
 
     def _make(session_id: str, events: list[dict]) -> Path:
