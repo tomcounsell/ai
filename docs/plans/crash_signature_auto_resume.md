@@ -6,7 +6,7 @@ owner: Valor
 created: 2026-06-17
 tracking: https://github.com/tomcounsell/ai/issues/1539
 last_comment_id:
-revision_applied: false
+revision_applied: true
 ---
 
 # Crash-signature library + auto-resume policy from session telemetry (#1539 / epic #1536 Pillar 2)
@@ -67,8 +67,11 @@ claims still hold, references updated below.
   (`confirmed_dead`, `signal_sent`, `pid`). **This is the crash-signature kill-outcome field.**
 - `models/session_lifecycle.py:288-314` — lifecycle-path `status_transition` emission (`kill: None`).
 - `models/session_lifecycle.py:61` — `TERMINAL_STATUSES = {completed, failed, killed, abandoned, cancelled}`.
-- `tools/valor_session.py:619-726` — `cmd_resume`; accepts `completed|killed|failed` with stored
-  `claude_session_uuid`; appends steering message; transitions to `pending`. CLI-only.
+- `tools/valor_session.py:619-726` — `cmd_resume`; **accepts only `{completed, killed, failed}`**
+  (status guard at `:660`) with stored `claude_session_uuid`; appends steering message; transitions
+  to `pending`. CLI-only. **Mismatch (Blocker 1): `abandoned` — the prime crash class #1537 drives
+  crashed sessions to — is inside `TERMINAL_STATUSES` but rejected by this guard.** Resolved below by
+  introducing `RESUMABLE_STATUSES`.
 - `tools/valor_session.py:1273` — `cmd_telemetry`; display-only, no aggregation.
 
 **Cited sibling issues/PRs re-checked:**
@@ -153,10 +156,13 @@ End-to-end, crash → signature → policy → (proposed/auto) resume:
    compact occurrence record (session_id, terminal status, whether `claude_session_uuid` was
    present → resumable, project_key). All reads/writes go through the Popoto ORM (no raw Redis).
 4. **Resume-outcome attribution.** When a session is resumed (via `valor-session resume` or the
-   auto-resume path), the resume is tagged with the crash signature of the session it recovered.
-   On the resumed session's *next* terminal transition, the outcome (recovered = reached
-   `completed`; failed = reached a crash state again) is recorded back against the originating
-   signature. This is the learning loop.
+   auto-resume path), it is stamped **write-once** with `crash_signature` = the signature of the
+   session it recovered. On the resumed session's *next* terminal transition, the reflection — only if
+   `crash_outcome_attributed` is falsy (checked via `_truthy()`) — records the outcome (recovered =
+   reached `completed`; failed = reached a crash state again) back against the originating signature,
+   then flips `crash_outcome_attributed = True` so a later tick cannot double-count. The session's own
+   `crash_signature` is never overwritten by re-extraction (re-extraction writes only to the library).
+   This is the learning loop.
 5. **Policy derivation (new).** A signature with `occurrence_count >= MIN_OCCURRENCES` and a
    resume-success ratio `>= MIN_SUCCESS_RATIO` for a given strategy yields a **policy entry**:
    "signature X → strategy Y, confidence Z."
@@ -182,9 +188,18 @@ End-to-end, crash → signature → policy → (proposed/auto) resume:
   `AgentSession` model. It does **not** couple to `agent/session_health.py`'s recovery internals —
   it only consumes the telemetry the recovery path *emits*. This is the key decoupling.
 - **Data ownership:** new `CrashSignature` Popoto model owns signature aggregates. `AgentSession`
-  retains a small additive nullable field `crash_signature` (the signature of the crash this
-  session is a resume of, for outcome attribution) — covered by the generic descriptor-healing
-  path (`_heal_descriptor_pollution`), no backcompat code needed (per memory `feedback_field_backcompat_heal`).
+  gains **two** small additive nullable fields (Blocker 2):
+  - `crash_signature` (str, nullable, **write-once**): the signature of the crash this session is a
+    resume *of*, stamped exactly once at resume time for outcome attribution. The reflection never
+    re-extracts or overwrites it.
+  - `crash_outcome_attributed` (bool, default `False`): the idempotency key. Set `True` after the
+    reflection has credited/debited the originating signature for this session's terminal outcome,
+    guarded with `_truthy()` (from `agent/session_pickup.py:36`) on read — Popoto stores bools as
+    `"True"`/`"False"` strings, so naive `bool(value)` is always truthy (per memories
+    `reference_popoto_bool_storage`, `feedback_field_backcompat_heal`).
+
+  Both fields are covered by the generic descriptor-healing path (`_heal_descriptor_pollution`), no
+  backcompat code needed.
 - **Reversibility:** high. Propose-only mode changes nothing in the execution path. Auto-apply is
   behind an env flag; clearing it reverts to propose-only. Deleting the reflection entry from
   `reflections.yaml` stops all signature work. The `CrashSignature` model and the additive field
@@ -201,7 +216,9 @@ End-to-end, crash → signature → policy → (proposed/auto) resume:
 | Read terminal telemetry → extract crash signature | **#1539** (this) | `crash_signature.py` reflection |
 | Decide a terminal session is resumable + resume it | **#1539** | auto-resume policy |
 
-**Invariant:** #1539 only ever acts on sessions whose status is already in `TERMINAL_STATUSES`. It
+**Invariant:** #1539 only ever acts on sessions whose status is already terminal **and** resumable —
+i.e. in `RESUMABLE_STATUSES` (`{completed, killed, failed, abandoned}` = `TERMINAL_STATUSES` minus
+`cancelled`, the intentional-stop status). It
 performs **no kills**, touches no `running` session, and never writes the `pending` requeue that
 #1537 owns *except* through the sanctioned `transition_status(..., reject_from_terminal=False)`
 inside the shared programmatic-resume core — the same atomic path `cmd_resume` already uses. The two
@@ -272,12 +289,29 @@ transition, outcome is attributed back to X (the learning loop closes).
   presence/absence of a preceding `idle_gap` (with gap bucketed into coarse bands, not raw seconds).
   Drop: pids, timestamps, exact durations, token counts. This yields a small, human-readable
   signature string before hashing (store both the human form and the hash).
-- **Outcome attribution via an additive `AgentSession.crash_signature` field.** When a session is
-  resumed, stamp it with the signature of the crash it recovers. On its next terminal transition,
-  the reflection reads that field and credits/debits the originating signature. No new event type
-  needed.
+- **Outcome attribution via two additive `AgentSession` fields, never one overloaded field (Blocker
+  2).** When a session is resumed, stamp `crash_signature` **once** (write-once) with the signature of
+  the crash it recovers. On its next terminal transition, the reflection — for any session whose
+  `crash_signature` is set and whose `crash_outcome_attributed` is falsy (checked via `_truthy()`) —
+  credits/debits the originating signature, then sets `crash_outcome_attributed = True`. This split
+  prevents the two corruption modes the critique named: (a) a resumed session stamped X that re-crashes
+  as Y cannot overwrite X before attribution (the stamp is write-once and the re-extraction writes to
+  the *library*, never back to the session's `crash_signature`); (b) a later reflection tick cannot
+  double-count, because `crash_outcome_attributed` is the idempotency key. No new event type needed.
 - **Reuse `transition_status(..., reject_from_terminal=False)`** for the actual resume — the exact
   atomic path `cmd_resume` already uses. Do not invent a second resume mechanism.
+- **Resolve the terminal-status / resumable-status mismatch (Blocker 1).** Today the resume guard at
+  `tools/valor_session.py:660` accepts only `{completed, killed, failed}`, but the auto-resume
+  Invariant filters on `TERMINAL_STATUSES = {completed, failed, killed, abandoned, cancelled}`. #1537
+  drives crashed sessions to `failed`/`abandoned` — so `abandoned` (the prime crash class this feature
+  recovers) is inside the auto-resume filter yet rejected by the resume core. **Fix:** define a single
+  module-level constant `RESUMABLE_STATUSES = frozenset({"completed", "killed", "failed", "abandoned"})`
+  in `models/session_lifecycle.py` (next to `TERMINAL_STATUSES`). Both `cmd_resume` and the shared
+  `resume_session` core check membership against `RESUMABLE_STATUSES` instead of the hardcoded tuple.
+  `cancelled` is deliberately excluded — a cancelled session represents an intentional human stop, not
+  a crash, and must never auto-resume; the auto-resume reflection therefore intersects its terminal
+  query with `RESUMABLE_STATUSES`, narrowing `TERMINAL_STATUSES` down to the auto-eligible set. The
+  resume core raises/returns a clear "not resumable" result for any status outside `RESUMABLE_STATUSES`.
 - **Gate auto-apply behind env + thresholds + caps**, all read at reflection-run time so toggling
   requires no restart of the analysis logic.
 - **Project scoping throughout** — the library, queries, and any bulk operations are scoped by
@@ -315,9 +349,15 @@ transition, outcome is attributed back to X (the learning loop closes).
 
 - [ ] `tests/unit/test_session_telemetry.py` (if present) — no change; this plan only *reads* via
   the public `read_session_timeline`. Confirm with `grep -rn "read_session_timeline" tests/`.
-- [ ] `tests/unit/test_valor_session.py` — UPDATE: refactoring `cmd_resume` to delegate to the new
-  `resume_session(session, message, source)` core must not change CLI behavior; existing
-  `cmd_resume` tests must still pass against the wrapper. Add cases for the extracted core.
+- [ ] `tests/unit/test_valor_session_resume_release.py` — UPDATE: refactoring `cmd_resume` to delegate
+  to the new `resume_session(session, message, source)` core must not change CLI behavior; existing
+  `cmd_resume` resume/release tests must still pass against the wrapper. Add cases for the extracted
+  core, including the new `RESUMABLE_STATUSES` membership check (notably `abandoned` now resumable,
+  `cancelled` still rejected).
+- [ ] `tests/unit/test_resume_hydration.py` — UPDATE: confirm the `claude_session_uuid` hydration path
+  is unaffected by the `cmd_resume` → `resume_session` core extraction (behavior-preserving refactor).
+- [ ] `tests/unit/test_crash_signature_cli.py` — NEW: cases for the new `valor-session crash-signatures`
+  / `crash-policy list` subcommands (empty-library handling, populated rendering, auto-eligible flag).
 - [ ] `tests/unit/test_crash_signature.py` — NEW: extractor normalization (kill-confirmed-dead,
   idle-gap-then-fail, killed-by-operator, abandoned-local, empty/truncated/unknown traces);
   signature stability (same logical crash → same hash; different crash → different hash).
@@ -412,6 +452,10 @@ flips the session out of terminal; the second caller re-reads, sees a non-termin
   ship is sufficient to prove value (a backfill, if wanted, is a separate chore).
 - Resurrecting sessions with null `claude_session_uuid` (killed before first turn) — same hard limit
   as `cmd_resume`; such sessions are non-resumable and never auto-resumed.
+- Auto-resuming `cancelled` sessions — `cancelled` is an intentional human stop, excluded from
+  `RESUMABLE_STATUSES`; never auto-resumed.
+- A global cross-project signature rollup (Resolved Q3) — deferred to a separate optional chore; v1 is
+  project-scoped only.
 
 ## Update System
 
@@ -419,10 +463,16 @@ No update system changes required for the core. The new modules, CLI subcommands
 callable propagate via the normal `git pull && ./scripts/valor-service.sh restart` on each machine.
 One soft touch: the new reflection must be added to the canonical `reflections.yaml`
 (`~/Desktop/Valor/reflections.yaml`, iCloud-synced per memory `reference_reflections_config`) so it
-schedules — document this as a one-line config addition in the feature doc, not a script change. The
-`CRASH_AUTORESUME_ENABLED` flag is opt-in per machine (default off); add a placeholder to `.env.example`
-with a comment line and a field in `config/settings.py` per the secrets convention (it is a feature
-flag, not a secret, but follows the same wiring).
+schedules — document this as a one-line config addition in the feature doc, not a script change.
+
+The `CRASH_AUTORESUME_ENABLED` flag is per-machine: **enabled on exactly one designated machine**
+(the dedicated bot-identity machine, per Resolved Q1 / memory `project_sdlc_bot_token`) and **off
+elsewhere** (propose-only). Add a placeholder to `.env.example` with a comment line documenting the
+"on for the one designated auto-resume machine, off elsewhere" posture, and a field in
+`config/settings.py` per the secrets convention (it is a feature flag, not a secret, but follows the
+same wiring). The designated machine sets `CRASH_AUTORESUME_ENABLED=1` in its
+`~/Desktop/Valor/.env`. No `/update` script change is required — the flag is read at reflection-run
+time.
 
 ## Agent Integration
 
@@ -471,6 +521,16 @@ sessions and (b) the new CLI subcommands return correctly-shaped output.
   are logged + surfaced only.
 - [ ] With `CRASH_AUTORESUME_ENABLED` set, an eligible terminal session is auto-resumed via the shared
   programmatic core; the per-session attempt cap and global per-run budget are enforced.
+- [ ] **(Operator-facing, Blocker 3) End-to-end auto-resume with ZERO human action.** Against a
+  real-or-replayed crash trace (a fixture `.jsonl` reproducing the `abandoned`-after-idle-gap crash
+  class #1537 produces), the reflection — with auto-apply enabled — extracts the signature, matches an
+  eligible policy entry, and drives the terminal session back to `pending` with a synthetic "continue"
+  steering message **without any operator command**. The integration test asserts: (a) the session
+  reaches `pending` purely from the reflection tick, (b) no `valor-session resume` invocation occurred,
+  (c) `crash_signature` is stamped and on the next terminal transition the outcome is attributed
+  exactly once (`crash_outcome_attributed` flips, no double-count). This criterion is the concrete
+  proof that the stated pain ("resume is manual, costs a human every time") is actually removed, not
+  merely surfaced.
 - [ ] Auto-resume is provably a no-op against any non-terminal session (unit + integration test) —
   the #1537 boundary holds.
 - [ ] Tests pass (`/do-test`).
@@ -532,24 +592,31 @@ sessions and (b) the new CLI subcommands return correctly-shaped output.
 ### 2. Programmatic resume core + auto-resume reflection
 - **Task ID**: build-resume
 - **Depends On**: build-signature
-- **Validates**: `tests/unit/test_valor_session.py` (update for refactor), `tests/integration/test_crash_auto_resume.py` (create)
+- **Validates**: `tests/unit/test_valor_session_resume_release.py` + `tests/unit/test_resume_hydration.py` (update for refactor), `tests/integration/test_crash_auto_resume.py` (create)
 - **Informed By**: Recon (`cmd_resume` at `tools/valor_session.py:619-726`; atomic `transition_status`); Ownership boundary
 - **Assigned To**: resume-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Refactor `cmd_resume` to delegate to a new shared `resume_session(session, message, *, source)`
-  core (CLI behavior unchanged; existing tests still pass).
-- Add additive nullable `AgentSession.crash_signature` field for outcome attribution.
-- Build the crash-recovery reflection callable: scan recently-terminal sessions, extract signatures,
-  upsert library, derive policy, attribute outcomes for resumed sessions.
-- Implement propose mode (default) and gated auto-apply (`CRASH_AUTORESUME_ENABLED`) with per-session
-  attempt cap + global per-run budget + terminal-only pre-transition re-check (Risk 3).
+- Define `RESUMABLE_STATUSES = frozenset({"completed", "killed", "failed", "abandoned"})` in
+  `models/session_lifecycle.py` (Blocker 1). Refactor `cmd_resume` to delegate to a new shared
+  `resume_session(session, message, *, source)` core, both checking membership against
+  `RESUMABLE_STATUSES` (replacing the hardcoded `("completed","killed","failed")` tuple at `:660`).
+  CLI behavior unchanged for the existing three statuses; `abandoned` now resumable, `cancelled` still
+  rejected. Existing resume/hydration tests still pass.
+- Add **two** additive nullable `AgentSession` fields (Blocker 2): `crash_signature` (str, write-once)
+  and `crash_outcome_attributed` (bool, default `False`), the latter read via `_truthy()`.
+- Build the crash-recovery reflection callable: scan recently-terminal sessions (terminal query
+  intersected with `RESUMABLE_STATUSES`), extract signatures, upsert library, derive policy, attribute
+  outcomes for resumed sessions exactly once (guard on `crash_outcome_attributed`, then flip it).
+- Implement propose mode (default) and gated auto-apply (`CRASH_AUTORESUME_ENABLED`, ENABLED on the one
+  designated machine per Resolved Q1) with per-session attempt cap (`min()`-clamped against an absolute
+  hard ceiling, Resolved Q2) + global per-run budget + terminal-only pre-transition re-check (Risk 3).
 - Register the reflection (document the `reflections.yaml` addition).
 
 ### 3. CLI inspection surfaces
 - **Task ID**: build-cli
 - **Depends On**: build-signature
-- **Validates**: `tests/unit/test_valor_session.py` (add subcommand cases)
+- **Validates**: `tests/unit/test_crash_signature_cli.py` (create — subcommand cases)
 - **Assigned To**: cli-builder
 - **Agent Type**: builder
 - **Parallel**: true
@@ -562,7 +629,7 @@ sessions and (b) the new CLI subcommands return correctly-shaped output.
 - **Assigned To**: car-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `pytest tests/unit/test_crash_signature.py tests/unit/test_crash_signature_library.py tests/unit/test_valor_session.py tests/integration/test_crash_auto_resume.py -v`.
+- Run `pytest tests/unit/test_crash_signature.py tests/unit/test_crash_signature_library.py tests/unit/test_crash_signature_cli.py tests/unit/test_valor_session_resume_release.py tests/unit/test_resume_hydration.py tests/integration/test_crash_auto_resume.py -v`.
 - Run `python -m ruff check . && python -m ruff format --check .`.
 - Prove the terminal-only invariant: auto-resume is a no-op against `running`/`pending` sessions.
 - Prove loop guards: per-session cap and global budget enforced.
@@ -592,31 +659,55 @@ sessions and (b) the new CLI subcommands return correctly-shaped output.
 | Check | Command | Expected |
 |-------|---------|----------|
 | Targeted unit tests pass | `pytest tests/unit/test_crash_signature.py tests/unit/test_crash_signature_library.py -x -q` | exit code 0 |
-| Resume refactor preserves CLI | `pytest tests/unit/test_valor_session.py -x -q` | exit code 0 |
+| Resume refactor preserves CLI | `pytest tests/unit/test_valor_session_resume_release.py tests/unit/test_resume_hydration.py -x -q` | exit code 0 |
 | Integration loop closes | `pytest tests/integration/test_crash_auto_resume.py -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No raw Redis in new code | `grep -rn "r\.\(hgetall\|delete\|srem\|sadd\|zrem\)" agent/crash_signature.py models/crash_signature.py` | exit code 1 |
 | Shared resume core exists | `grep -n "def resume_session" tools/valor_session.py` | output > 0 |
-| Terminal-only guard present | `grep -n "TERMINAL_STATUSES\|reject_from_terminal" agent/crash_signature.py reflections/*.py` | output > 0 |
+| RESUMABLE_STATUSES defined | `grep -n "RESUMABLE_STATUSES" models/session_lifecycle.py` | output > 0 |
+| Idempotency field present | `grep -n "crash_outcome_attributed" models/agent_session.py` | output > 0 |
+| Terminal-only guard present | `grep -rn "RESUMABLE_STATUSES\|TERMINAL_STATUSES\|reject_from_terminal" agent/crash_signature.py reflections/` | output > 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+FULL critique (3 critics) returned NEEDS REVISION. Blockers resolved in this revision pass:
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| Blocker | Critic 1 | Terminal-status mismatch: prime recovery output (`abandoned`) is in the auto-resume filter but rejected by the resume core (`:660` accepts only `{completed,killed,failed}`). | Technical Approach + Ownership Invariant + build-resume task | New `RESUMABLE_STATUSES = {completed,killed,failed,abandoned}` in `session_lifecycle.py`; both `cmd_resume` and shared `resume_session` core check it; `cancelled` excluded (intentional stop); reflection query intersects terminal set with `RESUMABLE_STATUSES`. |
+| Blocker | Critic 2 | Overloaded `crash_signature` field (immutable stamp AND re-extracted each tick) corrupts outcome attribution; no idempotency key. | Architectural Impact + Technical Approach + Data Flow step 4 + build-resume task | Split into two additive nullable fields: `crash_signature` (write-once stamp) + `crash_outcome_attributed` (bool idempotency key, read via `_truthy()`); re-extraction writes only to the library, never back to the session field. |
+| Blocker | Critic 3 | Default propose-only mode delivers zero pain reduction; auto-apply default undecided (Open Q1). | Resolved Q1 (now a binding gate) + new operator-facing Success Criterion + Update System | Auto-apply ships ENABLED on one designated machine from the start (per `project_sdlc_bot_token`); new Success Criterion proves end-to-end zero-human-action auto-resume against a replayed `abandoned` trace. |
+| Structural | Automated | Plan referenced non-existent `tests/unit/test_valor_session.py` in 4 places. | Test Impact + build-resume/build-cli Validates + Verification table | Repointed to real files `test_valor_session_resume_release.py` + `test_resume_hydration.py`; named new `test_crash_signature_cli.py` for the new subcommands. |
 
 ---
 
-## Open Questions
+## Resolved Questions (formerly Open)
 
-1. **Propose-vs-auto-apply default:** the plan ships propose-only by default with auto-apply behind
-   `CRASH_AUTORESUME_ENABLED` (opt-in per machine). Confirm that's the desired conservative default,
-   or should one trusted machine ship auto-apply on from the start?
-2. **Gating thresholds:** `MIN_OCCURRENCES`, `MIN_SUCCESS_RATIO`, per-session auto-resume cap, and
-   global per-run budget are left as named, configurable constants (per the "no specific numbers in
-   prompts/specs" memory). Any hard ceilings you want baked in regardless of config (e.g. an absolute
-   per-session cap that config cannot exceed)?
-3. **Signature scope:** should the crash-signature library be project-scoped only, or also maintain a
-   global cross-project view (the same crash class can recur across projects)? Plan currently scopes
-   per project; a global rollup is a small addition if wanted.
+1. **RESOLVED — Propose-vs-auto-apply default (was a blocking gate; Blocker 3).** The critique
+   correctly observed that propose-only delivers **zero** reduction in the stated pain ("resume is
+   manual, costs a human every time") — only auto-apply removes the human from the loop. Per the
+   single-trusted-machine posture already established for the SDLC bot identity (memory
+   `project_sdlc_bot_token`), the resolution is:
+   - The `CRASH_AUTORESUME_ENABLED` flag and the propose/auto split **remain** — they are the
+     safety substrate and the per-machine opt-in.
+   - **Auto-apply ships ENABLED on exactly one designated machine from the start** (the same dedicated
+     machine that runs the bot identity), so the feature delivers real pain reduction at ship rather
+     than waiting for a later flip. All other machines default to propose-only.
+   - The wiring: `.env.example` carries the flag with a comment documenting "on for the one designated
+     auto-resume machine, off elsewhere"; the designated machine sets `CRASH_AUTORESUME_ENABLED=1` in
+     its `~/Desktop/Valor/.env`. This is a build-blocking decision: build proceeds with auto-apply as a
+     first-class, shipped-on path, not a deferred toggle.
+
+   This decision is now reflected as a binding Success Criterion (the end-to-end zero-human-action
+   criterion below) and in **## Update System**.
+
+2. **RESOLVED — Gating thresholds.** `MIN_OCCURRENCES`, `MIN_SUCCESS_RATIO`, per-session auto-resume
+   cap, and global per-run budget remain named, configurable constants (per the "no specific numbers in
+   prompts/specs" memory). An **absolute per-session auto-resume ceiling that config cannot exceed** is
+   baked in as a hard backstop (a small constant the configurable cap is `min()`-clamped against), so a
+   misconfiguration can never produce an unbounded resume loop.
+
+3. **RESOLVED — Signature scope.** The library is **project-scoped** for v1 (per
+   `feedback_test_redis_isolation`). A global cross-project rollup is explicitly deferred to a separate
+   chore (noted under No-Gos); it is a small additive view that does not block this plan's value.
