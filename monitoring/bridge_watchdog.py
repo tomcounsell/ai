@@ -162,9 +162,7 @@ def get_bridge_process_start_ts(pid: int) -> float | None:
                 return None
         # ps lstart is local time; mktime() interprets it as local and returns a
         # Unix timestamp (seconds since UTC epoch) — no explicit UTC conversion needed.
-        import time as _time
-
-        local_ts = _time.mktime(dt.timetuple())
+        local_ts = time.mktime(dt.timetuple())
         return local_ts
     except Exception as e:
         logger.debug("get_bridge_process_start_ts failed for pid=%s: %s", pid, e)

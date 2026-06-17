@@ -110,7 +110,7 @@ When a project does have an explicit `EmailOutputHandler` registered (via `regis
 6. Run `ReflectionScheduler` for background maintenance tasks
 7. Run `KnowledgeWatcher` for work-vault file change monitoring
 8. Run message catchup scan and reconciler on startup
-9. Write bridge liveness signals to Redis for the external watchdog (see [Bridge Self-Healing](bridge-self-healing.md#3a-update-loop-wedged-detector-issue-1538)):
+9. Write bridge liveness signals to Redis for the external watchdog (see [Bridge Self-Healing](bridge-self-healing.md#3a-update-loop-wedged-detector-issue-1712)):
    - `bridge:last_update_received` — written by the `NewMessage` handler before dedup; staleness while `bridge:last_probe_ok` is fresh indicates the Telethon update loop has wedged
    - `bridge:last_probe_ok` — written by the reconciler after each successful `get_dialogs()` call; distinguishes a wedged update loop from a full TCP/API disconnect
 
