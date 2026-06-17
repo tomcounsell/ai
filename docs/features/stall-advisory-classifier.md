@@ -28,7 +28,7 @@ The classifier reads the session's JSONL telemetry trace (see [Session Telemetry
 |---|---|
 | `turn_start` | Presence or absence (key for never-started detection and recent-activity check) |
 | `turn_end` | Timestamp for last-activity measurement |
-| `idle_gap` | `duration_secs` field, compared against suspect and stall thresholds |
+| `idle_gap` | `gap_seconds` field (primary); falls back to `data.gap_seconds`, `data.duration_secs`, `data.duration`, `event.duration_secs`, `event.duration` for older event shapes |
 | `status_transition` | `to` field — kill-bearing values (`killed`, `failed`, `cancelled`) escalate to `stalled` |
 
 ### Per-Project Redis Counters (weak corroboration)
