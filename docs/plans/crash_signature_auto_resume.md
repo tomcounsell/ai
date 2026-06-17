@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor
 created: 2026-06-17
 tracking: https://github.com/tomcounsell/ai/issues/1539
-last_comment_id:
+last_comment_id: 4716949840
 revision_applied: true
 ---
 
@@ -48,13 +48,32 @@ consumes it.
 - A clear **ownership boundary with #1537**: auto-resume acts only on already-terminal sessions
   *after* recovery has finalized them. It never touches `running` sessions, the recovery
   transition, or subprocess killing.
+- A **determinism guardrail** (scope amendment from issue comment 2026-06-16): the policy
+  distinguishes *transient* mid-stream crashes (resumable) from *deterministic "never-started"*
+  startup failures (not resumable — escalate to human instead). Naively auto-resuming a
+  deterministic startup failure creates an infinite loop: resume → same hang → terminal → resume …
+  The guardrail uses `startup_failure_kind` (populated by the granite startup-failure diagnostic
+  shipped in #1710) and a "did the session emit a first turn event?" check to classify and gate.
 
 ## Freshness Check
 
 **Baseline commit:** `11ceb581` (`git rev-parse HEAD` at plan time)
 **Issue filed at:** `2026-06-01T08:16:10Z`
+**Revised at:** `2026-06-17` (two issue comments incorporated — see Scope Amendment below)
 **Disposition:** Minor drift — all three cited dependencies shipped between filing and planning;
-claims still hold, references updated below.
+claims still hold, references updated below. Two scope-amending comments added 2026-06-16
+incorporated: (1) determinism guardrail requirement and (2) new `startup_failure_kind` /
+`startup_captured_frame` fields from #1710 available as crash-signature inputs.
+
+**New from comments (2026-06-16):**
+- `models/agent_session.py:332-336` — `startup_failure_kind` (nullable Field, `"plateau"` |
+  `"ceiling"`) and `startup_captured_frame` (nullable Field, capped text snapshot) are live, set
+  on every `startup_unresolved` exit. The comment in the source file (`# Coordination surface for
+  #1539's auto-resume policy`) confirms this field is explicitly intended for this plan's use.
+  `startup_failure_kind="plateau"` = deterministic hang (NOT safe to auto-resume);
+  `"ceiling"` = slow/never-settled cold start (MAY be transient, use caution).
+- #1710 (granite startup-failure fast diagnostic) CLOSED and shipped via `d2d5761b`; fields
+  confirmed present in production.
 
 **File:line references re-verified:**
 - `docs/plans/session_telemetry_recorder.md` (cited in issue) — **GONE**: archived after PR #1699
@@ -272,6 +291,10 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/crash_signatur
 - **Safety gates:** `CRASH_AUTORESUME_ENABLED` env kill-switch (default off → propose-only), a
   per-session `auto_resume_attempts` cap, and a global per-run resume budget so a storm of identical
   crashes can't trigger a resume storm.
+- **Determinism guardrail:** a two-level check (1) `startup_failure_kind="plateau"` → flag
+  `NON_RESUMABLE_DETERMINISTIC`, escalate; (2) no `turn_start` event in trace → same. Consumes
+  the `startup_failure_kind` and `startup_captured_frame` fields shipped by #1710 — no new
+  telemetry emission needed.
 
 ### Flow
 
@@ -312,6 +335,23 @@ transition, outcome is attributed back to X (the learning loop closes).
   a crash, and must never auto-resume; the auto-resume reflection therefore intersects its terminal
   query with `RESUMABLE_STATUSES`, narrowing `TERMINAL_STATUSES` down to the auto-eligible set. The
   resume core raises/returns a clear "not resumable" result for any status outside `RESUMABLE_STATUSES`.
+- **Determinism guardrail — never auto-resume "never-started" failures** (scope amendment). Before
+  any auto-resume decision, the reflection applies a two-level gating check:
+  1. **`startup_failure_kind` check (fast path):** if the terminal session has
+     `startup_failure_kind="plateau"` (deterministic hang — same binary, same config, guaranteed
+     re-hang), mark the signature class as `NON_RESUMABLE_DETERMINISTIC` and route to escalation
+     (Telegram alert / loud log), NOT resume. `"ceiling"` sessions are tentatively resumable
+     (slow cold start is transient) but get a reduced confidence cap in the policy.
+  2. **First-event check (general case):** if the session has no `startup_failure_kind` set (e.g.
+     non-granite sessions or older sessions before #1710), check whether the telemetry trace
+     contains at least one `turn_start` event. No `turn_start` = never produced output = treat as
+     "never-started" = `NON_RESUMABLE_DETERMINISTIC`. At least one `turn_start` = mid-stream
+     crash = tentatively resumable.
+  The `CrashSignature` model records whether each signature class is `resumable` (bool) and —
+  for non-resumable classes — whether it has `escalated` to human attention. The extractor emits
+  this flag in the human-readable signature string (e.g. `never_started|plateau` vs.
+  `mid_stream|idle_gap+failed`). The integration test asserts that a `startup_unresolved` session
+  with `startup_failure_kind="plateau"` is never routed to `resume_session`.
 - **Gate auto-apply behind env + thresholds + caps**, all read at reflection-run time so toggling
   requires no restart of the analysis logic.
 - **Project scoping throughout** — the library, queries, and any bulk operations are scoped by
@@ -365,7 +405,9 @@ transition, outcome is attributed back to X (the learning loop closes).
   per-strategy outcome attribution, project scoping isolation, policy derivation thresholds.
 - [ ] `tests/integration/test_crash_auto_resume.py` — NEW: end-to-end with a fixture terminal
   session — propose mode (no resume, policy surfaced) and gated auto mode (resume fires, signature
-  tagged, cap enforced). Project-scoped test data, cleaned up via Popoto per CLAUDE.md hygiene.
+  tagged, cap enforced). **Add case:** `startup_failure_kind="plateau"` session → guardrail fires,
+  escalation log produced, session NOT transitioned to `pending`. Project-scoped test data, cleaned
+  up via Popoto per CLAUDE.md hygiene.
 
 No existing tests are broken beyond the additive `cmd_resume` refactor (which preserves behavior).
 
@@ -402,6 +444,18 @@ inspectable via `crash-signatures`. Normalization keeps the categorical fields t
 crash *classes* the issue names (kill-confirmed-dead vs idle-gap-then-fail vs operator-kill). If a
 collision is observed, widen the normalization (include one more categorical field), not narrow it to
 raw values (which would fragment every crash into a unique signature and learn nothing).
+
+### Risk 4: Auto-resume loop on a deterministic "never-started" failure
+**Impact:** A granite session that exits `startup_unresolved` (e.g. `/granite:prime-pm-role` command
+not found, same every time) gets auto-resumed repeatedly, burning PTYPool slots and masking the root
+cause indefinitely (the 2026-06-16 cyndra outage scenario).
+**Mitigation:** The determinism guardrail (Technical Approach) hard-blocks auto-resume for
+`startup_failure_kind="plateau"` sessions and for any session with no `turn_start` events.
+These sessions are routed to escalation (not resume). The `CrashSignature` model marks the entire
+signature class as `non_resumable`; once a signature is classified `NON_RESUMABLE_DETERMINISTIC`,
+the policy never promotes it to auto-eligible regardless of attempt count. The escalation path logs
+at WARNING with the captured frame (`startup_captured_frame`) if available, so the human can
+diagnose the root cause immediately.
 
 ### Risk 3: Fighting #1537 / acting on a non-terminal session
 **Impact:** Auto-resume races the recovery path, double-handles a session, or requeues a `running`
@@ -492,7 +546,8 @@ sessions and (b) the new CLI subcommands return correctly-shaped output.
 ### Feature Documentation
 - [ ] Create `docs/features/crash-signature-auto-resume.md` describing the signature schema,
   normalization rules, the library, the policy thresholds, the propose-vs-auto-apply modes, the
-  `CRASH_AUTORESUME_ENABLED` gate, and — prominently — the #1537 ownership boundary.
+  `CRASH_AUTORESUME_ENABLED` gate, the #1537 ownership boundary, and — prominently — the
+  determinism guardrail (never-started / `startup_failure_kind="plateau"` escalation path).
 - [ ] Add an entry to `docs/features/README.md` index table.
 - [ ] Update the epic-adjacent doc / link from the v1 recorder feature doc (if one exists) to this
   Pillar 2 consumer so the telemetry-to-learning story is traceable.
@@ -533,6 +588,10 @@ sessions and (b) the new CLI subcommands return correctly-shaped output.
   merely surfaced.
 - [ ] Auto-resume is provably a no-op against any non-terminal session (unit + integration test) —
   the #1537 boundary holds.
+- [ ] **Determinism guardrail holds:** a session with `startup_failure_kind="plateau"` (or no
+  `turn_start` events in its trace) is never auto-resumed. The reflection routes it to the
+  escalation path — producing a `[ESCALATE]` WARNING log with `startup_captured_frame` context —
+  and the session status remains terminal. Demonstrated in `tests/integration/test_crash_auto_resume.py`.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 - [ ] Lint clean (`python -m ruff check . && python -m ruff format --check .`).
@@ -579,15 +638,22 @@ sessions and (b) the new CLI subcommands return correctly-shaped output.
 - **Task ID**: build-signature
 - **Depends On**: none
 - **Validates**: `tests/unit/test_crash_signature.py` (create), `tests/unit/test_crash_signature_library.py` (create)
-- **Informed By**: Research (deterministic normalization, not ML); Recon (event types, `kill` dict fields)
+- **Informed By**: Research (deterministic normalization, not ML); Recon (event types, `kill` dict fields); `models/agent_session.py:332-336` (`startup_failure_kind`, `startup_captured_frame`)
 - **Assigned To**: sig-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Implement `agent/crash_signature.py::extract_signature(events) -> CrashSignatureKey` — pure,
-  fail-safe over empty/truncated/unknown traces; emits human form + hash.
+- Implement `agent/crash_signature.py::extract_signature(events, *, session=None) -> CrashSignatureKey`
+  — pure, fail-safe over empty/truncated/unknown traces; emits human form + hash. The optional
+  `session` parameter allows the extractor to read `startup_failure_kind` and check for at least one
+  `turn_start` event to apply the determinism guardrail: set `resumable=False` and
+  `signature_class="NON_RESUMABLE_DETERMINISTIC"` if plateau or never-started.
 - Implement `models/crash_signature.py` Popoto model (signature hash key, human form,
-  `occurrence_count`, per-strategy outcome tallies, `project_key`); upsert + occurrence append.
-- Unit tests per Test Impact (normalization cases, stability, project isolation).
+  `occurrence_count`, per-strategy outcome tallies, `project_key`, `resumable` bool,
+  `escalated` bool); upsert + occurrence append. A `NON_RESUMABLE_DETERMINISTIC` signature's
+  `resumable` field is permanently `False` — no policy entry can promote it.
+- Unit tests per Test Impact (normalization cases, stability, project isolation); add cases:
+  `startup_failure_kind="plateau"` → `NON_RESUMABLE_DETERMINISTIC`; no `turn_start` in trace
+  → `NON_RESUMABLE_DETERMINISTIC`; `startup_failure_kind="ceiling"` + has `turn_start` → resumable.
 
 ### 2. Programmatic resume core + auto-resume reflection
 - **Task ID**: build-resume
@@ -611,6 +677,12 @@ sessions and (b) the new CLI subcommands return correctly-shaped output.
 - Implement propose mode (default) and gated auto-apply (`CRASH_AUTORESUME_ENABLED`, ENABLED on the one
   designated machine per Resolved Q1) with per-session attempt cap (`min()`-clamped against an absolute
   hard ceiling, Resolved Q2) + global per-run budget + terminal-only pre-transition re-check (Risk 3).
+- **Apply determinism guardrail in reflection:** before any resume decision, call `extract_signature`
+  with the session to get the signature. If `signature.resumable is False` (NON_RESUMABLE_DETERMINISTIC),
+  skip resume entirely and call the escalation path: log at WARNING with signature, session id,
+  `startup_captured_frame` (if set), and a `[ESCALATE]` tag so the operator can grep. In auto mode,
+  also emit a Telegram alert (if bridge is reachable) with the captured frame. Never retry a
+  `NON_RESUMABLE_DETERMINISTIC` session on subsequent reflection ticks.
 - Register the reflection (document the `reflections.yaml` addition).
 
 ### 3. CLI inspection surfaces
@@ -633,6 +705,8 @@ sessions and (b) the new CLI subcommands return correctly-shaped output.
 - Run `python -m ruff check . && python -m ruff format --check .`.
 - Prove the terminal-only invariant: auto-resume is a no-op against `running`/`pending` sessions.
 - Prove loop guards: per-session cap and global budget enforced.
+- Prove the determinism guardrail: a session with `startup_failure_kind="plateau"` NEVER gets
+  auto-resumed — it produces an `[ESCALATE]` log and no `pending` transition.
 - Verify no raw Redis on Popoto keys (`grep` for direct `r.hgetall`/`r.delete` in new code → none).
 
 ### 5. Documentation
@@ -668,6 +742,8 @@ sessions and (b) the new CLI subcommands return correctly-shaped output.
 | RESUMABLE_STATUSES defined | `grep -n "RESUMABLE_STATUSES" models/session_lifecycle.py` | output > 0 |
 | Idempotency field present | `grep -n "crash_outcome_attributed" models/agent_session.py` | output > 0 |
 | Terminal-only guard present | `grep -rn "RESUMABLE_STATUSES\|TERMINAL_STATUSES\|reject_from_terminal" agent/crash_signature.py reflections/` | output > 0 |
+| Determinism guardrail present | `grep -n "NON_RESUMABLE_DETERMINISTIC\|startup_failure_kind\|ESCALATE" agent/crash_signature.py` | output > 0 |
+| Escalation path present | `grep -rn "ESCALATE\|startup_captured_frame" reflections/` | output > 0 |
 
 ## Critique Results
 
