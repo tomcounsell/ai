@@ -150,7 +150,7 @@ class TestIdleGapE2E:
         events_written = [
             {"type": "turn_start", "ts": time.time() - 1200},
             {"type": "turn_end", "ts": time.time() - 1200},
-            {"type": "idle_gap", "data": {"duration_secs": IDLE_STALL_SECS + 100}},
+            {"type": "idle_gap", "gap_seconds": IDLE_STALL_SECS + 100},
         ]
         trace_file(session_id, events_written)
 
@@ -171,7 +171,7 @@ class TestIdleGapE2E:
             # turn_start is required: has_turn_start=True skips never-started branch.
             {"type": "turn_start", "ts": old_ts},
             {"type": "turn_end", "ts": old_ts},
-            {"type": "idle_gap", "data": {"duration_secs": duration}},
+            {"type": "idle_gap", "gap_seconds": duration},
         ]
         trace_file(session_id, events_written)
 

@@ -243,7 +243,9 @@ def _classify(
         if etype == "idle_gap":
             data = event.get("data") or {}
             raw_dur = (
-                data.get("duration_secs")
+                event.get("gap_seconds")
+                or data.get("gap_seconds")
+                or data.get("duration_secs")
                 or data.get("duration")
                 or event.get("duration_secs")
                 or event.get("duration")

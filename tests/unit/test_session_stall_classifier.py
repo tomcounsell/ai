@@ -50,7 +50,7 @@ def _old_turn_event() -> dict:
 
 
 def _idle_gap_event(duration_secs: float) -> dict:
-    return {"type": "idle_gap", "data": {"duration_secs": duration_secs}}
+    return {"type": "idle_gap", "gap_seconds": duration_secs}
 
 
 def _kill_transition_event(to_status: str = "killed") -> dict:
@@ -271,8 +271,8 @@ class TestIdleGapSignals:
         verdict = classify_session_stall(events, session=session)
         assert verdict.level == "healthy"
 
-    def test_idle_gap_in_data_nested(self):
-        # duration in event.data.duration_secs
+    def test_idle_gap_top_level(self):
+        # duration in top-level gap_seconds (real recorder schema)
         events = _idle_events(IDLE_STALL_SECS + 10)
         session = _session(status="running")
         verdict = classify_session_stall(events, session=session)
