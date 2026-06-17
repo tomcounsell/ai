@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import redis
+
 from bridge.utc import utc_iso, utc_now
 
 # Add project root to path
@@ -70,6 +72,13 @@ WATCHDOG_INTERVAL = 60  # Check every 60 seconds (hardcoded per plan)
 ZOMBIE_THRESHOLD_SECONDS = 7200  # 2 hours - processes older than this are zombies
 SOFT_INSTANCE_LIMIT = 5  # Warn when more than this many active claude processes
 
+# Update-flow / wedged-detector thresholds
+UPDATE_STALENESS_CEILING = 4 * 3600  # 4 hours — primary ceiling for absolute staleness
+UPDATE_STALENESS_WARN = 30 * 60  # 30 minutes — secondary accelerator for recently-active chats
+STARTUP_GRACE_SECONDS = 5 * 60  # 5 minutes — grace window after bridge start
+# How recent last_probe_ok must be to count as "API layer healthy"
+PROBE_FRESHNESS_SECONDS = 3 * 3600  # 3 hours
+
 # Process name patterns to scan for zombies.
 # ZOMBIE_PROCESS_EXCLUDES filters out Claude Desktop app helper processes.
 ZOMBIE_PROCESS_PATTERNS = ("claude ", "pyright")
@@ -92,6 +101,8 @@ class HealthStatus:
     zombie_pids: list[int] | None = None
     zombie_memory_mb: float = 0.0
     active_claude_count: int = 0
+    update_flow_live: bool = True  # default True preserves existing tests
+    update_flow_issue: str = ""
 
     def __post_init__(self):
         if self.zombie_pids is None:
@@ -114,6 +125,152 @@ def is_bridge_running() -> tuple[bool, int | None]:
     except Exception as e:
         logger.debug(f"Error checking bridge process: {e}")
         return False, None
+
+
+def get_bridge_process_start_ts(pid: int) -> float | None:
+    """Return the bridge process's start time as a UTC unix timestamp.
+
+    Uses ``ps -o lstart= -p <pid>``.  Returns None on any error or unparseable
+    output.  None is treated as inconclusive — never authorise a restart based
+    on this alone (fail-safe for C3).
+
+    lstart format example: "Mon Jun 16 09:45:12 2026"
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        raw = result.stdout.strip()
+        if not raw:
+            return None
+        # lstart format: "Mon Jun 16 09:45:12 2026"
+        # Note: single-digit days are space-padded, e.g. " 6" not "06".
+        # strptime handles both with "%e" on many platforms; use "%d" with strip.
+        try:
+            dt = datetime.strptime(raw, "%a %b %d %H:%M:%S %Y")
+        except ValueError:
+            # Some macOS versions zero-pad; try both forms
+            try:
+                dt = datetime.strptime(raw.strip(), "%a %b  %d %H:%M:%S %Y")
+            except ValueError:
+                logger.warning("get_bridge_process_start_ts: unparseable lstart=%r", raw)
+                return None
+        # ps lstart is in local time; convert to UTC-aware then to timestamp
+        import time as _time
+
+        local_ts = _time.mktime(dt.timetuple())
+        return local_ts
+    except Exception as e:
+        logger.debug("get_bridge_process_start_ts failed for pid=%s: %s", pid, e)
+        return None
+
+
+def _get_watchdog_redis() -> redis.Redis:
+    """Return a decode_responses Redis client for watchdog use."""
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+    return redis.Redis.from_url(redis_url, decode_responses=True)
+
+
+def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, str]:
+    """Assess whether the bridge's Telethon update loop is live.
+
+    Returns (is_live, issue_description).
+
+    PRIMARY rule (always-on, no per-chat precondition):
+      process_running AND recent last_probe_ok AND last_update_received older than
+      UPDATE_STALENESS_CEILING AND bridge is past startup grace window.
+      => verdict: NOT live (wedged), restart needed
+
+    SECONDARY accelerator (optional, fires sooner):
+      If a respond_to_unaddressed chat had bridge:last_event inside the window
+      but has since gone quiet past UPDATE_STALENESS_WARN — and last_probe_ok
+      is recent.
+      => verdict: NOT live (early warning)
+
+    On signal unreadable past grace window:
+      => inconclusive (treated as live), emit WARNING "bridge_update_flow_signal_unreadable"
+
+    On missing signal within grace window:
+      => healthy (cold start)
+    """
+    from bridge.liveness import get_last_probe_ok, get_last_update_received
+
+    now = time.time()
+
+    # Determine if bridge is within startup grace window.
+    within_grace = False
+    if bridge_pid is not None:
+        start_ts = get_bridge_process_start_ts(bridge_pid)
+        if start_ts is None:
+            # Cannot determine start time — fail-safe: treat as inconclusive for
+            # grace-window purposes (do not authorise restart).
+            logger.warning(
+                "assess_update_flow: get_bridge_process_start_ts returned None for "
+                "pid=%s — suppressing wedge verdict (fail-safe C3)",
+                bridge_pid,
+            )
+            return True, ""
+        within_grace = (now - start_ts) < STARTUP_GRACE_SECONDS
+
+    try:
+        last_update = get_last_update_received(r)
+        last_probe = get_last_probe_ok(r)
+    except Exception as e:
+        logger.warning(
+            "assess_update_flow: bridge_update_flow_signal_unreadable — Redis error: %s", e
+        )
+        if within_grace:
+            return True, ""
+        return True, ""  # inconclusive — treat as live
+
+    # Cold start: no signal yet
+    if last_update is None and last_probe is None:
+        if within_grace:
+            return True, ""
+        # Past grace window with no signal at all — inconclusive, not wedged
+        logger.warning(
+            "assess_update_flow: bridge_update_flow_signal_unreadable — "
+            "no liveness keys found past grace window (cold start or keys expired)"
+        )
+        return True, ""
+
+    # Within grace window and keys missing or stale — not yet a problem
+    if within_grace:
+        return True, ""
+
+    # --- PRIMARY rule ---
+    # Probe is healthy (API layer up) but no update received for ceiling duration.
+    probe_is_fresh = last_probe is not None and (now - last_probe) < PROBE_FRESHNESS_SECONDS
+    update_is_stale = last_update is None or (now - last_update) >= UPDATE_STALENESS_CEILING
+
+    if probe_is_fresh and update_is_stale:
+        update_age_h = "never" if last_update is None else f"{(now - last_update) / 3600:.1f}h ago"
+        issue = (
+            f"update loop wedged: last_update_received={update_age_h}, "
+            f"last_probe_ok={((now - last_probe) / 60):.0f}m ago — "
+            f"Telethon stopped delivering events while API layer is healthy"
+        )
+        return False, issue
+
+    # --- SECONDARY accelerator ---
+    # Only fires if probe is fresh AND update went quiet within UPDATE_STALENESS_WARN
+    # but NOT yet at the ceiling (that would have been caught above).
+    if probe_is_fresh and last_update is not None:
+        update_age = now - last_update
+        if UPDATE_STALENESS_WARN <= update_age < UPDATE_STALENESS_CEILING:
+            issue = (
+                f"update loop possibly wedged (early warning): "
+                f"last_update_received={update_age / 60:.0f}m ago "
+                f"(>{UPDATE_STALENESS_WARN // 60}m), last_probe_ok fresh"
+            )
+            return False, issue
+
+    return True, ""
 
 
 def are_logs_fresh() -> bool:
@@ -363,6 +520,25 @@ def check_bridge_health() -> HealthStatus:
             f"(soft limit: {SOFT_INSTANCE_LIMIT})"
         )
 
+    # Check 5: Update-flow / wedged detector (only meaningful when process is up)
+    update_flow_live = True
+    update_flow_issue = ""
+    if running:
+        try:
+            r = _get_watchdog_redis()
+            update_flow_live, update_flow_issue = assess_update_flow(r, pid)
+        except Exception as e:
+            logger.warning("check_bridge_health: assess_update_flow raised: %s", e)
+            # Treat as inconclusive — do not trigger restart on our own errors
+            update_flow_live = True
+            update_flow_issue = ""
+
+        if not update_flow_live:
+            issues.append(update_flow_issue)
+            # The wedge check itself contributes at most level 2 — must never push
+            # to level 4 auto-revert (C4).  Other checks may independently set higher.
+            recovery_level = max(recovery_level, 2)
+
     healthy = len(issues) == 0
 
     return HealthStatus(
@@ -376,6 +552,8 @@ def check_bridge_health() -> HealthStatus:
         zombie_pids=zombie_pids,
         zombie_memory_mb=zombie_memory_mb,
         active_claude_count=active_claude_count,
+        update_flow_live=update_flow_live,
+        update_flow_issue=update_flow_issue,
     )
 
 
@@ -599,6 +777,19 @@ def run_health_check() -> bool:
     logger.warning(f"Bridge unhealthy: {', '.join(status.issues)}")
     logger.info(f"Recovery level needed: {status.recovery_level}")
 
+    # Log specific crash event when wedge is the trigger
+    if not status.update_flow_live:
+        logger.warning(
+            "bridge_update_loop_wedged: update loop stopped delivering events "
+            "while process is running and API layer is healthy. "
+            "Issue: %s",
+            status.update_flow_issue,
+        )
+        try:
+            log_crash("bridge_update_loop_wedged")
+        except Exception as e:
+            logger.debug("Failed to log wedge crash event: %s", e)
+
     # Execute recovery
     success = execute_recovery(status.recovery_level, status.issues)
 
@@ -657,6 +848,9 @@ def main():
                 f"WARNING: Active instances exceed soft limit "
                 f"({status.active_claude_count} > {SOFT_INSTANCE_LIMIT})"
             )
+        print(f"Update flow live: {status.update_flow_live}")
+        if not status.update_flow_live:
+            print(f"Update flow issue: {status.update_flow_issue}")
         return 0 if status.healthy else 1
 
     if args.loop:
