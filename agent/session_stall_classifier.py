@@ -275,16 +275,11 @@ def _classify(
                     if recent_turn_ts is None or ts_val > recent_turn_ts:
                         recent_turn_ts = ts_val
 
-        # --- tool_use events with timeout indicators ---
-        elif etype == "tool_use":
-            data = event.get("data") or {}
-            # Record timeout if present; we don't short-circuit here because
-            # project_counters already aggregates this more reliably.
-            _ = data.get("timed_out")
-
     # ------------------------------------------------------------------
     # 3. Corroborate with project_counters (weak signal)
     # ------------------------------------------------------------------
+    # tool_use timeout events: not tracked per-event; project_counters aggregates
+    # tool_timeouts more reliably, so we rely on that below instead.
     tool_timeout_total = sum(v for k, v in counters.items() if k.startswith("tool_timeouts"))
     recovery_total = sum(v for k, v in counters.items() if k.startswith("recoveries"))
     counter_suspect = (
