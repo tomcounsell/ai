@@ -427,6 +427,80 @@ class TestCrashAutoResume:
             _cleanup_signatures(sig_hash)
 
     # ------------------------------------------------------------------
+    # Test 3b: confidence gate — below-threshold signature NOT auto-resumed
+    # ------------------------------------------------------------------
+
+    def test_below_confidence_not_auto_resumed(self, redis_test_db):
+        """With CRASH_AUTORESUME_ENABLED=1 but a signature that has NOT cleared the
+        confidence gate (first occurrence: occurrence_count < MIN_OCCURRENCES, and
+        zero recorded outcomes so success ratio is 0.0), the reflection must NOT
+        auto-resume the session. Status stays terminal; a 'proposed:' finding
+        appears; no auto-resume fires.
+
+        This guards Blocker 1: the confidence gate (is_auto_eligible) must run
+        before any resume. A resumable signature is necessary but NOT sufficient —
+        it must also be statistically warranted.
+        """
+        trace = _standard_trace(to_status="abandoned")
+
+        session_id = "test-car-sess-below-conf"
+        session = _make_session(
+            session_id,
+            "abandoned",
+            claude_session_uuid="test-uuid-below-conf",
+        )
+        _write_telemetry(session_id, trace)
+
+        try:
+            with patch.dict(
+                os.environ,
+                {
+                    "CRASH_AUTORESUME_ENABLED": "1",
+                    "CRASH_AUTORESUME_LOOKBACK_HOURS": "9999",
+                    "CRASH_AUTORESUME_MIN_OCCURRENCES": "3",
+                    "CRASH_AUTORESUME_MIN_SUCCESS_RATIO": "0.7",
+                },
+            ):
+                from reflections.crash_recovery import run_crash_recovery
+
+                result = run_crash_recovery()
+
+            assert result["status"] == "ok", f"Unexpected error: {result}"
+
+            # Session must still be 'abandoned' — the confidence gate blocked resume.
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            assert sessions, f"Session {session_id!r} not found after reflection"
+            assert sessions[0].status == "abandoned", (
+                f"Confidence gate failed: session transitioned to {sessions[0].status!r}, "
+                f"expected it to stay 'abandoned'. Findings: {result['findings']}"
+            )
+
+            # A 'proposed:' finding must appear (observed but not acted on).
+            proposed_finding = next(
+                (f for f in result["findings"] if "proposed:" in f and session_id in f),
+                None,
+            )
+            assert proposed_finding is not None, (
+                f"Expected a 'proposed:' finding for the below-confidence session. "
+                f"Findings: {result['findings']}"
+            )
+
+            # The summary must report auto_resumed=0 (no resume fired).
+            summary = result["summary"]
+            assert "auto_resumed=0" in summary, (
+                f"Expected auto_resumed=0 in summary, got: {summary!r}"
+            )
+            # And it must report at least one proposed.
+            assert "proposed=0" not in summary, f"Expected proposed>0 in summary, got: {summary!r}"
+
+        finally:
+            sigs = CrashSignature.all_for_project(_TEST_PROJECT)
+            sig_hashes = [s.signature_hash for s in sigs]
+            _cleanup_sessions(session)
+            _cleanup_signatures(*sig_hashes)
+            _cleanup_telemetry(session_id)
+
+    # ------------------------------------------------------------------
     # Test 4: auto-resume fires on an eligible session
     # ------------------------------------------------------------------
 

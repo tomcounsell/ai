@@ -1411,6 +1411,30 @@ def _default_project_key() -> str:
         return "valor"
 
 
+def _crash_sig_strategy_stats(sig: object) -> tuple[str | None, int, int]:
+    """Extract (strategy, attempts, recovered) from a CrashSignature record.
+
+    Reads the real nested ``outcome_tallies_json`` via the model's
+    ``_load_tallies()`` helper. The tally shape is
+    ``{strategy_name: {"attempts": N, "recovered": N, "failed": N}}`` — NOT a
+    flat dict. Picks the first recorded strategy (the v1 library records a
+    single concrete strategy, ``"auto_resume"``).
+
+    Returns ``(None, 0, 0)`` when no outcomes have been recorded.
+    """
+    loader = getattr(sig, "_load_tallies", None)
+    tallies = loader() if callable(loader) else {}
+    if not isinstance(tallies, dict) or not tallies:
+        return None, 0, 0
+    # Pick the first strategy with a dict bucket (per-strategy nested shape).
+    for name, bucket in tallies.items():
+        if isinstance(bucket, dict):
+            attempts = int(bucket.get("attempts") or 0)
+            recovered = int(bucket.get("recovered") or 0)
+            return name, attempts, recovered
+    return None, 0, 0
+
+
 def cmd_crash_signatures(args: argparse.Namespace) -> int:
     """Show crash signatures in the library for a project.
 
@@ -1428,29 +1452,34 @@ def cmd_crash_signatures(args: argparse.Namespace) -> int:
     try:
         project = getattr(args, "project", None) or _default_project_key()
         min_occ = getattr(args, "min_occurrences", 1) or 1
+        min_ratio = getattr(args, "min_success_ratio", 0.7) or 0.7
 
         signatures = CrashSignature.all_for_project(project)
         if min_occ > 1:
-            signatures = [s for s in signatures if (s.occurrence_count or 0) >= min_occ]
+            signatures = [s for s in signatures if s.occurrence_count_int >= min_occ]
 
         if args.json:
             data = []
             for s in signatures:
-                tallies = getattr(s, "outcome_tallies", None) or {}
-                attempts = sum(tallies.values()) if tallies else 0
-                recovered = tallies.get("recovered", 0) if tallies else 0
-                confidence = (recovered / attempts) if attempts > 0 else 0.0
-                auto_eligible = bool(getattr(s, "auto_eligible", False))
+                strategy, attempts, recovered = _crash_sig_strategy_stats(s)
+                confidence = s.policy_confidence(strategy) if strategy else 0.0
+                auto_eligible = s.is_auto_eligible(
+                    strategy=strategy or "auto_resume",
+                    min_occurrences=min_occ,
+                    min_success_ratio=min_ratio,
+                )
                 data.append(
                     {
                         "signature_hash": s.signature_hash,
                         "human_form": s.human_form,
                         "signature_class": getattr(s, "signature_class", None),
-                        "resumable": bool(getattr(s, "resumable", False)),
-                        "escalated": bool(getattr(s, "escalated", False)),
-                        "occurrence_count": s.occurrence_count or 0,
+                        "resumable": s.is_resumable,
+                        "escalated": s.is_escalated,
+                        "occurrence_count": s.occurrence_count_int,
                         "project_key": project,
-                        "outcome_tallies": tallies,
+                        "strategy": strategy,
+                        "attempts": attempts,
+                        "recovered": recovered,
                         "policy_confidence": round(confidence, 4),
                         "auto_eligible": auto_eligible,
                     }
@@ -1466,19 +1495,16 @@ def cmd_crash_signatures(args: argparse.Namespace) -> int:
         for s in signatures:
             hash_short = (s.signature_hash or "")[:8]
             human = s.human_form or "(unknown)"
-            resumable = bool(getattr(s, "resumable", False))
-            escalated = bool(getattr(s, "escalated", False))
-            occ = s.occurrence_count or 0
-            tallies = getattr(s, "outcome_tallies", None) or {}
-            attempts = sum(tallies.values()) if tallies else 0
-            recovered = tallies.get("recovered", 0) if tallies else 0
-            confidence = (recovered / attempts * 100) if attempts > 0 else 0.0
-            strategy = None
-            for k in tallies:
-                if k not in ("escalated", "abandoned"):
-                    strategy = k
-                    break
-            auto_eligible = bool(getattr(s, "auto_eligible", False))
+            resumable = s.is_resumable
+            escalated = s.is_escalated
+            occ = s.occurrence_count_int
+            strategy, attempts, recovered = _crash_sig_strategy_stats(s)
+            confidence = (s.policy_confidence(strategy) * 100) if strategy else 0.0
+            auto_eligible = s.is_auto_eligible(
+                strategy=strategy or "auto_resume",
+                min_occurrences=min_occ,
+                min_success_ratio=min_ratio,
+            )
 
             print(f"  [{hash_short}] {human}")
             resumable_str = "yes" if resumable else "NO"
@@ -1525,33 +1551,26 @@ def cmd_crash_policy(args: argparse.Namespace) -> int:
         if args.json:
             data = []
             for s in signatures:
-                tallies = getattr(s, "outcome_tallies", None) or {}
-                attempts = sum(tallies.values()) if tallies else 0
-                recovered = tallies.get("recovered", 0) if tallies else 0
-                confidence = (recovered / attempts) if attempts > 0 else 0.0
-                occ = s.occurrence_count or 0
-                auto_eligible = (
-                    bool(getattr(s, "resumable", False))
-                    and occ >= min_occ
-                    and confidence >= min_ratio
+                strategy, attempts, recovered = _crash_sig_strategy_stats(s)
+                confidence = s.policy_confidence(strategy) if strategy else 0.0
+                occ = s.occurrence_count_int
+                auto_eligible = s.is_auto_eligible(
+                    strategy=strategy or "auto_resume",
+                    min_occurrences=min_occ,
+                    min_success_ratio=min_ratio,
                 )
-                strategy = None
-                for k in tallies:
-                    if k not in ("escalated", "abandoned"):
-                        strategy = k
-                        break
                 data.append(
                     {
                         "signature_hash": s.signature_hash,
                         "human_form": s.human_form,
-                        "resumable": bool(getattr(s, "resumable", False)),
+                        "resumable": s.is_resumable,
                         "occurrence_count": occ,
                         "confidence": round(confidence, 4),
                         "recovered": recovered,
                         "attempts": attempts,
                         "strategy": strategy,
                         "auto_eligible": auto_eligible,
-                        "escalated": bool(getattr(s, "escalated", False)),
+                        "escalated": s.is_escalated,
                     }
                 )
             print(json.dumps(data, indent=2))
@@ -1563,21 +1582,17 @@ def cmd_crash_policy(args: argparse.Namespace) -> int:
 
         print(f"Auto-Resume Policy (project: {project})")
         for s in signatures:
-            resumable = bool(getattr(s, "resumable", False))
-            escalated = bool(getattr(s, "escalated", False))
-            occ = s.occurrence_count or 0
-            tallies = getattr(s, "outcome_tallies", None) or {}
-            attempts = sum(tallies.values()) if tallies else 0
-            recovered = tallies.get("recovered", 0) if tallies else 0
-            confidence_pct = (recovered / attempts * 100) if attempts > 0 else 0.0
-            confidence_ratio = confidence_pct / 100.0
-            auto_eligible = resumable and occ >= min_occ and confidence_ratio >= min_ratio
+            resumable = s.is_resumable
+            escalated = s.is_escalated
+            occ = s.occurrence_count_int
+            strategy, attempts, recovered = _crash_sig_strategy_stats(s)
+            confidence_pct = (s.policy_confidence(strategy) * 100) if strategy else 0.0
+            auto_eligible = s.is_auto_eligible(
+                strategy=strategy or "auto_resume",
+                min_occurrences=min_occ,
+                min_success_ratio=min_ratio,
+            )
             hash_short = (s.signature_hash or "")[:8]
-            strategy = None
-            for k in tallies:
-                if k not in ("escalated", "abandoned"):
-                    strategy = k
-                    break
 
             if not resumable:
                 esc_str = f" ({occ} escalated)" if escalated else ""

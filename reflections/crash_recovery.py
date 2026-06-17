@@ -283,6 +283,36 @@ def run_crash_recovery() -> dict:
                 findings.append(f"escalated: session={session_id} sig={sig.human_form}")
                 continue
 
+            # Confidence gate (Risk 1 mitigation / core safety requirement):
+            # never auto-resume a signature that has not earned statistical
+            # confidence. A signature must clear MIN_OCCURRENCES and the
+            # per-strategy MIN_SUCCESS_RATIO before the policy promotes it to
+            # auto-eligible. Until then this is propose-mode: we observed the
+            # pattern but lack the confidence to act on it. The strategy name
+            # "auto_resume" matches record_outcome/policy_confidence usage above
+            # and in models/crash_signature.py.
+            if not sig_record.is_auto_eligible(
+                strategy="auto_resume",
+                min_occurrences=_MIN_OCCURRENCES,
+                min_success_ratio=_MIN_SUCCESS_RATIO,
+            ):
+                proposed += 1
+                logger.info(
+                    "propose-mode: signature=%s not yet auto-eligible "
+                    "(occurrences=%d < %d or confidence=%.2f < %.2f) — "
+                    "observed but not resuming session=%s",
+                    sig.human_form,
+                    sig_record.occurrence_count_int,
+                    _MIN_OCCURRENCES,
+                    sig_record.policy_confidence("auto_resume"),
+                    _MIN_SUCCESS_RATIO,
+                    session_id,
+                )
+                findings.append(
+                    f"proposed: session={session_id} sig={sig.human_form} (below-confidence)"
+                )
+                continue
+
             # Resume-eligible path
             if auto_enabled and run_budget_remaining > 0:
                 # Check per-session attempt cap
