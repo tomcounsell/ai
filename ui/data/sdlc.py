@@ -343,6 +343,13 @@ class PipelineProgress(BaseModel):
     # True once a user-facing message has been routed for this session.
     user_facing_routed: bool = False
 
+    # === Stall advisory (issue #1538) ===
+    # Read-only classification for non-terminal sessions. Populated by
+    # _session_to_pipeline() via classify_session_stall(). None for terminal
+    # sessions (skipped) and when classification raises (fail-soft).
+    stall_advisory: str | None = None  # "healthy", "suspect", "stalled", or None
+    stall_advisory_reason: str | None = None  # short reason slug
+
     # SDLC state
     stages: list[StageState] = []
     current_stage: str | None = None
@@ -889,6 +896,26 @@ def _session_to_pipeline(session) -> PipelineProgress:
         if not pr_url:
             pr_url = fallback_pr
 
+    # === Stall advisory (issue #1538) ===
+    # Classify non-terminal sessions only — fail-soft, never breaks dashboard.
+    stall_advisory: str | None = None
+    stall_advisory_reason: str | None = None
+    try:
+        from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES_LOCAL
+
+        if status not in _TERMINAL_STATUSES_LOCAL:
+            from agent.session_stall_classifier import classify_session_stall
+            from agent.session_telemetry import read_session_timeline
+
+            _stall_events = read_session_timeline(
+                _safe_str(session.session_id) or _safe_str(session.agent_session_id) or ""
+            )
+            _verdict = classify_session_stall(_stall_events, session=session)
+            stall_advisory = _verdict.level
+            stall_advisory_reason = _verdict.reason
+    except Exception:
+        pass  # fail-soft: advisory never breaks dashboard rendering
+
     return PipelineProgress(
         agent_session_id=_safe_str(session.agent_session_id) or "",
         session_id=_safe_str(session.session_id),
@@ -948,6 +975,8 @@ def _session_to_pipeline(session) -> PipelineProgress:
         dev_transcript_path=_safe_str(getattr(session, "dev_transcript_path", None)),
         pty_slot=_safe_nullable_int(getattr(session, "pty_slot", None)),
         user_facing_routed=bool(getattr(session, "user_facing_routed", False)),
+        stall_advisory=stall_advisory,
+        stall_advisory_reason=stall_advisory_reason,
     )
 
 
