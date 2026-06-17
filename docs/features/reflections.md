@@ -50,6 +50,7 @@ reflections:
 | `auto_delete_after_run` | bool | One-shot reflections (`at:` schedule) — record self-cleans on success. Default: `false`. |
 | `retry_policy` | dict | Optional override of `{max_retries, backoff_seconds, max_consecutive_failures_before_pause}`. See [Failure Tracking](#failure-tracking). |
 | `timeout` | int | Optional per-reflection timeout in seconds. Defaults: 1800 (30 min) for function, 3600 (60 min) for agent |
+| `params` | dict | Optional arbitrary kwargs forwarded to the callable when it declares a `params` keyword argument. The scheduler uses `inspect.signature` to detect whether the callable accepts `params`; if not, it is called without it. Use for feature flags and per-reflection tunables (e.g., `stall_advisory_telegram_enabled: false`). |
 
 **Convention:** Reflections are addressed by `name` (this YAML field) and dispatched by `callable` (dotted path). Numbered-step references (`step_X`) are historical and should not be reintroduced into source, comments, or docs.
 
