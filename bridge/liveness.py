@@ -1,16 +1,32 @@
-"""Bridge-level liveness signals for the stale-update-stream detector.
+"""Bridge-level liveness signals for the stale-update-stream detector (#1538).
 
-Writes two positive liveness keys to Redis:
+Writes two **positive** liveness keys to Redis.  Positive signals record that
+something good *happened* — they do not infer health from absence of bad events.
+This avoids the "silence-equals-failure" anti-pattern rejected in issue #1172.
 
+Keys:
 - ``bridge:last_update_received``: stamped by the NewMessage handler on every
-  incoming Telethon update, before dedup.  A gap here means the update loop
-  has silently stalled (bridge is alive but Telethon stopped firing events).
+  incoming Telethon update, **before dedup**.  A gap here — while
+  ``bridge:last_probe_ok`` is fresh — means the update loop has silently stalled
+  (bridge alive, TCP up, but Telethon stopped firing events).
+
+  **Important**: only the NewMessage handler writes this key.  The reconciler
+  must NOT write it, even though it also "receives" data from Telegram.  If the
+  reconciler stamped this key, a bridge whose update loop was wedged but whose
+  reconciler was healthy would look fine — defeating the detector entirely.
 
 - ``bridge:last_probe_ok``: stamped by the reconciler each time
-  ``get_dialogs()`` succeeds.  A gap here means the TCP/API layer is broken
-  even though the process is alive.
+  ``get_dialogs()`` succeeds.  A gap here means the TCP/API layer itself is
+  broken, distinguishing a wedged update loop from a full disconnect.  The
+  watchdog only fires a wedge restart when this probe is fresh — a stale probe
+  means the bridge may simply be disconnected, and restarting mid-reconnect
+  would be counterproductive.
 
-Both keys are freeform (not Popoto-managed), so raw Redis get/set is correct.
+Both keys are **freeform** (not Popoto-managed), so raw Redis ``get``/``set`` is
+correct here.  All other Redis writes in this codebase that touch Popoto-managed
+keys must go through the ORM.  See issue #1408 for the broader freeform-key
+convention used by ``bridge.dedup.record_last_event`` and friends.
+
 Both writers are best-effort: any exception logs a WARNING and never raises,
 matching the same safety contract as ``bridge.dedup.record_last_event``.
 """

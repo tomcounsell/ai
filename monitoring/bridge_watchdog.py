@@ -244,7 +244,17 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
         return True, ""
 
     # --- PRIMARY rule ---
-    # Probe is healthy (API layer up) but no update received for ceiling duration.
+    # Corroboration requirement: we only declare a wedge when last_probe_ok is
+    # FRESH.  A stale probe means the API/TCP layer itself may be broken — the
+    # bridge could be mid-reconnect.  Restarting mid-reconnect is counterproductive
+    # and would flood Telegram's rate limiter.  This dual-signal design follows the
+    # "silence != failure" principle from issue #1172: absence of updates alone is
+    # NOT authoritative; a positive probe confirmation is required.
+    #
+    # Level cap: the wedge detector contributes at most level 2 (plain restart with
+    # catch_up=True).  It must never push recovery_level to 4 (auto-revert).  A
+    # wedged update loop is not evidence of a bad commit — it is a known Telethon
+    # upstream bug (archived library, issue #1408).
     probe_is_fresh = last_probe is not None and (now - last_probe) < PROBE_FRESHNESS_SECONDS
     update_is_stale = last_update is None or (now - last_update) >= UPDATE_STALENESS_CEILING
 

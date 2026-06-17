@@ -110,6 +110,9 @@ When a project does have an explicit `EmailOutputHandler` registered (via `regis
 6. Run `ReflectionScheduler` for background maintenance tasks
 7. Run `KnowledgeWatcher` for work-vault file change monitoring
 8. Run message catchup scan and reconciler on startup
+9. Write bridge liveness signals to Redis for the external watchdog (see [Bridge Self-Healing](bridge-self-healing.md#3a-update-loop-wedged-detector-issue-1538)):
+   - `bridge:last_update_received` — written by the `NewMessage` handler before dedup; staleness while `bridge:last_probe_ok` is fresh indicates the Telethon update loop has wedged
+   - `bridge:last_probe_ok` — written by the reconciler after each successful `get_dialogs()` call; distinguishes a wedged update loop from a full TCP/API disconnect
 
 The mechanical catchup (`bridge/catchup.py`) and reconciler (`bridge/reconciler.py`) cover **ingestion gaps** — messages that never got a session enqueued. They cannot recover **response failures** (session enqueued, hung/killed, no reply) because the `DedupRecord` entry already exists. The [Agent-Judgment Catchup](agent-judgment-catchup.md) is the response-failure complement: it reads the actual chat thread (including Valor's own `out` replies), uses an LLM judge to classify unanswered messages, and enqueues recovery sessions. It runs out-of-band via `valor-catchup` and as the final best-effort step of `/update`.
 
