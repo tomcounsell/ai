@@ -78,6 +78,30 @@ the PTY container path, not the Telethon update loop or watchdog.)
 **Notes:** Minor drift only — reconciler gained persona logic but its dialog-pass
 structure (where any positive-probe could ride) is intact.
 
+**Incident topology — was `last_probe_ok` green during the outage? (C-required-2):**
+This **cannot be pinned from evidence**: neither `last_update_received` nor
+`last_probe_ok` existed on 2026-06-16, so there is no retained record of whether the
+reconciler's `get_dialogs()` round-trip was succeeding during the 8-hour silence. The
+log evidence is consistent with the *connection staying live* (heartbeats current, TCP
+connected, Telethon logged a per-channel `Account is now banned` rather than a
+disconnect), which **suggests** the probe would have been green — but this is inference,
+not a recorded fact. **Therefore the design must hold under BOTH topologies and does
+not depend on resolving this ambiguity:**
+- **Probe GREEN during the wedge (the likely case):** primary ceiling fires —
+  `process_running` + recent `last_probe_ok` + stale `last_update_received` past the
+  ceiling = wedged → restart. This is the path the plan relies on.
+- **Probe RED during the wedge (connection also down):** the wedged verdict
+  deliberately does NOT fire (the `last_probe_ok` recency guard fails), because a dead
+  connection is not a wedged-handler condition — it is a disconnect, already handled by
+  the bridge's existing reconnect logic and the watchdog's process-liveness ladder. The
+  detector correctly stays silent and lets the existing disconnect recovery run; it does
+  not need to win that case to be correct.
+So `last_probe_ok` is not a load-bearing *assumption* about the incident — it is a
+disambiguator that routes to the right recovery (wedge-restart vs. existing
+reconnect/process ladder) under whichever topology actually held. The 2026-06-16 shape
+(connection alive, handler silent) is the case the detector is purpose-built for; the
+disconnect case was already covered before this plan.
+
 ## Prior Art
 
 - **#1408 / PR #1559** (`fix: close catchup dead zone + extend reconciler lookback`):
@@ -164,7 +188,12 @@ liveness pattern, not library-specific.
 2. **Liveness write (NEW)**: The NewMessage handler — **and ONLY the NewMessage
    handler** — records `last_update_received = now` to a freeform Redis key
    `bridge:last_update_received` (mirroring the #1408 freeform-key convention).
-   Best-effort, never raises. The reconciler's `get_dialogs()`/ingest path does NOT
+   Best-effort, never raises. **Placed BEFORE the dedup early-return** (alongside the
+   existing `record_last_event()` at `:1117`, before `is_duplicate_message` at `:1122`,
+   C-required-1): the handler firing is the positive liveness proof, and a `catch_up=True`
+   restart replays duplicate events that hit the dedup early-return — so a post-dedup
+   write would leave the signal stale on a quiet-account restart and self-trigger the
+   detector. The reconciler's `get_dialogs()`/ingest path does NOT
    write this key (see B2 below): writing it from the reconciler would re-green the
    signal every ~180s while the handler is dead, making the wedge undetectable. The
    reconciler writes `last_probe_ok` only.
@@ -195,7 +224,11 @@ liveness pattern, not library-specific.
   field (and supporting issue string). `bridge/dedup.py` (or a new small
   `bridge/liveness.py`) gains `record_update_received()` / `get_last_update_received()`
   and `record_probe_ok()` / `get_last_probe_ok()` mirroring the existing
-  `record_last_event` pattern.
+  `record_last_event` pattern. `monitoring/bridge_watchdog.py` gains a **new**
+  `get_bridge_process_start_ts(pid)` helper (B3) — `ps -o lstart= -p <pid>` → UTC unix
+  ts, `None` on error — because no existing helper maps the bridge PID to its start time
+  (`is_bridge_running()` returns only `(running, pid)`; `_enumerate_claude_processes()`
+  enumerates all claude/pyright procs, not the bridge by PID).
 - **Signal design decision (C1 — keep both, not one):** Two signals are retained
   deliberately. `last_update_received` (handler-only) detects the wedge;
   `last_probe_ok` (reconciler) is the **disconfirmation guard** that prevents a
@@ -278,8 +311,20 @@ backfills → handler fires again → `last_update_received` resumes → green
 - Add `record_update_received()` / `get_last_update_received()` to a small
   `bridge/liveness.py` (or extend `bridge/dedup.py`), mirroring the existing
   `record_last_event` freeform-key + best-effort-never-raises pattern. Call it in the
-  NewMessage handler **only** (`telegram_bridge.py:1093`, after the early-return
-  guards). **Do NOT call it from the reconciler** — the reconciler rides the
+  NewMessage handler **only** (`telegram_bridge.py:1093`).
+- **Exact placement (C-required-1):** the `record_update_received()` call must sit
+  **alongside the existing `record_last_event()` call (currently `telegram_bridge.py:1117`)
+  — i.e. BEFORE the dedup early-return at `:1122` (`is_duplicate_message`)** and before
+  the `/update` bridge-command early-return. Rationale: the handler firing at all is the
+  positive proof the update loop is live; a `catch_up=True` restart replays already-seen
+  messages that hit the `is_duplicate_message` early-return, so placing the write *after*
+  dedup would leave the signal stale on a quiet-account restart whose only inbound events
+  are duplicates — the detector would then self-trigger a second restart. The write rides
+  the same pre-dedup position #1408 chose for `record_last_event` and for the same reason.
+  Place it immediately after the `record_last_event` await so both liveness writes share
+  one pre-dedup site. (Skip only the `event.out` / `SHUTTING_DOWN` guards above it —
+  outgoing/shutdown events are not real inbound update-loop activity.)
+- **Do NOT call it from the reconciler** — the reconciler rides the
   `get_dialogs()` poll and would re-green the signal every ~180s while the handler is
   dead, defeating the detector (B2).
 - Add `record_probe_ok()` in the reconciler's existing success path (no new API call —
@@ -306,6 +351,16 @@ backfills → handler fires again → `last_update_received` resumes → green
   is lossless). **Hard cap: this reason never raises `recovery_level` above 2** — it
   must not interact with the level-4 auto-revert path, which keys off crash-pattern
   commit signatures, not runtime wedges (C4).
+- **Add the new `get_bridge_process_start_ts(pid)` helper (B3)** to
+  `bridge_watchdog.py` — `ps -o lstart= -p <pid>` (or equivalent), parsed to a UTC unix
+  timestamp, returning `None` on empty/error/unparseable output. This is NEW: no
+  existing helper maps the bridge PID to its start time (`is_bridge_running()` returns
+  only `(running, pid)`; `_enumerate_claude_processes()` enumerates all claude/pyright
+  processes, not the bridge by PID). The startup grace window and per-restart
+  suppression both key off this helper's return value. **`None` (inconclusive) is
+  treated as "never wedged"** — a missing/unparseable start time must never authorize a
+  restart (fail-safe, mirroring C3). Unit-test the parser against representative
+  `lstart` output and the empty/error → `None` path.
 - Self-blindness signal (C3): if `assess_update_flow()` cannot read either signal
   (Redis unreadable, both keys missing past the grace window), it returns
   *inconclusive* (NOT wedged, no restart) **and** logs a distinct WARNING
@@ -352,9 +407,13 @@ backfills → handler fires again → `last_update_received` resumes → green
   matrix — (a) account-wide silence past the absolute ceiling with healthy
   `last_probe_ok` and NO recently-active chat → wedged verdict + restart (B1 incident
   shape); (b) quiet *below* the ceiling → no restart; (c) stale update +
-  failing-probe disconnect → NOT wedged; (d) reconciler activity while handler dead →
-  signal stays stale, still detected (B2 regression); (e) unreadable signal →
-  inconclusive + `bridge_update_flow_signal_unreadable` WARNING (C3).
+  failing-probe disconnect → NOT wedged (covers the C-required-2 "probe RED" topology:
+  detector stays silent, existing reconnect ladder owns it); (d) reconciler activity
+  while handler dead → signal stays stale, still detected (B2 regression); (e)
+  unreadable signal → inconclusive + `bridge_update_flow_signal_unreadable` WARNING (C3);
+  (f) `get_bridge_process_start_ts` returns `None` → suppression inconclusive, no
+  restart authorized (B3 fail-safe); (g) duplicate-only catch_up replay still writes a
+  fresh `last_update_received` → no self-trigger (C-required-1 regression).
 
 No existing behavior is removed — changes are additive to `HealthStatus` and the
 watchdog ladder, so most existing watchdog tests pass unchanged once the new field
@@ -394,12 +453,21 @@ re-introducing a silent outage the detector was built to catch.
 `startup_grace + worst_case_catchup` long (enough for the restarted bridge to reach a
 fresh `last_update_received` or, in genuinely quiet periods, a fresh `last_probe_ok`),
 NOT a fixed long cooldown. Basis decision (C2): the suppression clock keys off the
-**observed bridge process start time** (the watchdog already resolves the bridge PID
-via `is_bridge_running()`; process start is read from `ps etime`, the same source the
-zombie check uses — proven, not novel). When the restarted process's start time is
-newer than the last recovery action, suppression naturally clears — so a re-wedge of a
-*freshly restarted* process is detected on the next ceiling crossing rather than being
-masked by a stale cooldown timer. The detector also records each wedged restart via
+**observed bridge process start time**. **This primitive does NOT exist today and must
+be built (B3).** `is_bridge_running()` returns only `(running, pid)` — it does not read
+start time — and `_enumerate_claude_processes()` enumerates all claude/pyright
+processes system-wide (`ps -eo`), never mapping the bridge PID to its start time. A new
+helper `get_bridge_process_start_ts(pid)` must be added to `monitoring/bridge_watchdog.py`,
+calling `ps -o lstart= -p <pid>` (or equivalent), parsing the result to a UTC unix
+timestamp, and returning `None` on empty/error/unparseable output. The existing
+`_parse_elapsed_time()` etime parser is reused only for the zombie check; the new helper
+reads the bridge's *own* PID start time, which no existing code does. **Inconclusive
+(`None`) is treated as "never wedged"** — a missing/unreadable start time must never let
+the detector restart the bridge (same fail-safe posture as the unreadable-signal path,
+C3). When the restarted process's start time is newer than the last recovery action,
+suppression naturally clears — so a re-wedge of a *freshly restarted* process is detected
+on the next ceiling crossing rather than being masked by a stale cooldown timer. The
+detector also records each wedged restart via
 `crash_tracker.log_crash`; the existing "≥5 crashes in 30 min → level 5 alert human"
 rule (already in `check_bridge_health`) is the backstop against a true restart loop, so
 a persistent re-wedge escalates to a human rather than looping silently.
@@ -433,11 +501,14 @@ N seconds of process start = healthy) must be longer than worst-case catchup tim
 may legitimately stay stale after restart (no messages arrive) — this is why the grace
 window keys off process start, not off seeing a fresh `last_update_received`, and why
 the absolute ceiling (not a short timeout) is the trigger.
-**Mitigation:** Startup grace window keyed off the **observed process start time**
-(`is_bridge_running()` PID → `ps etime`, the same proven source the zombie check uses,
-C2); per-restart suppression scoped to `grace + worst_case_catchup` and cleared when a
-newer process-start time is observed, so the watchdog won't re-restart within the
-window but also won't mask a re-wedge of a freshly restarted process.
+**Mitigation:** Startup grace window keyed off the **observed process start time**, read
+via the **new** `get_bridge_process_start_ts(pid)` helper (B3 — `is_bridge_running()`
+returns only `(running, pid)` and the zombie check's `_enumerate_claude_processes()`
+never maps the bridge PID to its start time, so this is NEW code: `ps -o lstart= -p
+<pid>` → UTC unix ts, `None`-on-error = never-wedged). Per-restart suppression scoped to
+`grace + worst_case_catchup` and cleared when a newer process-start time is observed, so
+the watchdog won't re-restart within the window but also won't mask a re-wedge of a
+freshly restarted process.
 
 ## No-Gos (Out of Scope)
 
@@ -489,7 +560,12 @@ the watchdog already imports bridge/monitoring helpers.
 ## Success Criteria
 
 - [ ] `bridge/liveness.py` (or extended `bridge/dedup.py`) writes
-  `last_update_received` from the NewMessage handler ONLY — NOT the reconciler (B2).
+  `last_update_received` from the NewMessage handler ONLY — NOT the reconciler (B2) —
+  and the call is placed **before** the `is_duplicate_message` dedup early-return so a
+  catch_up duplicate-replay restart keeps the signal fresh (C-required-1).
+- [ ] `monitoring/bridge_watchdog.py` adds `get_bridge_process_start_ts(pid)` (B3) that
+  reads the bridge PID's own start time (`ps -o lstart=`) and returns `None` on error;
+  `None` is treated as never-wedged.
 - [ ] Reconciler records `last_probe_ok` on successful `get_dialogs()` (no new API
   call) and is its only liveness write.
 - [ ] `bridge_watchdog.py` `HealthStatus.update_flow_live` + `assess_update_flow()`
@@ -558,13 +634,18 @@ timing-sensitive watchdog rule.)
   `record_probe_ok()` / `get_last_probe_ok()` in `bridge/liveness.py`, mirroring the
   `record_last_event` freeform-key + best-effort pattern. **Redis-only, no `data/`
   file fallback** (N1).
-- Call `record_update_received()` in the NewMessage handler ONLY (after early-return
-  guards). **Do NOT call it from the reconciler** (B2 — reconciler re-greening defeats
+- Call `record_update_received()` in the NewMessage handler ONLY, **placed alongside
+  the existing `record_last_event()` at `:1117` — BEFORE the `is_duplicate_message`
+  dedup early-return at `:1122`** (C-required-1: a post-dedup write goes stale on
+  `catch_up=True` duplicate-replay restarts in a quiet account, self-triggering the
+  detector). **Do NOT call it from the reconciler** (B2 — reconciler re-greening defeats
   the detector). Call `record_probe_ok()` on the reconciler's successful
   `get_dialogs()` pass — that is the reconciler's only liveness write.
 - Unit tests: read/write, cold-start `None`, corruption coercion, Redis-failure
   WARNING + non-blocking; assert the reconciler ingest path does NOT write
-  `last_update_received` (regression guard for B2).
+  `last_update_received` (regression guard for B2); assert the handler writes
+  `last_update_received` for a duplicate (pre-dedup placement) so a catch_up replay
+  keeps the signal fresh (regression guard for C-required-1).
 
 ### 2. Build watchdog wedged detector + recovery
 - **Task ID**: build-watchdog-detector
@@ -578,11 +659,18 @@ timing-sensitive watchdog rule.)
   `assess_update_flow()` implementing the **ceiling-primary** rule: PRIMARY trigger is
   the absolute staleness ceiling with NO per-chat precondition (B1); the
   recently-active-chat-quiet check is a secondary accelerator only.
+- **Add the new `get_bridge_process_start_ts(pid)` helper (B3)**: `ps -o lstart= -p
+  <pid>` (or equivalent) → UTC unix timestamp, `None` on empty/error/unparseable.
+  No existing helper does this (`is_bridge_running()` returns only `(running, pid)`;
+  `_enumerate_claude_processes()` scans all claude/pyright procs, not the bridge PID).
+  Treat `None` as inconclusive → never-wedged (fail-safe). Unit-test the parser and the
+  error → `None` path.
 - Wire a `bridge_update_loop_wedged` recovery branch into the existing ladder using
   `restart_bridge()` + `crash_tracker.log_crash`; **cap its `recovery_level`
   contribution at 2 — never level 4 auto-revert** (C4). Add startup grace keyed off
-  observed process start time and per-restart suppression scoped to
-  `grace + worst_case_catchup`, cleared on a newer process-start observation (C2).
+  observed process start time (via the new `get_bridge_process_start_ts` helper) and
+  per-restart suppression scoped to `grace + worst_case_catchup`, cleared on a newer
+  process-start observation (C2/B3).
 - Emit a distinct `bridge_update_flow_signal_unreadable` WARNING when neither signal
   is readable past the grace window, so a persistently blind detector is visible (C3).
 - Integration tests: (a) account-wide silence past the ceiling with healthy
@@ -628,6 +716,8 @@ timing-sensitive watchdog rule.)
 | Handler wires writer | `grep -n "record_update_received" bridge/telegram_bridge.py` | output contains record_update_received |
 | Watchdog reads signal | `grep -n "get_last_update_received\|update_flow_live" monitoring/bridge_watchdog.py` | output contains update_flow_live |
 | Recovery reason logged | `grep -n "bridge_update_loop_wedged" monitoring/bridge_watchdog.py` | output contains bridge_update_loop_wedged |
+| Process-start helper exists (B3) | `grep -n "def get_bridge_process_start_ts" monitoring/bridge_watchdog.py` | output contains get_bridge_process_start_ts |
+| Liveness write is pre-dedup (C-required-1) | `grep -n "record_update_received\|is_duplicate_message" bridge/telegram_bridge.py` | record_update_received line number < is_duplicate_message line number |
 
 ## Critique Results
 
@@ -640,6 +730,9 @@ timing-sensitive watchdog rule.)
 | Concern | C3 | Detector fails open with no self-blindness alert | Technical Approach, Failure Path Test Strategy, Risk 3, task 2 | Unreadable signal past grace → inconclusive + distinct `bridge_update_flow_signal_unreadable` WARNING |
 | Concern | C4 | boolean vs integer escalation unspecified; could creep to level-4 auto-revert | Architectural Impact (Escalation model), Solution, Technical Approach, Resolved Decision 2 | `update_flow_live` is boolean health; wedged reason contributes `max(level,2)`, hard-capped, never level-4 auto-revert |
 | Nit | N1 | Redundant `data/` file fallback | spike-2 finding, Architectural Impact, Risk 3, task 1 | Dropped; Redis-only single source of truth |
+| Blocker | B3 (2nd pass) | Plan falsely claimed process-start was read from an existing "proven" source (the zombie check); `is_bridge_running()` returns only `(running, pid)` and `_enumerate_claude_processes()` never maps the bridge PID to its start time | Risk 1b, Race 1, Architectural Impact, Technical Approach, task 2, Success Criteria, Verification | Corrected every "proven/existing" claim; added explicit build task for NEW `get_bridge_process_start_ts(pid)` helper (`ps -o lstart=`, `None`-on-error = never-wedged) |
+| Concern | C-required-1 (2nd pass) | `record_update_received` placement "after early-return guards" would self-trigger on quiet `catch_up=True` duplicate-replay restarts | Data Flow step 2, Technical Approach, task 1, Success Criteria, tests (g) | Pinned exact placement: alongside `record_last_event` at `:1117`, BEFORE the `is_duplicate_message` dedup early-return at `:1122` |
+| Concern | C-required-2 (2nd pass) | Incident topology unpinned — whether `last_probe_ok` was green during the 8h outage was assumed | Freshness Check (Incident topology), tests (c) | Cannot pin from evidence (keys didn't exist 2026-06-16); design proven correct under BOTH probe-green (ceiling fires → restart) and probe-red (disconnect, existing ladder owns it) topologies |
 
 ---
 
