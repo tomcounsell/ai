@@ -456,6 +456,7 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 - **Bridge watchdog**: Separate launchd service (`com.valor.bridge-watchdog`) monitors health every 60s
 - **Crash tracker**: Logs start/crash events to Redis via `monitoring/crash_tracker.py` with git commit correlation
 - **5-level escalation**: restart → kill stale → clear locks → revert commit → alert human
+- **Update-loop wedged detector** (#1712): detects when the bridge is process-alive but Telethon's `NewMessage` handler has silently stopped firing — auto-restarts with `catch_up=True` for lossless backfill
 
 **Check watchdog**: `python monitoring/bridge_watchdog.py --check-only`
 **View crashes**: `python -c "from monitoring.crash_tracker import get_recent_crashes; print(get_recent_crashes(3600))"`
