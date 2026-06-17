@@ -1,5 +1,5 @@
 ---
-status: Built
+status: docs_complete
 type: feature
 appetite: Medium
 owner: Valor

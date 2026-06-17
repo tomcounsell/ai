@@ -42,7 +42,7 @@ reflections/crash_recovery.py   <-- periodic reflection
         Policy check: is_auto_eligible()?
             |
             +-- propose mode (default): log only
-            +-- auto mode (CRASH_AUTORESUME_ENABLED=1): call resume_session()
+            +-- auto mode (FEATURES__CRASH_AUTORESUME_ENABLED=1): call resume_session()
 ```
 
 ## Signature Extraction
@@ -169,9 +169,9 @@ In auto mode the reflection calls `resume_session(session, "continue", source="a
 
 Two caps prevent runaway auto-resume:
 
-**Per-session cap:** A session that has been auto-resumed `CRASH_AUTORESUME_MAX_ATTEMPTS` times (default 3, env: `CRASH_AUTORESUME_MAX_ATTEMPTS`) is left in its terminal state for human review. The attempt count is stored on `AgentSession.auto_resume_attempts`.
+**Per-session cap:** A session that has been auto-resumed `crash_autoresume_max_attempts` times (default 3, env: `FEATURES__CRASH_AUTORESUME_MAX_ATTEMPTS`) is left in its terminal state for human review. The attempt count is stored on `AgentSession.auto_resume_attempts`.
 
-**Per-run budget:** Each reflection run will auto-resume at most `CRASH_AUTORESUME_RUN_BUDGET` sessions (default 5, env: `CRASH_AUTORESUME_RUN_BUDGET`). This limits blast radius from a single noisy reflection tick.
+**Per-run budget:** Each reflection run will auto-resume at most `crash_autoresume_run_budget` sessions (default 5, env: `FEATURES__CRASH_AUTORESUME_RUN_BUDGET`). This limits blast radius from a single noisy reflection tick.
 
 ## Resumable Statuses
 
