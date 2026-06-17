@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-17
 tracking: https://github.com/tomcounsell/ai/issues/1712
 last_comment_id:
+revision_applied: true
 ---
 
 # Bridge Stale-Update-Stream Detector
@@ -127,44 +128,61 @@ liveness pattern, not library-specific.
   not connection health.
 - **Confidence**: high
 - **Impact on plan**: The liveness signal is a **`last_update_received` heartbeat
-  written from inside the NewMessage handler** (and the reconciler's own
-  message-ingest path), NOT a standalone connection probe. The watchdog compares
-  this against a *staleness-with-corroboration* rule, not a bare timeout.
+  written EXCLUSIVELY from inside the NewMessage handler**, NOT from the reconciler
+  ingest path and NOT a standalone connection probe. **Critical (B2):** the reconciler
+  rides the `get_dialogs()` poll every ~180s and recovers missed messages on that path;
+  if it also wrote `last_update_received`, it would re-green the signal every ~3 min
+  while the handler is dead — defeating the entire detector. The handler is the *only*
+  writer of `last_update_received`; the reconciler writes `last_probe_ok` only. The
+  watchdog's PRIMARY rule is an absolute-staleness ceiling on `last_update_received`
+  with no per-chat precondition (see B1 resolution / Open Question 1).
 
 ### spike-2: Can the external watchdog read the bridge's liveness signal?
 - **Assumption**: "The watchdog (separate launchd process) can consume an internal bridge signal."
 - **Method**: code-read (`monitoring/bridge_watchdog.py`)
 - **Finding**: The watchdog runs in-repo with `sys.path` set, already imports
-  `bridge.utc` and `monitoring.crash_tracker`, and reads files under `DATA_DIR`. It
-  can read a `data/last_update_received` file or a `bridge:last_update_received`
-  Redis key with zero new infrastructure.
+  `bridge.utc` and `monitoring.crash_tracker`, and can construct the same
+  `decode_responses` Redis client `bridge/dedup.py` already uses. It can read the
+  `bridge:last_update_received` / `bridge:last_probe_ok` Redis keys with zero new
+  infrastructure. **N1 resolution:** the earlier draft proposed a redundant
+  `data/last_update_received` file fallback — DROPPED. The whole system (bridge,
+  reconciler, dedup keys, silent_stream) already depends on Redis being reachable, and
+  the watchdog treats an unreadable signal as *inconclusive* (never wedged, see C3), so
+  a second file-based source adds a write path, a coherence question (which wins on
+  disagreement?), and no real availability. Single source of truth: Redis.
 - **Confidence**: high
 - **Impact on plan**: Signal is **produced inside the bridge** (where it's accurate)
   and **consumed by the external watchdog** (which owns recovery and survives a fully
   wedged bridge). This resolves the issue's "internal vs external" open question by
-  splitting it: produce internal, decide-and-recover external.
+  splitting it: produce internal, decide-and-recover external. No `data/` file
+  fallback — Redis-only (N1).
 
 ## Data Flow
 
 1. **Entry point**: An incoming Telegram message dispatches Telethon's
    `_update_loop` → fires `@client.on(events.NewMessage)` (`telegram_bridge.py:1093`).
-2. **Liveness write (NEW)**: The handler (and the reconciler's ingest path) records
-   `last_update_received = now` to a freeform Redis key `bridge:last_update_received`
-   (mirroring the #1408 freeform-key convention) and, as a watchdog-readable fallback,
-   a `data/last_update_received` file. Best-effort, never raises.
-2b. **Corroboration write (NEW)**: A lightweight periodic self-probe (riding the
-   existing reconciler `get_dialogs()` pass, no new API call) records
-   `bridge:last_probe_ok = now` whenever the connection round-trips successfully.
-   This distinguishes "wedged update loop" (probe OK, no updates) from "bridge
+2. **Liveness write (NEW)**: The NewMessage handler — **and ONLY the NewMessage
+   handler** — records `last_update_received = now` to a freeform Redis key
+   `bridge:last_update_received` (mirroring the #1408 freeform-key convention).
+   Best-effort, never raises. The reconciler's `get_dialogs()`/ingest path does NOT
+   write this key (see B2 below): writing it from the reconciler would re-green the
+   signal every ~180s while the handler is dead, making the wedge undetectable. The
+   reconciler writes `last_probe_ok` only.
+2b. **Connection-probe write (NEW)**: The reconciler's existing `get_dialogs()` pass
+   (no new API call) records `bridge:last_probe_ok = now` whenever the connection
+   round-trips successfully. This is the *only* signal the reconciler writes. It
+   distinguishes "wedged update loop" (probe OK, no `NewMessage` updates) from "bridge
    disconnected" (probe failing — already handled by existing reconnect logic).
-3. **Watchdog read (NEW)**: Every 60s, `bridge_watchdog.py` reads both signals plus
-   the **expected-traffic floor**: how many monitored `respond_to_unaddressed` chats
-   exist and whether any `bridge:last_event:{chat_id}` shows activity within the
-   window. The "wedged" verdict requires **all** of: process alive, probe OK
-   (connection works), `last_update_received` stale beyond threshold, AND at least
-   one corroborating signal that traffic *should* have arrived (a recently-active
-   chat went quiet, OR the staleness exceeds a long absolute ceiling). Pure overnight
-   silence with no recently-active chat does NOT trip recovery.
+3. **Watchdog read (NEW)**: Every 60s, `bridge_watchdog.py` reads both signals and
+   evaluates the wedged rule. The **PRIMARY, always-on trigger** is the
+   absolute-staleness ceiling: process alive + recent `last_probe_ok` (connection
+   works) + `last_update_received` older than `UPDATE_STALENESS_CEILING`. This path
+   has **no per-chat `bridge:last_event` precondition** — it fires on account-wide
+   silence, which is exactly the 2026-06-16 incident shape. A secondary, *earlier*
+   trigger (the recently-active-chat-went-quiet corroboration) may fire sooner when a
+   `respond_to_unaddressed` chat that was active inside the window goes quiet, but it
+   is an accelerator, never a gate: the ceiling alone is sufficient. Cold start within
+   the startup grace window is treated as healthy, not wedged.
 4. **Output**: On a wedged verdict, the watchdog injects a new escalation step into
    its existing ladder: a `restart_bridge()` (which re-runs `catch_up=True` →
    lossless backfill), logged via `crash_tracker.log_crash("bridge_update_loop_wedged")`.
@@ -176,13 +194,31 @@ liveness pattern, not library-specific.
 - **Interface changes**: `HealthStatus` dataclass gains an `update_flow_live: bool`
   field (and supporting issue string). `bridge/dedup.py` (or a new small
   `bridge/liveness.py`) gains `record_update_received()` / `get_last_update_received()`
-  mirroring the existing `record_last_event` pattern.
-- **Coupling**: Slightly increases coupling between bridge and watchdog via a shared
-  freeform signal key — but this mirrors the already-accepted `bridge:last_event`
-  cross-process pattern.
-- **Data ownership**: Bridge owns/writes the liveness signal; watchdog is read-only
-  on it. No Popoto-managed keys touched (freeform keys per #1408 convention).
-- **Reversibility**: High. Removing the field, the writer, and the watchdog branch
+  and `record_probe_ok()` / `get_last_probe_ok()` mirroring the existing
+  `record_last_event` pattern.
+- **Signal design decision (C1 — keep both, not one):** Two signals are retained
+  deliberately. `last_update_received` (handler-only) detects the wedge;
+  `last_probe_ok` (reconciler) is the **disconfirmation guard** that prevents a
+  false-positive restart during a genuine network partition — without it, a
+  disconnected-but-process-alive bridge (no updates *because* there's no connection)
+  would be misclassified as wedged and restarted pointlessly while the existing
+  reconnect logic is already handling it. Collapsing to a single signal would either
+  reintroduce that false positive or require the watchdog to re-derive connection
+  health some other way. The marginal cost of the second signal is one cheap `SET`
+  per ~180s reconciler pass (not per message) and one watchdog read — negligible. Both
+  signals stay.
+- **Escalation model (C4):** `update_flow_live` is a boolean health field; the wedged
+  reason maps to a fixed `recovery_level` of 1–2 (plain restart) and is explicitly
+  capped so it can never reach level 4 (auto-revert). The integer `recovery_level`
+  ladder is unchanged; the wedged reason simply slots a new max() contribution bounded
+  at 2. No new escalation tier, no auto-revert coupling.
+- **Coupling**: Slightly increases coupling between bridge and watchdog via shared
+  freeform signal keys — but this mirrors the already-accepted `bridge:last_event`
+  cross-process pattern. Redis-only, no `data/` file (N1).
+- **Data ownership**: Bridge owns/writes the liveness signals (handler →
+  `last_update_received`, reconciler → `last_probe_ok`); watchdog is read-only on both.
+  No Popoto-managed keys touched (freeform keys per #1408 convention).
+- **Reversibility**: High. Removing the field, the writers, and the watchdog branch
   fully reverts; no schema or migration.
 
 ## Appetite
@@ -207,47 +243,74 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/bridge_stale_u
 
 ### Key Elements
 
-- **Update-flow liveness signal**: a `last_update_received` timestamp written from
-  inside the NewMessage handler and the reconciler ingest path — the *positive*
-  proof that update dispatch is firing, not an absence-of-traffic inference.
+- **Update-flow liveness signal**: a `last_update_received` timestamp written
+  **exclusively from inside the NewMessage handler** (NOT the reconciler) — the
+  *positive* proof that the update-dispatch handler is firing, not an
+  absence-of-traffic inference. (B2: reconciler writing this would re-green it every
+  ~180s while the handler is dead.)
 - **Connection corroboration signal**: `last_probe_ok`, set when the reconciler's
   existing `get_dialogs()` pass succeeds — distinguishes a wedged update loop
-  (connection fine, no updates) from a disconnect (already handled elsewhere).
-- **Wedged detector**: a watchdog branch that declares the update loop wedged ONLY
-  when all corroborating conditions hold (process alive + connection probing OK +
-  update-flow stale + evidence traffic should have arrived). Avoids #1172's
-  silence=failure trap.
-- **Recovery**: a new escalation step in the watchdog's existing 5-level ladder that
-  restarts the bridge (re-running `catch_up=True` → lossless backfill).
+  (connection fine, no updates) from a disconnect (already handled elsewhere). This is
+  the watchdog's guard against false-positive restarts during a genuine network
+  partition (see C1 for why both signals are retained).
+- **Wedged detector**: a watchdog branch whose **PRIMARY trigger is an absolute
+  staleness ceiling** on `last_update_received` with **no per-chat precondition** —
+  fires on account-wide silence (the 2026-06-16 incident shape). Gated only by
+  `process_running` + recent `last_probe_ok` + past the startup grace window. The
+  recently-active-chat-went-quiet check is a secondary *accelerator* that can fire
+  sooner, never a required gate (B1 / Open Question 1).
+- **Recovery**: a new dedicated reason at the low end of the watchdog's existing
+  5-level ladder (level 1/2, a plain `restart_bridge()` re-running `catch_up=True` →
+  lossless backfill). **Never escalates to level 4 auto-revert** (C4): a wedged update
+  loop is a runtime condition, not a bad-commit signature.
 
 ### Flow
 
-Incoming message → NewMessage handler fires → **writes `last_update_received`** →
-(periodically) reconciler `get_dialogs()` succeeds → **writes `last_probe_ok`** →
-watchdog 60s tick reads both + expected-traffic floor → **wedged verdict** (all
-conditions) → **restart bridge** → catchup backfills → liveness signal resumes → green
+Incoming message → NewMessage handler fires → **writes `last_update_received`** (handler
+is the ONLY writer) → (periodically) reconciler `get_dialogs()` succeeds → **writes
+`last_probe_ok`** (reconciler's only liveness write) → watchdog 60s tick reads both →
+**wedged verdict** when process alive + `last_probe_ok` recent + `last_update_received`
+past the absolute ceiling (primary, no per-chat gate) → **restart bridge** → catchup
+backfills → handler fires again → `last_update_received` resumes → green
 
 ### Technical Approach
 
 - Add `record_update_received()` / `get_last_update_received()` to a small
   `bridge/liveness.py` (or extend `bridge/dedup.py`), mirroring the existing
   `record_last_event` freeform-key + best-effort-never-raises pattern. Call it in the
-  NewMessage handler (`telegram_bridge.py:1093`, after the early-return guards) and in
-  the reconciler's message-ingest path.
+  NewMessage handler **only** (`telegram_bridge.py:1093`, after the early-return
+  guards). **Do NOT call it from the reconciler** — the reconciler rides the
+  `get_dialogs()` poll and would re-green the signal every ~180s while the handler is
+  dead, defeating the detector (B2).
 - Add `record_probe_ok()` in the reconciler's existing success path (no new API call —
-  rides the `get_dialogs()` already happening every 180s).
+  rides the `get_dialogs()` already happening every 180s). This is the reconciler's
+  **only** liveness write.
 - Extend `HealthStatus` with `update_flow_live` and add `assess_update_flow()` to
-  `bridge_watchdog.py` implementing the **corroborated** wedged rule:
-  - Require `process_running` AND a recent `last_probe_ok` (connection works).
-  - Require `last_update_received` older than `UPDATE_STALENESS_THRESHOLD`.
-  - Require corroboration: at least one `respond_to_unaddressed` chat with a
-    `bridge:last_event` *inside* the window that has since gone quiet, OR staleness
-    beyond a long absolute ceiling (e.g. the incident's multi-hour scale). Tunable
-    constants, no hard-coded magic in the policy narrative — see Open Questions.
+  `bridge_watchdog.py` implementing the **ceiling-primary** wedged rule:
+  - **PRIMARY trigger (always-on, no per-chat precondition):** `process_running` AND
+    a recent `last_probe_ok` (connection works) AND `last_update_received` older than
+    `UPDATE_STALENESS_CEILING` (a long absolute ceiling at the incident's multi-hour
+    scale) AND the bridge is past its startup grace window. This alone is sufficient
+    and would have fired on the 2026-06-16 account-wide silence.
+  - **SECONDARY accelerator (optional, fires sooner, never a gate):** if a
+    `respond_to_unaddressed` chat had a `bridge:last_event` *inside* the window and has
+    since gone quiet past a shorter `UPDATE_STALENESS_WARN` threshold (still with
+    `process_running` + recent `last_probe_ok`), the verdict can trip earlier. Absence
+    of any such chat must NOT suppress the primary ceiling trigger.
+  - Threshold *values* are tunable constants in `bridge_watchdog.py`, no hard-coded
+    magic in the policy narrative — see Open Question 1 (now resolved: ceiling is
+    mandatory).
 - Wire a recovery branch that calls the existing `restart_bridge()` and records
   `crash_tracker.log_crash("bridge_update_loop_wedged")`. Slot it as a dedicated
-  reason within the existing ladder (likely level 1/2 — a plain restart suffices
-  because catchup is lossless), NOT auto-revert.
+  reason at level 1/2 of the existing ladder (a plain restart suffices because catchup
+  is lossless). **Hard cap: this reason never raises `recovery_level` above 2** — it
+  must not interact with the level-4 auto-revert path, which keys off crash-pattern
+  commit signatures, not runtime wedges (C4).
+- Self-blindness signal (C3): if `assess_update_flow()` cannot read either signal
+  (Redis unreadable, both keys missing past the grace window), it returns
+  *inconclusive* (NOT wedged, no restart) **and** logs a distinct WARNING
+  (`bridge_update_flow_signal_unreadable`) so a persistently blind detector is itself
+  visible in `logs/watchdog.log` rather than silently failing open forever.
 - All writes best-effort (`try/except` → WARNING), consistent with #1408.
 
 ## Failure Path Test Strategy
@@ -270,6 +333,9 @@ conditions) → **restart bridge** → catchup backfills → liveness signal res
 - [ ] No user-visible UI; the "rendering" path is the `crash_tracker.log_crash` entry
   and the watchdog log line. Test that a wedged verdict produces both the crash record
   and a distinguishable log message (`bridge_update_loop_wedged`).
+- [ ] Self-blindness (C3): test that when the signal is unreadable past the grace
+  window, the watchdog emits the distinct `bridge_update_flow_signal_unreadable`
+  WARNING (so failing-open is itself observable) and does NOT restart.
 
 ## Test Impact
 
@@ -282,10 +348,13 @@ conditions) → **restart bridge** → catchup backfills → liveness signal res
   is added instead, no change.
 - [ ] New: `tests/unit/test_bridge_liveness.py` — REPLACE/CREATE: cover signal
   read/write, cold-start grace, corruption, Redis-failure inconclusiveness.
-- [ ] New: `tests/integration/test_update_loop_wedge_recovery.py` — CREATE: simulate
-  stale `last_update_received` + healthy `last_probe_ok` + a recently-active-then-quiet
-  chat, assert the watchdog reaches a wedged verdict and would restart; and the inverse
-  (overnight silence, no recently-active chat → no restart).
+- [ ] New: `tests/integration/test_update_loop_wedge_recovery.py` — CREATE: cover the
+  matrix — (a) account-wide silence past the absolute ceiling with healthy
+  `last_probe_ok` and NO recently-active chat → wedged verdict + restart (B1 incident
+  shape); (b) quiet *below* the ceiling → no restart; (c) stale update +
+  failing-probe disconnect → NOT wedged; (d) reconciler activity while handler dead →
+  signal stays stale, still detected (B2 regression); (e) unreadable signal →
+  inconclusive + `bridge_update_flow_signal_unreadable` WARNING (C3).
 
 No existing behavior is removed — changes are additive to `HealthStatus` and the
 watchdog ladder, so most existing watchdog tests pass unchanged once the new field
@@ -311,10 +380,29 @@ has a default.
 ### Risk 1: False-positive restart during a genuinely quiet period
 **Impact:** Unnecessary bridge restart (cheap — catchup is lossless — but noisy and
 could mask a real issue if it loops).
-**Mitigation:** The corroborated wedged rule requires positive evidence traffic
-*should* have arrived (a recently-active chat gone quiet) OR a long absolute ceiling,
-plus a successful connection probe. A startup grace window suppresses cold-start
-false positives. Per-restart suppression prevents restart loops.
+**Mitigation:** The PRIMARY ceiling is deliberately long (multi-hour, the incident
+scale), so a genuinely quiet period shorter than the ceiling never trips it; a
+successful `last_probe_ok` is required so a disconnect is not misread as a wedge; and a
+startup grace window suppresses cold-start false positives. The ceiling being long is
+what makes pure overnight quiet safe — not a per-chat gate (B1).
+
+### Risk 1b (C2): Per-restart suppression swallows a genuine re-wedge
+**Impact:** If the suppression window is too long, a bridge that wedges *again*
+immediately after a restart-driven recovery would be ignored until the window expires,
+re-introducing a silent outage the detector was built to catch.
+**Mitigation:** Scope suppression tightly. The suppression window must be only
+`startup_grace + worst_case_catchup` long (enough for the restarted bridge to reach a
+fresh `last_update_received` or, in genuinely quiet periods, a fresh `last_probe_ok`),
+NOT a fixed long cooldown. Basis decision (C2): the suppression clock keys off the
+**observed bridge process start time** (the watchdog already resolves the bridge PID
+via `is_bridge_running()`; process start is read from `ps etime`, the same source the
+zombie check uses — proven, not novel). When the restarted process's start time is
+newer than the last recovery action, suppression naturally clears — so a re-wedge of a
+*freshly restarted* process is detected on the next ceiling crossing rather than being
+masked by a stale cooldown timer. The detector also records each wedged restart via
+`crash_tracker.log_crash`; the existing "≥5 crashes in 30 min → level 5 alert human"
+rule (already in `check_bridge_health`) is the backstop against a true restart loop, so
+a persistent re-wedge escalates to a human rather than looping silently.
 
 ### Risk 2: The liveness write itself adds latency to the hot message path
 **Impact:** Every inbound message would pay a Redis write.
@@ -324,9 +412,11 @@ adds one cheap SET alongside one already there.
 
 ### Risk 3: Watchdog and bridge disagree because the signal is unreadable
 **Impact:** A Redis blip could make the watchdog think the loop is wedged.
-**Mitigation:** "Signal unreadable" is treated as inconclusive (never wedged). The
-`data/last_update_received` file fallback gives a second source the watchdog can read
-without Redis.
+**Mitigation:** "Signal unreadable" is treated as inconclusive (never wedged) and
+emits a distinct `bridge_update_flow_signal_unreadable` WARNING so a persistently blind
+detector is visible rather than silently failing open (C3). No `data/` file fallback
+(N1) — the whole bridge already requires Redis, and inconclusive-on-unreadable already
+removes the false-restart risk a second source would guard against.
 
 ## Race Conditions
 
@@ -339,10 +429,15 @@ second restart could fire.
 **Data prerequisite:** The startup grace window (`last_update_received` missing within
 N seconds of process start = healthy) must be longer than worst-case catchup time.
 **State prerequisite:** Bridge must record `last_probe_ok` on first successful
-`get_dialogs()` after restart.
-**Mitigation:** Startup grace window keyed off process start (watchdog already knows
-bridge PID/start); per-restart suppression so the watchdog won't re-restart within the
-grace+catchup window.
+`get_dialogs()` after restart. Note: in a genuinely quiet account, `last_update_received`
+may legitimately stay stale after restart (no messages arrive) — this is why the grace
+window keys off process start, not off seeing a fresh `last_update_received`, and why
+the absolute ceiling (not a short timeout) is the trigger.
+**Mitigation:** Startup grace window keyed off the **observed process start time**
+(`is_bridge_running()` PID → `ps etime`, the same proven source the zombie check uses,
+C2); per-restart suppression scoped to `grace + worst_case_catchup` and cleared when a
+newer process-start time is observed, so the watchdog won't re-restart within the
+window but also won't mask a re-wedge of a freshly restarted process.
 
 ## No-Gos (Out of Scope)
 
@@ -352,8 +447,8 @@ grace+catchup window.
   smaller sibling ("could be its own issue") and rates it lower priority than the
   detector; it is defense-in-depth against a rare bypass-launchd scenario, orthogonal
   to update-loop wedging. Tracked in the same issue's "Related hardening" section for
-  a follow-up split. *(If the reviewer prefers, split into a dedicated issue before
-  merge — see Open Question 3.)*
+  a follow-up split. *(Resolved Decision 3: stays out of scope; split to its own issue
+  later.)*
 - Reworking `bridge/silent_stream.py` from observability to recovery — different
   (per-chat) scope; this plan adds an account-wide signal instead.
 
@@ -394,15 +489,21 @@ the watchdog already imports bridge/monitoring helpers.
 ## Success Criteria
 
 - [ ] `bridge/liveness.py` (or extended `bridge/dedup.py`) writes
-  `last_update_received` from the NewMessage handler and reconciler ingest path.
-- [ ] Reconciler records `last_probe_ok` on successful `get_dialogs()` (no new API call).
+  `last_update_received` from the NewMessage handler ONLY — NOT the reconciler (B2).
+- [ ] Reconciler records `last_probe_ok` on successful `get_dialogs()` (no new API
+  call) and is its only liveness write.
 - [ ] `bridge_watchdog.py` `HealthStatus.update_flow_live` + `assess_update_flow()`
-  implement the corroborated wedged rule.
+  implement the **ceiling-primary** rule: the absolute-staleness ceiling fires with NO
+  per-chat precondition (B1).
+- [ ] Account-wide silence past the ceiling (no recently-active chat) DOES trigger a
+  restart — the 2026-06-16 incident shape — verified by test.
 - [ ] A wedged verdict triggers `restart_bridge()` and logs
-  `crash_tracker.log_crash("bridge_update_loop_wedged")`.
-- [ ] Overnight-quiet (no recently-active chat, no corroboration) does NOT trigger a
-  restart — verified by test.
-- [ ] Signal-unreadable / cold-start are treated as inconclusive, not wedged.
+  `crash_tracker.log_crash("bridge_update_loop_wedged")`, with `recovery_level` capped
+  at ≤2 (never level-4 auto-revert) (C4).
+- [ ] Quiet *below* the ceiling does NOT trigger a restart — verified by test.
+- [ ] Signal-unreadable / cold-start are treated as inconclusive, not wedged, and an
+  unreadable signal past the grace window emits `bridge_update_flow_signal_unreadable`
+  (C3).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] grep confirms the NewMessage handler references the liveness writer and the
@@ -455,13 +556,15 @@ timing-sensitive watchdog rule.)
 - **Parallel**: true
 - Add `record_update_received()` / `get_last_update_received()` and
   `record_probe_ok()` / `get_last_probe_ok()` in `bridge/liveness.py`, mirroring the
-  `record_last_event` freeform-key + best-effort pattern; include a `data/` file
-  fallback for `last_update_received`.
-- Call `record_update_received()` in the NewMessage handler (after early-return guards)
-  and in the reconciler ingest path; call `record_probe_ok()` on successful
-  `get_dialogs()`.
+  `record_last_event` freeform-key + best-effort pattern. **Redis-only, no `data/`
+  file fallback** (N1).
+- Call `record_update_received()` in the NewMessage handler ONLY (after early-return
+  guards). **Do NOT call it from the reconciler** (B2 — reconciler re-greening defeats
+  the detector). Call `record_probe_ok()` on the reconciler's successful
+  `get_dialogs()` pass — that is the reconciler's only liveness write.
 - Unit tests: read/write, cold-start `None`, corruption coercion, Redis-failure
-  WARNING + non-blocking.
+  WARNING + non-blocking; assert the reconciler ingest path does NOT write
+  `last_update_received` (regression guard for B2).
 
 ### 2. Build watchdog wedged detector + recovery
 - **Task ID**: build-watchdog-detector
@@ -472,12 +575,22 @@ timing-sensitive watchdog rule.)
 - **Agent Type**: async-specialist
 - **Parallel**: false
 - Add `HealthStatus.update_flow_live` (default preserving existing tests) and
-  `assess_update_flow()` implementing the corroborated rule.
+  `assess_update_flow()` implementing the **ceiling-primary** rule: PRIMARY trigger is
+  the absolute staleness ceiling with NO per-chat precondition (B1); the
+  recently-active-chat-quiet check is a secondary accelerator only.
 - Wire a `bridge_update_loop_wedged` recovery branch into the existing ladder using
-  `restart_bridge()` + `crash_tracker.log_crash`; add startup grace + per-restart
-  suppression.
-- Integration tests: wedged verdict triggers restart; overnight-quiet does not;
-  unreadable signal is inconclusive.
+  `restart_bridge()` + `crash_tracker.log_crash`; **cap its `recovery_level`
+  contribution at 2 — never level 4 auto-revert** (C4). Add startup grace keyed off
+  observed process start time and per-restart suppression scoped to
+  `grace + worst_case_catchup`, cleared on a newer process-start observation (C2).
+- Emit a distinct `bridge_update_flow_signal_unreadable` WARNING when neither signal
+  is readable past the grace window, so a persistently blind detector is visible (C3).
+- Integration tests: (a) account-wide silence past the ceiling with healthy
+  `last_probe_ok` and NO recently-active chat → wedged verdict + restart (the B1
+  incident shape); (b) overnight-quiet below the ceiling → no restart; (c) stale
+  `last_update_received` but failing `last_probe_ok` (disconnect) → NOT wedged; (d)
+  unreadable signal → inconclusive + WARNING; (e) reconciler-only activity does NOT
+  keep the signal green while the handler is dead (B2 regression).
 
 ### 3. Validate detector
 - **Task ID**: validate-detector
@@ -518,24 +631,43 @@ timing-sensitive watchdog rule.)
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| Blocker | B1 | Corroboration rule re-inherits #1408's per-chat blind spot; ceiling demoted to OR-clause | Data Flow step 3, Solution Key Elements, Technical Approach, Resolved Decision 1 | Absolute-staleness ceiling is now the PRIMARY always-on trigger with NO per-chat precondition; recently-active-chat check is a non-gating accelerator only |
+| Blocker | B2 | Reconciler-ingest write of `last_update_received` re-greens signal every ~180s while handler dead | spike-1 impact, Data Flow step 2, Solution, Technical Approach, task 1, tests | `last_update_received` written ONLY from the NewMessage handler; reconciler writes `last_probe_ok` only; B2 regression test added |
+| Concern | C1 | Two-signal design possibly over-engineered | Architectural Impact (Signal design decision) | Keep both: `last_probe_ok` is the disconfirmation guard against false-positive restart during a genuine disconnect; cost is one SET per ~180s |
+| Concern | C2 | Per-restart suppression can swallow a re-wedge; process-start basis unproven | Risk 1b, Race 1, Technical Approach, task 2 | Suppression scoped to `grace+catchup`, keyed off observed `ps etime` process-start (same source as zombie check), cleared on newer start; ≥5-crashes/30min backstop |
+| Concern | C3 | Detector fails open with no self-blindness alert | Technical Approach, Failure Path Test Strategy, Risk 3, task 2 | Unreadable signal past grace → inconclusive + distinct `bridge_update_flow_signal_unreadable` WARNING |
+| Concern | C4 | boolean vs integer escalation unspecified; could creep to level-4 auto-revert | Architectural Impact (Escalation model), Solution, Technical Approach, Resolved Decision 2 | `update_flow_live` is boolean health; wedged reason contributes `max(level,2)`, hard-capped, never level-4 auto-revert |
+| Nit | N1 | Redundant `data/` file fallback | spike-2 finding, Architectural Impact, Risk 3, task 1 | Dropped; Redis-only single source of truth |
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Corroboration policy & thresholds.** The plan recommends a *corroborated* wedged
-   rule (stale `last_update_received` + healthy `last_probe_ok` + evidence traffic
-   should have arrived, e.g. a recently-active chat that went quiet, OR a long absolute
-   staleness ceiling). Is the recently-active-chat corroboration sufficient, or do you
-   want the absolute-ceiling-only path as a backstop for accounts with no
-   `respond_to_unaddressed` chats? (Threshold *values* are deliberately left to
-   implementation/tuning per the no-hardcoded-numbers-in-prompts convention.)
-2. **Recovery placement.** Plan slots the restart as a dedicated reason at the low end
-   of the existing ladder (plain restart, since catchup is lossless), NOT auto-revert.
-   Confirm this is the right rung.
-3. **Singleton mutex sibling.** The issue files the runtime singleton lock as a smaller
-   sibling. Keep it as a tagged No-Go in this plan (split to its own issue later), or
-   pull it into scope now as a second small deliverable?
+These were the plan's three Open Questions; all are now resolved in-plan (critique
+revision, addressing blockers B1/B2 and concerns C1–C4, N1).
+
+1. **Corroboration policy — RESOLVED: the absolute-staleness ceiling is the PRIMARY,
+   mandatory, always-on trigger with NO per-chat precondition** (B1). The earlier draft
+   demoted the ceiling to an OR-clause and gated the primary path on a recently-active
+   `respond_to_unaddressed` chat going quiet — which re-inherited the exact #1408 blind
+   spot, since the 2026-06-16 incident was account-wide silence with no such chat. Now:
+   the ceiling alone (process alive + recent `last_probe_ok` + `last_update_received`
+   past the ceiling + past startup grace) is sufficient. The recently-active-chat-quiet
+   check survives only as an optional *accelerator* that can trip the verdict sooner; it
+   can never gate or suppress the primary ceiling. Threshold *values* remain tunable
+   constants in `bridge_watchdog.py` (no hard-coded numbers in the policy narrative).
+
+2. **Recovery placement — RESOLVED: dedicated reason at level 1–2 (plain restart),
+   hard-capped so it can NEVER reach level 4 auto-revert** (C4). Catchup is lossless, so
+   a plain `restart_bridge()` fully recovers; a wedged update loop is a runtime
+   condition, not a bad-commit signature, so coupling it to the commit-revert path would
+   be wrong. The wedged reason contributes `max(recovery_level, 2)` at most. The
+   existing "≥5 crashes in 30 min → level 5 alert human" rule remains the loop backstop.
+
+3. **Singleton mutex sibling — RESOLVED: out of scope, stays a tagged No-Go.** The
+   runtime singleton lock is orthogonal defense-in-depth (it guards a bypass-launchd
+   double-launch, not update-loop wedging) and the issue itself rates it lower priority.
+   It remains a `[SEPARATE-SLUG #1712]` No-Go to be split into its own issue; pulling it
+   in now would widen a Medium-appetite bug fix into two unrelated deliverables.
