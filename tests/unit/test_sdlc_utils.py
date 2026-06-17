@@ -328,6 +328,50 @@ class TestFindPlanPath:
 
         assert result == plan
 
+    def test_tracking_field_wins_over_incidental_mention(self, tmp_path, monkeypatch):
+        """A plan that *tracks* the issue beats one that only mentions it.
+
+        Regression for the find_plan_path mis-resolution that broke G5: an
+        out-of-scope `#{issue}` cross-reference in another plan's No-Gos must
+        never win over the plan whose `tracking:` frontmatter owns the issue,
+        regardless of directory iteration order.
+        """
+        from tools._sdlc_utils import find_plan_path
+
+        plans_dir = tmp_path / "docs" / "plans"
+        # `aaa_other.md` sorts first and merely mentions #1712 as out-of-scope.
+        self._write_plan(
+            plans_dir,
+            "aaa_other.md",
+            "tracking: https://github.com/org/repo/issues/1721\n\n"
+            "## No-Gos\n- [SEPARATE-SLUG #1712] separate concern, not in scope.\n",
+        )
+        # The real owner sorts later but carries the authoritative tracking field.
+        owner = self._write_plan(
+            plans_dir,
+            "zzz_bridge.md",
+            "tracking: https://github.com/org/repo/issues/1712\n\nbody\n",
+        )
+
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        with patch("tools._sdlc_utils._git_toplevel", return_value=tmp_path):
+            result = find_plan_path(1712)
+
+        assert result == owner
+
+    def test_falls_back_to_mention_when_no_tracking_owner(self, tmp_path, monkeypatch):
+        """When no plan's tracking field claims the issue, any textual ref still resolves."""
+        from tools._sdlc_utils import find_plan_path
+
+        plans_dir = tmp_path / "docs" / "plans"
+        plan = self._write_plan(plans_dir, "feature.md", "relates to #4242\n")
+
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        with patch("tools._sdlc_utils._git_toplevel", return_value=tmp_path):
+            result = find_plan_path(4242)
+
+        assert result == plan
+
     def test_boundary_1455_does_not_match_145(self, tmp_path, monkeypatch):
         """D2: #1455 must not satisfy a lookup for issue 145."""
         from tools._sdlc_utils import find_plan_path
