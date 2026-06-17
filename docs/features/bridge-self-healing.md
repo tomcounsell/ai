@@ -78,7 +78,7 @@ The `--check-only` output includes zombie count, PIDs, memory usage, and active 
 | Level | Condition | Action |
 |-------|-----------|--------|
 | 1 | Process not running | Log crash event via `crash_tracker.log_crash("bridge_dead_on_watchdog_check")` + simple restart (launchd) |
-| 2 | Process running but logs stale — or update loop wedged | Kill stale + kill zombies + restart (with `catch_up=True` for wedge restarts — see below) |
+| 2 | Process running but logs stale — or update loop wedged | Kill stale + kill zombies + restart (the bridge always catches up missed messages on startup — see below) |
 | 3 | Lock files present | Kill stale + kill zombies + clear locks + restart |
 | 4 | Crash pattern detected | Kill stale + kill zombies + revert HEAD + restart (if enabled) |
 | 5 | Recovery exhausted | Alert human via Telegram |
@@ -116,7 +116,7 @@ A SECONDARY accelerator fires at `UPDATE_STALENESS_WARN` (before the ceiling) to
 - **Startup grace window**: `bridge:last_update_received` is absent on cold start (bridge has not received any messages yet). The grace window prevents false wedge verdicts during startup before Telegram delivers the first event.
 - **`None` process-start = fail-safe**: if `get_bridge_process_start_ts()` returns `None` (process info unavailable), the detector treats the verdict as inconclusive and suppresses the restart. This avoids a restart based on incomplete information.
 
-**Recovery**: when `update_flow_live=False`, the watchdog sets `recovery_level = max(recovery_level, 2)` and calls the standard `restart_bridge(catch_up=True)`. The level cap of 2 is hard — the wedge detector never escalates to level 4 (auto-revert), regardless of how many consecutive wedge ticks occur. The `catch_up=True` flag ensures the bridge performs a full catchup scan on restart, recovering any messages that arrived during the wedge window.
+**Recovery**: when `update_flow_live=False`, the watchdog sets `recovery_level = max(recovery_level, 2)` and calls the standard `restart_bridge()` (a `launchctl kickstart` — it takes no arguments). The level cap of 2 is hard — the wedge detector never escalates to level 4 (auto-revert), regardless of how many consecutive wedge ticks occur. Lossless backfill is inherent to bridge startup, not a flag the watchdog passes: the bridge unconditionally initializes Telethon with `catch_up=True` and runs a missed-message catchup scan on every connect, so any restart recovers the messages that arrived during the wedge window.
 
 **Log signals**:
 ```
