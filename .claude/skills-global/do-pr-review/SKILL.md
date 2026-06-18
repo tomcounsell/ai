@@ -129,7 +129,7 @@ by `sdk_client.py` from the `AgentSession` (issue #420):
 | `$SDLC_PR_BRANCH` | PR head branch | `gh pr view --json headRefName` |
 | `$SDLC_SLUG` | Work item slug | Derive from branch name |
 | `$SDLC_PLAN_PATH` | Path to plan doc | Derive from slug |
-| `$SDLC_ISSUE_NUMBER` | Tracking issue | Extract from PR body |
+| `$SDLC_ISSUE_NUMBER` | Tracking issue (env hint) | **Last-resort only** for recorder calls — primary is PR-body `Closes #N` extraction (#1731) |
 | `$SDLC_REPO` | GitHub repo (org/name) | `$GH_REPO` |
 
 **Usage:** Prefer `$SDLC_PR_NUMBER` over `$PR_NUMBER` when available.
@@ -175,8 +175,11 @@ Do NOT blanket-suppress the output with `2>/dev/null || true` — a forked
 sub-skill must announce degraded mode rather than silently lagging state:
 
 ```bash
-sdlc-tool stage-marker --stage REVIEW --status in_progress --issue-number {issue_number}
+sdlc-tool stage-marker --stage REVIEW --status in_progress --issue-number "$ISSUE_NUMBER"
 ```
+
+Note: `ISSUE_NUMBER` is resolved unconditionally in § 1 (PR Context Gathering) before this
+marker is written, so the variable is always a positive integer here (#1731).
 
 Parse the JSON output:
 - `{"stage": "REVIEW", "status": "in_progress"}` — substrate present, state persisted; proceed normally.
@@ -187,7 +190,7 @@ After posting the review (Step 6), on approval (no blockers), the REVIEW complet
 
 ```bash
 # Written immediately after `sdlc-tool verdict record ... --verdict "APPROVED"`:
-sdlc-tool stage-marker --stage REVIEW --status completed --issue-number {issue_number}
+sdlc-tool stage-marker --stage REVIEW --status completed --issue-number "$ISSUE_NUMBER"
 ```
 
 Apply the same degraded-vs-loud interpretation to the completion marker.
@@ -226,6 +229,34 @@ SLUG="${SDLC_SLUG:-}"
 if [ -z "$PLAN_PATH" ] && [ -n "$SLUG" ]; then
   PLAN_PATH="docs/plans/${SLUG}.md"
 fi
+
+# Resolve ISSUE_NUMBER — unconditional clobber (never ${ISSUE_NUMBER:-…}).
+# IMPORTANT: $ARGUMENTS is the PR number for this skill, NOT the issue number.
+# Do NOT use $ARGUMENTS as ISSUE_NUMBER. Do NOT use $SDLC_ISSUE_NUMBER as
+# authoritative — a stale inherited env value is exactly the "latched onto
+# wrong issue" mechanism this skill must guard against (#1731).
+#
+# Resolution order (first non-empty positive integer wins):
+# 1. PR body extraction: Closes #N / Fixes #N / Resolves #N  (PRIMARY — always run)
+# 2. PR body: tracking: https://.../issues/N  (secondary PR-body fallback)
+# 3. $SDLC_ISSUE_NUMBER env var (LAST RESORT ONLY — guarded by positive-integer check)
+PR_BODY=$(gh pr view "$PR_NUMBER" --json body -q '.body' 2>/dev/null)
+ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oiP '(?:closes|fixes|resolves)\s+#\K[0-9]+' | head -1)
+if [ -z "$ISSUE_NUMBER" ]; then
+  # Also try "tracking: https://.../issues/N" pattern
+  ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oP '(?<=issues/)[0-9]+' | head -1)
+fi
+if [ -z "$ISSUE_NUMBER" ] && [[ "$SDLC_ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
+  ISSUE_NUMBER="$SDLC_ISSUE_NUMBER"
+fi
+
+# Assert ISSUE_NUMBER is a positive integer before any recorder call (#1731).
+# An unresolvable issue number must fail loudly so the supervisor sees an
+# actionable error rather than a silently diverted verdict on a wrong session.
+[[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || {
+  echo "do-pr-review: could not resolve a positive-integer ISSUE_NUMBER from ARGUMENTS='${ARGUMENTS}', PR body, or SDLC_ISSUE_NUMBER. Pass the issue number as skill args or ensure the PR body contains 'Closes #N'." >&2
+  exit 1
+}
 ```
 
 **Run the mergeability preflight FIRST** (see `sub-skills/checkout.md` →
@@ -698,35 +729,36 @@ After emitting the OUTCOME block, record the review verdict on the PM session so
 # self-contained unit on the approval path — never record APPROVED without
 # immediately writing the completion marker, or the marker desyncs from the
 # verdict and router row 9 (/do-docs) stalls on REVIEW != completed.
+# ISSUE_NUMBER is unconditionally resolved and validated in § 1 (#1731).
 sdlc-tool verdict record --stage REVIEW \
-  --verdict "APPROVED" --blockers 0 --tech-debt 0 --issue-number $ISSUE_NUMBER
-sdlc-tool stage-marker --stage REVIEW --status completed --issue-number $ISSUE_NUMBER
+  --verdict "APPROVED" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER"
+sdlc-tool stage-marker --stage REVIEW --status completed --issue-number "$ISSUE_NUMBER"
 
 # For reviews with findings (OUTCOME status=partial or fail):
 sdlc-tool verdict record --stage REVIEW \
   --verdict "CHANGES REQUESTED" --blockers $BLOCKERS --tech-debt $TECH_DEBT \
-  --issue-number $ISSUE_NUMBER
+  --issue-number "$ISSUE_NUMBER"
 
 # For preflight short-circuit (branch cannot merge):
 sdlc-tool verdict record --stage REVIEW \
   --verdict "BLOCKED_ON_CONFLICT" --blockers 0 --tech-debt 0 \
-  --issue-number $ISSUE_NUMBER
+  --issue-number "$ISSUE_NUMBER"
 
 # For preflight short-circuit (PR not open):
 sdlc-tool verdict record --stage REVIEW \
   --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 \
-  --issue-number $ISSUE_NUMBER
+  --issue-number "$ISSUE_NUMBER"
 
 # Multi-judge: pass --judges-json and --consensus-json after computing
 # consensus via agent.sdlc_review_consensus.compute_consensus. ONE record
 # call writes both the scalar AND the side-fields (single-writer invariant).
 sdlc-tool verdict record --stage REVIEW \
   --verdict "$VERDICT" --blockers $BLOCKERS --tech-debt $TECH_DEBT \
-  --issue-number $ISSUE_NUMBER \
+  --issue-number "$ISSUE_NUMBER" \
   --judges-json "$JUDGES_JSON" --consensus-json "$CONSENSUS_JSON"
 ```
 
-The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state. **Always pass `--issue-number $ISSUE_NUMBER` when the issue number is known** — it is the authoritative session selector, guaranteeing the verdict lands on the session the router reads for that issue. Only if `$ISSUE_NUMBER` is genuinely unknown, omit the flag; the recorder then resolves via the `VALOR_SESSION_ID` / `AGENT_SESSION_ID` env-var session as a *last resort* (subordinate to `--issue-number`). A forked review subagent that inherited a parent's env-var session must still pass `--issue-number` so its verdict is not diverted to the parent's session (#1671/#1672).
+The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state. **Always pass `--issue-number "$ISSUE_NUMBER"` (quoted)** — it is the authoritative session selector, guaranteeing the verdict lands on the session the router reads for that issue. `ISSUE_NUMBER` is unconditionally resolved in § 1 (PR Context Gathering): `$ARGUMENTS` first, then PR-body extraction (`Closes #N`/`Fixes #N`), then `$SDLC_ISSUE_NUMBER` as a last-resort hint. `$SDLC_ISSUE_NUMBER` is never authoritative on its own — a stale inherited value is the exact divert mechanism this skill guards against (#1731/#1671/#1672).
 
 ## Hard Rules
 

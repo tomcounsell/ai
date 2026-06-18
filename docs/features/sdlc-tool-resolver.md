@@ -59,6 +59,54 @@ Adding a new subcommand: append to `ALLOWED_SUBCOMMANDS` in `scripts/sdlc-tool`.
 
 All `sdlc-tool` subcommands store/read pipeline state on a **PM `AgentSession`'s `stage_states`** in Redis — not in the plan file or git. They resolve that session through the shared resolver `find_session(session_id=None, issue_number=None, ensure=False)` in `tools/_sdlc_utils.py`.
 
+### Forked-skill issue-number passing — skill arg/env layer (issue #1731)
+
+The recorder-layer precedence (#1671/#1672, see below) only helps when a real `--issue-number N`
+value reaches `find_session`. A separate, earlier failure mode (#1731) prevented the value from
+ever being produced inside forked CRITIQUE/REVIEW skills:
+
+- `do-plan-critique/SKILL.md` assigned `ISSUE_NUM` in the Plan Resolution block but all downstream
+  recorder calls referenced `$ISSUE_NUMBER` (a different, never-assigned variable).
+- `do-pr-review/SKILL.md` set `$SDLC_ISSUE_NUMBER` from env and `$PR_NUMBER` in its
+  context-resolution block, but every recorder call referenced `$ISSUE_NUMBER` (never assigned).
+
+The consequence: `--issue-number $ISSUE_NUMBER` collapsed to `--issue-number ` (empty token),
+which argparse `type=int` rejected with exit code 2 ("expected one argument"). On stage-marker
+calls (then guarded with `2>/dev/null || true`) this silently no-op'd — the marker stayed
+`in_progress`. On the verdict-record call (no `|| true`) it errored — nothing was recorded.
+Either way the router saw no matching verdict and returned `Blocked('no matching dispatch rule')`.
+If a stale non-empty `ISSUE_NUMBER` was inherited from a prior context (the "latched onto #1724"
+symptom), it silently diverted the write to the wrong issue's session.
+
+**The #1731 fix (applied to the skill markdown layer):**
+
+1. `do-plan-critique`: Plan Resolution now unconditionally assigns `ISSUE_NUMBER` (clobbers
+   any inherited value, never `${ISSUE_NUMBER:-…}`). Numeric `$ARGUMENTS` → `ISSUE_NUMBER`.
+   Plan-path `$ARGUMENTS` → extract from plan frontmatter `tracking:` field.
+2. `do-pr-review`: Context-resolution now unconditionally assigns `ISSUE_NUMBER` by extracting
+   `Closes #N`/`Fixes #N`/`Resolves #N` from the PR body (PRIMARY — always runs first), then
+   `tracking: .../issues/N` from the PR body (secondary fallback), with `$SDLC_ISSUE_NUMBER`
+   as a last-resort validated hint only (never authoritative). **`$ARGUMENTS` is the PR number
+   in this skill, not the issue number — it is never used as `ISSUE_NUMBER`.**
+3. Both skills: **positive-integer assertion** `[[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || { ... exit 1 }`
+   added after every resolution path and before any recorder call. An unresolvable issue
+   number now fails loudly rather than silently diverting.
+4. Both skills: `2>/dev/null || true` swallow stripped from all stage-marker calls so failures
+   surface as visible non-zero exits in the subagent report.
+5. Both skills: every `--issue-number` flag now passes `"$ISSUE_NUMBER"` (quoted) so an empty
+   value produces a clear argparse error rather than a confusing token-drop.
+6. `do-sdlc` §3c: confirmed args-only hand-off (no `export SDLC_ISSUE_NUMBER`) — the skill
+   re-parses the number from `$ARGUMENTS` directly.
+
+**The two layers are distinct and complementary:**
+
+| Layer | PR / Issue | What it fixes |
+|-------|-----------|---------------|
+| Recorder session resolution | #1671/#1672 (PR #1673) | Given a real `--issue-number N`, the write lands on the issue-scoped session, not the env-var session |
+| Skill arg/env passing | #1731 | Ensures the `--issue-number N` value is actually produced inside the forked skill (so the recorder layer has something to work with) |
+
+Neither layer can compensate for the other. Together they close the full divert path.
+
 ### Session resolution precedence (issue #1671/#1672)
 
 Resolution order in `find_session`:
