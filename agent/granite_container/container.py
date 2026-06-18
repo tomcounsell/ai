@@ -40,7 +40,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from agent.granite_container.builder import PtyClaudeBuilder
+from agent.granite_container.builder import PiSubprocessBuilder, PtyClaudeBuilder
 from agent.granite_container.granite_classifier import (
     ClassificationResult,
     classify_pm_prefix,
@@ -239,6 +239,15 @@ MAX_WRAPUP_ATTEMPTS = 1
 # Fallback seed string for the wrap-up prompt when the developer did
 # not produce a captured report and the Dev PTY is no longer readable.
 DEV_REPORT_UNAVAILABLE = "The developer did not produce a captured report."
+
+# Canonical paths for Pi builder priming (two --append-system-prompt flags).
+# The rails file is the single source of safety constraints shared by all
+# granite personas; the persona file adds the Pi-tuned dev-role delta only.
+# Both paths are resolved relative to the repo root at import time so the
+# container never has to compute them per-turn.
+_REPO_ROOT = Path(__file__).parent.parent.parent
+PI_RAILS_PATH = str(_REPO_ROOT / ".claude" / "commands" / "granite" / "_prime-rails.md")
+PI_PERSONA_PATH = str(_REPO_ROOT / "config" / "personas" / "granite" / "pi_dev_rails.md")
 
 # Fallback user-visible message delivered directly (bypassing PM) when
 # the wrap-up guard exhausts MAX_WRAPUP_ATTEMPTS without PM emitting a
@@ -1391,24 +1400,37 @@ class Container:
         self,
         harness: str | None,
         result: ContainerResult,
-    ) -> PtyClaudeBuilder | None:
+    ) -> PtyClaudeBuilder | PiSubprocessBuilder | None:
         """Resolve a BuilderHarness for the given harness name.
 
         Returns a ``PtyClaudeBuilder`` for ``None`` or ``"claude"`` (the
-        default).  For unknown harness names, writes a compliance nudge to PM
-        and returns ``None`` — the caller must return
-        ``RouteOutcome(should_break=False)`` immediately.
+        default), a ``PiSubprocessBuilder`` for ``"pi"``.  For unknown
+        harness names, writes a compliance nudge to PM and returns ``None``
+        — the caller must return ``RouteOutcome(should_break=False)``
+        immediately.
 
         The ``PtyClaudeBuilder`` is constructed fresh per call so that the
         ``dev_transcript_getter`` lambda always captures the current
         ``result.dev_transcript_path`` value (which may change between turns
         if the PTY restarts).
+
+        ``PiSubprocessBuilder`` is also constructed fresh per call; it
+        receives ``builder_cwd = self._dev_pty.cwd`` — the same directory
+        the claude Dev PTY runs in — grounded across both the prewarmed-pool
+        and self-spawned paths.  A falsy cwd raises inside the constructor
+        (Risk 6: never spawn Pi with cwd=None / repo root).
         """
         if harness is None or harness == "claude":
             return PtyClaudeBuilder(
                 dev_pty=self._dev_pty,
                 dev_transcript_getter=lambda: result.dev_transcript_path,
                 cycle_idle_fn=self._cycle_idle,
+            )
+        if harness == "pi":
+            return PiSubprocessBuilder(
+                builder_cwd=self._dev_pty.cwd,
+                rails_path=PI_RAILS_PATH,
+                persona_path=PI_PERSONA_PATH,
             )
         # Unknown harness — PM sent [/dev:unknown_name] which the container
         # cannot fulfil.  Nudge PM to use a known harness.
