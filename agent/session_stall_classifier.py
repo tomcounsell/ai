@@ -24,6 +24,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -50,6 +51,15 @@ _RUNNING_PROBE_STATUSES: frozenset[str] = frozenset(
 # turn_start events is not flagged until it has been running for at least this
 # many seconds.
 NEVER_STARTED_GRACE_SECS: int = 120
+
+# Confirmation margin added on top of NEVER_STARTED_GRACE_SECS before the
+# _never_started_past_grace predicate fires. Sized to cover worst-case granite
+# cold-start-to-first-turn latency (container spin-up + TUI boot + priming).
+# Provisional safety-chosen starting value — tune via env / adjust freely;
+# no structural change needed.
+NEVER_STARTED_CONFIRM_MARGIN_SECS: int = int(
+    os.environ.get("NEVER_STARTED_CONFIRM_MARGIN_SECS", "30")
+)
 
 # Sustained idle window: an idle_gap event whose duration exceeds this
 # threshold raises the advisory to at least "suspect".

@@ -24,6 +24,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
+from agent.session_stall_classifier import (
+    NEVER_STARTED_CONFIRM_MARGIN_SECS,
+    NEVER_STARTED_GRACE_SECS,
+)
 from agent.session_state import SessionHandle, _active_events, _active_sessions, _active_workers
 from analytics.collector import record_metric
 from models.agent_session import AgentSession, SessionType
@@ -673,6 +677,68 @@ def _recover_interrupted_agent_sessions_startup() -> int:
 
 
 # === Agent Session Health Monitor ===
+
+
+def _never_started_past_grace(
+    entry: AgentSession,
+    now: datetime | None = None,
+) -> bool:
+    """Return True when a session has NEVER produced output and has exceeded the
+    combined never-started grace + confirmation margin window.
+
+    A session is considered to have "never started" when BOTH conditions hold:
+      - ``sdk_ever_output`` is False: neither ``last_tool_use_at`` nor
+        ``last_turn_at`` has ever been written (no structured SDK output).
+      - The session's wall-clock running time exceeds
+        ``NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS``
+        (default 120 + 30 = 150 seconds).
+
+    The confirmation margin (``NEVER_STARTED_CONFIRM_MARGIN_SECS``) is stacked
+    on top of the base grace to cover worst-case granite cold-start latency
+    (container spin-up + TUI boot + priming). Both constants live in
+    ``agent.session_stall_classifier`` and are env-overridable.
+
+    Call sites that do NOT have ``now`` in scope (e.g. ``_has_progress`` and
+    ``_tier2_reprieve_signal``) should omit the argument — this function
+    derives it internally via ``datetime.now(tz=timezone.utc)``.
+
+    Returns False (safe default) when:
+      - ``sdk_ever_output`` is True (session has produced output).
+      - ``started_at`` and ``created_at`` are both None (legacy / phantom
+        record) — no running_seconds to compute.
+      - ``running_seconds`` is below the combined threshold.
+      - Any unexpected exception is encountered.
+
+    This predicate NEVER raises.
+    """
+    try:
+        # Derive sdk_ever_output the same way _has_progress and
+        # _tier2_reprieve_signal do: True iff either per-turn field is set.
+        sdk_ever_output = bool(
+            getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
+        )
+        if sdk_ever_output:
+            return False
+
+        if now is None:
+            now = datetime.now(tz=UTC)
+
+        # Use started_at or created_at as the origin timestamp, mirroring the
+        # pattern established in _has_progress sub-check B (issue #1356).
+        started_at = getattr(entry, "started_at", None)
+        created_at = getattr(entry, "created_at", None)
+        started_ref = started_at if isinstance(started_at, datetime) else created_at
+        if not isinstance(started_ref, datetime):
+            # Legacy / phantom record — no running_seconds, safe default.
+            return False
+
+        started_aware = started_ref if started_ref.tzinfo else started_ref.replace(tzinfo=UTC)
+        running_seconds = (now - started_aware).total_seconds()
+
+        threshold = NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS
+        return running_seconds > threshold
+    except Exception:
+        return False
 
 
 def _has_progress(entry: AgentSession) -> bool:
