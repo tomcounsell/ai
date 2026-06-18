@@ -810,3 +810,6 @@ Free-text generation (memory title generation, test AI judge) uses the per-machi
   `MAX_CONCURRENT_SESSIONS` relationship.
 - [bridge-worker-architecture.md](bridge-worker-architecture.md) — where
   `_execute_agent_session` sits in the worker.
+- [Omnigent `claude_native_*` Reference Map](omnigent-hook-edge-reference.md) — production-proven
+  reference implementation for hook-driven turn completion (Stop/StopFailure as authority,
+  PTY reduced to liveness badge, 9 cited practices); feeds future issues #1688/#1719/#1721.

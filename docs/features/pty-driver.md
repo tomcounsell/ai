@@ -169,3 +169,7 @@ and is what the production cutover fixed.
 - Container: `agent/granite_container/container.py` (uses the driver).
 - Architecture doc: [`granite-interactive-tui.md`](granite-interactive-tui.md).
 - Originating results doc: `docs/plans/completed/granite-interactive-tui-poc-results.md`.
+- [Omnigent `claude_native_*` Reference Map](omnigent-hook-edge-reference.md) — maps
+  the 9 Omnigent production practices for replacing the C5 heuristic with Stop/StopFailure
+  hook edges; Practice 6 (verified-submit injection) directly targets `SUBMIT_KEY_DELAY_S`
+  and the bare `\r` send in this driver.
