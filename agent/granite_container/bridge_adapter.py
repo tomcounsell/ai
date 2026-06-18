@@ -684,11 +684,12 @@ class BridgeAdapter:
                 now = datetime.now(UTC)
                 update_fields = ["last_pty_read_loop_at"]
                 agent_session.last_pty_read_loop_at = now
-                # Diff-gate: only stamp activity when the raw buffer has changed.
-                # NOTE: this compares the raw PTY buffer, not normalized bytes (per plan Key
-                # Element 3, normalized bytes were specified to strip cursor/blink noise). The
-                # raw turn_buffer from read_until_idle is settled enough that this is safe for
-                # stage-1 observe-only, but normalization will matter in stage-2 recovery: a
+                # Diff-gate: only stamp activity when the buffer has changed.
+                # NOTE: this compares the ANSI-stripped (but not cursor/spinner-normalized)
+                # buffer from read_until_idle, not fully normalized bytes (per plan Key
+                # Element 3, normalized bytes were specified to also strip cursor/blink noise).
+                # The ANSI-stripped buffer is settled enough that this is safe for stage-1
+                # observe-only, but full normalization will matter in stage-2 recovery: a
                 # blinking cursor or spinner repaint that normalization would strip could keep
                 # last_pty_activity_at fresh on a wedged screen, defeating quiescence detection.
                 # Address this before wiring stage-2 recovery in the follow-up to #1724.

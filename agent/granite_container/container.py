@@ -572,12 +572,13 @@ class Container:
         # sessions (PR #1612 review TD1). Exceptions are swallowed —
         # progress signaling must never crash the loop.
         self._on_turn = on_turn
-        # PTY read-loop hook: called from _cycle_idle after each read_until_idle
-        # call, passing the normalized (ANSI-stripped) turn buffer. BridgeAdapter
-        # uses it to stamp last_pty_read_loop_at (unconditional) and
-        # last_pty_activity_at (only when buffer differs from prior read) for the
-        # path-B mid-run wedge detector (#1724). Exceptions are swallowed —
-        # liveness signaling must never crash the loop.
+        # PTY read-loop hook: called from _cycle_idle once per turn-boundary
+        # idle-return from read_until_idle, passing the ANSI-stripped (but not
+        # cursor/spinner-normalized) turn buffer. BridgeAdapter uses it to stamp
+        # last_pty_read_loop_at (unconditional) and last_pty_activity_at (only
+        # when buffer differs from prior read) for the path-B mid-run wedge
+        # detector (#1724). Exceptions are swallowed — liveness signaling must
+        # never crash the loop.
         self._on_pty_read = on_pty_read
         # Optional pre-warmed PTY pair from the PTYPool. When both
         # are provided, Container skips _spawn_pair() and reuses
@@ -763,6 +764,13 @@ class Container:
         # Called unconditionally on every _cycle_idle so the bridge-adapter can
         # stamp last_pty_read_loop_at and diff-gate last_pty_activity_at.
         # Exceptions are swallowed — liveness signaling must never crash the run.
+        # NOTE: on_pty_read fires once per _cycle_idle return (turn boundary), not
+        # per inner read_until_idle poll iteration (pty_driver.py). A session wedged
+        # mid-turn leaves last_pty_read_loop_at stale between _cycle_idle calls —
+        # stage-1 ABSTAINs for that interval rather than false-firing. Safe for
+        # observe-only stage-1; stamp the inner loop before stage-2 wires recovery
+        # (requires adding a per-iteration callback param to PTYDriver.read_until_idle
+        # and plumbing through Container + BridgeAdapter).
         if self._on_pty_read is not None:
             try:
                 self._on_pty_read(buffer)

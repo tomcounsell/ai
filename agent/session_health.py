@@ -2376,7 +2376,11 @@ def _eval_mid_run_pty_stage1(entry: "AgentSession", now: datetime) -> None:
         # Build current snapshot tuple string for cross-tick comparison.
         # byte_offset is a corroborator (log but do not gate on it).
         act_iso = last_activity_at.isoformat() if isinstance(last_activity_at, datetime) else "None"
-        byte_offset = getattr(entry, "total_input_tokens", None)  # best available proxy
+        # stage-1 proxy: total_input_tokens substitutes for the plan's byte_offset (raw
+        # transcript bytes) because byte_offset is not persisted on AgentSession.
+        # Safe for observe-only stage-1 (corroborator-only, never gates).
+        # Must be replaced with a persisted byte_offset before stage-2 wires recovery.
+        byte_offset = getattr(entry, "total_input_tokens", None)
         current_snapshot = f"({act_iso},{byte_offset})"
 
         prior_snapshot = getattr(entry, "mid_run_pty_snapshot", None)
