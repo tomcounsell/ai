@@ -2051,11 +2051,26 @@ class AgentSession(Model):
     def repair_indexes(cls) -> tuple[int, int]:
         """Clear stale IndexedField index entries then rebuild all indexes.
 
-        Popoto's built-in rebuild_indexes() clears KeyField and SortedField
-        indexes but not IndexedField ($IndexF:) indexes. This method fills
-        that gap: it first clears all $IndexF:ClassName:* keys (using Popoto's
-        own Redis connection), then calls rebuild_indexes() so every index is
-        reconstructed cleanly from actual hashes.
+        Popoto's built-in rebuild_indexes() does NOT enumerate $IndexF keys
+        (those are maintained separately by this method's loop).  However,
+        rebuild_indexes() DOES delete the class set ($Class:AgentSession) at
+        base.py:2745, then re-adds members in batch_size=1000 pipeline batches
+        (base.py:2785-2813).  This class-set delete→re-add is the layer that
+        transiently breaks session_id lookups: query.filter(session_id=...) on
+        a non-indexed Field reads smembers($Class:AgentSession) and filters in
+        memory, so it returns empty during the window.  See issue #1720.
+
+        Read-path defense: both caller sites that do query.filter(session_id=...)
+        — tools/valor_session.py::_find_session and
+        tools/sdlc_stage_query.py::_find_session_by_id — apply a bounded retry
+        (cap sized to exceed the measured p99 class-set-empty interval) to cover
+        this window without touching popoto internals.
+
+        This method's own role: clear all $IndexF:ClassName:* keys that
+        rebuild_indexes() does not touch (only status is an IndexedField here),
+        counting stale members before deletion so the caller can report drift.
+        Then call rebuild_indexes() to repopulate the class set, KeyField, and
+        SortedField indexes from actual hashes.
 
         Returns:
             (stale_count, rebuilt_count) — stale pointers removed and sessions

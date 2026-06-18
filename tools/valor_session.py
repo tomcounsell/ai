@@ -44,11 +44,36 @@ session lifecycle without requiring bridge access.
 import argparse
 import dataclasses
 import json
+import logging
 import re
 import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Bounded read-path retry for class-set lookups (issue #1720)
+# ---------------------------------------------------------------------------
+# popoto's rebuild_indexes() deletes the class set ($Class:AgentSession) and
+# re-adds members in batch_size=1000 pipeline batches.  A concurrent
+# query.filter(session_id=...) reads smembers($Class:AgentSession) and filters
+# in memory; during the delete→re-add window it observes an empty or partial
+# class set and returns no result for a live session.
+#
+# Measured (spike-1, 150 sessions): rebuild_indexes() takes ~600ms; p99
+# class-set-empty window = 651ms.  Retry cap: 5 attempts × 200ms = 1000ms
+# total, which covers the measured p99 with ~35% margin.
+#
+# Both reader sites (_find_session in this file and _find_session_by_id in
+# sdlc_stage_query.py) share the same design: re-read on empty, return
+# immediately on found, fall through to the existing absent-session fallback
+# (get_by_id / None) after the cap.  Hot-path sites (worker recovery, steering
+# delivery) are deliberately excluded — retry stays at operator/dispatch paths.
+_CLASS_SET_RETRY_ATTEMPTS = 5
+_CLASS_SET_RETRY_BACKOFF_S = 0.20  # seconds between attempts
 
 # Issue reference matcher (#1109): "issue #N" or "issue N" (case-insensitive).
 # Bounded lookbehind via (?:^|\W) so we don't false-positive on "tissue123".
@@ -607,13 +632,31 @@ def _find_session(id_arg: str) -> "AgentSession | None":  # noqa: F821
     ``AgentSession.query.filter(session_id=<uuid>)`` before the ``get_by_id``
     fallback fires. At operator-initiated CLI invocation rates (a handful per
     day) this is imperceptible. See issue #1061.
+
+    Bounded retry (issue #1720): popoto's rebuild_indexes() transiently empties
+    the class set ($Class:AgentSession); a concurrent query.filter(session_id=...)
+    reads the class set and returns empty for a live session during that window.
+    We retry up to _CLASS_SET_RETRY_ATTEMPTS times with _CLASS_SET_RETRY_BACKOFF_S
+    between attempts (total cap sized to exceed spike-1's measured p99 = 651ms),
+    then fall through to get_by_id as before.
     """
     from models.agent_session import AgentSession
 
-    sessions = list(AgentSession.query.filter(session_id=id_arg))
-    if sessions:
-        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-        return sessions[0]
+    for attempt in range(_CLASS_SET_RETRY_ATTEMPTS):
+        sessions = list(AgentSession.query.filter(session_id=id_arg))
+        if sessions:
+            sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+            return sessions[0]
+        if attempt < _CLASS_SET_RETRY_ATTEMPTS - 1:
+            logger.debug(
+                "query.filter(session_id=%r) returned empty on attempt %d/%d"
+                " — class-set may be mid-rebuild, retrying in %.0fms",
+                id_arg,
+                attempt + 1,
+                _CLASS_SET_RETRY_ATTEMPTS,
+                _CLASS_SET_RETRY_BACKOFF_S * 1000,
+            )
+            time.sleep(_CLASS_SET_RETRY_BACKOFF_S)
     return AgentSession.get_by_id(id_arg)
 
 

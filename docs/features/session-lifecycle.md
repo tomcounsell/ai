@@ -344,9 +344,62 @@ When `monitoring/session_watchdog.py::check_stalled_sessions` queues a user-visi
 - **Fail-safe side effects**: Each side effect (auto-tag, checkpoint, parent finalization) is wrapped in a try/except that logs and continues. A failure in any side effect never blocks the status save.
 - **Synchronous only**: The module provides sync functions. Callers in async contexts use `asyncio.to_thread()` as needed (matching existing patterns).
 
+## Index-Rebuild Race and Read-Path Retry (issue #1720)
+
+### Root cause
+
+`AgentSession.repair_indexes()` calls popoto's `rebuild_indexes()`, which
+**deletes the class set (`$Class:AgentSession`) at `base.py:2745`** and then
+re-adds all members in `batch_size=1000` pipeline batches (`base.py:2785-2813`).
+
+`session_id` is a plain `Field()` (not an `IndexedField`), so there is no
+`$IndexF:AgentSession:session_id:*` key.  A `query.filter(session_id=...)` on a
+non-indexed field reads `smembers($Class:AgentSession)` and filters in memory
+(`query.py:1341/1758/1790`).  During the class-set delete→re-add window, any
+concurrent reader returns an empty result for a live session — `Session not found`.
+
+`repair_indexes()` runs **hourly** (the `agent-session-cleanup` reflection at
+`agent/session_health.py:2626`) and at **worker startup**
+(`agent/session_pickup.py:411`), so every hour there is a window where live
+sessions transiently disappear from class-set reads.
+
+### Read-path retry defense
+
+Both reader sites apply a bounded retry that re-reads on empty, returns
+immediately on found, and falls through to the existing absent-session fallback
+after the cap:
+
+- `tools/valor_session.py::_find_session` (operator CLI: `valor-session status`)
+- `tools/sdlc_stage_query.py::_find_session_by_id` (SDLC stage dispatch)
+
+**Measured parameters (spike-1, 150 sessions):**
+- `rebuild_indexes()` wall-clock duration: ~600ms
+- p99 class-set-empty window: **651ms**
+- Retry cap: 5 attempts × 200ms = **1000ms total** (covers p99 with ~35% margin)
+
+When the retry fires, both sites emit a `logger.debug` message:
+`"query.filter(session_id=...) returned empty on attempt N/5 — class-set may be mid-rebuild, retrying in 200ms"`
+
+**Hot-path exclusion:** the retry is applied only at operator/dispatch reader
+sites, not at internal worker paths (recovery, steering delivery) where latency
+matters and the caller already handles `None` gracefully.
+
+### Spike-2 finding (informational)
+
+Stale class-set members (phantoms) occur primarily via TTL expiry: each
+`AgentSession` hash has `Meta.ttl = 2592000` (30 days), but index keys
+(including the class set) do not carry a coordinated TTL.  When a hash TTL
+expires, the class-set entry remains until the next `rebuild_indexes()` clears
+and reconstructs it.  Delete paths (`session.delete()`, status transitions) do
+maintain the class set via `srem()`, so manually-deleted sessions are not a
+significant phantom source.  TTL coordination is recorded here as a documented
+finding but is out of scope for issue #1720; the read-path retry already
+neutralizes the `Session not found` symptom regardless of phantom source.
+
 ## Related
 
 - [Agent Session Queue Reliability](agent-session-queue.md) -- KeyField index fixes and delete-and-recreate pattern
 - [Agent Session Health Monitor](agent-session-health-monitor.md) -- Stuck session detection
 - [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) -- Structured LIFECYCLE logging at every state transition
 - [Agent Session Hierarchy](agent-session-scheduling.md#parent-child-session-hierarchy) -- Parent-child relationships and orphan handling
+- [Popoto Index Hygiene](popoto-index-hygiene.md) -- Full index-cleanup pipeline and model exclusion list
