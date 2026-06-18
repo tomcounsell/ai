@@ -882,6 +882,22 @@ class AgentSession(Model):
         kwargs = cls._normalize_kwargs(kwargs)
         return await super().async_create(**kwargs)
 
+    # Fields whose partial saves intentionally omit ``updated_at`` at high
+    # frequency (liveness heartbeats and PID bookkeeping). Omitting the stamp
+    # here is by-design — the dedicated heartbeat fields carry freshness — so a
+    # WARNING per write is pure log noise (2 lines per 60s heartbeat per
+    # session) that buries genuine warnings. We downgrade these to DEBUG; any
+    # other omission (e.g. ``status``) still warns.
+    _UPDATED_AT_OMISSION_OK_FIELDS = frozenset(
+        {
+            "last_heartbeat_at",
+            "last_sdk_heartbeat_at",
+            "last_stdout_at",
+            "claude_pid",
+            "harness_pid",
+        }
+    )
+
     def save(self, *args, update_fields=None, **kwargs):
         """Override to stamp updated_at with UTC wall-clock time.
 
@@ -896,10 +912,19 @@ class AgentSession(Model):
         from bridge.utc import utc_now
 
         if update_fields is not None and "updated_at" not in update_fields:
-            logger.warning(
-                "save() called with update_fields missing 'updated_at'; "
-                "timestamp not persisted to avoid memory/Redis desync"
-            )
+            # Known high-frequency liveness/PID partial saves log at DEBUG;
+            # everything else keeps the WARNING so real omissions stay visible.
+            if set(update_fields) <= self._UPDATED_AT_OMISSION_OK_FIELDS:
+                logger.debug(
+                    "save() omitted 'updated_at' for liveness fields %s "
+                    "(by design; freshness carried by heartbeat fields)",
+                    list(update_fields),
+                )
+            else:
+                logger.warning(
+                    "save() called with update_fields missing 'updated_at'; "
+                    "timestamp not persisted to avoid memory/Redis desync"
+                )
             return super().save(*args, update_fields=update_fields, **kwargs)
         self.updated_at = utc_now()
         return super().save(*args, update_fields=update_fields, **kwargs)

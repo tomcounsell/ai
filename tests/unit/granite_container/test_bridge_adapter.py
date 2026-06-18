@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import unittest
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from agent.granite_container.bridge_adapter import BridgeAdapter
+from agent.granite_container.bridge_adapter import (
+    BridgeAdapter,
+    _transcript_path_from_spec,
+)
 from agent.granite_container.pty_pool import PTYPool
 
 
@@ -1027,6 +1031,45 @@ class TestPtySlotPersistence(unittest.TestCase):
             f"expected a warning containing 'pm_pid set but pty_slot is None'; "
             f"warnings captured: {warning_messages!r}",
         )
+
+
+class TestTranscriptPathSlug(unittest.TestCase):
+    """Regression: dotted cwds must slug the dot to '-' like Claude Code does.
+
+    Every bridge session runs in a synthetic ``.worktrees/dev-{id}`` worktree.
+    Claude Code slugifies a cwd by replacing BOTH ``/`` and ``.`` with ``-``.
+    Replacing only ``/`` produced a path Claude Code never writes to, so the PM
+    transcript read came back ``file-missing`` every turn and the run shipped
+    OPERATOR_TERMINAL_MESSAGE instead of the PM's real reply.
+    """
+
+    def test_dotted_worktree_cwd_replaces_dot_with_dash(self) -> None:
+        # Use a tmp-free, symlink-stable absolute path. realpath() on a
+        # non-existent path is an identity transform, so the slug is
+        # deterministic without touching the filesystem.
+        cwd = "/Users/x/src/ai/.worktrees/dev-5732c769"
+        uuid = "319a6bb5-aef2-4f92-9a86-7459eb3dee2a"
+        path = _transcript_path_from_spec(cwd, uuid)
+
+        # The '.worktrees' segment must become '--worktrees' (slash + dot both
+        # collapse to '-'), matching Claude Code's on-disk directory naming.
+        self.assertIn("-Users-x-src-ai--worktrees-dev-5732c769", path)
+        self.assertNotIn(".worktrees", path)
+        self.assertTrue(path.endswith(f"{uuid}.jsonl"))
+
+    def test_slug_matches_claude_codes_directory_naming(self) -> None:
+        # Full assertion against the exact expected path.
+        cwd = "/Users/x/src/ai/.worktrees/dev-abc"
+        uuid = "u"
+        home = os.path.expanduser("~")
+        expected = os.path.join(
+            home,
+            ".claude",
+            "projects",
+            "-Users-x-src-ai--worktrees-dev-abc",
+            "u.jsonl",
+        )
+        self.assertEqual(_transcript_path_from_spec(cwd, uuid), expected)
 
 
 if __name__ == "__main__":

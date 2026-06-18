@@ -227,15 +227,24 @@ def _now_iso() -> str:
 def _transcript_path_from_spec(cwd: str, session_id: str) -> str:
     """Compute the Claude Code JSONL transcript path from cwd + session UUID.
 
-    Claude Code names transcripts: ~/.claude/projects/{cwd.replace("/", "-")}/{uuid}.jsonl
-    This is deterministic because we set the UUID via `claude --session-id`.
+    Claude Code slugifies the cwd by replacing BOTH ``/`` and ``.`` with ``-``,
+    so ``~/.claude/projects/{slug}/{uuid}.jsonl``. This is deterministic because
+    we set the UUID via `claude --session-id`.
+
+    The ``.`` substitution is load-bearing: every bridge session runs in a
+    synthetic ``.worktrees/dev-{id}`` worktree, so the cwd always contains a
+    dot (``.worktrees`` → ``--worktrees``). Replacing only ``/`` produced a
+    path Claude Code never writes to, so the PM transcript read came back
+    ``file-missing`` on every turn, every turn classified ``unknown``, and the
+    run exhausted max_turns and shipped OPERATOR_TERMINAL_MESSAGE instead of the
+    PM's real reply.
     """
     # Resolve symlinks before slugging so the slug matches Claude Code's
     # own realpath-based naming. Guard on truthiness: os.path.realpath("")
     # returns the process CWD, which would silently corrupt the slug.
     if cwd:
         cwd = os.path.realpath(cwd)
-    slug = cwd.replace("/", "-")
+    slug = cwd.replace("/", "-").replace(".", "-")
     home = os.path.expanduser("~")
     return os.path.join(home, ".claude", "projects", slug, f"{session_id}.jsonl")
 
