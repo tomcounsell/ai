@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Large
 owner: Valor Engels

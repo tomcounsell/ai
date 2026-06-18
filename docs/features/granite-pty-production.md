@@ -246,11 +246,18 @@ delivers per-turn `[/user]` payloads **mid-loop** — the user sees responses
 ## Per-turn silence cap (not total runtime cap)
 
 Sessions can last up to ~6 hours of wall-clock. The bound is **per-turn
-silence**, not total runtime: `CYCLE_IDLE_TIMEOUT_S` (120s in
+silence**, not total runtime: `CYCLE_IDLE_TIMEOUT_S` (12 h sanity ceiling in
 `container.py`) is the per-cycle ceiling on a single PTY's idle wait. If a PTY
 does not reach idle within this window, the container exits as `pm_hang` /
 `dev_hang`. A wall-clock cap would force user-visible mid-session termination
 the operator does not want.
+
+> **Hang detection is delegated to the liveness layer** (issue #1724). The 12h
+> ceiling is a sanity backstop — real hang recovery is handled by
+> `agent/session_health.py`, which uses PTY-activity fields and the two-tier
+> no-progress detector rather than a per-turn wall-clock timeout. See
+> [Never-Started Session Recovery](never_started_session_recovery.md) for the
+> full design.
 
 ## Observability
 
@@ -467,6 +474,33 @@ is fail-silent — a Redis failure logs a warning and never crashes the run.
 > tailer rather than `_bump_last_turn_at`. The `on_turn` hook remains in place
 > to keep `last_turn_at` current for the two-tier detector, but the richer
 > liveness fields are now transcript-driven.
+
+#### PTY-activity liveness (issue #1724)
+
+As of issue #1724, `Container.__init__` accepts an optional `on_pty_read:
+Callable[[str], None]` hook. `BridgeAdapter` wires `_make_pty_read_callback()`
+into this slot, which fires after each turn-boundary idle return inside
+`_cycle_idle()`. The callback diff-gates on `_prev_pty_buffer` (only fires when
+the screen actually repainted) and writes two new `AgentSession` fields:
+
+| Field | Written when |
+|-------|-------------|
+| `last_pty_read_loop_at` | Every `on_pty_read` call (proves the loop is alive) |
+| `last_pty_activity_at` | Only when `buffer != _prev_pty_buffer` (screen repainted) |
+
+Two additional fields support Path-B mid-run quiescence tracking (observe-only
+stage-1 — no recovery fired yet; stage-2 deferred to a follow-up to #1724):
+
+| Field | Written when |
+|-------|-------------|
+| `mid_run_quiescent_since` | Set on first tick where `last_pty_activity_at` looks stale; cleared on activity |
+| `mid_run_pty_snapshot` | Snapshot taken when quiescence is first detected |
+
+`session_health._eval_mid_run_pty_stage1()` reads these fields to detect
+suspects and emit a `WARNING: "stage-1 CONFIRMED SUSPECT"` log when
+`MID_RUN_QUIESCENCE_SECS` (180s, env-tunable) is exceeded. See
+[Never-Started Session Recovery](never_started_session_recovery.md) for the
+full Path-A / Path-B design.
 
 ### Startup hard ceiling
 
