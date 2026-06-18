@@ -1,326 +1,292 @@
 ---
 status: Planning
 type: bug
-appetite: Medium
+appetite: Large
 owner: Valor Engels
 created: 2026-06-18
 tracking: https://github.com/valorengels/ai/issues/1724
 last_comment_id:
 ---
 
-# Recover never_started sessions promptly: stop the heartbeat from blinding the recovery actor
+# Recover hung granite sessions promptly: progress-based liveness for the priming wedge AND the mid-run wedge
 
 ## Problem
 
-A granite session can be marked `running` while wedged in PM priming — it has produced **no turn** (`last_turn_at = None`, `sdk_ever_output = False`), yet its background watchdog keeps writing fresh `last_heartbeat_at` / `last_sdk_heartbeat_at` every ~60s. Two detectors look at this state and disagree:
+As of commit `ef53a88f`, the in-container 120s `dev_hang`/`pm_hang` deadline became a 12h *sanity ceiling* (`CYCLE_IDLE_TIMEOUT_S = 12 * 60 * 60.0`, `agent/granite_container/container.py:138`), with the code comment explicitly delegating hang detection to "the heartbeat / liveness-recovery layer (agent/session_health.py + issue #1724)." **The session-health/liveness layer is now the sole hang detector for granite sessions.** This issue therefore owns the whole problem, in two distinct wedge shapes:
 
-- `reflections/stall_advisory.py::run_stall_advisory` correctly classifies it `STALLED reason=never_started` at a 120s grace, but is **advisory-only**: it logs a WARNING and optionally Telegram-alerts, then returns. It never recovers.
-- `agent/session_health.py::_has_progress` sub-check B treats the fresh heartbeat as "alive" across the whole band `300s <= running_seconds <= 1800s` for a no-output session, so the actor that *can* recover considers the wedge healthy for up to 30 minutes.
+**(a) Priming wedge (`never_started`).** A granite session is `running` but produced no turn (`last_turn_at = None`, `sdk_ever_output = False`), while its watchdog writes fresh `last_heartbeat_at`/`last_sdk_heartbeat_at` every ~60s. Two detectors disagree:
+- `reflections/stall_advisory.py::run_stall_advisory` classifies it `STALLED reason=never_started` at a 120s grace (`agent/session_stall_classifier.py::NEVER_STARTED_GRACE_SECS = 120`), but is **advisory-only** — logs/optionally-alerts, never recovers.
+- `agent/session_health.py::_has_progress` sub-check B treats the fresh heartbeat as "alive" across `300s <= running_seconds <= NO_OUTPUT_BUDGET_SECONDS (1800s)` (`session_health.py:784-824`), and even past 1800s the granite PTY pair's live children let `_tier2_reprieve_signal`'s `children`/`alive` gates grant up to `MAX_NO_OUTPUT_REPRIEVES (20)` reprieves (`:943`). Net: ~100 min before recovery, not ~300s.
 
-**Current behavior:**
-Session marked `running`, `last_turn_at = None`, heartbeats fresh. `stall-advisory` logs `never_started` at ~120s; nothing acts. `session-health` recovery considers it healthy for up to 1800s. Only a manual `valor-service.sh restart` (or eventually crossing the 1800s budget plus the 20-tick reprieve cap) frees it. Observed live on 2026-06-18 with session `tg_valor_-1003449100931_993` (~5 min wedge until manual restart).
+**(b) Mid-run wedge.** A session that produced turns (`sdk_ever_output = True`) then genuinely hangs during a long Dev turn — the TUI froze/crashed but the `claude` process is still alive. The container used to catch this at 120s; that deadline is now 12h. Worse, the session-health layer **cannot** catch it today: `_check_tool_timeout` would flag the stuck in-flight tool, but `_tier2_reprieve_signal`'s `"alive"` gate reprieves any session whose process exists — and a hung-but-alive process passes `"alive"` forever. So a mid-run wedge is unrecoverable for up to 12h.
 
-**Desired outcome:**
-A `running` session with `last_turn_at = None` and fresh heartbeats is escalated to real recovery on a timescale consistent with the advisory's grace — well under 1800s — **without** killing legitimately-slow-but-progressing sessions (large initial prompt, slow auth). The advisory grace and the actor's `never_started` grace derive from a single shared constant so they cannot drift apart again.
+### Why the obvious signals don't work
+- **Heartbeats lie.** The watchdog ticks on a schedule regardless of real work (the original bug). Not progress evidence.
+- **Process-alive lies.** A hung TUI keeps an alive `claude` process; `"alive"` reprieve fires forever. Not progress evidence.
+- **Transcript silence lies (the critical one).** The transcript tailer (`agent/granite_container/transcript_tailer.py`) folds an **append-only JSONL**: `byte_offset`, `total_*_tokens`, `turn_count`, and `last_tool_use_at` only advance when an assistant/user event lands. During a legitimate long `Task` subagent or long tool, **no event lands in the parent transcript for the entire run** (observed: subagents run 25+ min). All those fields freeze on a perfectly healthy session. A naive "transcript unchanged for N minutes → recover" rule would false-kill exactly the long-subagent case — the same mistake the old 120s `dev_hang` made.
+
+### The reliable oracle
+The signal that actually distinguishes alive from hung is the one the operator uses by eye: **the TUI screen repainting** — the spinner and token/elapsed counters tick continuously while work is happening, and freeze on a crash. `agent/granite_container/pty_driver.py` already computes byte-quiescence (C5 idle: a hung PTY goes byte-silent within ~seconds; a working PTY emits continuously), but this liveness is transient inside the container read loop and **is never persisted onto the `AgentSession`**. Capturing it is the core of the mid-run fix.
+
+### Desired outcome
+- **Priming wedge:** a `running` + `last_turn_at = None` + fresh-heartbeat session is recovered on a grace reconciled with the advisory's 120s detection grace — and the fix closes **both** sub-check B's band and the reprieve-cap path.
+- **Mid-run wedge:** a session whose **PTY screen has gone quiescent** for a generous window (no spinner/counter repaint) while the transcript has not advanced is recovered well below the 12h ceiling — **without** killing a legitimately long, actively-repainting subagent/tool turn.
+- Grace/window values derive from single shared sources of truth so detection and action cannot drift.
+
+### Real observation (2026-06-18)
+Session `tg_valor_-1003449100931_993` (`agent_session_id 7f819c9a7efa46f1b2b8b10ef1d34dfc`) was `running` + heartbeating with `last_turn_at = None` for ~5 min (priming wedge). `stall-advisory` logged `STALLED reason=never_started elapsed_secs=247 grace_secs=120` at 02:48:53; nothing recovered it until a manual `valor-service.sh restart`.
 
 ## Freshness Check
 
-**Baseline commit:** b414eed1fb7cc50fff5bd2979c376bc861b90782
-**Issue filed at:** 2026-06-18T03:13:30Z
-**Disposition:** Unchanged
+**Baseline commit at original plan:** b414eed1 (recon for the narrow scope). **Re-baselined to:** ef53a88f + the transcript-tailer fixes (995bc453, 91289fc3, b414eed1).
+**Disposition:** **CHANGED.** The original plan assumed (1) scope = priming wedge only, and (2) granite exposes no usable progress fields. Both are now false: `ef53a88f` removed the container's 120s hang detector (mid-run wedge now in scope), and the tailer fixes populate real progress fields. This plan supersedes the narrow version.
 
-**File:line references re-verified:**
-- `reflections/stall_advisory.py:38-161` — advisory-only, zero writes — still holds.
-- `agent/session_stall_classifier.py:50` — `NEVER_STARTED_GRACE_SECS = 120` — still holds (issue attributed the constant to `stall_advisory.py`; it actually lives in the classifier — corrected here and in Technical Approach).
-- `agent/session_health.py:219` — `HEARTBEAT_FRESHNESS_WINDOW = 90` — still holds.
-- `agent/session_health.py:267-269` — `STARTUP_GRACE_SECONDS = 300` (aliased to `AGENT_SESSION_HEALTH_MIN_RUNNING`) — still holds.
-- `agent/session_health.py:284` — `NO_OUTPUT_BUDGET_SECONDS = 1800` — still holds.
-- `agent/session_health.py:784-824` — sub-check B fresh-heartbeat band — still holds.
-- `agent/session_health.py:1708-1712` — main loop calls `_has_progress` only when `running_seconds > 300s` — still holds (the load-bearing constraint; see Revised in recon).
+**File:line references re-verified against current main:**
+- `agent/granite_container/container.py:121-138` — `CYCLE_IDLE_TIMEOUT_S` now 12h, comment delegates to session_health + #1724. ✓
+- `reflections/stall_advisory.py:38-161` — advisory-only, zero writes. ✓
+- `agent/session_stall_classifier.py:50` — `NEVER_STARTED_GRACE_SECS = 120`. ✓
+- `agent/session_health.py:207-269` — `AGENT_SESSION_HEALTH_MIN_RUNNING` / `STARTUP_GRACE_SECONDS = 300` (race-guard floor, env-tunable). ✓
+- `agent/session_health.py:284` — `NO_OUTPUT_BUDGET_SECONDS = MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW = 1800`. ✓
+- `agent/session_health.py:345-369` — `_check_tool_timeout`, tiers 30/120/300s. ✓
+- `agent/session_health.py:784-824` — sub-check B fresh-heartbeat band. ✓
+- `agent/session_health.py:884-981` — `_tier2_reprieve_signal` (`compacting`/`children`/`alive`; cap at `:943`). ✓
+- `agent/granite_container/bridge_adapter.py:626-648` — `_bump_last_turn_at` (flips `sdk_ever_output`). ✓
+- `agent/granite_container/bridge_adapter.py:837-934` — diff-gated tailer save of `turn_count`/`current_tool_name`/`last_tool_use_at`/`byte_offset`/token counts. ✓
+- `agent/granite_container/transcript_tailer.py:105-174` — append-only fold; confirms transcript freezes during in-flight tool with no following event. ✓
+- `agent/granite_container/pty_driver.py:36, 212, 353, 491` — byte-quiescence (C5 idle) computed but not persisted. ✓
 
-**Cited sibling issues/PRs re-checked:**
-- #1356 — CLOSED 2026-05-11, introduced `NO_OUTPUT_BUDGET_SECONDS=1800` gate. Resolution unchanged. This issue is its direct follow-up.
-- #1614 — CLOSED 2026-06-12, gated sticky own-progress fields on heartbeat freshness. Same bug family; reuse its test model.
-- #1172 — CLOSED 2026-04-29, "surface progress or stay graceful." Design context on not over-killing slow sessions.
+**Cited sibling issues/PRs re-checked:** #1356 (CLOSED, introduced 1800s gate), #1614 (CLOSED, gated sticky own-progress on heartbeat freshness), #1172 (CLOSED, "kill only on positive no-progress evidence, never on staleness"), #1226 (CLOSED, the 20-tick reprieve cap). All resolutions unchanged.
 
-**Commits on main since issue was filed (touching referenced files):** None (`git log --since=2026-06-18T03:13:30Z` on the three files is empty).
-
-**Active plans in `docs/plans/` overlapping this area:** None active. `session-heartbeat-progress-guard.md` (#1036, docs_complete), `stalled-session-user-visible-alert.md` (#1313), `progress-detector-tweaks.md` (#1159) are prior/closed-tracking work in the same module, not competing plans for #1724.
+**Test-path correction (critique B2):** the original plan cited `tests/unit/test_agent_session_health_monitor.py` 4×. That file lives in **`tests/integration/`**. Corrected throughout this plan.
 
 ## Prior Art
 
-- **#1356** (closed 2026-05-11): "tier-1 `_has_progress` sub-check B passes forever for no-output sessions." Introduced `NO_OUTPUT_BUDGET_SECONDS=1800`. **Outcome: partial.** Bounded the previously-infinite fast-path but set the bound at 30 min and never reconciled it with the advisory's 120s grace. This issue is the direct follow-up.
-- **#1614** (closed 2026-06-12): "ungated sticky own-progress fields let a 4-day-stalled session evade recovery." **Outcome: success.** Gated own-progress fields (`turn_count`/`log_path`/`claude_session_uuid`) on heartbeat freshness within `NO_OUTPUT_BUDGET_SECONDS`. Reuse its test pattern (`tests/unit/test_session_health_inference_removed.py`) as a model for the regression test.
-- **#1172** (closed 2026-04-29): "PM session liveness: surface progress or stay graceful." **Outcome: success.** Retired the wall-clock cap and the "stdout" reprieve gate; established the "do not infer death from staleness, only kill on positive no-progress evidence" principle. Constrains this fix: we must not reintroduce a naive wall-clock kill.
-- **#1226** (closed): added `MAX_NO_OUTPUT_REPRIEVES` reprieve-escalation cap. The 1800s wedge is the *combination* of sub-check B's band and this 20-tick cap.
+- **#1356** (closed): bounded sub-check B's previously-infinite fast-path at `NO_OUTPUT_BUDGET_SECONDS = 1800`. **Partial** — 30 min is still long, the value is internally-derived (`20 * 90`) with no tie to the advisory's 120s, and it left the reprieve-cap path untouched. Direct parent of this issue. **Do not repeat its partial-fix shape** (touching only one of the two gates).
+- **#1614** (closed): gated sticky own-progress fields (`turn_count`/`log_path`/`claude_session_uuid`) on heartbeat freshness so a stale `running` session can't evade recovery. **Success.** Reuse `tests/unit/test_session_health_inference_removed.py` as the regression-test model.
+- **#1172** (closed): retired wall-clock caps and the "stdout" reprieve gate; established "kill only on positive no-progress evidence, never infer death from staleness." **Constrains this fix**: the mid-run oracle must be positive evidence of a frozen screen, not mere transcript staleness.
+- **#1226** (closed): added `MAX_NO_OUTPUT_REPRIEVES` cap (only for `sdk_ever_output=False`). The priming wedge survives it because the granite pair keeps live children → `children`/`alive` reprieves keep firing until the cap.
+- **`ef53a88f`** (this week): demoted the container's 120s deadline to a 12h ceiling and handed hang detection to this layer. Read its `container.py:121-138` comment — it states the intent this plan fulfills.
 
 ## Why Previous Fixes Failed
 
 | Prior Fix | What It Did | Why It Failed / Was Incomplete |
 |-----------|-------------|-------------------------------|
-| #1356 | Bounded sub-check B's fresh-heartbeat fast-path at `NO_OUTPUT_BUDGET_SECONDS=1800` | Picked 1800s to stay symmetric with `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW`, an internally-derived number with no relationship to the advisory's externally-chosen 120s grace. The two systems were never tied to one constant, so they drift. 30 min is still a long wedge for a session that has produced literally nothing. |
-| #1226 | Added the 20-tick reprieve cap for no-output sessions | Operates on the *same* 1800s timescale; doesn't shorten the never-started case. |
+| #1356 | Bounded sub-check B at 1800s | Value untied to the advisory's 120s; ignored the reprieve-cap path; 30 min still long for a zero-progress session. |
+| #1226 | 20-tick reprieve cap (no-output only) | Same 1800s-class timescale; the priming pair's live children keep `children`/`alive` reprieves firing up to the cap. |
+| container 120s `dev_hang` | Killed any PTY not idle within 120s | Killed legit multi-minute turns (false positive) → removed in `ef53a88f`, leaving a 12h hole for the mid-run wedge. |
 
-**Root cause pattern:** Two independently-owned detectors (advisory classifier vs. recovery actor) each picked their own grace from their own internal logic, with no shared source of truth. The 1800s budget treats "session that has run 25 min and produced output then went quiet" and "session that has produced *nothing* since start" as the same case. They are not: a never-started session has zero positive progress evidence and should be recoverable far sooner than a session that demonstrably did work and then idled.
+**Root-cause pattern:** every prior signal (heartbeat, process-alive, transcript-staleness, wall-clock) is either a false-positive (kills long-but-working turns) or a false-negative (reprieves hung-but-alive sessions forever). None measures the one thing that is ground truth: **is the TUI screen still doing anything.**
 
 ## Data Flow
 
-1. **Entry point:** Bridge enqueues an Eng `AgentSession`; worker picks it up, sets `status=running`, `started_at=now`, spawns the granite PTY pair. Background `_heartbeat_loop` begins writing `last_heartbeat_at` / `last_sdk_heartbeat_at` every 60s. Priming runs; **no `turn_start` event, `last_turn_at` stays None, `sdk_ever_output` stays False.**
-2. **Advisory path (read-only):** `run_stall_advisory` (periodic reflection) → `read_session_timeline(session_id)` → `classify_session_stall(events, session)`. With no `turn_start` and `elapsed > NEVER_STARTED_GRACE_SECS (120s)` → `StallVerdict("stalled", "never_started", ...)`. Logged/alerted. **No write. Dead end for recovery.**
-3. **Actor path (can write):** `_agent_session_health_check` (5-min loop) iterates `running` sessions. Race guard: only evaluates `_has_progress(entry)` when `running_seconds > 300s`. `_has_progress` → sub-check A (per-turn freshness: absent, `sdk_ever_output=False`) → sub-check B (fresh heartbeat + `300s <= running_seconds <= 1800s` → **returns True**). So `should_recover` stays False until 1800s. After 1800s, sub-check B falls through, own-progress fields are gated on heartbeat freshness (#1614), and the 20-tick reprieve cap finally lets `_apply_recovery_transition(reason_kind="no_progress")` fire → `running -> pending` (or `failed` after `MAX_RECOVERY_ATTEMPTS`).
-4. **Output:** Re-queued session is picked up cleanly on next worker tick.
+**Priming wedge (path A):** bridge enqueues Eng `AgentSession` → worker `status=running`, spawns granite PTY pair → `_heartbeat_loop` ticks → priming runs, no `turn_start`, `last_turn_at=None`, `sdk_ever_output=False`. Advisory classifies `never_started` at 120s (read-only, dead end). Recovery actor `_agent_session_health_check` (`:1532`) only evaluates `_has_progress` when `running_seconds > 300s`; sub-check B returns True up to 1800s; past that, `_tier2_reprieve_signal` `children`/`alive` reprieves the live pair up to the 20-cap (~100 min) → finally `_apply_recovery_transition(reason_kind="no_progress")` → `running -> pending`.
 
-The fix lands at step 3, inside `_has_progress` sub-check B (and the constant it reads), not at step 2.
+**Mid-run wedge (path B):** session produces turns (`sdk_ever_output=True`) → enters a long Dev turn / `Task` subagent → parent transcript stops emitting events (byte_offset/tokens/turn_count/last_tool_use_at all freeze) → if the turn genuinely hangs, the TUI screen freezes but the `claude` process stays alive. `_check_tool_timeout` flags the stuck `current_tool_name`, but `_tier2_reprieve_signal` `"alive"` reprieves it forever (process exists). No recovery until the 12h ceiling.
+
+The fix lands in: (path A) sub-check B's never-started leg **and** the reprieve evaluation; (path B) a new PTY-activity signal persisted from the container read loop, consumed by a new mid-run leg in the recovery actor.
 
 ## Architectural Impact
 
-- **New dependencies:** None.
-- **Interface changes:** None to public signatures. One new module-level constant in `agent/session_stall_classifier.py` (the shared source of truth); `agent/session_health.py` imports it. Direction of the new import: `session_health` → `session_stall_classifier`. **This is the only allowed direction** — the classifier must never import `session_health` (enforced by `tests/integration/test_stall_advisory_e2e.py`'s `sys.modules` guard). Importing a bare `int` constant the other way is safe and does not pull in the kill machinery.
-- **Coupling:** Intentionally *increases* coupling on one shared constant — that is the point (Q3: single source of truth). Both detectors read the same value.
-- **Data ownership:** Unchanged. No new fields on `AgentSession`. `sdk_ever_output` continues to be derived (not stored) from `last_tool_use_at`/`last_turn_at`.
-- **Reversibility:** High. The change is a tighter branch inside one function plus one constant. Revertible by restoring the old band boundary.
+- **New persisted signal:** add `last_pty_activity_at` (datetime) to `AgentSession`, written by the granite container/`bridge_adapter` whenever the PTY read loop observes non-quiescent screen bytes (the same byte-activity `pty_driver` already detects for C5 idle). This is the only new field; per `feedback_field_backcompat_heal`, nullable AgentSession fields need no extra back-compat code (`_heal_descriptor_pollution` walks fields generically). Non-granite sessions leave it `None` and are unaffected.
+- **Import direction (unchanged constraint):** `session_health` → `session_stall_classifier` only (shared grace constant); the classifier must never import `session_health` (guarded by `tests/integration/test_stall_advisory_e2e.py`). The new PTY-activity field is plain data on the model — no new module coupling.
+- **Single writer for recovery:** only `session_health` ever writes recovery transitions; `stall_advisory` stays read-only. No double-action.
+- **Reversibility:** Medium-high. Path-A change is a tighter branch + reprieve guard + one constant. Path-B adds a field + a writer + a recovery leg; revertible by ignoring the field and restoring the prior reprieve behavior.
 
 ## Appetite
 
-**Size:** Medium
+**Size:** Large (was Medium — mid-run scope + the new persisted PTY signal raise it).
 
-**Team:** Solo dev (debugging-specialist for the recovery-logic change), validator, documentarian.
+**Team:** debugging-specialist (recovery logic + reprieve guard), an agent for the container/tailer PTY-activity writer, test-engineer (both wedge regressions), validator, documentarian.
 
-**Interactions:**
-- PM check-ins: 1-2 (the Q1-Q4 direction decisions in Open Questions must be confirmed before build)
-- Review rounds: 1 (this touches live recovery logic — one careful code-review pass on the regression-safety of the slow-priming case)
+**Interactions:** PM check-ins 1-2 (the PTY-activity-signal approach and the mid-run window are the load-bearing decisions); review rounds 1-2 (this is now the sole hang detector — careful pass on both false-kill and false-negative).
 
 ## Prerequisites
 
-No prerequisites — this work has no external dependencies. It modifies internal worker recovery logic only.
+None external. The transcript-tailer progress fields and PTY byte-quiescence detection already exist on main; this work consumes and persists them.
 
 ## Solution
 
+### Decisions locked (from PM, 2026-06-18)
+- **D1 (priming recovery timescale): lower the floor for `never_started`.** The 300s race guard cannot honor the advisory's 120s. For `never_started` sessions specifically, allow the recovery actor to evaluate/act before 300s, reconciled to the shared `NEVER_STARTED_GRACE_SECS (120s)` plus a small confirmation margin — rather than accepting ~300s. This is a deliberate, scoped relaxation of the race guard for the no-turn case only (general sessions keep the 300s floor).
+- **D2 (mid-run oracle): PTY-screen activity, not transcript silence.** Recover a mid-run session only when `last_pty_activity_at` has been quiescent beyond the mid-run window AND the transcript has not advanced — never on transcript-staleness alone, because a long subagent legitimately freezes the transcript while the screen keeps repainting.
+- **D3 (reprieve cap, educated guess to validate in build): bypass the `children`/`alive` reprieve for `never_started`.** Live PTY children are *expected* during priming and are not progress evidence, so a no-turn session past its grace must not be reprieved by `children`/`alive`. Validate via tests that this does not regress a genuinely-still-priming session that is about to emit its first turn.
+
 ### Key Elements
+1. **Shared never-started grace** — `session_health` reads `NEVER_STARTED_GRACE_SECS` (already in `session_stall_classifier.py`) plus a small `NEVER_STARTED_CONFIRM_MARGIN_SECS` so detection (advisory) and action (actor) derive from one source. No second magic number.
+2. **Never-started recovery leg (path A)** — when `not sdk_ever_output` and no turn ever: (a) sub-check B does NOT grant the heartbeat fast-path past the never-started grace, and (b) `_tier2_reprieve_signal` does NOT grant `children`/`alive` for this session (D3). The race-guard floor is relaxed to the never-started grace for this case only (D1).
+3. **PTY-activity signal (path B, new)** — persist `last_pty_activity_at` from the container read loop; add a mid-run recovery leg: if `sdk_ever_output=True`, `current_tool_name` is non-null (or a turn is in flight), the transcript byte_offset has not advanced, AND `last_pty_activity_at` is older than `MID_RUN_QUIESCENCE_SECS`, recover. The `"alive"` reprieve must NOT override a confirmed frozen screen.
+4. **Preserved long-subagent safety** — a session whose screen is still repainting (`last_pty_activity_at` fresh) is never recovered, regardless of how long the transcript or `last_tool_use_at` has been frozen. This is the regression guard for 25+ min subagents.
 
-- **Shared never-started grace constant** — a single module-level constant (proposed home: `agent/session_stall_classifier.py`, alongside the existing `NEVER_STARTED_GRACE_SECS`) that both the advisory classifier and the recovery actor read. The recovery actor cannot physically act before its 300s race-guard floor, so this constant defines the *recovery* grace at the floor (300s) while the advisory keeps its earlier *detection* grace (120s). The relationship between the two is made explicit in one place rather than two divergent magic numbers.
-- **Never-started branch in sub-check B** — when `sdk_ever_output is False` AND the session has never produced a turn, the fresh-heartbeat fast-path is denied once `running_seconds` exceeds the shared never-started recovery grace, instead of waiting for the full `NO_OUTPUT_BUDGET_SECONDS (1800s)`. The heartbeat loop runs during priming, so heartbeat freshness is **not** progress evidence for a session that has never produced a turn.
-- **Preserved slow-priming reprieve** — the existing Tier-2 reprieve gates (`compacting` / `children` / `alive`) still apply. A session that is genuinely still priming and has a live SDK subprocess with children gets reprieved; a wedged session with no children and no progress does not. This is the regression guard for "slow auth / large initial prompt."
-
-### Flow
-
-Worker running session, no turn produced → 5-min health loop tick (running_seconds > 300s) → `_has_progress`: sub-check A absent, sub-check B sees `sdk_ever_output=False` + never-started + running_seconds > never_started_grace → **denies fast-path** → own-progress fields absent → returns False → Tier-2 reprieve evaluated → no reprieve signal → `_apply_recovery_transition(reason_kind="no_progress")` → `running -> pending` → re-queued.
-
-Contrast (must NOT recover): same loop, but the session is genuinely priming with a live SDK child process → Tier-2 `children`/`alive` reprieve fires → kill skipped, `reprieve_count++`. If it keeps producing nothing past the reprieve cap, it eventually recovers — but the *normal* case is it produces a turn first and exits the no-output regime entirely.
-
-### Technical Approach
-
-Decision direction (pending Open Questions confirmation):
-
-- **Q1 → Yes (recovery actor owns the escalation).** Keep recovery in `session_health` where the kill/requeue/reprieve machinery already lives. Add a never-started leg to sub-check B: when `not sdk_ever_output` and there is no turn evidence, gate the fresh-heartbeat pass on a tighter `running_seconds <= NEVER_STARTED_RECOVERY_GRACE` instead of `<= NO_OUTPUT_BUDGET_SECONDS`. Heartbeat freshness alone is not progress for a never-started session.
-- **Q2 → No (advisory stays advisory).** Do not give `stall_advisory.py` write/kill powers. Avoiding double-action is automatic if only one actor (`session_health`) ever recovers. The advisory remains the early-warning observability surface; the actor is the single writer. This respects the classifier's hard "zero writes / never import session_health" constraint and avoids the "competing recovery functions racing" antipattern (#1036).
-- **Q3 → One shared constant.** Define the recovery grace once. Proposed: a new `NEVER_STARTED_RECOVERY_GRACE_SECS` in `agent/session_stall_classifier.py` (next to `NEVER_STARTED_GRACE_SECS`), imported by `session_health`. Document the deliberate two-value relationship: detection at 120s (advisory), action at the 300s race-guard floor — i.e. set `NEVER_STARTED_RECOVERY_GRACE_SECS = STARTUP_GRACE_SECONDS` (300s) or a small explicit multiple, with a comment tying it to `NEVER_STARTED_GRACE_SECS`. The exact home/value is an Open Question; the principle (single source of truth, no silent drift) is fixed.
-- **Q4 → Regression test for slow priming.** A session that produces a `turn_start` / writes `last_turn_at` within the normal startup window flips `sdk_ever_output=True`, leaves the never-started regime, and is governed by sub-check A's 1800s per-turn window — never touched by the new branch. The test asserts: (a) a never-started + fresh-heartbeat session is recovered shortly after 300s; (b) a session that produced a turn (or has a live SDK child) is NOT recovered by the new branch.
-
-Implementation is a tight change inside `_has_progress` sub-check B (`session_health.py:784-824`) plus one constant and an import. The `tier1_falloff:no_output_budget_exceeded` Redis counter increment should be mirrored with a distinct counter (e.g. `tier1_falloff:never_started_grace_exceeded`) so dashboards distinguish the two fall-through reasons.
+### Mid-run window (D2) — value rationale
+A live TUI repaints its spinner/counters on a sub-second-to-seconds cadence; a crash freezes it immediately. So `MID_RUN_QUIESCENCE_SECS` is a *confirmation* window over an already-strong signal, not a tolerance for legit silence. Proposed default **180s** of continuous screen quiescence (env-tunable `MID_RUN_QUIESCENCE_SECS`), comfortably above transient repaint gaps yet far below the 12h ceiling. The 25+ min subagent is protected by the *nature* of the signal (its screen keeps repainting), not by the window size. **Open for confirmation** — see Open Questions Q-A.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The only `except Exception` blocks in scope are the best-effort Redis counter increments in sub-check B and `_apply_recovery_transition` — they log at warning/debug and continue. Assert that a Redis failure on the new counter does NOT block the recovery decision (test: patch `POPOTO_REDIS_DB.incr` to raise, assert `_has_progress` still returns False and recovery still fires).
-- [ ] `classify_session_stall` already swallows all exceptions → `StallVerdict("healthy", "unclassifiable")`. No change to that contract; existing tests cover it.
+- [ ] Redis counter increments on the new fall-through legs are best-effort (log + continue); a counter failure must not block recovery (patch `incr` to raise, assert recovery still fires).
+- [ ] PTY-activity writer in the container must never raise into the read loop; a write failure leaves `last_pty_activity_at` stale and falls back to the existing (process-alive) behavior — assert the writer swallows + logs.
+- [ ] `classify_session_stall` keeps its swallow-all → `healthy/unclassifiable` contract; unchanged.
 
 ### Empty/Invalid Input Handling
-- [ ] `_has_progress` with `started_at=None AND created_at=None` (legacy/phantom) must preserve the existing fast-path (return True) — do not regress the legacy leg. Add/keep a test asserting this.
-- [ ] Negative `running_seconds` (clock skew) must preserve the fast-path (return True) — covered by the existing `running_seconds < STARTUP_GRACE_SECONDS` guard; keep a test pinning it.
-- [ ] `last_heartbeat_at` absent (None) on a never-started session → sub-check B already skips; falls through to own-progress fields (gated by #1614). Pin with a test.
+- [ ] `last_pty_activity_at is None` (non-granite session, or granite before first paint) → the mid-run leg is skipped entirely; behavior reverts to current. Test pins this.
+- [ ] `started_at=None AND created_at=None` (legacy/phantom) preserves the fast-path. Keep the existing test.
+- [ ] Negative `running_seconds` (clock skew) preserves the fast-path. Keep the existing guard + test.
 
 ### Error State Rendering
-- [ ] No user-visible output in this change — recovery is internal. The advisory's Telegram alert path is unchanged. State: error rendering is out of scope for this fix; the observable signal is the project-scoped Redis recovery counter and the `[session-health] Recovering session ...` log line, both asserted in tests.
+- [ ] No user-visible output; observable via the `[session-health] Recovering session ...` log and project-scoped Redis counters (new: `tier1_falloff:never_started_grace_exceeded`, `mid_run_pty_quiescent_recovery`). Asserted in tests.
 
 ## Test Impact
+- [ ] `tests/integration/test_agent_session_health_monitor.py` — UPDATE (note: integration, not unit): add never-started recovery cases (recover at the never-started grace, not 1800s) and the mid-run PTY-quiescence recovery case.
+- [ ] `tests/unit/test_session_health_inference_removed.py` — UPDATE: add never-started-grace assertions following its sub-check-B pattern; re-verify no assumption of the old 1800s boundary for the never-started case.
+- [ ] `tests/integration/test_session_heartbeat_progress.py` — UPDATE: extend to assert (a) never-started + fresh heartbeat recovers on the new grace, (b) a session that produced a turn is not recovered by the never-started leg.
+- [ ] `tests/unit/test_session_stall_classifier.py` — UPDATE: pin `NEVER_STARTED_GRACE_SECS` and the new `NEVER_STARTED_CONFIRM_MARGIN_SECS` relationship.
+- [ ] `tests/unit/test_session_health_compacting_reprieve.py` — UPDATE/VERIFY: the D3 reprieve-bypass for never-started must not break the existing `compacting`/`children`/`alive` reprieve behavior for output-producing sessions.
+- [ ] `tests/integration/test_stall_advisory_e2e.py` — VERIFY (no change expected): the `sys.modules` import-direction guard still holds.
+- [ ] NEW `tests/integration/` case — mid-run wedge: `last_pty_activity_at` stale > window + transcript frozen + process alive → recovered; and the inverse: `last_pty_activity_at` fresh (screen repainting) + transcript frozen 25+ min → NOT recovered.
 
-- [ ] `tests/unit/test_agent_session_health_monitor.py` — UPDATE: add cases for the never-started branch (recover shortly after 300s when no turn produced); verify existing no-output-budget cases still pass or are re-pinned to the new grace.
-- [ ] `tests/unit/test_session_health_inference_removed.py` — UPDATE: this file already covers sub-check B / own-progress gating (#1614). Add the never-started-grace assertions here following its existing pattern; re-verify it does not assume the old 1800s boundary for the never-started case.
-- [ ] `tests/integration/test_session_heartbeat_progress.py` — UPDATE: extend the end-to-end heartbeat-vs-progress scenario to assert a never-started + fresh-heartbeat session recovers on the new grace, and a turn-producing session does not.
-- [ ] `tests/unit/test_session_stall_classifier.py` — UPDATE only if the shared constant is introduced in `session_stall_classifier.py`: add a test pinning the new `NEVER_STARTED_RECOVERY_GRACE_SECS` value and its relationship to `NEVER_STARTED_GRACE_SECS`.
-- [ ] `tests/integration/test_stall_advisory_e2e.py` — VERIFY (no change expected): the `sys.modules` guard asserting the classifier never imports `session_health` must still hold after the new constant is added. The import direction is `session_health` → classifier, which does not violate the guard. Confirm the test still passes.
-
-No tests are DELETEd — the change is a tightening of an existing branch, not a removal of behavior.
+No tests DELETEd.
 
 ## Rabbit Holes
-
-- **Rewriting the two-tier detector or the reprieve-cap math.** Tempting to "clean up" the `NO_OUTPUT_BUDGET_SECONDS = MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW` derivation. Out of scope — the never-started case is a *separate, tighter* leg; leave the output-then-idle 1800s path alone.
-- **Lowering the 300s race-guard floor to match the advisory's 120s.** The 300s guard exists to avoid killing genuinely-fresh sessions and is referenced throughout the loop. Do not touch it; reconcile by acting at the floor, not by lowering it.
-- **Giving `stall_advisory` kill powers.** This breaks the classifier's zero-writes/no-session_health-import contract and reintroduces the competing-recoverers race. Explicitly rejected (Q2).
-- **Adding a stored `sdk_ever_output` field on `AgentSession`.** It is intentionally derived; storing it invites staleness bugs. Keep deriving it.
-- **Tuning the advisory's 120s.** Detection cadence is fine; the bug is the *actor's* 1800s, not the advisory's 120s.
+- **Lowering the global 300s race guard.** D1 relaxes it for `never_started` ONLY. Do not touch the floor for sessions that have produced output — it protects genuinely-fresh sessions loop-wide.
+- **Using transcript staleness as the mid-run trigger.** Explicitly rejected (false-kills long subagents). The mid-run trigger is PTY quiescence; transcript-not-advanced is a corroborating condition, never the sole one.
+- **Parsing the TUI screen for token/elapsed counters.** Tempting to read the exact counter values; unnecessary and brittle. Byte-activity (screen changed at all) is sufficient and is what `pty_driver` already computes.
+- **Giving `stall_advisory` kill powers.** Breaks the classifier's zero-writes / no-session_health-import contract; reintroduces competing recoverers. Rejected.
+- **Storing `sdk_ever_output`.** It stays derived from `last_tool_use_at`/`last_turn_at`.
+- **Discovering subagent transcript files as the liveness signal.** A plausible alternative to PTY-activity (a Task subagent writes its own growing JSONL), but it requires mapping parent→child transcripts and handling nested/Bash tools that have no transcript. PTY-activity is uniform across all tool types. Note as the fallback if PTY-activity proves unreliable in build; do not build both.
 
 ## Risks
 
-### Risk 1: Killing a legitimately-slow-but-priming session
-**Impact:** A session doing slow auth or digesting a large initial prompt is recovered mid-priming, wasting work and looking flaky.
-**Mitigation:** The new branch only denies the *heartbeat-as-progress* fast-path. Tier-2 reprieve gates (`children`/`alive`) still run and reprieve a session whose SDK subprocess is alive with active children. A session that produces any turn flips `sdk_ever_output=True` and leaves the regime entirely. Regression test (Q4) pins both the recover and the do-not-recover cases.
+### Risk 1: False-kill of a long, actively-working subagent/turn (the #1 regression)
+**Impact:** A 25+ min subagent is recovered mid-flight — wasted work, looks flaky, repeats the old `dev_hang` mistake.
+**Mitigation:** The mid-run trigger requires `last_pty_activity_at` quiescent for the full window. A working turn repaints continuously, so its activity timestamp stays fresh. Regression test pins "fresh PTY activity + frozen transcript 25 min → NOT recovered."
 
-### Risk 2: Recovery thrash / resurrection loop
-**Impact:** A session that wedges immediately on every pickup could be recovered repeatedly.
-**Mitigation:** Existing `MAX_RECOVERY_ATTEMPTS` finalizes to `failed` after N attempts (already in `_apply_recovery_transition`); `reprieve_count` reset on recovery is already handled. No new loop is introduced — the never-started case routes through the *same* `reason_kind="no_progress"` transition, inheriting all existing backstops.
+### Risk 2: PTY-activity signal not actually written / too coarse
+**Impact:** If the container doesn't persist screen activity reliably, the mid-run leg either never fires (false-negative restored) or fires wrongly.
+**Mitigation:** Source the timestamp from the same byte-read path `pty_driver` already uses for C5 idle; integration test drives a real PTY pair and asserts the field advances during work and freezes on a killed child. If unreliable, fall back to the subagent-transcript approach (Rabbit Holes).
 
-### Risk 3: Constant drift reintroduced later
-**Impact:** A future edit moves one grace without the other, re-opening the disagreement.
-**Mitigation:** Single shared constant (Q3) plus a unit test pinning the relationship between detection grace and recovery grace, so a divergent edit fails CI.
+### Risk 3: D3 reprieve-bypass kills a session about to emit its first turn
+**Impact:** A slow-but-genuinely-priming session is recovered just before its first turn lands.
+**Mitigation:** The never-started grace + confirmation margin gives priming headroom; the moment a turn lands, `sdk_ever_output` flips True and the never-started legs no longer apply. Regression test: a session that emits a turn within the grace+margin is not recovered.
+
+### Risk 4: Constant/grace drift reintroduced later
+**Mitigation:** Single shared `NEVER_STARTED_GRACE_SECS`; unit test pins the detection/action relationship so a divergent edit fails CI.
 
 ## Race Conditions
 
-### Race 1: Concurrent recovery vs. first turn arriving
-**Location:** `agent/session_health.py` `_has_progress` / `_agent_session_health_check` (`:1708-1745`)
-**Trigger:** The session emits its first `turn_start` (writing `last_turn_at`) in the same tick the health loop evaluates it.
-**Data prerequisite:** `last_turn_at` / `last_tool_use_at` must be readable before `_has_progress` short-circuits sub-check A.
-**State prerequisite:** Once `sdk_ever_output=True`, the never-started branch must not fire.
-**Mitigation:** `_has_progress` reads `sdk_ever_output` first (sub-check A) and returns True on any fresh per-turn signal before reaching sub-check B. The recovery transition uses CAS (`expected_status="running"`) so a concurrent status change loses safely. Worst case is a single benign re-queue; the resumed session continues from its transcript.
+### Race 1: Recovery vs. first turn arriving (path A)
+**Mitigation:** `_has_progress` checks `sdk_ever_output` first; `_apply_recovery_transition` uses CAS (`expected_status="running"`). Worst case: one benign re-queue; the resumed session continues from its transcript.
 
-### Race 2: Advisory and actor observing the same session in overlapping windows
-**Location:** `reflections/stall_advisory.py` vs. `agent/session_health.py`
-**Trigger:** Both reflections run near-simultaneously on the same never-started session.
-**Data prerequisite:** None shared for writes — advisory never writes.
-**State prerequisite:** Only one writer.
-**Mitigation:** Advisory is read-only by contract (Q2). Only `session_health` writes. No double-action possible. (This is the explicit AC: "No double-recovery.")
+### Race 2: Recovery vs. subagent finishing (path B)
+**Trigger:** the subagent returns (screen repaints, transcript advances) in the same tick the actor reads a stale `last_pty_activity_at`.
+**Mitigation:** require BOTH PTY quiescence beyond the window AND no byte_offset advance since the prior tick; CAS on the transition. A turn landing flips the conditions; worst case a single benign re-queue.
+
+### Race 3: Advisory and actor on the same session
+**Mitigation:** advisory is read-only; only `session_health` writes. No double-action.
 
 ## No-Gos (Out of Scope)
-
-Nothing deferred — every relevant item is in scope for this plan. Specifically NOT changing: the 300s race-guard floor, the 1800s output-then-idle path, the advisory's 120s detection grace, and the derived nature of `sdk_ever_output`. These are intentional preservations documented in Rabbit Holes, not deferred work.
+Not changing: the global 300s race guard for output-producing sessions, the 1800s output-then-idle path for the non-granite case, the advisory's 120s detection cadence, the derived nature of `sdk_ever_output`. Not building the subagent-transcript discovery path unless PTY-activity proves unreliable.
 
 ## Update System
-
-No update system changes required — this is purely internal worker recovery logic. No new dependencies, config files, env vars, or migration steps. The change ships with the next `/update` pull-and-restart like any code change; the running worker picks up the new grace on restart (`./scripts/valor-service.sh worker-restart`).
+No update-system changes required — purely internal worker/container logic. New env knobs (`NEVER_STARTED_CONFIRM_MARGIN_SECS`, `MID_RUN_QUIESCENCE_SECS`) have safe defaults and need no propagation; document them in `.env.example` only if we want operator-tunability. The change ships with the next `/update` pull-and-restart (`./scripts/valor-service.sh restart` to cycle worker + the granite container code).
 
 ## Agent Integration
-
-No agent integration required — this is a worker-internal change to recovery logic. No new CLI entry point, no MCP tool, no bridge import. The behavior is observable to operators via existing surfaces: the `[session-health] Recovering session ...` log line, the project-scoped Redis recovery counters (`{project_key}:session-health:recoveries:no_progress` and the new `tier1_falloff:never_started_grace_exceeded`), and the unchanged stall-advisory log/Telegram alert.
+No agent integration required — worker/container-internal recovery logic. No new CLI entry point, MCP tool, or bridge import. Observable via the `[session-health] Recovering session ...` log and project-scoped Redis counters (`tier1_falloff:never_started_grace_exceeded`, `mid_run_pty_quiescent_recovery`) and the unchanged stall-advisory alert.
 
 ## Documentation
-
 ### Feature Documentation
-- [ ] Update `docs/features/session-lifecycle.md` (or the session-health/recovery doc, e.g. `docs/features/bridge-self-healing.md`) to describe the never-started recovery grace and how it relates to the advisory's detection grace. Locate the canonical recovery doc during build (`grep -rl "NO_OUTPUT_BUDGET\|_has_progress\|sub-check B" docs/`).
-- [ ] If a dedicated doc exists for #1356/#1614 (the two-tier detector), append the never-started leg there.
+- [ ] Update the canonical recovery doc (locate during build: `grep -rl "NO_OUTPUT_BUDGET\|_has_progress\|_tier2_reprieve" docs/`; likely `docs/features/session-lifecycle.md` and/or `docs/features/granite-pty-production.md`) to describe both recovery legs and the `last_pty_activity_at` signal.
+- [ ] Document that the container's 12h `CYCLE_IDLE_TIMEOUT_S` is a ceiling and the session-health layer is the real hang detector (cross-link `ef53a88f`).
 
 ### Inline Documentation
-- [ ] Update the `_has_progress` docstring's four-leg description in `session_health.py` to add the never-started leg.
-- [ ] Add a comment on the new shared constant tying it to `NEVER_STARTED_GRACE_SECS` and the 300s floor, so the deliberate two-value relationship is visible at the definition site.
+- [ ] Update `_has_progress` and `_tier2_reprieve_signal` docstrings for the never-started legs.
+- [ ] Comment the new shared grace usage and the `last_pty_activity_at` writer site.
 
 ## Success Criteria
-
-- [ ] A `running` session with `last_turn_at = None` and fresh heartbeats is recovered shortly after the recovery grace (at/just past the 300s floor), not after 30 min.
-- [ ] The advisory's detection grace and the recovery actor's never-started grace derive from a single shared constant; a unit test pins their relationship so silent drift fails CI.
-- [ ] A session that produces a turn within the normal startup window (or has a live SDK child) is NOT recovered by the new branch — regression test included and green.
-- [ ] No double-recovery: advisory stays read-only; only `session_health` writes. Asserted by the unchanged `test_stall_advisory_e2e.py` import guard.
-- [ ] A new distinct Redis counter (`tier1_falloff:never_started_grace_exceeded`) distinguishes never-started fall-through from the 1800s output-budget fall-through on dashboards.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] `grep` confirms `session_health.py` imports the new constant from `session_stall_classifier.py` (and NOT vice versa).
+- [ ] Priming wedge: `running` + `last_turn_at=None` + fresh heartbeats is recovered on the never-started grace (reconciled to 120s + margin via D1), NOT after ~30-100 min — closing both sub-check B and the reprieve path.
+- [ ] Mid-run wedge: a session with frozen PTY screen (`last_pty_activity_at` quiescent > window) + non-advancing transcript + alive process is recovered well below the 12h ceiling.
+- [ ] No false-kill: a long subagent whose screen keeps repainting (fresh `last_pty_activity_at`) is NOT recovered even with a 25+ min frozen transcript — regression test green.
+- [ ] No false-kill: a session that emits its first turn within the never-started grace+margin is NOT recovered.
+- [ ] Detection and action graces derive from a single shared constant; a drift test fails CI.
+- [ ] `last_pty_activity_at` advances during real PTY work and freezes on a killed child — integration test green.
+- [ ] Advisory stays read-only; only `session_health` writes (import-guard test green).
+- [ ] New Redis counters distinguish the two recovery legs on dashboards.
+- [ ] Tests pass (`/do-test`); docs updated (`/do-docs`); ruff clean.
 
 ## Team Orchestration
-
-When this plan is executed, the lead agent orchestrates work using Task tools. The lead NEVER builds directly.
+The lead agent orchestrates via Task tools and NEVER builds directly.
 
 ### Team Members
-
-- **Builder (recovery-logic)**
-  - Name: recovery-builder
-  - Role: Implement the never-started branch in `_has_progress` sub-check B, the shared constant, the import, and the new Redis counter.
-  - Agent Type: debugging-specialist
-  - Resume: true
-
-- **Test Engineer (regression)**
-  - Name: regression-tester
-  - Role: Author the recover/do-not-recover regression tests and the constant-relationship pin test.
-  - Agent Type: test-engineer
-  - Resume: true
-
-- **Validator (recovery-logic)**
-  - Name: recovery-validator
-  - Role: Verify the slow-priming session is not killed, the import direction is correct, and the advisory remains read-only.
-  - Agent Type: validator
-  - Resume: true
-
-- **Documentarian**
-  - Name: docs-writer
-  - Role: Update the recovery feature doc and inline docstrings.
-  - Agent Type: documentarian
-  - Resume: true
+- **recovery-builder** (debugging-specialist) — path-A never-started leg, reprieve bypass (D3), shared grace, counters. Resume: true.
+- **pty-signal-builder** (agent-architect) — persist `last_pty_activity_at` from the container/`bridge_adapter` read loop; path-B mid-run recovery leg. Resume: true.
+- **regression-tester** (test-engineer) — both wedge recover/do-not-recover suites + drift pin + PTY-activity integration test. Resume: true.
+- **recovery-validator** (validator) — verify long-subagent not killed, slow-priming not killed, import direction, advisory read-only. Resume: true.
+- **docs-writer** (documentarian) — recovery feature doc + docstrings.
 
 ## Step by Step Tasks
 
-### 1. Introduce the shared never-started recovery grace constant
-- **Task ID**: build-shared-constant
+### 1. Shared never-started grace + confirmation margin
+- **Task ID**: build-shared-grace
 - **Depends On**: none
 - **Validates**: tests/unit/test_session_stall_classifier.py
-- **Assigned To**: recovery-builder
-- **Agent Type**: debugging-specialist
-- **Parallel**: false
-- Add `NEVER_STARTED_RECOVERY_GRACE_SECS` to `agent/session_stall_classifier.py` next to `NEVER_STARTED_GRACE_SECS`, with a comment documenting the two-value relationship (detection 120s vs. action at the 300s floor).
-- Confirm the value default and env-tunability stance match the team decision from Open Questions.
+- **Assigned To**: recovery-builder · debugging-specialist · Parallel: false
+- Add `NEVER_STARTED_CONFIRM_MARGIN_SECS` next to `NEVER_STARTED_GRACE_SECS` in `session_stall_classifier.py`; `session_health` imports both. Document the detection-vs-action relationship.
 
-### 2. Add the never-started branch to sub-check B
-- **Task ID**: build-subcheck-b
-- **Depends On**: build-shared-constant
-- **Validates**: tests/unit/test_agent_session_health_monitor.py, tests/unit/test_session_health_inference_removed.py
-- **Informed By**: recon (300s race-guard floor is the hard minimum; sub-check A must still short-circuit on sdk_ever_output)
-- **Assigned To**: recovery-builder
-- **Agent Type**: debugging-specialist
-- **Parallel**: false
-- Import the constant into `session_health.py` (direction: session_health → classifier only).
-- In sub-check B, when `not sdk_ever_output` and never-started, gate the fresh-heartbeat pass on `running_seconds <= NEVER_STARTED_RECOVERY_GRACE_SECS` instead of `<= NO_OUTPUT_BUDGET_SECONDS`.
-- Add the `tier1_falloff:never_started_grace_exceeded` Redis counter on the new fall-through (best-effort, swallow + log on failure).
-- Update the `_has_progress` docstring four-leg description.
+### 2. Path-A never-started recovery (sub-check B leg + reprieve bypass + floor relaxation)
+- **Task ID**: build-never-started
+- **Depends On**: build-shared-grace
+- **Validates**: tests/integration/test_agent_session_health_monitor.py, tests/unit/test_session_health_inference_removed.py, tests/unit/test_session_health_compacting_reprieve.py
+- **Informed By**: D1 (relax 300s floor for no-turn case only), D3 (bypass children/alive reprieve for never-started)
+- **Assigned To**: recovery-builder · debugging-specialist · Parallel: false
+- In sub-check B: when `not sdk_ever_output` and no turn ever, deny the heartbeat fast-path past the never-started grace. In `_tier2_reprieve_signal`: when never-started past grace, skip `children`/`alive`. Relax the actor's 300s evaluation floor for the never-started case. Add `tier1_falloff:never_started_grace_exceeded` counter. Update docstrings.
 
-### 3. Regression + constant-pin tests
+### 3. Path-B PTY-activity signal + mid-run recovery leg
+- **Task ID**: build-mid-run
+- **Depends On**: build-shared-grace
+- **Validates**: tests/integration/test_agent_session_health_monitor.py
+- **Informed By**: D2 (PTY-activity oracle), transcript-freeze finding, pty_driver C5 quiescence
+- **Assigned To**: pty-signal-builder · agent-architect · Parallel: true (independent of task 2; different code paths)
+- Add `last_pty_activity_at` to `AgentSession`; write it from the container read loop on non-quiescent screen bytes (swallow+log on failure). Add the mid-run leg: `sdk_ever_output=True` + tool/turn in flight + byte_offset not advanced + `last_pty_activity_at` quiescent > `MID_RUN_QUIESCENCE_SECS` → recover; `"alive"` reprieve must not override. Add `mid_run_pty_quiescent_recovery` counter.
+
+### 4. Regression + integration tests
 - **Task ID**: build-tests
-- **Depends On**: build-subcheck-b
-- **Validates**: tests/unit/test_agent_session_health_monitor.py, tests/integration/test_session_heartbeat_progress.py, tests/unit/test_session_stall_classifier.py
-- **Assigned To**: regression-tester
-- **Agent Type**: test-engineer
-- **Parallel**: false
-- Test: never-started + fresh heartbeat → recovered at/just past 300s (NOT 1800s).
-- Test: turn-producing session (sdk_ever_output=True) and live-SDK-child session → NOT recovered by the new branch.
-- Test: legacy (started_at=None AND created_at=None) and clock-skew (negative running_seconds) preserve the fast-path.
-- Test: Redis counter failure does not block the recovery decision.
-- Test: constant relationship pinned (detection vs. recovery grace).
+- **Depends On**: build-never-started, build-mid-run
+- **Validates**: all UPDATEd test files + the new mid-run integration case
+- **Assigned To**: regression-tester · test-engineer · Parallel: false
+- Never-started recover at grace (not 1800s); turn-producing + slow-priming-about-to-turn NOT recovered. Mid-run: stale PTY + frozen transcript + alive → recover; fresh PTY + 25min frozen transcript → NOT recover. `last_pty_activity_at` advances on work / freezes on killed child. Legacy + clock-skew preserve fast-path. Counter-failure does not block recovery. Drift pin.
 
-### 4. Validate recovery safety + import direction
+### 5. Validate safety + import direction
 - **Task ID**: validate-recovery
 - **Depends On**: build-tests
-- **Assigned To**: recovery-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Confirm slow-priming case not killed; confirm `test_stall_advisory_e2e.py` import guard still green; confirm import direction via grep.
-- Run targeted tests; report pass/fail.
+- **Assigned To**: recovery-validator · validator · Parallel: false
+- Confirm both false-kill cases safe; `test_stall_advisory_e2e.py` import guard green; import direction via grep; run targeted tests.
 
-### 5. Documentation
+### 6. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-recovery
-- **Assigned To**: docs-writer
-- **Agent Type**: documentarian
-- **Parallel**: false
-- Update the canonical recovery feature doc and the `_has_progress` docstring; add the constant comment.
-- Add/update the docs index entry if applicable.
+- **Assigned To**: docs-writer · documentarian · Parallel: false
+- Update recovery feature doc(s) + docstrings + constant/field comments + docs index entry.
 
-### 6. Final Validation
+### 7. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
-- **Assigned To**: recovery-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Run full targeted test set + ruff; verify all Success Criteria including docs and import-direction grep.
-- Generate final report.
+- **Assigned To**: recovery-validator · validator · Parallel: false
+- Full targeted test set + ruff; verify every Success Criterion incl. docs and import-direction grep. Final report.
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Stall classifier tests | `pytest tests/unit/test_session_stall_classifier.py -q` | exit code 0 |
-| Health monitor tests | `pytest tests/unit/test_agent_session_health_monitor.py tests/unit/test_session_health_inference_removed.py -q` | exit code 0 |
-| Heartbeat-progress integration | `pytest tests/integration/test_session_heartbeat_progress.py -q` | exit code 0 |
-| Advisory import guard | `pytest tests/integration/test_stall_advisory_e2e.py -q` | exit code 0 |
-| Import direction (no reverse import) | `grep -n "import session_health\|from agent.session_health" agent/session_stall_classifier.py` | exit code 1 |
-| Constant imported correctly | `grep -n "NEVER_STARTED_RECOVERY_GRACE_SECS" agent/session_health.py` | output contains NEVER_STARTED_RECOVERY_GRACE_SECS |
-| Lint clean | `python -m ruff check agent/session_health.py agent/session_stall_classifier.py` | exit code 0 |
-| Format clean | `python -m ruff format --check agent/session_health.py agent/session_stall_classifier.py` | exit code 0 |
+| Stall classifier tests | `pytest tests/unit/test_session_stall_classifier.py -q` | exit 0 |
+| Health monitor (integration) | `pytest tests/integration/test_agent_session_health_monitor.py -q` | exit 0 |
+| Inference-removed unit | `pytest tests/unit/test_session_health_inference_removed.py -q` | exit 0 |
+| Reprieve unit | `pytest tests/unit/test_session_health_compacting_reprieve.py -q` | exit 0 |
+| Heartbeat-progress integration | `pytest tests/integration/test_session_heartbeat_progress.py -q` | exit 0 |
+| Advisory import guard | `pytest tests/integration/test_stall_advisory_e2e.py -q` | exit 0 |
+| Import direction (no reverse import) | `grep -n "import session_health\|from agent.session_health" agent/session_stall_classifier.py` | exit 1 (no match) |
+| Shared grace imported | `grep -n "NEVER_STARTED_GRACE_SECS\|NEVER_STARTED_CONFIRM_MARGIN_SECS" agent/session_health.py` | match |
+| PTY-activity field present | `grep -n "last_pty_activity_at" models/agent_session.py agent/granite_container/bridge_adapter.py` | match in both |
+| Lint clean | `python -m ruff check agent/session_health.py agent/session_stall_classifier.py agent/granite_container/bridge_adapter.py` | exit 0 |
+| Format clean | `python -m ruff format --check agent/session_health.py agent/session_stall_classifier.py agent/granite_container/bridge_adapter.py` | exit 0 |
 
 ## Critique Results
 
@@ -332,6 +298,6 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ## Open Questions
 
-1. **(Q1 confirmation)** Confirm the recovery actor (`session_health`) owns the escalation via a tighter never-started branch in sub-check B — rather than giving the advisory write powers. The plan assumes yes.
-2. **(Q3 — constant home and value)** Where should the shared `NEVER_STARTED_RECOVERY_GRACE_SECS` live, and what value? The plan proposes `agent/session_stall_classifier.py` (next to `NEVER_STARTED_GRACE_SECS`), valued at the 300s race-guard floor (`= STARTUP_GRACE_SECONDS`). Acceptable, or prefer a small explicit multiple of the detection grace (e.g. 2× 120s = 240s, clamped up to the 300s floor) with the floor enforced in `session_health`? Should it be env-tunable like the neighboring constants?
-3. **(Recovery timescale)** Given the 300s race-guard floor cannot be lowered without broader risk, is "recovered at ~300-360s instead of 1800s" an acceptable realization of the AC "well under 1800s"? If a sub-300s recovery is required, that needs a separate decision to lower or special-case the race guard (explicitly a rabbit hole here).
+1. **(Q-A — mid-run window value)** `MID_RUN_QUIESCENCE_SECS` default. Proposed **180s** of continuous PTY-screen quiescence (the signal is strong; this is a confirmation margin, not silence tolerance). Confirm 180s, or prefer a different value? Env-tunable as planned?
+2. **(Q-B — PTY-activity vs subagent-transcript)** The plan makes PTY-screen byte-activity the mid-run oracle (uniform across all tool types). The alternative — discovering each subagent's own growing transcript — is noted as a build-time fallback. Confirm PTY-activity is the primary approach to build first.
+3. **(Q-C — D1 floor relaxation blast radius)** Relaxing the 300s race guard for the `never_started` case only: acceptable, or do you want the actor to still wait to ~300s and instead just close the reprieve path (slower recovery, zero change to the race guard)? D1 currently says relax it.
