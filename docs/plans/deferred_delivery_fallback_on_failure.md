@@ -123,7 +123,7 @@ re-deriving the 32-min ghost in a live worker is infeasible and unnecessary.
 | Prior Fix | What It Did | Why It Failed / Was Incomplete |
 |-----------|-------------|-------------------------------|
 | PR #1738 (#1711) | Added `_deliver_tool_timeout_degraded_notice` to the two `failed`-finalization branches | Delivers a *canned* degraded notice keyed on `tool_name`, but never checks whether a self-draft was deferred. A session with a pending `drafter-fallback` steering message still gets the generic notice (or nothing, since the notice is gated on `reason_kind == "tool_timeout"` only) and the user's *actual answer* — which the agent had narrated but deferred — is never delivered. |
-| PR #875 | CAS status authority in `models/session_lifecycle.py` | Authoritative *when invoked*, but on the happy-path return from `_execute_agent_session()` the completion transition is expected to have already happened inside the executor. When the executor leaves the session `running` (deferred-delivery / unconsumed-steering path), `finalized_by_execute=True` suppresses the worker finally-block's completion guard — so CAS is never called and the session ghosts. |
+| PR #875 | CAS status authority in `models/session_lifecycle.py` | Authoritative *when invoked*, but on the happy-path completion/delivery exit of `_execute_agent_session()` (~`session_executor.py:1759-1774`) the terminal `complete_transcript(..., status="completed")` → `finalize_session` CAS call does not land on the deferred-self-draft completion path — so the session is never finalized to `completed` and ghosts as `running`. (The fix is scoped to *this* completion exit; the nudge/re-enqueue path correctly creates a fresh successor and the cancel path is health-checker-owned — neither is the leak.) |
 
 **Root cause pattern:** deferred-delivery state and completion state are both
 *implicit* — encoded in local variables and control flow rather than persisted/
@@ -142,10 +142,15 @@ SDK work.
 6. **Output (today)**: nothing, or the generic `tool_timeout` degraded notice. The deferred answer is lost.
 7. **Output (desired)**: before each terminal `finalize_session(...)` in `_apply_recovery_transition()`, **read `entry.extra_context.get("deferred_self_draft_pending")`** (NOT the steering queue). On a truthy flag, deliver a fallback (apply the narration gate to `extra_context["deferred_self_draft_text"]` if recoverable, else an explicit "couldn't finish responding" notice) through the same callback path `_deliver_tool_timeout_degraded_notice` uses. This must fire on **all** terminal recovery branches — the two `failed` branches AND the local `abandoned` (`no_progress`) branch.
 
-For Bug A: **entry** `_execute_agent_session()` finishes SDK work → saves `complete`
-snapshot → **gap**: returns normally without a terminal CAS transition →
-`finalized_by_execute=True` → worker finally-block completion guard skipped →
-session stays `running` → **output**: 32-min ghost + spurious recovery.
+For Bug A: **entry** `_execute_agent_session()` (`agent/session_executor.py:601`)
+finishes SDK work and reaches the completion/delivery exit (~1759-1774) → saves
+`complete` snapshot → **gap**: on the deferred-self-draft completion path the terminal
+`complete_transcript(..., status="completed")` (which delegates to the #875 CAS
+`finalize_session`) does not land, so the lifecycle is never finalized to `completed` →
+worker future never resolves → session stays `running` → **output**: 32-min ghost +
+spurious recovery. The fix is scoped to **this completion exit only** — the nudge /
+re-enqueue path (1844-1892, fresh successor) and `CancelledError` (health-checker-owned)
+are deliberately untouched.
 
 ## Architectural Impact
 
@@ -206,10 +211,18 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/deferred_deliv
   Wired into **all three** terminal recovery branches (two `failed` + the local
   `abandoned`/`no_progress` branch).
 - **Worker-future-leak fix (Bug A)**: Ensure `_execute_agent_session()` resolves the
-  session to the terminal status `completed` via
+  session to the terminal status `completed` **only on the completion/delivery exit**
+  (`agent/session_executor.py:601` body; completion block ~1759-1774) via
   `models/session_lifecycle.py::finalize_session(session, "completed", ...)` (NOT
-  `transition_status` — it raises `ValueError` on terminal targets) whenever it stops
-  doing SDK work, so the worker future resolves promptly and no spurious recovery fires.
+  `transition_status` — it raises `ValueError` on terminal targets), guarded by a
+  `get_authoritative_session` re-read + stale-object bail and a `try/except
+  StatusConflictError` (CAS conflict = another process already finalized = success).
+  **Do NOT finalize on the nudge / unconsumed-steering re-enqueue path** (it
+  delete-and-recreates a fresh successor — finalizing the stale object is the #867/#875
+  nudge-stomp) **or on `CancelledError`** (the health checker owns that terminal
+  transition). The existing `complete_transcript(...)` call already routes the
+  completion exit through this CAS authority with `StatusConflictError` handling; the
+  fix closes any gap that still leaves the session `running`.
 - **Terminal-state counter cleanup (AC4)**: Call the existing
   `reset_self_draft_attempts(session_id)` whenever a session reaches a terminal
   status (`failed`, `killed`, `completed`), replacing reliance on the 1-hour TTL.
@@ -234,11 +247,31 @@ no ghost → no recovery.
   Recon confirms this). Draining it at finalization would detect nothing and the
   fallback would never fire. Instead, in `agent/output_handler.py`, inside the
   `if steering_deferred:` block (lines 429-436), **before** the early `return`,
-  persist on the `AgentSession`:
-  `session.extra_context = {**(session.extra_context or {}), "deferred_self_draft_pending": True, "deferred_self_draft_text": text}`
-  then `session.save()`. Best-effort, wrapped so a persistence error never blocks the
-  file dual-write / return. This is the cross-process, cross-turn signal the
+  persist on the `AgentSession` the keys `deferred_self_draft_pending=True` and
+  `deferred_self_draft_text=text`. This is the cross-process, cross-turn signal the
   finalization path reads.
+  - **Safe read-modify-write (critique concern).** `extra_context` is a DictField that
+    other processes (the health checker, the executor's transport-resolution writes) also
+    mutate. A naive `session.extra_context = {**(session.extra_context or {}), ...}` on a
+    possibly-stale local `session` would clobber concurrent writes (last-writer-wins on
+    the whole dict). To make the read-modify-write safe, **re-read the authoritative
+    record immediately before the merge** via
+    `models/session_lifecycle.py::get_authoritative_session(session.session_id, session.project_key)`,
+    merge the two new keys into *that* record's `extra_context`, and `save(update_fields=["extra_context"])`.
+    If `get_authoritative_session` returns None (record gone) or raises, fall back to the
+    local `session` object (best-effort — a missed persist degrades to the canned
+    "couldn't finish" notice, never a crash). Document the expectation explicitly: this
+    is **last-writer-wins per the whole `extra_context` dict**, mitigated by re-reading at
+    the latest possible moment; the two deferred keys are write-once-per-defer so the
+    only realistic concurrent writer is the transport-resolution write, which sets
+    disjoint keys — a re-read immediately before the merge makes a lost update vanishingly
+    unlikely. (A field-scoped CAS is out of scope — Popoto DictField has no per-key CAS;
+    the re-read-then-merge is the agreed mitigation.)
+  - **No silent persist failure (critique concern).** Wrap the persist in
+    `try/except Exception` so it never blocks the file dual-write / early `return`, but
+    **log the failure at `logger.warning`** (with `session_id` and the exception) — do
+    NOT swallow silently. A persist failure means the fallback signal is lost and the user
+    will get (at best) the canned notice, so it must be visible in logs for triage.
 - **Bug B, part 2 — fallback delivery.** Add `_deliver_deferred_self_draft_fallback(entry)`
   in `agent/session_health.py`, modeled on `_deliver_tool_timeout_degraded_notice`
   (distinct SETNX idempotency lock `self_draft_fallback_sent:{sid}`; same
@@ -270,26 +303,72 @@ no ghost → no recovery.
   helper delivers the explicit "couldn't finish responding" notice, never an empty
   message. The canned-notice-only alternative is **removed as the primary path** — it
   remains only the degenerate case when no text was persisted.
-- **Bug A — worker-future leak.** Audit `_execute_agent_session()`'s exit path. The
-  symptom is: executor saves a `complete` snapshot and the output handler returns
-  (deferred path `return`s early at `output_handler.py:436`), but the lifecycle is
-  not finalized to `completed`, and `_execute_agent_session()` returns normally so
-  `finalized_by_execute=True` suppresses the worker finally-block completion guard.
-  The fix is to ensure the executor finalizes the session to the terminal status
-  `completed` **via `models/session_lifecycle.py::finalize_session(session, "completed", ...)`**
-  before returning whenever it has stopped doing SDK work — including the
-  steering-deferred early-return and the unconsumed-steering re-enqueue path the issue
-  flags. **`completed` is terminal**, so `transition_status()` is the WRONG API — it
-  raises `ValueError` on terminal targets and a literal build would crash the worker
-  (critique blocker 1). `finalize_session()` is the #875 CAS authority for terminal
-  states; routing through it (no raw status writes) preserves the CAS guard and avoids
-  re-opening the #867 race.
-- **AC4 — counter cleanup.** Wire `reset_self_draft_attempts(session_id)` into the
-  terminal-transition path. Cleanest seat: the lifecycle reaper hook that already
-  fires on terminal transitions (the same place `finalize_session` telemetry reaps),
-  so all three terminal statuses (`failed`, `killed`, `completed`) are covered by a
-  single call site rather than sprinkling deletes across branches. Best-effort,
-  swallow errors.
+- **Bug A — worker-future leak (anchor: `agent/session_executor.py:601`, the body of
+  `_execute_agent_session`; the completion/delivery exit is at ~1759-1774).** The
+  leak fix must be scoped to **the COMPLETION/DELIVERY exit ONLY** — NOT "wherever the
+  executor stops doing SDK work" (critique blocker 2: that over-reaches into the nudge
+  and cancel paths and re-introduces the #867/#875 nudge-stomp).
+  - **Where the fix goes.** The executor's terminal block at `session_executor.py:1759-1774`
+    already computes `final_status = "active" if chat_state.defer_reaction else
+    ("completed" if not task.error else "failed")` and, when `not chat_state.defer_reaction`,
+    calls `complete_transcript(session.session_id, status=final_status)` — which already
+    delegates to `models/session_lifecycle.py::finalize_session(s, "completed", ...)`
+    with `StatusConflictError` handling (`bridge/session_transcript.py:315-326`). This
+    is the completion/delivery exit and is already the correct, CAS-routed seat. The Bug A
+    work is to **confirm this seat actually fires on the deferred-self-draft completion
+    path and close any gap that leaves the session `running`** — e.g. an exit path where
+    `agent_session` is truthy but the `complete_transcript` call is skipped, or where the
+    deferred early-return in the output handler leaves `defer_reaction` unset so the
+    branch is reached but the future still never resolves. The remedy is a guaranteed
+    terminal `finalize_session(session, "completed", ...)` on this completion exit, never
+    a raw status write and never `transition_status()` (which raises `ValueError` on the
+    terminal `completed` target — critique blocker 1).
+  - **Paths the fix must NOT touch:**
+    - **Nudge / unconsumed-steering re-enqueue path** (`session_executor.py:1844-1892`):
+      this path calls `enqueue_agent_session(...)`, which **delete-and-recreates a fresh
+      pending successor** (the `_enqueue_nudge` family already sets `defer_reaction=True`
+      at lines 1210/1227/1244, so the completion branch is correctly skipped for it).
+      Finalizing the now-stale `session` object to terminal `completed` here is the exact
+      #867/#875 nudge-stomp the plan claims to avoid. **Do NOT finalize on any nudge_* /
+      re-enqueue exit.**
+    - **`CancelledError`:** the session is left `running` by design (the health checker
+      owns the terminal transition after cancel+SIGTERM+SIGKILL). **Do NOT finalize there.**
+  - **Stale-object guard (mandatory).** Before the completion `finalize_session(session,
+    "completed", ...)` fires, **re-read the authoritative record** via
+    `models/session_lifecycle.py::get_authoritative_session(session_id, project_key)` and
+    **bail if it is no longer the one we executed** (status already terminal, or a nudge
+    successor replaced it). This prevents finalizing a record a concurrent nudge/recovery
+    already moved. Wrap the finalize in `try/except StatusConflictError` (treat a CAS
+    conflict as success — another process already finalized) so a race never crashes the
+    worker. `complete_transcript` already does both (re-query by `session_id` +
+    `StatusConflictError` swallow), so reusing/extending that path is preferred over a
+    bespoke finalize.
+- **AC4 — counter cleanup (blocker 1 fix).** Wire `reset_self_draft_attempts(session_id)`
+  into the terminal-transition path. The naive seat — inside `finalize_session`'s
+  `if emit_telemetry:` block (`models/session_lifecycle.py:293+`, alongside the
+  telemetry reaper) — is **WRONG**: *every* health-checker terminal finalize passes
+  `emit_telemetry=False` (verified: `session_health.py:1624`, `1642`, `1668`, and the
+  `transition_status(..., emit_telemetry=False)` at `1750`). The dedup source on those
+  paths is the kill-enriched `status_transition` event emitted earlier, so the in-finalize
+  reaper is deliberately skipped — and `session_health.py:1607-1610` calls
+  `finalize_telemetry()` directly to compensate (the **dual-seat pattern**). A reset
+  placed only in the `emit_telemetry` block would therefore be skipped on exactly the
+  `failed`/`abandoned` paths this counter cleanup targets, leaving
+  `steering:attempts:{session_id}` on its 1-hour TTL — the bug AC4 exists to fix.
+  **FIX — follow the existing dual-seat pattern, not a single seat:**
+  1. **Seat A (in-finalize, telemetry-on path):** add `reset_self_draft_attempts(_sid)`
+     to `finalize_session`'s reaper, but **OUTSIDE** the `if emit_telemetry:` guard —
+     in an unconditional best-effort block that runs on every terminal finalize
+     regardless of `emit_telemetry`. This covers the happy-path `completed` finalize
+     (Bug A) and any caller that does emit telemetry.
+  2. **Seat B (health-checker path):** add `reset_self_draft_attempts(entry.session_id)`
+     next to the existing `finalize_telemetry(entry.session_id)` dual-seat at
+     `session_health.py:1607-1610` (inside the `if _dest in ("abandoned", "failed"):`
+     block), so the `emit_telemetry=False` terminal finalizes are covered.
+  Both seats are best-effort (`try/except Exception: pass`); a Redis failure during
+  reset never blocks the terminal transition. Placing the reset unconditionally in
+  `finalize_session` (Seat A) means it also fires for `killed` and any future terminal
+  caller; Seat B closes the `emit_telemetry=False` gap that Seat A alone would miss.
 
 ## Failure Path Test Strategy
 
@@ -339,7 +418,20 @@ no ghost → no recovery.
   `completed` (no lingering `running`) — the Bug A regression test. Assert the
   transition goes through `finalize_session`, not `transition_status`.
 - [ ] Steering counter tests in `tests/unit/test_steering.py` — UPDATE: assert
-  `steering:attempts:{session_id}` is deleted on terminal transition.
+  `steering:attempts:{session_id}` is deleted on terminal transition via **both** seats:
+  (a) a `completed` finalize through `finalize_session` (Seat A, telemetry-agnostic), and
+  (b) a health-checker `failed`/`abandoned` finalize with `emit_telemetry=False`
+  (Seat B at `session_health.py:1607-1610`) — the latter is the regression that a
+  single `emit_telemetry`-gated seat would miss (revision-2 blocker 1).
+- [ ] Worker-loop / lifecycle tests — UPDATE: add a Bug-A nudge-stomp regression
+  asserting that a nudge enqueued during execution (fresh successor via
+  `enqueue_agent_session`) is NOT overwritten to terminal `completed` by the
+  completion-exit finalize, and that `CancelledError` leaves the session `running`
+  (revision-2 blocker 2).
+- [ ] `tests/unit/test_output_handler.py` — UPDATE (extends the persistence case): assert
+  the persist re-reads the authoritative record and merges (does not clobber a
+  concurrently-written `extra_context` key), and that a persist failure is logged at
+  `warning` rather than swallowed silently.
 
 No existing tests are deleted or replaced — all changes are additive guards plus new
 assertions on existing behavior.
@@ -371,11 +463,16 @@ pending). Test asserts mutual exclusivity.
 ### Risk 2: Bug A fix re-opens the #867/#875 nudge/finalize race
 **Impact:** A nudge-enqueued session gets its `pending` status stomped back to
 `completed`, or a CAS conflict crashes the worker.
-**Mitigation:** Route the executor's completion transition exclusively through the
-#875 CAS authority (`finalize_session(session, "completed", ...)` — the terminal-state
-authority; `transition_status` would raise on the terminal target), never a raw status
-write. Add a regression test that a nudge enqueued during execution is not overwritten.
-Async-specialist reviews this change.
+**Mitigation:** (1) Scope the completion finalize to the **completion/delivery exit
+ONLY** — never the nudge / unconsumed-steering re-enqueue path (which
+`enqueue_agent_session`-creates a fresh successor) and never `CancelledError`. (2) Route
+exclusively through the #875 CAS authority (`finalize_session(session, "completed", ...)`
+— the terminal-state authority; `transition_status` would raise on the terminal target),
+never a raw status write. (3) **Re-read** via `get_authoritative_session` and **bail if
+the record is no longer ours** (already terminal / replaced by a nudge successor) before
+finalizing. (4) Wrap the finalize in `try/except StatusConflictError` and treat a CAS
+conflict as success (another process already finalized). Add a regression test that a
+nudge enqueued during execution is not overwritten. Async-specialist reviews this change.
 
 ### Risk 3: Detection signal missed because the steering queue is empty at finalization
 **Impact:** If detection read the steering queue, the fallback would NEVER fire — the
@@ -531,7 +628,7 @@ Bug A must commit separately even though the work is parallelizable.
 - **Assigned To**: fallback-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- **Persist defer state.** In `agent/output_handler.py`, inside the `if steering_deferred:` block (lines 429-436), **before** the early `return`, set `session.extra_context["deferred_self_draft_pending"] = True` and `["deferred_self_draft_text"] = text` (merging into the existing dict, `extra_context or {}`) and `session.save()`. Best-effort, never blocks the file dual-write / return.
+- **Persist defer state (safe RMW).** In `agent/output_handler.py`, inside the `if steering_deferred:` block (lines 429-436), **before** the early `return`, **re-read** the authoritative record via `get_authoritative_session(session.session_id, session.project_key)`, merge `deferred_self_draft_pending=True` and `deferred_self_draft_text=text` into *that* record's `extra_context` (`{**(rec.extra_context or {}), ...}`), and `save(update_fields=["extra_context"])`. If the re-read returns None or raises, fall back to the local `session` object. This makes the cross-process read-modify-write safe (last-writer-wins per dict, mitigated by re-reading at the latest moment; the deferred keys are disjoint from the transport-resolution write). Best-effort, never blocks the file dual-write / return — but on failure **log at `logger.warning`** (session_id + exception), never swallow silently (a lost signal degrades the user to the canned notice and must be triageable).
 - Add `_deliver_deferred_self_draft_fallback(entry)` in `agent/session_health.py`, modeled on `_deliver_tool_timeout_degraded_notice` (distinct SETNX lock `self_draft_fallback_sent:{sid}`, `_resolve_callbacks` + FileOutputHandler fallback, swallow-and-log).
 - **Detect via `entry.extra_context.get("deferred_self_draft_pending")` — NOT the steering queue** (the queue is drained at turn start and empty by finalization; using it would never fire the fallback). Recover `extra_context.get("deferred_self_draft_text")` and apply `_apply_narration_fallback()`; deliver the explicit "couldn't finish" notice when the text is absent/whitespace.
 - Wire the fallback into the **two `failed` branches** (1633-1634, 1657-1658) **before** the generic degraded notice, with precedence (generic notice only if `deferred_self_draft_pending` was not set). Do **not** gate on `reason_kind == "tool_timeout"`.
@@ -545,7 +642,10 @@ Bug A must commit separately even though the work is parallelizable.
 - **Assigned To**: fallback-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Call `reset_self_draft_attempts(session_id)` from the single terminal-transition reaper seat covering `failed`/`killed`/`completed`. Best-effort, swallow errors. May ride in the Bug B commit (same builder, same delivery concern).
+- **Dual-seat (blocker 1):** a single seat inside `finalize_session`'s `if emit_telemetry:` block would be SKIPPED on every health-checker terminal finalize (all pass `emit_telemetry=False` — `session_health.py:1624/1642/1668/1750`), leaving the counter on its 1-hour TTL.
+  - **Seat A:** add `reset_self_draft_attempts(_sid)` to `finalize_session` **OUTSIDE** the `if emit_telemetry:` guard (unconditional best-effort block), covering the happy-path `completed` finalize and any telemetry-on caller.
+  - **Seat B:** add `reset_self_draft_attempts(entry.session_id)` next to the existing `finalize_telemetry(entry.session_id)` dual-seat at `session_health.py:1607-1610` (inside `if _dest in ("abandoned", "failed"):`), covering the `emit_telemetry=False` terminal finalizes.
+- Both seats best-effort (`try/except Exception: pass`); a Redis failure never blocks the terminal transition. May ride in the Bug B commit (same builder, same delivery concern).
 
 ### 3. Worker-future-leak fix (Bug A) — SECOND, SEPARATE COMMIT
 - **Task ID**: build-worker-leak
@@ -554,8 +654,12 @@ Bug A must commit separately even though the work is parallelizable.
 - **Assigned To**: leak-builder
 - **Agent Type**: async-specialist
 - **Parallel**: true
-- Trace `_execute_agent_session()` exit paths (steering-deferred early return, unconsumed-steering re-enqueue) and ensure the session is finalized to `completed` before normal return when SDK work is done.
-- **Use `models/session_lifecycle.py::finalize_session(session, "completed", ...)`** — NOT `transition_status()`, which raises `ValueError` on the terminal `completed` target and would crash the worker on a literal build (blocker 1). `finalize_session` is the #875 CAS authority for terminal states; never a raw status write. Preserve the #867 nudge-overwrite guard.
+- **Anchor: `agent/session_executor.py:601`** (the `_execute_agent_session` body); the completion/delivery exit is the terminal block at ~1759-1774. NOT `agent_session_queue.py` (corrected anchor — critique concern).
+- Scope the finalize-to-`completed` to the **COMPLETION/DELIVERY exit ONLY** (the `not chat_state.defer_reaction` → `complete_transcript(..., status="completed")` branch). Confirm this seat actually fires on the deferred-self-draft completion path and close any gap that still leaves the session `running`.
+- **Use `models/session_lifecycle.py::finalize_session(session, "completed", ...)`** — NOT `transition_status()`, which raises `ValueError` on the terminal `completed` target and would crash the worker on a literal build (blocker 1). The existing `complete_transcript()` already delegates to `finalize_session` with `StatusConflictError` handling (`bridge/session_transcript.py:315-326`) — prefer reusing/extending that path over a bespoke finalize.
+- **Stale-object guard (blocker 2):** re-read via `get_authoritative_session(session_id, project_key)` and **bail if the record is no longer the one we executed** (already terminal, or replaced by a nudge successor). Wrap the finalize in `try/except StatusConflictError` (CAS conflict = success).
+- **Do NOT finalize** on the nudge / unconsumed-steering re-enqueue path (`session_executor.py:1844-1892`, which `enqueue_agent_session`-creates a fresh successor — finalizing the stale object is the #867/#875 nudge-stomp) **or on `CancelledError`** (the health checker owns that terminal transition by design).
+- Add a regression test asserting a nudge enqueued during execution is NOT overwritten by the Bug A finalize.
 - Commit Bug A as its own separate commit, after the Bug B commit.
 
 ### 4. Validate delivery (AC1/AC3/AC4)
@@ -598,7 +702,9 @@ Bug A must commit separately even though the work is parallelizable.
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Fallback wired | `grep -n "_deliver_deferred_self_draft_fallback" agent/session_health.py` | output > 1 |
-| Counter cleanup wired | `grep -rn "reset_self_draft_attempts" agent/ | grep -v "agent/steering.py"` | output contains a terminal-transition call site |
+| Counter cleanup dual-seat (Seat B) | `grep -n "reset_self_draft_attempts" agent/session_health.py` | output contains a call near the `finalize_telemetry` dual-seat (~1607-1610) |
+| Counter cleanup Seat A (telemetry-agnostic) | `grep -n "reset_self_draft_attempts" models/session_lifecycle.py` | a call OUTSIDE the `if emit_telemetry:` block |
+| Bug A scoped to completion exit | `grep -n "get_authoritative_session\|StatusConflictError" agent/session_executor.py` | re-read + guard present on the completion finalize |
 | No new mandatory field | `git diff main -- models/agent_session.py | grep -E '^\+.*= (Field|IndexedField|KeyField)\(' | grep -v 'null=True'` | exit code 1 |
 
 ## Critique Results
@@ -611,6 +717,12 @@ Bug A must commit separately even though the work is parallelizable.
 | CONCERN | War-room | Mis-pathed file: `agent/session_lifecycle.py` does not exist. | Prior Art / Why Previous Fixes Failed / Technical Approach | Corrected to `models/session_lifecycle.py` throughout. |
 | CONCERN | War-room | Test file `tests/unit/test_session_health.py` does not exist; real tests live in `test_mcp_hang_graceful_degradation.py`. | Test Impact / Failure Path Test Strategy / Tasks | Repointed to `tests/unit/test_mcp_hang_graceful_degradation.py`, `test_output_handler.py`, `test_steering.py`. |
 | CONCERN | War-room | Bug A bundled with Bug B against the issue's "separate commit, Bug B first" guidance. | Step by Step Tasks (sequencing note) | Bug B first commit; Bug A as a separate second commit. |
+| BLOCKER (revision 2) | Supervisor (source-verified) | AC4's single reaper seat inside `finalize_session`'s `if emit_telemetry:` block is SKIPPED on every health-checker terminal finalize (all pass `emit_telemetry=False` — `session_health.py:1624/1642/1668/1750`), leaving the `steering:attempts` counter on its 1-hour TTL on exactly the failure paths AC4 targets. | Solution (AC4) / Technical Approach (AC4) / Task 2 | Dual-seat: Seat A in `finalize_session` OUTSIDE the `emit_telemetry` guard; Seat B next to the `finalize_telemetry` dual-seat at `session_health.py:1607-1610`. |
+| BLOCKER (revision 2) | Supervisor (source-verified) | Bug A's "finalize to completed whenever it stops doing SDK work" over-reached into the nudge re-enqueue path (`session_executor.py:1844-1892`), which `enqueue_agent_session`-creates a fresh successor — finalizing the stale object is the #867/#875 nudge-stomp. | Solution (Bug A) / Data Flow / Technical Approach (Bug A) / Task 3 / Risk 2 / Why Previous Fixes Failed | Scope finalize-to-completed to the COMPLETION/DELIVERY exit ONLY; add `get_authoritative_session` re-read + stale bail + `StatusConflictError` guard; never finalize on nudge_* or `CancelledError`. |
+| CONCERN (revision 2) | Supervisor | Bug A anchor pointed at `agent_session_queue.py`; correct anchor is `agent/session_executor.py:601` (completion/delivery exit ~1759-1774). | Solution (Bug A) / Technical Approach / Task 3 | Anchor corrected throughout. |
+| CONCERN (revision 2) | Supervisor | Unguarded `finalize_session(session, "completed")` can raise `StatusConflictError`. | Technical Approach (Bug A) / Task 3 / Risk 2 | Re-read authoritative state + `try/except StatusConflictError` (CAS conflict = success). |
+| CONCERN (revision 2) | Supervisor | Unsafe cross-process `extra_context` read-modify-write for the persist could clobber concurrent writes. | Technical Approach (Bug B part 1) / Task 1 | Re-read via `get_authoritative_session` immediately before the merge; documented last-writer-wins-per-dict expectation with disjoint-key mitigation. |
+| CONCERN (revision 2) | Supervisor | Silent best-effort persist failure swallowed without a log. | Technical Approach (Bug B part 1) / Task 1 | Persist failure logged at `logger.warning` (session_id + exception), never swallowed silently. |
 
 ---
 
