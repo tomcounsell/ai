@@ -659,7 +659,7 @@ def _parse_history(history_list: list | None) -> list[PipelineEvent]:
                 text = raw_text or str(entry)
 
             # Granite events use "ts" key; standard events use "timestamp".
-            ts = entry.get("timestamp") or entry.get("ts")
+            ts = _safe_float(entry.get("timestamp") or entry.get("ts"))
             events.append(
                 PipelineEvent(
                     role=event_type,
@@ -729,6 +729,13 @@ def _safe_float(val) -> float | None:
     if isinstance(val, str):
         try:
             return float(val)
+        except (ValueError, TypeError):
+            pass
+        try:
+            dt = datetime.datetime.fromisoformat(val)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.UTC)
+            return dt.timestamp()
         except (ValueError, TypeError):
             return None
     return None
