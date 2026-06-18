@@ -191,6 +191,40 @@ not suppress a parallel `error_cascade` or `token_alert` steer.
 **Feature gate.** `WATCHDOG_AUTO_STEER_ENABLED=false` disables the push
 without disabling the detection (still logged at WARNING).
 
+## Automatic Steering on tool_timeout Recovery
+
+When the per-tool timeout sub-loop (mechanism 10 in `session-recovery-mechanisms.md`) detects a session wedged on a hung MCP or other tool call, `_apply_recovery_transition` handles the `tool_timeout` recovery kind. On the requeue (`pending`) branch — i.e., before `MAX_RECOVERY_ATTEMPTS` is exhausted — the recovery helper now automatically prepends a skip-the-tool steering message to the session's inbox.
+
+### How it works
+
+1. `_compose_tool_timeout_steering(tool_name, original_message)` builds a self-contained message that:
+   - Names the specific tool that timed out
+   - Embeds the user's original request verbatim
+   - Instructs the model to skip the hung tool and answer using available context
+
+2. `entry.push_steering_message(..., front=True)` prepends the message at index 0 of `queued_steering_messages`.
+
+3. On re-pickup, the worker's turn-boundary drain pops this message first and uses it as the turn input.
+
+### Why prepend, not append
+
+`queued_steering_messages` is a FIFO queue. Any previously queued messages would run first if the tool-skip instruction were appended. Prepending via `front=True` ensures the skip instruction is the first thing the model sees on re-pickup, before any human-authored or watchdog-authored messages that were already in the queue.
+
+The `front=True` parameter on `push_steering_message` trims from the back of the list (preserving the new message at index 0 and the oldest existing messages). The default `front=False` behavior (append, trim from head) is unchanged.
+
+### Container-run self-containedness
+
+Container runs launched by the granite PTY harness do not support `--resume`. This means the re-queued session starts fresh — it has no direct memory of the prior turn. The steering message is therefore self-contained: it includes the original request text so the model can answer without needing to re-read prior context.
+
+### Deterministic floor on terminal failure
+
+On the terminal `failed` branch — both the `MAX_RECOVERY_ATTEMPTS` exhaustion path and the not-confirmed-dead path — `_deliver_tool_timeout_degraded_notice(entry, tool_name)` delivers a canned user-facing message through the session's resolved output handler. This is the **deterministic floor**: even if advisory steering was never injected (e.g. the session failed on its first attempt), the user still receives a reply.
+
+- **Idempotency**: Redis `SETNX` on a per-session key prevents double-delivery if both failure branches fire in a race.
+- **Channel-agnostic**: `_resolve_callbacks(project_key, transport)` routes the message through Telegram, email, or file output — whichever transport the session was using.
+
+See [Session Recovery Mechanisms §Per-Tool Timeout Sub-Loop](session-recovery-mechanisms.md#10-per-tool-timeout-sub-loop-_agent_session_tool_timeout_loop) for the recovery trigger conditions and tier budgets.
+
 ## Parent-Child Steering (parent Eng session to child Eng session)
 
 In addition to Telegram reply-thread steering (user to agent), the steering queue supports **parent-child steering**. Parent and child sessions are both Eng sessions (`session_type="eng"`); a parent created its child via `AgentSession.create_child()` for parallel work, and steers it while it runs.

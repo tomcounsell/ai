@@ -1219,6 +1219,122 @@ def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> Subprocess
     return SubprocessKillResult(confirmed_dead=_poll_until_dead(), signal_sent=True)
 
 
+# === MCP hang graceful degradation helpers (issue #1711) ===
+
+
+def _compose_tool_timeout_steering(tool_name: str, original_request: str | None) -> str:
+    """Compose the advisory steering message injected when a tool times out.
+
+    Pure function — never raises. Returns a self-contained string the session
+    can consume on the next turn.
+
+    **Self-contained requirement:** The message must not rely on ``--resume``
+    continuity. When the health-check kills the stuck subprocess, the prior
+    ``claude_session_uuid`` becomes stale; the harness falls back to a fresh
+    run (no ``--resume``) using ``full_context_message``. A fresh run has no
+    prior conversation history, so the steering message must embed the original
+    request verbatim — it is the only thread of context the re-queued turn has.
+
+    Args:
+        tool_name: The tool that timed out (e.g. ``mcp__foo__bar``).
+        original_request: The user's original message text. Truncated to 1500
+            chars. May be None or empty — still returns a valid string.
+    """
+    req = (original_request or "").strip()
+    if req:
+        req_truncated = req[:1500]
+        req_part = f" Original request: {req_truncated}"
+    else:
+        req_part = ""
+    return (
+        f"The tool {tool_name} timed out and is temporarily unavailable — "
+        f"do not call it again this turn. Answer the user's original request "
+        f"as best you can without it, and note which information was "
+        f"unavailable.{req_part}"
+    )
+
+
+async def _deliver_tool_timeout_degraded_notice(
+    entry: "AgentSession",
+    tool_name: str | None,
+) -> None:
+    """Send a one-shot degraded-service notice when a tool timeout leads to
+    session failure.
+
+    Idempotent: the first caller wins via Redis SETNX on
+    ``tool_timeout:degraded_sent:{session_id}`` (1 h TTL). Subsequent calls
+    return immediately.
+
+    Transport is read from ``entry.extra_context["transport"]`` — AgentSession
+    has no top-level ``transport`` field.  Falls back to FileOutputHandler when
+    no registered callback is found.
+
+    Never raises; failures are logged at WARNING and swallowed.
+    """
+    try:
+        session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
+        project_key = getattr(entry, "project_key", None) or "unknown"
+
+        # Atomic dedup: only the first caller sends the notice (1 h window).
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+            lock_key = f"tool_timeout:degraded_sent:{session_id}"
+            acquired = _R.set(lock_key, "1", nx=True, ex=3600)
+            if not acquired:
+                logger.debug(
+                    "[session-health] degraded notice already sent for %s — skipping",
+                    session_id,
+                )
+                return
+        except Exception as _lock_err:
+            logger.warning(
+                "[session-health] degraded notice lock failed for %s: %s; proceeding anyway",
+                session_id,
+                _lock_err,
+            )
+
+        # Resolve transport from extra_context (never from a top-level field).
+        transport = (getattr(entry, "extra_context", None) or {}).get("transport")
+
+        # Resolve send callback — fall back to FileOutputHandler when none registered.
+        from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
+
+        send_cb, _react_cb = _resolve_callbacks(project_key, transport)
+        if send_cb is None:
+            from agent.output_handler import FileOutputHandler  # noqa: PLC0415
+
+            _fallback = FileOutputHandler()
+            send_cb = _fallback.send
+
+        # Compose the user-facing degraded notice.
+        tool_label = tool_name or "the requested service"
+        message = (
+            f"I couldn't finish that — the {tool_label} service didn't respond. "
+            f"Please try again shortly; everything else is working."
+        )
+
+        chat_id = getattr(entry, "chat_id", None) or ""
+        telegram_message_id = getattr(entry, "telegram_message_id", None) or 0
+
+        await send_cb(chat_id, message, telegram_message_id, entry)
+
+        # Best-effort telemetry counter.
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _R2  # noqa: PLC0415
+
+            _R2.incr(f"{project_key}:session-health:tool_timeout_degraded_delivered")
+        except Exception:
+            pass
+
+    except Exception as _err:
+        logger.warning(
+            "[session-health] _deliver_tool_timeout_degraded_notice failed for %s: %s",
+            getattr(entry, "session_id", "?"),
+            _err,
+        )
+
+
 async def _apply_recovery_transition(
     entry: AgentSession,
     *,
@@ -1374,6 +1490,8 @@ async def _apply_recovery_transition(
         return False
 
     is_local = worker_key.startswith("local")
+    # Capture tool_name once for use in advisory injection and degraded notice.
+    tool_name = getattr(entry, "current_tool_name", None)
     logger.warning(
         "[session-health] Recovering session %s (chat=%s, session=%s, local=%s, kind=%s): %s",
         entry.agent_session_id,
@@ -1512,6 +1630,8 @@ async def _apply_recovery_transition(
                 entry.recovery_attempts,
             )
         elif entry.recovery_attempts >= MAX_RECOVERY_ATTEMPTS:
+            if reason_kind == "tool_timeout":
+                await _deliver_tool_timeout_degraded_notice(entry, tool_name)
             finalize_session(
                 entry,
                 "failed",
@@ -1534,6 +1654,8 @@ async def _apply_recovery_transition(
             # ``failed`` terminal status so the in-process orphan reaper
             # (_TERMINAL_STATUSES) owns cleanup. Do NOT null ``started_at`` into
             # a pending record.
+            if reason_kind == "tool_timeout":
+                await _deliver_tool_timeout_degraded_notice(entry, tool_name)
             finalize_session(
                 entry,
                 "failed",
@@ -1558,6 +1680,38 @@ async def _apply_recovery_transition(
         else:
             entry.priority = "high"
             entry.started_at = None
+            # Advisory injection (issue #1711): only on the requeue (``else``) branch,
+            # only for ``tool_timeout`` reason kind. Explanation of each constraint:
+            #   • Requeue-branch-only: the ``failed`` and ``abandoned`` branches
+            #     finalize the session — there is no next turn to consume steering.
+            #     Advisory steering is only useful when the session will run again.
+            #   • tool_timeout-only: steering is narrowly targeted at the "model
+            #     attempted a specific tool and it wedged" failure mode. Other reason
+            #     kinds (no_progress, worker_dead) have different root causes and
+            #     different remediation patterns; injecting a tool-skip message for
+            #     them would be misleading and could mask the real issue.
+            if reason_kind == "tool_timeout" and tool_name:
+                try:
+                    entry.push_steering_message(
+                        _compose_tool_timeout_steering(
+                            tool_name, getattr(entry, "message_text", None)
+                        ),
+                        front=True,
+                    )
+                    try:
+                        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+                        _R.incr(
+                            f"{entry.project_key}:session-health:tool_timeout_steering_injected"
+                        )
+                    except Exception:
+                        pass
+                except Exception as _steer_err:
+                    logger.warning(
+                        "[session-health] Failed to inject tool_timeout steering for %s: %s",
+                        entry.agent_session_id,
+                        _steer_err,
+                    )
             if (
                 getattr(entry, "exit_returncode", None) == -9
                 and pre_bump_attempts == 0
