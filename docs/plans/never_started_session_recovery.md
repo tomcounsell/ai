@@ -220,6 +220,7 @@ No agent integration required — worker/container-internal recovery logic. No n
 ### Inline Documentation
 - [ ] Update `_has_progress` and `_tier2_reprieve_signal` docstrings for the never-started legs.
 - [ ] Comment the new shared grace usage and the `last_pty_activity_at` writer site.
+- [ ] **Grain-of-salt comment on every new numeric constant.** Each of `MID_RUN_QUIESCENCE_SECS`, the `K` confirmation count, the classifier timeout, and `NEVER_STARTED_CONFIRM_MARGIN_SECS` carries an inline comment stating it is a provisional, safety-chosen starting value — tune via env / adjust / refactor (e.g. derive from a neighbor) freely; no structural change should be needed to change it. Keep all of them as named, env-overridable constants, never inline literals.
 
 ## Success Criteria
 - [ ] Priming wedge: `running` + `last_turn_at=None` + fresh heartbeats is recovered on the never-started grace (reconciled to 120s + margin via D1), NOT after ~30-100 min — closing both sub-check B and the reprieve path.
@@ -326,11 +327,11 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 
 ---
 
-### Resolved (PM, 2026-06-18)
+### All resolved (PM, 2026-06-18)
 - **Mid-run oracle = cheap-gate-then-judge** (was Q-B): stage-1 PTY byte-diff gate (free, always-on) → stage-2 granite classifier on suspects only. Subagent-transcript discovery is the build-time fallback if PTY-activity proves unreliable; do not build both. Captured as D2.
 - **Resilience over brittleness** (D4): bias to inaction, K-of-N confirmation, classifier fails toward "leave alone," explicit `RETRYING` handling for flaky Claude API connections.
+- **Q-A — go with defaults:** `MID_RUN_QUIESCENCE_SECS = 180s`, `K = 2` consecutive ticks. Env-tunable.
+- **Q-C — go with defaults:** relax the 300s race guard for the `never_started` case only (D1 as written).
+- **Q-D — go with defaults:** reuse the existing local granite/ollama classifier path (no new model); per-call timeout **~5-10s** (suspect-only, so a short budget is fine).
 
-### Still open
-1. **(Q-A — mid-run window value)** `MID_RUN_QUIESCENCE_SECS` default. Proposed **180s** of continuous PTY-screen quiescence plus **K consecutive ticks** of confirmation. Confirm 180s + a K value (e.g. K=2), or prefer different values? Env-tunable as planned.
-2. **(Q-C — D1 floor relaxation blast radius)** Relaxing the 300s race guard for the `never_started` case only: acceptable, or keep the floor untouched and just close the reprieve path (slower recovery, zero race-guard risk)? D1 currently says relax it.
-3. **(Q-D — classifier reuse)** Stage 2 should reuse the existing local granite/ollama classifier path (the same model already used for message classification) rather than introducing a new model. Confirm — and confirm the per-call timeout budget (proposed: short, e.g. 5-10s, since it runs only on already-suspect sessions).
+> ⚠️ **All numeric constants in this plan are provisional — take them with a grain of salt.** `MID_RUN_QUIESCENCE_SECS (180)`, `K (2)`, the classifier timeout (5-10s), `NEVER_STARTED_GRACE_SECS`/`NEVER_STARTED_CONFIRM_MARGIN_SECS`, and the tool-timeout tiers are starting points chosen for safety, not tuned values. They are expected to be adjusted from real-world behavior, made env-tunable, or refactored away (e.g. derived from one another) at any time. The build MUST (a) keep them as named, env-overridable constants — never inline literals — and (b) annotate each definition site with an inline comment saying so (see Inline Documentation). Tuning a constant later must require zero structural change.
