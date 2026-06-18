@@ -225,6 +225,36 @@ If areas lack coverage, add new tests rather than skipping — granite PTY has t
 **State prerequisite:** an idempotency marker on the terminal transition consumed by whichever path fires first.
 **Mitigation:** mutual gating via an idempotency key written at terminal transition; the second path observes it and no-ops. Attempt count carries forward onto the new pending record (C1).
 
+## Omnigent Deltas (from #1732 reference map)
+
+The following two deltas from issue #1732's reference map home to this issue and plan. They are additive — they do not change the plan's scope or contradict its design:
+
+### Delta 1: Fork-on-resume guard
+
+**Source:** Omnigent `claude_native_hook.py:123-167`, `claude_native_bridge.py:1346-1351` (pinned to omnigent HEAD 2026-06-18; re-verify on revisit).
+
+When `claude --resume <uuid>` runs, if the resumed session surfaces a *new* Claude session ID (different from the one passed to `--resume`), Omnigent forks the session record rather than silently rebinding to an unexpected session. The `seen_claude_session_ids` set detects this: a `SessionStart source=resume` event with an unfamiliar session ID means the resume spawned a different underlying session than expected.
+
+**Our-side acceptance criterion addition:** The `--resume` path in `pty_driver.py` (step 3 of this plan) SHOULD log a warning when the post-resume session ID differs from the one we passed to `--resume`. This guards the case where `--resume` creates a divergent session (e.g., due to transcript corruption or missing checkpoint). The fork-detection does not need to be a hard abort — a warning + continuing on the new session is acceptable — but it must be **detectable** so operators can diagnose unexpected forks.
+
+**Reconciliation against determinism guardrail:** This guard is complementary to the existing `NON_RESUMABLE_DETERMINISTIC` guardrail (`agent/crash_signature.py:207-228`, `reflections/crash_recovery.py:280-293`). The guardrail gates *whether* to attempt resume (never-started → escalate-only). The fork guard applies *during* a permitted resume to detect unexpected session divergence. No conflict.
+
+### Delta 2: Dead-vs-stalled disambiguation rationale
+
+**Source:** Issue #1732 crash/resume section; reconciled against `reflections/crash_recovery.py:280-293` and `agent/crash_signature.py:207-228`.
+
+The hook-edge architecture (once #1688 ships) changes the meaning of PTY silence:
+
+| State | Before hook edge (C5 heuristic) | After hook edge |
+|-------|--------------------------------|-----------------|
+| Process dead (`pexpect.EOF`, `isalive()==False`) | Detected — process gone, crash path | Same — resume the session |
+| Stalled-but-alive + no Stop within watchdog | *Ambiguous* — could be thinking or wedged | Unambiguous — still running (hook would have fired if done) |
+| Never-started / startup plateau | `NON_RESUMABLE_DETERMINISTIC` — escalate | Same — guardrail unchanged |
+
+**Implication for this plan:** The lossless resume path (#1721) handles the "process dead" case (crash or stall that killed the process). The hook-edge architecture (#1688) handles the "stalled-but-alive + no Stop" case by making it unambiguous. These two issues are complementary: #1721 resumes dead processes losslessly; #1688 eliminates false completions from alive-but-quiet processes. No conflict with the determinism guardrail — never-started stays escalate-only regardless.
+
+**No Open Question raised:** Omnigent's model confirms the two-layer architecture (hook edge for happy path, PTY for crash/liveness detection) is sound for our case. The reconciliation finds no contradictory resume triggers between #1688 and #1721.
+
 ## No-Gos (Out of Scope)
 
 - [SEPARATE-SLUG #1538] Live stalled-session *detection* (advisory classifier) — owned by Pillar 1; this plan consumes its verdicts but does not build detection.
