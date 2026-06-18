@@ -251,6 +251,12 @@ def check_system_tools() -> list[ToolCheck]:
     # pre-install warning would be noise on machines that never use Workspace.
     if shutil.which("gws"):
         results.append(check_command("gws", "--version"))
+    # pi (Pi coding agent) is optional — only required on machines that use
+    # [/dev:pi] builder routing in granite sessions. Warn if absent but do
+    # not hard-gate the bridge/worker — bare [/dev]/[/dev:claude] keeps
+    # working without pi. Install: npm install -g @mariozechner/pi-coding-agent
+    if shutil.which("pi"):
+        results.append(check_command("pi", "--version"))
     return results
 
 

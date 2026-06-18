@@ -300,6 +300,15 @@ tests/
 | unit | `test_sdk_permissions.py` | 7 | SDK permissions |
 | unit | `test_workflow_sdk_integration.py` | 6 | Workflow SDK integration |
 
+### `granite` — Granite PTY container and builder harness
+
+| Level | File | Tests | Description |
+|-------|------|------:|-------------|
+| unit | `granite_container/test_granite_classifier.py` | 46+ | PM prefix-token classification, harness selector (strict + fallback paths) |
+| unit | `test_pi_builder.py` | 39 | `parse_pi_final_text` edge cases; `PiSubprocessBuilder` init, run_turn, timeout, cwd, close |
+| unit | `granite_container/test_container_builder_gate.py` | 10 | `PI_SUBPROCESS_TIMEOUT_S` constant, `BuilderHarness` protocol, caller-owned gate |
+| integration | `test_pi_builder_e2e.py` | 5 | Real `pi -p --mode json` against local `ollama/gemma4:31b`; skipped if pi/ollama absent |
+
 ### Other
 
 | Level | File | Tests | Description |
