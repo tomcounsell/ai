@@ -852,6 +852,17 @@ def _has_progress(entry: AgentSession) -> bool:
         if isinstance(hb, datetime):
             hb_aware = hb if hb.tzinfo else hb.replace(tzinfo=UTC)
             if (now_utc - hb_aware).total_seconds() < HEARTBEAT_FRESHNESS_WINDOW:
+                # Sub-check B D0 gate (issue #1724): deny the fresh-heartbeat
+                # fast-path when the session is never-started past grace.
+                # _never_started_past_grace uses now_utc internally (called
+                # without a `now` arg here; it derives now itself). When True,
+                # the session has been running longer than
+                # NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS
+                # without any SDK output — a fresh heartbeat must NOT falsely
+                # signal "alive" for a session that has never started.
+                if _never_started_past_grace(entry):
+                    return False
+
                 # Compute running_seconds and apply the no-output budget gate
                 # (NO_OUTPUT_BUDGET_SECONDS = 1800s, 30 min).
                 #
@@ -1006,7 +1017,9 @@ def _tier2_reprieve_signal(
         getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
     )
     reprieve_count = getattr(entry, "reprieve_count", 0) or 0
-    if not sdk_ever_output and reprieve_count >= MAX_NO_OUTPUT_REPRIEVES:
+    if not sdk_ever_output and (
+        reprieve_count >= MAX_NO_OUTPUT_REPRIEVES or _never_started_past_grace(entry)
+    ):
         return None  # escalate: suppress all Tier 2 reprieves, allow recovery
 
     # "compacting" — reprieve when a compaction completed within
@@ -2287,6 +2300,51 @@ async def _agent_session_tool_timeout_check() -> None:
         if actual_status in _TERMINAL_STATUSES:
             continue
         try:
+            now = datetime.now(tz=UTC)
+
+            # D0: dedicated never-started recovery branch (issue #1724).
+            # Check BEFORE the tool-timeout path so never-started sessions are
+            # caught promptly on the 30s loop without waiting for a tool wedge.
+            # Uses the same race-mitigation pattern as the tool-timeout path:
+            # re-read fresh, re-confirm predicate, then transition.
+            if _never_started_past_grace(entry, now):
+                try:
+                    fresh_ns = AgentSession.get_by_id(entry.agent_session_id)
+                except Exception as _ns_re_err:
+                    logger.debug(
+                        "[session-health] never-started re-read failed for %s: %s",
+                        entry.agent_session_id,
+                        _ns_re_err,
+                    )
+                    fresh_ns = None
+                if fresh_ns is not None and (
+                    getattr(fresh_ns, "status", None) not in _TERMINAL_STATUSES
+                ):
+                    if _never_started_past_grace(fresh_ns, now):
+                        # Increment project-scoped telemetry counter.
+                        try:
+                            from popoto.redis_db import POPOTO_REDIS_DB as _R_NS
+
+                            _R_NS.incr(
+                                f"{fresh_ns.project_key}:session-health:"
+                                f"tier1_falloff:never_started_grace_exceeded"
+                            )
+                        except Exception as _ns_ctr_err:
+                            logger.debug(
+                                "[session-health] never_started_grace_exceeded counter "
+                                "increment failed: %s",
+                                _ns_ctr_err,
+                            )
+                        handle_ns = _active_sessions.get(fresh_ns.agent_session_id)
+                        await _apply_recovery_transition(
+                            fresh_ns,
+                            reason="no progress signal observed (never_started past grace)",
+                            reason_kind="no_progress",
+                            handle=handle_ns,
+                            worker_key=fresh_ns.worker_key,
+                        )
+                        continue
+
             check = _check_tool_timeout(entry)
             if check is None:
                 continue
