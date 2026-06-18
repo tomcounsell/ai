@@ -2086,3 +2086,150 @@ class TestDrafterHoistedAboveTransport:
 
         payload = json.loads(handler._redis.rpush.call_args[0][1])
         assert payload["attachments"] == ["/tmp/report.pdf"]
+
+
+# ---------------------------------------------------------------------------
+# Persist-defer-state tests (issue #1730)
+# ---------------------------------------------------------------------------
+
+
+class TestDeferredSelfDraftPersistence:
+    """Tests that deferred_self_draft_pending + deferred_self_draft_text are
+    persisted to AgentSession.extra_context when steering_deferred=True.
+
+    The persisted flag is the cross-process detection signal the health checker
+    reads to decide whether to deliver a fallback.  The steering queue CANNOT be
+    used because the agent drains it at turn start, leaving it empty by
+    finalization time.
+    """
+
+    def _make_handler(self):
+        from unittest.mock import MagicMock
+
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        h = TelegramRelayOutputHandler()
+        h._redis = MagicMock()
+        return h
+
+    def _make_session(self, *, session_id="sess-persist", extra_context=None):
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.session_id = session_id
+        session.extra_context = extra_context or {}
+        return session
+
+    def test_persists_pending_flag_and_text_when_steering_deferred(self):
+        """When steering_deferred=True, extra_context gains deferred_self_draft_pending=True
+        and deferred_self_draft_text=<the original text> before the early return."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from bridge.message_drafter import MessageDraft
+
+        handler = self._make_handler()
+        session = self._make_session()
+
+        drafted = MessageDraft(text="", full_output_file=None, needs_self_draft=True, artifacts={})
+
+        auth_session = MagicMock()
+        auth_session.extra_context = {}
+        saved_contexts: list[dict] = []
+
+        def _capture_save(update_fields=None, **_kw):
+            saved_contexts.append(dict(auth_session.extra_context))
+
+        auth_session.save = _capture_save
+
+        with (
+            patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)),
+            patch("agent.steering.peek_steering_sender", return_value=None),
+            patch("agent.steering.push_steering_message", return_value=True),
+            patch("agent.steering.bump_self_draft_attempts", return_value=1),
+            patch(
+                "models.session_lifecycle.get_authoritative_session",
+                return_value=auth_session,
+            ),
+        ):
+            asyncio.run(handler.send("123", "This is the deferred text", 0, session=session))
+
+        # A save with the deferred keys must have occurred.
+        assert saved_contexts, "save must have been called with extra_context update"
+        last_ctx = saved_contexts[-1]
+        assert last_ctx.get("deferred_self_draft_pending") is True
+        assert last_ctx.get("deferred_self_draft_text") == "This is the deferred text"
+
+    def test_persist_failure_is_logged_not_swallowed(self):
+        """If the extra_context persist fails, a WARNING is logged (not swallowed).
+        The file dual-write and early return still complete normally."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from bridge.message_drafter import MessageDraft
+
+        handler = self._make_handler()
+        file_handler = MagicMock()
+        file_handler.send = AsyncMock()
+        handler._file_handler = file_handler
+
+        session = self._make_session()
+
+        drafted = MessageDraft(text="", full_output_file=None, needs_self_draft=True, artifacts={})
+
+        def _raise(*_a, **_kw):
+            raise RuntimeError("Redis unavailable")
+
+        with (
+            patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)),
+            patch("agent.steering.peek_steering_sender", return_value=None),
+            patch("agent.steering.push_steering_message", return_value=True),
+            patch("agent.steering.bump_self_draft_attempts", return_value=1),
+            patch("models.session_lifecycle.get_authoritative_session", side_effect=_raise),
+            patch("agent.output_handler.logger") as mock_logger,
+        ):
+            asyncio.run(handler.send("123", "text", 0, session=session))
+
+        # Must log at WARNING level (not silently swallow).
+        warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
+        assert any("sess-persist" in w or "deferred" in w.lower() for w in warning_calls), (
+            f"Expected a WARNING about persist failure; got calls: {warning_calls}"
+        )
+
+    def test_persist_uses_authoritative_re_read_not_stale_session(self):
+        """The RMW re-reads the authoritative session before merging, avoiding a
+        last-writer-wins clobber of concurrent extra_context writes."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from bridge.message_drafter import MessageDraft
+
+        handler = self._make_handler()
+        session = self._make_session()
+        # Pre-load a key that a concurrent writer might have set.
+        session.extra_context = {"transport": "telegram"}
+
+        drafted = MessageDraft(text="", full_output_file=None, needs_self_draft=True, artifacts={})
+
+        auth_session = MagicMock()
+        # Auth session has a different (newer) extra_context.
+        auth_session.extra_context = {"transport": "telegram", "other_key": "other_val"}
+        auth_session.save = MagicMock()
+
+        with (
+            patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)),
+            patch("agent.steering.peek_steering_sender", return_value=None),
+            patch("agent.steering.push_steering_message", return_value=True),
+            patch("agent.steering.bump_self_draft_attempts", return_value=1),
+            patch(
+                "models.session_lifecycle.get_authoritative_session",
+                return_value=auth_session,
+            ),
+        ):
+            asyncio.run(handler.send("123", "text", 0, session=session))
+
+        # The save target must be the auth_session (re-read), not the stale local session.
+        auth_session.save.assert_called()
+        # The re-read's pre-existing key must survive (not clobbered).
+        assert auth_session.extra_context.get("other_key") == "other_val", (
+            "concurrent extra_context key must not be clobbered by the RMW"
+        )
+        # The deferred keys must be present.
+        assert auth_session.extra_context.get("deferred_self_draft_pending") is True

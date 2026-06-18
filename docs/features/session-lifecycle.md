@@ -338,6 +338,51 @@ When `monitoring/session_watchdog.py::check_stalled_sessions` queues a user-visi
 
 **Implication:** there is a ≤5-minute window (one watchdog tick interval) where ⏳ can briefly persist on the user's message after the session recovers, before the next tick clears the dedup. The recovery message itself lands first, so the user sees the recovery before the reaction is reset for a future stall.
 
+## Deferred Self-Draft Fallback Delivery (issue #1730)
+
+When the message drafter flags an output as an "empty promise" (`needs_self_draft=True`),
+`TelegramRelayOutputHandler.send()` injects a `sender="drafter-fallback"` steering message asking
+the agent to rewrite and resend, then skips the outbox write.  This is called a *deferred delivery*:
+the user's message will be delivered on the agent's next SDK turn after it consumes the steering.
+
+**The failure mode:** if the session is killed by the health checker (`tool_timeout` or
+`no_progress`) before the self-draft completes, the deferred answer is silently lost.  The
+steering queue is empty by finalization time — the agent drains it at turn start — so it cannot be
+used as a detection signal.
+
+**The fix (issue #1730):**
+
+1. **Persist at defer time**: at the point where `steering_deferred=True` in
+   `agent/output_handler.py`, the handler persists two keys into `AgentSession.extra_context`
+   (safe read-modify-write via `get_authoritative_session` re-read):
+   - `"deferred_self_draft_pending"`: `True`
+   - `"deferred_self_draft_text"`: the original output text
+
+2. **Fallback at finalization**: a new async helper `_deliver_deferred_self_draft_fallback(entry)`
+   in `agent/session_health.py` reads `entry.extra_context["deferred_self_draft_pending"]` on all
+   three terminal recovery branches (`failed` × 2, `abandoned` × 1).  On a truthy flag it delivers
+   the recovered `deferred_self_draft_text` — narration-gated inline via the imported
+   `is_narration_only` predicate and `NARRATION_FALLBACK_MESSAGE` constant from
+   `bridge.message_quality`, or an explicit "couldn't finish responding" notice when text is absent.
+   The helper is idempotent via Redis SETNX (`self_draft_fallback_sent:{session_id}`, 1 h TTL).
+
+3. **Precedence**: the self-draft fallback fires *before* the generic degraded notice
+   (`_deliver_tool_timeout_degraded_notice`).  When `deferred_self_draft_pending` is set, the
+   generic notice is suppressed.  The two helpers use distinct SETNX keys so neither blocks the
+   other.
+
+4. **Counter cleanup (AC4 dual-seat)**: `reset_self_draft_attempts(session_id)` is called at
+   every terminal finalize to clean up the `steering:attempts:{session_id}` Redis counter instead
+   of relying on its 1-hour TTL:
+   - **Seat A** (`models/session_lifecycle.py::finalize_session`): outside the `emit_telemetry`
+     guard so it fires unconditionally (covers `completed` + any telemetry-on caller).
+   - **Seat B** (`agent/session_health.py`, next to `finalize_telemetry`): covers the
+     `emit_telemetry=False` health-checker terminal finalizes that Seat A alone would miss.
+
+**Cross-reference:** `_deliver_tool_timeout_degraded_notice` (added in PR #1738, issue #1711) is
+the delivery primitive this fallback is modelled after.  New precedence: self-draft fallback
+supersedes the generic degraded notice when a deferred self-draft was pending.
+
 ## Design Constraints
 
 - **Import safety**: The module uses lazy imports for `tools.session_tags` and `agent.agent_session_queue` so it can be imported from `.claude/hooks/stop.py` subprocess context where those modules may not be on `sys.path`.

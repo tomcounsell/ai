@@ -592,3 +592,268 @@ def test_not_confirmed_dead_does_not_inject_steering():
     entry = _recovery_entry(current_tool_name="mcp__svc", recovery_attempts=0)
     _run_recovery_not_confirmed_dead(entry, reason_kind="tool_timeout")
     assert not entry._steered, "steering must not be injected when subprocess is not confirmed dead"
+
+
+# ---------------------------------------------------------------------------
+# Component D: _deliver_deferred_self_draft_fallback (issue #1730)
+# ---------------------------------------------------------------------------
+
+
+from agent.session_health import _deliver_deferred_self_draft_fallback  # noqa: E402
+
+
+def _make_deferred_entry(
+    *,
+    session_id: str = "sess-deferred",
+    project_key: str = "test-proj",
+    deferred_pending: bool = True,
+    deferred_text: str = "Here is the answer you were looking for.",
+    transport: str = "telegram",
+    chat_id: str = "chat-1",
+    telegram_message_id: int = 42,
+) -> SimpleNamespace:
+    extra = {"transport": transport}
+    if deferred_pending:
+        extra["deferred_self_draft_pending"] = True
+        extra["deferred_self_draft_text"] = deferred_text
+    return SimpleNamespace(
+        session_id=session_id,
+        agent_session_id=session_id,
+        project_key=project_key,
+        extra_context=extra,
+        chat_id=chat_id,
+        telegram_message_id=telegram_message_id,
+    )
+
+
+def test_deferred_fallback_delivers_when_flag_set(_mock_redis):
+    """When deferred_self_draft_pending=True, send_cb is called with the deferred text."""
+    send_cb = AsyncMock()
+    entry = _make_deferred_entry(deferred_text="Here is the answer.")
+
+    with patch("agent.agent_session_queue._resolve_callbacks", return_value=(send_cb, None)):
+        asyncio.run(_deliver_deferred_self_draft_fallback(entry))
+
+    send_cb.assert_called_once()
+    delivered_text = send_cb.call_args[0][1]
+    assert "Here is the answer" in delivered_text
+
+
+def test_deferred_fallback_no_op_when_flag_absent(_mock_redis):
+    """When deferred_self_draft_pending is not set, helper is a no-op."""
+    send_cb = AsyncMock()
+    entry = _make_deferred_entry(deferred_pending=False)
+
+    with patch("agent.agent_session_queue._resolve_callbacks", return_value=(send_cb, None)):
+        asyncio.run(_deliver_deferred_self_draft_fallback(entry))
+
+    send_cb.assert_not_called()
+
+
+def test_deferred_fallback_no_op_when_extra_context_none(_mock_redis):
+    """extra_context=None is handled defensively — no crash, no delivery."""
+    send_cb = AsyncMock()
+    entry = SimpleNamespace(
+        session_id="sess-none-ctx",
+        agent_session_id="sess-none-ctx",
+        project_key="test-proj",
+        extra_context=None,
+        chat_id="c",
+        telegram_message_id=0,
+    )
+
+    with patch("agent.agent_session_queue._resolve_callbacks", return_value=(send_cb, None)):
+        asyncio.run(_deliver_deferred_self_draft_fallback(entry))
+
+    send_cb.assert_not_called()
+
+
+def test_deferred_fallback_canned_notice_when_text_missing(_mock_redis):
+    """deferred_self_draft_pending=True but text absent → delivers explicit notice."""
+    send_cb = AsyncMock()
+    entry = SimpleNamespace(
+        session_id="sess-no-text",
+        agent_session_id="sess-no-text",
+        project_key="test-proj",
+        extra_context={"deferred_self_draft_pending": True},  # no deferred_self_draft_text
+        chat_id="c",
+        telegram_message_id=0,
+    )
+
+    with patch("agent.agent_session_queue._resolve_callbacks", return_value=(send_cb, None)):
+        asyncio.run(_deliver_deferred_self_draft_fallback(entry))
+
+    send_cb.assert_called_once()
+    delivered_text = send_cb.call_args[0][1]
+    assert delivered_text.strip(), "delivered text must not be empty"
+
+
+def test_deferred_fallback_idempotent(_mock_redis):
+    """Second call with same session_id is blocked by Redis SETNX lock."""
+    _mock_redis.set.return_value = None  # SETNX: key already exists
+    send_cb = AsyncMock()
+    entry = _make_deferred_entry(session_id="sess-idemp")
+
+    with patch("agent.agent_session_queue._resolve_callbacks", return_value=(send_cb, None)):
+        asyncio.run(_deliver_deferred_self_draft_fallback(entry))
+
+    send_cb.assert_not_called()
+
+
+def test_deferred_fallback_never_raises_on_send_failure(_mock_redis):
+    """Exception in send_cb is swallowed — helper must not propagate."""
+    send_cb = AsyncMock(side_effect=RuntimeError("send exploded"))
+    entry = _make_deferred_entry(session_id="sess-err")
+
+    with patch("agent.agent_session_queue._resolve_callbacks", return_value=(send_cb, None)):
+        # Must complete without raising.
+        asyncio.run(_deliver_deferred_self_draft_fallback(entry))
+
+
+def test_deferred_fallback_falls_back_to_file_output_handler(_mock_redis):
+    """When no registered callback, FileOutputHandler.send is used."""
+    entry = _make_deferred_entry(session_id="sess-file-fb")
+    fake_handler = MagicMock()
+    fake_handler.send = AsyncMock()
+
+    with patch("agent.agent_session_queue._resolve_callbacks", return_value=(None, None)):
+        with patch("agent.output_handler.FileOutputHandler", return_value=fake_handler):
+            asyncio.run(_deliver_deferred_self_draft_fallback(entry))
+
+    fake_handler.send.assert_called_once()
+
+
+def test_deferred_fallback_setnx_key_distinct_from_degraded_notice(_mock_redis):
+    """The SETNX keys for the two helpers are distinct — neither blocks the other."""
+    setnx_keys: list[str] = []
+
+    def _track_set(key, val, *, nx, ex):
+        setnx_keys.append(key)
+        return True  # always acquired
+
+    _mock_redis.set.side_effect = _track_set
+    send_cb = AsyncMock()
+    entry = _make_deferred_entry(session_id="sess-keys")
+
+    with patch("agent.agent_session_queue._resolve_callbacks", return_value=(send_cb, None)):
+        asyncio.run(_deliver_deferred_self_draft_fallback(entry))
+        asyncio.run(_deliver_tool_timeout_degraded_notice(entry, "mcp__svc"))
+
+    # Both helpers must use distinct Redis keys.
+    assert len(setnx_keys) >= 2
+    assert len(set(setnx_keys)) == len(setnx_keys), (
+        f"SETNX keys must be distinct — got {setnx_keys}"
+    )
+
+
+def _run_recovery_with_deferred(entry, *, reason_kind="tool_timeout", worker_key="wk-1"):
+    """Like _run_recovery but patches _deliver_deferred_self_draft_fallback instead."""
+    from agent.session_health import _apply_recovery_transition
+
+    def _fake_finalize(e, status, reason="", **kw):
+        e.status = status
+
+    def _fake_transition(e, status, reason="", **kw):
+        e.status = status
+
+    with (
+        patch("agent.session_health._tier2_reprieve_signal", return_value=None),
+        patch("agent.session_health._confirm_subprocess_dead") as mock_kill,
+        patch("agent.session_health._increment_subprocess_kill_counter"),
+        patch("agent.session_health._is_memory_tight", return_value=False),
+        patch("agent.session_health._rte", create=True),
+        patch("agent.session_health.asyncio.get_running_loop") as mock_loop,
+        patch(
+            "agent.session_health._deliver_tool_timeout_degraded_notice",
+            new_callable=AsyncMock,
+        ) as mock_degraded,
+        patch(
+            "agent.session_health._deliver_deferred_self_draft_fallback",
+            new_callable=AsyncMock,
+        ) as mock_fallback,
+        patch("models.session_lifecycle.finalize_session", side_effect=_fake_finalize),
+        patch("models.session_lifecycle.transition_status", side_effect=_fake_transition),
+        patch("models.session_lifecycle.StatusConflictError", Exception),
+        patch("agent.agent_session_queue._ensure_worker"),
+        patch("agent.session_health._active_events", {}),
+        patch("popoto.redis_db.POPOTO_REDIS_DB", MagicMock()),
+    ):
+        from agent.session_health import SubprocessKillResult
+
+        mock_kill.return_value = SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+        mock_loop.return_value.run_in_executor = AsyncMock(
+            return_value=SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+        )
+        if worker_key == "local-test" or worker_key.startswith("local"):
+            pass  # is_local will be True
+
+        async def _run():
+            return await _apply_recovery_transition(
+                entry,
+                reason="test-reason",
+                reason_kind=reason_kind,
+                handle=None,
+                worker_key=worker_key,
+            )
+
+        result = asyncio.run(_run())
+    return result, mock_degraded, mock_fallback
+
+
+def test_deferred_fallback_wired_into_failed_branch():
+    """failed branch (MAX_RECOVERY_ATTEMPTS): _deliver_deferred_self_draft_fallback called."""
+    from agent.session_health import MAX_RECOVERY_ATTEMPTS
+
+    entry = _recovery_entry(
+        current_tool_name="mcp__svc",
+        recovery_attempts=MAX_RECOVERY_ATTEMPTS - 1,
+        extra_context={"deferred_self_draft_pending": True},
+    )
+    _result, _mock_degraded, mock_fallback = _run_recovery_with_deferred(
+        entry, reason_kind="tool_timeout"
+    )
+    mock_fallback.assert_called_once()
+
+
+def test_deferred_fallback_suppresses_degraded_notice_when_flag_set():
+    """When deferred_self_draft_pending=True, the generic degraded notice is suppressed."""
+    from agent.session_health import MAX_RECOVERY_ATTEMPTS
+
+    entry = _recovery_entry(
+        current_tool_name="mcp__svc",
+        recovery_attempts=MAX_RECOVERY_ATTEMPTS - 1,
+        extra_context={"deferred_self_draft_pending": True},
+    )
+    _result, mock_degraded, _mock_fallback = _run_recovery_with_deferred(
+        entry, reason_kind="tool_timeout"
+    )
+    mock_degraded.assert_not_called()
+
+
+def test_degraded_notice_fires_when_no_deferred_flag():
+    """When deferred_self_draft_pending is absent, the generic degraded notice still fires."""
+    from agent.session_health import MAX_RECOVERY_ATTEMPTS
+
+    entry = _recovery_entry(
+        current_tool_name="mcp__svc",
+        recovery_attempts=MAX_RECOVERY_ATTEMPTS - 1,
+        extra_context={},  # no deferred flag
+    )
+    _result, mock_degraded, _mock_fallback = _run_recovery_with_deferred(
+        entry, reason_kind="tool_timeout"
+    )
+    mock_degraded.assert_called_once()
+
+
+def test_deferred_fallback_wired_into_abandoned_branch():
+    """abandoned (is_local) branch: _deliver_deferred_self_draft_fallback called."""
+    entry = _recovery_entry(
+        current_tool_name="mcp__svc",
+        recovery_attempts=0,
+        extra_context={"deferred_self_draft_pending": True},
+    )
+    _result, _mock_degraded, mock_fallback = _run_recovery_with_deferred(
+        entry, reason_kind="no_progress", worker_key="local-test"
+    )
+    mock_fallback.assert_called_once()
+    assert entry.status == "abandoned"

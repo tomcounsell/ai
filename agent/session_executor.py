@@ -1756,6 +1756,16 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
         # Update session status in Redis via AgentSession
         # When auto-continue deferred, session is still active (not completed)
+        # Bug A (issue #1730): complete_transcript is confirmed to fire on the
+        # deferred-self-draft completion path (defer_reaction=False, since
+        # _inject_self_draft_steering does NOT call _enqueue_nudge).  However, if
+        # complete_transcript itself throws, the session can ghost as ``running`` for
+        # up to the health-check TTL (32 min in the production timeline).  The
+        # defensive fallback below ensures a terminal finalize always lands on the
+        # COMPLETION/DELIVERY exit when complete_transcript fails.  Scoped to this
+        # exit only — the nudge / unconsumed-steering re-enqueue path is gated by
+        # chat_state.defer_reaction=True and the CancelledError path is health-checker-
+        # owned; neither is touched here.
         if agent_session:
             try:
                 from bridge.session_transcript import complete_transcript
@@ -1778,6 +1788,45 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"session {session.session_id} (operation: finalize status to "
                     f"{'completed' if not task.error else 'failed'}): {e}"
                 )
+                # Defensive fallback: if complete_transcript failed and the session is
+                # still running, finalize directly so we never leave a ghost `running`
+                # state.  Scoped to the completion/delivery exit only (not the nudge
+                # path, which is protected by the defer_reaction guard above).
+                # get_authoritative_session re-read + StatusConflictError guard ensure
+                # we never stomp a concurrent nudge or health-checker transition.
+                if not chat_state.defer_reaction:
+                    try:
+                        from models.session_lifecycle import (  # noqa: PLC0415
+                            StatusConflictError,
+                            finalize_session,
+                            get_authoritative_session,
+                        )
+
+                        _auth = get_authoritative_session(session.session_id)
+                        if _auth is not None and _auth.status == "running":
+                            _fallback_status = "completed" if not task.error else "failed"
+                            finalize_session(
+                                _auth,
+                                _fallback_status,
+                                reason=(
+                                    f"completion-exit fallback finalize after "
+                                    f"complete_transcript failure: {e}"
+                                ),
+                            )
+                            logger.info(
+                                "[executor] Defensive completion finalize: session %s → %s",
+                                session.session_id,
+                                _fallback_status,
+                            )
+                    except StatusConflictError:
+                        # CAS conflict = another process already finalized. Success.
+                        pass
+                    except Exception as _fb_err:
+                        logger.warning(
+                            "[executor] Defensive completion finalize failed for %s: %s",
+                            session.session_id,
+                            _fb_err,
+                        )
         else:
             # agent_session lookup returned None (race on status="running" filter,
             # e.g. after health-check recovery). Finalize using outer `session`

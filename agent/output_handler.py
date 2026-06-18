@@ -431,6 +431,36 @@ class TelegramRelayOutputHandler:
                 "Delivery deferred to agent self-draft (steering injected) for session %s",
                 session_id,
             )
+            # Persist the defer state so the health checker can deliver a
+            # fallback if the session dies before the self-draft completes.
+            # Detection CANNOT use the steering queue — the agent drains it at
+            # turn start, so the queue is always empty by finalization time.
+            # The persisted extra_context flag is the only reliable cross-process
+            # signal. Safe RMW: re-read the authoritative record immediately
+            # before the merge so we never clobber a concurrent extra_context
+            # write (last-writer-wins per dict; the two deferred keys are
+            # disjoint from the transport-resolution write, making a lost update
+            # vanishingly unlikely). Never blocks the file dual-write / return —
+            # a persist failure degrades to the canned "couldn't finish" notice
+            # and is logged at WARNING for triage.
+            if session is not None and session_id:
+                try:
+                    from models.session_lifecycle import get_authoritative_session
+
+                    _auth = get_authoritative_session(session_id)
+                    _target = _auth if _auth is not None else session
+                    _ctx = dict(_target.extra_context or {})
+                    _ctx["deferred_self_draft_pending"] = True
+                    _ctx["deferred_self_draft_text"] = text
+                    _target.extra_context = _ctx
+                    _target.save(update_fields=["extra_context"])
+                except Exception as _persist_err:
+                    logger.warning(
+                        "Failed to persist deferred self-draft state for session %s: %s "
+                        "(fallback will deliver canned notice if session dies)",
+                        session_id,
+                        _persist_err,
+                    )
             if self._file_handler is not None:
                 await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
             return

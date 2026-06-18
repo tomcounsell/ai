@@ -317,6 +317,21 @@ def finalize_session(
         except Exception:
             pass
 
+    # AC4 Seat A: reset the self-draft attempt counter on every terminal finalize,
+    # unconditionally (regardless of emit_telemetry).  Health-checker callers pass
+    # emit_telemetry=False, so a reset inside the emit_telemetry block would be
+    # skipped on exactly the failed/abandoned paths that need cleanup.  Placing
+    # the reset here covers completed (happy path) and all health-checker terminals.
+    # Best-effort: a Redis failure never blocks the terminal transition.
+    try:
+        _ac4_sid = getattr(session, "session_id", None) or getattr(session, "id", None)
+        if _ac4_sid:
+            from agent.steering import reset_self_draft_attempts as _reset_attempts
+
+            _reset_attempts(_ac4_sid)
+    except Exception:
+        pass
+
     # Idempotency: if already in this terminal state, skip side effects
     current_status = getattr(session, "status", None)
     if current_status == status:
