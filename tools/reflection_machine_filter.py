@@ -34,11 +34,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
 
 import yaml
+
+from tools.machine_identity import computer_name
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REFLECTIONS = PROJECT_ROOT / "config" / "reflections.yaml"
@@ -46,18 +47,13 @@ DEFAULT_PROJECTS = PROJECT_ROOT / "config" / "projects.json"
 
 
 def _current_machine_name() -> str:
-    """Return this machine's ComputerName (matches projects.json ``machine``)."""
-    try:
-        result = subprocess.run(
-            ["scutil", "--get", "ComputerName"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        return result.stdout.strip()
-    except Exception:
-        return ""
+    """Return this machine's ComputerName (matches projects.json ``machine``).
+
+    Empty string on failure → fail-open in the ownership check. Delegates to the
+    canonical :func:`tools.machine_identity.computer_name` so the raw lookup
+    lives in exactly one place.
+    """
+    return computer_name()
 
 
 def _load_project_machines(projects_path: Path) -> dict[str, str]:

@@ -24,11 +24,12 @@ import json
 import logging
 import os
 import re
-import socket
 import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+
+from tools.machine_identity import display_machine_name
 
 logger = logging.getLogger("reflections.docs_auditor")
 
@@ -709,24 +710,11 @@ def _filing_machine_name() -> str:
     is stamped into every issue body so duplicates fanned across hosts — or a
     host still running this reflection after it was disabled in the synced
     config — name themselves instead of being anonymous.
+
+    Delegates to :func:`tools.machine_identity.display_machine_name`, the shared
+    helper that owns the ComputerName→hostname→"unknown" fallback chain.
     """
-    try:
-        result = subprocess.run(
-            ["scutil", "--get", "ComputerName"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        name = result.stdout.strip()
-        if name:
-            return name
-    except Exception:
-        pass
-    try:
-        return socket.gethostname()
-    except Exception:
-        return "unknown"
+    return display_machine_name()
 
 
 def _open_issue_exists(title: str, repo_root: Path) -> bool:
