@@ -108,6 +108,21 @@ def fold_events(events: list[dict], totals: TranscriptTelemetry) -> TranscriptTe
 
             if event_type == "user":
                 result.turn_count += 1
+                # A user event carries the tool_result for the prior tool_use,
+                # so any tool the assistant launched has now completed and
+                # nothing is in flight. Clear current_tool_name here.
+                #
+                # Without this, current_tool_name stayed pinned to the last
+                # tool the PM ran (e.g. a fast Read during priming) while
+                # last_tool_use_at froze at that moment. The PM would then
+                # think/respond for >30s — normal opus cadence — and
+                # session_health._check_tool_timeout would false-flag it as
+                # `tool-wedge: Read (internal tier) older than 30s` and kill
+                # the session. A genuinely hung tool produces a tool_use with
+                # NO following user/result event, so current_tool_name stays
+                # set and the timeout still fires correctly — only the
+                # completed-tool false positive is removed.
+                result.current_tool_name = None
                 continue
 
             if event_type != "assistant":

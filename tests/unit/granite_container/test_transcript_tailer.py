@@ -310,6 +310,55 @@ class TestFoldEventsToolUse(unittest.TestCase):
         self.assertEqual(result.tool_call_count, 1)
 
 
+class TestCurrentToolNameClearedOnCompletion(unittest.TestCase):
+    """current_tool_name must reflect a genuinely in-flight tool only.
+
+    A user event carries the tool_result for the prior tool_use, so the tool
+    has completed. If current_tool_name stays pinned to a completed tool while
+    last_tool_use_at freezes, session_health._check_tool_timeout false-flags
+    the normal post-tool think time (>30s for opus) as
+    `tool-wedge: Read (internal tier) older than 30s` and kills the session.
+    This regression guards the clear-on-user-event fix.
+    """
+
+    def test_user_event_after_tool_use_clears_current_tool_name(self) -> None:
+        """tool_use then a user (tool_result) event -> nothing in flight."""
+        events = [
+            _make_assistant_entry(tool_names=["Read"]),
+            _make_user_entry(),
+        ]
+        result = fold_events(events, TranscriptTelemetry())
+        self.assertIsNone(result.current_tool_name)
+        # The tool still counts; only the in-flight marker is cleared.
+        self.assertEqual(result.tool_call_count, 1)
+
+    def test_clear_persists_across_incremental_calls(self) -> None:
+        """tool_use in poll 1, user event in poll 2 -> cleared via prev_state."""
+        state1 = fold_events([_make_assistant_entry(tool_names=["Read"])], TranscriptTelemetry())
+        self.assertEqual(state1.current_tool_name, "Read")
+        state2 = fold_events([_make_user_entry()], state1)
+        self.assertIsNone(state2.current_tool_name)
+
+    def test_in_flight_tool_with_no_result_is_preserved(self) -> None:
+        """A genuinely hung tool (tool_use, no following user event) stays set.
+
+        This is what keeps real wedge detection working.
+        """
+        events = [_make_assistant_entry(tool_names=["Bash"])]
+        result = fold_events(events, TranscriptTelemetry())
+        self.assertEqual(result.current_tool_name, "Bash")
+
+    def test_new_tool_use_after_clear_sets_again(self) -> None:
+        """Read -> result (clear) -> Edit -> in flight as Edit."""
+        events = [
+            _make_assistant_entry(tool_names=["Read"]),
+            _make_user_entry(),
+            _make_assistant_entry(tool_names=["Edit"]),
+        ]
+        result = fold_events(events, TranscriptTelemetry())
+        self.assertEqual(result.current_tool_name, "Edit")
+
+
 # ---------------------------------------------------------------------------
 # 7. fold_events with user entries → turn_count incremented
 # ---------------------------------------------------------------------------
