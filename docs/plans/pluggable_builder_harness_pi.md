@@ -97,7 +97,7 @@ External research (WebSearch) plus live CLI spikes against the installed `pi` (v
 3. **Classification** (changed): regex now yields `(destination, harness, payload)`. For `[/dev:pi]`, `destination="dev"`, `harness="pi"`.
 4. **Builder dispatch** (changed): `_route_pm_classification` resolves a `BuilderHarness` for `harness` (default `claude`) and calls `builder.run_turn(payload)` instead of inlining the PTY+transcript logic.
    - `PtyClaudeBuilder.run_turn` = today's `_cycle_idle(dev)` → write → baseline → `_cycle_idle(dev)` → `last_assistant_text`.
-   - `PiSubprocessBuilder.run_turn` = `subprocess.run(["pi","-p","--mode","json","--append-system-prompt","@<persona>","--provider",P,"--model",M,"--tools","read,bash,edit,write"], cwd=worktree, input=payload)` → parse NDJSON → final assistant text.
+   - `PiSubprocessBuilder.run_turn` = `subprocess.Popen(["pi","-p","--mode","json","--append-system-prompt","@<persona>","--provider",P,"--model",M,"--tools","read,bash,edit,write"], cwd=worktree, start_new_session=True, ...)` → `communicate(input=payload, timeout=PI_SUBPROCESS_TIMEOUT_S)` (timeout → `killpg` the group, `return ""`) → parse NDJSON → final assistant text.
 5. **Relay back**: builder's returned text is interpreted **by the container caller** (not the builder): the caller applies the empty-return fallback gate (empty → bump `transcript_fallback_count`, seed `DEV_REPORT_UNAVAILABLE`), assigns `_last_dev_report` to the returned text, and writes it to PM PTY. This ownership is harness-agnostic — see Risk 5.
 6. **Output**: PM eventually emits `[/user]`/`[/complete]` → delivered to the user via the existing callbacks (unchanged).
 
@@ -139,7 +139,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/pluggable_buil
 - **`PiSubprocessBuilder`**: runs Pi as a one-shot subprocess (`-p --mode json`) in the session worktree, primed via `--append-system-prompt @<persona-file>`, with an explicit `--provider/--model`. Parses the NDJSON envelope to the final assistant text.
 - **Harness-aware classifier**: `classify_pm_prefix` parses `[/dev:<harness>]` (and plain `[/dev]`), returning the selected harness.
 - **Builder registry / resolver**: maps a harness name → `BuilderHarness` instance, with `claude` as the default and a clear error for an unknown harness (routed back to PM as a compliance nudge, not a crash).
-- **Pi dev persona file** (`config/personas/granite/pi_dev_rails.md` or similar): the rails + dev-persona text Pi receives via `--append-system-prompt`, since it cannot run the `/granite:prime-dev-role` slash command. v1 is a faithful translation of the claude Dev rails (no-push-to-main, worktree discipline, narrow tests, report in natural language).
+- **Pi dev persona file** (`config/personas/granite/pi_dev_rails.md` or similar — **note `config/personas/granite/` does not yet exist; the build creates it**): the rails + dev-persona text Pi receives via `--append-system-prompt`, since it cannot run the `/granite:prime-dev-role` slash command. v1 is a faithful translation of the claude Dev rails sourced from `.claude/commands/granite/_prime-rails.md` + `prime-dev-role.md` (no-push-to-main, worktree discipline, narrow tests, report in natural language). **Rails single-source-of-truth (round-2 NON-BLOCKING):** to avoid the Pi rails drifting from `_prime-rails.md`, Open Question 1 must resolve to either (a) transcluding/`@file`-referencing `_prime-rails.md` content so there is one source, or (b) a documented sync note in the persona file header pointing back to `_prime-rails.md` as the canonical rails. Do not silently fork a second copy of the rails text with no back-reference.
 
 ### Flow
 
@@ -148,13 +148,18 @@ PM turn → `classify_pm_prefix` returns `(dev, "pi", payload)` → resolver ret
 ### Technical Approach
 
 - **Extraction first, additively.** Land `BuilderHarness` + `PtyClaudeBuilder` as a behavior-preserving refactor in its own commit, fully covered by regression tests, *before* adding Pi. This keeps the risky change (claude path) separable from the new feature (Pi).
-- **Classifier change is additive.** Regex becomes `^\[/(dev|user|complete)(?::([a-z0-9_-]+))?\]\s*$`; the harness group defaults to `None` → treated as `claude`. Existing `[/dev]` callers and all current tests are unaffected.
+- **Classifier change is additive — and must touch BOTH regexes.** `classify_pm_prefix` (`agent/granite_container/granite_classifier.py`) has *two* regexes, and the harness group must be added to **both** or the suffix is silently dropped on the drift path:
+  - **Strict** `PREFIX_TOKEN_RE` (`:119`) becomes `^\[/(dev|user|complete)(?::([a-z0-9_-]+))?\]\s*$`. Threaded through the strict branch (`m.group(2)` → harness) at `:200-214`.
+  - **Fallback** `PREFIX_TOKEN_FALLBACK_RE` (`:120`, used via `.search(pm_tail[:200])` at `:223`) becomes `\[/(dev|user|complete)(?::([a-z0-9_-]+))?\]`. The fallback branch at `:224-230` must read `harness=fallback.group(2)` — **not just `fallback.group(1)`**, which today reads only `(dev|user|complete)` and would drop the `:pi` suffix when the PM emits `[/dev:pi]` mid-line, with leading whitespace, or with trailing text (exactly the drift the fallback exists to tolerate). Dropping it routes Pi-intended work to claude with `compliance_miss=True` and **no error signal**.
+  - Both unknown-return branches (`:192-198` empty-first-line, `:232-237` no-match) return `harness=None`.
+  - The harness group defaults to `None` → treated as `claude`. Existing `[/dev]` callers and all current tests are unaffected; the new `harness` field is additive on `ClassificationResult`.
 - **Pi priming via flag, not slash.** `--append-system-prompt @<persona-file>` on every invocation (stateless priming is fine for single-turn). The persona file is the "skill translation" deliverable.
 - **Pi runs in the worktree.** `cwd=working_dir` (the same session worktree the claude Dev uses) so Pi's `bash/edit/write` tools obey the existing filesystem isolation. `--tools read,bash,edit,write` only.
 - **Explicit model.** Adapter passes `--provider`/`--model` from config; tests pass the local ollama model, the demo passes a cloud model. Never rely on Pi's default (spike-3).
 - **NDJSON parser is the only fragile surface.** Implement it as a small pure function (`parse_pi_final_text(stream: str) -> str`) with a captured real envelope as a fixture; handle: no `agent_end` (timeout/crash → return `""` so the existing `DEV_REPORT_UNAVAILABLE` fallback fires), multiple text blocks (concatenate), thinking-only output (return `""`).
-- **Per-turn timeout, not the PTY ceiling.** `PiSubprocessBuilder.run_turn` bounds the subprocess with `subprocess.run(..., timeout=PI_SUBPROCESS_TIMEOUT_S)` where `PI_SUBPROCESS_TIMEOUT_S = 10 * 60` (provisional). It catches `subprocess.TimeoutExpired` → `logger.warning` + `return ""`. **Do NOT pass `CYCLE_IDLE_TIMEOUT_S`** — that is a 12-hour PTY-idle ceiling, not a turn bound (see Race 1).
+- **Per-turn timeout, not the PTY ceiling — with process-group kill.** `PiSubprocessBuilder.run_turn` bounds the subprocess at `PI_SUBPROCESS_TIMEOUT_S = 10 * 60` (provisional). Use `subprocess.Popen(..., start_new_session=True)` + `proc.communicate(input=payload, timeout=PI_SUBPROCESS_TIMEOUT_S)` (not bare `subprocess.run`) so the handle is held for `os.killpg(os.getpgid(proc.pid), SIGKILL)` on `TimeoutExpired` — this reaps Pi **and** its `bash/edit/write` tool subtree, not just the direct process (see Race 1). On timeout → `logger.warning` + `return ""`. **Do NOT pass `CYCLE_IDLE_TIMEOUT_S`** — that is a 12-hour PTY-idle ceiling, not a turn bound (see Race 1).
 - **Caller owns the empty-return interpretation.** `run_turn` returns only the final text (or `""` on timeout/crash/empty). The container caller — not the builder — applies the `_last_dev_report` assignment and the empty-return fallback gate (`transcript_fallback_count` bump + `DEV_REPORT_UNAVAILABLE` substitution). This keeps the gate harness-agnostic; the Pi path and the claude path hit the identical caller-side handling. See Risk 5 for the precise ownership boundary.
+- **Protocol surface vs. the No-Go (round-2 NON-BLOCKING).** `BuilderHarness` declares `prepare(spec)` and `close()`, but the single-turn `-p` PoC needs neither for Pi (stateless priming via `--append-system-prompt`; no long-lived process to close beyond the per-turn `killpg`). To avoid speculative surface that contradicts the "design against exactly two implementations" Rabbit Hole: keep `prepare`/`close` in the protocol **only because `PtyClaudeBuilder` genuinely uses them** (the dev PTY has real setup/teardown) — for `PiSubprocessBuilder` they are no-ops (`prepare` returns immediately; `close` reaps any live child via `killpg`). Do not add RPC-lifecycle hooks (`steer`/`follow-up`/persistent-process) to the protocol now; those land with the `--mode rpc` fast-follow slug. The two methods are justified by the claude implementation, not by anticipated Pi multi-turn.
 - **Driver verification is load-bearing.** A non-claude builder cannot be trusted on rails compliance the way slash-priming implies. For the PoC, the PM persona is instructed to re-read the diff after a `[/dev:pi]` turn before reporting `[/complete]`. Full adversarial verification is a fast-follow.
 
 ## Failure Path Test Strategy
@@ -175,14 +180,14 @@ PM turn → `classify_pm_prefix` returns `(dev, "pi", payload)` → resolver ret
 
 ## Test Impact
 
-- [ ] `tests/unit/test_granite_classifier.py` (or equivalent) — UPDATE: add cases for `[/dev:pi]`, `[/dev:claude]`, `[/dev]` (default), and `[/dev:unknown]`; assert the new `harness` field and that existing bare-token cases still classify identically.
+- [ ] `tests/unit/granite_container/test_granite_classifier.py` (360 lines; the real path — **NOT** `tests/unit/test_granite_classifier.py`, which does not exist) — UPDATE: add **strict** cases for `[/dev:pi]`, `[/dev:claude]`, `[/dev]` (default), `[/dev:unknown]`; assert the new `harness` field and that existing bare-token cases still classify identically. **Critically, add FALLBACK-path cases** (`[/dev:pi]` mid-line, with leading whitespace, with trailing text — e.g. `output: [/dev:pi] please build`) asserting `harness=="pi"` *and* `compliance_miss=True`. This file's existing fallback tests (`test_fallback_*`, line ~29-99) assert the destination recovers but **never check the harness** — they would lock in the round-2 BLOCKER (dropped `:pi` on drift) green if not extended. The new fallback cases are the regression guard.
 - [ ] Tests asserting `_route_pm_classification` dev-branch behavior — UPDATE: re-point at the `BuilderHarness` seam; assert `PtyClaudeBuilder.run_turn` produces byte-identical relay behavior to the pre-refactor path (regression guard).
 - [ ] New (Risk 5 — caller-owned fallback gate): `tests/.../test_container*.py` — assert that a `builder.run_turn` returning a non-empty string sets `_last_dev_report` to that exact string (NOT `DEV_REPORT_UNAVAILABLE`) for **both** harnesses; and that a `run_turn` returning `""` bumps `transcript_fallback_count` and seeds `DEV_REPORT_UNAVAILABLE`. Use a stub `BuilderHarness` so the test is harness-agnostic and proves the gate lives in the container caller, not the builder.
 - [ ] `tests/.../test_container*.py` two-PTY/loop tests — UPDATE only if they construct the dev relay directly; the goal is no behavioral diff for the claude path.
 - [ ] New: `tests/unit/test_pi_builder.py` — `parse_pi_final_text` against the captured fixture + edge cases; `PiSubprocessBuilder` with a mocked subprocess and a real-envelope fixture.
 - [ ] New: `tests/integration/test_pi_builder_e2e.py` — real `pi -p --mode json` against local ollama in a temp worktree, asserting a file write happens and the final text is relayed. Marked appropriately so CI runs it on the local model only.
 - [ ] New (NIT — PM routing judgment): a persona-routing check on PM output — given the `prime-pm-role.md` selector guidance, assert the PM emits `[/dev:pi]` for a pi-appropriate prompt and `[/dev]`/`[/dev:claude]` for a claude-appropriate one (classifier-level assertion on two representative PM outputs; or a persona-doc review checkpoint per Open Questions).
-- [ ] New (NIT — Pi timeout): `PiSubprocessBuilder.run_turn` on a slow/hanging subprocess raises `subprocess.TimeoutExpired` internally at `PI_SUBPROCESS_TIMEOUT_S`, is caught, logs a warning, and returns `""` (driving the caller's `DEV_REPORT_UNAVAILABLE` path). Assert it does **not** use `CYCLE_IDLE_TIMEOUT_S`.
+- [ ] New (NIT — Pi timeout): `PiSubprocessBuilder.run_turn` on a slow/hanging subprocess raises `subprocess.TimeoutExpired` internally at `PI_SUBPROCESS_TIMEOUT_S`, is caught, logs a warning, and returns `""` (driving the caller's `DEV_REPORT_UNAVAILABLE` path). Assert it does **not** use `CYCLE_IDLE_TIMEOUT_S`, **and** that on timeout it calls `os.killpg` on the child's process group (mock `os.killpg`/`os.getpgid`; assert `start_new_session=True` was passed to `Popen`) — proving the tool subtree is reaped, not orphaned.
 
 If any current granite test asserts the literal absence of a `harness` concept, that assertion is updated to allow the additive field.
 
@@ -229,6 +234,26 @@ If any current granite test asserts the literal absence of a `harness` concept, 
 **Data prerequisite:** The subprocess handle must be tracked so it can be killed on `close()`.
 **State prerequisite:** No second Pi turn starts for the same builder before the first returns (the container loop is single-threaded, so this holds).
 **Mitigation:** `subprocess.run(..., timeout=PI_SUBPROCESS_TIMEOUT_S)` bounds each turn (see below); `close()` kills any live child; teardown mirrors the existing `pkill` orphan-reaping pattern in `pty_driver.close`.
+
+> **Orphaned tool subtree on timeout (round-2 NON-BLOCKING, applied — it's cheap and directly tied to the timeout handling above).** A plain `subprocess.run(timeout=...)` SIGKILLs only the direct `pi` process on `TimeoutExpired`; any `bash`/`edit`/`write` tool subprocess Pi spawned can survive as an orphan, holding the worktree or a file lock. Launch Pi in its **own process group** and kill the whole group on timeout:
+>
+> ```python
+> import os, signal, subprocess
+> proc = subprocess.Popen(
+>     [...pi args...], cwd=working_dir, stdin=subprocess.PIPE,
+>     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+>     start_new_session=True,  # new session → new process group; pi + its tool subtree share the pgid
+> )
+> try:
+>     out, err = proc.communicate(input=payload, timeout=PI_SUBPROCESS_TIMEOUT_S)
+> except subprocess.TimeoutExpired:
+>     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)  # reap pi + every tool subprocess
+>     proc.communicate()
+>     logger.warning("Pi builder turn timed out after %ss; killed process group", PI_SUBPROCESS_TIMEOUT_S)
+>     return ""
+> ```
+>
+> Using `Popen` + `communicate(timeout=...)` (rather than `subprocess.run`) is what lets us hold the `proc` handle for `os.getpgid` and for `close()`-time reaping. `close()` applies the same `killpg` to any live child. This eliminates the orphan-subtree window without changing the timeout value or the empty-return contract.
 
 > **CRITICAL — do NOT reuse `CYCLE_IDLE_TIMEOUT_S` here.** `CYCLE_IDLE_TIMEOUT_S` (`container.py:138`) is `12 * 60 * 60.0` — a **12-hour PTY-idle sanity ceiling**, explicitly *"not a hang signal."* It is the maximum a PTY may sit idle, not a per-turn execution bound. Passing it as `subprocess.run(timeout=...)` would let a runaway Pi process pin a worker turn for **12 hours**. Instead, add a dedicated turn bound:
 >
@@ -338,7 +363,7 @@ The lead agent orchestrates; it does not build directly.
 ### 1. Extract BuilderHarness seam + PtyClaudeBuilder
 - **Task ID**: build-seam
 - **Depends On**: none
-- **Validates**: existing granite container/classifier tests (must stay green), new `tests/unit/test_granite_classifier.py` harness cases
+- **Validates**: existing granite container/classifier tests (must stay green), new harness cases in `tests/unit/granite_container/test_granite_classifier.py` (strict **and** fallback paths)
 - **Informed By**: spike-1, spike-2
 - **Assigned To**: seam-builder
 - **Agent Type**: builder
@@ -347,7 +372,7 @@ The lead agent orchestrates; it does not build directly.
 - Move the **claude-specific transcript-cursor reads** into `PtyClaudeBuilder.run_turn`: `_cycle_idle(dev)` → write → `dev_baseline = text_bearing_count(dev_transcript)` → `_cycle_idle(dev)` → `last_assistant_text(dev_transcript, baseline_text_count=dev_baseline)`. Return the text (or `""`). No behavior change to these reads.
 - **Keep caller-owned in the container** (Risk 5): the `_last_dev_report = <returned-text>` assignment and the empty-return fallback gate (`if not <returned-text>:` → bump `transcript_fallback_count`, log, seed `DEV_REPORT_UNAVAILABLE`). `BuilderHarness.run_turn` never touches these. This is what makes the gate harness-agnostic.
 - **Preserve and name the #1721 surfaces** (Risk 4) — `dev_transcript`/`dev_baseline`/`text_bearing_count`/`last_assistant_text` (`container.py:1343-1360`). The build-seam **commit message must list these four by name** so the second-to-merge owner can rebase against a known surface.
-- Extend `classify_pm_prefix` to parse optional `[/dev:<harness>]`; default → claude.
+- Extend `classify_pm_prefix` to parse optional `[/dev:<harness>]`; default → claude. **Add the harness group to BOTH regexes** — strict `PREFIX_TOKEN_RE` (`:119`) *and* fallback `PREFIX_TOKEN_FALLBACK_RE` (`:120`) — and thread the capture through BOTH return branches: `m.group(2)` in the strict branch (`:200-214`) and `fallback.group(2)` in the fallback branch (`:224-230`). Set `harness=None` on both unknown returns (`:192-198`, `:232-237`). Missing the fallback path silently drops the `:pi` suffix when the PM emits `[/dev:pi]` mid-line / with leading whitespace / trailing text → routes Pi work to claude with no error signal (BLOCKER, round 2). Add `harness` to `ClassificationResult` (additive, defaults `None`).
 - Wire `_route_pm_classification` to resolve and call the builder seam, applying the caller-owned `_last_dev_report` + fallback gate to `builder.run_turn(...)`'s return value.
 
 ### 2. Validate seam behavior preservation
@@ -367,7 +392,7 @@ The lead agent orchestrates; it does not build directly.
 - **Assigned To**: pi-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Implement `PiSubprocessBuilder.run_turn` (subprocess, `-p --mode json`, `cwd=worktree`, explicit provider/model, timeout).
+- Implement `PiSubprocessBuilder.run_turn` (`subprocess.Popen(..., start_new_session=True)` + `communicate(timeout=...)`, `-p --mode json`, `cwd=worktree`, explicit provider/model). On `TimeoutExpired`: `os.killpg(os.getpgid(proc.pid), SIGKILL)` to reap the tool subtree, log a warning, return `""`. Mirror the `killpg` in `close()`.
 - Implement `parse_pi_final_text` with fallbacks (no `agent_end` → `""`).
 - Add the Pi dev persona file and resolver registration (`pi` → builder).
 - Update `prime-pm-role.md` with the `[/dev:<harness>]` selector guidance.
@@ -405,7 +430,8 @@ The lead agent orchestrates; it does not build directly.
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Classifier knows harness | `python -c "from agent.granite_container.granite_classifier import classify_pm_prefix as c; r=c('[/dev:pi]\nbuild it'); print(getattr(r,'harness',None))"` | output contains `pi` |
+| Classifier knows harness (strict) | `python -c "from agent.granite_container.granite_classifier import classify_pm_prefix as c; r=c('[/dev:pi]\nbuild it'); print(getattr(r,'harness',None))"` | output contains `pi` |
+| Classifier knows harness (fallback/drift) | `python -c "from agent.granite_container.granite_classifier import classify_pm_prefix as c; r=c('output: [/dev:pi] please build'); print(r.destination, getattr(r,'harness',None), r.compliance_miss)"` | output contains `dev pi True` (suffix survives the drift path — round-2 BLOCKER guard) |
 | Default harness preserved | `python -c "from agent.granite_container.granite_classifier import classify_pm_prefix as c; r=c('[/dev]\nbuild it'); print(r.destination, getattr(r,'harness',None) or 'claude')"` | output contains `dev claude` |
 | Pi parser importable | `python -c "from agent.granite_container.builder import parse_pi_final_text; print(parse_pi_final_text(''))"` | exit code 0 |
 | Pi available | `command -v pi` | exit code 0 |
@@ -418,6 +444,15 @@ The lead agent orchestrates; it does not build directly.
 2. **CONCERN (2 critics) — `_last_dev_report` / empty-return ownership after extraction.** RESOLVED via new **Risk 5** + ownership rule: the container caller (not either builder) owns the `_last_dev_report` assignment and the empty-return fallback gate (`transcript_fallback_count` bump + `DEV_REPORT_UNAVAILABLE`); `run_turn` returns only final text or `""`. Verified line refs: assignment at `container.py:1374`, fallback gate at 1361-1370. Added a harness-agnostic regression test (Test Impact) and updated Data Flow step 5, Technical Approach, Rabbit Holes, Step 1.
 3. **CONCERN — #1721 rebase coordination under-specified.** RESOLVED: Risk 4 now names the four preserved surfaces (`dev_transcript`/`dev_baseline`/`text_bearing_count`/`last_assistant_text`, `container.py:1343-1360`); Step 1 mandates the build-seam commit message list them by name.
 4. **NIT — cloud demo validates plumbing, not PM routing judgment.** ADDRESSED: added a persona-routing acceptance check (Success Criteria + Test Impact) asserting the PM emits `[/dev:pi]` vs `[/dev]`/`[/dev:claude]` per the `prime-pm-role.md` selector guidance; Open Question 4 records the CI-cost tradeoff (live PM run vs classifier-level assertion vs persona-doc review checkpoint).
+
+**Round 2 — NEEDS REVISION (revision applied 2026-06-18):**
+
+1. **BLOCKER — fallback regex silently drops the harness selector.** RESOLVED. Verified against the real file: `classify_pm_prefix` has **two** regexes — strict `PREFIX_TOKEN_RE` (`granite_classifier.py:119`) and fallback `PREFIX_TOKEN_FALLBACK_RE` (`:120`, used via `.search(pm_tail[:200])` at `:223`, returns `fallback.group(1)` at `:224-230`). Round 1 only modified the strict one. The fallback fires on PM drift (`[/dev:pi]` mid-line / leading whitespace / trailing text) and would drop the `:pi` suffix, routing Pi work to claude with `compliance_miss=True` and no error signal. Fix: harness group added to **both** regexes; capture threaded via `m.group(2)` (strict, `:200-214`) **and** `fallback.group(2)` (fallback, `:224-230`); `harness=None` on both unknown returns (`:192-198`, `:232-237`). Updated Technical Approach, Step 1, Verification table (new fallback-path check), Test Impact.
+2. **CONCERN (coupled) — Test Impact named a nonexistent file.** RESOLVED. Verified: `tests/unit/test_granite_classifier.py` does not exist; the real file is `tests/unit/granite_container/test_granite_classifier.py` (360 lines) and its existing `test_fallback_*` cases (line ~29-99) assert destination recovery but never check harness — they would lock in the BLOCKER green. Corrected the path in Test Impact + Step 1 `Validates`; mandated strict **and** fallback `[/dev:pi]` cases asserting `harness=="pi"` + `compliance_miss=True`.
+3. **NON-BLOCKING — orphaned tool subtree on timeout.** APPLIED (cheap, tied to existing timeout handling): `PiSubprocessBuilder` now uses `subprocess.Popen(..., start_new_session=True)` + `communicate(timeout=...)` and `os.killpg(os.getpgid(proc.pid), SIGKILL)` on `TimeoutExpired`, reaping Pi **and** its `bash/edit/write` subtree. Updated Race 1, Technical Approach, Data Flow, Step 3, Test Impact.
+4. **NON-BLOCKING — speculative `prepare`/`close` vs the protocol No-Go.** RECORDED + reconciled in Technical Approach: the two methods stay because `PtyClaudeBuilder` genuinely uses them; for `PiSubprocessBuilder` they are no-ops (no RPC-lifecycle hooks now — those land with the rpc fast-follow).
+5. **NON-BLOCKING — rails single-source-of-truth drift.** RECORDED: Solution + Open Question 1 require the Pi persona to transclude/`@file` or back-reference `.claude/commands/granite/_prime-rails.md` (the canonical rails), not silently fork a second copy.
+6. **NON-BLOCKING — `config/personas/granite/` does not exist.** RECORDED: Solution notes the build must create the directory.
 
 ---
 
