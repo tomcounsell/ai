@@ -260,7 +260,7 @@ The adapter writes non-user-visible progress to `agent_session.session_events`
 | `type` | When | Key fields |
 |--------|------|------------|
 | `exit_summary` | every run, on completion | `exit_reason`, `turns`, `compliance_misses`, `ts` |
-| `exit_anomaly` | `exit_reason in {pm_hang, dev_hang, startup_unresolved, pm_no_user_message, exception (soft→WARNING, hard→ERROR)}` | `exit_reason`, `ts` — logged at ERROR for hard exits (Sentry log-capture picks it up; on-call path for session-runner regressions); WARNING for soft exception exits (had turns → likely network blip, no Sentry alert) |
+| `exit_anomaly` | `exit_reason in {pm_hang, dev_hang, startup_unresolved, pm_no_user_message, exception (soft→WARNING, hard→ERROR)}` | `exit_reason`, `ts` — logged at ERROR for hard exits (Sentry log-capture picks it up; on-call path for session-runner regressions); WARNING for soft exception exits (had turns → likely network blip, no Sentry alert). For `startup_unresolved` exits: also carries `startup_failure_kind` (`"plateau"` or `"ceiling"`) and `startup_diagnostic_frame` (truncated frame excerpt, up to 1000 chars). |
 | `granite_user_routed` | on each `[/user]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
 | `granite_complete_routed` | on each `[/complete]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
 | `granite_delivery_failure` | a mid-loop `send_cb` raised | `event_type`, `text`, `payload_chars`, `reason`, `ts` |
@@ -392,10 +392,13 @@ diagnostic branch is never bypassed.
 | `pm_transcript_path` | `Field(null=True)` | Absolute path to PM Claude Code JSONL transcript |
 | `dev_transcript_path` | `Field(null=True)` | Absolute path to Dev Claude Code JSONL transcript |
 | `pty_slot` | `IntField(null=True)` | Stable physical PTYPool slot index (0-based, issue #1663) |
+| `startup_failure_kind` | `Field(null=True)` | `"plateau"` or `"ceiling"` for `startup_unresolved` exits; `None` for all other exit reasons (issue #1710) |
+| `startup_captured_frame` | `Field(null=True)` | Stripped PM+Dev PTY snapshot captured at startup bail time, size-capped to 6000 chars; `None` for normal exits (issue #1710) |
 
-All five are nullable: non-granite sessions and pre-deploy granite sessions
+All are nullable: non-granite sessions and pre-deploy granite sessions
 leave them as `None`. The dashboard uses them to surface active PTY processes
-and link to transcript files.
+and link to transcript files. `startup_failure_kind` and
+`startup_captured_frame` are populated only for `startup_unresolved` exits.
 
 #### `pty_slot` semantics
 
@@ -476,6 +479,127 @@ distinct failure signature for a broken `--permission-mode` flag (a TUI
 upgrade renaming the flag means the bypass bar never paints, so the idle
 heuristic can never fire). Without the ceiling that failure would burn the
 steady-state budget and report a misleading `pm_hang`.
+
+### Startup fast diagnostic: plateau detection, frame capture, and alert (issue #1710)
+
+The startup loop has an **orthogonal** early-bail path layered on top of the
+600s ceiling. This fast-diagnostic path does not shorten the ceiling — it
+fires only when a deterministic stuck state is confirmed.
+
+#### Plateau detector
+
+Every startup cycle, the loop computes a **write-independent fingerprint**:
+`(pm_idle_bool, dev_idle_bool, response)`, where `response` is the value
+returned by `_handle_startup` (the parser's verdict, computed *before* any
+`write()` call). When `STARTUP_PLATEAU_CYCLES = 10` consecutive identical
+fingerprints accumulate, the startup is confirmed stuck and the loop bails
+immediately.
+
+**Why the fingerprint is write-independent:** the `write()` call at
+`container.py` resets `_turn_text` in `pty_driver.py` before sending, so the
+post-write `turn_buffer` (a "capture since the last write" buffer) restarts
+empty on each oscillating-event cycle. Hashing the buffer tail would never
+repeat across cycles and the counter would never accumulate. By hashing the
+parser's *verdict* instead, both stuck shapes accumulate cleanly: an
+oscillating event repeats the same `response` string (fingerprint stable); a
+silent never-started PTY yields `(False, False, None)` (fingerprint stable
+at `(False, False, None)`). Genuine progress flips an idle bool or changes
+the parser verdict, resetting the count to zero.
+
+At `STARTUP_CYCLE_TIMEOUT_S = 3s` per cycle, 10 identical cycles ≈ 30 seconds
+of confirmed zero-progress before bailing — well under the 600s ceiling, yet
+past transient cold-start jitter. The constant is documented as a tuning knob
+to tighten after observing real failures.
+
+**Why the fingerprint is computed outside the `response is None` guard:** the
+prior code structure only reached the accumulator on the no-event path; a
+session emitting a spurious startup event every other cycle would never
+accumulate consecutive no-progress cycles if the counter lived there. The
+fingerprint is evaluated at the top of the loop body, before any branching,
+so every cycle (including event-emitting oscillating ones) is counted.
+
+#### Frame capture (`_capture_startup_frame`)
+
+At bail time — whether plateau or ceiling — the container captures the last
+PM and Dev PTY buffer snapshots into a single diagnostic frame string:
+
+- Source: `level_tail` (level-triggered `turn_buffer`, the persistent
+  "capture since last `write()`") for each PTY, with `edge_buffer` as
+  fallback to ensure the frame is never blank.
+- Stripped of non-printable bytes; capped per-buffer and in total (sum cap
+  ≈ 6000 chars on `AgentSession`, 1000 chars in the event payload).
+- Header line: `[startup-failure kind=plateau|ceiling cycles=N]` followed by
+  PM and Dev sections.
+
+The pure helper `_capture_startup_frame(pm_level_tail, dev_level_tail, kind,
+cycles)` is unit-testable without a live PTY and handles empty/None buffers.
+
+The captured frame is attached to `ContainerResult` as
+`startup_diagnostic_frame`. The `_startup_cycle_idle` return tuple was widened
+to surface both the edge-triggered `buffer` (fed to the parser unchanged, so
+event detection stays edge-triggered) and the level-triggered `turn_buffer`
+(used only by frame capture). This prevents a blanket-swap regression that
+would re-fire dismissed events on every poll tick.
+
+#### Startup failure kind
+
+`ContainerResult` gains three nullable fields:
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `startup_failure_kind` | `"plateau"` / `"ceiling"` | How the startup failed |
+| `startup_diagnostic_frame` | `str \| None` | Human-readable stripped PTY snapshot |
+| `startup_plateau_cycles` | `int \| None` | Plateau-only: consecutive identical cycles detected |
+
+#### Telegram alert (`_send_startup_alert`)
+
+On any `startup_unresolved` exit, `BridgeAdapter._maybe_publish_exit_anomaly`
+fires a best-effort direct notification to the `"Eng: Valor"` Telegram chat:
+
+```
+[granite-startup-failure] kind=plateau cycles=10  session=<id>
+<frame excerpt>
+```
+
+The alert is gated by `_should_alert(machine) -> bool` — a two-layer
+cooldown with **inverted contract** (returns `True` when sending is
+permitted):
+
+1. **Process-local (checked first):** a module-level `dict[str, float]` of
+   last-alert monotonic timestamps per machine; permits only if
+   `time.monotonic() - last >= 300s`. This layer survives Redis-down outages.
+2. **Cross-process (Redis TTL):** if the process-local gate permits, attempts
+   a per-machine `SET granite:startup_alert_cooldown:{machine} NX EX 300`
+   via the Popoto Redis client. Key already existed → suppress. Key set →
+   send. Redis unavailable → fall through to the process-local decision
+   (send anyway; better a duplicate alert than a silenced outage).
+
+**Subprocess call:** `subprocess.run(["valor-telegram", "send", "--chat",
+"Eng: Valor", message], capture_output=True, text=True, timeout=3,
+check=False)`. The `timeout=3` bound (not the 10s precedent) keeps
+worker-thread blocking short during a fleet-wide outage where every session
+triggers the path. After the first alert within a window, subsequent
+suppressed sessions skip the subprocess entirely (fast gate, not a 3s call).
+
+**Suppression logging:** when the alert is suppressed due to an active
+cooldown window (either layer) OR a send failure (CLI absent, timeout), the
+adapter logs `logger.error("[granite-alert-suppressed] ...")` so Sentry
+captures it. The suppression tag is **not** emitted on the Redis-down path
+(the alert still sends there; logging suppression would be a false signal).
+
+#### Persistence
+
+`BridgeAdapter._publish_exit_summary` persists two new nullable fields on
+`AgentSession` for every `startup_unresolved` exit:
+
+| AgentSession field | Source | Cap |
+|--------------------|--------|-----|
+| `startup_failure_kind` | `ContainerResult.startup_failure_kind` | — |
+| `startup_captured_frame` | `ContainerResult.startup_diagnostic_frame` | 6000 chars |
+
+Both are additive nullable fields; existing non-granite sessions and
+pre-deploy records read them as `None` (Popoto's `_heal_descriptor_pollution`
+handles generic field addition per issues #1099/#1172).
 
 ## Failure handling
 

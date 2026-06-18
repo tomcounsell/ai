@@ -151,9 +151,13 @@ Up to 50 JSONL file handles are kept open simultaneously (LRU eviction when the 
 
 Idle gaps are purely observational. They identify where time was spent; they do not trigger any action. Kill decisions belong to the session health monitor (`agent/session_health.py`). This separation was established in issue #1172 and is enforced at the design level — the telemetry recorder has no write path to session status.
 
+## Related
+
+The live telemetry trace is read by the [Stall Advisory Classifier](stall-advisory-classifier.md) (Pillar 1 of #1536) to derive a per-session advisory verdict for running sessions. The classifier's `classify_session_stall()` function reads `turn_start`, `idle_gap`, and `status_transition` events from this JSONL file.
+
 ## Related Issues
 
 - **Epic #1536** — Session Telemetry (this is v1)
-- **#1538** — Learning extraction from telemetry
-- **#1539** — Session classification using telemetry signals
+- **#1538** — Stall Advisory Classifier (Pillar 1) — reads this trace for live verdicts
+- **#1539** — Crash-Signature Auto-Resume (Pillar 2) — reads this trace for terminal session signatures
 - **#1540** — Crash-resume informed by telemetry

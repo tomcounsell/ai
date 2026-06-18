@@ -365,6 +365,15 @@ def find_plan_path(issue_number: int) -> Path | None:
     # Match `#145`, `issues/145`, and the full tracking URL, but NOT `#1455`
     # (the trailing non-digit lookahead enforces the boundary).
     ref_re = re.compile(rf"(?:#|issues/){issue_number}(?![0-9])")
+    # A `tracking:` frontmatter line pointing at this issue is the AUTHORITATIVE
+    # owner — a plan that merely *mentions* `#{issue}` (e.g. an out-of-scope
+    # cross-reference in another plan's No-Gos) must never win over the plan that
+    # actually tracks the issue. Prefer a tracking-field match; fall back to any
+    # textual reference only when no plan claims ownership.
+    tracking_re = re.compile(
+        rf"^tracking:.*(?:#|issues/){issue_number}(?![0-9])", re.MULTILINE
+    )
+    fallback: Path | None = None
     try:
         for entry in plans_dir.iterdir():
             if not entry.is_file() or entry.suffix != ".md":
@@ -373,8 +382,10 @@ def find_plan_path(issue_number: int) -> Path | None:
                 text = entry.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            if ref_re.search(text):
+            if tracking_re.search(text):
                 return entry
+            if fallback is None and ref_re.search(text):
+                fallback = entry
     except Exception as e:
         logger.debug(f"find_plan_path walk failed: {e}")
-    return None
+    return fallback

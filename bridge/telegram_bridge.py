@@ -1116,6 +1116,13 @@ async def main():
 
         await record_last_event(event.chat_id, getattr(event.message, "date", None))
 
+        # Record bridge-level update liveness signal (stale-stream detector).
+        # Must be pre-dedup so the key reflects every Telethon event, not only
+        # novel ones. Best-effort: never raises.
+        from bridge.liveness import record_update_received
+
+        record_update_received()
+
         # Dedup: skip if we've already processed this message (catch_up replay)
         from bridge.dedup import is_duplicate_message
 

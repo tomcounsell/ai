@@ -100,7 +100,7 @@ class TestMaybeInjectResumeHydration:
 
     def test_eng_session_no_resume_files_skips_hydration(self, tmp_path):
         """Eng sessions with no resume snapshot files skip hydration silently."""
-        session = _make_session(session_type="eng")'
+        session = _make_session(session_type="eng")
 
         self._run(session)
         # message_text unchanged

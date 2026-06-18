@@ -519,9 +519,12 @@ class TestContainerStartupHardCeiling(unittest.TestCase):
     """
 
     def test_never_idle_exits_startup_unresolved_at_ceiling(self) -> None:
-        # Neither PTY ever reaches idle AND no startup event is
-        # found. With the (patched, tiny) hard ceiling exhausted,
-        # the container exits `startup_unresolved` — NOT `pm_hang`.
+        # Neither PTY ever reaches idle AND no startup event is found.
+        # With the plateau detector (issue #1710), the container now bails
+        # early on a plateau (N consecutive silent cycles) rather than always
+        # waiting for the full ceiling. To test the ceiling path specifically
+        # we patch STARTUP_PLATEAU_CYCLES to a very large value so the plateau
+        # never fires, then verify the ceiling exit captures the frame.
         c = Container(user_message="hello", max_turns=5)
         pm_mock, dev_mock = _mock_pm("", saw_idle=False), _mock_dev("", saw_idle=False)
 
@@ -531,6 +534,8 @@ class TestContainerStartupHardCeiling(unittest.TestCase):
             patch.object(c, "_prime_session"),
             patch.object(c, "_run_pkill_fallback"),
             patch("agent.granite_container.container.STARTUP_HARD_CEILING_S", 0.05),
+            # Disable plateau detector so we hit the pure ceiling exit path.
+            patch("agent.granite_container.container.STARTUP_PLATEAU_CYCLES", 10_000_000),
         ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
@@ -542,7 +547,11 @@ class TestContainerStartupHardCeiling(unittest.TestCase):
             f"got {result.exit_reason!r}: {result.exit_message!r}",
         )
         self.assertIn("hard ceiling", result.exit_message)
-        # The steady-state loop never ran — no classified turns.
+        # Startup failure diagnostic fields (issue #1710).
+        self.assertEqual(result.startup_failure_kind, "ceiling")
+        self.assertIsNotNone(result.startup_diagnostic_frame)
+        self.assertGreater(len(result.startup_diagnostic_frame or ""), 0)
+        # The steady-state loop never ran -- no classified turns.
         self.assertEqual(len(result.turns), 0)
 
     def test_late_settle_proceeds_to_steady_state(self) -> None:

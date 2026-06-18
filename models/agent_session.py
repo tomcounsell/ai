@@ -321,6 +321,38 @@ class AgentSession(Model):
     # slot the session occupied.
     pty_slot = IntField(null=True)
 
+    # === Granite startup failure diagnostic (issue #1710) ===
+    # Populated by BridgeAdapter._publish_exit_summary when the granite
+    # container exits startup_unresolved. Nullable: only set on failed startups.
+    #
+    # startup_failure_kind: "plateau" (N consecutive identical no-progress
+    #   cycles) or "ceiling" (burned the full STARTUP_HARD_CEILING_S).
+    #   Coordination surface for #1539's auto-resume policy: plateau = do NOT
+    #   auto-resume (deterministic stuck), ceiling = slow/never-settled cold start.
+    startup_failure_kind = Field(null=True, default=None)
+    # startup_captured_frame: size-capped PM+Dev buffer snapshot from the
+    #   moment of failure. Human-readable, stripped of ANSI. Lets the dashboard
+    #   and #1538's recorder show the diagnosis without re-deriving it.
+    startup_captured_frame = Field(null=True, default=None)
+
+    # === Crash-recovery reflection fields (issue #1539) ===
+    # crash_signature: write-once stamp set at resume time, recording the
+    # crash signature of the session this resume recovers. Used by the
+    # crash-recovery reflection to attribute outcomes back to the originating
+    # signature. Never overwritten after initial write.
+    # Coordination surface for #1539 auto-resume policy.
+    crash_signature = Field(null=True, default=None)
+
+    # crash_outcome_attributed: idempotency key for the outcome-attribution loop.
+    # Set True after the reflection has credited/debited the originating
+    # CrashSignature record for this session's terminal outcome.
+    # Read via _truthy() — Popoto stores bools as "True"/"False" strings.
+    crash_outcome_attributed = Field(null=True, default=None)
+
+    # auto_resume_attempts: count of times the crash-recovery reflection has
+    # auto-resumed this session. Enforces per-session cap.
+    auto_resume_attempts = Field(null=True, default=None)
+
     # === Continuation PM depth tracking ===
     # Tracks how many continuation PMs have been chained from the original PM.
     # Stored directly on the session (O(1)) rather than walking the parent chain

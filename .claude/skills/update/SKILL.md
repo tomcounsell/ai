@@ -36,6 +36,7 @@ The orchestrator will:
 - Install/restart bridge, worker, caffeinate, and reflections services (skipped if the validation gate failed)
 - Set up global calendar hook and generate config
 - Check MCP server configuration
+- **Best-effort agent-judgment catchup (strictly last step)** — runs `valor-catchup` only after every service-management and health check above, and only when BOTH the bridge and worker report running. Failure or timeout is logged and swallowed; `/update` completion is wholly independent of its outcome. See [Agent-Judgment Catchup](#agent-judgment-catchup-strictly-last-step) below.
 
 After running, report the result. If there are warnings or errors, list each one clearly.
 
@@ -48,6 +49,20 @@ The orchestrator automatically cleans up sessions as part of Step 5.5:
 - Running/pending sessions older than 120 min with no live process are transitioned to `killed`
 - Terminal sessions (killed/abandoned/failed/completed) are preserved for reflections to analyze
 - Reflections handles its own 90-day expiry of old session records
+
+### Agent-Judgment Catchup (strictly last step)
+
+After all service-management and health checks, the orchestrator runs `run_catchup_step` (`scripts/update/run.py`) as the **final** action of `run_update` — invoking the `valor-catchup` CLI (issue #1709, see [Agent-Judgment Catchup](../../../docs/features/agent-judgment-catchup.md)).
+
+`valor-catchup` reads each owned chat's recent thread, asks an LLM judge which inbound human messages are genuinely unanswered, and enqueues recovery sessions only for those — recovering messages whose original session hung or was killed *without replying* (which the mechanical catchup and reconciler skip forever).
+
+**Best-effort contract — the step never blocks or fails `/update`:**
+
+- **Health gate.** Invoked only when BOTH `service.get_service_status(...).running` AND `service.get_worker_status(...).running` are true. If either is down, the step logs a `catchup: skipped — ...` line and returns. It is also gated on `do_service_restart`, so verify-only and follower-skip runs never trigger recovery enqueues.
+- **Subprocess + tight timeout.** `valor-catchup` runs as a subprocess with a tight per-invocation timeout (`CATCHUP_STEP_TIMEOUT_SECONDS`, 90s). A hung Telethon connect or stalled LLM call is killed on expiry and never stalls `/update`.
+- **Failure/timeout swallowed.** Any failure, non-zero exit, or timeout is logged (`catchup: ... (swallowed)`) and swallowed. `run_catchup_step` never raises and never flips `UpdateResult.success` — `/update` completion is independent of `valor-catchup`'s outcome.
+
+The `valor-catchup` CLI is propagated automatically via `pip install -e .` during the existing dependency-sync step — it's a `[project.scripts]` entry in `pyproject.toml`, so no extra propagation wiring is needed.
 
 ### Auto-Bump Critical Dependencies
 

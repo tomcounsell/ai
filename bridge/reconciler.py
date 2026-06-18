@@ -105,6 +105,13 @@ async def reconcile_once(
 
     dialogs = await client.get_dialogs()
 
+    # Record successful API probe for the stale-stream detector.
+    # get_dialogs() success proves the Telethon TCP/API layer is alive.
+    # Best-effort: never raises.
+    from bridge.liveness import record_probe_ok
+
+    record_probe_ok()
+
     for dialog in dialogs:
         chat_title = getattr(dialog.entity, "title", None)
         if not chat_title:

@@ -192,6 +192,8 @@ valor-email threads
 | `python -m tools.valor_session resume --id <ID> --message "..."` | Resume a completed, killed, or failed session (hard-PATCH path; accepts session_id or agent_session_id) |
 | `python -m tools.valor_session release --pr <N>` | Clear retain_for_resume after PR merge/close |
 | `python -m tools.valor_session telemetry --id <ID>` | Show session telemetry timeline (turn events, token usage, status transitions) |
+| `valor-session crash-signatures` | Show crash signatures in the library (project-scoped) |
+| `valor-session crash-policy list` | Show derived auto-resume policy entries |
 | `python -m tools.memory_search search "query"` | Search memories by query |
 | `python -m tools.memory_search search "query" --category correction` | Search filtered by category |
 | `python -m tools.memory_search search "query" --tag redis` | Search filtered by tag |
@@ -454,6 +456,7 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 - **Bridge watchdog**: Separate launchd service (`com.valor.bridge-watchdog`) monitors health every 60s
 - **Crash tracker**: Logs start/crash events to Redis via `monitoring/crash_tracker.py` with git commit correlation
 - **5-level escalation**: restart → kill stale → clear locks → revert commit → alert human
+- **Update-loop wedged detector** (#1712): detects when the bridge is process-alive but Telethon's `NewMessage` handler has silently stopped firing — auto-restarts with `catch_up=True` for lossless backfill
 
 **Check watchdog**: `python monitoring/bridge_watchdog.py --check-only`
 **View crashes**: `python -c "from monitoring.crash_tracker import get_recent_crashes; print(get_recent_crashes(3600))"`

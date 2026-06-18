@@ -15,13 +15,9 @@ INTERVAL=600  # 10 minutes in seconds
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
-# Only track planned Dev sessions (tier-2 work with a real AgentSession.slug).
-# Direct CLI sessions have no CLAUDE_CODE_TASK_LIST_ID; thread-scoped sessions
-# have a 'thread-' prefix. Both should produce no calendar events.
-TASK_LIST_ID="${CLAUDE_CODE_TASK_LIST_ID:-}"
-if [ -z "$TASK_LIST_ID" ] || echo "$TASK_LIST_ID" | grep -qE '^thread-'; then
-    exit 0
-fi
+# Every local Claude Code session in a calendar-mapped project is tracked.
+# Scope is enforced downstream: the EXCLUDED_PROJECTS denylist below plus
+# valor-calendar's own skip for projects absent from calendar_config.json.
 
 # Skip excluded projects (too noisy for calendar tracking)
 EXCLUDED_PROJECTS="valor"

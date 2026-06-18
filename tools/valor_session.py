@@ -42,6 +42,7 @@ session lifecycle without requiring bridge access.
 """
 
 import argparse
+import dataclasses
 import json
 import re
 import sys
@@ -616,11 +617,99 @@ def _find_session(id_arg: str) -> "AgentSession | None":  # noqa: F821
     return AgentSession.get_by_id(id_arg)
 
 
-def cmd_resume(args: argparse.Namespace) -> int:
-    """Resume a completed/killed/failed session by re-enqueuing it with a new message.
+@dataclasses.dataclass
+class ResumeResult:
+    """Result of a resume_session call."""
 
-    Validates the session is in ``completed``, ``killed``, or ``failed``
-    status and has a stored ``claude_session_uuid``. Transitions the session
+    success: bool
+    session_id: str
+    error: str | None = None
+    model: str | None = None
+    claude_session_uuid: str | None = None
+
+
+def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResult":
+    """Programmatic core for resuming a terminal session.
+
+    Shared by cmd_resume (CLI) and the auto-resume reflection.
+
+    - Validates session is in RESUMABLE_STATUSES (not cancelled, not running/pending)
+    - Validates session has a claude_session_uuid
+    - Stages steering message BEFORE transition (eliminates race window)
+    - Atomically transitions to pending via transition_status(..., reject_from_terminal=False)
+
+    Returns a ResumeResult. Never raises — caller checks result.success.
+    """
+    from models.session_lifecycle import RESUMABLE_STATUSES, transition_status
+
+    _load_env()
+    session_id = getattr(session, "session_id", str(session))
+    current_status = getattr(session, "status", None)
+
+    if current_status == "pending":
+        return ResumeResult(
+            success=False,
+            session_id=session_id,
+            error=f"Session {session_id} is already pending",
+        )
+    if current_status == "running":
+        return ResumeResult(
+            success=False,
+            session_id=session_id,
+            error=f"Session {session_id} is currently running",
+        )
+    if current_status not in RESUMABLE_STATUSES:
+        return ResumeResult(
+            success=False,
+            session_id=session_id,
+            error=(
+                f"Session {session_id} has status '{current_status}'. "
+                f"Only {sorted(RESUMABLE_STATUSES)} can be resumed."
+            ),
+        )
+    if getattr(session, "claude_session_uuid", None) is None:
+        return ResumeResult(
+            success=False,
+            session_id=session_id,
+            error=(
+                "cannot resume: no transcript UUID stored "
+                "(session was killed before first turn completed)"
+            ),
+        )
+
+    # Stage steering message BEFORE transitioning to pending so the worker
+    # always sees it — eliminates the two-write race (transition then save).
+    existing_steering = list(session.queued_steering_messages or [])
+    existing_steering.append(message)
+    session.queued_steering_messages = existing_steering
+    session.save()
+
+    # Transition to pending (atomic — fails if another process raced us).
+    # Steering message is already persisted above, so no race window.
+    try:
+        transition_status(
+            session, "pending", reason=f"resume ({source})", reject_from_terminal=False
+        )
+    except Exception as e:
+        return ResumeResult(
+            success=False,
+            session_id=session_id,
+            error=f"Could not transition to pending: {e}",
+        )
+
+    return ResumeResult(
+        success=True,
+        session_id=session_id,
+        model=getattr(session, "model", None),
+        claude_session_uuid=getattr(session, "claude_session_uuid", None),
+    )
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    """Resume a completed/killed/failed/abandoned session by re-enqueuing it with a new message.
+
+    Validates the session is in RESUMABLE_STATUSES (completed, killed, failed, or
+    abandoned) and has a stored ``claude_session_uuid``. Transitions the session
     back to ``pending`` and appends the new message to the steering queue so
     the worker delivers it as the first message in the resumed conversation.
 
@@ -629,12 +718,12 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
     ``--id`` accepts either ``session_id`` or ``agent_session_id`` (UUID) --
     see :py:func:`_find_session`. Support for ``killed`` / ``failed`` was added
-    in issue #1061 so operators can recover from manual kills or worker crashes
-    without losing prior context.
+    in issue #1061; ``abandoned`` was added in issue #1539 so the auto-resume
+    reflection and operators can recover abandoned sessions without losing context.
     """
     _load_env()
     try:
-        from models.session_lifecycle import transition_status
+        from models.session_lifecycle import RESUMABLE_STATUSES
 
         session_id = args.id
         new_message = args.message
@@ -645,6 +734,9 @@ def cmd_resume(args: argparse.Namespace) -> int:
             return 1
 
         current_status = getattr(session, "status", None)
+
+        # Fast-path checks for non-terminal active states (separate from RESUMABLE_STATUSES
+        # check for clear user-facing error messages)
         if current_status == "pending":
             print(
                 f"Error: Session {session_id} is already pending — cannot resume.",
@@ -657,47 +749,24 @@ def cmd_resume(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        if current_status not in ("completed", "killed", "failed"):
-            print(
-                f"Error: Session {session_id} has status '{current_status}'. "
-                "Only completed/killed/failed sessions can be resumed.",
-                file=sys.stderr,
-            )
+
+        result = resume_session(session, new_message, source="valor-session resume")
+
+        if not result.success:
+            # Map the resume_session error back to operator-facing output.
+            # For status rejections, keep the legacy wording pattern.
+            if current_status not in RESUMABLE_STATUSES:
+                print(
+                    f"Error: Session {session_id} has status '{current_status}'. "
+                    "Only completed/killed/failed/abandoned sessions can be resumed.",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"Error: {result.error}", file=sys.stderr)
             return 1
 
-        # A session with no stored transcript UUID cannot be resumed -- there
-        # is no Claude Code transcript to replay. This happens when a session
-        # is killed before its first turn completes.
-        if getattr(session, "claude_session_uuid", None) is None:
-            print(
-                "Error: cannot resume: no transcript UUID stored "
-                "(session was killed before first turn completed)",
-                file=sys.stderr,
-            )
-            return 1
-
-        # Stage steering message BEFORE transitioning to pending so the worker
-        # always sees it — eliminates the two-write race (transition then save).
-        existing_steering = list(session.queued_steering_messages or [])
-        existing_steering.append(new_message)
-        session.queued_steering_messages = existing_steering
-        session.save()
-
-        # Transition to pending (atomic — fails if another process raced us).
-        # Steering message is already persisted above, so no race window.
-        try:
-            transition_status(
-                session, "pending", reason="valor-session resume", reject_from_terminal=False
-            )
-        except Exception as e:
-            print(
-                f"Error: Could not transition session {session_id} to pending: {e}",
-                file=sys.stderr,
-            )
-            return 1
-
-        model = getattr(session, "model", None)
-        uuid = getattr(session, "claude_session_uuid", None)
+        model = result.model
+        uuid = result.claude_session_uuid
 
         if args.json:
             print(
@@ -1326,6 +1395,234 @@ def cmd_telemetry(args) -> int:
     return 0
 
 
+def _default_project_key() -> str:
+    """Return the default project key from identity.json or PROJECT_KEY env var."""
+    import os
+
+    env_key = os.environ.get("PROJECT_KEY", "")
+    if env_key:
+        return env_key
+    try:
+        identity_path = _repo_root / "config" / "identity.json"
+        with open(identity_path) as f:
+            data = json.load(f)
+        return data.get("project_key", "valor")
+    except Exception:
+        return "valor"
+
+
+def _crash_sig_strategy_stats(sig: object) -> tuple[str | None, int, int]:
+    """Extract (strategy, attempts, recovered) from a CrashSignature record.
+
+    Reads the real nested ``outcome_tallies_json`` via the model's
+    ``_load_tallies()`` helper. The tally shape is
+    ``{strategy_name: {"attempts": N, "recovered": N, "failed": N}}`` — NOT a
+    flat dict. Picks the first recorded strategy (the v1 library records a
+    single concrete strategy, ``"auto_resume"``).
+
+    Returns ``(None, 0, 0)`` when no outcomes have been recorded.
+    """
+    loader = getattr(sig, "_load_tallies", None)
+    tallies = loader() if callable(loader) else {}
+    if not isinstance(tallies, dict) or not tallies:
+        return None, 0, 0
+    # Pick the first strategy with a dict bucket (per-strategy nested shape).
+    for name, bucket in tallies.items():
+        if isinstance(bucket, dict):
+            attempts = int(bucket.get("attempts") or 0)
+            recovered = int(bucket.get("recovered") or 0)
+            return name, attempts, recovered
+    return None, 0, 0
+
+
+def cmd_crash_signatures(args: argparse.Namespace) -> int:
+    """Show crash signatures in the library for a project.
+
+    Reads all CrashSignature records for the given project and renders them
+    in a human-readable or JSON format, showing each signature's human-readable
+    form, resumability, occurrence count, and outcome statistics.
+    """
+    _load_env()
+    try:
+        from models.crash_signature import CrashSignature
+    except ImportError:
+        print("Error: crash_signature library not available.", file=sys.stderr)
+        return 1
+
+    try:
+        project = getattr(args, "project", None) or _default_project_key()
+        min_occ = getattr(args, "min_occurrences", 1) or 1
+        min_ratio = getattr(args, "min_success_ratio", 0.7) or 0.7
+
+        signatures = CrashSignature.all_for_project(project)
+        if min_occ > 1:
+            signatures = [s for s in signatures if s.occurrence_count_int >= min_occ]
+
+        if args.json:
+            data = []
+            for s in signatures:
+                strategy, attempts, recovered = _crash_sig_strategy_stats(s)
+                confidence = s.policy_confidence(strategy) if strategy else 0.0
+                auto_eligible = s.is_auto_eligible(
+                    strategy=strategy or "auto_resume",
+                    min_occurrences=min_occ,
+                    min_success_ratio=min_ratio,
+                )
+                data.append(
+                    {
+                        "signature_hash": s.signature_hash,
+                        "human_form": s.human_form,
+                        "signature_class": getattr(s, "signature_class", None),
+                        "resumable": s.is_resumable,
+                        "escalated": s.is_escalated,
+                        "occurrence_count": s.occurrence_count_int,
+                        "project_key": project,
+                        "strategy": strategy,
+                        "attempts": attempts,
+                        "recovered": recovered,
+                        "policy_confidence": round(confidence, 4),
+                        "auto_eligible": auto_eligible,
+                    }
+                )
+            print(json.dumps(data, indent=2))
+            return 0
+
+        if not signatures:
+            print("No crash signatures recorded yet.")
+            return 0
+
+        print(f"Crash Signatures (project: {project})")
+        for s in signatures:
+            hash_short = (s.signature_hash or "")[:8]
+            human = s.human_form or "(unknown)"
+            resumable = s.is_resumable
+            escalated = s.is_escalated
+            occ = s.occurrence_count_int
+            strategy, attempts, recovered = _crash_sig_strategy_stats(s)
+            confidence = (s.policy_confidence(strategy) * 100) if strategy else 0.0
+            auto_eligible = s.is_auto_eligible(
+                strategy=strategy or "auto_resume",
+                min_occurrences=min_occ,
+                min_success_ratio=min_ratio,
+            )
+
+            print(f"  [{hash_short}] {human}")
+            resumable_str = "yes" if resumable else "NO"
+            auto_str = "yes" if auto_eligible else "no"
+            print(f"    occurrences: {occ}  resumable: {resumable_str}  auto-eligible: {auto_str}")
+            if resumable and attempts > 0:
+                strat_str = f"strategy={strategy}" if strategy else "strategy=?"
+                print(
+                    f"    outcomes: {strat_str}  attempts={attempts}  recovered={recovered}"
+                    f"  confidence={confidence:.1f}%"
+                )
+            elif escalated:
+                print("    escalated: yes")
+            print()
+
+        return 0
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_crash_policy(args: argparse.Namespace) -> int:
+    """Show derived auto-resume policy entries for a project.
+
+    Reads CrashSignature records and displays the policy: which signatures are
+    auto-eligible for resume, their strategies, and confidence levels. Useful
+    for understanding what the auto-resume system will do for each crash pattern.
+    """
+    _load_env()
+    try:
+        from models.crash_signature import CrashSignature
+    except ImportError:
+        print("Error: crash_signature library not available.", file=sys.stderr)
+        return 1
+
+    try:
+        project = getattr(args, "project", None) or _default_project_key()
+        min_occ = getattr(args, "min_occurrences", 3) or 3
+        min_ratio = getattr(args, "min_success_ratio", 0.7) or 0.7
+
+        signatures = CrashSignature.all_for_project(project)
+
+        if args.json:
+            data = []
+            for s in signatures:
+                strategy, attempts, recovered = _crash_sig_strategy_stats(s)
+                confidence = s.policy_confidence(strategy) if strategy else 0.0
+                occ = s.occurrence_count_int
+                auto_eligible = s.is_auto_eligible(
+                    strategy=strategy or "auto_resume",
+                    min_occurrences=min_occ,
+                    min_success_ratio=min_ratio,
+                )
+                data.append(
+                    {
+                        "signature_hash": s.signature_hash,
+                        "human_form": s.human_form,
+                        "resumable": s.is_resumable,
+                        "occurrence_count": occ,
+                        "confidence": round(confidence, 4),
+                        "recovered": recovered,
+                        "attempts": attempts,
+                        "strategy": strategy,
+                        "auto_eligible": auto_eligible,
+                        "escalated": s.is_escalated,
+                    }
+                )
+            print(json.dumps(data, indent=2))
+            return 0
+
+        if not signatures:
+            print("No auto-resume policy entries — library is cold (no signatures yet).")
+            return 0
+
+        print(f"Auto-Resume Policy (project: {project})")
+        for s in signatures:
+            resumable = s.is_resumable
+            escalated = s.is_escalated
+            occ = s.occurrence_count_int
+            strategy, attempts, recovered = _crash_sig_strategy_stats(s)
+            confidence_pct = (s.policy_confidence(strategy) * 100) if strategy else 0.0
+            auto_eligible = s.is_auto_eligible(
+                strategy=strategy or "auto_resume",
+                min_occurrences=min_occ,
+                min_success_ratio=min_ratio,
+            )
+            hash_short = (s.signature_hash or "")[:8]
+
+            if not resumable:
+                esc_str = f" ({occ} escalated)" if escalated else ""
+                print(f"  No entries for NON_RESUMABLE signatures{esc_str}.")
+                continue
+
+            print(f"  Signature: {s.human_form or '(unknown)'}")
+            print(f"    Hash: {hash_short}")
+            if strategy:
+                print(f"    Strategy: {strategy}")
+            print(f"    Confidence: {confidence_pct:.1f}%  ({recovered}/{attempts} recovered)")
+            if auto_eligible:
+                elig_str = (
+                    f"YES (occurrences={occ} >= {min_occ},"
+                    f" confidence={confidence_pct:.1f}% >= {min_ratio * 100:.1f}%)"
+                )
+            elif occ < min_occ:
+                elig_str = f"NO (occurrences={occ} < {min_occ})"
+            else:
+                elig_str = f"NO (confidence={confidence_pct:.1f}% < {min_ratio * 100:.1f}%)"
+            print(f"    Auto-eligible: {elig_str}")
+            print()
+
+        return 0
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -1485,10 +1782,67 @@ def main() -> int:
         "--tail", type=int, metavar="N", help="Show only the last N events"
     )
 
+    # crash-signatures subcommand
+    crash_sig_parser = subparsers.add_parser(
+        "crash-signatures",
+        help="Show all crash signatures in the library for a project",
+    )
+    crash_sig_parser.add_argument(
+        "--project",
+        help="Project key (default: from identity.json or $PROJECT_KEY env var)",
+    )
+    crash_sig_parser.add_argument(
+        "--min-occurrences",
+        dest="min_occurrences",
+        type=int,
+        default=1,
+        help="Only show signatures with at least this many occurrences (default: 1)",
+    )
+    crash_sig_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # crash-policy subcommand (with nested sub-action)
+    crash_policy_parser = subparsers.add_parser(
+        "crash-policy",
+        help="Show derived auto-resume policy for a project",
+    )
+    crash_policy_subparsers = crash_policy_parser.add_subparsers(
+        dest="crash_policy_action", help="Action"
+    )
+    policy_list_parser = crash_policy_subparsers.add_parser(
+        "list", help="List auto-resume policy entries"
+    )
+    policy_list_parser.add_argument(
+        "--project",
+        help="Project key (default: from identity.json or $PROJECT_KEY env var)",
+    )
+    policy_list_parser.add_argument(
+        "--min-occurrences",
+        dest="min_occurrences",
+        type=int,
+        default=3,
+        help="Occurrences threshold for auto-eligibility (default: 3)",
+    )
+    policy_list_parser.add_argument(
+        "--min-success-ratio",
+        dest="min_success_ratio",
+        type=float,
+        default=0.7,
+        help="Success ratio threshold for auto-eligibility (default: 0.7)",
+    )
+    policy_list_parser.add_argument("--json", action="store_true", help="Output JSON")
+
     args = parser.parse_args()
 
     if not args.command:
         parser.print_help()
+        return 1
+
+    # crash-policy dispatches to sub-action
+    if args.command == "crash-policy":
+        action = getattr(args, "crash_policy_action", None)
+        if action == "list":
+            return cmd_crash_policy(args)
+        crash_policy_parser.print_help()
         return 1
 
     dispatch = {
@@ -1503,6 +1857,7 @@ def main() -> int:
         "inspect": cmd_inspect,
         "children": cmd_children,
         "telemetry": cmd_telemetry,
+        "crash-signatures": cmd_crash_signatures,
     }
 
     return dispatch[args.command](args)

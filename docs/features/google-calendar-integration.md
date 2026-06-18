@@ -41,7 +41,11 @@ Time tracking runs automatically in two contexts:
 
 ### Claude Code Hook (direct machine work)
 
-A Claude Code hook (`scripts/calendar_hook.sh`) fires on `SessionStart` and `Stop` events. It derives the slug from the working directory name (e.g., `ai`, `psyoptimal`). Rate-limited to one call per 25 minutes via a timestamp file to avoid excessive API calls.
+Two hooks fire for local Claude Code sessions:
+- `scripts/calendar_prompt_hook.sh` on `UserPromptSubmit` — derives a descriptive kebab-case slug from the first prompt via a quick Haiku call (e.g. `worker-queue-retry-logic`).
+- `scripts/calendar_hook.sh` on `Stop` — extends the session's event, reusing the prompt-derived slug.
+
+Both are rate-limited to one call per 10 minutes via a timestamp file. **Scope is the calendar-mapped-project allowlist, not session type**: every local session in a project present in `calendar_config.json` is tracked, whether it's a planned Dev session or an ad-hoc interactive `claude` session. Projects with no calendar mapping (e.g. `valor`) are skipped automatically by `valor-calendar`'s own `get_calendar_id` lookup — there is no `default` fallback.
 
 Configured in `.claude/settings.json` — committed to the repo, so it works on all machines.
 
@@ -100,8 +104,9 @@ for cal_id, slug, start, end in events:
 | `tools/google_workspace/__init__.py` | Package init |
 | `tools/google_workspace/auth.py` | OAuth module (reusable for future Workspace tools) |
 | `agent/agent_session_queue.py` | Bridge heartbeat integration |
-| `scripts/calendar_hook.sh` | Claude Code hook script (rate-limited) |
-| `.claude/settings.json` | Hook configuration (SessionStart + Stop) |
+| `scripts/calendar_prompt_hook.sh` | Claude Code `UserPromptSubmit` hook — derives descriptive slug (rate-limited) |
+| `scripts/calendar_hook.sh` | Claude Code `Stop` hook — extends the session event (rate-limited) |
+| `.claude/settings.json` | Hook configuration (UserPromptSubmit + Stop) |
 
 ## Configuration
 
