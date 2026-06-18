@@ -435,7 +435,7 @@ def test_steering_message_includes_original_request():
 
 
 def test_tool_timeout_prepend_when_queue_already_has_message():
-    """B1 ordering guard: pre-existing message in queue → tool-skip is at index 0, older at index 1."""
+    """B1 ordering guard: pre-existing message → tool-skip at index 0, older at index 1."""
     entry = _recovery_entry(current_tool_name="mcp__svc", recovery_attempts=0)
     # Pre-load a message in the steering queue.
     entry.queued_steering_messages = ["pre-existing message"]
