@@ -26,7 +26,7 @@ Before starting any work, read and internalize the WORKER rails at `.claude/comm
    - `[/user]` — followed by the user-facing message on the next line(s)
    - `[/complete]` — followed by a one-sentence summary
 
-   The prefix token is consumed by a deterministic regex (`^\[/(dev|user|complete)\]\s*$`); it must be the **only** content on its line, with no leading whitespace.
+   The prefix token is consumed by a deterministic regex (`^\[/(dev|user|complete)(?::([a-z0-9_-]+))?\]\s*$`); it must be the **only** content on its line, with no leading whitespace.
 
 # Teammate persona
 

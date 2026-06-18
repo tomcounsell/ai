@@ -116,8 +116,8 @@ def ensure_granite_model(
 # its line (no trailing text, allowed trailing whitespace). It is
 # matched against the **first non-empty line** of PM's tail using
 # re.match (which anchors at the start of the line).
-PREFIX_TOKEN_RE = re.compile(r"^\[/(dev|user|complete)\]\s*$")
-PREFIX_TOKEN_FALLBACK_RE = re.compile(r"\[/(dev|user|complete)\]")
+PREFIX_TOKEN_RE = re.compile(r"^\[/(dev|user|complete)(?::([a-z0-9_-]+))?\]\s*$")
+PREFIX_TOKEN_FALLBACK_RE = re.compile(r"\[/(dev|user|complete)(?::([a-z0-9_-]+))?\]")
 
 # Destination: which PTY the routed output goes to.
 Destination = Literal["dev", "user", "complete", "unknown"]
@@ -137,12 +137,19 @@ class ClassificationResult:
     `compliance_miss` is True iff the PM tail had no prefix token
     on its first line. The container uses this to compute the
     compliance rate; the results doc reports it.
+
+    `harness` is the optional builder harness name from the prefix
+    token (e.g. ``[/dev:pi]`` → ``harness="pi"``). ``None`` means
+    the default claude harness. Only populated when destination is
+    ``"dev"``; always ``None`` for ``"user"`` / ``"complete"`` /
+    ``"unknown"``.
     """
 
     destination: Destination
     payload: str
     compliance_miss: bool
     raw_first_line: str
+    harness: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -195,11 +202,13 @@ def classify_pm_prefix(pm_tail: str) -> ClassificationResult:
             payload="",
             compliance_miss=True,
             raw_first_line="",
+            harness=None,
         )
 
     m = PREFIX_TOKEN_RE.match(first_line)
     if m:
         token = m.group(1)
+        harness = m.group(2)  # None when no ":name" suffix (bare [/dev])
         # The payload is the rest of the tail (the lines after the
         # prefix token), stripped of leading/trailing whitespace.
         # For complete, the trailing one-sentence summary is the
@@ -211,22 +220,25 @@ def classify_pm_prefix(pm_tail: str) -> ClassificationResult:
             payload=rest,
             compliance_miss=False,
             raw_first_line=first_line,
+            harness=harness,
         )
 
     # Strict match failed; try a more permissive fallback. PM may
     # have included the token mid-line or with light surrounding
-    # text (e.g., "output: [/dev] please ...") — that's a
+    # text (e.g., "output: [/dev:pi] please ...") — that's a
     # compliance miss by the strict definition but a correct
     # classification. The fallback's `compliance_miss=True` is
     # the right signal: the persona is not strictly enforcing the
     # convention.
     fallback = PREFIX_TOKEN_FALLBACK_RE.search(pm_tail[:200])
     if fallback:
+        harness = fallback.group(2)  # group(2) is the harness name; group(1) is destination
         return ClassificationResult(
             destination=fallback.group(1),  # type: ignore[arg-type]
             payload=pm_tail.strip(),
             compliance_miss=True,
             raw_first_line=first_line,
+            harness=harness,
         )
 
     return ClassificationResult(
@@ -234,4 +246,5 @@ def classify_pm_prefix(pm_tail: str) -> ClassificationResult:
         payload="",
         compliance_miss=True,
         raw_first_line=first_line,
+        harness=None,
     )
