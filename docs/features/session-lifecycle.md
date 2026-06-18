@@ -361,9 +361,10 @@ used as a detection signal.
 2. **Fallback at finalization**: a new async helper `_deliver_deferred_self_draft_fallback(entry)`
    in `agent/session_health.py` reads `entry.extra_context["deferred_self_draft_pending"]` on all
    three terminal recovery branches (`failed` × 2, `abandoned` × 1).  On a truthy flag it delivers
-   the recovered `deferred_self_draft_text` (narration-gated via `_apply_narration_fallback()`, or
-   an explicit "couldn't finish responding" notice when text is absent).  The helper is idempotent
-   via Redis SETNX (`self_draft_fallback_sent:{session_id}`, 1 h TTL).
+   the recovered `deferred_self_draft_text` — narration-gated inline via the imported
+   `is_narration_only` predicate and `NARRATION_FALLBACK_MESSAGE` constant from
+   `bridge.message_quality`, or an explicit "couldn't finish responding" notice when text is absent.
+   The helper is idempotent via Redis SETNX (`self_draft_fallback_sent:{session_id}`, 1 h TTL).
 
 3. **Precedence**: the self-draft fallback fires *before* the generic degraded notice
    (`_deliver_tool_timeout_degraded_notice`).  When `deferred_self_draft_pending` is set, the
