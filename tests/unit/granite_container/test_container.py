@@ -1478,11 +1478,31 @@ class TestTranscriptPathRealpath(unittest.TestCase):
 
             path = _transcript_path(link, "sess-uuid")
             self.assertIsNotNone(path)
-            expected_slug = real.replace("/", "-")
+            expected_slug = real.replace("/", "-").replace(".", "-")
             link_slug = os.path.realpath(link)  # same as real, sanity
             self.assertEqual(link_slug, real)
             self.assertIn(expected_slug, path)
             self.assertTrue(path.endswith("sess-uuid.jsonl"))
+
+    def test_dotted_worktree_cwd_replaces_dot_with_dash(self) -> None:
+        """Regression: a `.worktrees` cwd must slug the dot to '-'.
+
+        Every bridge session runs in a synthetic `.worktrees/dev-{id}`
+        worktree. Claude Code replaces BOTH '/' and '.' with '-'. Replacing
+        only '/' pointed the transcript read at a directory Claude Code never
+        writes to -> file-missing every turn -> OPERATOR_TERMINAL_MESSAGE
+        shipped instead of the PM's real reply. Must stay in sync with
+        bridge_adapter._transcript_path_from_spec.
+        """
+        from agent.granite_container.container import _transcript_path
+
+        # Non-existent path: realpath is an identity transform, so the slug is
+        # deterministic without touching the filesystem.
+        path = _transcript_path("/Users/x/src/ai/.worktrees/dev-5732c769", "u")
+        self.assertIsNotNone(path)
+        self.assertIn("-Users-x-src-ai--worktrees-dev-5732c769", path)
+        self.assertNotIn(".worktrees", path)
+        self.assertTrue(path.endswith("u.jsonl"))
 
     def test_empty_cwd_does_not_crash_and_skips_realpath(self) -> None:
         """Empty cwd is not realpath'd (would return process CWD); slug stays empty-rooted."""

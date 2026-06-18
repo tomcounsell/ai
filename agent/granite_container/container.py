@@ -280,7 +280,8 @@ class ContainerResult:
     # PTY identity fields: PID and deterministic transcript path for each role.
     # Populated by Container.run() after the PTY pair is acquired. Transcript
     # paths follow Claude Code's naming convention:
-    #   ~/.claude/projects/{cwd.replace("/", "-")}/{session_id}.jsonl
+    #   ~/.claude/projects/{cwd-slug}/{session_id}.jsonl
+    #   where cwd-slug = realpath(cwd).replace("/", "-").replace(".", "-")
     pm_pid: int | None = None
     pm_transcript_path: str | None = None
     dev_pid: int | None = None
@@ -311,7 +312,14 @@ def _transcript_path(cwd: str, session_id: str | None) -> str | None:
 
     Claude Code names transcripts:
         ~/.claude/projects/{cwd-slug}/{session_id}.jsonl
-    where {cwd-slug} = cwd.replace("/", "-").
+    where {cwd-slug} replaces BOTH ``/`` and ``.`` in the realpath'd cwd with
+    ``-``. The ``.`` substitution is load-bearing: every bridge session runs in
+    a synthetic ``.worktrees/dev-{id}`` worktree, so the cwd always contains a
+    dot (``.worktrees`` -> ``--worktrees``). Replacing only ``/`` produced a
+    path Claude Code never writes to, so the transcript read came back
+    file-missing every turn and the run shipped OPERATOR_TERMINAL_MESSAGE
+    instead of the PM's real reply. Must stay in sync with
+    ``bridge_adapter._transcript_path_from_spec``.
 
     Returns None when session_id is not known; callers that receive None
     should skip transcript tailing for that session.
@@ -323,7 +331,7 @@ def _transcript_path(cwd: str, session_id: str | None) -> str | None:
     # returns the process CWD, which would silently corrupt the slug.
     if cwd:
         cwd = os.path.realpath(cwd)
-    cwd_slug = cwd.replace("/", "-")
+    cwd_slug = cwd.replace("/", "-").replace(".", "-")
     return str(Path.home() / ".claude" / "projects" / cwd_slug / f"{session_id}.jsonl")
 
 
