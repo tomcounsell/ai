@@ -12,14 +12,14 @@ context: fork
 At the very start of this skill, write an in_progress marker:
 
 ```bash
-sdlc-tool stage-marker --stage CRITIQUE --status in_progress --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage CRITIQUE --status in_progress --issue-number "$ISSUE_NUMBER"
 ```
 
 The completion marker is written in **Step 5.5**, co-located with the verdict record so the two can never desync. On a READY TO BUILD verdict, write the completion marker; on any other verdict, leave it `in_progress`. Step 5.5 is mandatory and reached on every exit path — see that step for the self-contained verdict-record + marker block:
 
 ```bash
 # On READY TO BUILD verdict (written in Step 5.5, immediately after `verdict record`):
-sdlc-tool stage-marker --stage CRITIQUE --status completed --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage CRITIQUE --status completed --issue-number "$ISSUE_NUMBER"
 ```
 
 Do NOT write the completion marker before the verdict is recorded, and do NOT record an APPROVED/READY verdict without the matching completion marker. They are a single unit.
@@ -43,24 +43,39 @@ Critiques a plan document from a frozen roster of expert perspectives (1 (LITE) 
 
 ## Plan Resolution
 
-Resolve the plan document path from `$ARGUMENTS`:
+Resolve the plan document path and issue number from `$ARGUMENTS`.
+
+**IMPORTANT:** Always assign `ISSUE_NUMBER` unconditionally (never `${ISSUE_NUMBER:-…}`).
+A non-empty inherited value (e.g. a stale "1724" latched from a prior context) would survive
+deferral and divert recorder writes to the wrong session. Clobber it on every run. (#1731)
 
 ```bash
 ARG="$ARGUMENTS"
 
 # If argument is a number, resolve from GitHub issue
 if [[ "$ARG" =~ ^#?[0-9]+$ ]]; then
-  ISSUE_NUM="${ARG#\#}"
-  PLAN_PATH=$(gh issue view "$ISSUE_NUM" --json body -q '.body' | grep -oP '(?<=docs/plans/)[^\s)]+\.md' | head -1)
+  ISSUE_NUMBER="${ARG#\#}"  # assign ISSUE_NUMBER (canonical name) — clobbers any inherited value
+  PLAN_PATH=$(gh issue view "$ISSUE_NUMBER" --json body -q '.body' | grep -oP '(?<=docs/plans/)[^\s)]+\.md' | head -1)
   if [ -n "$PLAN_PATH" ]; then
     PLAN_PATH="docs/plans/$PLAN_PATH"
   fi
 fi
 
-# If argument is a path, use directly
+# If argument is a path, use directly; recover the issue number from plan frontmatter
 if [[ "$ARG" == *.md ]]; then
   PLAN_PATH="$ARG"
+  # Extract tracking issue from frontmatter: "tracking: https://.../issues/N" or "tracking: #N"
+  ISSUE_NUMBER=$(grep -oP '(?<=tracking:[ \t])(https://[^\s]+/issues/|#?)\K[0-9]+' "$PLAN_PATH" 2>/dev/null | head -1)
 fi
+
+# Assert ISSUE_NUMBER is a positive integer before any recorder call (#1731).
+# An empty or non-integer value here means the caller did not supply a resolvable
+# issue reference — fail loudly so the supervisor sees an actionable error rather
+# than a silently diverted verdict on a wrong session.
+[[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || {
+  echo "do-plan-critique: could not resolve a positive-integer ISSUE_NUMBER (got: '${ISSUE_NUMBER}'). Pass a numeric issue number or a plan path with a tracking: field." >&2
+  exit 1
+}
 
 # Verify plan exists
 if [ ! -f "$PLAN_PATH" ]; then
@@ -401,21 +416,25 @@ After printing the verdict (Step 5), record it on the PM session so the SDLC rou
 
 ```bash
 # 1. Record the verdict (ALL verdicts) — mandatory.
+# Always pass --issue-number "$ISSUE_NUMBER" (quoted); ISSUE_NUMBER was
+# unconditionally assigned and validated in Plan Resolution (#1731).
 sdlc-tool verdict record --stage CRITIQUE \
-  --verdict "$VERDICT_STRING" --issue-number $ISSUE_NUMBER
+  --verdict "$VERDICT_STRING" --issue-number "$ISSUE_NUMBER"
 
 # 2. On a READY TO BUILD verdict ONLY, write the completion marker in the
 #    SAME block, immediately after the verdict record. Verdict + marker are a
 #    single unit: never record one without the other on the READY path.
+# NOTE: do NOT suppress with 2>/dev/null || true — a marker failure must
+# surface as a visible non-zero exit so the supervisor sees the error (#1731).
 case "$VERDICT_STRING" in
   *"READY TO BUILD"*)
     sdlc-tool stage-marker --stage CRITIQUE --status completed \
-      --issue-number $ISSUE_NUMBER 2>/dev/null || true
+      --issue-number "$ISSUE_NUMBER"
     ;;
 esac
 ```
 
-Where `$VERDICT_STRING` is the exact verdict string emitted in Step 5 (e.g. `"NEEDS REVISION"`, `"READY TO BUILD (with concerns)"`). **Always pass `--issue-number $ISSUE_NUMBER` when the issue number is known** — it is the authoritative session selector and guarantees the verdict lands on the same session the router reads for that issue (`sdlc-local-{N}` or the bridge PM session that owns the issue). Only if `$ISSUE_NUMBER` is genuinely unknown, omit the flag; the recorder then falls back to the `VALOR_SESSION_ID` / `AGENT_SESSION_ID` env-var session as a *last resort* (subordinate to `--issue-number`), and the artifact_hash will be None. A forked subagent that inherited a parent's env-var session must still pass `--issue-number` so its verdict is not diverted to the parent's session (#1671/#1672).
+Where `$VERDICT_STRING` is the exact verdict string emitted in Step 5 (e.g. `"NEEDS REVISION"`, `"READY TO BUILD (with concerns)"`). **Always pass `--issue-number "$ISSUE_NUMBER"` (quoted)** — it is the authoritative session selector and guarantees the verdict lands on the same session the router reads for that issue (`sdlc-local-{N}` or the bridge PM session that owns the issue). The variable is unconditionally assigned and validated in Plan Resolution — it is always a positive integer by the time Step 5.5 runs. A forked subagent that inherited a parent's env-var session is protected because the Plan Resolution block clobbers any inherited value and asserts a positive integer (#1731/#1671/#1672).
 
 The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state. On a non-READY verdict, leave the CRITIQUE marker at `in_progress` (the router's row 3 / row 2b handle re-routing).
 
@@ -431,7 +450,7 @@ Set the lock when the verdict is one of:
 ```bash
 # Set plan_revising lock after verdict record, when revision is needed
 sdlc-tool meta-set --key plan_revising --value true \
-  --issue-number $ISSUE_NUMBER 2>/dev/null || true
+  --issue-number "$ISSUE_NUMBER"
 ```
 
 **Do NOT set the lock** when the verdict is `READY TO BUILD (no concerns)` — no revision pass is needed and the lock would incorrectly block build dispatch.
