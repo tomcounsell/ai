@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-06-19
 tracking: https://github.com/tomcounsell/ai/issues/1730
-last_comment_id:
+last_comment_id: 4745184399
 ---
 
 # Deferred Delivery Fallback on Session Failure
