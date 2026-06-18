@@ -118,10 +118,24 @@ _STARTUP_FRAME_BUF_CAP = 4000
 # Maximum total persisted frame length (PM + Dev combined).
 _STARTUP_FRAME_TOTAL_CAP = 6000
 
-# Per-cycle idle timeout. If a PTY doesn't reach idle within this
-# many seconds, the container treats it as a hang (pm_hang /
-# dev_hang) and exits the loop.
-CYCLE_IDLE_TIMEOUT_S = 120.0
+# Per-cycle idle ceiling. This is a SANITY BOUND for pathological /
+# extreme cases, NOT a hang detector. "Did not reach idle within N
+# seconds" is an unreliable hang signal: a genuinely hung PTY goes
+# byte-silent and is therefore declared idle almost immediately,
+# while a PTY doing real multi-minute work (research, multi-tool Dev
+# turns, writing a GitHub issue) emits continuously and would be
+# falsely killed by a short deadline. The old 120s value killed any
+# Dev turn that took longer than two minutes — i.e. essentially all
+# substantive engineering work — and surfaced as exit_reason=dev_hang
+# despite the Dev actively making progress.
+#
+# Real hang detection lives in the heartbeat / liveness-recovery layer
+# (agent/session_health.py + issue #1724): it observes actual progress
+# signals and can cancel a wedged session's task. The container must
+# NOT second-guess that with a fixed idle deadline. We keep a large
+# 12-hour ceiling only so a truly stuck loop cannot wait forever; the
+# recovery layer is expected to act long before this is reached.
+CYCLE_IDLE_TIMEOUT_S = 12 * 60 * 60.0  # 12 hours — sanity ceiling, not a hang signal
 
 # Per-cycle idle budget for the startup-phase poll loop. Short by
 # design: the loop's job is to detect transient startup events
