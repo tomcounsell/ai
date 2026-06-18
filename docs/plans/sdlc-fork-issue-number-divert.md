@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-06-18
 tracking: https://github.com/tomcounsell/ai/issues/1731
 last_comment_id:
+revision_applied: true
 ---
 
 # SDLC forked stage skills divert verdicts/markers — `$ISSUE_NUMBER` never assigned
@@ -42,6 +43,15 @@ Consequences, both observed in the real `/do-sdlc 1720` run:
 Either way the router (`agent/sdlc_router.py:1150`) sees no matching verdict/marker for issue
 `N` and returns `Blocked('no matching dispatch rule')` — which reads as a hard pipeline blocker
 even though it is just diverted/missing state. Recovery today is manual marker backfilling.
+
+**Live corroboration (reproduced during THIS plan's own `/do-sdlc 1731` run):**
+While critiquing this very plan, the `do-plan-critique` subagent computed verdict
+`NEEDS REVISION` (artifact_hash `sha256:c8bcdee…`), but the write did **not** persist to the
+`sdlc-local-1731` session that the router reads — `sdlc-tool verdict get --stage CRITIQUE
+--issue-number 1731` returned `{}`, and the supervisor had to **manually backfill** the verdict
+to unblock the router. This is the exact failure mode #1731 describes, reproduced live, and it
+directly strengthens Blocker-1 below: a swallowed/diverted recorder write left the router
+stalled with no visible error. The fix must **surface** recorder failures, not swallow them.
 
 **Desired outcome:**
 A forked stage skill **always** records its verdict and stage marker against the issue the
@@ -140,25 +150,47 @@ asserts a verdict lands on the correct session; the unit tests mock/stub the ORM
 
 ### Key Elements
 
-- **Issue-number resolution in `do-plan-critique`**: Assign `ISSUE_NUMBER` deterministically in
-  the Plan Resolution block — parse it from `$ARGUMENTS` (the numeric form), and if `$ARGUMENTS`
-  is a plan path, recover the tracking issue from the plan frontmatter / the issue body. Replace
-  the orphaned `ISSUE_NUM` with the canonical `ISSUE_NUMBER` so the variable that downstream calls
-  reference is actually populated.
-- **Issue-number resolution in `do-pr-review`**: Assign `ISSUE_NUMBER` in the context-resolution
-  block, sourced from `$SDLC_ISSUE_NUMBER` env first, then fall back to extracting the tracking
-  issue from the PR body (`Closes #N` / `tracking:` link) — the extraction the env table already
-  promises but never performs.
-- **Robust hand-off across the fork boundary in `do-sdlc` §3c**: Have the dispatch prompt template
-  guarantee the fork receives the issue number both as the skill `args` AND as an explicit
-  instruction to export it (or have the supervisor export `SDLC_ISSUE_NUMBER` into the subagent
-  context) so the skill always has a non-ambient source. Quote the variable in every
-  `--issue-number "$ISSUE_NUMBER"` call so an empty value becomes an *empty-string arg* the CLI
-  rejects cleanly, never a swallowed/argument-stealing token.
-- **Loud-fail guard in the recorder (decision-gated — see Open Questions)**: Make
-  `sdlc-tool verdict record` / `stage-marker` exit non-zero with a clear message when no
-  `--issue-number` is given AND the env-var fallback session does not own the artifact being
-  recorded — converting a silent divert into a visible failure the subagent reports upward.
+- **Issue-number resolution in `do-plan-critique`**: Assign `ISSUE_NUMBER` **unconditionally** in
+  the Plan Resolution block — parse it directly from `$ARGUMENTS` (the numeric form) on every
+  invocation, and if `$ARGUMENTS` is a plan path, recover the tracking issue from the plan
+  frontmatter / the issue body. Replace the orphaned `ISSUE_NUM` with the canonical `ISSUE_NUMBER`
+  so the variable that downstream calls reference is actually populated. The assignment must
+  **clobber** any inherited value — do NOT use `${ISSUE_NUMBER:-…}` deferral, because a
+  valid-but-wrong inherited integer (e.g. a stale `1724` latched in from a prior context) would
+  survive deferral and divert the write. Direct assignment from the parsed argument on every run
+  is the only safe form; quoting alone is inert against a non-empty wrong value (Concern 4).
+- **Issue-number resolution in `do-pr-review`**: Assign `ISSUE_NUMBER` **unconditionally** in the
+  context-resolution block, sourced from `$SDLC_ISSUE_NUMBER` env first, then fall back to
+  extracting the tracking issue from the PR body (`Closes #N` / `tracking:` link) — the extraction
+  the env table already promises but never performs.
+- **Positive-integer assertion after EVERY resolution path (Blocker 2)**: Both fallback paths can
+  legitimately produce an *empty* value — `do-plan-critique`'s plan-frontmatter recovery yields
+  nothing if the frontmatter lacks a tracking link, and `do-pr-review`'s `Closes #N` grep yields
+  nothing if the PR body omits the keyword. An empty `ISSUE_NUMBER` re-enters the wrong-session
+  divert. Immediately after each resolution path completes — and **before any recorder call** —
+  assert the value is a positive integer:
+  ```bash
+  [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || { echo "do-<skill>: could not resolve a positive-integer ISSUE_NUMBER (got: '${ISSUE_NUMBER}')" >&2; exit 1; }
+  ```
+  This converts an unresolvable issue number into a loud non-zero exit the subagent reports
+  upward, instead of a swallowed divert.
+- **Robust hand-off across the fork boundary in `do-sdlc` §3c — args-only (Blocker 3 / Q2
+  resolved)**: The dispatch prompt template guarantees the fork receives the issue number as the
+  skill `args` and the skill re-parses it from `$ARGUMENTS`. **Do NOT export an ambient
+  `SDLC_ISSUE_NUMBER` env var** into the subagent context. Rationale: `find_session()` already
+  consults `issue_number` *before* any env-var fallback (`tools/_sdlc_utils.py:283`, the
+  #1671/#1672 precedence), so an exported env var is dead weight at best — and at worst it is
+  itself a divert vector, since an ambient env value is exactly the "latched onto #1724" mechanism
+  this issue is fixing. Args-only keeps the resolution path single-sourced and ambient-free. (Note:
+  `do-pr-review` still *reads* `$SDLC_ISSUE_NUMBER` if the env happens to carry it, but the `do-sdlc`
+  supervisor does not *set* it — the authoritative path is `$ARGUMENTS` → PR-body extraction.)
+- **Loud-fail recorder guard — DEFERRED (Concern 5 / Q1 resolved)**: A recorder-level guard that
+  exits non-zero when no owning session can be resolved is **deferred to a follow-up issue**, not
+  built here. The skill-side fixes (assign + clobber + positive-integer assertion + de-swallowed
+  markers) fully resolve the reported divert. If the guard is ever added later, it MUST gate on the
+  session's **ownership of the artifact**, not on a bare `None`/missing `--issue-number` — a
+  `None`-only guard would fire on every legitimate `VALOR_SESSION_ID`-based bridge call that
+  intentionally omits the flag. File the follow-up issue during build (task 3).
 
 ### Flow
 
@@ -174,10 +206,25 @@ router reads matching state → advances to next stage (no `no matching dispatch
 - **Single source of truth for the variable name.** Standardize on `ISSUE_NUMBER` (the name every
   downstream call already uses). In `do-plan-critique`, the Plan Resolution block currently
   computes `ISSUE_NUM` for the GitHub lookup — make it set `ISSUE_NUMBER` and use that everywhere.
+- **Unconditional clobber, not deferral (Concern 4).** Assign `ISSUE_NUMBER` directly from the
+  parsed argument on *every* invocation. Quoting is necessary but **not sufficient**: it only
+  defends against the empty case; a non-empty but wrong inherited integer (the "latched onto #1724"
+  symptom) passes `type=int` and diverts silently. Therefore the assignment must overwrite any
+  inherited value — never `${ISSUE_NUMBER:-…}`.
+- **Strip the failure-swallow from stage-marker calls (Blocker 1).** The current marker calls use
+  `--issue-number $ISSUE_NUMBER 2>/dev/null || true` (`do-plan-critique/SKILL.md:413,434`; the
+  marker templates at `:15,:22`; and the do-pr-review marker block). The `2>/dev/null || true`
+  hides argparse/recorder failures, so a failed marker silently stays `in_progress` — which is the
+  exact "router never silently stalls" outcome this plan must *not* leave broken (and is precisely
+  what the live corroboration above shows). **Remove the `2>/dev/null || true` swallow from every
+  stage-marker call** so a marker failure surfaces as a visible non-zero exit in the subagent
+  report. (do-pr-review already warns against blanket suppression at `:174`; make the
+  do-plan-critique markers match.)
 - **Always quote `--issue-number "$ISSUE_NUMBER"`** in both skills. With quoting, an empty value
   yields `--issue-number ""`, which argparse `type=int` rejects with a clear error (vs. the
   current unquoted form that drops the token and steals the next flag or errors confusingly).
-  This makes the "couldn't resolve" case loud at the call site.
+  Quoting handles the empty case at the call site; the positive-integer assertion (Key Elements)
+  catches it one step earlier, before the recorder is even invoked.
 - **Do NOT touch `tools/_sdlc_utils.find_session()` precedence.** The #1671/#1672 ordering
   (issue_number before env) is correct and load-bearing; the regression test for it must keep
   passing.
@@ -215,7 +262,10 @@ router reads matching state → advances to next stage (no `no matching dispatch
   before finalizing.
 - **Confidence**: medium (static read; a live `/do-sdlc` run would raise to high)
 - **Impact on plan**: No persistence-gating change needed. Keeps scope to variable assignment +
-  dispatch hardening.
+  dispatch hardening. **Caveat discharge (Concern 6):** the "re-confirm no other persistence gate
+  in do-pr-review" caveat is converted into an explicit BUILD task — see task `verify-no-persistence-gate`
+  below — so the medium-confidence read is positively closed before the skill edits land, not left
+  as an open assumption.
 
 ## Data Flow
 
@@ -236,21 +286,30 @@ The break is at step 3: `$ISSUE_NUMBER` is never assigned, so step 4 receives an
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The marker calls use `2>/dev/null || true` (silent no-op on failure). Add a test asserting
-      that after a *successful* resolution the marker is observably written to the correct session
-      (state change), so a silent no-op cannot pass unnoticed.
+- [ ] The stage-marker calls currently swallow failures with `2>/dev/null || true`. After this work
+      strips that swallow, add a test that a marker failure (e.g. unresolvable session) surfaces as a
+      non-zero exit / visible stderr, and that after a *successful* resolution the marker is
+      observably written to the correct session (state change). A silent no-op must not be able to
+      pass unnoticed.
 - [ ] `sdlc-tool verdict record` exits non-zero on Redis failure (documented at
-      do-pr-review:729). If the loud-fail guard is added, test that an unresolvable session yields a
-      non-zero exit with a human-readable message, not a silent env divert.
+      do-pr-review:729). The loud-fail recorder guard is DEFERRED (Q1); no recorder-exit test is in
+      scope for this plan — but the positive-integer assertion in each skill must be tested (next bullet).
+- [ ] The positive-integer assertion (`[[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || exit 1`) is exercised:
+      a resolution path that produces an empty value must exit non-zero before any recorder call,
+      not divert.
 - [ ] No `except Exception: pass` blocks are introduced by this work — state explicitly in the PR.
 
 ### Empty/Invalid Input Handling
 - [ ] Test `sdlc-tool verdict record --issue-number ""` (quoted empty) → argparse rejects with a
       clear error (current `type=int` behavior; assert exit code 2).
 - [ ] Test the skill resolution producing an empty `$ISSUE_NUMBER` when neither args nor env supply
-      it → the call must fail loudly or the guard must trip, not silently divert.
+      it → the positive-integer assertion must exit non-zero, not silently divert.
 - [ ] Test that a numeric `$ARGUMENTS` and a plan-path `$ARGUMENTS` both resolve `$ISSUE_NUMBER`
-      correctly in `do-plan-critique`.
+      correctly in `do-plan-critique`, AND that a plan-path with no tracking link in frontmatter
+      trips the assertion (empty → exit 1).
+- [ ] Test that an inherited stale `ISSUE_NUMBER` in the environment (e.g. `1724`) is **clobbered**
+      by the parsed argument — assign-then-check that the recorded issue number equals the argument,
+      not the inherited value (Concern 4 regression guard).
 
 ### Error State Rendering
 - [ ] The subagent report (`outcome/verdict/failures`) must surface a resolution failure verbatim
@@ -298,11 +357,14 @@ hard gate in Verification.
 **Mitigation:** Every recorder call already expects a real value; quoting only changes the
 empty-value case (which is the bug). Add unit tests for both numeric and empty cases.
 
-### Risk 3: The loud-fail guard breaks legitimate "issue genuinely unknown" calls
-**Impact:** Some callers intentionally omit `--issue-number` and rely on env resolution.
-**Mitigation:** Guard only fires when no `--issue-number` is given AND the resolved env session
-does not own the artifact. If this nuance is hard to detect safely, gate the guard behind the
-Open Question decision and ship the skill-side fix first (which alone resolves the reported bug).
+### Risk 3: A future loud-fail recorder guard breaks legitimate "issue genuinely unknown" calls
+**Impact:** Some callers intentionally omit `--issue-number` and rely on `VALOR_SESSION_ID` env
+resolution (e.g. bridge PM sessions). A naive guard that fires on a bare missing/`None`
+`--issue-number` would break every one of those legitimate calls.
+**Mitigation:** The guard is **DEFERRED to a follow-up issue** (Q1 resolved — DEFER); this plan
+ships the skill-side fix only, which alone resolves the reported divert. **If** the follow-up ever
+builds the guard, it MUST gate on the session's *ownership of the artifact being recorded*, never
+on a bare `None`/missing issue number — otherwise it fires for every legit env-based bridge call.
 
 ## Race Conditions
 
@@ -362,11 +424,23 @@ skill + CLI paths.**
       both `args` and an explicit env hand-off (e.g. `SDLC_ISSUE_NUMBER`).
 - [ ] `grep -n 'ISSUE_NUMBER=' .claude/skills-global/do-plan-critique/SKILL.md` and the
       do-pr-review equivalent each return at least one assignment.
+- [ ] No `--issue-number $ISSUE_NUMBER 2>/dev/null || true` swallow remains on any stage-marker
+      call: `grep -n '2>/dev/null || true' .claude/skills-global/do-plan-critique/SKILL.md` returns
+      no stage-marker line (Blocker 1).
+- [ ] Both skills assert `[[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]` after every resolution path, before any
+      recorder call (Blocker 2): `grep -c '=~ \^\[0-9\]' SKILL.md` returns ≥1 in each skill.
+- [ ] `do-sdlc/SKILL.md` §3c passes the issue number via `args` only and does NOT export
+      `SDLC_ISSUE_NUMBER`: `grep -c 'export SDLC_ISSUE_NUMBER' .claude/skills-global/do-sdlc/SKILL.md`
+      returns 0 (Blocker 3 / Q2).
 - [ ] Regression: an integration test confirms a forked-style `verdict record --issue-number N`
       lands on `sdlc-local-{N}` even when `VALOR_SESSION_ID` points to a different session.
+- [ ] **E2E read-back (executable):** run a forked critique against issue A (with a *conflicting*
+      env session set), then verify the verdict is readable on issue A:
+      `sdlc-tool verdict get --stage CRITIQUE --issue-number A` returns a non-empty record for issue
+      A — not `{}` and not a record on the env-session's issue. This is the executable proof the
+      live-corroboration failure is fixed (Nit 7).
 - [ ] The #1671/#1672 precedence/convergence tests still pass unchanged.
-- [ ] (If decided) `sdlc-tool verdict record` / `stage-marker` exit non-zero with a clear message
-      when no owning session can be resolved.
+- [ ] A follow-up issue exists for the deferred ownership-gated loud-fail recorder guard (Q1 = DEFER).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -380,9 +454,9 @@ skill + CLI paths.**
   - Agent Type: builder
   - Resume: true
 
-- **Builder (recorder guard)**
+- **Builder (follow-up issue + spike-2 discharge)**
   - Name: recorder-builder
-  - Role: (Decision-gated) add the loud-fail guard to `tools/sdlc_verdict.py` / `tools/sdlc_stage_marker.py`
+  - Role: File the deferred loud-fail-guard follow-up issue (ownership-gated, NOT `None`-gated); re-confirm no other persistence gate exists in `do-pr-review` (spike-2 caveat discharge)
   - Agent Type: builder
   - Resume: true
 
@@ -408,27 +482,39 @@ skill + CLI paths.**
 - **Assigned To**: skills-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `do-plan-critique/SKILL.md`: replace `ISSUE_NUM` with `ISSUE_NUMBER` in Plan Resolution; ensure both numeric and plan-path `$ARGUMENTS` populate it (recover issue from plan frontmatter/issue body for the path case).
-- In `do-pr-review/SKILL.md`: assign `ISSUE_NUMBER` from `$SDLC_ISSUE_NUMBER`, falling back to extracting the tracking issue from the PR body.
+- In `do-plan-critique/SKILL.md`: replace `ISSUE_NUM` with `ISSUE_NUMBER` in Plan Resolution; assign it **unconditionally** (clobber, never `${VAR:-…}`); ensure both numeric and plan-path `$ARGUMENTS` populate it (recover issue from plan frontmatter/issue body for the path case).
+- In `do-pr-review/SKILL.md`: assign `ISSUE_NUMBER` unconditionally from `$SDLC_ISSUE_NUMBER`, falling back to extracting the tracking issue (`Closes #N`) from the PR body.
+- **After every resolution path in both skills**, add the positive-integer assertion `[[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || { echo "...">&2; exit 1; }` **before any recorder call** (Blocker 2).
+- **Strip `2>/dev/null || true` from every stage-marker call** in `do-plan-critique` (lines ~15, ~22, ~413, ~434) so marker failures surface (Blocker 1). Ensure do-pr-review markers do not swallow either.
 - Quote every `--issue-number "$ISSUE_NUMBER"` in both skills.
 
-### 2. Harden the do-sdlc dispatch hand-off
+### 2. Harden the do-sdlc dispatch hand-off (args-only)
 - **Task ID**: build-dispatch-handoff
 - **Depends On**: none
-- **Validates**: §3c template names an explicit env/args hand-off of the issue number
+- **Validates**: §3c template passes the issue number via `args`; does NOT export `SDLC_ISSUE_NUMBER`
 - **Assigned To**: skills-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Update `do-sdlc/SKILL.md` §3c so the fork is guaranteed a non-ambient source for the issue number (args + `SDLC_ISSUE_NUMBER` export instruction).
+- Update `do-sdlc/SKILL.md` §3c so the fork receives the issue number via the skill `args` and re-parses it from `$ARGUMENTS`. **Do NOT add an ambient `SDLC_ISSUE_NUMBER` export** — `find_session()` already prefers issue-number over env, so the export is dead weight / a divert vector (Blocker 3 / Q2 resolved: args-only).
 
-### 3. (Decision-gated) Loud-fail guard in the recorder
-- **Task ID**: build-recorder-guard
-- **Depends On**: none (but ship only if Open Question 1 is answered "yes")
-- **Validates**: unit test for unresolvable-session → non-zero exit + message
+### 3. File the deferred guard follow-up + discharge spike-2 caveat
+- **Task ID**: file-guard-followup
+- **Depends On**: none
+- **Validates**: a follow-up issue exists describing the ownership-gated loud-fail recorder guard; a build note confirms no other persistence gate in do-pr-review
 - **Assigned To**: recorder-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Make `sdlc-tool verdict record` / `stage-marker` fail loudly when no `--issue-number` is given AND the env-var session does not own the artifact.
+- File a follow-up GitHub issue for the loud-fail recorder guard (Q1 = DEFER). The issue MUST state the guard gates on **artifact ownership**, not on a bare `None`/missing `--issue-number` (else it fires for every legit `VALOR_SESSION_ID` bridge call).
+- **Discharge spike-2 caveat (Concern 6):** re-read `do-pr-review/SKILL.md` and confirm in the PR description that NO branch other than the (already-ruled-out) `CLAUDE_AGENT_REVIEW` token switch gates verdict/marker persistence — i.e. persistence runs unconditionally (lines ~701-725). Record the confirmation as a checked task.
+
+### 3b. Re-confirm do-pr-review persistence is ungated
+- **Task ID**: verify-no-persistence-gate
+- **Depends On**: none
+- **Validates**: PR description records that verdict/marker persistence in do-pr-review is unconditional (no gate beyond the CLAUDE_AGENT_REVIEW token switch)
+- **Assigned To**: recorder-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- This is the explicit discharge of spike-2's medium-confidence caveat. Grep do-pr-review for any conditional wrapping the `verdict record` / `stage-marker` calls; confirm none gate persistence.
 
 ### 4. Tests
 - **Task ID**: build-tests
@@ -463,6 +549,10 @@ skill + CLI paths.**
 | critique skill assigns ISSUE_NUMBER | `grep -c 'ISSUE_NUMBER=' .claude/skills-global/do-plan-critique/SKILL.md` | output > 0 |
 | pr-review skill assigns ISSUE_NUMBER | `grep -c 'ISSUE_NUMBER=' .claude/skills-global/do-pr-review/SKILL.md` | output > 0 |
 | recorder calls are quoted (critique) | `grep -c 'issue-number "\$ISSUE_NUMBER"' .claude/skills-global/do-plan-critique/SKILL.md` | output > 0 |
+| no stage-marker swallow remains | `grep -c '2>/dev/null \|\| true' .claude/skills-global/do-plan-critique/SKILL.md` | 0 (Blocker 1) |
+| positive-int assertion present (critique) | `grep -c '=~ \^\[0-9\]' .claude/skills-global/do-plan-critique/SKILL.md` | output > 0 (Blocker 2) |
+| positive-int assertion present (pr-review) | `grep -c '=~ \^\[0-9\]' .claude/skills-global/do-pr-review/SKILL.md` | output > 0 (Blocker 2) |
+| no ambient env export in do-sdlc | `grep -c 'export SDLC_ISSUE_NUMBER' .claude/skills-global/do-sdlc/SKILL.md` | 0 (Blocker 3 / Q2) |
 | find_session precedence untouched | `git diff --quiet HEAD -- tools/_sdlc_utils.py` | exit code 0 |
 | Tests pass | `pytest tests/ -x -q -k sdlc` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
@@ -478,13 +568,17 @@ skill + CLI paths.**
 
 ## Open Questions
 
-1. **Loud-fail recorder guard (task 3): ship it, or skill-side fix only?** The skill-side
-   assignment + quoting fix (tasks 1-2) fully resolves the reported divert. The recorder guard
-   (task 3) is defense-in-depth that turns *any future* empty-issue-number call into a loud
-   failure — but it risks breaking legitimate "issue genuinely unknown" callers that rely on env
-   resolution. Should we ship the guard now, or land tasks 1-2 first and treat the guard as a
-   follow-up?
-2. **Dispatch hand-off mechanism (task 2): `args`-only, or also export `SDLC_ISSUE_NUMBER`?** Is
-   exporting an env var into the subagent context acceptable, or should the fix rely solely on the
-   skill robustly parsing `$ARGUMENTS` (avoiding any ambient env dependency, which was part of how
-   the original divert happened)?
+_Both open questions were resolved during the revision pass (NEEDS REVISION critique). Recorded
+here for the trail:_
+
+1. **Loud-fail recorder guard: ship it, or skill-side fix only?** — **RESOLVED: DEFER.** 2 of 3
+   critics favored deferral. The skill-side fix (assign + clobber + positive-integer assertion +
+   de-swallowed markers) fully resolves the reported divert. The recorder guard is filed as a
+   follow-up issue (task 3). If it is ever built, it MUST gate on the recording session's
+   **ownership of the artifact**, never on a bare `None`/missing `--issue-number` — a `None`-only
+   guard would fire for every legitimate `VALOR_SESSION_ID` bridge call.
+2. **Dispatch hand-off mechanism: `args`-only, or also export `SDLC_ISSUE_NUMBER`?** — **RESOLVED:
+   args-only.** Do NOT export an ambient `SDLC_ISSUE_NUMBER` env var. `find_session()` consults
+   `issue_number` before env (`tools/_sdlc_utils.py:283`), so the export is dead weight at best and
+   a divert vector at worst (it is the same ambient-env mechanism that produced the original
+   "latched onto #1724" symptom). The skill re-parses the number from `$ARGUMENTS`.
