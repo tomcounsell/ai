@@ -422,9 +422,10 @@ skill + CLI paths.**
 - [ ] `do-plan-critique/SKILL.md` assigns `ISSUE_NUMBER` (numeric `$ARGUMENTS` and plan-path forms
       both resolve it) and every recorder call uses `--issue-number "$ISSUE_NUMBER"` (quoted).
 - [ ] `do-pr-review/SKILL.md` assigns `ISSUE_NUMBER` by extracting the tracking issue from the PR body
-      (`Closes #N` / `Fixes #N`) FIRST, with `$ARGUMENTS` as the primary source; never trusts an
-      inherited `$SDLC_ISSUE_NUMBER` env value as authoritative — and every recorder call uses
-      `--issue-number "$ISSUE_NUMBER"`.
+      (`Closes #N` / `Fixes #N` / `Resolves #N`) as the PRIMARY, authoritative source (always runs
+      first). `$ARGUMENTS` is the PR number in this skill, NOT the issue number — it must NOT be
+      used as `ISSUE_NUMBER`. `$SDLC_ISSUE_NUMBER` is a last-resort fallback only, guarded by a
+      positive-integer check. Every recorder call uses `--issue-number "$ISSUE_NUMBER"`.
 - [ ] `do-sdlc/SKILL.md` §3c dispatch template passes the issue number via `args` only — it does NOT
       export `SDLC_ISSUE_NUMBER` or any ambient env hand-off (Blocker 3 / Q2; an ambient env var is a
       divert vector since find_session already prefers issue-number over env).

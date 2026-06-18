@@ -190,15 +190,29 @@ class TestPrReviewSkillIssueNumberResolution:
             "do-pr-review/SKILL.md must assign ISSUE_NUMBER in the context-resolution block"
         )
 
-    def test_arguments_is_primary_resolution_path(self, pr_review_skill: str) -> None:
-        """$ARGUMENTS must be the primary source for ISSUE_NUMBER resolution."""
-        # The resolution block should check $ARGUMENTS first
-        resolution_idx = pr_review_skill.find("ISSUE_NUMBER=")
-        assert resolution_idx >= 0
-        segment = pr_review_skill[resolution_idx : resolution_idx + 600]
-        assert "ARGUMENTS" in segment, (
-            "ISSUE_NUMBER resolution must check $ARGUMENTS first (the do-sdlc dispatcher "
-            "passes the issue number via skill args)"
+    def test_pr_body_is_primary_resolution_path(self, pr_review_skill: str) -> None:
+        """PR body extraction must be the primary source for ISSUE_NUMBER resolution.
+
+        In do-pr-review, $ARGUMENTS is the PR number, not the issue number.
+        So PR-body extraction (Closes #N / Fixes #N / Resolves #N) must run FIRST,
+        and ISSUE_NUMBER="$ARGUMENTS" must NOT appear (that would wrongly assign
+        the PR number as the issue number — the exact #1731 divert).
+        """
+        # PR body extraction must appear before any $SDLC_ISSUE_NUMBER fallback
+        pr_body_idx = pr_review_skill.find("gh pr view")
+        env_idx = pr_review_skill.find('"$SDLC_ISSUE_NUMBER"')
+        assert pr_body_idx >= 0, (
+            "do-pr-review must fetch PR body via 'gh pr view' to extract the tracking issue number"
+        )
+        if env_idx >= 0:
+            assert pr_body_idx < env_idx, (
+                "PR body extraction must appear before any $SDLC_ISSUE_NUMBER fallback — "
+                "PR body is the PRIMARY source of ISSUE_NUMBER in do-pr-review (#1731)"
+            )
+        # $ARGUMENTS must NOT be directly assigned as ISSUE_NUMBER (it is the PR number)
+        assert 'ISSUE_NUMBER="$ARGUMENTS"' not in pr_review_skill, (
+            'ISSUE_NUMBER="$ARGUMENTS" must not appear in do-pr-review — $ARGUMENTS is the '
+            "PR number, not the issue number; use PR body extraction instead (#1731)"
         )
 
     def test_pr_body_extraction_present(self, pr_review_skill: str) -> None:

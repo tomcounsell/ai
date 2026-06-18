@@ -231,28 +231,23 @@ if [ -z "$PLAN_PATH" ] && [ -n "$SLUG" ]; then
 fi
 
 # Resolve ISSUE_NUMBER — unconditional clobber (never ${ISSUE_NUMBER:-…}).
-# IMPORTANT: Do NOT use $SDLC_ISSUE_NUMBER as authoritative — a stale inherited
-# env value is exactly the "latched onto wrong issue" mechanism this skill
-# must guard against (#1731). The do-sdlc supervisor passes the number via
-# $ARGUMENTS (args-only); $SDLC_ISSUE_NUMBER is only a hint of last resort.
+# IMPORTANT: $ARGUMENTS is the PR number for this skill, NOT the issue number.
+# Do NOT use $ARGUMENTS as ISSUE_NUMBER. Do NOT use $SDLC_ISSUE_NUMBER as
+# authoritative — a stale inherited env value is exactly the "latched onto
+# wrong issue" mechanism this skill must guard against (#1731).
 #
 # Resolution order (first non-empty positive integer wins):
-# 1. $ARGUMENTS (the issue number passed by the do-sdlc dispatcher)
-# 2. Closes #N / Fixes #N / tracking: link extracted from the PR body
-# 3. $SDLC_ISSUE_NUMBER env var (legacy bridge hint — lower priority)
-if [[ "$ARGUMENTS" =~ ^[0-9]+$ ]]; then
-  ISSUE_NUMBER="$ARGUMENTS"
-else
-  # Fetch PR body and extract tracking issue number
-  PR_BODY=$(gh pr view "$PR_NUMBER" --json body -q '.body' 2>/dev/null)
-  ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oiP '(?:closes|fixes|resolves)\s+#\K[0-9]+' | head -1)
-  if [ -z "$ISSUE_NUMBER" ]; then
-    # Also try "tracking: https://.../issues/N" pattern
-    ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oP '(?<=issues/)[0-9]+' | head -1)
-  fi
-  if [ -z "$ISSUE_NUMBER" ] && [[ "$SDLC_ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
-    ISSUE_NUMBER="$SDLC_ISSUE_NUMBER"
-  fi
+# 1. PR body extraction: Closes #N / Fixes #N / Resolves #N  (PRIMARY — always run)
+# 2. PR body: tracking: https://.../issues/N  (secondary PR-body fallback)
+# 3. $SDLC_ISSUE_NUMBER env var (LAST RESORT ONLY — guarded by positive-integer check)
+PR_BODY=$(gh pr view "$PR_NUMBER" --json body -q '.body' 2>/dev/null)
+ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oiP '(?:closes|fixes|resolves)\s+#\K[0-9]+' | head -1)
+if [ -z "$ISSUE_NUMBER" ]; then
+  # Also try "tracking: https://.../issues/N" pattern
+  ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oP '(?<=issues/)[0-9]+' | head -1)
+fi
+if [ -z "$ISSUE_NUMBER" ] && [[ "$SDLC_ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
+  ISSUE_NUMBER="$SDLC_ISSUE_NUMBER"
 fi
 
 # Assert ISSUE_NUMBER is a positive integer before any recorder call (#1731).
