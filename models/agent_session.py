@@ -1996,23 +1996,39 @@ class AgentSession(Model):
 
     # === Queued steering message helpers ===
 
-    def push_steering_message(self, text: str) -> None:
+    def push_steering_message(self, text: str, front: bool = False) -> None:
         """Buffer a human reply for the PM session.
 
         Uses partial save (update_fields) to avoid clobbering status on stale
         worker references. See #950.
+
+        Args:
+            text: The steering message text to enqueue.
+            front: When True, prepend to the queue (urgent advisory; trimmed
+                from the back so the new message is never dropped).  When
+                False (default), append as before (trimmed from the front).
         """
         current = self.queued_steering_messages
         if not isinstance(current, list):
             current = []
-        current.append(text)
-        if len(current) > STEERING_QUEUE_MAX:
-            dropped = len(current) - STEERING_QUEUE_MAX
-            logger.warning(
-                f"Steering queue overflow for session {self.session_id}: "
-                f"dropping {dropped} oldest message(s)"
-            )
-            current = current[-STEERING_QUEUE_MAX:]
+        if front:
+            current.insert(0, text)
+            if len(current) > STEERING_QUEUE_MAX:
+                dropped = len(current) - STEERING_QUEUE_MAX
+                logger.warning(
+                    f"Steering queue overflow for session {self.session_id}: "
+                    f"dropping {dropped} oldest message(s) from back (front=True)"
+                )
+                current = current[:STEERING_QUEUE_MAX]
+        else:
+            current.append(text)
+            if len(current) > STEERING_QUEUE_MAX:
+                dropped = len(current) - STEERING_QUEUE_MAX
+                logger.warning(
+                    f"Steering queue overflow for session {self.session_id}: "
+                    f"dropping {dropped} oldest message(s)"
+                )
+                current = current[-STEERING_QUEUE_MAX:]
         self.queued_steering_messages = current
         try:
             self.save(update_fields=["queued_steering_messages", "updated_at"])

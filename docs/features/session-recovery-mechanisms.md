@@ -131,7 +131,15 @@ See [Harness Startup Retry](harness-startup-retry.md) for full design details.
 | Counters | Three `IntField` counters on `AgentSession` (`tool_timeout_count_internal`, `..._mcp`, `..._default`) cumulate per-tier hits per session. Project-scoped Redis counter `{project_key}:session-health:tool_timeouts:{internal\|mcp\|default}` mirrors the existing `recoveries:{kind}` pattern for dashboards. |
 | Kill switch | `TOOL_TIMEOUT_TIERS_DISABLED=1` short-circuits the entire sub-loop (parity with `DISABLE_PROGRESS_KILL` for the main loop). |
 
-See [Agent Session Health Monitor §Per-Tool Timeout Sub-Loop](agent-session-health-monitor.md#how-it-works) for the full design, including the v1 single-slot `current_tool_name` limitation and out-of-scope items (per-`tool_use_id` registries, synthetic `tool_result` injection, "your tool wedged" steering messages on recovery).
+#### Graceful Degradation on tool_timeout (issue #1711)
+
+Two-layer degradation ensures the user always gets a response when a tool hang triggers recovery:
+
+**Layer 1 — Advisory steering (attempt-1 requeue):** On the `pending` requeue branch (before `MAX_RECOVERY_ATTEMPTS` is exhausted), `_apply_recovery_transition` calls `_compose_tool_timeout_steering(tool_name, original_message_text)` and prepends the result to the session's steering inbox via `push_steering_message(..., front=True)`. The message is self-contained — it names the timed-out tool, embeds the original request verbatim, and instructs the model to skip the hung tool. On re-pickup the worker pops this message first (FIFO front), so the model receives the skip instruction before any pre-existing queue entries. See [Session Steering §Automatic Steering on tool_timeout Recovery](session-steering.md#automatic-steering-on-tool_timeout-recovery) for the prepend mechanics.
+
+**Layer 2 — Deterministic floor (terminal `failed`):** On EVERY `tool_timeout`→`failed` exit — both the `MAX_RECOVERY_ATTEMPTS` exhaustion branch and the not-confirmed-dead branch — `_deliver_tool_timeout_degraded_notice(entry, tool_name)` delivers a canned user-facing message through the session's resolved output handler. Redis `SETNX` prevents double-delivery. Routing is channel-agnostic: Telegram, email, or file output, whichever transport the session was using.
+
+See [Agent Session Health Monitor §Per-Tool Timeout Sub-Loop](agent-session-health-monitor.md#how-it-works) for the full design, including the v1 single-slot `current_tool_name` limitation and out-of-scope items (per-`tool_use_id` registries, synthetic `tool_result` injection).
 
 ## Recovery Ownership
 

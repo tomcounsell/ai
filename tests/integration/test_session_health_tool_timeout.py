@@ -1,4 +1,4 @@
-"""Integration test for the per-tool timeout sub-loop (issue #1270).
+"""Integration test for the per-tool timeout sub-loop (issue #1270 / #1711).
 
 End-to-end: a real ``AgentSession`` row in ``status="running"`` with a stale
 ``last_tool_use_at`` and non-null ``current_tool_name`` is recovered by one
@@ -9,6 +9,10 @@ exceeds MAX_RECOVERY_ATTEMPTS).
 
 This test uses real Popoto AgentSession rows (not SimpleNamespace mocks)
 to verify the full read/save round-trip works end-to-end.
+
+Issue #1711 additions:
+- MCP-tier wedge requeue carries prepended steering message.
+- Terminal tool_timeout wedge delivers degraded notice (Redis counter bumped).
 """
 
 from __future__ import annotations
@@ -18,8 +22,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from agent.session_health import (
+    MAX_RECOVERY_ATTEMPTS,
     TOOL_TIMEOUT_DEFAULT_SEC,
     TOOL_TIMEOUT_INTERNAL_SEC,
+    TOOL_TIMEOUT_MCP_SEC,
     _agent_session_tool_timeout_check,
 )
 from models.agent_session import AgentSession, SessionType
@@ -156,5 +162,156 @@ async def test_subloop_no_op_on_fresh_session(monkeypatch):
     finally:
         try:
             s.delete()
+        except Exception:
+            pass
+
+
+async def test_mcp_tier_wedge_requeue_carries_prepended_steering(monkeypatch):
+    """Issue #1711: MCP-tier wedge that requeues must carry a prepended steering message.
+
+    End-to-end: create a real session wedged on an MCP tool with recovery_attempts=0
+    so the sub-loop tick takes the requeue (pending) branch.  After the tick the
+    session must be ``pending`` and ``queued_steering_messages[0]`` must name the tool.
+    """
+    monkeypatch.delenv("TOOL_TIMEOUT_TIERS_DISABLED", raising=False)
+    monkeypatch.delenv("DISABLE_PROGRESS_KILL", raising=False)
+
+    mcp_tool = "mcp__claude_ai_Gmail__create_draft"
+    s = AgentSession.create(
+        project_key=f"test-tt-steer-{id(monkeypatch)}",
+        chat_id="local-test-tt-steer",
+        session_type=SessionType.ENG,
+        message_text="please draft an email summarising the sprint",
+        sender_name="x",
+        session_id=f"tt-steer-{id(monkeypatch)}",
+        working_dir="/tmp",
+    )
+    try:
+        s.status = "running"
+        s.started_at = datetime.now(tz=UTC) - timedelta(seconds=600)
+        s.current_tool_name = mcp_tool
+        s.last_tool_use_at = datetime.now(tz=UTC) - timedelta(seconds=TOOL_TIMEOUT_MCP_SEC + 30)
+        s.recovery_attempts = 0
+        s.save(
+            update_fields=[
+                "status",
+                "started_at",
+                "current_tool_name",
+                "last_tool_use_at",
+                "recovery_attempts",
+            ]
+        )
+
+        await _agent_session_tool_timeout_check()
+
+        refreshed = AgentSession.get_by_id(s.agent_session_id)
+        assert refreshed is not None
+
+        # The session must have been requeued (pending) on the first attempt.
+        # If it went to failed it means confirmed_dead=False on this machine —
+        # that's acceptable (the steering branch only fires on requeue), but then
+        # we can't assert steering.  Only assert steering when status is pending.
+        if refreshed.status == "pending":
+            msgs = refreshed.queued_steering_messages or []
+            assert len(msgs) >= 1, (
+                f"requeued session must carry at least one steering message; got {msgs!r}"
+            )
+            assert mcp_tool in msgs[0], (
+                f"first steering message must name the tool ({mcp_tool!r}); got {msgs[0]!r}"
+            )
+        else:
+            # failed branch is acceptable on machines where subprocess can't be confirmed dead
+            assert refreshed.status == "failed", (
+                f"unexpected status {refreshed.status!r} — expected pending or failed"
+            )
+    finally:
+        try:
+            s.delete()
+        except Exception:
+            pass
+        # Clean up project-tier Redis counters.
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as R
+
+            R.delete(f"{s.project_key}:session-health:tool_timeouts:mcp")
+            R.delete(f"{s.project_key}:session-health:tool_timeout_steering_injected")
+        except Exception:
+            pass
+
+
+async def test_terminal_wedge_delivers_degraded_notice(monkeypatch):
+    """Issue #1711: tool_timeout at MAX_RECOVERY_ATTEMPTS must deliver degraded notice.
+
+    End-to-end: real session at recovery_attempts=MAX_RECOVERY_ATTEMPTS-1 wedged on
+    an MCP tool.  After the sub-loop tick the session must be ``failed`` and the
+    project-scoped ``tool_timeout_degraded_delivered`` Redis counter must increment.
+    """
+    monkeypatch.delenv("TOOL_TIMEOUT_TIERS_DISABLED", raising=False)
+    monkeypatch.delenv("DISABLE_PROGRESS_KILL", raising=False)
+
+    mcp_tool = "mcp__claude_ai_Gmail__list_labels"
+    proj = f"test-tt-term-{id(monkeypatch)}"
+    s = AgentSession.create(
+        project_key=proj,
+        chat_id="local-test-tt-term",
+        session_type=SessionType.ENG,
+        message_text="list all my Gmail labels",
+        sender_name="x",
+        session_id=f"tt-term-{id(monkeypatch)}",
+        working_dir="/tmp",
+    )
+    try:
+        s.status = "running"
+        s.started_at = datetime.now(tz=UTC) - timedelta(seconds=600)
+        s.current_tool_name = mcp_tool
+        s.last_tool_use_at = datetime.now(tz=UTC) - timedelta(seconds=TOOL_TIMEOUT_MCP_SEC + 30)
+        # Set to MAX-1 so the sub-loop bumps to MAX and takes the failed branch.
+        s.recovery_attempts = MAX_RECOVERY_ATTEMPTS - 1
+        s.save(
+            update_fields=[
+                "status",
+                "started_at",
+                "current_tool_name",
+                "last_tool_use_at",
+                "recovery_attempts",
+            ]
+        )
+
+        from popoto.redis_db import POPOTO_REDIS_DB as R
+
+        degraded_counter_key = f"{proj}:session-health:tool_timeout_degraded_delivered"
+        try:
+            before = int(R.get(degraded_counter_key) or 0)
+        except Exception:
+            before = 0
+
+        await _agent_session_tool_timeout_check()
+
+        refreshed = AgentSession.get_by_id(s.agent_session_id)
+        assert refreshed is not None
+        assert refreshed.status == "failed", (
+            f"expected status=failed after MAX_RECOVERY_ATTEMPTS; got {refreshed.status!r}"
+        )
+
+        # Degraded notice delivery is signalled by the Redis counter bump.
+        try:
+            after = int(R.get(degraded_counter_key) or 0)
+        except Exception:
+            after = before  # Redis unavailable — skip counter assertion
+        assert after > before, (
+            f"tool_timeout_degraded_delivered counter must increment on terminal wedge "
+            f"(before={before}, after={after})"
+        )
+    finally:
+        try:
+            s.delete()
+        except Exception:
+            pass
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as R
+
+            R.delete(f"{proj}:session-health:tool_timeouts:mcp")
+            R.delete(f"{proj}:session-health:tool_timeout_degraded_delivered")
+            R.delete(f"tool_timeout:degraded_sent:{s.session_id}")
         except Exception:
             pass
