@@ -129,7 +129,7 @@ by `sdk_client.py` from the `AgentSession` (issue #420):
 | `$SDLC_PR_BRANCH` | PR head branch | `gh pr view --json headRefName` |
 | `$SDLC_SLUG` | Work item slug | Derive from branch name |
 | `$SDLC_PLAN_PATH` | Path to plan doc | Derive from slug |
-| `$SDLC_ISSUE_NUMBER` | Tracking issue | Extract from PR body |
+| `$SDLC_ISSUE_NUMBER` | Tracking issue (env hint) | **Last-resort only** for recorder calls — primary is PR-body `Closes #N` extraction (#1731) |
 | `$SDLC_REPO` | GitHub repo (org/name) | `$GH_REPO` |
 
 **Usage:** Prefer `$SDLC_PR_NUMBER` over `$PR_NUMBER` when available.

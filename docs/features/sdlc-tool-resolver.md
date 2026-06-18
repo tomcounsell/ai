@@ -83,9 +83,11 @@ symptom), it silently diverted the write to the wrong issue's session.
 1. `do-plan-critique`: Plan Resolution now unconditionally assigns `ISSUE_NUMBER` (clobbers
    any inherited value, never `${ISSUE_NUMBER:-…}`). Numeric `$ARGUMENTS` → `ISSUE_NUMBER`.
    Plan-path `$ARGUMENTS` → extract from plan frontmatter `tracking:` field.
-2. `do-pr-review`: Context-resolution now unconditionally assigns `ISSUE_NUMBER` from
-   `$ARGUMENTS` first, then by extracting `Closes #N`/`Fixes #N` from the PR body, with
-   `$SDLC_ISSUE_NUMBER` as a last-resort validated hint only (never authoritative).
+2. `do-pr-review`: Context-resolution now unconditionally assigns `ISSUE_NUMBER` by extracting
+   `Closes #N`/`Fixes #N`/`Resolves #N` from the PR body (PRIMARY — always runs first), then
+   `tracking: .../issues/N` from the PR body (secondary fallback), with `$SDLC_ISSUE_NUMBER`
+   as a last-resort validated hint only (never authoritative). **`$ARGUMENTS` is the PR number
+   in this skill, not the issue number — it is never used as `ISSUE_NUMBER`.**
 3. Both skills: **positive-integer assertion** `[[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || { ... exit 1 }`
    added after every resolution path and before any recorder call. An unresolvable issue
    number now fails loudly rather than silently diverting.
