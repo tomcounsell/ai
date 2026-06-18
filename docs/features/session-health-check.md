@@ -70,6 +70,7 @@ The judge receives rich context to reduce false positives:
 The hook also checks a Redis steering queue on every tool call (lightweight LPOP). Steering messages can:
 - **Abort**: Inject a stop directive immediately
 - **Redirect**: Inject supervisor messages into the agent's context
+- **Skip-tool** (issue #1711): Prepended by `_apply_recovery_transition` when the per-tool timeout sub-loop detects a wedged tool and requeues the session. The message names the timed-out tool, embeds the original request verbatim, and instructs the model to answer without the hung tool. It is prepended at index 0 (`push_steering_message(..., front=True)`) so the model receives the skip instruction before any previously-queued steering entries. See [Session Steering §Automatic Steering on tool_timeout Recovery](session-steering.md#automatic-steering-on-tool_timeout-recovery).
 
 ## Key Functions
 

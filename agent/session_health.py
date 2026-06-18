@@ -1228,6 +1228,13 @@ def _compose_tool_timeout_steering(tool_name: str, original_request: str | None)
     Pure function — never raises. Returns a self-contained string the session
     can consume on the next turn.
 
+    **Self-contained requirement:** The message must not rely on ``--resume``
+    continuity. When the health-check kills the stuck subprocess, the prior
+    ``claude_session_uuid`` becomes stale; the harness falls back to a fresh
+    run (no ``--resume``) using ``full_context_message``. A fresh run has no
+    prior conversation history, so the steering message must embed the original
+    request verbatim — it is the only thread of context the re-queued turn has.
+
     Args:
         tool_name: The tool that timed out (e.g. ``mcp__foo__bar``).
         original_request: The user's original message text. Truncated to 1500
@@ -1673,8 +1680,16 @@ async def _apply_recovery_transition(
         else:
             entry.priority = "high"
             entry.started_at = None
-            # Advisory injection (issue #1711): prepend a steering message so the
-            # re-queued session knows which tool timed out and can work around it.
+            # Advisory injection (issue #1711): only on the requeue (``else``) branch,
+            # only for ``tool_timeout`` reason kind. Explanation of each constraint:
+            #   • Requeue-branch-only: the ``failed`` and ``abandoned`` branches
+            #     finalize the session — there is no next turn to consume steering.
+            #     Advisory steering is only useful when the session will run again.
+            #   • tool_timeout-only: steering is narrowly targeted at the "model
+            #     attempted a specific tool and it wedged" failure mode. Other reason
+            #     kinds (no_progress, worker_dead) have different root causes and
+            #     different remediation patterns; injecting a tool-skip message for
+            #     them would be misleading and could mask the real issue.
             if reason_kind == "tool_timeout" and tool_name:
                 try:
                     entry.push_steering_message(
