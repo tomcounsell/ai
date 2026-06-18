@@ -333,7 +333,7 @@ The same edit updates the token-shape documentation at `prime-pm-role.md:30`: th
 ## Success Criteria
 
 - [ ] `BuilderHarness` protocol exists; `PtyClaudeBuilder` is the claude implementation; the container dev branch delegates to it.
-- [ ] Regression tests prove the claude path is behavior-identical to pre-refactor (byte-identical relay on representative turns).
+- [x] Regression tests prove the claude path is behavior-identical to pre-refactor (byte-identical relay on representative turns).
 - [ ] `classify_pm_prefix` parses `[/dev:pi]`/`[/dev:claude]`/`[/dev]` correctly; unknown harness routes a compliance nudge, not a crash.
 - [ ] `PiSubprocessBuilder` executes a task via `pi -p --mode json` in the worktree and relays the final text; `parse_pi_final_text` unit-tested against a real envelope fixture + edge cases.
 - [ ] **Demo:** a real task routed `[/dev:pi]` on the cross-vendor cloud model (`--provider google --model gemini-2.5-pro`, OQ2) produces a committed change in the worktree and a user-facing result through normal granite flow (proof artifact: transcript + diff). The demo runs on the real-worktree bridge path, not the sandbox path (Risk 6 caveat).

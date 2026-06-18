@@ -615,6 +615,24 @@ handles generic field addition per issues #1099/#1172).
   PID-targeted, so an operator's personal interactive `claude` session on
   another project is never touched.
 
+## Dev relay and `BuilderHarness`
+
+As of plan #1725, the dev-relay branch of `_route_pm_classification` delegates
+to a `BuilderHarness` abstraction (`agent/granite_container/builder.py`) rather
+than inlining PTY+transcript logic.
+
+- Bare `[/dev]` and `[/dev:claude]` route to `PtyClaudeBuilder` — the existing
+  Dev PTY + JSONL transcript path, extracted verbatim. Behavior is unchanged.
+- `[/dev:pi]` routes to `PiSubprocessBuilder` — a subprocess-based alternative
+  that bypasses PTY entirely, running `pi -p --mode json` in the same working
+  directory as the Dev PTY.
+
+The container caller (`_route_pm_classification`) still owns `_last_dev_report`
+assignment and the empty-return fallback gate (`DEV_REPORT_UNAVAILABLE`). The
+builder returns only the final assistant text (or `""` on failure); it never
+touches those container-owned fields. See
+[Pluggable Builder Harness](pluggable-builder-harness.md) for the full seam design.
+
 ## Known limitations (deep-dive audit, PR #1612)
 
 1. **Resume is a fresh TUI session.** The container has no `claude --resume`
@@ -783,7 +801,11 @@ Free-text generation (memory title generation, test AI judge) uses the per-machi
 - [Granite Operator: Interactive TUI](granite-interactive-tui.md) — the
   session-runner container this path builds on.
 - [PTY Driver](pty-driver.md) — the substrate driver (submit key, idle signal,
-  resume-UUID capture).
+  resume-UUID capture). `PTYDriver` is the claude builder's substrate; the Pi
+  builder bypasses it entirely.
+- [Pluggable Builder Harness](pluggable-builder-harness.md) — `BuilderHarness`
+  seam design, `PtyClaudeBuilder` vs `PiSubprocessBuilder`, `[/dev:<harness>]`
+  selector rubric.
 - [deployment.md](deployment.md#granite-pty-pool) — env var and the
   `MAX_CONCURRENT_SESSIONS` relationship.
 - [bridge-worker-architecture.md](bridge-worker-architecture.md) — where

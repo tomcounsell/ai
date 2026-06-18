@@ -40,6 +40,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from agent.granite_container.builder import PiSubprocessBuilder, PtyClaudeBuilder
 from agent.granite_container.granite_classifier import (
     ClassificationResult,
     classify_pm_prefix,
@@ -238,6 +239,15 @@ MAX_WRAPUP_ATTEMPTS = 1
 # Fallback seed string for the wrap-up prompt when the developer did
 # not produce a captured report and the Dev PTY is no longer readable.
 DEV_REPORT_UNAVAILABLE = "The developer did not produce a captured report."
+
+# Canonical paths for Pi builder priming (two --append-system-prompt flags).
+# The rails file is the single source of safety constraints shared by all
+# granite personas; the persona file adds the Pi-tuned dev-role delta only.
+# Both paths are resolved relative to the repo root at import time so the
+# container never has to compute them per-turn.
+_REPO_ROOT = Path(__file__).parent.parent.parent
+PI_RAILS_PATH = str(_REPO_ROOT / ".claude" / "commands" / "granite" / "_prime-rails.md")
+PI_PERSONA_PATH = str(_REPO_ROOT / "config" / "personas" / "granite" / "pi_dev_rails.md")
 
 # Fallback user-visible message delivered directly (bypassing PM) when
 # the wrap-up guard exhausts MAX_WRAPUP_ATTEMPTS without PM emitting a
@@ -1327,50 +1337,42 @@ class Container:
             self._pm_pty.write(PM_COMPLIANCE_NUDGE)
             return RouteOutcome(should_break=False, exit_reason=None)
 
-        # Write to Dev's PTY (await idle first to enforce the
-        # "write only to idle PTYs" invariant).
-        await_idle, _, _, _ = self._cycle_idle(self._dev_pty)
-        if not await_idle:
-            result.exit_message = "Dev did not reach idle before PM instruction"
-            return RouteOutcome(should_break=True, exit_reason="dev_hang")
-        self._dev_pty.write(dev_prompt)
+        # Resolve the builder harness for this turn.
+        # harness_name is None → default claude PTY path; unknown names
+        # route a compliance nudge back to PM.
+        harness_name = getattr(classification, "harness", None)
+        builder = self._get_builder(harness_name, result)
+        if builder is None:
+            # Unknown harness — _get_builder already wrote the nudge.
+            return RouteOutcome(should_break=False, exit_reason=None)
 
-        # Snapshot the count of text-bearing Dev assistant entries before waiting
-        # for Dev so last_assistant_text can require a NEW text-bearing entry this
-        # cycle. This is the dominant bug shape: the Dev→PM verbatim forward is the
-        # most tool-heavy path, and the old mtime guard was defeated by intra-turn
-        # tool_use/tool_result writes (forwarding the prior turn's text).
-        dev_transcript = result.dev_transcript_path
-        dev_baseline = text_bearing_count(dev_transcript) if dev_transcript else 0
+        # Delegate the dev turn to the builder harness.
+        # The builder performs: cycle_idle(dev) → write → baseline → cycle_idle(dev)
+        # → last_assistant_text. It stores per-turn metadata as attributes.
+        dev_text = builder.run_turn(dev_prompt)
 
-        # Wait for Dev to respond and reach idle.
-        dev_idle, dev_buf, dev_marker, dev_ms = self._cycle_idle(self._dev_pty)
-        if not dev_idle:
-            result.exit_message = f"Dev did not reach idle within {CYCLE_IDLE_TIMEOUT_S}s"
+        # Check for hang (pre-write or post-write idle timeout).
+        if builder.last_hung:
+            result.exit_message = "Dev did not reach idle within the cycle idle budget"
             return RouteOutcome(should_break=True, exit_reason="dev_hang")
 
-        result.total_dev_pty_bytes += len(dev_buf)
+        # Account for bytes captured from Dev's PTY buffer.
+        result.total_dev_pty_bytes += len(builder.last_dev_buf)
 
-        # Read Dev's verbatim last assistant text from the JSONL transcript.
-        # This is the zero-LLM shuttle: no summarize_for_pm rewrite.
-        dev_text = (
-            last_assistant_text(dev_transcript, baseline_text_count=dev_baseline)
-            if dev_transcript
-            else ""
-        )
+        # Container-owned: empty-return fallback gate (Risk 5 — stays here,
+        # not in the builder). If the transcript read returned empty, bump
+        # the fallback count and substitute a placeholder so PM can continue.
         if not dev_text:
             logger.warning(
-                "[granite-container] Dev transcript read returned empty "
-                "(path=%r, baseline_text_count=%s); falling back to transcript_fallback_count bump",
-                dev_transcript,
-                dev_baseline,
+                "[granite-container] Dev transcript read returned empty; "
+                "falling back to transcript_fallback_count bump"
             )
             result.transcript_fallback_count += 1
             # Still write something to PM so the loop can continue.
             dev_text = DEV_REPORT_UNAVAILABLE
 
-        # Capture the Dev text as the last Dev report for the wrap-up
-        # guard (issue #1647).
+        # Container-owned: capture the Dev text as the last Dev report for
+        # the wrap-up guard (issue #1647). Stays here, not in the builder.
         self._last_dev_report = dev_text
 
         # Write Dev's verbatim text to PM's PTY.
@@ -1383,16 +1385,61 @@ class Container:
         turn_record = TurnRecord(
             turn_index=turn_index,
             pm_idle_ms=0,
-            dev_idle_ms=dev_ms,
+            dev_idle_ms=builder.last_dev_ms,
             classification="dev",
             compliance_miss=classification.compliance_miss,
             pm_first_line=classification.raw_first_line,
             routed_payload_chars=len(dev_prompt),
             pm_idle_marker="",
-            dev_idle_marker=dev_marker,
+            dev_idle_marker=builder.last_dev_marker,
         )
         result.turns.append(turn_record)
         return RouteOutcome(should_break=False, exit_reason=None)
+
+    def _get_builder(
+        self,
+        harness: str | None,
+        result: ContainerResult,
+    ) -> PtyClaudeBuilder | PiSubprocessBuilder | None:
+        """Resolve a BuilderHarness for the given harness name.
+
+        Returns a ``PtyClaudeBuilder`` for ``None`` or ``"claude"`` (the
+        default), a ``PiSubprocessBuilder`` for ``"pi"``.  For unknown
+        harness names, writes a compliance nudge to PM and returns ``None``
+        — the caller must return ``RouteOutcome(should_break=False)``
+        immediately.
+
+        The ``PtyClaudeBuilder`` is constructed fresh per call so that the
+        ``dev_transcript_getter`` lambda always captures the current
+        ``result.dev_transcript_path`` value (which may change between turns
+        if the PTY restarts).
+
+        ``PiSubprocessBuilder`` is also constructed fresh per call; it
+        receives ``builder_cwd = self._dev_pty.cwd`` — the same directory
+        the claude Dev PTY runs in — grounded across both the prewarmed-pool
+        and self-spawned paths.  A falsy cwd raises inside the constructor
+        (Risk 6: never spawn Pi with cwd=None / repo root).
+        """
+        if harness is None or harness == "claude":
+            return PtyClaudeBuilder(
+                dev_pty=self._dev_pty,
+                dev_transcript_getter=lambda: result.dev_transcript_path,
+                cycle_idle_fn=self._cycle_idle,
+            )
+        if harness == "pi":
+            return PiSubprocessBuilder(
+                builder_cwd=self._dev_pty.cwd,
+                rails_path=PI_RAILS_PATH,
+                persona_path=PI_PERSONA_PATH,
+            )
+        # Unknown harness — PM sent [/dev:unknown_name] which the container
+        # cannot fulfil.  Nudge PM to use a known harness.
+        logger.warning(
+            "[granite-container] Unknown builder harness %r — nudging PM",
+            harness,
+        )
+        self._pm_pty.write(PM_COMPLIANCE_NUDGE)
+        return None
 
     # -- Wrap-up guard (issue #1647) --------------------------------------
 

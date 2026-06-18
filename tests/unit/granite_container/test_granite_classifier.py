@@ -114,6 +114,74 @@ class TestClassifyPmPrefix(unittest.TestCase):
         result = classify_pm_prefix(text)
         self.assertEqual(result.destination, "dev")
 
+    # -- Backward compatibility: bare tokens must still work with harness=None --
+
+    def test_dev_bare_token_harness_none(self) -> None:
+        """[/dev] with no harness suffix produces harness=None (backward compat)."""
+        result = classify_pm_prefix("[/dev]\nadd a function `foo` to bar.py")
+        self.assertEqual(result.destination, "dev")
+        self.assertFalse(result.compliance_miss)
+        self.assertIsNone(result.harness)
+
+    def test_user_bare_token_harness_none(self) -> None:
+        """[/user] token always yields harness=None."""
+        result = classify_pm_prefix("[/user]\nThe plan is on track.")
+        self.assertEqual(result.destination, "user")
+        self.assertIsNone(result.harness)
+
+    def test_complete_bare_token_harness_none(self) -> None:
+        """[/complete] token always yields harness=None."""
+        result = classify_pm_prefix("[/complete]\nShipped PR #42.")
+        self.assertEqual(result.destination, "complete")
+        self.assertIsNone(result.harness)
+
+    # -- Harness suffix strict match --
+
+    def test_dev_pi_harness_strict(self) -> None:
+        """[/dev:pi] strict match → destination=dev, harness='pi', compliance_miss=False."""
+        result = classify_pm_prefix("[/dev:pi]\nbuild it")
+        self.assertEqual(result.destination, "dev")
+        self.assertEqual(result.harness, "pi")
+        self.assertFalse(result.compliance_miss)
+        self.assertIn("build it", result.payload)
+
+    def test_dev_claude_harness_strict(self) -> None:
+        """[/dev:claude] explicit suffix → harness='claude', compliance_miss=False."""
+        result = classify_pm_prefix("[/dev:claude]\ndo the refactor")
+        self.assertEqual(result.destination, "dev")
+        self.assertEqual(result.harness, "claude")
+        self.assertFalse(result.compliance_miss)
+
+    def test_dev_unknown_harness_strict(self) -> None:
+        """[/dev:unknown] strict → harness='unknown', destination='dev'."""
+        result = classify_pm_prefix("[/dev:unknown]\nsome instruction")
+        self.assertEqual(result.destination, "dev")
+        self.assertEqual(result.harness, "unknown")
+        self.assertFalse(result.compliance_miss)
+
+    # -- Harness suffix fallback match (compliance_miss=True) --
+
+    def test_dev_pi_harness_fallback_mid_line(self) -> None:
+        """Mid-line token 'output: [/dev:pi] please build' → dev, harness='pi', miss=True."""
+        result = classify_pm_prefix("output: [/dev:pi] please build")
+        self.assertEqual(result.destination, "dev")
+        self.assertEqual(result.harness, "pi")
+        self.assertTrue(result.compliance_miss)
+
+    def test_dev_pi_harness_fallback_leading_whitespace(self) -> None:
+        """Leading whitespace before [/dev:pi] is a strict miss; fallback recovers harness."""
+        result = classify_pm_prefix("  [/dev:pi] some instruction")
+        self.assertEqual(result.destination, "dev")
+        self.assertEqual(result.harness, "pi")
+        self.assertTrue(result.compliance_miss)
+
+    def test_dev_pi_harness_fallback_mid_text(self) -> None:
+        """Newline before [/dev:pi] text — fallback recovers harness and compliance_miss=True."""
+        result = classify_pm_prefix("\n[/dev:pi] text")
+        self.assertEqual(result.destination, "dev")
+        self.assertEqual(result.harness, "pi")
+        self.assertTrue(result.compliance_miss)
+
 
 # ---------------------------------------------------------------------------
 # ANSI stripping: defense-in-depth

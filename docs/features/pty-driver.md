@@ -11,8 +11,13 @@ attached to a pseudo-terminal and exposes a small surface
 (`spawn`, `write`, `read_until_idle`, `send_ctrl_c`, `close`) the
 container layer can use without reaching into pexpect directly.
 
-This is the **substrate** — every other component in
-`agent/granite_container/` sits on top of it.
+This is the **substrate for the claude builder** (`PtyClaudeBuilder` in
+`agent/granite_container/builder.py`). As of plan #1725, `PTYDriver` is not
+the only builder substrate in the granite system — `PiSubprocessBuilder` is a
+subprocess-based alternative that bypasses PTY entirely (no pexpect, no idle
+heuristic, no startup parser). Each `[/dev:pi]` turn spawns a one-shot `pi`
+subprocess; `PTYDriver` is not involved. See
+[Pluggable Builder Harness](pluggable-builder-harness.md) for the seam design.
 
 ## C1-C5 substrate facts (the load-bearing invariants)
 

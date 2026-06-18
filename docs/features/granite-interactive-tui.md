@@ -63,7 +63,11 @@ as a single `$ARGUMENTS` string (F3).
 The PM persona body instructs PM to begin every output with one of three
 literal prefix tokens on a line of its own:
 
-- `[/dev]` — followed by the developer instruction (Dev-address)
+- `[/dev]` — followed by the developer instruction (Dev-address). Optionally
+  takes a `:<harness>` suffix to select the builder: `[/dev:pi]` routes to
+  `PiSubprocessBuilder`; `[/dev:claude]` or bare `[/dev]` route to
+  `PtyClaudeBuilder`. See [Pluggable Builder Harness](pluggable-builder-harness.md)
+  for the full task-shape rubric the PM uses to choose.
 - `[/user]` — followed by the user-facing message
 - `[/complete]` — followed by a one-sentence completion summary
 
@@ -84,10 +88,15 @@ routing tool:
 
 | Tool | Caller | Type | Purpose |
 |------|--------|------|---------|
-| `classify_pm_prefix` | container | deterministic regex | Parse PM's first non-empty line for the `[/dev]/[/user]/[/complete]` convention. **Not** an LLM call. |
+| `classify_pm_prefix` | container | deterministic regex | Parse PM's first non-empty line for the `[/dev]/[/user]/[/complete]` convention, including the optional `:<harness>` suffix. **Not** an LLM call. |
+
+The classifier accepts the optional harness suffix on `[/dev]`:
+`^\[/(dev|user|complete)(?::([a-z0-9_-]+))?\]\s*$` (strict) and the
+equivalent fallback form for mid-line tolerance. `ClassificationResult` carries a
+`harness: str | None` field; `None` or `"claude"` default to `PtyClaudeBuilder`.
 
 - **PM→Dev:** the verbatim text after `[/dev]` (`classification.payload`)
-  is written directly to Dev. No rewrite.
+  is written directly to Dev (or passed to the selected builder). No rewrite.
 - **Dev→PM:** `last_assistant_text()` (`agent/granite_container/transcript_tailer.py`)
   reads Dev's final authored assistant message from the JSONL transcript
   and writes it to PM verbatim. No summary. A content-identity freshness
