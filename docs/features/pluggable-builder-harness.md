@@ -143,7 +143,7 @@ a real worktree cwd is provided.
 
 `PI_SUBPROCESS_TIMEOUT_S = 600` (10 minutes) is the per-turn execution bound.
 
-Do NOT use `CYCLE_IDLE_TIMEOUT_S` (12 hours) — that is a PTY-idle sanity
+Never pass `CYCLE_IDLE_TIMEOUT_S` (12 hours) — that is a PTY-idle sanity
 ceiling, not a per-turn bound. Passing the 12-hour value would allow a runaway
 Pi subprocess to pin a worker turn for half a day.
 
