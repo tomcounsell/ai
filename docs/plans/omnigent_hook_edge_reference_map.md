@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor
 created: 2026-06-18
 tracking: https://github.com/tomcounsell/ai/issues/1732
 last_comment_id:
+revision_applied: true
 ---
 
 # Omnigent claude_native_* Reference Map — Capture & Distribute
@@ -17,7 +18,7 @@ Granite (this repo's interactive-TUI session runner) decides a Claude turn is *d
 [Omnigent](https://github.com/omnigent-ai/omnigent) — an open-source multi-harness agent runner — solved the *identical* problem in production: it **demoted the PTY to a liveness sensor** and reads turn completion from Claude Code's own `Stop`/`StopFailure` hook edges. Issue #1732 is a **reference map** of Omnigent's `claude_native_*` harness, every practice cited to file:line, so we can adopt what they proved and revisit those exact files when we hit a bug along the same path.
 
 **Current behavior:**
-The hook-edge architecture already lives in our backlog as three OPEN issues (#1688 architecture, #1719 completion floor, #1721 resume). But those issues do not yet capture five specific Omnigent-proven practices, and the Omnigent file:line citations that make those practices auditable live only in issue #1732's body — they are not recorded in the home issues or in any durable doc. When a builder eventually executes #1688/#1719/#1721, the Omnigent reference trail will be lost in a closed/buried issue.
+The hook-edge architecture already lives in our backlog as three OPEN issues (#1688 architecture, #1719 completion floor, #1721 resume). But those issues do not yet capture the **five NEW Omnigent-proven practices** (edge-transport bridge file, durable hook cursor, subagent-hook filtering, verified-submit injection, compaction forwarding — practices 3/4/5/6/8 in the home map below), and the Omnigent file:line citations that make those practices auditable live only in issue #1732's body — they are not recorded in the home issues or in any durable doc. When a builder eventually executes #1688/#1719/#1721, the Omnigent reference trail will be lost in a closed/buried issue.
 
 **Desired outcome:**
 Every Omnigent practice from the #1732 reference map is **captured** in its home — folded into #1688/#1719/#1721 (issue body + the existing #1721 plan) as explicit, file:line-cited deltas, with the genuinely-NEW deltas additionally recorded in a durable repo reference doc so the citation trail survives issue closure. **No granite code is changed by this plan** — issue #1732 states verbatim "Refactor proposal only — do NOT implement from this issue directly." The deliverable is knowledge capture, not architecture.
@@ -52,7 +53,7 @@ Every Omnigent practice from the #1732 reference map is **captured** in its home
 
 ## Prior Art
 
-- **#1688 (OPEN)** "Hook-driven turn returns for granite PTY shuttle" — the core thesis (Stop hooks for turn-end, `AskUserQuestion`/`PermissionRequest` for needs-human, crash-path watchdog/resume). Prior art it cites is the **superwhisper-claude-code** plugin. This plan feeds #1688 a *second* reference implementation (Omnigent) plus five practices #1688 omits.
+- **#1688 (OPEN)** "Hook-driven turn returns for granite PTY shuttle" — the core thesis (Stop hooks for turn-end, `AskUserQuestion`/`PermissionRequest` for needs-human, crash-path watchdog/resume). Prior art it cites is the **superwhisper-claude-code** plugin. This plan feeds #1688 a *second* reference implementation (Omnigent) plus the five NEW practices #1688 omits (durable cursor, subagent filtering, verified-submit, compaction, edge-transport — practices 3/4/5/6/8, captured in the durable reference doc since #1688 has no plan yet).
 - **#1719 (OPEN)** "Stop-hook completion floor" — deliver the last assistant message when a turn ends with nothing routed. This plan confirms its floor against Omnigent's `_HOOK_EVENT_TO_STATUS` mapping + sticky-`failed` logic.
 - **#1721 (OPEN) + `granite_lossless_checkpoint_resume.md` (Ready)** — persist resume handles + loop cursor; lossless `--resume`. This plan adds Omnigent's fork-on-resume guard and dead-vs-stalled rationale to it.
 - **`granite_pty_production_cutover.md`, `granite-tui-pty-spike.md` (completed)** — established the PTY-shuttle architecture this reference map proposes to evolve. Confirm the C5 heuristic they shipped is the one being demoted.
@@ -119,7 +120,7 @@ Issue #1732's "Downstream context" requires the planner to choose, up front, bet
 ### Key Elements
 
 - **Reference doc (`docs/features/omnigent-hook-edge-reference.md`)**: A durable, repo-resident capture of the Omnigent `claude_native_*` reference map — the 9 practices, each with Omnigent file:line, our-side equivalent (re-verified), and home tag (#1688 / #1719 / #1721 / NEW). Survives issue closure as the bug-trail. Carries the "re-verify against omnigent HEAD" caveat.
-- **#1688 issue-body delta**: Append a "Captured deltas from #1732 (Omnigent reference)" section recording the five practices that home to #1688, with the **subagent-hook-filtering** requirement called out as a first-class, load-bearing acceptance criterion (spike-1 evidence), plus edge-transport (NDJSON + durable cursor), PTY-reduced-to-two-jobs, async-decoupled completion, and verified-submit injection.
+- **#1688 issue-body delta**: Append a "Captured deltas from #1732 (Omnigent reference)" section recording the **three practices that home to #1688** — practice 1 (Stop/StopFailure as the authoritative turn-end edge), practice 2 (PTY reduced to two jobs), and practice 7 (completion decoupled from injection, with `_inject_lock`) — and pointering to the **five NEW practices** captured in the reference doc that #1688's build must consume (edge-transport NDJSON, durable hook cursor, subagent-hook filtering, verified-submit injection, compaction forwarding). The **subagent-hook-filtering** requirement is called out as a first-class, load-bearing acceptance criterion on #1688 (spike-1 evidence) even though it is itself a NEW practice, because a naive Stop-hook wiring in #1688's build would end the Dev turn early without it.
 - **#1719 issue-body delta**: Append the sticky-`failed` floor delta (the completion floor must respect a sticky failure so a `StopFailure` isn't overwritten by trailing PTY idle).
 - **#1721 delta (issue body + existing Ready plan)**: Add the fork-on-resume guard (`seen_claude_session_ids` / `SessionStart source=resume`) and the dead-vs-stalled disambiguation rationale to both the #1721 issue body AND `docs/plans/granite_lossless_checkpoint_resume.md` — reconciled against `reflections/crash_recovery.py`'s determinism guardrail so the two issues don't propose conflicting resume triggers.
 - **#1732 close-out comment**: A comment on #1732 mapping each of its four acceptance-criteria checkboxes to the artifact that satisfies it.
@@ -133,7 +134,23 @@ Issue #1732 (reference appendix) → extract 9 practices → write durable refer
 - **No source code is touched.** Touched artifacts: one new markdown doc, three GitHub issue bodies (`gh issue edit`), one existing plan doc (`granite_lossless_checkpoint_resume.md`), and one GitHub comment (`gh issue comment`).
 - **Preserve every Omnigent file:line verbatim** in the reference doc — it is the load-bearing value (a bug-trail back to a production implementation). Annotate each with "pinned to omnigent HEAD 2026-06-18; re-verify on revisit."
 - **Re-verify our-side citations** as captured in the Freshness Check (line drifts noted: `on_turn` at container `:563/583`; no-resume limitation at doc `:636-644`).
-- **Home-tagging discipline**: each of the 9 practices lands in exactly ONE home (no double-capture). Practices 1, 2, 3, 5, 6, 7 → #1688; practice 9 → #1719; practices 4 (durable cursor, as #1721-companion) and resume-fork → #1721. NEW practices (edge transport, subagent filtering, verified-submit, compaction, fork-on-resume) are *additionally* recorded in the durable reference doc.
+- **Home-tagging discipline**: each of the 9 practices lands in exactly ONE home (no double-capture, no orphan). The home map is re-derived verbatim from issue #1732's "Omnigent reference map" row tags:
+
+  | # | Practice | Home (per #1732 row tag) |
+  |---|----------|--------------------------|
+  | 1 | Stop/StopFailure as the authoritative turn-end edge | **#1688** |
+  | 2 | PTY reduced to two jobs (inject + running/idle badge) | **#1688** |
+  | 3 | Hook writes the edge to a bridge file (append-only NDJSON) | **NEW** |
+  | 4 | Durable, idempotent hook cursor `(event_cursor, byte_offset, fingerprint)` | **NEW** (companion to #1721's persistence) |
+  | 5 | Subagent-hook filtering (child Stop must not end parent turn) | **NEW** |
+  | 6 | Verified-submit injection (poll-until-committed, re-send) | **NEW** |
+  | 7 | Completion decoupled from injection (async edge, `_inject_lock`) | **#1688** |
+  | 8 | Compaction boundaries forwarded, not mistaken for completion | **NEW** |
+  | 9 | Sticky-`failed` against trailing PTY idle | **#1719** |
+
+  Plus the crash/`/resume` section's **fork-on-resume guard** (`seen_claude_session_ids` / `SessionStart source=resume`) and the **dead-vs-stalled disambiguation rationale** → **#1721**.
+
+  Summary: **#1688 → {1, 2, 7}** (three practices); **#1719 → {9}** (one); **NEW → {3, 4, 5, 6, 8}** (five — the exact set #1732 calls "5 practices #1688 omits": durable cursor, subagent filtering, verified-submit, compaction, edge-transport); **#1721 → fork-on-resume + resume deltas**. The five NEW practices are recorded in the durable reference doc as their home (and pointered from the relevant issue bodies), since #1688/#1719 have no plan documents and the NEW citation trail must survive issue closure.
 - **Reconciliation check (#1721 ↔ crash_recovery)**: confirm the dead-vs-stalled contract (dead = `pexpect.EOF`/`!isalive()` → resume; stalled-but-alive + no Stop → still-running, bounded by liveness watchdog; never-started → `NON_RESUMABLE_DETERMINISTIC` escalate-only per `agent/crash_signature.py:207-228`, `reflections/crash_recovery.py:280-293`) does not contradict the #1721 plan's resume triggers. Read both, note any conflict in the #1721 plan's risks section.
 
 ## Failure Path Test Strategy
@@ -163,7 +180,7 @@ No existing tests affected — this is a documentation/knowledge-capture chore t
 
 ### Risk 1: A practice is captured in the wrong home, or in two homes
 **Impact:** A future #1688/#1719/#1721 builder either misses a load-bearing requirement (e.g., subagent filtering) or implements a delta twice.
-**Mitigation:** The reference doc's home-tag column is the single source of truth; the close-out comment on #1732 maps each acceptance criterion to exactly one artifact. Review round verifies each of the 9 practices appears in exactly one issue body.
+**Mitigation:** The reference doc's home-tag column is the single source of truth (corrected map: #1688 → {1,2,7}; #1719 → {9}; NEW → {3,4,5,6,8}; #1721 → fork-on-resume); the close-out comment on #1732 maps each acceptance criterion to exactly one artifact. Review round verifies each of the 9 practices carries exactly one home tag — #1688/#1719-homed practices land in those issue bodies, NEW practices land in the reference doc (their durable home), and no practice is orphaned (practice 8/compaction was the orphan the critique caught).
 
 ### Risk 2: The #1721 delta conflicts with the already-Ready resume plan
 **Impact:** Two issues propose contradictory resume triggers (e.g., resume-on-stalled vs. escalate-on-never-started), causing build-time confusion.
@@ -205,7 +222,7 @@ No agent integration required — this is a documentation/knowledge-capture chor
 
 ## Success Criteria
 
-- [ ] `docs/features/omnigent-hook-edge-reference.md` exists, capturing all 9 Omnigent practices with their Omnigent file:line preserved verbatim and the re-verified our-side equivalent + home tag for each.
+- [ ] `docs/features/omnigent-hook-edge-reference.md` exists, capturing all 9 Omnigent practices with their Omnigent **file:line** preserved verbatim (at least one `claude_native_*.py:NNN` citation per practice — verified by the citation-anchored grep in the Verification table, not a bare module-name count) and the re-verified our-side equivalent + home tag for each. Home map: #1688 → {1,2,7}; #1719 → {9}; NEW → {3,4,5,6,8}; #1721 → fork-on-resume + resume deltas.
 - [ ] `docs/features/README.md` has an index entry for the new reference doc.
 - [ ] #1688 issue body carries the captured deltas, with **subagent-hook filtering recorded as a first-class, load-bearing acceptance criterion** (spike-1 evidence cited: granite spawns claude with no `--settings` isolation, so child Stop hooks share the parent stream).
 - [ ] #1719 issue body carries the sticky-`failed` completion-floor delta.
@@ -254,7 +271,7 @@ When this plan is executed, the lead agent orchestrates the capture work. The le
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Extract all 9 practices from issue #1732's "Omnigent reference map" table.
-- For each: preserve the Omnigent file:line verbatim (annotate "pinned to omnigent HEAD 2026-06-18; re-verify on revisit"), record the re-verified our-side equivalent with current line numbers (use Freshness Check drift corrections), and assign the home tag (#1688 / #1719 / #1721 / NEW).
+- For each: preserve the Omnigent file:line verbatim — keep the literal `claude_native_*.py:NNN` form (the citation-anchored Verification grep requires ≥1 per practice; a module name without `:line` does not count), annotate "pinned to omnigent HEAD 2026-06-18; re-verify on revisit", record the re-verified our-side equivalent with current line numbers (use Freshness Check drift corrections), and assign the home tag per the corrected map: #1688 → {1,2,7}; #1719 → {9}; NEW → {3,4,5,6,8}; #1721 → fork-on-resume + resume deltas.
 - Add the "re-verify against omnigent HEAD" caveat and the dead-vs-stalled / determinism-guardrail rationale from #1732's crash section.
 - Add the index entry to `docs/features/README.md`.
 
@@ -265,7 +282,7 @@ When this plan is executed, the lead agent orchestrates the capture work. The le
 - **Assigned To**: delta-distributor
 - **Agent Type**: builder
 - **Parallel**: false
-- Append a "Captured from #1732 (Omnigent reference)" section to #1688's body — include the five #1688-homed practices, with subagent-hook filtering as a first-class acceptance criterion citing spike-1.
+- Append a "Captured from #1732 (Omnigent reference)" section to #1688's body — include the three #1688-homed practices (1: Stop/StopFailure turn-end edge; 2: PTY reduced to two jobs; 7: completion decoupled from injection) and pointer to the five NEW practices in the reference doc, with subagent-hook filtering recorded as a first-class acceptance criterion citing spike-1.
 - Append the sticky-`failed` floor delta to #1719's body.
 - Append the fork-on-resume guard + dead-vs-stalled rationale to #1721's body AND to `granite_lossless_checkpoint_resume.md`; read `reflections/crash_recovery.py` (determinism guardrail at `:280-293`, `agent/crash_signature.py:207-228`) and record reconciliation (or surface a conflict as an Open Question).
 - Post a close-out comment on #1732 mapping each of its four acceptance criteria to its satisfying artifact.
@@ -276,8 +293,8 @@ When this plan is executed, the lead agent orchestrates the capture work. The le
 - **Assigned To**: capture-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify each of the 9 practices appears in exactly one home (no double-capture, no orphan).
-- Verify every Omnigent file:line from #1732 is preserved in the reference doc.
+- Verify each of the 9 practices appears in exactly one home per the corrected map (#1688 → {1,2,7}; #1719 → {9}; NEW → {3,4,5,6,8}; #1721 → fork-on-resume) — no double-capture, no orphan (explicitly confirm practice 8/compaction is present).
+- Verify every Omnigent file:line from #1732 is preserved in the reference doc — run the citation-anchored grep (`claude_native_*.py:NNN`, ≥9 hits), not a bare module-name count.
 - Verify the four #1732 acceptance criteria each map to a concrete artifact.
 - Run `git diff --stat` and confirm only `docs/` + the plan file changed — zero `.py` changes.
 - Report pass/fail.
@@ -298,21 +315,26 @@ When this plan is executed, the lead agent orchestrates the capture work. The le
 |-------|---------|----------|
 | Reference doc exists | `test -f docs/features/omnigent-hook-edge-reference.md` | exit code 0 |
 | Doc indexed | `grep -q 'omnigent-hook-edge-reference' docs/features/README.md` | exit code 0 |
-| Omnigent citations preserved | `grep -c 'claude_native_' docs/features/omnigent-hook-edge-reference.md` | output > 5 |
+| Omnigent **file:line citations** preserved (anchors on `:` + line digits, not bare module names) | `grep -cE 'claude_native_[a-z_]+\.py:[0-9]+' docs/features/omnigent-hook-edge-reference.md` | output ≥ 9 (one citation per practice minimum; a doc that dropped its file:line trail fails this even if module names survive) |
+| All 9 practices present (home-tag column populated) | `grep -cE '\*\*(#1688\|#1719\|#1721\|NEW)\*\*' docs/features/omnigent-hook-edge-reference.md` | output ≥ 9 (every practice row carries exactly one home tag) |
 | Subagent-filtering captured | `grep -iq 'subagent' docs/features/omnigent-hook-edge-reference.md` | exit code 0 |
 | No source code changed | `git diff --name-only main -- '*.py' \| wc -l` | output contains 0 |
 | Lint clean (docs-only, trivially) | `python -m ruff format --check .` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | home-tag map | Home map contradicted #1732's row tags, orphaned practice 8 (compaction), and mis-homed practices 3/5/6 to #1688 (issue tags them NEW). | Re-derived the full 9-row map verbatim from the issue and added it as a table in Solution → Key Elements / Technical Approach. | Corrected map: **#1688 → {1,2,7}; #1719 → {9}; NEW → {3,4,5,6,8}; #1721 → fork-on-resume + resume deltas.** Practice 8 (compaction) restored. Propagated to all four stale call sites (lines ~20, ~55, ~122, ~268) + Success Criteria + Risk 1 + validator task. |
+| CONCERN | delta-count | Five-vs-six contradiction for #1688: prose said "five," enumeration listed six, source homes three to #1688. | Reconciled to the single corrected number. | #1688 homes **three** practices (1,2,7). The "five" everywhere now consistently means the **five NEW practices** (3,4,5,6,8) that #1732 says #1688 omits — captured in the reference doc, pointered from #1688's body. No standalone "six." |
+| CONCERN | weak verification | Only check was `grep -c 'claude_native_' > 5`, which passes even if every file:line citation is dropped. | Added a citation-anchored Verification check requiring `claude_native_*.py:NNN` (module + `:` + line digits), ≥9 hits, plus a home-tag-count check and a per-practice citation requirement in the build task + success criteria. | The load-bearing value (file:line bug-trail) is now the gate, not bare module names. |
 
 ---
 
-## Open Questions
+## Resolved Decisions (post-critique)
 
-1. **Scope confirmation.** This plan chose option (a)-hybrid: a thin standalone *capture* plan that distributes deltas into the home issue bodies (#1688/#1719) and the one existing plan (#1721's), plus a durable reference doc for the NEW deltas — because #1688/#1719 have no plan documents to distribute into yet, and "do NOT implement directly" forbids code. Confirm this is the intended reading, vs. the alternative of waiting and folding these deltas in *only* when #1688/#1719 are themselves planned (which would leave #1732's acceptance criteria unmet in the interim).
-2. **#1721 plan edit.** Is editing the already-**Ready** `granite_lossless_checkpoint_resume.md` to append two deltas acceptable, or should the fork-on-resume guard + dead-vs-stalled rationale go *only* into the #1721 issue body (leaving the Ready plan untouched until its own revision pass)?
-3. **#1732 close-out.** Once the deltas are distributed, should #1732 be closed by this plan's PR (it's a reference appendix, fully consumed), or kept open as a living index until #1688/#1719/#1721 actually ship?
+These were Open Questions in the draft; the revision pass settles them so the plan is finalized:
+
+1. **Scope.** Option (a)-hybrid stands: a thin standalone *capture* plan that distributes the #1688/#1719-homed practices into those issue bodies, the #1721 deltas into the #1721 issue body + its Ready plan, and records the five NEW practices (3,4,5,6,8) in the durable reference doc (their home, since #1688/#1719 have no plan docs). Honors "do NOT implement directly."
+2. **#1721 plan edit.** Editing the Ready `granite_lossless_checkpoint_resume.md` to *append* the fork-on-resume guard + dead-vs-stalled rationale (plus a reconciliation note in its Risks) is in scope — it is additive, not a re-plan.
+3. **#1732 close-out.** #1732 is closed by this plan's implementation PR (`Closes #1732`) once the deltas are distributed and the reference doc lands — it is a reference appendix fully consumed by capture; the home issues (#1688/#1719/#1721) carry the live deltas thereafter.
