@@ -704,8 +704,12 @@ class TestCrossMachineDedup:
         ):
             filed = docs_auditor._file_issue_if_new(finding, repo)
         assert filed is True
-        assert run.call_count == 1  # gh issue create invoked
-        create_cmd = run.call_args.args[0]
+        # gh issue create invoked exactly once (a scutil call for the machine
+        # stamp in the issue body may also run — assert on the create call, not
+        # the raw subprocess count).
+        create_calls = [c for c in run.call_args_list if c.args[0][:3] == ["gh", "issue", "create"]]
+        assert len(create_calls) == 1
+        create_cmd = create_calls[0].args[0]
         assert create_cmd[:3] == ["gh", "issue", "create"]
 
     def test_redis_fast_path_skips_tracker_query(self, repo: Path, patch_redis):

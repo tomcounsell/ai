@@ -47,6 +47,20 @@ _copy_config_file() {
 _copy_config_file "$HOME/Desktop/Valor/projects.json"     "$PROJECT_DIR/config/projects.json"     "projects.json"
 _copy_config_file "$HOME/Desktop/Valor/reflections.yaml"  "$PROJECT_DIR/config/reflections.yaml"  "reflections.yaml"
 
+# Single-machine ownership for repo-specific reflections: disable any reflection
+# carrying a `project_key` this machine does not own (per config/projects.json) in
+# the just-copied local config/reflections.yaml. Computed here, at install time —
+# when projects.json is safely readable — so the launchd scheduler needs no runtime
+# ownership check and repo audits (e.g. docs-auditor) never run on N machines at
+# once, which is what produced duplicate GitHub issues. Best-effort: a non-zero
+# exit must not abort the install.
+if [ -f "$PROJECT_DIR/.venv/bin/python" ]; then
+    "$PROJECT_DIR/.venv/bin/python" -m tools.reflection_machine_filter \
+        --reflections "$PROJECT_DIR/config/reflections.yaml" \
+        --projects "$PROJECT_DIR/config/projects.json" || \
+        echo "WARNING: reflection ownership filter failed — config/reflections.yaml left unfiltered"
+fi
+
 # Check source plist exists
 if [ ! -f "$PLIST_SRC" ]; then
     echo "ERROR: Plist not found at $PLIST_SRC"

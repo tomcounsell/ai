@@ -100,6 +100,11 @@ class ReflectionEntry:
     command: str | None = None  # shell command for agent type
     enabled: bool = True
     timeout: int | None = None  # per-reflection timeout in seconds (None = use default)
+    project_key: str | None = None  # repo-specific gate: only the machine that
+    # owns this project (projects.json) runs the reflection. Enforced at update
+    # time by tools.reflection_machine_filter, which flips `enabled: false` in
+    # the per-machine config/reflections.yaml copy on non-owning machines — so
+    # the scheduler needs no runtime ownership check.
     params: dict = field(default_factory=dict)  # arbitrary kwargs forwarded to the callable
 
     def __post_init__(self) -> None:
@@ -244,6 +249,7 @@ def load_registry(path: Path | None = None) -> list[ReflectionEntry]:
                 command=raw.get("command"),
                 enabled=raw.get("enabled", True),
                 timeout=int(raw_timeout) if raw_timeout is not None else None,
+                project_key=raw.get("project_key"),
                 params=raw.get("params") or {},
             )
         except (TypeError, ValueError) as e:

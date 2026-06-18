@@ -3,8 +3,8 @@
 **Status:** Production. The granite interactive-TUI container is the
 execution path for bridge-originated sessions under the standalone worker.
 It drives a PTY-backed interactive TUI rather than the headless `-p`
-substrate. The headless harness (`agent/claude_session.py`,
-`agent/sdk_client.py`) remains in place alongside it; this container lives
+substrate. The headless harness (`agent/sdk_client.py`) remains in place
+alongside it; this container lives
 at module path `agent/granite_container/`. (Historical origin: the
 container began as the #1546 PoC and was cut over to production in
 #1572 / #1612.)
@@ -29,7 +29,7 @@ Bridge → Container → Granite + PM/Dev
 1. **Substrate is the TUI** — never `claude -p`. The container spawns
    `claude` interactively (`--permission-mode bypassPermissions`).
 2. **Max OAuth path** — `ANTHROPIC_API_KEY=""` is set on the subprocess env
-   (mirroring `agent/claude_session.py:90-101`).
+   (mirroring the auth setup in `agent/sdk_client.py`).
 3. **Resume UUID** — the on-exit hint is environment-gated (C3). Resume
    acceptance tests run only in a model-reachable env.
 4. **Persona priming** — `.claude/commands/granite/prime-{pm,dev}-role.md`

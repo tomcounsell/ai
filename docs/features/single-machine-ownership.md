@@ -111,3 +111,4 @@ In every case, the running bridge keeps serving until the operator fixes the con
 - [Remote Update](remote-update.md) — the update flow that runs the green-light gate
 - [Email Bridge](email-bridge.md) — sender → project routing
 - [Config Architecture](config-architecture.md) — config file layout and source-of-truth
+- [Reflections](reflections.md#repo-specific-reflections-single-machine-ownership) — repo-specific reflections (`project_key`) inherit this same one-owner-per-project boundary so repo audits don't file duplicate issues from N machines
