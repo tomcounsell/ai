@@ -1335,6 +1335,112 @@ async def _deliver_tool_timeout_degraded_notice(
         )
 
 
+async def _deliver_deferred_self_draft_fallback(
+    entry: "AgentSession",
+) -> None:
+    """Deliver a fallback message when a deferred self-draft was never completed.
+
+    Called on every terminal recovery branch (``failed`` and ``abandoned``) when
+    ``entry.extra_context["deferred_self_draft_pending"]`` is truthy.  This flag
+    is written at defer time by ``TelegramRelayOutputHandler.send()`` — the
+    steering queue cannot be used because the agent drains it at turn start,
+    leaving it empty by finalization time.
+
+    Precedence over the generic degraded notice: callers invoke this helper
+    *before* ``_deliver_tool_timeout_degraded_notice``; if the deferred flag is
+    set, only the self-draft fallback fires (not the generic notice).
+
+    Idempotent: the first caller wins via Redis SETNX on
+    ``self_draft_fallback_sent:{session_id}`` (1 h TTL).  The TTL is intentionally
+    NOT per-run — for legitimate resume scenarios, scope it per-run by including
+    ``started_at`` in the key if that becomes necessary.
+
+    Never raises; failures are logged at WARNING and swallowed.
+
+    Terminal-branch-only precondition: must only be called from the ``abandoned``
+    or ``failed`` finalization branches, never from the requeue (``else``) branch
+    where the session will run again and the agent may still deliver.
+    """
+    try:
+        # Check the persisted detection signal — NOT the steering queue.
+        extra_ctx = getattr(entry, "extra_context", None) or {}
+        if not extra_ctx.get("deferred_self_draft_pending"):
+            return
+
+        session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
+        project_key = getattr(entry, "project_key", None) or "unknown"
+
+        # Atomic dedup: only the first caller sends the fallback (1 h window).
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+            lock_key = f"self_draft_fallback_sent:{session_id}"
+            acquired = _R.set(lock_key, "1", nx=True, ex=3600)
+            if not acquired:
+                logger.debug(
+                    "[session-health] self-draft fallback already sent for %s — skipping",
+                    session_id,
+                )
+                return
+        except Exception as _lock_err:
+            logger.warning(
+                "[session-health] self-draft fallback lock failed for %s: %s; proceeding anyway",
+                session_id,
+                _lock_err,
+            )
+
+        # Recover the deferred text and apply the narration gate.
+        deferred_text = extra_ctx.get("deferred_self_draft_text") or ""
+        if deferred_text and deferred_text.strip():
+            try:
+                from bridge.message_quality import (  # noqa: PLC0415
+                    NARRATION_FALLBACK_MESSAGE,
+                    is_narration_only,
+                )
+
+                if is_narration_only(deferred_text[:500]):
+                    message = NARRATION_FALLBACK_MESSAGE
+                else:
+                    message = deferred_text
+            except Exception:
+                message = deferred_text
+        else:
+            message = "I couldn't finish responding to that — please try again."
+
+        # Resolve transport from extra_context (no top-level transport field).
+        transport = extra_ctx.get("transport")
+
+        # Resolve send callback — fall back to FileOutputHandler when none registered.
+        from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
+
+        send_cb, _react_cb = _resolve_callbacks(project_key, transport)
+        if send_cb is None:
+            from agent.output_handler import FileOutputHandler  # noqa: PLC0415
+
+            _fallback = FileOutputHandler()
+            send_cb = _fallback.send
+
+        chat_id = getattr(entry, "chat_id", None) or ""
+        telegram_message_id = getattr(entry, "telegram_message_id", None) or 0
+
+        await send_cb(chat_id, message, telegram_message_id, entry)
+
+        # Best-effort telemetry counter.
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _R2  # noqa: PLC0415
+
+            _R2.incr(f"{project_key}:session-health:deferred_self_draft_fallback_delivered")
+        except Exception:
+            pass
+
+    except Exception as _err:
+        logger.warning(
+            "[session-health] _deliver_deferred_self_draft_fallback failed for %s: %s",
+            getattr(entry, "session_id", "?"),
+            _err,
+        )
+
+
 async def _apply_recovery_transition(
     entry: AgentSession,
     *,
@@ -1608,11 +1714,26 @@ async def _apply_recovery_transition(
             from agent.session_telemetry import finalize_session as _finalize_telemetry
 
             _finalize_telemetry(entry.session_id)
+            # AC4 Seat B: reset the self-draft attempt counter on every
+            # health-checker terminal finalize.  These callers pass
+            # emit_telemetry=False, so the finalize_session Seat A reaper
+            # (outside the emit_telemetry guard) would not fire here — this
+            # seat closes that gap.  Best-effort: a Redis failure never blocks
+            # the terminal transition.
+            try:
+                from agent.steering import reset_self_draft_attempts as _reset_attempts
+
+                _reset_attempts(entry.session_id)
+            except Exception:
+                pass
     except Exception as _tel_err:
         logger.debug("[session-health] telemetry emit failed (non-fatal): %s", _tel_err)
 
     try:
         if is_local:
+            # Deferred self-draft fallback: fire on abandoned path too (blocker 3).
+            # The agent already stopped; deliver the deferred answer before closing.
+            await _deliver_deferred_self_draft_fallback(entry)
             finalize_session(
                 entry,
                 "abandoned",
@@ -1630,7 +1751,13 @@ async def _apply_recovery_transition(
                 entry.recovery_attempts,
             )
         elif entry.recovery_attempts >= MAX_RECOVERY_ATTEMPTS:
-            if reason_kind == "tool_timeout":
+            # Self-draft fallback takes precedence over the generic degraded notice.
+            # Only send the generic notice when no deferred self-draft was pending.
+            _has_deferred = (getattr(entry, "extra_context", None) or {}).get(
+                "deferred_self_draft_pending"
+            )
+            await _deliver_deferred_self_draft_fallback(entry)
+            if not _has_deferred and reason_kind == "tool_timeout":
                 await _deliver_tool_timeout_degraded_notice(entry, tool_name)
             finalize_session(
                 entry,
@@ -1654,7 +1781,11 @@ async def _apply_recovery_transition(
             # ``failed`` terminal status so the in-process orphan reaper
             # (_TERMINAL_STATUSES) owns cleanup. Do NOT null ``started_at`` into
             # a pending record.
-            if reason_kind == "tool_timeout":
+            _has_deferred = (getattr(entry, "extra_context", None) or {}).get(
+                "deferred_self_draft_pending"
+            )
+            await _deliver_deferred_self_draft_fallback(entry)
+            if not _has_deferred and reason_kind == "tool_timeout":
                 await _deliver_tool_timeout_degraded_notice(entry, tool_name)
             finalize_session(
                 entry,
