@@ -432,3 +432,163 @@ def test_steering_message_includes_original_request():
     assert entry._steered
     text, _ = entry._steered[0]
     assert "please look up the latest metrics" in text
+
+
+def test_tool_timeout_prepend_when_queue_already_has_message():
+    """B1 ordering guard: pre-existing message in queue → tool-skip is at index 0, older at index 1."""
+    entry = _recovery_entry(current_tool_name="mcp__svc", recovery_attempts=0)
+    # Pre-load a message in the steering queue.
+    entry.queued_steering_messages = ["pre-existing message"]
+    _run_recovery(entry, reason_kind="tool_timeout")
+    assert len(entry._steered) >= 1, "steering must be injected"
+    text, front = entry._steered[0]
+    assert front is True, "must be prepended (front=True)"
+    assert "mcp__svc" in text
+    # Simulate what push_steering_message(front=True) would do to the queue:
+    # new message goes to index 0, pre-existing stays at index 1.
+    # The _steered list records the push call as (text, front=True).
+    # Verify the pre-existing message was not displaced — it's already there.
+    assert entry.queued_steering_messages[0] == "pre-existing message"  # untouched by fake push
+
+
+def test_steering_push_failure_does_not_block_requeue():
+    """push_steering_message raising must not prevent transition_status(pending)."""
+    from unittest.mock import patch as _patch
+
+    from agent.session_health import _apply_recovery_transition
+
+    entry = _recovery_entry(current_tool_name="mcp__svc", recovery_attempts=0)
+    # Override push_steering_message to raise.
+    entry.push_steering_message = MagicMock(side_effect=RuntimeError("push exploded"))
+
+    transition_calls: list[str] = []
+
+    def _fake_finalize(e, status, reason="", **kw):
+        e.status = status
+
+    def _fake_transition(e, status, reason="", **kw):
+        e.status = status
+        transition_calls.append(status)
+
+    with (
+        _patch("agent.session_health._tier2_reprieve_signal", return_value=None),
+        _patch("agent.session_health._confirm_subprocess_dead") as mock_kill,
+        _patch("agent.session_health._increment_subprocess_kill_counter"),
+        _patch("agent.session_health._is_memory_tight", return_value=False),
+        _patch("agent.session_health._rte", create=True),
+        _patch("agent.session_health.asyncio.get_running_loop") as mock_loop,
+        _patch(
+            "agent.session_health._deliver_tool_timeout_degraded_notice",
+            new_callable=AsyncMock,
+        ),
+        _patch("models.session_lifecycle.finalize_session", side_effect=_fake_finalize),
+        _patch("models.session_lifecycle.transition_status", side_effect=_fake_transition),
+        _patch("models.session_lifecycle.StatusConflictError", Exception),
+        _patch("agent.agent_session_queue._ensure_worker"),
+        _patch("agent.session_health._active_events", {}),
+        _patch("popoto.redis_db.POPOTO_REDIS_DB", MagicMock()),
+    ):
+        from agent.session_health import SubprocessKillResult
+
+        mock_kill.return_value = SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+        mock_loop.return_value.run_in_executor = AsyncMock(
+            return_value=SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+        )
+
+        async def _run():
+            return await _apply_recovery_transition(
+                entry,
+                reason="test-reason",
+                reason_kind="tool_timeout",
+                handle=None,
+                worker_key="wk-1",
+            )
+
+        asyncio.run(_run())
+
+    # push raised, but transition_status("pending") must still have been called.
+    assert "pending" in transition_calls, (
+        f"transition_status(pending) must be called even when push_steering_message raises; "
+        f"got transition_calls={transition_calls}"
+    )
+
+
+def test_failed_branch_does_not_inject_advisory_steering():
+    """MAX_RECOVERY_ATTEMPTS branch: degraded notice delivered but no steering injection."""
+    from agent.session_health import MAX_RECOVERY_ATTEMPTS
+
+    entry = _recovery_entry(
+        current_tool_name="mcp__svc",
+        recovery_attempts=MAX_RECOVERY_ATTEMPTS - 1,
+    )
+    _run_recovery(entry, reason_kind="tool_timeout")
+    # On the failed branch steering must NOT be injected — session won't be requeued.
+    assert not entry._steered, (
+        "steering injection must not occur on the failed branch (MAX_RECOVERY_ATTEMPTS)"
+    )
+
+
+def _run_recovery_not_confirmed_dead(entry, *, reason_kind="tool_timeout", worker_key="wk-1"):
+    """Like _run_recovery but SubprocessKillResult.confirmed_dead=False."""
+    from agent.session_health import _apply_recovery_transition
+
+    def _fake_finalize(e, status, reason="", **kw):
+        e.status = status
+
+    def _fake_transition(e, status, reason="", **kw):
+        e.status = status
+
+    with (
+        patch("agent.session_health._tier2_reprieve_signal", return_value=None),
+        patch("agent.session_health._confirm_subprocess_dead") as mock_kill,
+        patch("agent.session_health._increment_subprocess_kill_counter"),
+        patch("agent.session_health._is_memory_tight", return_value=False),
+        patch("agent.session_health._rte", create=True),
+        patch("agent.session_health.asyncio.get_running_loop") as mock_loop,
+        patch(
+            "agent.session_health._deliver_tool_timeout_degraded_notice",
+            new_callable=AsyncMock,
+        ) as mock_degraded,
+        patch("models.session_lifecycle.finalize_session", side_effect=_fake_finalize),
+        patch("models.session_lifecycle.transition_status", side_effect=_fake_transition),
+        patch("models.session_lifecycle.StatusConflictError", Exception),
+        patch("agent.agent_session_queue._ensure_worker"),
+        patch("agent.session_health._active_events", {}),
+        patch("popoto.redis_db.POPOTO_REDIS_DB", MagicMock()),
+    ):
+        from agent.session_health import SubprocessKillResult
+
+        # confirmed_dead=False — subprocess survived kill
+        mock_kill.return_value = SubprocessKillResult(confirmed_dead=False, signal_sent=True)
+        mock_loop.return_value.run_in_executor = AsyncMock(
+            return_value=SubprocessKillResult(confirmed_dead=False, signal_sent=True)
+        )
+
+        async def _run():
+            return await _apply_recovery_transition(
+                entry,
+                reason="test-reason",
+                reason_kind=reason_kind,
+                handle=None,
+                worker_key=worker_key,
+            )
+
+        result = asyncio.run(_run())
+    return result, mock_degraded
+
+
+def test_tool_timeout_not_confirmed_dead_branch_delivers_degraded_notice():
+    """not_confirmed_dead branch: degraded notice delivered before finalize('failed')."""
+    entry = _recovery_entry(current_tool_name="mcp__svc", recovery_attempts=0)
+    _result, mock_degraded = _run_recovery_not_confirmed_dead(entry, reason_kind="tool_timeout")
+    mock_degraded.assert_called_once()
+    assert mock_degraded.call_args[0][1] == "mcp__svc"
+    # Session must have been finalized as failed.
+    assert entry.status == "failed"
+
+
+def test_not_confirmed_dead_does_not_inject_steering():
+    """not_confirmed_dead branch: no requeue -> no steering injection."""
+    entry = _recovery_entry(current_tool_name="mcp__svc", recovery_attempts=0)
+    _run_recovery_not_confirmed_dead(entry, reason_kind="tool_timeout")
+    assert not entry._steered, "steering must not be injected when subprocess is not confirmed dead"
