@@ -69,7 +69,7 @@ Three-state outcome:
 - **NOT SUSPECT**: loop is fresh AND screen recently painted → clear `mid_run_quiescent_since`
 - **SUSPECT**: loop is fresh AND screen frozen >= `MID_RUN_QUIESCENCE_SECS` → log warning
 
-Path B ships in **observe-only mode** by default. The `MID_RUN_RECOVERY_ACTIVE=1` env flag is reserved for enabling recovery once sufficient production data is collected.
+Path B stage-1 ships as **detect-and-log only**: `_eval_mid_run_pty_stage1` identifies suspects and emits a warning log. No recovery action is taken. Stage-2 (off-loop classifier dispatch, `MID_RUN_RECOVERY_ACTIVE` flag, recovery wiring, counters, and dashboard surface) is planned as future work in a follow-up to #1724.
 
 ## PTY Liveness Infrastructure
 
@@ -104,6 +104,17 @@ All constants are marked **provisional/tunable** — the defaults are safety-cho
 
 `NEVER_STARTED_GRACE_SECS` and `NEVER_STARTED_CONFIRM_MARGIN_SECS` are defined in `agent/session_stall_classifier.py` (single source of truth) and imported by `agent/session_health.py`. Never redefine them locally.
 
+## Stage-2 (Planned — Not Yet Shipped)
+
+Path B stage-2 is deferred to a follow-up issue. When built, it will add:
+- Off-loop `asyncio` task dispatch for the granite classifier on stage-1 suspects
+- `MID_RUN_RECOVERY_ACTIVE` env flag (default off) to gate recovery behind observe-only logging
+- `mid_run_pty_quiescent_recovery_observed` Redis counter for would-be kills while observe-only
+- Dashboard fallback-rate alert for classifier unavailability
+- CAS re-check precondition on the post-classifier recovery write
+
+Until then, a session flagged by stage-1 receives only a warning log entry.
+
 ## Telemetry Counters
 
 | Redis key | When incremented |
@@ -123,7 +134,7 @@ agent/session_health.py → agent/session_stall_classifier.py
 ## Safety Invariants
 
 1. Recovery reason string must contain "no progress signal" so `reason_kind` resolves to `"no_progress"` in `_apply_recovery_transition`
-2. Path B ships observe-only by default; `MID_RUN_RECOVERY_ACTIVE=1` enables recovery
+2. Path B stage-1 ships detect-and-log only; no recovery action is taken; stage-2 recovery is deferred to a follow-up
 3. `_never_started_past_grace` NEVER raises — all exceptions swallowed, returns False on error
 4. `_eval_mid_run_pty_stage1` NEVER raises — all exceptions swallowed
-5. Off-loop classifier slot must be removed in a `finally` block (prevents permanent slot leaks)
+5. Stage-2 off-loop classifier dispatch (deferred) — when built, the classifier task slot must be removed in a `finally` block (prevents permanent slot leaks)

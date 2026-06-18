@@ -396,11 +396,11 @@ class AgentSession(Model):
     # the PTY has been silent while a tool is in flight.
     mid_run_quiescent_since = DatetimeField(null=True)
     # Cross-tick durable state: serialized (last_pty_activity_at_iso, total_input_tokens)
-    # snapshot from the prior health-check tick. Stage-1 compares the current
-    # snapshot to this to detect whether the screen has painted between ticks.
-    # ``total_input_tokens`` is used as a byte-growth proxy because the real PTY
-    # transcript byte_offset is never persisted on AgentSession; a future stage-2
-    # builder reusing this tuple as a CAS precondition should note this distinction.
+    # Note: total_input_tokens is used as the best available proxy for byte_offset (the plan
+    # specified byte_offset, but it lives only on in-memory tailer cursors and is not persisted
+    # onto AgentSession). This substitution is safe for stage-1 observe-only (the field is an
+    # optional corroborator, never a gating conjunct per plan D2/concern #3), but the discrepancy
+    # should be resolved before stage-2 uses this tuple as a CAS precondition.
     # None until the first stage-1 evaluation.
     mid_run_pty_snapshot = Field(null=True)
 
