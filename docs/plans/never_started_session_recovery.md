@@ -28,10 +28,16 @@ As of commit `ef53a88f`, the in-container 120s `dev_hang`/`pm_hang` deadline bec
 ### The reliable oracle
 The signal that actually distinguishes alive from hung is the one the operator uses by eye: **the TUI screen repainting** — the spinner and token/elapsed counters tick continuously while work is happening, and freeze on a crash. `agent/granite_container/pty_driver.py` already computes byte-quiescence (C5 idle: a hung PTY goes byte-silent within ~seconds; a working PTY emits continuously), but this liveness is transient inside the container read loop and **is never persisted onto the `AgentSession`**. Capturing it is the core of the mid-run fix.
 
+But "the screen is frozen" is necessary, not sufficient — it splits into two jobs that must NOT be conflated:
+
+- **Job 1 — is the screen moving? (mechanical, always-on, free.)** A normalized hash/diff of the screen buffer between reads answers this deterministically in microseconds, immune to local-model load. This is the cheap gate. An LLM here would only add latency, nondeterminism, and a contention failure mode — the bottom-bar token/elapsed counter literally repaints every second while working, so byte-activity already *is* the liveness bit.
+- **Job 2 — the screen is frozen; WHY? (interpretive, triggered, rare.)** A frozen screen can mean `CRASHED` (recover), `WAITING` at an idle prompt (turn genuinely done — do not recover), `DIALOG` (trust-folder / update notice — do not recover, needs a keystroke not a kill), or — critically, given flaky Claude API connections — **`RETRYING` / `API_ERROR`**, where the session is alive and waiting out a transient network/API hiccup and will self-heal. Recovering a `RETRYING` session is a false-kill of healthy work. Regex/glyph heuristics for this disambiguation are brittle across ANSI noise and Claude Code version changes; this fuzzy classification is exactly where the **local granite classifier** earns its keep — but only as a second stage fired on the handful of suspects the cheap gate flags, never as a polling loop over every session (which would load the same local model that does live message classification, and degrade precisely under the memory/CPU pressure that correlates with hangs).
+
 ### Desired outcome
 - **Priming wedge:** a `running` + `last_turn_at = None` + fresh-heartbeat session is recovered on a grace reconciled with the advisory's 120s detection grace — and the fix closes **both** sub-check B's band and the reprieve-cap path.
-- **Mid-run wedge:** a session whose **PTY screen has gone quiescent** for a generous window (no spinner/counter repaint) while the transcript has not advanced is recovered well below the 12h ceiling — **without** killing a legitimately long, actively-repainting subagent/tool turn.
+- **Mid-run wedge:** a session whose **PTY screen has gone quiescent** for a generous window (no spinner/counter repaint) while the transcript has not advanced, **and which a triggered classifier confirms is `CRASHED`** (not waiting, not on a dialog, not retrying an API hiccup), is recovered well below the 12h ceiling — **without** killing a legitimately long actively-repainting turn, an idle-at-prompt session, or a session waiting out a flaky Claude API connection.
 - Grace/window values derive from single shared sources of truth so detection and action cannot drift.
+- The detector is **resilient by construction**: it errs toward inaction, requires multiple independent confirmations before killing, and degrades safely (does nothing this pass) whenever any input is missing, slow, or low-confidence — because every layer here (PTY rendering, local inference, the Claude API) is non-deterministic and flaky.
 
 ### Real observation (2026-06-18)
 Session `tg_valor_-1003449100931_993` (`agent_session_id 7f819c9a7efa46f1b2b8b10ef1d34dfc`) was `running` + heartbeating with `last_turn_at = None` for ~5 min (priming wedge). `stall-advisory` logged `STALLED reason=never_started elapsed_secs=247 grace_secs=120` at 02:48:53; nothing recovered it until a manual `valor-service.sh restart`.
@@ -83,13 +89,14 @@ Session `tg_valor_-1003449100931_993` (`agent_session_id 7f819c9a7efa46f1b2b8b10
 
 **Mid-run wedge (path B):** session produces turns (`sdk_ever_output=True`) → enters a long Dev turn / `Task` subagent → parent transcript stops emitting events (byte_offset/tokens/turn_count/last_tool_use_at all freeze) → if the turn genuinely hangs, the TUI screen freezes but the `claude` process stays alive. `_check_tool_timeout` flags the stuck `current_tool_name`, but `_tier2_reprieve_signal` `"alive"` reprieves it forever (process exists). No recovery until the 12h ceiling.
 
-The fix lands in: (path A) sub-check B's never-started leg **and** the reprieve evaluation; (path B) a new PTY-activity signal persisted from the container read loop, consumed by a new mid-run leg in the recovery actor.
+The fix lands in: (path A) sub-check B's never-started leg **and** the reprieve evaluation; (path B) a new PTY-activity signal persisted from the container read loop, consumed by a two-stage mid-run leg — a free byte-diff quiescence gate, then a triggered granite classifier (fail-safe) that must confirm `CRASHED` before any recovery.
 
 ## Architectural Impact
 
 - **New persisted signal:** add `last_pty_activity_at` (datetime) to `AgentSession`, written by the granite container/`bridge_adapter` whenever the PTY read loop observes non-quiescent screen bytes (the same byte-activity `pty_driver` already detects for C5 idle). This is the only new field; per `feedback_field_backcompat_heal`, nullable AgentSession fields need no extra back-compat code (`_heal_descriptor_pollution` walks fields generically). Non-granite sessions leave it `None` and are unaffected.
 - **Import direction (unchanged constraint):** `session_health` → `session_stall_classifier` only (shared grace constant); the classifier must never import `session_health` (guarded by `tests/integration/test_stall_advisory_e2e.py`). The new PTY-activity field is plain data on the model — no new module coupling.
 - **Single writer for recovery:** only `session_health` ever writes recovery transitions; `stall_advisory` stays read-only. No double-action.
+- **Classifier dependency (stage 2):** reuse the existing local granite/ollama classifier path already used for message classification (no new model). The dependency is *soft* by design — stage 2 is best-effort and fails toward "leave alone" (D4/Risk 6), so a classifier outage degrades to no-recovery, never to a crash or a wrong kill.
 - **Reversibility:** Medium-high. Path-A change is a tighter branch + reprieve guard + one constant. Path-B adds a field + a writer + a recovery leg; revertible by ignoring the field and restoring the prior reprieve behavior.
 
 ## Appetite
@@ -108,23 +115,27 @@ None external. The transcript-tailer progress fields and PTY byte-quiescence det
 
 ### Decisions locked (from PM, 2026-06-18)
 - **D1 (priming recovery timescale): lower the floor for `never_started`.** The 300s race guard cannot honor the advisory's 120s. For `never_started` sessions specifically, allow the recovery actor to evaluate/act before 300s, reconciled to the shared `NEVER_STARTED_GRACE_SECS (120s)` plus a small confirmation margin — rather than accepting ~300s. This is a deliberate, scoped relaxation of the race guard for the no-turn case only (general sessions keep the 300s floor).
-- **D2 (mid-run oracle): PTY-screen activity, not transcript silence.** Recover a mid-run session only when `last_pty_activity_at` has been quiescent beyond the mid-run window AND the transcript has not advanced — never on transcript-staleness alone, because a long subagent legitimately freezes the transcript while the screen keeps repainting.
+- **D2 (mid-run oracle): cheap-gate-then-judge, not transcript silence.** Stage 1 (free, always-on): a normalized PTY-buffer diff → is the screen quiescent beyond the window AND the transcript not advanced? Stage 2 (triggered, only on stage-1 suspects): the local granite classifier reads the frozen buffer and labels it `CRASHED / WAITING / DIALOG / RETRYING`. Recover **only** on `CRASHED`. Never recover on transcript-staleness alone (false-kills long subagents) and never on a frozen screen alone (false-kills idle-at-prompt, dialogs, and API retries).
 - **D3 (reprieve cap, educated guess to validate in build): bypass the `children`/`alive` reprieve for `never_started`.** Live PTY children are *expected* during priming and are not progress evidence, so a no-turn session past its grace must not be reprieved by `children`/`alive`. Validate via tests that this does not regress a genuinely-still-priming session that is about to emit its first turn.
+- **D4 (resilience posture — overrides ambiguity everywhere): bias to inaction, confirm before killing, degrade safely.** Concretely: (a) recovery requires the stage-1 gate to hold across **K consecutive health ticks** (not a single reading) so one flaky read/render can't trigger a kill; (b) the stage-2 classifier runs with a hard timeout, structured output, a fixed label set, low temperature, and **defaults to a non-`CRASHED` label on any failure, timeout, unavailability, or low confidence** — a granite outage must never cause recoveries, only suppress them; (c) `RETRYING`/`API_ERROR` is treated as alive (Claude API flakiness self-heals); (d) the whole stage-2 path is best-effort and never raises into or blocks the health loop. When in doubt, leave the session alone — a wedge that persists one more cycle is cheaper than killing live work (#1172's principle).
 
 ### Key Elements
 1. **Shared never-started grace** — `session_health` reads `NEVER_STARTED_GRACE_SECS` (already in `session_stall_classifier.py`) plus a small `NEVER_STARTED_CONFIRM_MARGIN_SECS` so detection (advisory) and action (actor) derive from one source. No second magic number.
 2. **Never-started recovery leg (path A)** — when `not sdk_ever_output` and no turn ever: (a) sub-check B does NOT grant the heartbeat fast-path past the never-started grace, and (b) `_tier2_reprieve_signal` does NOT grant `children`/`alive` for this session (D3). The race-guard floor is relaxed to the never-started grace for this case only (D1).
-3. **PTY-activity signal (path B, new)** — persist `last_pty_activity_at` from the container read loop; add a mid-run recovery leg: if `sdk_ever_output=True`, `current_tool_name` is non-null (or a turn is in flight), the transcript byte_offset has not advanced, AND `last_pty_activity_at` is older than `MID_RUN_QUIESCENCE_SECS`, recover. The `"alive"` reprieve must NOT override a confirmed frozen screen.
-4. **Preserved long-subagent safety** — a session whose screen is still repainting (`last_pty_activity_at` fresh) is never recovered, regardless of how long the transcript or `last_tool_use_at` has been frozen. This is the regression guard for 25+ min subagents.
+3. **PTY-activity signal + two-stage mid-run leg (path B, new)** — persist `last_pty_activity_at` from the container read loop (stamped on non-quiescent, normalized screen bytes). Stage 1 (free): if `sdk_ever_output=True`, a tool/turn is in flight, the transcript `byte_offset` has not advanced, AND `last_pty_activity_at` has been quiescent > `MID_RUN_QUIESCENCE_SECS` across K consecutive ticks → mark as a suspect. Stage 2 (triggered, per D4): classify the frozen buffer; recover only on `CRASHED`. The `"alive"` reprieve must NOT override a `CRASHED` verdict, and conversely a non-`CRASHED`/failed/absent verdict must NOT recover.
+4. **Preserved long-subagent safety** — a session whose screen is still repainting (`last_pty_activity_at` fresh) never even becomes a stage-1 suspect, regardless of how long the transcript or `last_tool_use_at` has been frozen. This is the primary regression guard for 25+ min subagents; the stage-2 classifier is the backstop for the frozen-but-not-crashed cases.
+5. **Resilient by construction (D4)** — K-of-N confirmation on the cheap gate, a bounded best-effort classifier that fails toward "leave alone," and explicit `RETRYING`/`WAITING`/`DIALOG` handling so non-determinism in rendering, local inference, or the Claude API can only ever *suppress* a recovery, never cause a wrong one.
 
-### Mid-run window (D2) — value rationale
-A live TUI repaints its spinner/counters on a sub-second-to-seconds cadence; a crash freezes it immediately. So `MID_RUN_QUIESCENCE_SECS` is a *confirmation* window over an already-strong signal, not a tolerance for legit silence. Proposed default **180s** of continuous screen quiescence (env-tunable `MID_RUN_QUIESCENCE_SECS`), comfortably above transient repaint gaps yet far below the 12h ceiling. The 25+ min subagent is protected by the *nature* of the signal (its screen keeps repainting), not by the window size. **Open for confirmation** — see Open Questions Q-A.
+### Mid-run window (D2/D4) — value rationale
+A live TUI repaints its spinner/counters on a sub-second-to-seconds cadence; a crash freezes it immediately. So `MID_RUN_QUIESCENCE_SECS` is a *confirmation* window over an already-strong signal, not a tolerance for legit silence. Proposed default **180s** of continuous screen quiescence (env-tunable `MID_RUN_QUIESCENCE_SECS`), required to hold across K consecutive health ticks before stage 2 even runs — comfortably above transient repaint gaps and API-retry backoffs yet far below the 12h ceiling. The 25+ min subagent is protected by the *nature* of the signal (its screen keeps repainting), not by the window size; the API-retry case is protected by both the window and the stage-2 `RETRYING` label. **Open for confirmation** — see Open Questions Q-A.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
 - [ ] Redis counter increments on the new fall-through legs are best-effort (log + continue); a counter failure must not block recovery (patch `incr` to raise, assert recovery still fires).
 - [ ] PTY-activity writer in the container must never raise into the read loop; a write failure leaves `last_pty_activity_at` stale and falls back to the existing (process-alive) behavior — assert the writer swallows + logs.
+- [ ] Stage-2 classifier (D4): on timeout, exception, ollama-unavailable, malformed/unparseable output, or low confidence → returns a non-`CRASHED` label and the session is NOT recovered. Tests patch the classifier to raise / time out / return garbage and assert no recovery fires and the loop continues.
+- [ ] `RETRYING`/`API_ERROR`/`WAITING`/`DIALOG` verdicts → NOT recovered (only `CRASHED` recovers). Explicit test per label.
 - [ ] `classify_session_stall` keeps its swallow-all → `healthy/unclassifiable` contract; unchanged.
 
 ### Empty/Invalid Input Handling
@@ -149,7 +160,8 @@ No tests DELETEd.
 ## Rabbit Holes
 - **Lowering the global 300s race guard.** D1 relaxes it for `never_started` ONLY. Do not touch the floor for sessions that have produced output — it protects genuinely-fresh sessions loop-wide.
 - **Using transcript staleness as the mid-run trigger.** Explicitly rejected (false-kills long subagents). The mid-run trigger is PTY quiescence; transcript-not-advanced is a corroborating condition, never the sole one.
-- **Parsing the TUI screen for token/elapsed counters.** Tempting to read the exact counter values; unnecessary and brittle. Byte-activity (screen changed at all) is sufficient and is what `pty_driver` already computes.
+- **Regex/glyph-parsing the TUI screen to decide crashed-vs-waiting.** Brittle across ANSI noise and Claude Code version changes — this is exactly what the stage-2 classifier replaces. For stage 1 (liveness), byte-activity is sufficient and deterministic; do not parse exact counter values.
+- **Polling the granite classifier on every session every tick.** Loads the shared local model continuously and degrades under the load that correlates with hangs. The classifier runs ONLY on stage-1 suspects (D2/D4).
 - **Giving `stall_advisory` kill powers.** Breaks the classifier's zero-writes / no-session_health-import contract; reintroduces competing recoverers. Rejected.
 - **Storing `sdk_ever_output`.** It stays derived from `last_tool_use_at`/`last_turn_at`.
 - **Discovering subagent transcript files as the liveness signal.** A plausible alternative to PTY-activity (a Task subagent writes its own growing JSONL), but it requires mapping parent→child transcripts and handling nested/Bash tools that have no transcript. PTY-activity is uniform across all tool types. Note as the fallback if PTY-activity proves unreliable in build; do not build both.
@@ -170,6 +182,14 @@ No tests DELETEd.
 
 ### Risk 4: Constant/grace drift reintroduced later
 **Mitigation:** Single shared `NEVER_STARTED_GRACE_SECS`; unit test pins the detection/action relationship so a divergent edit fails CI.
+
+### Risk 5: False-kill of a session waiting out a flaky Claude API connection (resilience #1)
+**Impact:** A transient API/network hiccup freezes the screen; a naive frozen-screen kill recovers healthy work that would have self-healed on reconnect.
+**Mitigation (D4):** the stage-2 classifier explicitly distinguishes `RETRYING`/`API_ERROR` from `CRASHED` and only `CRASHED` recovers; the K-consecutive-tick confirmation outlasts typical retry backoffs; on any classifier doubt the default is non-`CRASHED` (no recovery). Test drives a `RETRYING` buffer and asserts no recovery.
+
+### Risk 6: Local classifier unavailable / slow / degraded under load
+**Impact:** ollama down or thrashing (often correlated with the very incidents we care about) could either block the health loop or make wrong calls.
+**Mitigation (D4):** stage-2 is best-effort with a hard timeout, never raises into the loop, and **fails toward "leave alone"** — a granite outage suppresses recoveries rather than causing them. The stage-1 cheap gate (which needs no inference) keeps running; suspects simply wait for a later tick when the classifier is reachable. Test patches the classifier to raise/time-out and asserts the loop continues and nothing is recovered.
 
 ## Race Conditions
 
@@ -203,9 +223,11 @@ No agent integration required — worker/container-internal recovery logic. No n
 
 ## Success Criteria
 - [ ] Priming wedge: `running` + `last_turn_at=None` + fresh heartbeats is recovered on the never-started grace (reconciled to 120s + margin via D1), NOT after ~30-100 min — closing both sub-check B and the reprieve path.
-- [ ] Mid-run wedge: a session with frozen PTY screen (`last_pty_activity_at` quiescent > window) + non-advancing transcript + alive process is recovered well below the 12h ceiling.
+- [ ] Mid-run wedge: a session with frozen PTY screen (quiescent > window across K ticks) + non-advancing transcript + alive process + stage-2 `CRASHED` verdict is recovered well below the 12h ceiling.
 - [ ] No false-kill: a long subagent whose screen keeps repainting (fresh `last_pty_activity_at`) is NOT recovered even with a 25+ min frozen transcript — regression test green.
 - [ ] No false-kill: a session that emits its first turn within the never-started grace+margin is NOT recovered.
+- [ ] Resilience: a frozen-screen session classified `WAITING`/`DIALOG`/`RETRYING`, or for which the classifier times out / errors / is unavailable / low-confidence, is NOT recovered — and a granite outage suppresses recoveries without crashing the loop. Tests green for each case.
+- [ ] Resilience: a single flaky quiescent reading does not trigger recovery — the gate must hold across K consecutive ticks.
 - [ ] Detection and action graces derive from a single shared constant; a drift test fails CI.
 - [ ] `last_pty_activity_at` advances during real PTY work and freezes on a killed child — integration test green.
 - [ ] Advisory stays read-only; only `session_health` writes (import-guard test green).
@@ -217,7 +239,7 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 
 ### Team Members
 - **recovery-builder** (debugging-specialist) — path-A never-started leg, reprieve bypass (D3), shared grace, counters. Resume: true.
-- **pty-signal-builder** (agent-architect) — persist `last_pty_activity_at` from the container/`bridge_adapter` read loop; path-B mid-run recovery leg. Resume: true.
+- **pty-signal-builder** (agent-architect) — persist `last_pty_activity_at`; build the stage-1 cheap quiescence gate and the stage-2 triggered granite classifier (fail-safe). Resume: true.
 - **regression-tester** (test-engineer) — both wedge recover/do-not-recover suites + drift pin + PTY-activity integration test. Resume: true.
 - **recovery-validator** (validator) — verify long-subagent not killed, slow-priming not killed, import direction, advisory read-only. Resume: true.
 - **docs-writer** (documentarian) — recovery feature doc + docstrings.
@@ -239,20 +261,28 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 - **Assigned To**: recovery-builder · debugging-specialist · Parallel: false
 - In sub-check B: when `not sdk_ever_output` and no turn ever, deny the heartbeat fast-path past the never-started grace. In `_tier2_reprieve_signal`: when never-started past grace, skip `children`/`alive`. Relax the actor's 300s evaluation floor for the never-started case. Add `tier1_falloff:never_started_grace_exceeded` counter. Update docstrings.
 
-### 3. Path-B PTY-activity signal + mid-run recovery leg
-- **Task ID**: build-mid-run
+### 3a. Path-B stage 1 — PTY-activity signal + cheap quiescence gate
+- **Task ID**: build-mid-run-gate
 - **Depends On**: build-shared-grace
 - **Validates**: tests/integration/test_agent_session_health_monitor.py
-- **Informed By**: D2 (PTY-activity oracle), transcript-freeze finding, pty_driver C5 quiescence
+- **Informed By**: D2 stage 1, transcript-freeze finding, pty_driver C5 quiescence
 - **Assigned To**: pty-signal-builder · agent-architect · Parallel: true (independent of task 2; different code paths)
-- Add `last_pty_activity_at` to `AgentSession`; write it from the container read loop on non-quiescent screen bytes (swallow+log on failure). Add the mid-run leg: `sdk_ever_output=True` + tool/turn in flight + byte_offset not advanced + `last_pty_activity_at` quiescent > `MID_RUN_QUIESCENCE_SECS` → recover; `"alive"` reprieve must not override. Add `mid_run_pty_quiescent_recovery` counter.
+- Add `last_pty_activity_at` to `AgentSession`; write it from the container read loop on non-quiescent *normalized* screen bytes (strip known cursor/blink noise; swallow+log on failure). Add the stage-1 suspect gate: `sdk_ever_output=True` + tool/turn in flight + `byte_offset` not advanced + `last_pty_activity_at` quiescent > `MID_RUN_QUIESCENCE_SECS` held across K consecutive ticks. Stage 1 alone does NOT recover — it only marks a suspect.
+
+### 3b. Path-B stage 2 — triggered classifier + recovery (D4 resilience)
+- **Task ID**: build-mid-run-judge
+- **Depends On**: build-mid-run-gate
+- **Validates**: tests/integration/test_agent_session_health_monitor.py
+- **Informed By**: D4 (fail-safe), flaky-API false-kill risk (Risk 5), classifier-unavailable (Risk 6)
+- **Assigned To**: pty-signal-builder · agent-architect · Parallel: false
+- For stage-1 suspects only, call the local granite classifier on the frozen buffer with a hard timeout, low temperature, structured output, fixed label set `{CRASHED, WAITING, DIALOG, RETRYING}`. Recover ONLY on `CRASHED`; any other label, timeout, exception, unavailability, or low confidence → no recovery (default-safe). `"alive"` reprieve must not override `CRASHED`; a non-`CRASHED` verdict must not be overridden into a kill. Best-effort, never raises into the loop. Add `mid_run_pty_quiescent_recovery` and `mid_run_classifier_*` (per-label / unavailable) counters.
 
 ### 4. Regression + integration tests
 - **Task ID**: build-tests
-- **Depends On**: build-never-started, build-mid-run
-- **Validates**: all UPDATEd test files + the new mid-run integration case
+- **Depends On**: build-never-started, build-mid-run-gate, build-mid-run-judge
+- **Validates**: all UPDATEd test files + the new mid-run integration cases
 - **Assigned To**: regression-tester · test-engineer · Parallel: false
-- Never-started recover at grace (not 1800s); turn-producing + slow-priming-about-to-turn NOT recovered. Mid-run: stale PTY + frozen transcript + alive → recover; fresh PTY + 25min frozen transcript → NOT recover. `last_pty_activity_at` advances on work / freezes on killed child. Legacy + clock-skew preserve fast-path. Counter-failure does not block recovery. Drift pin.
+- Never-started recover at grace (not 1800s); turn-producing + slow-priming-about-to-turn NOT recovered. Stage 1: fresh PTY + 25min frozen transcript → never a suspect (NOT recovered); single flaky quiescent read → not enough (K-of-N). Stage 2: suspect + `CRASHED` → recover; suspect + `WAITING`/`DIALOG`/`RETRYING` → NOT recovered; classifier timeout/raise/garbage/unavailable → NOT recovered and loop continues. `last_pty_activity_at` advances on work / freezes on killed child. Legacy + clock-skew preserve fast-path. Counter-failure does not block recovery. Drift pin.
 
 ### 5. Validate safety + import direction
 - **Task ID**: validate-recovery
@@ -296,8 +326,11 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 
 ---
 
-## Open Questions
+### Resolved (PM, 2026-06-18)
+- **Mid-run oracle = cheap-gate-then-judge** (was Q-B): stage-1 PTY byte-diff gate (free, always-on) → stage-2 granite classifier on suspects only. Subagent-transcript discovery is the build-time fallback if PTY-activity proves unreliable; do not build both. Captured as D2.
+- **Resilience over brittleness** (D4): bias to inaction, K-of-N confirmation, classifier fails toward "leave alone," explicit `RETRYING` handling for flaky Claude API connections.
 
-1. **(Q-A — mid-run window value)** `MID_RUN_QUIESCENCE_SECS` default. Proposed **180s** of continuous PTY-screen quiescence (the signal is strong; this is a confirmation margin, not silence tolerance). Confirm 180s, or prefer a different value? Env-tunable as planned?
-2. **(Q-B — PTY-activity vs subagent-transcript)** The plan makes PTY-screen byte-activity the mid-run oracle (uniform across all tool types). The alternative — discovering each subagent's own growing transcript — is noted as a build-time fallback. Confirm PTY-activity is the primary approach to build first.
-3. **(Q-C — D1 floor relaxation blast radius)** Relaxing the 300s race guard for the `never_started` case only: acceptable, or do you want the actor to still wait to ~300s and instead just close the reprieve path (slower recovery, zero change to the race guard)? D1 currently says relax it.
+### Still open
+1. **(Q-A — mid-run window value)** `MID_RUN_QUIESCENCE_SECS` default. Proposed **180s** of continuous PTY-screen quiescence plus **K consecutive ticks** of confirmation. Confirm 180s + a K value (e.g. K=2), or prefer different values? Env-tunable as planned.
+2. **(Q-C — D1 floor relaxation blast radius)** Relaxing the 300s race guard for the `never_started` case only: acceptable, or keep the floor untouched and just close the reprieve path (slower recovery, zero race-guard risk)? D1 currently says relax it.
+3. **(Q-D — classifier reuse)** Stage 2 should reuse the existing local granite/ollama classifier path (the same model already used for message classification) rather than introducing a new model. Confirm — and confirm the per-call timeout budget (proposed: short, e.g. 5-10s, since it runs only on already-suspect sessions).
