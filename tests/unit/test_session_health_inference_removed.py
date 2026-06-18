@@ -132,52 +132,64 @@ def test_dual_heartbeat_or_check_still_holds():
 
 
 def test_fresh_heartbeat_with_long_stdout_silence_is_progress():
-    """Regression: the deleted Tier 1 stdout-stale path must NOT fire.
+    """D0 gate (issue #1724): a session past the never-started grace window with no SDK
+    output is treated as never-started (not alive), even with a fresh heartbeat.
 
-    Previously, fresh heartbeats + stale stdout (>600s) was flagged as
-    no-progress (#1046). #1172 retires that — fresh heartbeat alone proves
-    progress regardless of stdout cadence. A 4-hour PM session with active
-    tool use and no result event is NOT killed.
+    Previously (#1172), fresh heartbeat alone proved progress regardless of stdout
+    cadence. The D0 gate overrides that fast-path when sdk_ever_output=False AND
+    running time exceeds NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS
+    (120 + 30 = 150s). turn_count=5 does NOT set sdk_ever_output — only last_tool_use_at
+    or last_turn_at count. A 4-hour session with neither field set is a zombie.
     """
     now = datetime.now(tz=UTC)
 
     class _S:
+        last_tool_use_at = None
+        last_turn_at = None
         last_heartbeat_at = now  # fresh
         last_sdk_heartbeat_at = now  # fresh
         # Stdout silent for 2 hours — would have tripped the deleted path.
         last_stdout_at = now - timedelta(hours=2)
         started_at = now - timedelta(hours=4)
+        created_at = now - timedelta(hours=4)
         turn_count = 5
         log_path = "/tmp/log"
         claude_session_uuid = "abc"
+        project_key = "test"
 
         def get_children(self):
             return []
 
-    assert session_health._has_progress(_S()) is True
+    assert session_health._has_progress(_S()) is False
 
 
 def test_fresh_heartbeat_no_stdout_yet_is_progress():
-    """Regression: deleted FIRST_STDOUT_DEADLINE path must NOT fire.
+    """D0 gate (issue #1724): after 10 minutes with no SDK output, the session is past
+    the never-started grace window (600s > 150s) and correctly treated as not alive.
 
-    A long-warmup PM session with fresh heartbeats and no stdout yet must
-    NOT be flagged. The deleted path killed at 5 min after started_at.
+    Previously the deleted FIRST_STDOUT_DEADLINE path killed at 5 min. The D0 gate
+    now correctly handles this case: sdk_ever_output=False (neither last_tool_use_at
+    nor last_turn_at is set) AND running_seconds=600 > threshold=150 → returns False.
     """
     now = datetime.now(tz=UTC)
 
     class _S:
+        last_tool_use_at = None
+        last_turn_at = None
         last_heartbeat_at = now  # fresh
         last_sdk_heartbeat_at = now  # fresh
         last_stdout_at = None  # never produced stdout
-        started_at = now - timedelta(minutes=10)  # 10 min after start
+        started_at = now - timedelta(minutes=10)  # 10 min after start — past 150s grace
+        created_at = now - timedelta(minutes=10)
         turn_count = 0
         log_path = None
         claude_session_uuid = None
+        project_key = "test"
 
         def get_children(self):
             return []
 
-    assert session_health._has_progress(_S()) is True
+    assert session_health._has_progress(_S()) is False
 
 
 def test_tier2_reprieve_no_longer_returns_stdout_gate():
@@ -229,23 +241,25 @@ def test_zombie_profile_is_not_progress():
 
 def test_own_progress_gate_fresh_heartbeat_is_progress():
     """
-    AC3 FRESH sibling: A legitimately-running session with claude_session_uuid set AND
-    a fresh queue-layer heartbeat MUST NOT be recovered. The gate must preserve this.
+    D0 gate (issue #1724): fresh heartbeat does NOT protect a session that is past
+    the never-started grace window with zero SDK output.
 
-    Verifies that the fix on L847-853 does NOT kill sessions with a fresh heartbeat.
+    A session running for 3600s with sdk_ever_output=False (neither last_tool_use_at
+    nor last_turn_at set) is correctly treated as never-started. The D0 gate denies
+    the fresh-heartbeat fast-path and returns False, enabling recovery.
 
-    Both pre-fix and post-fix: fresh heartbeat + uuid set → True (sub-check B fires
-    before reaching the own-progress block).
+    Note: the class name "fresh heartbeat is progress" is now a misnomer post-D0 gate.
+    The gate fires before the heartbeat fast-path can return True.
     """
     now = datetime.now(tz=UTC)
 
     class _S:
         last_tool_use_at = None
         last_turn_at = None
-        last_heartbeat_at = now  # FRESH — sub-check B returns True here
+        last_heartbeat_at = now  # FRESH — but D0 gate fires before fast-path
         last_sdk_heartbeat_at = None
         last_stdout_at = None
-        started_at = now - timedelta(seconds=3600)  # past 1800s NO_OUTPUT_BUDGET
+        started_at = now - timedelta(seconds=3600)  # 3600s >> 150s grace
         created_at = now - timedelta(seconds=3600)
         turn_count = 0
         log_path = None
@@ -256,9 +270,42 @@ def test_own_progress_gate_fresh_heartbeat_is_progress():
             return []
 
     result = session_health._has_progress(_S())
+    assert result is False, (
+        "Session past never-started grace (3600s >> 150s) with sdk_ever_output=False "
+        "must return False — the D0 gate fires before the heartbeat fast-path"
+    )
+
+
+def test_own_progress_gate_inside_grace_window_is_protected():
+    """
+    Sessions inside the never-started grace window (< 150s running) with a fresh
+    heartbeat MUST return True — the D0 gate must not fire before the grace expires.
+
+    This is the safety boundary: sessions that just started (e.g., granite cold-start
+    taking up to 120s) must not be prematurely recovered.
+    """
+    now = datetime.now(tz=UTC)
+
+    class _S:
+        last_tool_use_at = None
+        last_turn_at = None
+        last_heartbeat_at = now  # FRESH
+        last_sdk_heartbeat_at = None
+        last_stdout_at = None
+        started_at = now - timedelta(seconds=60)  # 60s — well inside 150s grace
+        created_at = now - timedelta(seconds=60)
+        turn_count = 0
+        log_path = None
+        claude_session_uuid = None
+        project_key = "test"
+
+        def get_children(self):
+            return []
+
+    result = session_health._has_progress(_S())
     assert result is True, (
-        "A session with fresh heartbeat + claude_session_uuid set must return True "
-        "(live long-thinker must not be recovered)"
+        "Session inside the never-started grace window (60s < 150s) with fresh "
+        "heartbeat must return True — the D0 gate must not fire before grace expires"
     )
 
 

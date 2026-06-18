@@ -395,9 +395,12 @@ class AgentSession(Model):
     # tick; cleared when activity resumes. Used by stage-1 to measure how long
     # the PTY has been silent while a tool is in flight.
     mid_run_quiescent_since = DatetimeField(null=True)
-    # Cross-tick durable state: serialized (last_pty_activity_at_iso, byte_offset)
+    # Cross-tick durable state: serialized (last_pty_activity_at_iso, total_input_tokens)
     # snapshot from the prior health-check tick. Stage-1 compares the current
     # snapshot to this to detect whether the screen has painted between ticks.
+    # ``total_input_tokens`` is used as a byte-growth proxy because the real PTY
+    # transcript byte_offset is never persisted on AgentSession; a future stage-2
+    # builder reusing this tuple as a CAS precondition should note this distinction.
     # None until the first stage-1 evaluation.
     mid_run_pty_snapshot = Field(null=True)
 
