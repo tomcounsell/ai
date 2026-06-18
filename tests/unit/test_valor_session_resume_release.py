@@ -627,19 +627,28 @@ class TestFindSessionFallbackToAgentSessionId:
     """When session_id filter is empty, fall back to AgentSession.get_by_id()."""
 
     def test_uuid_fallback_when_session_id_empty(self):
+        # Issue #1720: _find_session now retries _CLASS_SET_RETRY_ATTEMPTS times
+        # before falling through to get_by_id.  The filter is called N times
+        # (once per retry attempt) when the class-set is empty, then get_by_id.
+        import tools.valor_session as vs
+
         uuid_session = _make_session("sess-from-uuid")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
         mock_cls.get_by_id.return_value = uuid_session
 
-        with patch.dict(
-            "sys.modules",
-            {"models.agent_session": MagicMock(AgentSession=mock_cls)},
-        ):
+        with (
+            patch.dict(
+                "sys.modules",
+                {"models.agent_session": MagicMock(AgentSession=mock_cls)},
+            ),
+            patch("tools.valor_session.time.sleep"),
+        ):  # skip backoff in unit tests
             result = _find_session("c00fd40d7a10432ba38b52bead17061f")
 
         assert result is uuid_session
-        mock_cls.query.filter.assert_called_once_with(session_id="c00fd40d7a10432ba38b52bead17061f")
+        # filter is called _CLASS_SET_RETRY_ATTEMPTS times (bounded retry exhaust)
+        assert mock_cls.query.filter.call_count == vs._CLASS_SET_RETRY_ATTEMPTS
         mock_cls.get_by_id.assert_called_once_with("c00fd40d7a10432ba38b52bead17061f")
 
     def test_returns_none_when_neither_lookup_finds(self):
@@ -647,10 +656,13 @@ class TestFindSessionFallbackToAgentSessionId:
         mock_cls.query.filter.return_value = []
         mock_cls.get_by_id.return_value = None
 
-        with patch.dict(
-            "sys.modules",
-            {"models.agent_session": MagicMock(AgentSession=mock_cls)},
-        ):
+        with (
+            patch.dict(
+                "sys.modules",
+                {"models.agent_session": MagicMock(AgentSession=mock_cls)},
+            ),
+            patch("tools.valor_session.time.sleep"),
+        ):  # skip retry backoff
             result = _find_session("nonexistent-id")
 
         assert result is None
@@ -661,10 +673,13 @@ class TestFindSessionFallbackToAgentSessionId:
         mock_cls.query.filter.return_value = []
         mock_cls.get_by_id.return_value = None
 
-        with patch.dict(
-            "sys.modules",
-            {"models.agent_session": MagicMock(AgentSession=mock_cls)},
-        ):
+        with (
+            patch.dict(
+                "sys.modules",
+                {"models.agent_session": MagicMock(AgentSession=mock_cls)},
+            ),
+            patch("tools.valor_session.time.sleep"),
+        ):  # skip retry backoff
             result = _find_session("")
 
         assert result is None

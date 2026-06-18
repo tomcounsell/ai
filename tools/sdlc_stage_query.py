@@ -43,6 +43,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from tools._sdlc_utils import _resolve_target_repo
@@ -50,23 +51,52 @@ from tools._sdlc_utils import find_plan_path as _find_plan_path
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Bounded read-path retry for class-set lookups (issue #1720)
+# ---------------------------------------------------------------------------
+# Mirrors the retry constants in tools/valor_session.py.  Both reader sites
+# use the same parameters: 5 attempts × 200ms = 1000ms total, covering the
+# measured spike-1 p99 class-set-empty window of 651ms (150 sessions).
+# See tools/valor_session.py for the full design rationale.
+_CLASS_SET_RETRY_ATTEMPTS = 5
+_CLASS_SET_RETRY_BACKOFF_S = 0.20  # seconds between attempts
+
 
 def _find_session_by_id(session_id: str):
     """Find an AgentSession by session_id.
 
     Returns the session object or None.
+
+    Bounded retry (issue #1720): popoto's rebuild_indexes() transiently empties
+    the class set ($Class:AgentSession); a concurrent query.filter(session_id=...)
+    returns empty for a live session during that window.  We retry up to
+    _CLASS_SET_RETRY_ATTEMPTS times (total cap sized to exceed the measured p99
+    class-set-empty window of 651ms), then return None on genuine absence.
+    The retry sits inside the try/except so a cap-exhausted genuine miss still
+    returns None cleanly (unchanged behavior).
     """
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if not sessions:
-            return None
-        # Prefer PM sessions (they own stage_states)
-        for s in sessions:
-            if getattr(s, "session_type", None) == "eng":
-                return s
-        return sessions[0]
+        for attempt in range(_CLASS_SET_RETRY_ATTEMPTS):
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            if sessions:
+                # Prefer eng sessions (they own stage_states)
+                for s in sessions:
+                    if getattr(s, "session_type", None) == "eng":
+                        return s
+                return sessions[0]
+            if attempt < _CLASS_SET_RETRY_ATTEMPTS - 1:
+                logger.debug(
+                    "_find_session_by_id: query.filter(session_id=%r) returned empty"
+                    " on attempt %d/%d — class-set may be mid-rebuild, retrying in %.0fms",
+                    session_id,
+                    attempt + 1,
+                    _CLASS_SET_RETRY_ATTEMPTS,
+                    _CLASS_SET_RETRY_BACKOFF_S * 1000,
+                )
+                time.sleep(_CLASS_SET_RETRY_BACKOFF_S)
+        return None
     except Exception as e:
         logger.debug(f"_find_session_by_id failed: {e}")
         return None
