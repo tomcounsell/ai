@@ -365,6 +365,10 @@ class BridgeAdapter:
         # the executor's emoji branch can distinguish a real delivery
         # from a session that was never routed to the user (issue #1647).
         self._user_facing_routed: bool = False
+        # Path-B mid-run wedge detector (#1724): prior PTY buffer snapshot
+        # used by _make_pty_read_callback to diff-gate last_pty_activity_at.
+        # Reset at Container construction time (single-shot BridgeAdapter).
+        self._prev_pty_buffer: str | None = None
 
         # Resolve the bridge callback. The default resolver looks
         # for a registered `agent_session_queue` callback; tests
@@ -444,6 +448,7 @@ class BridgeAdapter:
                 on_user_payload=self._on_user_payload,
                 on_complete_payload=self._on_complete_payload,
                 on_turn=self._bump_last_turn_at,
+                on_pty_read=self._make_pty_read_callback(),
                 pm_pty=pm,
                 dev_pty=dev,
                 session_type=self._session_type,
@@ -646,6 +651,51 @@ class BridgeAdapter:
                 save(update_fields=["last_turn_at"])
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("[bridge-adapter] last_turn_at bump failed: %s", e)
+
+    def _make_pty_read_callback(self) -> Callable[[str], None]:
+        """Build the sync callable for PTY read-loop liveness stamps (#1724).
+
+        # Spike-1 result: the parent PTY (PM or Dev TUI) renders its own
+        # bottom bar, spinner animation, and elapsed-seconds counter as part
+        # of the claude process's OWN terminal output — not from any child
+        # subprocess. When a long Task subagent runs inside the Dev TUI, the
+        # PARENT claude process is still alive, still consuming the child's
+        # output, and its own TUI repaints the spinner+elapsed counter at >=1 Hz.
+        # Therefore the parent PTY DOES keep repainting while a subagent is
+        # running, and byte-quiescence (QUIESCENCE_S gap) is a reliable signal
+        # that the parent TUI has genuinely gone quiet — not merely that a Task
+        # subagent is running. The stage-1 gate (screen diff + MID_RUN_QUIESCENCE_SECS
+        # window) correctly distinguishes a healthy deep-subagent run (repaint every
+        # second) from a wedged run (no repaint for MID_RUN_QUIESCENCE_SECS).
+
+        Returns a closure that:
+        - Stamps ``last_pty_read_loop_at`` unconditionally on every call.
+        - Stamps ``last_pty_activity_at`` only when ``buffer`` differs from
+          the prior call's buffer (screen repainted).
+        Both writes are fail-silent and use ``update_fields`` to avoid clobbering
+        concurrent saves from the tailer task.
+        """
+        agent_session = self._agent_session
+
+        def _on_pty_read(buffer: str) -> None:
+            if agent_session is None:
+                return
+            try:
+                now = datetime.now(UTC)
+                update_fields = ["last_pty_read_loop_at"]
+                agent_session.last_pty_read_loop_at = now
+                # Diff-gate: only stamp activity when the buffer has changed.
+                if buffer != self._prev_pty_buffer:
+                    agent_session.last_pty_activity_at = now
+                    update_fields.append("last_pty_activity_at")
+                self._prev_pty_buffer = buffer
+                save = getattr(agent_session, "save", None)
+                if callable(save):
+                    save(update_fields=update_fields)
+            except Exception as _e:
+                logger.debug("[bridge-adapter] pty_read liveness stamp failed: %s", _e)
+
+        return _on_pty_read
 
     # -- Bridge callbacks (sync wrappers around async send_cb) -----------
 

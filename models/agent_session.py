@@ -380,6 +380,27 @@ class AgentSession(Model):
     # Count of Tier 2 reprieves (activity-positive saves) for post-hoc analysis.
     reprieve_count = IntField(default=0)
 
+    # === PTY liveness signals (path B — mid-run wedge detection, #1724) ===
+    # Stamped every read-loop iteration (each _cycle_idle call), unconditionally.
+    # Proves the pexpect read loop is still cycling inside the container thread.
+    # Distinct from last_heartbeat_at (queue-layer) and last_sdk_heartbeat_at
+    # (messenger-layer): those are async; this is synchronous with the PTY loop.
+    last_pty_read_loop_at = DatetimeField(null=True)
+    # Stamped when the normalized screen buffer differs from the prior read.
+    # Proves the PTY screen is still repainting (model/TUI actively rendering).
+    # None until the first screen change after session start.
+    last_pty_activity_at = DatetimeField(null=True)
+    # Cross-tick durable state: UTC timestamp when the screen first went
+    # quiescent (no new paint since last_pty_activity_at). Set on first quiescent
+    # tick; cleared when activity resumes. Used by stage-1 to measure how long
+    # the PTY has been silent while a tool is in flight.
+    mid_run_quiescent_since = DatetimeField(null=True)
+    # Cross-tick durable state: serialized (last_pty_activity_at_iso, byte_offset)
+    # snapshot from the prior health-check tick. Stage-1 compares the current
+    # snapshot to this to detect whether the screen has painted between ticks.
+    # None until the first stage-1 evaluation.
+    mid_run_pty_snapshot = Field(null=True)
+
     # === Harness subprocess PID (issue #1269) ===
     # PID of the live `claude -p stream-json` subprocess for THIS session, when
     # one is currently running. Subprocess-scoped lifecycle (NOT session-scoped):

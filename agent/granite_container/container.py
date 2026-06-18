@@ -551,6 +551,7 @@ class Container:
         on_user_payload: Callable[[str], None] | None = None,
         on_complete_payload: Callable[[str], None] | None = None,
         on_turn: Callable[[], None] | None = None,
+        on_pty_read: Callable[[str], None] | None = None,
         pm_pty: PTYDriver | None = None,
         dev_pty: PTYDriver | None = None,
         session_type: str | None = None,
@@ -571,6 +572,13 @@ class Container:
         # sessions (PR #1612 review TD1). Exceptions are swallowed —
         # progress signaling must never crash the loop.
         self._on_turn = on_turn
+        # PTY read-loop hook: called from _cycle_idle after each read_until_idle
+        # call, passing the normalized (ANSI-stripped) turn buffer. BridgeAdapter
+        # uses it to stamp last_pty_read_loop_at (unconditional) and
+        # last_pty_activity_at (only when buffer differs from prior read) for the
+        # path-B mid-run wedge detector (#1724). Exceptions are swallowed —
+        # liveness signaling must never crash the loop.
+        self._on_pty_read = on_pty_read
         # Optional pre-warmed PTY pair from the PTYPool. When both
         # are provided, Container skips _spawn_pair() and reuses
         # the pool's prewarmed pair (BridgeAdapter is the caller in
@@ -751,6 +759,19 @@ class Container:
             min_content_bytes=min_content_bytes, timeout_s=CYCLE_IDLE_TIMEOUT_S
         )
         buffer = result.turn_buffer or result.buffer
+        # Fire the PTY read-loop hook (path-B mid-run wedge detector, #1724).
+        # Called unconditionally on every _cycle_idle so the bridge-adapter can
+        # stamp last_pty_read_loop_at and diff-gate last_pty_activity_at.
+        # Exceptions are swallowed — liveness signaling must never crash the run.
+        if self._on_pty_read is not None:
+            try:
+                self._on_pty_read(buffer)
+            except Exception as _pty_read_err:
+                import logging as _log
+
+                _log.getLogger(__name__).debug(
+                    "[granite-container] on_pty_read hook raised: %s", _pty_read_err
+                )
         return (result.saw_idle, buffer, result.idle_marker, result.elapsed_ms)
 
     # -- Startup phase ----------------------------------------------------

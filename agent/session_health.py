@@ -310,6 +310,17 @@ TOOL_TIMEOUT_INTERNAL_SEC = int(os.environ.get("TOOL_TIMEOUT_INTERNAL_SEC", 30))
 TOOL_TIMEOUT_MCP_SEC = int(os.environ.get("TOOL_TIMEOUT_MCP_SEC", 120))
 TOOL_TIMEOUT_DEFAULT_SEC = int(os.environ.get("TOOL_TIMEOUT_DEFAULT_SEC", 300))
 
+# === Path-B mid-run wedge detector constants (#1724) ===
+# Stage-1 cheap quiescence gate: window of continuous PTY-screen quiescence
+# (no new paint detected by the on_pty_read callback) before a running session
+# with a tool in flight is marked a confirmed suspect for stage-2 dispatch.
+# Provisional — tune via env. The value balances false-positive risk (a slow
+# model turn that just happens to be silent) against detection latency. 180s
+# (3 minutes) accommodates slow extended-thinking turns while still catching
+# genuine wedges well within the existing TOOL_TIMEOUT_DEFAULT_SEC (300s) budget.
+# Set to 0 to disable the quiescence gate without disabling the writers.
+MID_RUN_QUIESCENCE_SECS: float = float(os.environ.get("MID_RUN_QUIESCENCE_SECS", "180"))
+
 # Internal-tier tool name set: lightweight built-in tools that should never
 # legitimately exceed 30s. Hard-coded; adding a tool is a one-line edit. Not
 # env-overridable in v1 — drift risk is small and documented.
@@ -2266,6 +2277,180 @@ async def _agent_session_health_loop() -> None:
         await asyncio.sleep(AGENT_SESSION_HEALTH_CHECK_INTERVAL)
 
 
+def _eval_mid_run_pty_stage1(entry: "AgentSession", now: datetime) -> None:
+    """Stage-1 PTY quiescence evaluation for the path-B mid-run wedge detector (#1724).
+
+    Evaluates PTY screen liveness for a single session on the 30s tool-timeout
+    sub-loop tick. Updates durable cross-tick state on ``entry`` in place and
+    persists via ``update_fields``. Does NOT recover — it only maintains the
+    ``mid_run_quiescent_since`` timestamp and flags confirmed suspects for the
+    future stage-2 dispatch (task 4). Fail-silent: never raises.
+
+    Eligibility gate:
+    - ``sdk_ever_output=True``: session has produced at least one PM turn.
+    - ``current_tool_name`` is set: a tool is currently in flight.
+    - ``last_pty_read_loop_at`` is not None: PTY writer has initialized.
+
+    Three-state PTY freshness logic (compared against ``last_heartbeat_at``):
+    1. ABSTAIN: ``last_pty_read_loop_at`` is None → writer not initialized yet.
+    2. ABSTAIN: read-loop marker is stale (> HEARTBEAT_FRESHNESS_WINDOW behind
+       ``last_heartbeat_at``) → the pexpect thread may have died; clear
+       ``mid_run_quiescent_since`` and skip this tick.
+    3. FRESH: read-loop marker is current.
+       a. Activity fresh (``last_pty_activity_at`` recently changed): NOT a
+          suspect; clear ``mid_run_quiescent_since``.
+       b. Activity stale (screen not repainting): check the snapshot tuple
+          ``(last_pty_activity_at, byte_offset)`` against the prior tick's
+          ``mid_run_pty_snapshot``. If unchanged, increment the quiescence
+          window (set ``mid_run_quiescent_since`` if not already set); if
+          ``now - mid_run_quiescent_since >= MID_RUN_QUIESCENCE_SECS``,
+          log the confirmed suspect for stage-2. If the snapshot changed,
+          reset ``mid_run_quiescent_since``.
+    """
+    try:
+        # Eligibility: must have produced output and have a tool in flight.
+        sdk_ever_output = bool(
+            getattr(entry, "last_turn_at", None) or getattr(entry, "last_tool_use_at", None)
+        )
+        if not sdk_ever_output:
+            return
+        tool_name = getattr(entry, "current_tool_name", None)
+        if not tool_name:
+            return
+
+        # Eligibility: PTY writer must have initialized.
+        last_loop_at = getattr(entry, "last_pty_read_loop_at", None)
+        if not isinstance(last_loop_at, datetime):
+            # ABSTAIN: writer never initialized (non-granite session or not yet started).
+            return
+
+        last_loop_aware = last_loop_at if last_loop_at.tzinfo else last_loop_at.replace(tzinfo=UTC)
+        last_hb_at = getattr(entry, "last_heartbeat_at", None)
+
+        # Use last_heartbeat_at as the reference clock for staleness checks.
+        # If not set, fall back to now (conservative).
+        if isinstance(last_hb_at, datetime):
+            ref_time = last_hb_at if last_hb_at.tzinfo else last_hb_at.replace(tzinfo=UTC)
+        else:
+            ref_time = now
+
+        loop_age = (ref_time - last_loop_aware).total_seconds()
+        if loop_age > HEARTBEAT_FRESHNESS_WINDOW:
+            # ABSTAIN: the pexpect read-loop writer has gone silent (thread may
+            # have died or been throttled). Clear quiescent_since so we don't
+            # accumulate stale quiescence time across a writer outage.
+            mid_qs = getattr(entry, "mid_run_quiescent_since", None)
+            if mid_qs is not None:
+                try:
+                    entry.mid_run_quiescent_since = None
+                    save = getattr(entry, "save", None)
+                    if callable(save):
+                        save(update_fields=["mid_run_quiescent_since"])
+                except Exception as _clr_err:
+                    logger.debug(
+                        "[session-health] stage-1 mid_run_quiescent_since clear failed: %s",
+                        _clr_err,
+                    )
+            logger.debug(
+                "[session-health] stage-1 ABSTAIN session=%s: "
+                "last_pty_read_loop_at stale by %.0fs (> HEARTBEAT_FRESHNESS_WINDOW=%ds)",
+                getattr(entry, "agent_session_id", "?"),
+                loop_age,
+                HEARTBEAT_FRESHNESS_WINDOW,
+            )
+            return
+
+        # PTY read-loop is fresh. Check whether the screen is repainting.
+        last_activity_at = getattr(entry, "last_pty_activity_at", None)
+        activity_fresh = False
+        if isinstance(last_activity_at, datetime):
+            act_aware = (
+                last_activity_at
+                if last_activity_at.tzinfo
+                else last_activity_at.replace(tzinfo=UTC)
+            )
+            activity_age = (now - act_aware).total_seconds()
+            # Screen is "fresh" if activity within the same HEARTBEAT_FRESHNESS_WINDOW.
+            activity_fresh = activity_age < HEARTBEAT_FRESHNESS_WINDOW
+
+        # Build current snapshot tuple string for cross-tick comparison.
+        # byte_offset is a corroborator (log but do not gate on it).
+        act_iso = last_activity_at.isoformat() if isinstance(last_activity_at, datetime) else "None"
+        byte_offset = getattr(entry, "total_input_tokens", None)  # best available proxy
+        current_snapshot = f"({act_iso},{byte_offset})"
+
+        prior_snapshot = getattr(entry, "mid_run_pty_snapshot", None)
+        mid_qs = getattr(entry, "mid_run_quiescent_since", None)
+
+        update_fields: list[str] = []
+
+        if activity_fresh:
+            # NOT a suspect: screen is repainting. Clear quiescent_since.
+            if mid_qs is not None:
+                entry.mid_run_quiescent_since = None
+                update_fields.append("mid_run_quiescent_since")
+        else:
+            # Screen is quiescent. Compare snapshot to prior tick.
+            if current_snapshot == prior_snapshot:
+                # Same snapshot as last tick: screen has not repainted.
+                if mid_qs is None:
+                    # First quiescent tick: record the start time.
+                    entry.mid_run_quiescent_since = now
+                    update_fields.append("mid_run_quiescent_since")
+                    mid_qs = now
+                # Check whether the quiescence window has been exceeded.
+                if isinstance(mid_qs, datetime):
+                    qs_aware = mid_qs if mid_qs.tzinfo else mid_qs.replace(tzinfo=UTC)
+                    quiescent_secs = (now - qs_aware).total_seconds()
+                    if MID_RUN_QUIESCENCE_SECS > 0 and quiescent_secs >= MID_RUN_QUIESCENCE_SECS:
+                        logger.warning(
+                            "[session-health] stage-1 CONFIRMED SUSPECT session=%s "
+                            "tool=%s quiescent_secs=%.0f byte_offset=%s "
+                            "(awaiting stage-2 dispatch, task #1724)",
+                            getattr(entry, "agent_session_id", "?"),
+                            tool_name,
+                            quiescent_secs,
+                            byte_offset,
+                        )
+                    else:
+                        logger.debug(
+                            "[session-health] stage-1 quiescent session=%s tool=%s "
+                            "quiescent_secs=%.0f / %.0f",
+                            getattr(entry, "agent_session_id", "?"),
+                            tool_name,
+                            quiescent_secs,
+                            MID_RUN_QUIESCENCE_SECS,
+                        )
+            else:
+                # Snapshot changed between ticks (activity resumed): reset.
+                if mid_qs is not None:
+                    entry.mid_run_quiescent_since = None
+                    update_fields.append("mid_run_quiescent_since")
+
+        # Always rewrite snapshot to current (cross-tick state persistence).
+        entry.mid_run_pty_snapshot = current_snapshot
+        update_fields.append("mid_run_pty_snapshot")
+
+        if update_fields:
+            try:
+                save = getattr(entry, "save", None)
+                if callable(save):
+                    save(update_fields=update_fields)
+            except Exception as _save_err:
+                logger.debug(
+                    "[session-health] stage-1 snapshot save failed for %s: %s",
+                    getattr(entry, "agent_session_id", "?"),
+                    _save_err,
+                )
+
+    except Exception:
+        logger.debug(
+            "[session-health] stage-1 eval raised for session %s",
+            getattr(entry, "agent_session_id", "?"),
+            exc_info=True,
+        )
+
+
 async def _agent_session_tool_timeout_check() -> None:
     """Per-tool timeout sub-loop tick (issue #1270).
 
@@ -2344,6 +2529,14 @@ async def _agent_session_tool_timeout_check() -> None:
                             worker_key=fresh_ns.worker_key,
                         )
                         continue
+
+            # === Stage-1 PTY quiescence gate (path B, #1724) ===
+            # Cheap, stateless per-tick evaluation of PTY screen activity for
+            # sessions that have produced output and have a tool in flight.
+            # Updates durable state (mid_run_quiescent_since, mid_run_pty_snapshot)
+            # on the entry object and persists via update_fields. Does NOT recover —
+            # it only flags confirmed suspects for stage-2 (task 4). Fail-silent.
+            _eval_mid_run_pty_stage1(entry, now)
 
             check = _check_tool_timeout(entry)
             if check is None:
