@@ -160,9 +160,12 @@ asserts a verdict lands on the correct session; the unit tests mock/stub the ORM
   survive deferral and divert the write. Direct assignment from the parsed argument on every run
   is the only safe form; quoting alone is inert against a non-empty wrong value (Concern 4).
 - **Issue-number resolution in `do-pr-review`**: Assign `ISSUE_NUMBER` **unconditionally** in the
-  context-resolution block, sourced from `$SDLC_ISSUE_NUMBER` env first, then fall back to
-  extracting the tracking issue from the PR body (`Closes #N` / `tracking:` link) — the extraction
-  the env table already promises but never performs.
+  context-resolution block, sourced from `$ARGUMENTS` first, then by extracting the tracking issue
+  from the PR body (`Closes #N` / `Fixes #N` / `tracking:` link) — the extraction the env table
+  already promises but never performs. An inherited `$SDLC_ISSUE_NUMBER` env value is **never**
+  treated as authoritative: a stale latched value (the "#1724" mechanism this issue fixes) would
+  otherwise divert the write. Since `do-sdlc` §3c no longer exports `SDLC_ISSUE_NUMBER`, the
+  authoritative path is `$ARGUMENTS` → PR-body extraction.
 - **Positive-integer assertion after EVERY resolution path (Blocker 2)**: Both fallback paths can
   legitimately produce an *empty* value — `do-plan-critique`'s plan-frontmatter recovery yields
   nothing if the frontmatter lacks a tracking link, and `do-pr-review`'s `Closes #N` grep yields
@@ -182,8 +185,8 @@ asserts a verdict lands on the correct session; the unit tests mock/stub the ORM
   #1671/#1672 precedence), so an exported env var is dead weight at best — and at worst it is
   itself a divert vector, since an ambient env value is exactly the "latched onto #1724" mechanism
   this issue is fixing. Args-only keeps the resolution path single-sourced and ambient-free. (Note:
-  `do-pr-review` still *reads* `$SDLC_ISSUE_NUMBER` if the env happens to carry it, but the `do-sdlc`
-  supervisor does not *set* it — the authoritative path is `$ARGUMENTS` → PR-body extraction.)
+  `do-pr-review` does NOT treat `$SDLC_ISSUE_NUMBER` as authoritative — the `do-sdlc` supervisor
+  never *sets* it, and the authoritative path is `$ARGUMENTS` → PR-body extraction.)
 - **Loud-fail recorder guard — DEFERRED (Concern 5 / Q1 resolved)**: A recorder-level guard that
   exits non-zero when no owning session can be resolved is **deferred to a follow-up issue**, not
   built here. The skill-side fixes (assign + clobber + positive-integer assertion + de-swallowed
@@ -273,7 +276,7 @@ router reads matching state → advances to next stage (no `no matching dispatch
    records the dispatch, then spawns a stage subagent (`do-sdlc/SKILL.md` §3c).
 2. **Fork boundary**: The subagent invokes the stage skill with `args "{N}"`. The fork's shell
    environment may or may not carry `ISSUE_NUMBER`/`SDLC_ISSUE_NUMBER`.
-3. **Stage skill resolution**: The skill *should* assign `$ISSUE_NUMBER` from `$ARGUMENTS`/env, then
+3. **Stage skill resolution**: The skill *should* assign `$ISSUE_NUMBER` from `$ARGUMENTS` (and, for do-pr-review, PR-body extraction) — never from an inherited env value — then
    run `sdlc-tool verdict record --issue-number "$ISSUE_NUMBER"` and `stage-marker ...`.
 4. **Recorder**: `tools/sdlc_verdict.py` / `tools/sdlc_stage_marker.py` call
    `find_session(issue_number=N, ensure=True)` → `tools/_sdlc_utils.py:283` resolves
@@ -418,10 +421,13 @@ skill + CLI paths.**
 
 - [ ] `do-plan-critique/SKILL.md` assigns `ISSUE_NUMBER` (numeric `$ARGUMENTS` and plan-path forms
       both resolve it) and every recorder call uses `--issue-number "$ISSUE_NUMBER"` (quoted).
-- [ ] `do-pr-review/SKILL.md` assigns `ISSUE_NUMBER` (from `$SDLC_ISSUE_NUMBER` env, falling back to
-      PR-body tracking-issue extraction) and every recorder call uses `--issue-number "$ISSUE_NUMBER"`.
-- [ ] `do-sdlc/SKILL.md` §3c dispatch template guarantees the fork receives the issue number via
-      both `args` and an explicit env hand-off (e.g. `SDLC_ISSUE_NUMBER`).
+- [ ] `do-pr-review/SKILL.md` assigns `ISSUE_NUMBER` by extracting the tracking issue from the PR body
+      (`Closes #N` / `Fixes #N`) FIRST, with `$ARGUMENTS` as the primary source; never trusts an
+      inherited `$SDLC_ISSUE_NUMBER` env value as authoritative — and every recorder call uses
+      `--issue-number "$ISSUE_NUMBER"`.
+- [ ] `do-sdlc/SKILL.md` §3c dispatch template passes the issue number via `args` only — it does NOT
+      export `SDLC_ISSUE_NUMBER` or any ambient env hand-off (Blocker 3 / Q2; an ambient env var is a
+      divert vector since find_session already prefers issue-number over env).
 - [ ] `grep -n 'ISSUE_NUMBER=' .claude/skills-global/do-plan-critique/SKILL.md` and the
       do-pr-review equivalent each return at least one assignment.
 - [ ] No `--issue-number $ISSUE_NUMBER 2>/dev/null || true` swallow remains on any stage-marker
@@ -483,7 +489,7 @@ skill + CLI paths.**
 - **Agent Type**: builder
 - **Parallel**: true
 - In `do-plan-critique/SKILL.md`: replace `ISSUE_NUM` with `ISSUE_NUMBER` in Plan Resolution; assign it **unconditionally** (clobber, never `${VAR:-…}`); ensure both numeric and plan-path `$ARGUMENTS` populate it (recover issue from plan frontmatter/issue body for the path case).
-- In `do-pr-review/SKILL.md`: assign `ISSUE_NUMBER` unconditionally from `$SDLC_ISSUE_NUMBER`, falling back to extracting the tracking issue (`Closes #N`) from the PR body.
+- In `do-pr-review/SKILL.md`: assign `ISSUE_NUMBER` unconditionally from `$ARGUMENTS` first, then by extracting the tracking issue (`Closes #N` / `Fixes #N`) from the PR body. Never treat an inherited `$SDLC_ISSUE_NUMBER` env value as authoritative (a stale value would divert the write).
 - **After every resolution path in both skills**, add the positive-integer assertion `[[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || { echo "...">&2; exit 1; }` **before any recorder call** (Blocker 2).
 - **Strip `2>/dev/null || true` from every stage-marker call** in `do-plan-critique` (lines ~15, ~22, ~413, ~434) so marker failures surface (Blocker 1). Ensure do-pr-review markers do not swallow either.
 - Quote every `--issue-number "$ISSUE_NUMBER"` in both skills.
