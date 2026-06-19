@@ -166,7 +166,7 @@ receive the user message as `$ARGUMENTS` (issue #1692):
   message omission).
 
 Persona is delivered entirely via these prime commands. No `--append-system-prompt`
-flag is set at spawn time (removed in issue #1692). The shared WORKER rails
+flag is set at spawn time. The shared WORKER rails
 (no-push-to-main, principal context, completion criteria) live in
 `.claude/commands/granite/_prime-rails.md` and each role prime references it.
 
@@ -298,7 +298,7 @@ The adapter writes non-user-visible progress to `agent_session.session_events`
 | `granite_user_routed` | on each `[/user]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
 | `granite_complete_routed` | on each `[/complete]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
 | `granite_delivery_failure` | a mid-loop `send_cb` raised | `event_type`, `text`, `payload_chars`, `reason`, `ts` |
-| `delivery_failure` | a mid-loop `send_cb` raised (legacy alias) | `payload_chars`, `reason`, `ts` |
+| `delivery_failure` | a mid-loop `send_cb` raised (alias for `granite_delivery_failure`) | `payload_chars`, `reason`, `ts` |
 
 Normal completions (`pm_complete`, `pm_user`, `pm_max_turns`) do **not** emit
 `exit_anomaly`, because they are expected outcomes. `pm_no_user_message` emits
@@ -830,9 +830,9 @@ branches unconditionally.
 naming the branch. The branch and worktree remain on disk. Grep `logs/worker.log` for
 `[unmerged-branch-guard]` to find preserved branches.
 
-**Interim accumulation:** Until #1647 lands the PM-authorized landing step, unmerged
-dev-session branches accumulate. The `preserved=N` counter in `logs/worker.log` is the
-interim signal. Manual operator action is the only safe reaping path — do NOT use
+**Interim accumulation:** Unmerged dev-session branches accumulate until the
+PM-authorized landing step. The `preserved=N` counter in `logs/worker.log` is the
+signal. Manual operator action is the only safe reaping path — avoid
 `scripts/worktree-gc.sh --apply` for no-PR branches (it has an unguarded `git branch -D`
 at line 208 that would re-destroy the preserved work).
 
