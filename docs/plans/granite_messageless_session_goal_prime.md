@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-19
 tracking: https://github.com/tomcounsell/ai/issues/1741
 last_comment_id:
+revision_applied: true
 ---
 
 # Granite messageless sdlc-local session fail-loud + /goal-driven PM/Dev prime
@@ -131,16 +132,27 @@ at the source; Fix B is a backstop at the sink.
    carries a real originating message derived from issue #N.
 2. **Executor read**: worker runs the record → `enriched_text = session.message_text`
    (`session_executor.py:1392`). `None` today; real string after Fix A.
-3. **Turn input**: `_turn_input = enriched_text`, then `pop_steering_messages()`
-   *may* override it (`:1519-1537`). **Critical**: the goal must anchor to the
-   originating `message_text`, never to a popped steering message — steering is
-   course-correction toward the goal, never redefinition of it.
+3. **Turn input**: `_turn_input = enriched_text` (`:1519`), then the steering-pop
+   block `pop_steering_messages()` *may* override it (`:1520-1537`). **Critical**:
+   the goal must anchor to the originating `message_text`, never to a popped
+   steering message — steering is course-correction toward the goal, never
+   redefinition of it. **Fix B guard lands HERE** — immediately after the
+   steering-pop block (~`:1538`), checking the **pre-SCOPE** `_turn_input` value:
+   if `_turn_input is None`, or `str(_turn_input).strip()` is `""` or exactly
+   `"None"`, finalize `failed` and `return` BEFORE `build_harness_turn_input` /
+   `BridgeAdapter` are constructed. This is the *only* point where the bare `None`
+   / `"None"` is still visible — see the note in step 4 on why the post-SCOPE
+   placement is a dead backstop.
 4. **Harness build**: `build_harness_turn_input(message=_turn_input, …)`
-   (`:1557`) wraps the message in SCOPE headers → `_harness_input`.
-5. **Finalize**: `_container_message = _harness_input` (`:1659`). **Fix B guard
-   lands here**: if `_container_message` is empty / `None` / strips to `"None"`,
-   finalize `failed` and return BEFORE building the BridgeAdapter / running the
-   container.
+   (`:1557`) wraps the message in a `SCOPE:`/`PROJECT:`/`FROM:`/`SESSION_ID:`
+   header block and appends `\nMESSAGE: {message}` → `_harness_input`. **Once this
+   runs, the bare `None` is gone**: `_harness_input` is the full multi-line header
+   block ending in `MESSAGE: None`. It NEVER strips to the bare string `"None"`,
+   so a guard placed at `_container_message` (post-SCOPE) can never fire on the
+   real #1460 failure — it would only catch a genuinely empty harness output,
+   which cannot happen. That is why the guard MUST sit pre-SCOPE at step 3.
+5. **Finalize**: `_container_message = _harness_input` (`:1659`). No guard here —
+   the guard already short-circuited at step 3 for the empty/None/"None" case.
 6. **Sink**: `do_work()` → `_bridge_adapter.run(user_message=_container_message)`
    → `Container.__init__` (`container.py:569`). The PM TUI is primed; the `/goal`
    (Fix C) anchors it to the originating message.
@@ -236,54 +248,101 @@ SCOPE block — a plain natural-language instruction. (The exact wording is a
 build-time detail; the load-bearing requirement is non-empty, issue-anchored,
 PM-actionable text.)
 
-**Fix B — `agent/session_executor.py` (~line 1659).** Immediately after
-`_container_message = _harness_input`, before `do_work()` / `BridgeAdapter`
-construction, add a guard:
+**Fix B — `agent/session_executor.py` (~line 1538, PRE-SCOPE).** The guard must
+check `_turn_input` **before** `build_harness_turn_input` wraps it in the SCOPE
+header block — because once wrapped, the bare `None` becomes a multi-line header
+block ending in `MESSAGE: None` that never strips to `"None"` (the SCOPE block
+also carries `PROJECT:`/`FROM:`/`SESSION_ID:`/`SCOPE:` headers). A guard at the
+post-SCOPE `_container_message` (line 1659) is a **dead backstop**: it can never
+fire on the real #1460 failure, only on a genuinely empty harness output that
+cannot occur. Place the guard immediately AFTER the steering-pop block
+(`session_executor.py:1520-1537`, i.e. right after `_turn_input = enriched_text`
+at `:1519` and the steering override) so it also catches an empty/None steering
+message, and BEFORE the `from agent.granite_container.bridge_adapter import
+BridgeAdapter` block at `:1544` and the `build_harness_turn_input` call at `:1557`:
 
-```
-_stripped = (_container_message or "").strip()
-if not _stripped or _stripped == "None":
-    # ... [executor-guard] structured error log with reason ...
-    # finalize_session(session, "failed", reason="empty_container_message: ...")
+```python
+# Fix B (issue #1741): fail loud on a messageless task. A None/empty/"None"
+# first message means the originating intent never reached this record (the
+# #1460 sdlc-local silent no-op). Guard the PRE-SCOPE value: once
+# build_harness_turn_input wraps _turn_input in the SCOPE header block, the
+# bare "None" is buried inside "MESSAGE: None" and can never be detected by a
+# strip()=="None" check. Container.__init__'s own "if not user_message.strip()"
+# guard also misses it because the SCOPE block is non-empty. Catch it here.
+_pre_scope = "" if _turn_input is None else str(_turn_input).strip()
+if _pre_scope == "" or _pre_scope == "None":
+    # ... [executor-guard] structured ERROR log with the offending repr ...
+    # finalize_session(session, "failed",
+    #     reason=f"empty_container_message: _turn_input stripped to {_pre_scope!r}")
     # mirror the StatusConflictError / last-resort save handling from the
-    # existing guards at :684-717 and :733-769
+    # existing guards at :684-717 and :733-771
     return
 ```
 
-Reuse the **exact** error-handling shape of the two existing guards: import
+Reuse the **exact** error-handling shape of the two existing guards
+(`session_executor.py:684-717`, `:733-771`): import
 `StatusConflictError, finalize_session` locally; call
-`finalize_session(session, "failed", reason="empty_container_message: container message stripped to <repr>")`;
+`finalize_session(session, "failed", reason="empty_container_message: _turn_input stripped to <repr>")`;
 catch `StatusConflictError` (already-terminal → log at INFO, no fallback save);
 catch broad `Exception` (alarm-log + last-resort `session.status = "failed";
-session.save(update_fields=["status","updated_at"])`). The structured
-`[executor-guard]` log line is the durable failure record — there is no
-`failure_reason` column. Emit the offending repr (e.g. the SCOPE block) so the
-log shows WHY it was judged empty.
+session.save(update_fields=["status","updated_at"])`); then `return`. The
+structured `[executor-guard]` log line is the durable failure record — there is
+no `failure_reason` column. Emit the offending repr (the bare `_turn_input`
+value, e.g. `None` or `'None'`) so the log shows WHY it was judged empty.
 
-Note: this guard catches the `"None"`-rendered SCOPE block that
-`Container.__init__`'s `strip()` check misses, AND any future regression that
-produces a null/empty message. It is defense-in-depth — Fix A removes the only
-known producer, Fix B ensures no producer can ever silently succeed again.
+Note: this guard catches the bare `None` / `"None"` first message that both
+`build_harness_turn_input` (which would otherwise render it into a `MESSAGE:
+None` SCOPE block) AND `Container.__init__`'s `strip()` check let through, AND
+any future regression that produces a null/empty `_turn_input`. It is
+defense-in-depth — Fix A removes the only known producer, Fix B ensures no
+producer can ever silently succeed again. Because it sits before the
+`BridgeAdapter`/harness construction, no container is ever spawned for a
+messageless session.
 
-**Fix C — the primes.**
+**Fix C — the primes.** The most failure-sensitive part of Fix C is the exact
+`/goal` condition text and the `WAITING:` sentinel wiring. The builder MUST copy
+the verbatim strings below rather than re-inventing them — the `/goal` Haiku
+evaluator reads ONLY the PM's own transcript and runs no tools, so the condition
+must be phrased so it is satisfiable purely from text the PM surfaces.
 
-*PM prime (`prime-pm-role.md`)*: add a "Set your goal" step at the top of "What
-you DO" instructing the PM, on its first turn, to set a `/goal` anchored to the
-literal `$ARGUMENTS` (the originating message). The completion condition must be
-**demonstrable in the PM transcript** because the `/goal` evaluator reads only
-the conversation and runs no tools. Concretely the condition is satisfied when
-the PM's transcript shows BOTH: (a) the Dev has reported the routed work
-complete (e.g. "PR for #N merged"), AND (b) the PM has authored a FINAL
-`[/complete]` reply to the supervisor (not a progress report). The prime states
-explicitly: anchor the goal to `$ARGUMENTS`, never to a later steering/relay
-message; steering is course-correction toward the goal, never redefinition.
+**Key mechanics the builder must understand (do not paraphrase loosely):**
+- `/goal` is a session-scoped Stop hook that operates INSIDE the PM's own TUI. It
+  re-drives a turn within the PM TUI after the PM stops if its condition is unmet.
+  It is NOT the granite operator's cross-role loop. The operator (which classifies
+  `[/dev]`/`[/user]`/`[/complete]` via `^\[/(dev|user|complete)(?::([a-z0-9_-]+))?\]\s*$`
+  and exits on PM `[/complete]`) remains the **sole** driver of cross-role turns.
+- The `WAITING:` sentinel is a transcript affordance for the `/goal` evaluator
+  ONLY. It is NOT a routing prefix and is NOT parsed by the granite classifier
+  regex. It is a plain final line in the PM's turn text that gives the `/goal`
+  Haiku evaluator demonstrable evidence the PM is legitimately blocked, so the
+  Stop hook quiesces instead of re-spinning the PM. When the Dev's report later
+  arrives via the operator relay, the PM starts a fresh turn naturally and `/goal`
+  re-evaluates against the new transcript.
+
+*PM prime (`prime-pm-role.md`)*: add a first-turn "Set your goal" step at the top
+of "What you DO" instructing the PM to run `/goal` on its first turn with the
+**verbatim** condition below, anchored to the literal `$ARGUMENTS` (the
+originating message). The PM substitutes the concrete issue number / task
+description for `{N}` / `{task}` but otherwise copies the condition text:
+
+> **Verbatim `/goal` condition (PM):**
+> `/goal The PM transcript shows BOTH of: (1) the Dev has reported the routed work for #{N} complete — concretely the Dev's relayed report states the PR for #{N} is merged; AND (2) I have authored a FINAL [/complete] reply to my supervisor delivering the result (not a progress report). This goal is also considered QUIESCENT for this turn — do NOT start another turn — if my most recent turn ends with a line beginning "WAITING:" indicating I have handed off to the Dev and am awaiting the Dev's report. Anchor this goal to the originating request above; steering or relay messages are course-corrections toward this goal, never a redefinition of it.`
+
+> **Verbatim `WAITING:` sentinel (PM, last line of any hand-off turn):**
+> `WAITING: Dev is executing {task}; will resume on Dev report. No further PM turn needed until the operator relays the Dev's report.`
+
+The prime states explicitly: anchor the goal to `$ARGUMENTS`, never to a later
+steering/relay message; steering is course-correction toward the goal, never
+redefinition. End every turn that routes `[/dev]` with the `WAITING:` sentinel
+line so `/goal` does not re-spin the PM while the Dev runs.
 
 *Dev prime (`prime-dev-role.md`)*: the Dev already waits for the operator to
-relay the PM's first `[/dev]` instruction (item 5, lines 30/53-55). Add one
+relay the PM's first `[/dev]` instruction (item 5, lines 30/49-55). Add one
 sentence: if the PM's first relay includes a `/goal …` directive, set it as your
-session goal; the goal is PM-decided and may be a decomposed sub-goal. Dev goal
-conditions may reference tool output the Dev surfaces (e.g. "`npm test` exits 0",
-"PR opened and review passed").
+session goal via `/goal`; the goal is PM-decided and may be a decomposed
+sub-goal. Dev goal conditions may reference tool output the Dev surfaces in its
+own transcript (e.g. "`pytest` for the changed test file exits 0", "PR opened and
+`/do-pr-review` passed").
 
 **Turn-loop ownership resolution (the primary design question).** Two
 turn-drivers coexist in one PTY session: (1) the granite operator, which drives
@@ -294,14 +353,17 @@ hazard: a PM blocked WAITING on the Dev gets re-turned (burning turns/tokens) by
 `/goal` because, from the PM transcript's point of view, the goal is not yet met.
 
 **Chosen mitigation: (a) — the PM completion/quiescence condition tolerates an
-explicit, in-transcript "WAITING on Dev" state.** The PM prime instructs the PM
-to end any turn where it has handed off to the Dev with a recognized waiting
-sentinel surfaced in the transcript (e.g. a final line `WAITING: Dev is
-executing <task>; will resume on Dev report`). The `/goal` condition is authored
-so it is satisfied (loop quiesces) when the PM's last turn ends in EITHER a
-final `[/complete]` reply to the supervisor OR a `WAITING:` sentinel. Because
-the `/goal` evaluator reads only the transcript, the `WAITING:` line is
-sufficient evidence for it to NOT re-drive a turn. The granite operator remains
+explicit, in-transcript "WAITING on Dev" state** (ratified; see Open Questions).
+The PM prime instructs the PM to end any turn where it has handed off to the Dev
+with the verbatim `WAITING:` sentinel surfaced in the transcript (the exact
+string is embedded in the Fix C section above). The verbatim `/goal` condition
+(also embedded above) is authored so it is satisfied (loop quiesces) when the
+PM's last turn ends in EITHER a final `[/complete]` reply to the supervisor OR a
+`WAITING:` sentinel line. Because the `/goal` evaluator reads only the
+transcript, the `WAITING:` line is sufficient evidence for it to NOT re-drive a
+turn. The `WAITING:` line is NOT a routing prefix — the granite classifier regex
+`^\[/(dev|user|complete)(?::([a-z0-9_-]+))?\]\s*$` does not match it, so it never
+contends with the operator's cross-role routing. The granite operator remains
 the **sole** driver of the next cross-role turn: when the Dev's report arrives,
 the operator relays it into the PM, which starts a fresh PM turn naturally. The
 goal then re-evaluates against the new transcript content and, if the work is
@@ -329,15 +391,29 @@ it. (a) is authored-text only and keeps the operator and `/goal` decoupled.
   handler. State: "no new exception handlers in `sdlc_session_ensure`."
 
 ### Empty/Invalid Input Handling
-- [ ] Fix B is itself the empty/invalid-input handler. Unit-test all three
-  trigger forms against the guard: `_container_message = None`, `""`,
-  whitespace-only, and a SCOPE block that strips to `"None"` → each must finalize
-  `failed` and must NOT construct the BridgeAdapter / run the container.
-- [ ] Assert the non-trigger case: a real non-empty message passes the guard and
-  proceeds to dispatch (guard must not be over-eager — e.g. a message that merely
-  *contains* "None" mid-text but does not strip to exactly "None" must pass).
+- [ ] Fix B is itself the empty/invalid-input handler. Unit-test all trigger
+  forms against the **pre-SCOPE `_turn_input`** guard: `message_text=None`,
+  `message_text=""`, `message_text="   "` (whitespace-only), and
+  `message_text="None"` (the literal bare token) → each must finalize `failed`
+  and must NOT call `BridgeAdapter.run` / spawn the container.
+- [ ] **Test fixture (do NOT reuse `TestExecutorGuardWorkingDirNone`):** that
+  class's `_block_path_constructor` monkeypatch makes `Path()` explode at
+  `session_executor.py:773` — ~750 lines BEFORE the new pre-SCOPE guard at
+  `:1538` — so a Fix B test using it would raise at the Path() line and never
+  reach the guard. Build the Fix B test on the **`TestExecutorGraniteWiring`
+  fixture shape** instead (`_make_session(working_dir="/tmp", ...)` with a valid
+  `working_dir`/`session_id`, plus `patch.object(BridgeAdapter, "run", _fake_run)`
+  recording calls and an initialized PTY pool). That session reaches deep into the
+  executor (today it reaches `BridgeAdapter.run` at `:1662`); with an empty/None
+  `message_text` and no queued steering messages, it must short-circuit at the new
+  guard and `BridgeAdapter.run` must NOT be called.
+- [ ] Assert the non-trigger case: a real non-empty `message_text` (e.g.
+  `"hello granite"`) passes the guard and `BridgeAdapter.run` IS called. Also
+  assert a message that merely *contains* "None" mid-text (e.g.
+  `"Investigate the None return from foo()"`) but does not strip to exactly
+  "None" passes — the guard must not be over-eager (substring vs exact-match).
 - [ ] Verify a messageless `sdlc-local-{N}` can no longer reach a 👏 success: the
-  session ends `failed`, never `completed`.
+  session ends `failed`, never `completed`, and no container is spawned.
 
 ### Error State Rendering
 - [ ] Fix B's failure is operator-visible via the `[executor-guard]` structured
@@ -355,14 +431,23 @@ it. (a) is authored-text only and keeps the operator and `/goal` decoupled.
   `message_text is None` (if present) must flip to assert the new value.
 - [ ] `tests/integration/test_sdlc_session_ensure_integration.py` — UPDATE:
   end-to-end creation assertions extend to cover the populated `message_text`.
-- [ ] `tests/unit/test_session_executor_guards.py` — UPDATE (extend): add a new
-  test class `TestExecutorGuardEmptyContainerMessage` mirroring the existing
-  `TestExecutorGuardWorkingDirNone` pattern (same fixtures, same caplog
-  assertions on the `[executor-guard]` reason), covering the empty/"None"/None
-  container-message cases and the non-trigger pass-through case.
-- [ ] `tests/unit/test_session_executor_granite.py` — UPDATE if it asserts the
-  dispatch always proceeds; ensure no existing granite-path test regresses now
-  that an empty message short-circuits before BridgeAdapter construction.
+- [ ] `tests/unit/test_session_executor_granite.py` — UPDATE (extend, **primary
+  home for the Fix B test**): add a new test class
+  `TestExecutorGuardEmptyTurnInput` built on this file's `_make_session` +
+  `BridgeAdapter.run` patch + initialized PTY pool fixtures (the
+  `TestExecutorGraniteWiring` shape), because that shape actually reaches the new
+  pre-SCOPE guard at `:1538`. Cover: `message_text` ∈ {None, "", "   ", "None"} →
+  session `failed`, `[executor-guard]` ERROR log with reason,
+  `BridgeAdapter.run` NOT called; and the non-trigger cases (`"hello granite"`,
+  `"...None..."` mid-text) → `BridgeAdapter.run` IS called. Also confirm the
+  existing `TestExecutorGraniteWiring` tests still pass (they use
+  `message_text="hello granite"`, which passes the guard unchanged).
+- [ ] `tests/unit/test_session_executor_guards.py` — NO CHANGE for Fix B. The
+  `_block_path_constructor` fixture there short-circuits at `Path()`
+  (`:773`) long before the new guard, so it cannot host the Fix B test. Leave it
+  to the existing `working_dir`/`session_id` guard coverage. (Rationale recorded
+  here so a future editor does not "helpfully" add the Fix B test to the wrong
+  file.)
 - [ ] No prime-file unit tests exist today (the primes are authored markdown).
   Fix C verification is via a structural test asserting the prime files contain
   the required `/goal` and `WAITING:` affordances (see Verification table) — a
@@ -405,10 +490,11 @@ two-tier no-progress detector and turn caps in the executor are the backstop.
 **Impact:** A real message that happens to strip to something the guard
 mis-judges (e.g. a message whose entire content is the literal word "None")
 would be failed incorrectly.
-**Mitigation:** The guard triggers only on exact-match `strip() == "None"` or
-empty/whitespace — not substring containment. The "real message contains 'None'
-mid-text" non-trigger case is an explicit unit test. The realistic blast radius
-is near-zero: a legitimate first message is never the bare token "None".
+**Mitigation:** The guard triggers only on exact-match `_pre_scope == "None"` or
+empty/whitespace (where `_pre_scope = str(_turn_input).strip()`) — not substring
+containment. The "real message contains 'None' mid-text" non-trigger case is an
+explicit unit test. The realistic blast radius is near-zero: a legitimate first
+message is never the bare token "None".
 
 ### Risk 3: `/goal` and the operator's classifier both react to the same turn
 **Impact:** Double-driving — the operator relays a turn AND `/goal` re-drives it,
@@ -584,17 +670,25 @@ The lead agent orchestrates; it never builds directly.
 ### 2. Fix B — fail loud on empty container message
 - **Task ID**: build-fix-b
 - **Depends On**: none
-- **Validates**: tests/unit/test_session_executor_guards.py, tests/unit/test_session_executor_granite.py
+- **Validates**: tests/unit/test_session_executor_granite.py
 - **Assigned To**: guard-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- After `_container_message = _harness_input` (~`session_executor.py:1659`), add a
-  guard: if `(_container_message or "").strip()` is empty or `== "None"`,
-  finalize `failed` and `return` before BridgeAdapter construction / `do_work()`.
+- Add the guard **PRE-SCOPE**, immediately after the steering-pop block
+  (~`session_executor.py:1538`, right after `_turn_input = enriched_text` at
+  `:1519` and the steering override) and BEFORE the
+  `from agent.granite_container.bridge_adapter import BridgeAdapter` import at
+  `:1544` / the `build_harness_turn_input` call at `:1557`. Condition: with
+  `_pre_scope = "" if _turn_input is None else str(_turn_input).strip()`, if
+  `_pre_scope == "" or _pre_scope == "None"`, finalize `failed` and `return`.
+- **Do NOT place the guard at `_container_message = _harness_input` (`:1659`)** —
+  that value is the full SCOPE header block ending in `MESSAGE: None`; it never
+  strips to `"None"`, so a guard there is a dead backstop that cannot catch the
+  #1460 failure.
 - Mirror the existing guards' error handling exactly (local import of
   `StatusConflictError, finalize_session`; `StatusConflictError` → INFO; broad
-  `Exception` → alarm-log + last-resort status save). Emit the offending repr in
-  the `[executor-guard]` log. Cite #1741.
+  `Exception` → alarm-log + last-resort status save). Emit the offending
+  `_turn_input` repr in the `[executor-guard]` log. Cite #1741.
 
 ### 3. Fix C — /goal-anchored primes + turn-loop ownership
 - **Task ID**: build-fix-c
@@ -617,15 +711,21 @@ The lead agent orchestrates; it never builds directly.
 ### 4. Tests — Fix A, Fix B, prime structure
 - **Task ID**: build-tests
 - **Depends On**: build-fix-a, build-fix-b, build-fix-c
-- **Validates**: tests/unit/test_sdlc_session_ensure.py, tests/unit/test_session_executor_guards.py, tests/integration/test_sdlc_session_ensure_integration.py
+- **Validates**: tests/unit/test_sdlc_session_ensure.py, tests/unit/test_session_executor_granite.py, tests/integration/test_sdlc_session_ensure_integration.py
 - **Assigned To**: test-builder
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Extend `test_sdlc_session_ensure.py` / integration to assert `message_text` is
   non-empty and issue-anchored.
-- Add `TestExecutorGuardEmptyContainerMessage` (mirror `TestExecutorGuardWorkingDirNone`):
-  None / "" / whitespace / strips-to-"None" → `failed` + `[executor-guard]` log;
-  real message passes; "None" mid-text non-trigger passes.
+- Add `TestExecutorGuardEmptyTurnInput` **in
+  `tests/unit/test_session_executor_granite.py`** built on its `_make_session` +
+  `patch.object(BridgeAdapter, "run", ...)` + initialized-PTY-pool fixtures (the
+  `TestExecutorGraniteWiring` shape): `message_text` ∈ {None, "", whitespace,
+  "None"} → `failed` + `[executor-guard]` log + `BridgeAdapter.run` NOT called;
+  `"hello granite"` and `"...None..."` mid-text non-trigger → `BridgeAdapter.run`
+  IS called. **Do NOT use `test_session_executor_guards.py`'s
+  `_block_path_constructor` fixture** — it explodes at `Path()` (`:773`) before
+  the new guard.
 - Add a structural test asserting the PM prime contains `/goal` + `WAITING:` and
   the Dev prime references accepting a PM-set goal.
 
@@ -660,10 +760,12 @@ The lead agent orchestrates; it never builds directly.
 | Check | Command | Expected |
 |-------|---------|----------|
 | Fix A unit tests pass | `pytest tests/unit/test_sdlc_session_ensure.py -q` | exit code 0 |
-| Fix B guard tests pass | `pytest tests/unit/test_session_executor_guards.py -q` | exit code 0 |
+| Fix B guard tests pass | `pytest tests/unit/test_session_executor_granite.py -q` | exit code 0 |
 | Fix A integration passes | `pytest tests/integration/test_sdlc_session_ensure_integration.py -q` | exit code 0 |
 | `create_local` call sets message_text | `grep -n "message_text" tools/sdlc_session_ensure.py` | output contains message_text |
-| Fix B guard present | `grep -n 'strip() == "None"' agent/session_executor.py` | output > 0 |
+| Fix B guard is PRE-SCOPE (near `_turn_input`, not `_container_message`) | `awk '/_turn_input = enriched_text/{l=NR} /_pre_scope/{print NR-l}' agent/session_executor.py` | a small positive offset (guard sits within ~25 lines AFTER `_turn_input = enriched_text`, BEFORE `build_harness_turn_input`) |
+| Fix B guard precedes harness build | `grep -n '_pre_scope\|build_harness_turn_input' agent/session_executor.py` | `_pre_scope` line number is LESS than the `build_harness_turn_input` call line |
+| Fix B guard NOT at `_container_message` | `grep -n 'strip() == "None"' agent/session_executor.py` | empty (the dead-backstop placement must NOT exist) |
 | PM prime sets /goal | `grep -n "/goal" .claude/commands/granite/prime-pm-role.md` | output > 0 |
 | PM prime has WAITING sentinel | `grep -n "WAITING" .claude/commands/granite/prime-pm-role.md` | output > 0 |
 | Dev prime accepts PM goal | `grep -ni "goal" .claude/commands/granite/prime-dev-role.md` | output > 0 |
@@ -674,22 +776,37 @@ The lead agent orchestrates; it never builds directly.
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | critique-1 | Fix B guard at `:1659` (`_container_message`) is a dead backstop — `_harness_input` is the full SCOPE block ending in `MESSAGE: None`, never strips to `"None"`. | Relocated guard to PRE-SCOPE ~`:1538` (after steering-pop, before `build_harness_turn_input`), checking `_turn_input`. | Data Flow steps 3-5, Technical Approach Fix B, build-fix-b task, Verification greps all updated. |
+| Non-blocking | critique-1 | Fix B test cannot reuse `TestExecutorGuardWorkingDirNone` — `_block_path_constructor` explodes at `Path()` (`:773`) before the guard. | Spec'd Fix B test on `TestExecutorGraniteWiring` fixture shape in `test_session_executor_granite.py`. | Test Impact + Failure Path Test Strategy + build-tests updated; `test_session_executor_guards.py` explicitly NOT touched for Fix B. |
+| Non-blocking | critique-1 | Fix C `/goal` condition + `WAITING:` sentinel were prose-only (most failure-sensitive part). | Embedded EXACT verbatim `/goal` condition string and `WAITING:` sentinel in Fix C; clarified `WAITING:` is a `/goal`-evaluator affordance, not a classifier prefix. | Mitigation (a) kept (operator sole turn driver); (b) rejected. |
+| Resolved | n/a | 3 confirm-only open questions. | Completion bar = "Dev reported PR for #N merged AND final `[/complete]` delivered"; Fix A = issue-anchored wording; mitigation (a) ratified. | See Resolved Decisions section. |
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **PM `/goal` completion-condition phrasing.** The plan picks "Dev reported the
-   routed work complete AND PM delivered a final `[/complete]` reply" as the
-   transcript-demonstrable condition, with a `WAITING:` sentinel for quiescence.
-   Is that the right completion bar, or should the PM's goal also require an
-   explicit human acknowledgement (👍) before it considers itself done?
-2. **Fix A message wording.** Minimum is `f"/do-sdlc {issue_number}"`; the plan
-   proposes a richer "Run the full SDLC pipeline for issue #{N}; read the issue
-   body…" so the PM can resolve the goal from the issue. Confirm the richer
-   phrasing is preferred (it is what makes the `/goal` anchor useful).
-3. **Turn-loop ownership mitigation.** The plan commits to mitigation (a) —
-   in-transcript `WAITING:` sentinel, operator stays sole cross-role driver — and
-   explicitly rejects (b) (operator suppresses the Stop hook). Confirm (a) is
-   acceptable before build; it is authored-text only and keeps `/goal` and the
-   operator decoupled.
+The three prior confirm-only open questions are settled with the defaults below.
+No open questions remain.
+
+1. **PM `/goal` completion bar — RESOLVED.** The completion bar is: **"Dev
+   reported PR for #N merged AND I delivered a final `[/complete]` reply to my
+   supervisor."** No explicit human 👍 acknowledgement is required for the `/goal`
+   to consider itself done — the `[/complete]` reply IS the terminal deliverable,
+   and the human 👍 is a separate, out-of-band "done for now" signal (per the
+   repo's reaction convention), not a precondition the Haiku evaluator could even
+   observe in the PM transcript. The `WAITING:` sentinel provides per-turn
+   quiescence while the Dev runs. This is the verbatim condition embedded in the
+   Fix C section.
+2. **Fix A message wording — RESOLVED: issue-anchored (richer than the bare
+   minimum).** The `message_text` references issue #N so the PM can read the issue
+   body for the goal: `"Run the full SDLC pipeline for issue #{N}. Read the issue
+   body for the work to be done (#{url} if present)."` This is preferred over the
+   bare `/do-sdlc {N}` minimum precisely because it makes the `/goal` anchor
+   resolvable — the PM can pull the real intent from the issue rather than from a
+   thin command string.
+3. **Turn-loop ownership — RESOLVED: mitigation (a), ratified.** In-transcript
+   `WAITING:` sentinel; the operator stays the sole cross-role turn driver;
+   `/goal` only guards premature completion and quiesces on `[/complete]` OR
+   `WAITING:`. Mitigation (b) (operator suppresses the Stop hook) is explicitly
+   rejected — it couples the operator to `/goal` internals it does not own. (a)
+   is authored-text only and keeps the operator and `/goal` decoupled.
