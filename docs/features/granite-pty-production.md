@@ -184,12 +184,27 @@ the routing outcome (including dev routes). The first steady-state iteration
 then reads a **fresh** PM idle before classifying — the stale-buffer race guard
 — so the prime buffer is never double-classified.
 
-### Wrap-up guard — mandatory user-facing delivery (issue #1647)
+### Per-turn contract reminder (issue #1719)
+
+On every steady-state Dev→PM handoff write, `PM_TURN_CONTRACT_REMINDER` is
+appended to the dev_text sent to PM's PTY:
+
+```
+"Begin your reply with [/user], [/complete], or [/dev] on its own line."
+```
+
+This single sentence costs minimal tokens and prevents PM from losing the
+routing prefix contract across multi-turn cycles — a regression introduced when
+issue #1694 removed the `--append-system-prompt` path that previously
+reinforced the contract at the system-prompt level.
+
+### Wrap-up guard — mandatory user-facing delivery (issue #1647, relaxed #1719)
 
 The `_run_wrapup_guard` method fires when the run exits in a
-*successful-shaped* state (`pm_complete`, `pm_user`, `pm_max_turns`) but
-`result.user_facing_routed` is still `False`. This happens when PM performs
-only `[/dev]` routing turns and never emits `[/user]` or `[/complete]`.
+*successful-shaped* state (`pm_complete`, `pm_user`, `pm_max_turns`,
+`pm_floor_delivered`) but `result.user_facing_routed` is still `False`. This
+happens when PM performs only `[/dev]` routing turns and never emits `[/user]`
+or `[/complete]`.
 
 The guard:
 
@@ -197,15 +212,24 @@ The guard:
    call), a fresh Dev idle read, or `DEV_REPORT_UNAVAILABLE` as fallback.
 2. Writes `PM_WRAPUP_PROMPT` (seeded with the Dev report) to PM's PTY and
    waits for PM to respond — capped at `MAX_WRAPUP_ATTEMPTS = 1`.
-3. If PM responds with a `[/user]` or `[/complete]`, that payload is delivered
-   and `user_facing_routed = True`.
-4. If PM still does not produce a user-facing message after all attempts,
+3. Three-way floor on PM's response:
+   - **Compliant prefix** (`[/user]`, `[/complete]`, or `[/dev]`): payload is
+     routed normally via `_route_pm_classification`; `user_facing_routed = True`.
+   - **Non-empty but prefix-less**: text is delivered directly via
+     `_on_user_payload(pm_text.strip())`; `user_facing_routed = True`;
+     `exit_reason = "pm_floor_delivered"`. This avoids sending
+     `PM_COMPLIANCE_NUDGE` into the dying PTY, which would have triggered
+     another idle cycle and fallen to the canned message anyway.
+   - **Empty PM transcript**: falls through to step 4.
+4. If PM's transcript is empty after all attempts (genuinely no output),
    delivers `OPERATOR_TERMINAL_MESSAGE` directly via `on_user_payload` and
    sets `exit_reason = "pm_no_user_message"`.
 
 **The human is never left with only an emoji.** The wrap-up guard guarantees
 at least `OPERATOR_TERMINAL_MESSAGE` reaches the user for every successful run,
-regardless of how the PM classified its turns internally.
+regardless of how the PM classified its turns internally. When PM produces any
+non-empty text — even without the required routing prefix — that real text is
+preferred over the canned fallback.
 
 ### Completion emoji and `user_facing_routed`
 
@@ -239,9 +263,12 @@ delivers per-turn `[/user]` payloads **mid-loop** — the user sees responses
   PM's final turn classifies as `[/user]` — this is the same model behavior,
   now visible to the operator in real time.
 - (e) A session that completes via `pm_no_user_message` (wrap-up guard
-  exhausted) sends `OPERATOR_TERMINAL_MESSAGE` — a brief canned notice that
-  the task was handled. This is a last resort; the wrap-up guard should
-  normally coax a summary from PM.
+  exhausted with empty PM transcript) sends `OPERATOR_TERMINAL_MESSAGE` — a
+  brief canned notice that the task was handled. This is a last resort; the
+  wrap-up guard should normally coax a summary from PM.
+- (f) A session where PM produced a non-empty but prefix-less final message
+  delivers that text directly via the relaxed floor (`pm_floor_delivered` exit
+  reason). The user receives PM's actual words rather than the canned fallback.
 
 ## Per-turn silence cap (not total runtime cap)
 
@@ -444,8 +471,13 @@ occupancy and the running session.
 
 `AgentSession.exit_reason` is granite-path-populated. The dashboard renders a
 warning chip for non-clean values. Clean exit reasons: `pm_complete`, `pm_user`,
-`pm_max_turns`. Anomaly exit reasons: `pm_hang`, `dev_hang`,
-`startup_unresolved`, `pm_no_user_message`, `exception`.
+`pm_max_turns`, `pm_floor_delivered` (wrap-up floor delivered PM's non-empty
+prefix-less text directly; user received a real message). Anomaly exit reasons:
+`pm_hang`, `dev_hang`, `startup_unresolved`, `pm_no_user_message`, `exception`.
+
+`pm_floor_delivered` is registered in `_CLEAN_GRANITE_EXIT_REASONS` in
+`session_executor.py` — it gets a `REACTION_COMPLETE` emoji when
+`user_facing_routed=True`, consistent with `pm_complete` and `pm_user`.
 
 The executor's reaction logic consults `exit_reason` in addition to
 `user_facing_routed`:
@@ -456,6 +488,7 @@ The executor's reaction logic consults `exit_reason` in addition to
   in dashboard) → normal reaction (the wrap-up guard fired but the session
   technically completed without user-facing output).
 - Clean `exit_reason` + `user_facing_routed=True` → `REACTION_COMPLETE`.
+  Applies to `pm_complete`, `pm_user`, and `pm_floor_delivered`.
 
 ### Liveness (two-tier no-progress detector)
 
