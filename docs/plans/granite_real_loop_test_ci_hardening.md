@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor Engels
@@ -283,4 +283,4 @@ The lead (Dev session) orchestrates; builders execute. Given the small, tightly-
 
 ## Open Questions
 
-1. **`pm_max_turns` salvage behavior (load-bearing).** Dropping `pm_max_turns` from `_successful_exits` means max-turns runs no longer floor-deliver real PM text via the wrap-up guard — they surface as `REACTION_ERROR` with no delivered message. Is the desired behavior (a) the literal drop (max-turns = visible failure, no salvage), or (b) keep floor-delivering *real* PM text on max-turns but never the canned `OPERATOR_TERMINAL_MESSAGE` (which would mean splitting the set rather than dropping the entry)? Plan proceeds on (a) per the issue's literal text and anti-canned-fallback intent; confirm before build.
+1. **`pm_max_turns` salvage behavior (load-bearing) — RESOLVED.** Dropping `pm_max_turns` from `_successful_exits` means max-turns runs no longer floor-deliver real PM text via the wrap-up guard — they surface as `REACTION_ERROR` with no delivered message. The supervising PM's task framing explicitly instructs the **literal drop** ("Drop `pm_max_turns` from `_successful_exits` ... and treat a successful-shaped exit with `user_facing_routed=False` as a hard test failure"), so the plan proceeds on interpretation **(a)**: max-turns = visible failure, no canned salvage. The critique war-room vets this decision.
