@@ -32,16 +32,18 @@ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
-_CLEAN_GRANITE_EXIT_REASONS = frozenset({"pm_complete", "pm_user"})
+_CLEAN_GRANITE_EXIT_REASONS = frozenset({"pm_complete", "pm_user", "pm_floor_delivered"})
 
 
 def _is_non_clean_granite_exit(agent_session) -> bool:
     """Return True when the session has a granite exit_reason that signals a real failure.
 
     None exit_reason = non-granite session or not yet set = clean (default behavior).
-    Clean granite exits: pm_complete (normal end), pm_user (user message sent).
-    Everything else (exception, pm_hang, dev_hang, startup_unresolved, pm_no_user_message,
-    pm_max_turns) is non-clean → REACTION_ERROR.
+    Clean granite exits: pm_complete (normal end), pm_user (user message sent),
+    pm_floor_delivered (wrap-up floor delivered PM's final text directly — non-empty but
+    prefix-less; user got a real message).
+    Any other exit reason (e.g. exception, pm_hang, dev_hang, startup_unresolved,
+    pm_no_user_message, pm_max_turns) is non-clean → REACTION_ERROR.
 
     This does NOT suppress the success reaction for clean+communicated=False completions
     (those still get REACTION_SUCCESS or REACTION_COMPLETE via the normal branch).

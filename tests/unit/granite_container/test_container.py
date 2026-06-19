@@ -1280,12 +1280,78 @@ class TestWrapupGuard(unittest.TestCase):
             "transcript_fallback_count",
         )
 
-    def test_terminal_message_sent_when_pm_silent(self) -> None:
-        """After the bounded wrap-up yields nothing, OPERATOR_TERMINAL_MESSAGE
-        is delivered via on_user_payload so the human always gets a real message
+    def test_floor_delivers_prefixless_wrapup_response(self) -> None:
+        """Wrap-up guard floor: non-empty but prefix-less PM text is delivered
+        directly via on_user_payload with exit_reason=pm_floor_delivered.
+
+        This replaces the old test_terminal_message_sent_when_pm_silent
+        behaviour: a PM that produces text (even without a routing prefix)
+        should have its text delivered to the user, NOT the canned
+        OPERATOR_TERMINAL_MESSAGE. Concern C2 (#1647) is satisfied because
+        the human always receives real output.
+        """
+        terminal_deliveries: list[str] = []
+
+        def _on_user(payload: str) -> None:
+            terminal_deliveries.append(payload)
+
+        c = Container(user_message="do the work", max_turns=0, on_user_payload=_on_user)
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
+
+        pm_buffers = [
+            _idle_result("", saw_idle=True),  # startup
+            _idle_result("", saw_idle=True),  # prime-relay
+            # wrap-up guard: PM produces text but no prefix
+            _idle_result("", saw_idle=True),  # await PM idle
+            _idle_result("no prefix — still responding", saw_idle=True),  # PM wrapup response
+        ]
+        pm_mock.read_until_idle.side_effect = lambda **kw: pm_buffers.pop(0)
+        dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
+
+        # PM transcript: prime-relay (unknown/empty), wrapup (prefix-less text).
+        pm_transcript_texts = iter(
+            [
+                "",  # prime-relay: unknown (empty → fallback)
+                "no prefix — still responding",  # wrapup response: prefix-less but non-empty
+            ]
+        )
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path or "mock-session-dev" in path:
+                return ""
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
+        ):
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            result = c.run()
+
+        # Floor delivers the prefix-less text — NOT the canned message.
+        self.assertEqual(terminal_deliveries, ["no prefix — still responding"])
+        self.assertTrue(result.user_facing_routed)
+        self.assertEqual(result.exit_reason, "pm_floor_delivered")
+
+    def test_terminal_message_sent_when_pm_truly_silent(self) -> None:
+        """After wrap-up, when PM produces no text at all (truly silent),
+        OPERATOR_TERMINAL_MESSAGE is delivered so the human always gets something
         (concern C2, issue #1647).
 
-        Also verifies user_facing_routed=True and exit_reason=pm_no_user_message.
+        The distinction from test_floor_delivers_prefixless_wrapup_response:
+        here last_assistant_text returns "" for the wrapup response (the PM
+        did not write anything to its transcript), so the floor cannot deliver
+        real text and falls through to the canned message.
         """
         from agent.granite_container.container import OPERATOR_TERMINAL_MESSAGE
 
@@ -1300,20 +1366,15 @@ class TestWrapupGuard(unittest.TestCase):
         pm_buffers = [
             _idle_result("", saw_idle=True),  # startup
             _idle_result("", saw_idle=True),  # prime-relay
-            # wrap-up guard: PM never produces user-facing output
+            # wrap-up guard: PM produces no transcript text
             _idle_result("", saw_idle=True),  # await PM idle
-            _idle_result("no prefix — still silent", saw_idle=True),  # PM wrapup response
+            _idle_result("", saw_idle=True),  # PM wrapup response (buffer empty too)
         ]
         pm_mock.read_until_idle.side_effect = lambda **kw: pm_buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
-        # PM transcript: prime-relay (unknown), wrapup response (still no prefix).
-        pm_transcript_texts = iter(
-            [
-                "",  # prime-relay: unknown (empty → fallback)
-                "no prefix — still silent",  # wrapup response: unknown (no prefix)
-            ]
-        )
+        # PM transcript: prime-relay (empty), wrapup response (empty — truly silent).
+        pm_transcript_texts = iter(["", ""])
 
         def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:

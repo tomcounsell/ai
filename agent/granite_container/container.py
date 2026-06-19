@@ -236,6 +236,16 @@ PM_WRAPUP_PROMPT = (
 # OPERATOR_TERMINAL_MESSAGE instead.
 MAX_WRAPUP_ATTEMPTS = 1
 
+# Per-turn routing-prefix contract reminder appended to the Dev-report
+# handoff write so the PM cannot lose the contract across turns. One
+# short sentence — intentionally brief so it costs minimal tokens and
+# does not distract the PM from the Dev report content. Restores the
+# per-turn guarantee that was lost when #1694 deleted the
+# --append-system-prompt path.
+PM_TURN_CONTRACT_REMINDER = (
+    "\n\nBegin your reply with [/user], [/complete], or [/dev] on its own line."
+)
+
 # Fallback seed string for the wrap-up prompt when the developer did
 # not produce a captured report and the Dev PTY is no longer readable.
 DEV_REPORT_UNAVAILABLE = "The developer did not produce a captured report."
@@ -277,8 +287,11 @@ class ContainerResult:
     """Final output of a container run.
 
     `exit_reason` is one of: pm_complete, pm_user, pm_max_turns,
-    dev_hang, pm_hang, startup_unresolved, pm_no_user_message,
-    exception. The worker renders this as the run's terminal verdict.
+    pm_floor_delivered, dev_hang, pm_hang, startup_unresolved,
+    pm_no_user_message, exception. The worker renders this as the
+    run's terminal verdict. pm_floor_delivered means the wrap-up
+    floor delivered PM's final text directly (non-empty but
+    prefix-less); it is a clean exit (user got a real message).
 
     `user_facing_routed` is True when at least one [/user] or
     non-empty [/complete] payload was delivered to the user channel
@@ -1216,7 +1229,10 @@ class Container:
             # successful-shaped terminal state but PM never delivered a
             # user-facing message, drive PM to produce one. This
             # guarantees the human always receives some output.
-            _successful_exits = {"pm_complete", "pm_user", "pm_max_turns"}
+            # Failure exit_reasons (dev_hang, pm_hang, exception, startup_unresolved,
+            # pm_no_user_message) bypass this gate structurally — they are never in
+            # _successful_exits. No runtime sticky-failed guard is needed here.
+            _successful_exits = {"pm_complete", "pm_user", "pm_max_turns", "pm_floor_delivered"}
             if result.exit_reason in _successful_exits and not result.user_facing_routed:
                 self._run_wrapup_guard(result)
 
@@ -1409,7 +1425,7 @@ class Container:
         if not await_pm:
             result.exit_message = "PM did not reach idle before Dev report"
             return RouteOutcome(should_break=True, exit_reason="pm_hang")
-        self._pm_pty.write(dev_text)
+        self._pm_pty.write(dev_text + PM_TURN_CONTRACT_REMINDER)
 
         turn_record = TurnRecord(
             turn_index=turn_index,
@@ -1537,18 +1553,39 @@ class Container:
                 )
                 if pm_text:
                     wrapup_classification = classify_pm_prefix(pm_text)
+                    if wrapup_classification.destination in ("user", "complete", "dev"):
+                        # PM produced a compliant prefix — route normally.
+                        outcome = self._route_pm_classification(
+                            wrapup_classification, pm_buf, turn_index=-2, result=result
+                        )
+                        if result.user_facing_routed:
+                            result.exit_reason = outcome.exit_reason or result.exit_reason
+                            return
+                    else:
+                        # Non-empty but prefix-less — deliver pm_text directly
+                        # WITHOUT calling _route_pm_classification (which would
+                        # write PM_COMPLIANCE_NUDGE into the dying PTY at :1286).
+                        if self._on_user_payload is not None:
+                            try:
+                                self._on_user_payload(pm_text.strip())
+                                result.user_facing_routed = True
+                                result.exit_reason = "pm_floor_delivered"
+                                logger.info(
+                                    "[granite-container] wrap-up floor: "
+                                    "delivered prefix-less PM text (%d chars)",
+                                    len(pm_text),
+                                )
+                                return
+                            except Exception as e:
+                                logger.warning(
+                                    "[granite-container] wrap-up floor: direct delivery failed: %s",
+                                    e,
+                                )
                 else:
                     _log_transcript_read_diagnostic(
                         "wrap-up guard", pm_transcript, self._pm_pty, self._dev_pty
                     )
                     result.transcript_fallback_count += 1
-                    wrapup_classification = _unknown_classification()
-                outcome = self._route_pm_classification(
-                    wrapup_classification, pm_buf, turn_index=-2, result=result
-                )
-                if result.user_facing_routed:
-                    result.exit_reason = outcome.exit_reason or result.exit_reason
-                    return
 
             # PM still silent after MAX_WRAPUP_ATTEMPTS — deliver canned
             # terminal message directly so the human always gets something.
