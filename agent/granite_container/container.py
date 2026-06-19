@@ -249,6 +249,15 @@ _REPO_ROOT = Path(__file__).parent.parent.parent
 PI_RAILS_PATH = str(_REPO_ROOT / ".claude" / "commands" / "granite" / "_prime-rails.md")
 PI_PERSONA_PATH = str(_REPO_ROOT / "config" / "personas" / "granite" / "pi_dev_rails.md")
 
+# Per-turn prefix-contract reminder appended to Dev-report text before
+# it is written to PM's PTY. Restores the load-bearing per-turn contract
+# assertion that the deleted --append-system-prompt path guaranteed.
+# Kept to one line so the token cost is negligible; the full contract is
+# in the one-shot /prime-pm-role slash command.
+PM_TURN_CONTRACT_REMINDER = (
+    "\n\nBegin your reply with `[/user]`, `[/complete]`, or `[/dev]` on its own line."
+)
+
 # Fallback user-visible message delivered directly (bypassing PM) when
 # the wrap-up guard exhausts MAX_WRAPUP_ATTEMPTS without PM emitting a
 # user-facing prefix. Guarantees the human always gets some message.
@@ -277,8 +286,11 @@ class ContainerResult:
     """Final output of a container run.
 
     `exit_reason` is one of: pm_complete, pm_user, pm_max_turns,
-    dev_hang, pm_hang, startup_unresolved, pm_no_user_message,
-    exception. The worker renders this as the run's terminal verdict.
+    pm_floor_delivered, dev_hang, pm_hang, startup_unresolved,
+    pm_no_user_message, exception. The worker renders this as the
+    run's terminal verdict. pm_floor_delivered is a clean exit where
+    the wrap-up guard delivered the PM's last assistant message
+    directly (non-empty but prefix-less response).
 
     `user_facing_routed` is True when at least one [/user] or
     non-empty [/complete] payload was delivered to the user channel
@@ -1216,7 +1228,11 @@ class Container:
             # successful-shaped terminal state but PM never delivered a
             # user-facing message, drive PM to produce one. This
             # guarantees the human always receives some output.
-            _successful_exits = {"pm_complete", "pm_user", "pm_max_turns"}
+            # Invariant: failure exit_reasons (dev_hang, pm_hang, exception,
+            # startup_unresolved, pm_no_user_message) never reach this gate —
+            # they are set in the except/break paths above and never end up in
+            # _successful_exits. No runtime sticky-failed guard is needed.
+            _successful_exits = {"pm_complete", "pm_user", "pm_max_turns", "pm_floor_delivered"}
             if result.exit_reason in _successful_exits and not result.user_facing_routed:
                 self._run_wrapup_guard(result)
 
@@ -1404,12 +1420,15 @@ class Container:
         # the wrap-up guard (issue #1647). Stays here, not in the builder.
         self._last_dev_report = dev_text
 
-        # Write Dev's verbatim text to PM's PTY.
+        # Write Dev's verbatim text to PM's PTY, with a per-turn prefix-
+        # contract reminder appended (issue #1719). Restores the per-turn
+        # contract assertion lost when --append-system-prompt was removed in
+        # #1694. The reminder is a single line; token cost is negligible.
         await_pm, _, _, _ = self._cycle_idle(self._pm_pty)
         if not await_pm:
             result.exit_message = "PM did not reach idle before Dev report"
             return RouteOutcome(should_break=True, exit_reason="pm_hang")
-        self._pm_pty.write(dev_text)
+        self._pm_pty.write(dev_text + PM_TURN_CONTRACT_REMINDER)
 
         turn_record = TurnRecord(
             turn_index=turn_index,
@@ -1537,18 +1556,42 @@ class Container:
                 )
                 if pm_text:
                     wrapup_classification = classify_pm_prefix(pm_text)
+                    if wrapup_classification.destination == "unknown":
+                        # Non-empty but prefix-less: deliver directly as a
+                        # user message (relaxed floor, issue #1719). Bypasses
+                        # _route_pm_classification so PM_COMPLIANCE_NUDGE is
+                        # not written into a PTY that is about to be torn down.
+                        # OPERATOR_TERMINAL_MESSAGE is reserved for a genuinely
+                        # empty transcript (pm_text falsy, handled below).
+                        if self._on_user_payload is not None:
+                            try:
+                                self._on_user_payload(pm_text.strip())
+                                result.user_facing_routed = True
+                                result.exit_reason = "pm_floor_delivered"
+                                logger.info(
+                                    "[granite-container] wrap-up guard: floor-delivered "
+                                    "prefix-less PM text (exit_reason=pm_floor_delivered)"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "[granite-container] wrap-up guard: floor delivery "
+                                    "via _on_user_payload failed: %s",
+                                    e,
+                                )
+                        return
+                    # Prefix found — route normally via _route_pm_classification.
+                    outcome = self._route_pm_classification(
+                        wrapup_classification, pm_buf, turn_index=-2, result=result
+                    )
+                    if result.user_facing_routed:
+                        result.exit_reason = outcome.exit_reason or result.exit_reason
+                        return
                 else:
                     _log_transcript_read_diagnostic(
                         "wrap-up guard", pm_transcript, self._pm_pty, self._dev_pty
                     )
                     result.transcript_fallback_count += 1
-                    wrapup_classification = _unknown_classification()
-                outcome = self._route_pm_classification(
-                    wrapup_classification, pm_buf, turn_index=-2, result=result
-                )
-                if result.user_facing_routed:
-                    result.exit_reason = outcome.exit_reason or result.exit_reason
-                    return
+                    # Empty transcript — fall through to OPERATOR_TERMINAL_MESSAGE below.
 
             # PM still silent after MAX_WRAPUP_ATTEMPTS — deliver canned
             # terminal message directly so the human always gets something.

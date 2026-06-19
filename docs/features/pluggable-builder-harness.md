@@ -229,8 +229,10 @@ follows the same caller-owned path as an empty claude transcript read:
 
 1. `transcript_fallback_count` is bumped.
 2. `DEV_REPORT_UNAVAILABLE` is substituted as the dev text written to PM.
-3. PM receives a seed and writes a `[/user]` summary via the wrap-up guard.
-4. The human always receives at least `OPERATOR_TERMINAL_MESSAGE`.
+3. PM receives a seed and writes a `[/user]` or `[/complete]` summary via the wrap-up guard.
+4. The human always receives at least `OPERATOR_TERMINAL_MESSAGE` (last resort for a genuinely
+   empty PM transcript; the relaxed wrap-up floor delivers a real PM message when one exists —
+   see `pm_floor_delivered` in `docs/features/granite-pty-production.md`).
 
 The builder never touches `_last_dev_report`, `transcript_fallback_count`, or
 `DEV_REPORT_UNAVAILABLE` — those are caller-owned.

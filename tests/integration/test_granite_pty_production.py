@@ -277,3 +277,74 @@ class TestGraniteProductionWiring:
         )
         anomaly_events = [e for e in session.session_events if e.get("type") == "exit_anomaly"]
         assert anomaly_events[0]["exit_reason"] == "pm_hang"
+
+    @pytest.mark.asyncio
+    async def test_prefix_less_pm_response_floor_delivered_not_canned(self, redis_test_db):
+        """Issue #1719: when the PM produces a non-empty but prefix-less wrap-up
+        response, the relaxed floor delivers it (exit_reason=pm_floor_delivered)
+        instead of OPERATOR_TERMINAL_MESSAGE (exit_reason=pm_no_user_message).
+
+        Uses a fake Container.run that simulates the wrapup guard setting
+        exit_reason=pm_floor_delivered and user_facing_routed=True — the mocked-
+        PTY path for this scenario lives in tests/unit/granite_container/test_container.py.
+        This test verifies the BridgeAdapter surfaces pm_floor_delivered correctly
+        (no exit_anomaly, exit_summary contains the reason).
+        """
+        session = _make_session(session_id="granite-floor-001")
+        pool = _make_pool(size=1)
+        with _patch_spawn():
+            await pool.initialize(cwd="/tmp")
+
+        def _fake_container_run(self):
+            # Simulate: wrap-up guard floor-delivered PM's prefix-less last message.
+            if self._on_user_payload is not None:
+                self._on_user_payload("Here is the work I completed for you.")
+            result = _make_container_result(
+                exit_reason="pm_floor_delivered",
+                exit_message="wrap-up guard delivered prefix-less PM text",
+            )
+            result.user_facing_routed = True
+            return result
+
+        delivered_calls: list[tuple] = []
+
+        async def _fake_send_cb(chat_id, text, reply_to, agent_session):
+            delivered_calls.append((chat_id, text))
+            return None
+
+        def _fake_resolver(project_key, transport):
+            return (_fake_send_cb, None)
+
+        with (
+            _patch_spawn(),
+            patch.object(Container, "run", _fake_container_run),
+            patch(
+                "agent.granite_container.bridge_adapter._default_resolve_callbacks",
+                _fake_resolver,
+            ),
+        ):
+            adapter = BridgeAdapter(
+                agent_session=session,
+                project_key="test",
+                transport="telegram",
+                pool=pool,
+            )
+            result_text = await adapter.run(
+                user_message="Floor delivery test",
+                working_dir="/tmp",
+            )
+
+        assert result_text == ""
+
+        event_types = [e.get("type") for e in session.session_events]
+        # pm_floor_delivered is a clean exit — no exit_anomaly should be recorded.
+        assert "exit_summary" in event_types, (
+            f"Expected exit_summary in session_events; got {event_types}"
+        )
+        assert "exit_anomaly" not in event_types, (
+            f"pm_floor_delivered is a clean exit; unexpected exit_anomaly in {event_types}"
+        )
+
+        # The exit_summary should record pm_floor_delivered.
+        summary_events = [e for e in session.session_events if e.get("type") == "exit_summary"]
+        assert summary_events[0]["exit_reason"] == "pm_floor_delivered"

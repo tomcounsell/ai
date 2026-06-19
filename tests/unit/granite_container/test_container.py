@@ -1280,12 +1280,14 @@ class TestWrapupGuard(unittest.TestCase):
             "transcript_fallback_count",
         )
 
-    def test_terminal_message_sent_when_pm_silent(self) -> None:
-        """After the bounded wrap-up yields nothing, OPERATOR_TERMINAL_MESSAGE
-        is delivered via on_user_payload so the human always gets a real message
-        (concern C2, issue #1647).
+    def test_floor_delivers_prefix_less_pm_text(self) -> None:
+        """When the wrap-up guard reads a non-empty but prefix-less PM response,
+        the relaxed floor delivers it directly via on_user_payload with
+        exit_reason=pm_floor_delivered — NOT OPERATOR_TERMINAL_MESSAGE (#1719).
 
-        Also verifies user_facing_routed=True and exit_reason=pm_no_user_message.
+        Verifies: user_facing_routed=True, exit_reason=pm_floor_delivered,
+        delivered text is the real PM message (not the canned fallback),
+        and PM_COMPLIANCE_NUDGE is NOT written to the PM PTY.
         """
         from agent.granite_container.container import OPERATOR_TERMINAL_MESSAGE
 
@@ -1300,18 +1302,18 @@ class TestWrapupGuard(unittest.TestCase):
         pm_buffers = [
             _idle_result("", saw_idle=True),  # startup
             _idle_result("", saw_idle=True),  # prime-relay
-            # wrap-up guard: PM never produces user-facing output
-            _idle_result("", saw_idle=True),  # await PM idle
-            _idle_result("no prefix — still silent", saw_idle=True),  # PM wrapup response
+            # wrap-up guard: PM responds with real text but no prefix
+            _idle_result("", saw_idle=True),  # await PM idle before wrapup prompt
+            _idle_result("Here is what I did: fixed the bug.", saw_idle=True),  # PM wrapup
         ]
         pm_mock.read_until_idle.side_effect = lambda **kw: pm_buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
-        # PM transcript: prime-relay (unknown), wrapup response (still no prefix).
+        # PM transcript: prime-relay (unknown/empty), wrapup response (prefix-less).
         pm_transcript_texts = iter(
             [
                 "",  # prime-relay: unknown (empty → fallback)
-                "no prefix — still silent",  # wrapup response: unknown (no prefix)
+                "Here is what I did: fixed the bug.",  # wrapup: non-empty, no prefix
             ]
         )
 
@@ -1337,6 +1339,81 @@ class TestWrapupGuard(unittest.TestCase):
             c._dev_pty = dev_mock
             result = c.run()
 
+        # The floor must deliver the real PM message, not the canned fallback.
+        self.assertEqual(terminal_deliveries, ["Here is what I did: fixed the bug."])
+        self.assertNotIn(OPERATOR_TERMINAL_MESSAGE, terminal_deliveries)
+        self.assertTrue(result.user_facing_routed)
+        self.assertEqual(result.exit_reason, "pm_floor_delivered")
+
+        # PM_COMPLIANCE_NUDGE must NOT have been written to the PM PTY AFTER
+        # the wrapup prompt (the floor bypasses _route_pm_classification to
+        # avoid nudging a PTY that is about to be torn down). We identify the
+        # wrapup-prompt write by finding the write that contains PM_WRAPUP_PROMPT
+        # and check no compliance nudge appears after it.
+        from agent.granite_container.container import PM_COMPLIANCE_NUDGE
+
+        pm_write_args = [str(call) for call in pm_mock.write.call_args_list]
+        # Find the index of the wrapup prompt write.
+        wrapup_prompt_idx = next(
+            (i for i, s in enumerate(pm_write_args) if "The developer has finished" in s),
+            None,
+        )
+        if wrapup_prompt_idx is not None:
+            # Any writes AFTER the wrapup prompt must not include PM_COMPLIANCE_NUDGE.
+            post_wrapup_writes = pm_write_args[wrapup_prompt_idx + 1 :]
+            for write_str in post_wrapup_writes:
+                self.assertNotIn(
+                    PM_COMPLIANCE_NUDGE,
+                    write_str,
+                    f"PM_COMPLIANCE_NUDGE must not be written after the wrapup prompt "
+                    f"(floor path bypasses routing); got: {write_str!r}",
+                )
+
+    def test_terminal_message_sent_when_pm_genuinely_empty(self) -> None:
+        """OPERATOR_TERMINAL_MESSAGE fires only when the wrap-up guard reads
+        a genuinely empty PM transcript — the last-resort canned fallback (#1719).
+
+        Verifies user_facing_routed=True and exit_reason=pm_no_user_message.
+        """
+        from agent.granite_container.container import OPERATOR_TERMINAL_MESSAGE
+
+        terminal_deliveries: list[str] = []
+
+        def _on_user(payload: str) -> None:
+            terminal_deliveries.append(payload)
+
+        c = Container(user_message="do the work", max_turns=0, on_user_payload=_on_user)
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
+
+        pm_buffers = [
+            _idle_result("", saw_idle=True),  # startup
+            _idle_result("", saw_idle=True),  # prime-relay
+            # wrap-up guard: PM produces nothing (genuinely empty)
+            _idle_result("", saw_idle=True),  # await PM idle
+            _idle_result("", saw_idle=True),  # PM wrapup response (empty)
+        ]
+        pm_mock.read_until_idle.side_effect = lambda **kw: pm_buffers.pop(0)
+        dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
+
+        # PM transcript always returns empty (no new entry).
+        def _lat_stub(path, *, baseline_text_count=None):
+            return ""
+
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
+        ):
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            result = c.run()
+
+        # Genuinely empty PM → canned fallback delivered.
         self.assertIn(OPERATOR_TERMINAL_MESSAGE, terminal_deliveries)
         self.assertTrue(result.user_facing_routed)
         self.assertEqual(result.exit_reason, "pm_no_user_message")
@@ -1400,6 +1477,88 @@ class TestWrapupGuard(unittest.TestCase):
         self.assertIn("Real summary.", terminal_deliveries)
         # Empty [/complete] body — user_facing_routed set by the wrap-up [/user].
         self.assertTrue(result.user_facing_routed)
+
+
+class TestPerTurnContractReminder(unittest.TestCase):
+    """Issue #1719: PM_TURN_CONTRACT_REMINDER appended on Dev-report handoff.
+
+    Verifies that the text written to self._pm_pty.write() at the Dev-report
+    handoff contains PM_TURN_CONTRACT_REMINDER, giving Change 1 a deterministic
+    CI assertion that does not depend on a live model.
+    """
+
+    def test_contract_reminder_appended_on_dev_handoff(self) -> None:
+        """A [/dev] handoff writes dev_text + PM_TURN_CONTRACT_REMINDER to PM PTY.
+
+        Buffer sequence (prime-relay handles the first PM read):
+          1. startup: ""
+          2. prime-relay: "[/dev]\\ndo the task"  → dev route (contract reminder appended)
+          3. await PM idle for dev-report write: ""
+          wrap-up guard is patched out (no on_user_payload).
+        """
+        from agent.granite_container.container import PM_TURN_CONTRACT_REMINDER
+
+        c = Container(user_message="hello", max_turns=1)
+        pm_mock = _mock_pm("")
+        dev_mock = _mock_dev("")
+
+        pm_buffers = [
+            _idle_result("", saw_idle=True),  # startup
+            _idle_result("[/dev]\ndo the task", saw_idle=True),  # prime-relay → dev route
+            _idle_result("", saw_idle=True),  # await PM idle for dev-report write
+            # max_turns=1 → loop exits pm_max_turns after 1 dev turn
+            _idle_result("", saw_idle=True),  # steady-state turn 0 PM read (unknown → miss)
+            _idle_result("", saw_idle=True),  # stale-buffer guard
+        ]
+        pm_mock.read_until_idle.side_effect = lambda **kw: pm_buffers.pop(0)
+        dev_mock.read_until_idle.return_value = _idle_result(
+            "Dev finished the task.", saw_idle=True
+        )
+
+        dev_transcript_text = "Dev finished the task."
+        pm_transcript_texts = iter(
+            [
+                "[/dev]\ndo the task",  # prime-relay → dev route
+                "",  # turn 0: unknown (empty → compliance miss)
+            ]
+        )
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path:
+                return ""
+            if "mock-session-dev" in path:
+                return dev_transcript_text
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_run_wrapup_guard"),  # no on_user_payload callback
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
+        ):
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            c.run()
+
+        # At least one PM PTY write must contain PM_TURN_CONTRACT_REMINDER.
+        # The dev-report write (which follows the [/dev] route) appends the
+        # reminder to the dev text before writing to the PM PTY.
+        pm_write_calls = [str(call) for call in pm_mock.write.call_args_list]
+        reminder_writes = [w for w in pm_write_calls if PM_TURN_CONTRACT_REMINDER.strip() in w]
+        self.assertGreater(
+            len(reminder_writes),
+            0,
+            f"Expected at least one PM PTY write containing PM_TURN_CONTRACT_REMINDER; "
+            f"got writes: {pm_write_calls!r}",
+        )
 
 
 class TestContainerResultPtySlot(unittest.TestCase):
