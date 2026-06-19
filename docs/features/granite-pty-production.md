@@ -73,9 +73,9 @@ without granite would accept sessions and silently mis-route every one of them
 `worker/__main__.py` Step 4b.5 calls
 `granite_classifier.ensure_granite_model()` (run off the event loop via
 `asyncio.to_thread`) *before* the PTY pool is built. This is a precondition for
-the **classification** role — the PM↔Dev content channel no longer calls ollama
-(payloads are forwarded verbatim from the JSONL transcript), but the
-turn-classification step still requires the model. The helper:
+the **classification** role — the PM↔Dev content channel forwards payloads
+verbatim from the JSONL transcript (ollama is not called for content routing),
+but the turn-classification step still requires the model. The helper:
 
 1. confirms the `ollama` python client is importable (the classifier uses it),
 2. confirms the `ollama` CLI/daemon is on `PATH`,
@@ -166,7 +166,7 @@ receive the user message as `$ARGUMENTS` (issue #1692):
   message omission).
 
 Persona is delivered entirely via these prime commands. No `--append-system-prompt`
-flag is set at spawn time (removed in issue #1692). The shared WORKER rails
+flag is set at spawn time (dropped in issue #1692). The shared WORKER rails
 (no-push-to-main, principal context, completion criteria) live in
 `.claude/commands/granite/_prime-rails.md` and each role prime references it.
 
@@ -308,7 +308,7 @@ The adapter writes non-user-visible progress to `agent_session.session_events`
 | `granite_user_routed` | on each `[/user]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
 | `granite_complete_routed` | on each `[/complete]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
 | `granite_delivery_failure` | a mid-loop `send_cb` raised | `event_type`, `text`, `payload_chars`, `reason`, `ts` |
-| `delivery_failure` | a mid-loop `send_cb` raised (legacy alias) | `payload_chars`, `reason`, `ts` |
+| `delivery_failure` | a mid-loop `send_cb` raised (older alias, kept for back-compat) | `payload_chars`, `reason`, `ts` |
 
 Normal completions (`pm_complete`, `pm_user`, `pm_max_turns`) do **not** emit
 `exit_anomaly`, because they are expected outcomes. `pm_no_user_message` emits
@@ -839,7 +839,7 @@ naming the branch. The branch and worktree remain on disk. Grep `logs/worker.log
 
 **Interim accumulation:** Until #1647 lands the PM-authorized landing step, unmerged
 dev-session branches accumulate. The `preserved=N` counter in `logs/worker.log` is the
-interim signal. Manual operator action is the only safe reaping path — do NOT use
+interim signal. Manual operator action is the only safe reaping path — avoid
 `scripts/worktree-gc.sh --apply` for no-PR branches (it has an unguarded `git branch -D`
 at line 208 that would re-destroy the preserved work).
 
@@ -911,7 +911,7 @@ WAITING: Dev is executing {task}; will resume on Dev report. No further PM turn 
 
 It is consumed exclusively by the `/goal` evaluator as a quiescence signal. It
 is **NOT** a routing prefix and is NOT parsed by the granite classifier regex
-(`^\[/(dev|user|complete)(?::([a-z0-9_-]+))?\]\s*$`). Do not use `[WAITING]`
+(`^\[/(dev|user|complete)(?::([a-z0-9_-]+))?\]\s*$`). Avoid `[WAITING]`
 or any bracket form — the evaluator only recognizes the bare `WAITING:` prefix.
 
 ### Turn-loop ownership
