@@ -166,7 +166,7 @@ valor-email threads
 | `python scripts/autoexperiment.py --target summarizer --dry-run` | Dry-run autoexperiment on the message drafter (target name is historical) |
 | `python scripts/autoexperiment.py --list-targets` | List autoexperiment targets |
 | `./scripts/install_autoexperiment.sh` | Install autoexperiment nightly schedule |
-| `./scripts/install_nightly_tests.sh` | Install nightly regression test launchd schedule |
+| `./scripts/install_nightly_tests.sh` | Install nightly regression test launchd schedule (bridge-role gated; auto-installed by `/update` on bridge machines, self-skips + removes stale plist elsewhere) |
 | `python scripts/nightly_regression_tests.py --dry-run` | Preview nightly test run without Telegram |
 | `tail -f logs/nightly_tests.log` | Stream nightly test logs |
 | `tail -f logs/nightly_tests_error.log` | Stream nightly test error log (startup crashes) |
