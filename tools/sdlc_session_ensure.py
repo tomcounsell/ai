@@ -158,6 +158,18 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         if issue_url:
             kwargs["issue_url"] = issue_url
 
+        # Fix A (issue #1741): populate the originating intent so the PM prime has a real
+        # goal anchor. Without this, message_text=None propagates to the executor and the
+        # granite PM is primed with "MESSAGE: None" — silently producing no-op [/complete].
+        # This must be a plain natural-language instruction referencing issue #N so the PM
+        # can read the issue body for the goal. Steering messages are course-corrections
+        # toward this goal, never redefinitions of it.
+        kwargs["message_text"] = (
+            f"Run the full SDLC pipeline for issue #{issue_number}. "
+            f"Read the issue body for the work to be done"
+            + (f" ({issue_url})." if issue_url else ".")
+        )
+
         from tools.valor_session import (
             _resolve_project_working_directory,
             resolve_project_key,
