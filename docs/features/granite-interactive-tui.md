@@ -133,7 +133,7 @@ PM→granite→Dev→granite→PM cycle per tick:
                  await_idle(dev_pty)         # wait for Dev's response
                  dev_text = last_assistant_text(dev_transcript, baseline)  # verbatim from JSONL
                  await_idle(pm_pty)          # PM must be idle
-                 write(pm_pty, dev_text)     # verbatim, \r terminator
+                 write(pm_pty, dev_text + PM_TURN_CONTRACT_REMINDER)  # reminder on every handoff (#1719)
    - unknown:  compliance miss; log + continue
 4. loop until destination == "complete" or max_turns reached
 ```
@@ -145,7 +145,8 @@ PM→granite→Dev→granite→PM cycle per tick:
 | `pm_complete` | PM emitted `[/complete]` | No |
 | `pm_user` | PM emitted `[/user]` | No |
 | `pm_max_turns` | Steady-state loop exhausted `max_turns` | No |
-| `pm_no_user_message` | Wrap-up guard exhausted; `OPERATOR_TERMINAL_MESSAGE` sent | Yes |
+| `pm_floor_delivered` | Wrap-up guard delivered PM's non-empty but prefix-less last message directly (issue #1719) | No |
+| `pm_no_user_message` | Wrap-up guard exhausted; PM produced no text; `OPERATOR_TERMINAL_MESSAGE` sent | Yes |
 | `pm_hang` | PM did not reach idle within `CYCLE_IDLE_TIMEOUT_S` | Yes |
 | `dev_hang` | Dev did not reach idle within `CYCLE_IDLE_TIMEOUT_S` | Yes |
 | `startup_unresolved` | Neither PTY settled within `STARTUP_HARD_CEILING_S` | Yes |
@@ -166,8 +167,17 @@ different purposes and must not be confused:
 
 `PM_COMPLIANCE_NUDGE` fires inside the steady-state loop and does not
 consume a `max_turns` slot. `PM_WRAPUP_PROMPT` fires post-loop, is capped at
-`MAX_WRAPUP_ATTEMPTS = 1`, and on continued silence is followed by the canned
-`OPERATOR_TERMINAL_MESSAGE` delivered directly.
+`MAX_WRAPUP_ATTEMPTS = 1`. The wrap-up guard then:
+1. If PM produces a **non-empty but prefix-less** response: delivers it directly
+   via `on_user_payload` with `exit_reason = "pm_floor_delivered"` (relaxed
+   floor, issue #1719). Bypasses `_route_pm_classification` so no
+   `PM_COMPLIANCE_NUDGE` is written to a PTY being torn down.
+2. If PM is genuinely silent (empty transcript after all attempts): delivers
+   the canned `OPERATOR_TERMINAL_MESSAGE` directly with
+   `exit_reason = "pm_no_user_message"`.
+
+The human always receives at least `OPERATOR_TERMINAL_MESSAGE`; the relaxed
+floor means a real PM message is preferred when one exists.
 
 ## Cross-references
 
