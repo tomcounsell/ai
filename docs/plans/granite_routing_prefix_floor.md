@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-06-19
 tracking: https://github.com/tomcounsell/ai/issues/1719
 last_comment_id:
+revision_applied: true
 ---
 
 # Granite Bridge Canned-Fallback Fix — Per-Turn Prefix Contract + Relaxed Wrap-Up Floor
@@ -39,7 +40,7 @@ No active plan in `docs/plans/` overlaps this surface (the granite_lossless_chec
 - **#1651 / `d005aaa2`** — introduced `_run_wrapup_guard` + `PM_WRAPUP_PROMPT` (the mandatory user-facing wrap-up). The floor this plan relaxes.
 - **#1694 / `971b77d6`** — Persona-as-Priming refactor. Root-cause commit: deleted the per-turn `--append-system-prompt` contract injection, moving the prefix contract into one-shot `/prime-*` slash commands.
 - **#1713 / #1708** — canned-fallback *diagnostic* + catchup/reconciler persona resolution. Added transcript-read diagnostics (`_log_transcript_read_diagnostic`) we reuse; did not address the routing gate.
-- **#1732** — Omnigent reference map. Source of the sticky-`failed` constraint (Practice 9).
+- **#1732** — Omnigent reference map. Source of the sticky-`failed` constraint (Practice 9), evaluated and found **not applicable** to this codebase — see Solution Key Elements §2.
 
 ## Research
 
@@ -80,10 +81,15 @@ Telegram msg → bridge → worker → BridgeAdapter → Container.run()
          ├─ [/complete] → on_complete_payload; user_facing_routed=True; break
          └─ unknown     → PM_COMPLIANCE_NUDGE; continue
   → exit successful-shaped but user_facing_routed=False
+  → entry gate (:1219-1221): exit_reason ∈ {pm_complete, pm_user, pm_max_turns}?
+       (failure exit_reasons — dev_hang/pm_hang/exception/… — never reach here)
   → _run_wrapup_guard():
-       read last_assistant_text → classify_pm_prefix
-         ├─ prefix found → route, user_facing_routed=True              ← current
-         └─ no prefix    → OPERATOR_TERMINAL_MESSAGE (canned)          ← CHANGE 2 HERE
+       re-drive PM once via PM_WRAPUP_PROMPT (MAX_WRAPUP_ATTEMPTS=1, :1511-1551)
+       read pm_text = last_assistant_text(...) (:1533) → classify_pm_prefix
+         ├─ prefix found → route via _route_pm_classification, user_facing_routed=True   ← current
+         └─ no prefix / re-drive exhausted (tail :1553-1567):
+              ├─ pm_text non-empty → deliver pm_text directly, exit_reason=pm_floor_delivered  ← CHANGE 2 HERE
+              └─ pm_text empty     → OPERATOR_TERMINAL_MESSAGE (canned, :1557)
 ```
 
 ## Architectural Impact
@@ -104,7 +110,8 @@ Changes are confined to the granite container layer (`agent/granite_container/co
 
 1. **Change 1 — per-turn prefix-contract re-assertion (primary).** Restore the load-bearing instruction the deleted `--append-system-prompt` path guaranteed: append a one-line contract reminder to the PM PTY on each steady-state Dev-report handoff, so the contract cannot decay across turns. Exact wording confirmed by spike-2.
 2. **Change 2 — relax the wrap-up floor (defense in depth).** In `_run_wrapup_guard`, when `last_assistant_text` is **non-empty** but classification yields no routing prefix, deliver that text directly via `_on_user_payload`, set `user_facing_routed=True`, and set `exit_reason="pm_floor_delivered"`. Reserve `OPERATOR_TERMINAL_MESSAGE` for a **genuinely empty** transcript only.
-3. **Sticky-`failed` guard.** The floor must not deliver (and must not flip status) when the result already reflects a `StopFailure`/failed terminal state — a failure status must remain terminal and not be overwritten by trailing PTY idle (per #1732/Omnigent Practice 9).
+
+> **No sticky-failed guard needed (verified against this codebase).** The #1732/Omnigent reference map (Practice 9) warns against trailing PTY idle overwriting a failed terminal state. That hazard does not exist here: `ContainerResult` has no `failed`/`status` field, and `_run_wrapup_guard` is only entered when `result.exit_reason in {"pm_complete", "pm_user", "pm_max_turns"}` (`container.py:1219-1221`). Failure exit_reasons (`dev_hang`, `pm_hang`, `exception`, `startup_unresolved`, `pm_no_user_message`) structurally bypass the guard at the entry gate — so the floor can never reach, let alone overwrite, a failed run. Change 1's only obligation here is a one-line invariant comment at the entry gate documenting why no runtime guard is required.
 
 ### Flow
 
@@ -113,8 +120,9 @@ After Change 1, the PM keeps emitting prefixes across all 10 turns → normal ex
 ### Technical Approach
 
 - **Change 1**: Add a `PM_TURN_CONTRACT_REMINDER` constant (one line: *"Begin your reply with `[/user]`, `[/complete]`, or `[/dev]` on its own line."*) and append it to the Dev-report text written to the PM PTY in the steady-state loop's `dev` branch (`container.py` ~`:1261-1263`, where `self._last_dev_report` is written back to PM). Keep it short — it is a reminder, not a re-prime. Optionally tighten `prime-pm-role.md` wording, but the per-turn reminder is the load-bearing fix.
-- **Change 2**: Rewrite `_run_wrapup_guard`'s tail (`container.py:1538-1562`). When `pm_text` is truthy after `last_assistant_text`, deliver `pm_text` (stripped of any partial leading prefix) via `_on_user_payload`, set `user_facing_routed=True`, `exit_reason="pm_floor_delivered"`. Only when `pm_text` is empty/whitespace fall to `OPERATOR_TERMINAL_MESSAGE`. Guard the whole delivery behind `if not <result indicates StopFailure/failed>`.
+- **Change 2**: Rewrite `_run_wrapup_guard`'s canned-delivery tail (`container.py:1553-1567`). The guard already re-drives PM once via `PM_WRAPUP_PROMPT` (`MAX_WRAPUP_ATTEMPTS=1`, `:1511-1551`) and reads `pm_text = last_assistant_text(...)` (`:1533`). The change is in the post-re-drive tail: when `pm_text` is truthy but no routing prefix was detected, deliver `pm_text` (stripped of any partial leading prefix) via `_on_user_payload`, set `user_facing_routed=True`, `exit_reason="pm_floor_delivered"`. Only when `pm_text` is empty/whitespace fall to `OPERATOR_TERMINAL_MESSAGE` (`:1557`). No additional failed-state guard is needed — the entry gate at `:1219-1221` already excludes failure exit_reasons (see Key Elements §2).
 - **`_successful_exits`**: add `pm_floor_delivered` to the set (`:1219`) so the new clean-delivery exit is not treated as an anomaly. Dropping `pm_max_turns` from the set is `[SEPARATE-SLUG #1740]`.
+- **Invariant comment**: add a one-line comment at the entry gate (`:1219-1221`) documenting that failure exit_reasons structurally bypass the guard, so no runtime sticky-failed guard exists or is needed.
 
 ## Failure Path Test Strategy
 
@@ -127,12 +135,12 @@ After Change 1, the PM keeps emitting prefixes across all 10 turns → normal ex
 - Whitespace-only `pm_text`: treated as empty (`.strip()`), canned path.
 
 ### Error State Rendering
-- StopFailure terminal state: floor must not overwrite. Test asserts a `failed`-flagged result is not flipped to `pm_floor_delivered` by trailing idle.
+- Failure exit_reasons (`dev_hang`, `pm_hang`, `exception`, `startup_unresolved`, `pm_no_user_message`) never reach the floor — the entry gate (`:1219-1221`) only admits `{pm_complete, pm_user, pm_max_turns}`. No floor-vs-failure overwrite path exists, so no test guards one (the entry-gate invariant comment is the documentation).
 
 ## Test Impact
 - [ ] `tests/integration/test_granite_pty_production.py::test_simulated_bridge_session_completes_via_container` — UPDATE: the mock PTY emulator emits compliant prefixes by construction; add a variant whose mock PM emits a **prefix-less** final message and assert the relaxed floor delivers it (not the canned string).
 - [ ] `tests/integration/test_granite_container_loop.py::test_cli_short_run_produces_results_json` — UPDATE: extend the real-loop assertion (when `_model_reachable`) to require a **non-empty, non-canned** user-facing message regardless of `exit_reason`. (Note: this test SKIPS when `claude --print ping` is unreachable — the scheduling/alert-on-skip hardening is `[SEPARATE-SLUG #1740]`.)
-- [ ] New unit coverage for `_run_wrapup_guard` floor branches: non-empty→delivered, empty→canned, StopFailure→not-overwritten.
+- [ ] New unit coverage for `_run_wrapup_guard` floor branches: non-empty→delivered, empty→canned. (No failed-state test — failure exit_reasons structurally bypass the guard at the entry gate; the invariant is enforced by the gate, not by runtime logic, so there is nothing to assert at the guard level.)
 
 ## Rabbit Holes
 
@@ -154,8 +162,7 @@ Then Change 1's mechanism changes (fix prime-load path) but Change 2 is unaffect
 
 ## Race Conditions
 
-### Race 1: Trailing PTY idle overwrites a StopFailure with a floor delivery
-A `StopFailure` (in-turn error, clean hook exit) is followed by PTY quiescence; the wrap-up guard could misread the quiet PTY and deliver a floor message over a failed status. Mitigation (Change 2's sticky-`failed` guard): once `failed`/StopFailure is set on the result, the floor short-circuits and does not deliver or flip status. Treat `failed` as terminal once set.
+No timing hazards in scope. The wrap-up guard runs synchronously after the steady-state loop exits, on a quiesced PTY pair, within the same `Container.run()` call — there is no concurrent writer to `result`. The "trailing PTY idle overwrites a failed terminal state" race called out by the #1732 reference map cannot occur here: `_run_wrapup_guard` is gated to successful-shaped exit_reasons only (`:1219-1221`), so a failed run never reaches the guard. See Key Elements §2.
 
 ## No-Gos (Out of Scope)
 
@@ -182,7 +189,7 @@ No new agent integration required — this is a bridge-internal change. The gran
 - Granite exits `pm_complete`/`pm_user` with `user_facing_routed=True` for normal turns (production logs show `pm_no_user_message` rate returning to baseline).
 - `OPERATOR_TERMINAL_MESSAGE` fires only on a genuinely empty turn (asserted by test).
 - `_run_wrapup_guard` delivers `last_assistant_text` (not canned) when the PM produced a non-empty prefix-less final message (unit + mocked-PTY integration test).
-- A StopFailure terminal status is not overwritten by the floor (unit test).
+- The entry gate (`:1219-1221`) carries a one-line invariant comment documenting that failure exit_reasons bypass the guard, so no runtime sticky-failed guard exists.
 
 ## Step by Step Tasks
 
@@ -193,10 +200,10 @@ Confirm decay-over-turns vs. prime-load-failure. Pick Change 1's exact mechanism
 Add `PM_TURN_CONTRACT_REMINDER`; append to the Dev-report handoff write in the steady-state loop. Keep to one sentence.
 
 ### 3. Change 2 — relax `_run_wrapup_guard` floor
-Deliver non-empty `last_assistant_text` directly; reserve canned for empty transcript; add `pm_floor_delivered` exit reason; add sticky-`failed` guard. Add `pm_floor_delivered` to `_successful_exits`.
+Deliver non-empty `last_assistant_text` directly; reserve canned for empty transcript; add `pm_floor_delivered` exit reason. Add `pm_floor_delivered` to `_successful_exits`. Add the one-line entry-gate invariant comment (`:1219-1221`) — no runtime sticky-failed guard.
 
 ### 4. Tests
-Unit tests for the three floor branches (non-empty→delivered, empty→canned, StopFailure→not-overwritten). Mocked-PTY integration variant with a prefix-less PM. Extend the real-loop test's assertion (env-gated).
+Unit tests for the two floor branches (non-empty→delivered, empty→canned). Mocked-PTY integration variant with a prefix-less PM. Extend the real-loop test's assertion (env-gated).
 
 ### 5. Documentation
 Update `docs/features/granite-pty-production.md` and the `ContainerResult` exit-reason docstring.
