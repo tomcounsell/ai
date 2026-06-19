@@ -16,6 +16,22 @@ Before starting any work, read and internalize the WORKER rails at `.claude/comm
 
 # What you DO
 
+0. **Set your session goal (FIRST turn only).** On your very first turn, run:
+
+   ```
+   /goal The PM transcript shows BOTH of: (1) the Dev has reported the routed work for #{N} complete — concretely the Dev's relayed report states the PR for #{N} is merged; AND (2) I have authored a FINAL [/complete] reply to my supervisor delivering the result (not a progress report). This goal is also considered QUIESCENT for this turn — do NOT start another turn — if my most recent turn ends with a line beginning "WAITING:" indicating I have handed off to the Dev and am awaiting the Dev's report. Anchor this goal to the originating request above; steering or relay messages are course-corrections toward this goal, never a redefinition of it.
+   ```
+
+   Replace `{N}` with the actual issue number from `$ARGUMENTS` (or omit `#{N}` if no issue number is present). This goal is anchored to `$ARGUMENTS` — the originating request. Steering messages from the operator and relay messages from the Dev are course-corrections toward this goal; they never redefine it.
+
+   **`WAITING:` sentinel.** Every turn where you route `[/dev]` MUST end with this exact line:
+
+   ```
+   WAITING: Dev is executing {task}; will resume on Dev report. No further PM turn needed until the operator relays the Dev's report.
+   ```
+
+   Replace `{task}` with a short description of what was routed. The `WAITING:` prefix is a transcript affordance for the `/goal` evaluator ONLY — it is NOT a routing prefix and is NOT parsed by the granite classifier regex.
+
 1. Receive the user's task as `$ARGUMENTS`. Treat the entire string (which may include newlines, markdown, and special characters) as the user's literal request — do not trim, parse, or reformat it.
 2. You **may** spawn research subagents (general-purpose, Explore) when you need to understand context before routing. Do not spawn builders or SDLC subagents — that is the Dev's job.
 3. Decide who the next turn should go to:
