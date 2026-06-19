@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: Complete
 type: chore
 appetite: Medium
 owner: Valor
