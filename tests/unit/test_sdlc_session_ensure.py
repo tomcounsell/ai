@@ -358,7 +358,7 @@ class TestBridgeShortCircuit:
         find_session_mock.assert_not_called()
 
     def test_short_circuit_falls_through_for_non_owning_session(self, monkeypatch):
-        """Env var points at an Eng session that does not own the issue — short-circuit must NOT activate (C2)."""
+        """Env var points at an Eng session that does not own the issue — must NOT activate (C2)."""
         from tools.sdlc_session_ensure import ensure_session
 
         monkeypatch.setenv("VALOR_SESSION_ID", "dev_session_id")
@@ -788,3 +788,114 @@ class TestKillOrphans:
         # argparse .error() exits 2
         assert result.returncode != 0
         assert "mutually exclusive" in result.stderr.lower()
+
+
+class TestCreateLocalMessageText:
+    """Fix A (#1741): create_local receives a non-empty, issue-anchored message_text.
+
+    Without Fix A, ``message_text`` was not passed to ``create_local``, so the
+    AgentSession was created with ``message_text=None``. The executor then built
+    the PTY container's first turn as "MESSAGE: None", which primed the granite
+    PM with a phantom task and triggered a silent [/complete] no-op.
+
+    These tests assert that ``create_local`` is always called with:
+    - ``message_text`` kwarg present and non-empty
+    - the text references the issue number (issue-anchored)
+    - when ``issue_url`` is supplied, it is also embedded in the text
+    """
+
+    def test_create_local_receives_message_text(self):
+        """create_local is called with a non-empty message_text kwarg."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-1741"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            result = ensure_session(issue_number=1741)
+
+        assert result == {"session_id": "sdlc-local-1741", "created": True}
+        mock_as.create_local.assert_called_once()
+        _, kwargs = mock_as.create_local.call_args
+        assert "message_text" in kwargs, "create_local was not called with message_text kwarg"
+        assert kwargs["message_text"], "message_text must be non-empty"
+
+    def test_message_text_is_issue_anchored(self):
+        """message_text references the issue number so the PM has a real goal anchor."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-1742"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            ensure_session(issue_number=1742)
+
+        _, kwargs = mock_as.create_local.call_args
+        msg = kwargs["message_text"]
+        # Must reference the issue number so the PM can find the work to do.
+        assert "1742" in msg, f"message_text must reference issue number 1742; got: {msg!r}"
+
+    def test_message_text_embeds_issue_url_when_provided(self):
+        """When issue_url is supplied, it is embedded in message_text."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-1743"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        mock_as.create_local.return_value = mock_new_session
+
+        issue_url = "https://github.com/tomcounsell/ai/issues/1743"
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            ensure_session(issue_number=1743, issue_url=issue_url)
+
+        _, kwargs = mock_as.create_local.call_args
+        msg = kwargs["message_text"]
+        assert issue_url in msg, (
+            f"message_text must embed the issue_url when supplied; got: {msg!r}"
+        )
+
+    def test_message_text_present_without_issue_url(self):
+        """message_text is non-empty even when no issue_url is supplied."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-1744"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            ensure_session(issue_number=1744)
+
+        _, kwargs = mock_as.create_local.call_args
+        msg = kwargs.get("message_text", "")
+        assert msg and msg.strip(), "message_text must be non-empty even without issue_url"
+        assert "1744" in msg

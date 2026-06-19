@@ -89,6 +89,7 @@ def _make_session(
     project_key: str = "test",
     working_dir: str | None = "/tmp",
     session_id: str = "exec-granite-001",
+    message_text: str = "hello granite",
 ) -> AgentSession:
     """Build a minimal AgentSession for the executor."""
     return AgentSession.create(
@@ -98,7 +99,7 @@ def _make_session(
         working_dir=working_dir,
         status="pending",
         chat_id="999",
-        message_text="hello granite",
+        message_text=message_text,
         sender_name="tester",
         created_at=datetime.now(tz=UTC),
         turn_count=0,
@@ -221,6 +222,316 @@ def async_mock_return(value):
         return value
 
     return _coro
+
+
+# ---------------------------------------------------------------------------
+# Fix B guard tests (issue #1741): pre-SCOPE empty-turn-input guard
+# ---------------------------------------------------------------------------
+
+
+def _worktree_path() -> str:
+    """Return a temp path whose string includes '.worktrees' so the executor's
+    worktree-path guard (``WORKTREES_DIR in str(working_dir)``) is satisfied.
+    The directory is created on disk so the ``exists()`` check also passes.
+    """
+    import os
+
+    base = tempfile.mkdtemp()
+    wt_path = os.path.join(base, ".worktrees", "test-slot")
+    os.makedirs(wt_path, exist_ok=True)
+    return wt_path
+
+
+def _patch_worktree():
+    """Return a context manager that stubs out all worktree git operations.
+
+    The executor allocates a synthetic slug for slugless eng sessions and then
+    tries to create a real git worktree, verify its branch, and run git commands
+    against it. In a test environment (running from a worktree or in a directory
+    that is not a git repo), all of these fail. We mock:
+    - get_or_create_worktree → returns a fake .worktrees path (satisfies
+      WORKTREES_DIR and exists() guards)
+    - verify_worktree_branch → no-op (satisfies branch-mismatch guard)
+
+    This lets the executor proceed past all worktree guards and reach the
+    Fix B pre-SCOPE guard at ~line 1541.
+    """
+    from contextlib import ExitStack, contextmanager
+
+    @contextmanager
+    def _ctx():
+        wt_path = _worktree_path()
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "agent.worktree_manager.get_or_create_worktree",
+                    return_value=wt_path,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "agent.worktree_manager.verify_worktree_branch",
+                    return_value=None,
+                )
+            )
+            yield
+
+    return _ctx()
+
+
+class TestExecutorGuardEmptyTurnInput:
+    """Fix B (#1741): the pre-SCOPE guard fails loud on empty/None/"None" turn input.
+
+    Context: before Fix B, a messageless sdlc-local session (``message_text=None``)
+    would pass through the executor, build the harness turn input as
+    "MESSAGE: None", and prime the granite PM with a phantom task — producing a
+    silent [/complete] no-op with no error logged.
+
+    Fix B inserts a guard at line ~1541 in ``agent/session_executor.py`` that
+    checks ``_turn_input`` BEFORE ``build_harness_turn_input`` wraps it in the
+    SCOPE header block. It must:
+    - Set session status to "failed"
+    - Log an ``[executor-guard]`` ERROR with reason ``empty_container_message``
+    - NOT call BridgeAdapter.run
+
+    Non-trigger cases (must pass through to BridgeAdapter.run):
+    - Normal non-empty message_text
+    - A message containing "None" mid-text (not stripping to exactly "None")
+
+    IMPORTANT: this class uses the same fixture shape as TestExecutorGraniteWiring
+    (_make_session with working_dir="/tmp", valid session_id) and patches
+    BridgeAdapter.run via patch.object — NOT the _block_path_constructor fixture
+    from TestExecutorGuardWorkingDirNone, which fires at Path() ~line 773 and
+    would block BEFORE the new guard at ~line 1541.
+
+    Worktree provisioning is also patched (_patch_worktree) because the executor
+    allocates a synthetic slug for slugless eng sessions and calls git to create
+    a worktree. In non-main-checkout environments that fails before the guard is
+    reached. The mock returns a temp dir so the guard is the first failure point.
+    """
+
+    @pytest.mark.asyncio
+    async def test_none_message_text_triggers_guard(self, redis_test_db, caplog):
+        """message_text=None → guard triggers; BridgeAdapter.run NOT called."""
+        import uuid
+
+        session = AgentSession.create(
+            session_id=f"guard-test-{uuid.uuid4().hex[:8]}",
+            session_type="eng",
+            project_key="test",
+            working_dir="/tmp",
+            status="pending",
+            chat_id="999",
+            message_text=None,
+            sender_name="tester",
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        bridge_called = []
+
+        async def _spy_run(self, user_message, working_dir):
+            bridge_called.append(user_message)
+            return ""
+
+        pool = await _make_initialized_pool(size=1)
+        with (
+            patch("agent.granite_container.pty_pool._pty_pool", pool),
+            patch.object(BridgeAdapter, "run", _spy_run),
+            _patch_worktree(),
+            caplog.at_level(logging.ERROR),
+        ):
+            await _execute_agent_session(session)
+
+        assert not bridge_called, "BridgeAdapter.run must NOT be called when message_text is None"
+        assert session.status == "failed", f"Expected failed, got {session.status!r}"
+        guard_logs = [r for r in caplog.records if "[executor-guard]" in r.message]
+        assert guard_logs, "Expected an [executor-guard] ERROR log"
+        assert any("empty_container_message" in r.message for r in guard_logs), (
+            "Guard log must mention empty_container_message"
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_string_message_text_triggers_guard(self, redis_test_db, caplog):
+        """message_text='' triggers the guard — BridgeAdapter.run NOT called."""
+        import uuid
+
+        session = AgentSession.create(
+            session_id=f"guard-test-{uuid.uuid4().hex[:8]}",
+            session_type="eng",
+            project_key="test",
+            working_dir="/tmp",
+            status="pending",
+            chat_id="999",
+            message_text="",
+            sender_name="tester",
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        bridge_called = []
+
+        async def _spy_run(self, user_message, working_dir):
+            bridge_called.append(user_message)
+            return ""
+
+        pool = await _make_initialized_pool(size=1)
+        with (
+            patch("agent.granite_container.pty_pool._pty_pool", pool),
+            patch.object(BridgeAdapter, "run", _spy_run),
+            _patch_worktree(),
+            caplog.at_level(logging.ERROR),
+        ):
+            await _execute_agent_session(session)
+
+        assert not bridge_called, "BridgeAdapter.run must NOT be called for empty message_text"
+        assert session.status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_message_text_triggers_guard(self, redis_test_db, caplog):
+        """message_text='   ' (whitespace only) triggers the guard."""
+        import uuid
+
+        session = AgentSession.create(
+            session_id=f"guard-test-{uuid.uuid4().hex[:8]}",
+            session_type="eng",
+            project_key="test",
+            working_dir="/tmp",
+            status="pending",
+            chat_id="999",
+            message_text="   ",
+            sender_name="tester",
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        bridge_called = []
+
+        async def _spy_run(self, user_message, working_dir):
+            bridge_called.append(user_message)
+            return ""
+
+        pool = await _make_initialized_pool(size=1)
+        with (
+            patch("agent.granite_container.pty_pool._pty_pool", pool),
+            patch.object(BridgeAdapter, "run", _spy_run),
+            _patch_worktree(),
+            caplog.at_level(logging.ERROR),
+        ):
+            await _execute_agent_session(session)
+
+        assert not bridge_called, "BridgeAdapter.run must NOT be called for whitespace message_text"
+        assert session.status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_bare_none_string_message_text_triggers_guard(self, redis_test_db, caplog):
+        """message_text='None' (the bare string) triggers the guard — this is the
+        #1460 silent-no-op shape where Python's str(None) == 'None'."""
+        import uuid
+
+        session = AgentSession.create(
+            session_id=f"guard-test-{uuid.uuid4().hex[:8]}",
+            session_type="eng",
+            project_key="test",
+            working_dir="/tmp",
+            status="pending",
+            chat_id="999",
+            message_text="None",
+            sender_name="tester",
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        bridge_called = []
+
+        async def _spy_run(self, user_message, working_dir):
+            bridge_called.append(user_message)
+            return ""
+
+        pool = await _make_initialized_pool(size=1)
+        with (
+            patch("agent.granite_container.pty_pool._pty_pool", pool),
+            patch.object(BridgeAdapter, "run", _spy_run),
+            _patch_worktree(),
+            caplog.at_level(logging.ERROR),
+        ):
+            await _execute_agent_session(session)
+
+        assert not bridge_called, (
+            "BridgeAdapter.run must NOT be called when message_text is the bare string 'None'"
+        )
+        assert session.status == "failed"
+        guard_logs = [r for r in caplog.records if "[executor-guard]" in r.message]
+        assert guard_logs, "Expected an [executor-guard] ERROR log for bare-None message"
+
+    @pytest.mark.asyncio
+    async def test_normal_message_text_passes_through(self, redis_test_db, caplog):
+        """A normal non-empty message_text passes through to BridgeAdapter.run."""
+        session = _make_session(working_dir="/tmp", message_text="hello granite")
+
+        bridge_called = []
+
+        async def _spy_run(self, user_message, working_dir):
+            bridge_called.append(user_message)
+            return ""
+
+        pool = await _make_initialized_pool(size=1)
+        with (
+            patch("agent.granite_container.pty_pool._pty_pool", pool),
+            patch.object(BridgeAdapter, "run", _spy_run),
+            _patch_worktree(),
+            caplog.at_level(logging.ERROR),
+        ):
+            await _execute_agent_session(session)
+
+        assert bridge_called, "BridgeAdapter.run must be called for a normal message"
+        guard_errors = [
+            r
+            for r in caplog.records
+            if "[executor-guard]" in r.message and r.levelno >= logging.ERROR
+        ]
+        assert not guard_errors, f"Guard must NOT fire for normal message; got: {guard_errors}"
+
+    @pytest.mark.asyncio
+    async def test_none_mid_text_does_not_trigger_guard(self, redis_test_db, caplog):
+        """A message containing 'None' mid-text does NOT trigger the guard.
+
+        Only the bare string 'None' (after strip()) matches — not substrings.
+        Example: 'Investigate the None return from foo()' must pass through.
+        """
+        session = _make_session(
+            working_dir="/tmp",
+            message_text="Investigate the None return from foo()",
+        )
+
+        bridge_called = []
+
+        async def _spy_run(self, user_message, working_dir):
+            bridge_called.append(user_message)
+            return ""
+
+        pool = await _make_initialized_pool(size=1)
+        with (
+            patch("agent.granite_container.pty_pool._pty_pool", pool),
+            patch.object(BridgeAdapter, "run", _spy_run),
+            _patch_worktree(),
+            caplog.at_level(logging.ERROR),
+        ):
+            await _execute_agent_session(session)
+
+        assert bridge_called, (
+            "BridgeAdapter.run must be called when 'None' appears mid-text (not bare)"
+        )
+        guard_errors = [
+            r
+            for r in caplog.records
+            if "[executor-guard]" in r.message and r.levelno >= logging.ERROR
+        ]
+        assert not guard_errors, "Guard must NOT fire for a message that contains 'None' mid-text"
 
 
 # ---------------------------------------------------------------------------
