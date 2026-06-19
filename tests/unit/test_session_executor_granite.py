@@ -237,6 +237,9 @@ class TestIsNonCleanGraniteExit:
             # Clean exits → False
             ("pm_complete", False),
             ("pm_user", False),
+            # pm_floor_delivered: wrap-up guard delivered PM's real (prefix-less)
+            # last message — a genuine delivery, not a canned fallback (#1719).
+            ("pm_floor_delivered", False),
             # Non-clean exits → True
             ("exception", True),
             ("pm_hang", True),
@@ -278,6 +281,10 @@ class TestReactionGating:
             ("pm_complete", False, False),
             ("pm_complete", True, False),
             ("pm_user", False, False),
+            # pm_floor_delivered: wrap-up guard delivered real (prefix-less) PM
+            # text directly — genuine delivery, clean exit (#1719).
+            ("pm_floor_delivered", True, False),
+            ("pm_floor_delivered", False, False),
             # Non-clean exits → REACTION_ERROR (regardless of delivery)
             ("exception", False, True),
             ("exception", True, True),
