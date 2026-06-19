@@ -76,7 +76,7 @@ Telegram msg → bridge → worker → BridgeAdapter → Container.run()
   → prime PM (one-shot /prime-pm-role)  ← [contract asserted ONCE]
   → steady-state loop (≤10 turns):
        PM idle → classify_pm_prefix(pm_tail)
-         ├─ [/dev]      → forward to Dev, Dev idle, report back to PM   ← [no contract re-assert]  ← CHANGE 1 HERE
+         ├─ [/dev]      → forward to Dev, Dev idle, write dev_text to PM PTY (:1412)   ← [no contract re-assert]  ← CHANGE 1 HERE
          ├─ [/user]     → on_user_payload(payload); user_facing_routed=True; break
          ├─ [/complete] → on_complete_payload; user_facing_routed=True; break
          └─ unknown     → PM_COMPLIANCE_NUDGE; continue
@@ -85,16 +85,22 @@ Telegram msg → bridge → worker → BridgeAdapter → Container.run()
        (failure exit_reasons — dev_hang/pm_hang/exception/… — never reach here)
   → _run_wrapup_guard():
        re-drive PM once via PM_WRAPUP_PROMPT (MAX_WRAPUP_ATTEMPTS=1, :1511-1551)
-       read pm_text = last_assistant_text(...) (:1533) → classify_pm_prefix
-         ├─ prefix found → route via _route_pm_classification, user_facing_routed=True   ← current
-         └─ no prefix / re-drive exhausted (tail :1553-1567):
-              ├─ pm_text non-empty → deliver pm_text directly, exit_reason=pm_floor_delivered  ← CHANGE 2 HERE
-              └─ pm_text empty     → OPERATOR_TERMINAL_MESSAGE (canned, :1557)
+       read pm_text = last_assistant_text(...) (:1533)
+       if pm_text (:1538): classify_pm_prefix
+         ├─ prefix found  → route via _route_pm_classification (:1546), user_facing_routed=True   ← current, preserved
+         └─ unknown (non-empty, prefix-less)
+              → deliver pm_text DIRECTLY, exit_reason=pm_floor_delivered, return   ← CHANGE 2 HERE (intercept BEFORE _route_pm_classification — no PM_COMPLIANCE_NUDGE into dying PTY)
+       else / re-drive exhausted (tail :1553-1567):
+         └─ pm_text empty → OPERATOR_TERMINAL_MESSAGE (canned, :1557)
+  → exit_reason=pm_floor_delivered must ALSO be in _CLEAN_GRANITE_EXIT_REASONS (session_executor.py:35)
+       else _is_non_clean_granite_exit → REACTION_ERROR on a real delivery   ← CHANGE 2b HERE
 ```
 
 ## Architectural Impact
 
-Changes are confined to the granite container layer (`agent/granite_container/container.py`) and one priming slash command (`.claude/commands/granite/prime-pm-role.md`). No change to BridgeAdapter, session_executor, the worker, or the message-drafter/health-checker layer. The `ContainerResult` contract gains one new `exit_reason` value (`pm_floor_delivered`); `user_facing_routed` semantics are unchanged (still "the human got a real message").
+Changes touch the granite container layer (`agent/granite_container/container.py`), one priming slash command (`.claude/commands/granite/prime-pm-role.md`), **and the worker's granite exit-reason classifier** (`agent/session_executor.py`). No change to BridgeAdapter, the worker's session-execution flow, or the message-drafter/health-checker layer. The `ContainerResult` contract gains one new `exit_reason` value (`pm_floor_delivered`); `user_facing_routed` semantics are unchanged (still "the human got a real message").
+
+**Why session_executor MUST change (do not skip — verified against live code):** The authoritative reaction classifier is `_CLEAN_GRANITE_EXIT_REASONS = frozenset({"pm_complete", "pm_user"})` at `agent/session_executor.py:35`. `_is_non_clean_granite_exit()` (`:38-53`) treats *any* exit_reason not in that frozenset as a real failure → `REACTION_ERROR` (`:1955-1959`). The local `_successful_exits` set at `container.py:1219` is **only the wrap-up-guard entry gate** — it does not influence the reaction emoji. If `pm_floor_delivered` is added only to `container.py:1219` and NOT to `_CLEAN_GRANITE_EXIT_REASONS`, every floor-delivered session (where the human received a genuine message) gets an error-reaction emoji. The fix therefore adds `"pm_floor_delivered"` to `_CLEAN_GRANITE_EXIT_REASONS` (`:35`) and updates its docstring (`:42-44`) to reflect that floor-delivered is a clean exit. This is an explicit, mandatory plan task (see Step 3).
 
 ## Appetite
 
@@ -119,9 +125,15 @@ After Change 1, the PM keeps emitting prefixes across all 10 turns → normal ex
 
 ### Technical Approach
 
-- **Change 1**: Add a `PM_TURN_CONTRACT_REMINDER` constant (one line: *"Begin your reply with `[/user]`, `[/complete]`, or `[/dev]` on its own line."*) and append it to the Dev-report text written to the PM PTY in the steady-state loop's `dev` branch (`container.py` ~`:1261-1263`, where `self._last_dev_report` is written back to PM). Keep it short — it is a reminder, not a re-prime. Optionally tighten `prime-pm-role.md` wording, but the per-turn reminder is the load-bearing fix.
-- **Change 2**: Rewrite `_run_wrapup_guard`'s canned-delivery tail (`container.py:1553-1567`). The guard already re-drives PM once via `PM_WRAPUP_PROMPT` (`MAX_WRAPUP_ATTEMPTS=1`, `:1511-1551`) and reads `pm_text = last_assistant_text(...)` (`:1533`). The change is in the post-re-drive tail: when `pm_text` is truthy but no routing prefix was detected, deliver `pm_text` (stripped of any partial leading prefix) via `_on_user_payload`, set `user_facing_routed=True`, `exit_reason="pm_floor_delivered"`. Only when `pm_text` is empty/whitespace fall to `OPERATOR_TERMINAL_MESSAGE` (`:1557`). No additional failed-state guard is needed — the entry gate at `:1219-1221` already excludes failure exit_reasons (see Key Elements §2).
-- **`_successful_exits`**: add `pm_floor_delivered` to the set (`:1219`) so the new clean-delivery exit is not treated as an anomaly. Dropping `pm_max_turns` from the set is `[SEPARATE-SLUG #1740]`.
+- **Change 1**: Add a `PM_TURN_CONTRACT_REMINDER` constant (one line: *"Begin your reply with `[/user]`, `[/complete]`, or `[/dev]` on its own line."*) and append it to the Dev-report text written to the PM PTY in the steady-state loop's `dev` branch. The actual handoff write is `self._pm_pty.write(dev_text)` at `container.py:1412` (immediately after `self._last_dev_report = dev_text` at `:1405`); append the reminder to `dev_text` before that write. Keep it short — it is a reminder, not a re-prime. Optionally tighten `prime-pm-role.md` wording, but the per-turn reminder is the load-bearing fix.
+- **Change 2 — intercept the floor BEFORE the routing call (critical placement).** The guard re-drives PM once via `PM_WRAPUP_PROMPT` (`MAX_WRAPUP_ATTEMPTS=1`, `:1511-1551`), reads `pm_text = last_assistant_text(...)` (`:1533`), then *currently* calls `classify_pm_prefix` (`:1539`) and `_route_pm_classification` (`:1546-1548`) before checking `user_facing_routed` (`:1549`). **The floor check MUST be inserted in the `if pm_text:` block at `:1538`, between the `pm_text` assignment (`:1533`) and the routing call (`:1546`) — NOT after `:1549`.** Why: for a non-empty prefix-less `pm_text`, `classify_pm_prefix` returns `unknown`; `_route_pm_classification`'s unknown branch writes `PM_COMPLIANCE_NUDGE` into the PM PTY at `:1286`. If the floor only checks `user_facing_routed` *after* the routing call, that nudge has already fired into a PTY about to be torn down (`_close_pair()` runs in the `Container.run` finally block at `:1233`) and no user message was delivered. Correct logic in the `if pm_text:` block:
+  - Run `classify_pm_prefix(pm_text)`. If it yields a real routing prefix (`user`/`complete`/`dev`), route normally via `_route_pm_classification` (existing path — preserves prefix-compliant wrap-ups).
+  - If classification is `unknown` (non-empty but prefix-less), **deliver `pm_text` directly** (stripped of any partial leading prefix token) via `_on_user_payload`, set `user_facing_routed=True`, `exit_reason="pm_floor_delivered"`, and `return` — bypassing `_route_pm_classification` entirely so no `PM_COMPLIANCE_NUDGE` is written to the dying PTY.
+  - When `pm_text` is empty/whitespace, leave the existing `else` branch (`:1540-1545`) and post-re-drive tail (`:1553-1567`) intact: fall to `OPERATOR_TERMINAL_MESSAGE` (`:1557`).
+
+  No additional failed-state guard is needed — the entry gate at `:1219-1221` already excludes failure exit_reasons (see Key Elements §2).
+- **`_successful_exits` (container.py:1219, wrap-up-guard entry gate)**: add `pm_floor_delivered` to the set so the new clean-delivery exit is not treated as an anomaly *at the guard entry gate*. Dropping `pm_max_turns` from this set is `[SEPARATE-SLUG #1740]`.
+- **`_CLEAN_GRANITE_EXIT_REASONS` (session_executor.py:35, authoritative reaction classifier) — MANDATORY**: add `"pm_floor_delivered"` to the frozenset and update the docstring (`:42-44`) to list `pm_floor_delivered` as a clean exit. Without this, `_is_non_clean_granite_exit()` (`:38-53`) returns `True` for `pm_floor_delivered` → `REACTION_ERROR` (`:1955-1959`) is set on a session that delivered a real message. The two sets are distinct: `container.py:1219` gates whether the wrap-up guard runs; `session_executor.py:35` decides the reaction emoji. Both must include `pm_floor_delivered`.
 - **Invariant comment**: add a one-line comment at the entry gate (`:1219-1221`) documenting that failure exit_reasons structurally bypass the guard, so no runtime sticky-failed guard exists or is needed.
 
 ## Failure Path Test Strategy
@@ -140,7 +152,9 @@ After Change 1, the PM keeps emitting prefixes across all 10 turns → normal ex
 ## Test Impact
 - [ ] `tests/integration/test_granite_pty_production.py::test_simulated_bridge_session_completes_via_container` — UPDATE: the mock PTY emulator emits compliant prefixes by construction; add a variant whose mock PM emits a **prefix-less** final message and assert the relaxed floor delivers it (not the canned string).
 - [ ] `tests/integration/test_granite_container_loop.py::test_cli_short_run_produces_results_json` — UPDATE: extend the real-loop assertion (when `_model_reachable`) to require a **non-empty, non-canned** user-facing message regardless of `exit_reason`. (Note: this test SKIPS when `claude --print ping` is unreachable — the scheduling/alert-on-skip hardening is `[SEPARATE-SLUG #1740]`.)
-- [ ] New unit coverage for `_run_wrapup_guard` floor branches: non-empty→delivered, empty→canned. (No failed-state test — failure exit_reasons structurally bypass the guard at the entry gate; the invariant is enforced by the gate, not by runtime logic, so there is nothing to assert at the guard level.)
+- [ ] New unit coverage for `_run_wrapup_guard` floor branches: non-empty prefix-less `pm_text`→delivered via `_on_user_payload` with `exit_reason=pm_floor_delivered` **and `_route_pm_classification` is NOT called** (assert no `PM_COMPLIANCE_NUDGE` write to `_pm_pty.write` in the floor path); empty `pm_text`→canned. (No failed-state test — failure exit_reasons structurally bypass the guard at the entry gate; the invariant is enforced by the gate, not by runtime logic, so there is nothing to assert at the guard level.)
+- [ ] **Change 1 CI acceptance gate (new mocked-PTY unit test)**: with a mocked PM/Dev PTY pair, drive one `dev`-classified handoff and assert the text written to `self._pm_pty.write` at `container.py:1412` contains `PM_TURN_CONTRACT_REMINDER`. This gives Change 1 a deterministic CI assertion that does not depend on a live model (the real-loop test SKIPs when the model is unreachable). ADD.
+- [ ] **`_CLEAN_GRANITE_EXIT_REASONS` regression test (session_executor)**: assert `_is_non_clean_granite_exit()` returns `False` for an `agent_session` with `exit_reason="pm_floor_delivered"` (i.e. it is classified clean → no `REACTION_ERROR`). ADD — directly guards B1.
 
 ## Rabbit Holes
 
@@ -182,11 +196,12 @@ No new agent integration required — this is a bridge-internal change. The gran
 
 - [ ] Update `docs/features/granite-pty-production.md` — document the per-turn prefix-contract reminder and the relaxed wrap-up floor (`pm_floor_delivered` exit reason; canned only on empty transcript).
 - [ ] Add the `pm_floor_delivered` exit reason to any exit-reason reference in `docs/features/granite-pty-production.md` (and `ContainerResult` docstring at `container.py:279`).
+- [ ] Update the `_CLEAN_GRANITE_EXIT_REASONS` / `_is_non_clean_granite_exit()` docstring at `agent/session_executor.py:42-44` to list `pm_floor_delivered` as a clean granite exit (currently lists only `pm_complete`/`pm_user` as clean and `pm_max_turns` among the non-clean set).
 
 ## Success Criteria
 
 - A real Telegram message to the Eng session round-trips a genuine, non-canned response (verified on the bridge machine).
-- Granite exits `pm_complete`/`pm_user` with `user_facing_routed=True` for normal turns (production logs show `pm_no_user_message` rate returning to baseline).
+- Granite exits `pm_complete`/`pm_user` with `user_facing_routed=True` for normal turns. **Combined-rate criterion (avoids confounding the two changes):** the production rate of `pm_no_user_message` **plus** `pm_floor_delivered` (both relative to total granite exits) returns toward baseline. Rationale: Change 1 (per-turn reminder) should drive `pm_no_user_message` *down* by keeping the PM prefix-compliant; Change 2 (relaxed floor) converts the residual would-be `pm_no_user_message` exits into `pm_floor_delivered` (a real delivery, not a canned fallback). Measuring `pm_no_user_message` alone would falsely credit Change 2 for Change 1's effect; the combined `pm_no_user_message + pm_floor_delivered` rate isolates the genuine-failure signal (canned-only). A healthy result is: `pm_no_user_message` near-zero, `pm_floor_delivered` rare-and-decreasing as Change 1 takes hold. Add `pm_floor_delivered` to the exit-reason aggregation/log query used to compute this rate.
 - `OPERATOR_TERMINAL_MESSAGE` fires only on a genuinely empty turn (asserted by test).
 - `_run_wrapup_guard` delivers `last_assistant_text` (not canned) when the PM produced a non-empty prefix-less final message (unit + mocked-PTY integration test).
 - The entry gate (`:1219-1221`) carries a one-line invariant comment documenting that failure exit_reasons bypass the guard, so no runtime sticky-failed guard exists.
@@ -197,13 +212,13 @@ No new agent integration required — this is a bridge-internal change. The gran
 Confirm decay-over-turns vs. prime-load-failure. Pick Change 1's exact mechanism + reminder wording from the evidence. Time cap: 10 min.
 
 ### 2. Change 1 — per-turn prefix-contract reminder
-Add `PM_TURN_CONTRACT_REMINDER`; append to the Dev-report handoff write in the steady-state loop. Keep to one sentence.
+Add `PM_TURN_CONTRACT_REMINDER`; append it to `dev_text` before the handoff write `self._pm_pty.write(dev_text)` at `container.py:1412`. Keep to one sentence.
 
-### 3. Change 2 — relax `_run_wrapup_guard` floor
-Deliver non-empty `last_assistant_text` directly; reserve canned for empty transcript; add `pm_floor_delivered` exit reason. Add `pm_floor_delivered` to `_successful_exits`. Add the one-line entry-gate invariant comment (`:1219-1221`) — no runtime sticky-failed guard.
+### 3. Change 2 — relax `_run_wrapup_guard` floor (+ classifier update)
+In the `if pm_text:` block at `container.py:1538` (BEFORE the `_route_pm_classification` call at `:1546`): when classification is `unknown` (non-empty, prefix-less), deliver `pm_text` directly via `_on_user_payload`, set `user_facing_routed=True`, `exit_reason="pm_floor_delivered"`, and `return` — so no `PM_COMPLIANCE_NUDGE` (`:1286`) is written to the dying PTY. Preserve the prefix-found path (route normally) and the empty-`pm_text` canned path (`:1557`). Add `pm_floor_delivered` to `_successful_exits` (`container.py:1219`, guard entry gate). **MANDATORY — add `"pm_floor_delivered"` to `_CLEAN_GRANITE_EXIT_REASONS` (`session_executor.py:35`) and update its docstring (`:42-44`)**, else floor-delivered sessions get `REACTION_ERROR` (B1). Add the one-line entry-gate invariant comment (`:1219-1221`) — no runtime sticky-failed guard.
 
 ### 4. Tests
-Unit tests for the two floor branches (non-empty→delivered, empty→canned). Mocked-PTY integration variant with a prefix-less PM. Extend the real-loop test's assertion (env-gated).
+Unit tests for the two floor branches (non-empty prefix-less→delivered with `pm_floor_delivered` and NO `_route_pm_classification`/`PM_COMPLIANCE_NUDGE`; empty→canned). Mocked-PTY unit test asserting `PM_TURN_CONTRACT_REMINDER` appears in the `_pm_pty.write` at `:1412` on a `dev` handoff (Change 1 CI gate). Unit test asserting `_is_non_clean_granite_exit()` is `False` for `pm_floor_delivered` (B1 guard). Mocked-PTY integration variant with a prefix-less PM. Extend the real-loop test's assertion (env-gated).
 
 ### 5. Documentation
 Update `docs/features/granite-pty-production.md` and the `ContainerResult` exit-reason docstring.
