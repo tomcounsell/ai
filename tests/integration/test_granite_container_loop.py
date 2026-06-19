@@ -16,6 +16,8 @@ The test exercises:
   - A short end-to-end run with `--max-turns 3` (a short run that
     won't loop forever) writes a well-formed results JSON
   - The stdout summary JSON and the written results JSON shapes
+  - On the model-reachable path: the exit reason is a clean granite
+    exit AND the user-facing message is real (not the canned fallback)
 
 It is **not** the full historical verdict (that lives in
 docs/plans/completed/granite-interactive-tui-poc-results.md). It is a
@@ -32,6 +34,8 @@ import tempfile
 import unittest
 import urllib.request
 from pathlib import Path
+
+from agent.session_executor import _CLEAN_GRANITE_EXIT_REASONS
 
 
 def _model_reachable() -> bool:
@@ -76,6 +80,23 @@ _MODEL_REACHABLE: bool = _model_reachable()
 # end on any of these; the test asserts shape, not a specific verdict.
 _VALID_EXIT_CODES = {0, 1, 2, 3, 4}
 
+# All exit reasons the container can produce on a best-effort run.
+# pm_floor_delivered and pm_user are added (#1740) to fix a whitelist gap
+# that would have caught the canned-fallback regression (#1719).
+# pm_no_user_message is NOT in this set — it indicates the wrap-up guard
+# exhausted all attempts without delivering a real message (canned fallback).
+_ALL_VALID_EXIT_REASONS = {
+    "pm_complete",
+    "pm_user",
+    "pm_floor_delivered",
+    "pm_max_turns",
+    "pm_no_user_message",
+    "dev_hang",
+    "pm_hang",
+    "startup_unresolved",
+    "exception",
+}
+
 # Keys the written results JSON (result_to_json -> asdict) must carry.
 _RESULTS_KEYS = {
     "session_id",
@@ -109,7 +130,15 @@ class TestGraniteContainerIntegration(unittest.TestCase):
     """Env-gated end-to-end run driven through the registered CLI."""
 
     def test_cli_short_run_produces_results_json(self) -> None:
-        """`valor-granite-loop` runs end-to-end and writes a well-formed results JSON."""
+        """`valor-granite-loop` runs end-to-end and writes a well-formed results JSON.
+
+        On the model-reachable path this test also asserts that:
+        - exit_reason is one of the full valid set (including pm_floor_delivered,
+          pm_user — previously missing from the whitelist, issue #1740)
+        - When exit_reason is a clean granite exit (_CLEAN_GRANITE_EXIT_REASONS),
+          the user-facing message is non-empty and not equal to OPERATOR_TERMINAL_MESSAGE
+          (the canned fallback that was silently shipped in issue #1719)
+        """
         # Blocker-1 guard: the entry point must be registered in
         # [project.scripts]. A direct Container() call cannot catch this.
         cli = shutil.which("valor-granite-loop")
@@ -162,18 +191,40 @@ class TestGraniteContainerIntegration(unittest.TestCase):
                 f"results JSON missing keys {_RESULTS_KEYS - set(payload)}",
             )
             self.assertIsNotNone(payload["session_id"])
+
+            # Widen the exit-reason whitelist to include pm_floor_delivered and pm_user
+            # (previously missing — issue #1740). This would have caught the
+            # canned-fallback regression (#1719) where pm_floor_delivered was a
+            # valid but unrecognised exit_reason.
+            exit_reason = payload["exit_reason"]
             self.assertIn(
-                payload["exit_reason"],
-                {
-                    "pm_complete",
-                    "pm_max_turns",
-                    "dev_hang",
-                    "pm_hang",
-                    "startup_unresolved",
-                    "exception",
-                },
+                exit_reason,
+                _ALL_VALID_EXIT_REASONS,
+                f"exit_reason {exit_reason!r} is not in the known valid set "
+                f"{_ALL_VALID_EXIT_REASONS}",
             )
             self.assertIsInstance(payload["turns"], list)
+
+            # Clean-exit assertion (#1740): on a clean granite exit, the
+            # user-facing message must be real — not the canned OPERATOR_TERMINAL_MESSAGE
+            # fallback. This is the canary for the regression that shipped in #1719.
+            # We do NOT assert pm_floor_delivered specifically (non-deterministic on
+            # the live path) — any clean exit must deliver a real message.
+            if exit_reason in _CLEAN_GRANITE_EXIT_REASONS:
+                from agent.granite_container.container import OPERATOR_TERMINAL_MESSAGE
+
+                exit_message = payload.get("exit_message", "")
+                self.assertTrue(
+                    exit_message,
+                    f"exit_reason={exit_reason!r} (clean exit) but exit_message is empty — "
+                    f"the user-facing message was not delivered",
+                )
+                self.assertNotEqual(
+                    exit_message,
+                    OPERATOR_TERMINAL_MESSAGE,
+                    f"exit_reason={exit_reason!r} (clean exit) but exit_message is the "
+                    f"canned OPERATOR_TERMINAL_MESSAGE fallback — regression from #1719",
+                )
 
 
 if __name__ == "__main__":

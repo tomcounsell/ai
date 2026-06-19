@@ -1380,6 +1380,18 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 result.warnings.append("Worker plist install failed")
 
+        # Install nightly-tests launchd service on bridge machines.
+        # The install script self-gates on has_bridge_role() — it skips
+        # gracefully and removes stale plists on non-bridge machines.
+        if has_bridge:
+            if service.install_nightly_tests(project_dir):
+                log("Nightly tests service installed/verified", v)
+            else:
+                log("WARN: Nightly tests service install failed or not supported", v, always=True)
+                result.warnings.append("Nightly tests service install failed")
+        else:
+            log("Nightly tests: skipped (no projects assigned to this machine)", v)
+
         # Ensure email bridge is running if this machine has projects AND IMAP is configured.
         # If the machine has no projects, stop any stray email bridge process.
         has_projects = bool(machine_check.get("projects"))

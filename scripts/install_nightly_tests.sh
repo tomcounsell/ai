@@ -17,6 +17,60 @@ PLIST_SRC="$PROJECT_DIR/com.valor.nightly-tests.plist"
 LABEL="${SERVICE_LABEL_PREFIX}.nightly-tests"
 PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
+# ── Bridge-role gate ────────────────────────────────────────────────────
+# Nightly tests exercise the granite real-loop integration test, which is only
+# meaningful on a machine that has at least one Telegram-configured (bridge)
+# project assigned to it. Non-bridge machines (e.g. skills-only laptops) skip
+# the install and remove any stale plist from a prior install.
+#
+# Mirrors the has_email_role() pattern from scripts/install_email_bridge.sh.
+has_bridge_role() {
+    local config="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
+    if [ ! -f "$config" ]; then
+        return 0  # Fail open when config is unreadable
+    fi
+    if [ ! -x "$PROJECT_DIR/.venv/bin/python" ]; then
+        return 0  # Fail open when venv is missing
+    fi
+    "$PROJECT_DIR/.venv/bin/python" - "$config" <<'PYEOF'
+import json, subprocess, sys
+
+try:
+    host = subprocess.check_output(
+        ["scutil", "--get", "ComputerName"], text=True
+    ).strip()
+except Exception:
+    sys.exit(0)  # Fail open on scutil error
+
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+except Exception:
+    sys.exit(0)  # Fail open on config parse error
+
+target = host.lower()
+for proj in cfg.get("projects", {}).values():
+    if (proj.get("machine") or "").lower() != target:
+        continue
+    if proj.get("telegram"):
+        sys.exit(0)  # At least one bridge-role project found — qualify
+sys.exit(1)  # No bridge-role project found for this host
+PYEOF
+}
+
+if ! has_bridge_role; then
+    host=$(scutil --get ComputerName 2>/dev/null || echo unknown)
+    echo "Skipping nightly-tests install (no bridge projects assigned to '$host')"
+    if [ -f "$PLIST_DST" ]; then
+        echo "Removing stale nightly-tests plist from non-bridge machine..."
+        launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+        rm -f "$PLIST_DST"
+        echo "Stale nightly-tests plist removed."
+    fi
+    exit 0
+fi
+# ── End bridge-role gate ────────────────────────────────────────────────
+
 # Prerequisite: pytest-json-report must be installed
 if ! "$PROJECT_DIR/.venv/bin/python" -m pytest --json-report --help > /dev/null 2>&1; then
     echo "ERROR: pytest-json-report not installed. Run: uv pip install pytest-json-report"

@@ -1231,9 +1231,17 @@ class Container:
             # Invariant: failure exit_reasons (dev_hang, pm_hang, exception,
             # startup_unresolved, pm_no_user_message) never reach this gate —
             # they are set in the except/break paths above and never end up in
-            # _successful_exits. No runtime sticky-failed guard is needed.
-            _successful_exits = {"pm_complete", "pm_user", "pm_max_turns", "pm_floor_delivered"}
-            if result.exit_reason in _successful_exits and not result.user_facing_routed:
+            # _wrapup_eligible_exits. No runtime sticky-failed guard is needed.
+            # NOTE: _wrapup_eligible_exits is the TRIGGER set (wraps up when
+            # user_facing_routed=False); it is distinct from _CLEAN_GRANITE_EXIT_REASONS
+            # in session_executor (the clean-exit gate used for REACTION_ERROR routing).
+            _wrapup_eligible_exits = {
+                "pm_complete",
+                "pm_user",
+                "pm_max_turns",
+                "pm_floor_delivered",
+            }
+            if result.exit_reason in _wrapup_eligible_exits and not result.user_facing_routed:
                 self._run_wrapup_guard(result)
 
         except Exception as e:
@@ -1495,8 +1503,8 @@ class Container:
         """Drive PM to produce a user-facing message when none was delivered.
 
         Called when the run exits in a successful-shaped state
-        (pm_complete, pm_user, pm_max_turns) but result.user_facing_routed
-        is still False. The guard:
+        (pm_complete, pm_user, pm_max_turns, pm_floor_delivered) but
+        result.user_facing_routed is still False. The guard:
           1. Builds a seed from self._last_dev_report (or a fresh Dev
              idle read + summarize, or DEV_REPORT_UNAVAILABLE).
           2. Writes PM_WRAPUP_PROMPT to PM's PTY.
