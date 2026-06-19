@@ -134,6 +134,33 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `slug` -- derives branch name, plan path, worktree
 - `issue_url`, `plan_url`, `pr_url` -- SDLC link URLs
 
+### sdlc-local session `message_text` (issue #1741)
+
+`sdlc-local-{N}` sessions created by `tools/sdlc_session_ensure.py` now carry
+an issue-anchored `message_text`. Before issue #1741, `message_text` was not
+passed to `create_local`, so the field was `None`. The executor then built the
+granite PTY container's first turn as "MESSAGE: None", which primed the PM with
+a phantom task and caused a silent `[/complete]` no-op — the SDLC pipeline
+appeared to succeed but did no work.
+
+The fix populates `message_text` with:
+
+```
+Run the full SDLC pipeline for issue #{N}. Read the issue body for the work to be done[ ({issue_url})].
+```
+
+This gives the granite PM a real goal anchor so it can read the issue body,
+route to the Dev, and drive the pipeline to completion.
+
+**Executor fail-loud guard (pre-SCOPE, `agent/session_executor.py` ~line 1541):**
+After steering-message injection and before `build_harness_turn_input` wraps
+`_turn_input` in the SCOPE header block, the executor checks the raw turn input.
+If `_turn_input` stripped equals `""` or `"None"`, the session is immediately
+finalized as `status="failed"` and an `[executor-guard]` ERROR is logged with
+reason `empty_container_message`. `BridgeAdapter.run` is never called. This
+guard catches both `None` values and the bare string `"None"` (which arises
+from `str(None)`) before they can reach the granite PM as phantom tasks.
+
 ### Session Creation
 Sessions are created via factory methods:
 - `AgentSession.create_eng(...)` -- creates an Eng session

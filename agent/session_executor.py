@@ -1538,6 +1538,46 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"[{session.project_key}] Steering check failed (non-fatal): {_steer_err}"
                 )
 
+        # Fix B (issue #1741): fail loud on a messageless task. A None/empty/"None"
+        # first message means the originating intent never reached this record (the
+        # #1460 sdlc-local silent no-op). Guard the PRE-SCOPE value: once
+        # build_harness_turn_input wraps _turn_input in the SCOPE header block, the
+        # bare "None" is buried inside "MESSAGE: None" and can never be detected by a
+        # strip()=="None" check. Container.__init__'s own "if not user_message.strip()"
+        # guard also misses it because the SCOPE block is non-empty. Catch it here.
+        _pre_scope = "" if _turn_input is None else str(_turn_input).strip()
+        if _pre_scope == "" or _pre_scope == "None":
+            _guard_reason = f"empty_container_message: _turn_input stripped to {_turn_input!r}"
+            logger.error(
+                "[executor-guard] session %s: refusing empty container message — %s",
+                session.agent_session_id,
+                _guard_reason,
+            )
+            try:
+                from models.session_lifecycle import (  # noqa: PLC0415
+                    StatusConflictError,
+                    finalize_session,
+                )
+
+                finalize_session(session, "failed", reason=_guard_reason)
+            except StatusConflictError:
+                logger.info(
+                    "[executor-guard] session %s already terminal, skipping finalize",
+                    session.agent_session_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "[executor-guard] last-resort status save for session %s: %s",
+                    session.agent_session_id,
+                    exc,
+                )
+                try:
+                    session.status = "failed"
+                    session.save(update_fields=["status", "updated_at"])
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+
         # All session types route to the granite PTY container (plan #1572).
         # The CLI harness in `agent/sdk_client.py` is preserved for the
         # follow-on issue (per the plan's No-Gos) but no longer called from

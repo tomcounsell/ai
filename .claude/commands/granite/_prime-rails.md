@@ -46,6 +46,16 @@ Do NOT emit a "done" signal when:
 
 ---
 
+## Turn-Loop Ownership and `/goal`
+
+The granite operator (which classifies `[/dev]`/`[/user]`/`[/complete]` via `^\[/(dev|user|complete)(?::([a-z0-9_-]+))?\]\s*$`) is the sole driver of cross-role turns. No role may invoke another role directly — all cross-role handoffs go through the operator's routing layer.
+
+`/goal` is a session-scoped Stop hook that operates INSIDE each role's TUI. It guards premature completion by evaluating whether the goal condition is met at session end. It does NOT drive cross-role turns.
+
+The `WAITING:` sentinel (a line beginning with `WAITING:` at the end of a PM turn) allows `/goal` to quiesce when the PM has legitimately handed off to the Dev and is awaiting the Dev's report. It is a transcript affordance for the `/goal` evaluator only — not a routing prefix, not parsed by the classifier regex.
+
+---
+
 ## Hard Safety Rules
 
 - **NEVER co-author commits with Claude.** No `Co-Authored-By: Claude` lines or "Generated with

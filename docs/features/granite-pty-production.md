@@ -861,6 +861,63 @@ Free-text generation (memory title generation, test AI judge) uses the per-machi
 
 `gemma4:e2b` was the previous local model (standardized in issue #671) and is now in `OLLAMA_SUPERSEDED_MODELS` — removed from every machine by `/update` superseded-cleanup once the granite smoke-test passes.
 
+## Goal anchoring and turn-loop ownership
+
+**Added in issue #1741.**
+
+### PM prime: `/goal` anchored to `$ARGUMENTS`
+
+On its very first turn, the PM session runs `/goal` with a completion condition
+anchored to the originating request (`$ARGUMENTS`). The goal text specifies two
+required conditions for `[/complete]` to be valid:
+
+1. The Dev has reported the routed work complete (concretely: the Dev's relayed
+   report states the PR for `#{N}` is merged).
+2. The PM has authored a `FINAL [/complete]` reply delivering the result (not a
+   progress report).
+
+The `/goal` evaluator also treats the current turn as **QUIESCENT** (does not
+fire another turn) when the PM's most recent output ends with a line beginning
+`WAITING:` — the sentinel indicating the PM has handed off to the Dev and is
+waiting for the Dev's relay.
+
+Steering messages from the operator and relay messages from the Dev are
+**course-corrections toward this goal**, never a redefinition of it. The goal
+is fixed at the originating `$ARGUMENTS`; it survives the entire session.
+
+### Dev prime: accepts PM-set `/goal` on first relay
+
+The Dev session does not set its own `/goal`. On the first relay from the PM,
+the Dev accepts the goal forwarded by the PM (if any) and proceeds to execute
+the implementation work. The Dev's turn-loop is driven entirely by the operator
+(the granite PTY container relay); the Dev does not quiesce on `WAITING:`.
+
+### `WAITING:` sentinel
+
+`WAITING:` is a **plain final line** in the PM's turn output:
+
+```
+WAITING: Dev is executing {task}; will resume on Dev report. No further PM turn needed until the operator relays the Dev's report.
+```
+
+It is consumed exclusively by the `/goal` evaluator as a quiescence signal. It
+is **NOT** a routing prefix and is NOT parsed by the granite classifier regex
+(`^\[/(dev|user|complete)(?::([a-z0-9_-]+))?\]\s*$`). Do not use `[WAITING]`
+or any bracket form — the evaluator only recognizes the bare `WAITING:` prefix.
+
+### Turn-loop ownership
+
+The **operator** (the granite PTY container) is the sole cross-role driver:
+
+- It routes PM output to the Dev when the PM emits `[/dev]`.
+- It relays Dev output back to the PM as a steering message.
+- It delivers PM `[/user]` output to Telegram.
+- It terminates the loop when the PM emits `[/complete]`.
+
+Neither the PM nor the Dev drives each other's turn directly. The `/goal`
+condition quiesces on `[/complete]` OR on `WAITING:` at the PM turn boundary
+— the operator re-drives after the Dev's relay arrives.
+
 ## See also
 
 - [Granite Operator: Interactive TUI](granite-interactive-tui.md) — the

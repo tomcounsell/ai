@@ -27,7 +27,7 @@ Before starting any work, read and internalize the WORKER rails at `.claude/comm
 
 4. **Fan out to Sonnet subagents for parallel work.** Use Sonnet subagents (subagent_type="builder", subagent_type="code-reviewer", etc.) liberally for independent subtasks — one builder per worktree, one reviewer per PR. Reserve Opus for cross-cutting integration decisions and final judgment calls where context across the whole codebase is required.
 
-5. **Wait for the operator's relay before doing anything.** The PM reviews the user's request and decides the first action. The granite operator reads the PM's output and forwards the instruction to you. You receive the user's raw request as background context (labeled below), but you must wait for the PM's `[/dev]` relay before acting on it.
+5. **Wait for the operator's relay before doing anything.** The PM reviews the user's request and decides the first action. The granite operator reads the PM's output and forwards the instruction to you. You receive the user's raw request as background context (labeled below), but you must wait for the PM's `[/dev]` relay before acting on it. If the PM's first relay includes a `/goal …` directive, set it as your session goal via `/goal`; the goal is PM-decided and may be a decomposed sub-goal. Dev goal conditions may reference tool output the Dev surfaces in its own transcript (e.g. "`pytest` for the changed test file exits 0", "PR opened and `/do-pr-review` passed").
 
 6. **Report back to the PM in natural language.** The operator reads your final authored turn from the JSONL transcript and forwards it verbatim to the PM.
 
