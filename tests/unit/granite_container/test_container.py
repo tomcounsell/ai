@@ -1478,6 +1478,83 @@ class TestWrapupGuard(unittest.TestCase):
         # Empty [/complete] body — user_facing_routed set by the wrap-up [/user].
         self.assertTrue(result.user_facing_routed)
 
+    def _run_wrapup_guard_with_callback(self, initial_exit_reason: str) -> bool:
+        """Helper: run _run_wrapup_guard with an on_user_payload callback.
+
+        Returns result.user_facing_routed after the guard runs.
+        PM responds with a prefix-less real message so the floor path fires.
+        """
+        delivered: list[str] = []
+
+        def _on_user(payload: str) -> None:
+            delivered.append(payload)
+
+        c = Container(user_message="do the work", max_turns=0, on_user_payload=_on_user)
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
+
+        # Two reads: (1) await PM idle before wrapup prompt, (2) PM wrapup response.
+        # PM returns a real prefix-less message so the floor delivers it.
+        pm_mock.read_until_idle.side_effect = [
+            _idle_result("", saw_idle=True),  # await PM idle before wrapup prompt
+            _idle_result("Here is the summary.", saw_idle=True),  # PM wrapup response
+        ]
+        dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
+
+        # PM transcript: first read returns the prefix-less message (floor path).
+        pm_transcript_texts = iter(["Here is the summary."])
+
+        def _lat_stub(path, *, baseline_text_count=None):
+            if not path or "mock-session-dev" in path:
+                return ""
+            try:
+                return next(pm_transcript_texts)
+            except StopIteration:
+                return ""
+
+        result = ContainerResult(
+            session_id="test-session",
+            user_message="do the work",
+        )
+        result.exit_reason = initial_exit_reason
+        result.user_facing_routed = False
+
+        with (
+            patch(
+                "agent.granite_container.container.last_assistant_text",
+                side_effect=_lat_stub,
+            ),
+        ):
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            c._run_wrapup_guard(result)
+
+        return result.user_facing_routed
+
+    def test_wrapup_guard_sets_user_facing_routed_for_all_eligible_exits(self) -> None:
+        """_run_wrapup_guard with on_user_payload callback must set user_facing_routed=True
+        for every wrap-up-eligible exit reason (issue #1740).
+
+        This parametrized invariant is the canary that would have caught the
+        canned-fallback regression (#1719) in CI — any exit reason missing from
+        the wrap-up guard's eligible set would have left user_facing_routed=False.
+        """
+        # All four wrap-up-eligible exits must result in user_facing_routed=True
+        # when the container has an on_user_payload callback.
+        wrapup_eligible_exits = {
+            "pm_complete",
+            "pm_user",
+            "pm_max_turns",
+            "pm_floor_delivered",
+        }
+        for exit_reason in sorted(wrapup_eligible_exits):
+            with self.subTest(exit_reason=exit_reason):
+                routed = self._run_wrapup_guard_with_callback(exit_reason)
+                self.assertTrue(
+                    routed,
+                    f"_run_wrapup_guard with on_user_payload present must set "
+                    f"user_facing_routed=True for exit_reason={exit_reason!r}",
+                )
+
 
 class TestPerTurnContractReminder(unittest.TestCase):
     """Issue #1719: PM_TURN_CONTRACT_REMINDER appended on Dev-report handoff.
