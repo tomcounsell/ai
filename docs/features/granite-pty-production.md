@@ -205,9 +205,18 @@ token cost; the full contract is still established by the one-shot
 ### Wrap-up guard — mandatory user-facing delivery (issues #1647, #1719)
 
 The `_run_wrapup_guard` method fires when the run exits in a
-*successful-shaped* state (`pm_complete`, `pm_user`, `pm_max_turns`) but
-`result.user_facing_routed` is still `False`. This happens when PM performs
-only `[/dev]` routing turns and never emits `[/user]` or `[/complete]`.
+*wrap-up-eligible* state (`pm_complete`, `pm_user`, `pm_max_turns`,
+`pm_floor_delivered`) but `result.user_facing_routed` is still `False`. This
+happens when PM performs only `[/dev]` routing turns and never emits `[/user]`
+or `[/complete]`.
+
+**Note on exit-reason sets:** The wrap-up trigger set (`_wrapup_eligible_exits`
+in `container.py`) is distinct from `_CLEAN_GRANITE_EXIT_REASONS` in
+`session_executor.py`. The former is the guard trigger; the latter is the
+reaction/telemetry "clean" classifier. `pm_max_turns` is in the trigger set
+(so the guard fires and attempts delivery) but is NOT in `_CLEAN_GRANITE_EXIT_REASONS`
+(it is a non-clean exit from the executor's perspective). `pm_floor_delivered`
+is in both — it is both a guard trigger and a clean exit.
 
 The guard:
 
