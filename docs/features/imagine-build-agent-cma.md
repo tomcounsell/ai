@@ -1,6 +1,6 @@
 # Imagine/Build Agent (CMA)
 
-Tracking issue: [#1761](https://github.com/tomcounsell/ai/issues/1761)
+Tracking issue: [#1747](https://github.com/tomcounsell/ai/issues/1747)
 
 ## What they are
 
