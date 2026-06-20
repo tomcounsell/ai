@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor Engels
 created: 2026-06-20
 tracking: https://github.com/tomcounsell/ai/issues/1747
 last_comment_id:
+revision_applied: true
 ---
 
 # Integrate imagine-agent and build-agent CMA Skills
@@ -34,7 +35,7 @@ The two `SKILL.md` files themselves are **out of scope** — already built and s
 **Issue filed at:** 2026-06-20T05:17:09Z
 **Disposition:** Unchanged
 
-The issue was filed today and HEAD is the same commit (`33b571a4`) the skills were built and smoke-tested on. `git log --since` the issue createdAt against `tools.md`, `docs/features/README.md`, `tests/unit/test_skills_exist.py`, and `scripts/update/hardlinks.py` returns no commits — nothing has moved.
+The issue was filed today. Commit `33b571a4` is the **tip of the local branch `skills/imagine-build-agent-cma`** where the skills were built and smoke-tested — it is NOT an ancestor of `main` (the two skill directories do not exist on main). `git log --since` the issue createdAt against `tools.md`, `docs/features/README.md`, `tests/unit/test_skills_exist.py`, and `scripts/update/hardlinks.py` on main returns no commits — the integration targets have not moved. The branch-lineage consequence (skills must reach main via this PR) is the substance of the critique and is handled in the Prerequisites section.
 
 **File:line references re-verified:**
 - `.claude/skills-global/imagine-agent/SKILL.md` — has valid frontmatter (`name: imagine-agent`, `description:`, `allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion, Agent`) — still holds.
@@ -75,7 +76,22 @@ This is a low-risk additive integration: one persona subsection, one feature doc
 
 ## Prerequisites
 
-No prerequisites — this work has no external dependencies. Everything needed (the two `SKILL.md` files, their references, the persona segment, the test pattern) already exists in the repo at HEAD.
+**Branch lineage (critical — addresses the critique blockers): the two skill directories are NOT on `main`.** They are committed only on the local branch `skills/imagine-build-agent-cma` (tip = commit `33b571a4`), which is **not an ancestor of `main`**. The four skill files —
+`.claude/skills-global/imagine-agent/SKILL.md`,
+`.claude/skills-global/build-agent/SKILL.md`,
+`.claude/skills-global/build-agent/references/cma-primitives.md`,
+`.claude/skills-global/build-agent/references/build-sheet.md` —
+exist on that branch and nowhere on main.
+
+**This plan adopts the one-atomic-PR strategy (Option a):**
+
+1. The BUILD stage creates its working branch **from `skills/imagine-build-agent-cma` (i.e. from commit `33b571a4`), NOT from `origin/main`.** The build branch name is `session/cma_skills_integration`. Because it is cut from `33b571a4`, the two skill directories are already present in the working tree and in the resulting PR diff.
+2. The resulting PR therefore carries BOTH the skills (as NEW files landing on main for the first time) AND the new integration artifacts (persona subsection, feature doc + index row, structural tests). A single squash-merge lands all of them on main together.
+3. This satisfies CLAUDE.md Principle #1 (no half-migrations): the skills and the artifacts that reference them merge atomically. There is no merge-ordering race — the integration artifacts can never land on a main that lacks the skills they assert on, because they share one PR.
+
+**Note on the remote:** `skills/imagine-build-agent-cma` currently exists only locally (no `origin/` ref). The BUILD stage must `git push -u origin skills/imagine-build-agent-cma` (or cut directly from the local branch and push the build branch) before opening the PR — otherwise the PR base/head cannot be created. The skill *contents* must not be modified during this push; see the contents-unchanged invariant in Success Criteria.
+
+Apart from this branch lineage, there are no external dependencies — the persona segment target, the feature-doc precedent, and the test pattern all already exist on main.
 
 ## Solution
 
@@ -102,6 +118,7 @@ Contributor opens `docs/features/README.md` → finds "Imagine/Build Agent (CMA)
 - **Feature doc:** Follow the structure of `docs/features/email-google-workspace-skills.md` (the precedent for globally-synced Skill-tool skills). Sections: what CMA is, the two skills and their handoff via `build-sheet.json`, place in the system (non-SDLC / client-facing), Update System note (sync is automatic via `sync_claude_dirs()`), and Agent Integration note (Skill-tool only — no `pyproject.toml` entry, no bridge import).
 - **Index row:** Add to the single "Features" table in alphabetical position (between Image Vision and Intake Classifier). Link text "Imagine/Build Agent (CMA)", status "Shipped".
 - **Tests:** New file `tests/unit/test_cma_skills_well_formed.py`. Parametrize over `["imagine-agent", "build-agent"]` for directory + `SKILL.md` existence and frontmatter (`name:`, `description:`, `allowed-tools:`). A dedicated test asserts `build-agent/references/cma-primitives.md` and `build-agent/references/build-sheet.md` exist. A dedicated test reads `config/personas/segments/tools.md` and asserts it contains `imagine-agent`. Use `pathlib.Path(__file__).parent.parent.parent` for `REPO_ROOT`, matching the existing pattern. Tests are structural only — no CMA API calls.
+- **Deliberately NO heading-body checks (inline-comment required):** the precedent `tests/unit/test_skills_exist.py` asserts a `REQUIRED_SECTIONS` list (`Purpose`, `When to Use`, `Steps`, `Output`, `Anti-Patterns`). The CMA `SKILL.md` files use a *different* heading vocabulary — `## What this skill does`, `## The core move`/`## The build loop`, `## Anti-patterns` (lowercase "p") — verified against commit `33b571a4`. Porting the precedent's `REQUIRED_SECTIONS` assertion would false-fail. The new test MUST therefore omit any body-heading assertion and carry an **inline comment** at the omission point explaining this divergence, so a future "normalize the skill tests" pass does not naively copy `REQUIRED_SECTIONS` in and break CI. The comment should name the heading mismatch explicitly (e.g. `# NOTE: CMA skills use "## What this skill does", not the "Purpose"/"When to Use" headings of test_skills_exist.py — do NOT add REQUIRED_SECTIONS-style body checks here.`).
 
 ## Failure Path Test Strategy
 
@@ -116,7 +133,7 @@ Contributor opens `docs/features/README.md` → finds "Imagine/Build Agent (CMA)
 
 ## Test Impact
 
-No existing tests affected — this work is purely additive (a brand-new test file, a new feature doc, a new index row, and an additive persona subsection). It does not modify any existing function, interface, or behavior, so no current test's assertions change. `tests/unit/test_skills_exist.py` is used only as a copy-from pattern reference and is not edited; its `NEW_SKILLS` list is intentionally left untouched (it covers a different skill cohort).
+No existing tests affected — this work is purely additive (a brand-new test file, a new feature doc, a new index row, an additive persona subsection, and the two skill directories landing on main for the first time as new files). It does not modify any existing function, interface, or behavior, so no current test's assertions change. `tests/unit/test_skills_exist.py` is used only as a copy-from pattern reference and is **not edited** — critically, its `REQUIRED_SECTIONS` body-heading checks are intentionally NOT ported into the new file (the CMA skills use different headings; see Technical Approach), and its `NEW_SKILLS` list is left untouched (it covers a different skill cohort). The new structural test (`test_cma_skills_well_formed.py`) will PASS once the build branch carries the skill files (cut from `33b571a4`), since the asserted directories and `SKILL.md` files then exist in the tree.
 
 ## Rabbit Holes
 
@@ -125,6 +142,7 @@ No existing tests affected — this work is purely additive (a brand-new test fi
 - **Adding a CLI entry point or bridge import.** These are Skill-tool skills by design. Wiring a `valor-*` entry point or a bridge import would be net-new surface area the issue explicitly rules out.
 - **Expanding the persona beyond a brief subsection.** The capability is secondary; a large persona expansion would mis-weight it relative to the core SDLC loop.
 - **Adding `RENAMED_REMOVALS` entries.** These are new skill names, not renames or moves between `skills/` and `skills-global/`, so no cleanup entry is needed.
+- **Splitting the skills and the integration artifacts across two PRs.** The plan deliberately uses ONE atomic PR (build branch cut from `33b571a4`). A two-PR split would re-introduce a merge-ordering race (integration artifacts could land on a main lacking the skills they assert on) and violate Principle #1's no-half-migrations rule. The single-PR choice eliminates this race entirely — do not "simplify" by separating them.
 
 ## Risks
 
@@ -176,7 +194,9 @@ No agent integration wiring required — `/imagine-agent` and `/build-agent` are
 - [ ] `docs/features/README.md` contains an alphabetically-placed entry for the CMA skills.
 - [ ] `tests/unit/test_cma_skills_well_formed.py` exists and verifies: both skill dirs exist, both `SKILL.md` files have `name:` / `description:` / `allowed-tools:` frontmatter, build-agent's two reference files exist, and `tools.md` contains `imagine-agent`.
 - [ ] `pytest tests/unit/test_cma_skills_well_formed.py` passes.
-- [ ] The two `SKILL.md` files are unchanged by this PR (`git diff` shows no modifications under `.claude/skills-global/imagine-agent/` or `.claude/skills-global/build-agent/`).
+- [ ] The four skill files appear in the PR as **NEW additions** (they land on main for the first time via this PR's branch lineage from `33b571a4`). Confirm the PR diff shows them as added files under `.claude/skills-global/imagine-agent/` and `.claude/skills-global/build-agent/`.
+- [ ] **Skill contents are unchanged from commit `33b571a4`** — the build *adds* the skills as-is; it must not edit them. Verify with `git diff 33b571a4 -- .claude/skills-global/imagine-agent .claude/skills-global/build-agent` producing **no output** (empty diff). Do NOT use `git diff --quiet HEAD` against main as the baseline — main has no skill files, so that comparison is meaningless.
+- [ ] **Persona prose spot-check:** the new `### Managed Agent Creation (CMA)` subsection actually *frames* CMA as a known, secondary, non-SDLC capability (not the agent's primary loop) — verified by reading the prose, not merely by `grep` confirming the token `imagine-agent` is present. The wording must make clear CMA is a client-facing capability Valor *can* reach for, distinct from the core SDLC pipeline.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -213,6 +233,7 @@ Using Tier 1 core agents only: `builder` and `validator`. No specialists needed 
 - **Parallel**: true
 - Insert a `### Managed Agent Creation (CMA)` subsection in `config/personas/segments/tools.md` under "Tools I Use" (after "Local Python Tools", before "Communication").
 - One short paragraph: what CMA is, when to use it, and the two skills (`/imagine-agent`, `/build-agent`). Frame as a secondary, non-SDLC capability. Must include the literal token `imagine-agent`.
+- **Prose-framing requirement (spot-checked at validation):** the paragraph must make CMA read as a *known, client-facing, non-primary* capability — explicitly distinct from the core SDLC loop. The validator reads the prose to confirm framing, not just that the token is present.
 
 ### 2. Write feature doc and index row
 - **Task ID**: build-docs
@@ -235,6 +256,7 @@ Using Tier 1 core agents only: `builder` and `validator`. No specialists needed 
 - Parametrize over `["imagine-agent", "build-agent"]`: directory exists, `SKILL.md` exists, frontmatter has `name:`, `description:`, `allowed-tools:`.
 - Add a test asserting `build-agent/references/cma-primitives.md` and `references/build-sheet.md` exist.
 - Add a test asserting `config/personas/segments/tools.md` contains `imagine-agent`.
+- **Do NOT port `REQUIRED_SECTIONS` body-heading checks from `test_skills_exist.py`.** The CMA `SKILL.md` files use `## What this skill does` / `## Anti-patterns`, not `Purpose`/`When to Use`/`Steps`/`Output`/`Anti-Patterns`. Add an inline comment at the omission point naming this mismatch so a future normalize pass doesn't re-introduce a failing assertion.
 
 ### 4. Final validation
 - **Task ID**: validate-all
@@ -243,7 +265,10 @@ Using Tier 1 core agents only: `builder` and `validator`. No specialists needed 
 - **Agent Type**: validator
 - **Parallel**: false
 - Run `pytest tests/unit/test_cma_skills_well_formed.py` — must pass.
-- Confirm `git diff` shows no changes under `.claude/skills-global/imagine-agent/` or `.claude/skills-global/build-agent/`.
+- Confirm the build branch was cut from `33b571a4` (skills present as NEW additions): `git diff --name-status main -- .claude/skills-global/imagine-agent .claude/skills-global/build-agent` shows 4 `A` lines.
+- Confirm skill **contents** are unchanged from `33b571a4`: `git diff 33b571a4 -- .claude/skills-global/imagine-agent .claude/skills-global/build-agent` produces empty output.
+- Spot-check the persona prose: read the new `### Managed Agent Creation (CMA)` subsection and confirm it frames CMA as a secondary, non-SDLC, client-facing capability (not just that `imagine-agent` appears).
+- Confirm the new test file carries the inline comment explaining why heading-body checks are omitted.
 - Verify each Success Criteria checkbox.
 - Run `python -m ruff check tests/unit/test_cma_skills_well_formed.py` and `python -m ruff format --check`.
 - Generate final report.
@@ -256,12 +281,19 @@ Using Tier 1 core agents only: `builder` and `validator`. No specialists needed 
 | Persona mention present | `grep -c 'imagine-agent' config/personas/segments/tools.md` | output > 0 |
 | Feature doc exists | `test -f docs/features/imagine-build-agent-cma.md` | exit code 0 |
 | Index row present | `grep -c 'imagine-build-agent-cma' docs/features/README.md` | output > 0 |
-| SKILL.md files untouched | `git diff --quiet HEAD -- .claude/skills-global/imagine-agent .claude/skills-global/build-agent` | exit code 0 |
+| Skill files present as NEW additions in PR | `git diff --name-status main -- .claude/skills-global/imagine-agent .claude/skills-global/build-agent` | 4 lines, all prefixed `A` (added) |
+| Skill contents unchanged from `33b571a4` | `git diff 33b571a4 -- .claude/skills-global/imagine-agent .claude/skills-global/build-agent` | empty output (exit 0, no diff) |
 | Lint clean | `python -m ruff check tests/unit/test_cma_skills_well_formed.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tests/unit/test_cma_skills_well_formed.py` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** NEEDS REVISION (recorded 2026-06-20T05:28:07Z). **Revision applied:** 2026-06-20 — see frontmatter `revision_applied: true`.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | branch-lineage | The two skill dirs are committed only on `skills/imagine-build-agent-cma` (`33b571a4`), NOT on main — the plan never said how skills reach the same merge target as the integration artifacts. | Prerequisites section (rewritten) | Adopted Option (a): one atomic PR. BUILD cuts the working branch `session/cma_skills_integration` from `33b571a4` (NOT main), so skills + artifacts merge to main in a single squash. No merge-ordering race; satisfies Principle #1. |
+| BLOCKER | branch-lineage | The "git diff shows no modifications under the skill dirs" guard contradicts the skills being NEW files in this PR. | Success Criteria + Verification table | Replaced the bad guard. New invariant: skills appear as NEW additions vs main (`git diff --name-status main` → 4 `A` lines) AND contents unchanged from `33b571a4` (`git diff 33b571a4 ...` → empty). Removed the meaningless `git diff --quiet HEAD` check (main has no baseline). |
+| CONCERN | prose-quality | Persona criterion only checked that text/token is present, not that CMA is correctly framed as a known/non-primary capability. | Success Criteria + build-persona task + validate-all task | Added a prose-quality spot-check: the validator reads the `### Managed Agent Creation (CMA)` subsection to confirm it frames CMA as secondary, non-SDLC, client-facing — distinct from the core loop — not just that `imagine-agent` appears. |
+| CONCERN | test-robustness | New test could naively inherit `REQUIRED_SECTIONS` heading checks from `test_skills_exist.py`, which would false-fail (CMA skills use `## What this skill does`, not `Purpose`/`When to Use`). | Technical Approach + build-tests task + Test Impact + validate-all | Mandated an inline comment at the omission point naming the heading mismatch, so a future normalize pass doesn't re-add body-heading assertions and break CI. Verified headings against `33b571a4`. |
+| NIT | scope | Extend existing test file vs new file; rollback note; merge-ordering race. | Rabbit Holes | Kept a separate new test file (different skill cohort + different headings). The single-PR choice (Option a) eliminates the merge-ordering-race nit entirely — added a Rabbit Hole forbidding a two-PR split. |
