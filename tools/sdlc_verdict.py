@@ -56,6 +56,14 @@ parent (via ``agent.sdlc_review_consensus.compute_consensus``) and makes ONE
 aggregate before recording. See
 ``docs/plans/multi-judge-consensus-gates.md``.
 
+Ownership gate (issue #1735): when ``--issue-number N`` is explicitly passed to
+the CLI ``record`` subcommand, the resolved session is verified to own issue N
+via ``session_owns_issue()`` in ``tools._sdlc_utils``. If the check fails (the
+resolved session belongs to a different issue — the artifact-divert residual
+case), the CLI exits 1 with a stderr diagnostic and writes nothing. The gate
+does not fire when ``--issue-number`` is omitted (bridge PM sessions using env-
+var resolution are unaffected).
+
 Graceful failure: every function returns ``{}`` on error. Missing Redis, bad
 input, malformed sessions, malformed ``judges`` payload — none of these crash
 the caller, and a malformed payload never produces a partial write. Skills

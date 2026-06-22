@@ -38,10 +38,18 @@ Degradation contract (D7 — loud failure, quiet absence):
       Loud is reserved ONLY for this case. The idempotent already-completed
       path stays exit 0.
 
+Ownership gate (issue #1735): when ``--issue-number N`` is explicitly provided,
+the resolved session is verified to own issue N via ``session_owns_issue()`` in
+``tools._sdlc_utils``. If the check fails (the resolved session belongs to a
+different issue — the artifact-divert residual case), the tool prints a stderr
+diagnostic and returns exit code 1 with no marker write. The gate does not fire
+when ``--issue-number`` is omitted (bridge PM sessions using env-var resolution
+are unaffected).
+
 Exit codes:
     0 — success, degraded (substrate absent / no session), or idempotent no-op
     1 — substrate present, session resolved, but the marker write genuinely
-        failed (the only loud case)
+        failed (the only loud case; includes ownership-guard rejection)
 
 Output:
     {"status": "degraded", "stage": ..., "reason": ...} when the substrate is
