@@ -97,6 +97,56 @@ Gating here covers all of them. The complementary `/update` Step 4.75 gate
 service restart and tells the operator to pull granite — but the worker gate is
 the actual enforcement that no path can bypass.
 
+## OAuth Token Prevention
+
+### Problem
+
+Granite PTYs authenticate via the Claude Max subscription OAuth path. Short-lived session tokens
+expire after roughly an hour, causing the TUI to render a `/login` prompt mid-session. The PTY
+container cannot dismiss an interactive login screen — the session hangs.
+
+### Prevention: `CLAUDE_CODE_OAUTH_TOKEN`
+
+`_build_env()` in `agent/granite_container/pty_driver.py` injects `CLAUDE_CODE_OAUTH_TOKEN` (a
+long-lived ~1-year token minted via `claude setup-token`, prefix `sk-ant-oat01-`) into every PTY
+child environment when the var is present in `os.environ`. The token is stored in the vault at
+`~/Desktop/Valor/.env` and propagates to all machines via iCloud sync automatically.
+
+This mechanism complements the `ANTHROPIC_*` blanking — they serve different purposes and do not
+conflict:
+
+| Mechanism | Purpose |
+|-----------|---------|
+| Blank `ANTHROPIC_API_KEY` / `BASE_URL` / `AUTH_TOKEN` | Force real Claude OAuth endpoint (not ollama) |
+| Inject `CLAUDE_CODE_OAUTH_TOKEN` | Supply long-lived token so TUI never prompts for `/login` |
+
+When `CLAUDE_CODE_OAUTH_TOKEN` is absent, the key is removed entirely from the child env so the
+TUI falls back to its own credential lookup. It is intentionally NOT blanked.
+
+### Rotation
+
+Mint a new token once per year (approximately) on a browser-accessible machine:
+
+```bash
+claude setup-token
+```
+
+Copy the resulting `sk-ant-oat01-...` value to `~/Desktop/Valor/.env` under the key
+`CLAUDE_CODE_OAUTH_TOKEN`. iCloud propagates it to all machines; no per-machine step needed.
+
+`python -m tools.doctor` reports presence and prefix validity:
+
+```
+[GRANITE] CLAUDE_CODE_OAUTH_TOKEN  ok  (prefix sk-ant-oat01-)
+```
+
+### Graceful degradation
+
+If absent or expired: the TUI eventually renders `/login`, the session exits as `pm_hang`/`dev_hang`,
+and issue #1750's recovery path fires as a backstop. The right fix is always token rotation.
+
+Full reference: [`docs/infra/granite-oauth-token.md`](../infra/granite-oauth-token.md)
+
 ## Configuration
 
 One operator-facing setting, in `config/settings.py` under `GraniteSettings`:
