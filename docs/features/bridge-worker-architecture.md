@@ -655,6 +655,48 @@ Expected output:
 <PID>  0  com.valor.bridge-watchdog
 ```
 
+## Telegram Relay Defect Fixes (issue #1749)
+
+Four defects in `bridge/telegram_relay.py` and `bridge/dead_letters.py` were patched together because they share the same retry/dead-letter code path.
+
+### 1. File-send idempotency (`_file_sent` flag)
+
+When a message payload contains both a file and follow-up text, the relay sends them in two separate Telethon calls. If the file send succeeded but the process crashed before the text send completed, a naive retry would re-send the file, producing a duplicate attachment in the chat.
+
+After a successful file send, the relay now writes `message["_file_sent"] = True` and `message["_file_msg_id"] = msg_id` directly onto the in-memory payload dict before proceeding to the text step. If the message is re-queued (because the text step failed), those keys survive serialisation into Redis. On the next dequeue, `_send_queued_message` checks `message.get("_file_sent")` and skips the `send_file` call, reusing the recorded `_file_msg_id`. This is the direct analogue of the `#1205` text-dedup guard applied to the file branch.
+
+### 2. Oversized-text guard for file+text messages (`_maybe_send_oversized_text_as_file`)
+
+The existing oversized-text detection (converting a >4096-char response to a `.txt` attachment) was only reachable from the text-only branch. The file+text branch called `send_message` directly on the follow-up text without length checking, so the guard was unreachable whenever a file was also present.
+
+A shared helper `_maybe_send_oversized_text_as_file` was extracted. It accepts `(telegram_client, chat_id, text, reply_to, session_id)`, checks `len(text) > 4096`, converts to a temp `.txt` attachment if needed, and returns the resulting `msg_id` or `None` (no action taken). Both the file+text branch and the text-only branch now call this helper before their respective terminal sends (`send_file` → `send_message` vs. `send_markdown`). Each call site keeps its own terminal send for the normal-length case; the helper never sends normal-length text itself.
+
+### 3. Group/supergroup-safe dead-letter (two guards narrowed in lockstep)
+
+Group and supergroup Telegram chat IDs are legitimately negative integers. The previous guard `chat_id_int <= 0` rejected all negative IDs, silently discarding failed delivery records for group chats rather than persisting them to the dead-letter queue. The guard also appeared in the `replay_dead_letters` function in `bridge/dead_letters.py`, where it cleaned up any records already stored with negative `chat_id` values — so narrowing only the persist-side guard in `telegram_relay.py` would have been a no-op: the replay side would silently delete those records on next bridge startup.
+
+Both guards were narrowed to `chat_id_int == 0` in lockstep:
+
+- `_dead_letter_message` in `bridge/telegram_relay.py` (the persist side)
+- `replay_dead_letters` in `bridge/dead_letters.py` (the replay side)
+
+Only `chat_id=0` (an invalid Telegram peer that causes `PeerIdInvalidError` in a loop) is now excluded. Negative IDs are accepted and replayed normally.
+
+### 4. Send-path FloodWait handling
+
+`FloodWaitError` raised by Telethon during a relay send was previously uncaught inside `process_outbox`, propagating up to the outer `except Exception` handler and causing the message to be re-queued with a burned `_relay_attempts` counter. After three such failures the message was dead-lettered even though no actual delivery problem existed — the API was simply enforcing a rate limit.
+
+`process_outbox` now catches `FloodWaitError` as a first-class case in the dispatch loop. On receipt it:
+
+1. Sleeps `min(flood_err.seconds + RELAY_FLOOD_WAIT_BUFFER_SECS, RELAY_FLOOD_WAIT_MAX_SLEEP_SECS)`.
+2. Increments `message["_flood_waits"]` (a separate counter, distinct from `_relay_attempts`).
+3. Re-queues the message via `RPUSH` without touching `_relay_attempts`, carrying `_file_sent` if it was already set.
+4. Dead-letters only after `RELAY_FLOOD_WAIT_MAX` consecutive flood events.
+
+The three env-overridable constants (`RELAY_FLOOD_WAIT_BUFFER_SECS`, `RELAY_FLOOD_WAIT_MAX_SLEEP_SECS`, `RELAY_FLOOD_WAIT_MAX`) are marked provisional — tune from production telemetry.
+
+This handler is distinct from the `FloodWaitError` handler in `telegram_bridge.py`'s connect loop. The connect-loop handler also calls `_write_flood_backoff` to throttle reconnects; the relay send-path handler deliberately omits that side-effect because the relay is not re-establishing a connection.
+
 ## Background: Prior Separation Efforts
 
 | Effort | What It Did | Why It Was Incomplete |
