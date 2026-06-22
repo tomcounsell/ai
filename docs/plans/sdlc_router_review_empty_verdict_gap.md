@@ -1,0 +1,352 @@
+---
+status: Planning
+type: bug
+appetite: Small
+owner: Valor Engels
+created: 2026-06-22
+tracking: https://github.com/tomcounsell/ai/issues/1687
+last_comment_id: IC_kwDOEYGa088AAAABGqXoyg
+---
+
+# SDLC Router: Refute Phantom #1680 Dead-Ends + Close REVIEW Empty-Verdict Rule Gap
+
+## Problem
+
+The SDLC router (`agent/sdlc_router.py::decide_next_dispatch`) walks an ordered rule table to pick the next pipeline sub-skill from recorded stage/verdict state. It has a documented history of dead-end loops where a recorded verdict outlives the artifact it judged. Two such dead-ends were fixed on the CRITIQUE path: #1639 (row 2b, stale recorded verdict) and #1668 (row 2c, empty/unrecorded verdict). #1668 warned that a supervisor can *report* a dead-end that is not real by pattern-matching a stale agent-memory note and applying a harmless manual workaround.
+
+During a `/do-sdlc` run of #1680 (PR #1685, merged 2026-06-13), the supervisor reported navigating both a NEEDS-REVISION→`/do-plan` dead-end and a CHANGES-REQUESTED→`/do-patch` dead-end. The persisted pipeline state does not corroborate that report (`critique_cycle_count=0`, `same_stage_dispatch_count=0`, only a final `READY TO BUILD` verdict recorded). This issue confirms or refutes that report, then closes two real gaps the investigation surfaced.
+
+**Current behavior:**
+- Supervisors can report phantom router dead-ends that the persisted state does not support, because the state is not self-describing (Gap B: intermediate critique verdicts not persisted, CRITIQUE marker not flipped to `completed`).
+- The REVIEW path lacks the empty-verdict re-dispatch escape (analogous to CRITIQUE row 2c). A REVIEW marker stuck at `in_progress` with no recorded verdict and no completed PATCH is bounded only by the G4 oscillation guard, never self-correcting via re-review (Gap A).
+
+**Desired outcome:**
+- The reported #1680 dead-ends are confirmed or refuted against the recorded trail (gating spike — already executed at plan time; see Spike Results).
+- The REVIEW path gains an empty-verdict re-dispatch rule mirroring row 2c, with a regression test mirroring `TestCritiqueInProgressNoVerdictDeadEnd`.
+- Gap B (non-flipped CRITIQUE marker / non-persisted intermediate verdicts) is investigated and a disposition recorded (fix-now vs. file-separate vs. already-covered-by #1654/#1736).
+
+## Freshness Check
+
+**Baseline commit:** `6b407cde4001b90654922a939d872896b20a132e`
+**Issue filed at:** 2026-06-14T14:32:16Z
+**Disposition:** Minor drift
+
+**File:line references re-verified:**
+- `agent/sdlc_router.py:785-818` (`_critique_verdict_is_stale`) — issue cited this range — drifted to `:738-771`; symbol + claim unchanged.
+- `agent/sdlc_router.py:838-867` (`_rule_critique_in_progress_no_verdict`) — drifted to `:791-820`; registered as row 2c at `:981-986` (issue cited `:1028-1033`); claim unchanged.
+- `agent/sdlc_router.py:757-782` (`_review_verdict_is_stale`) — drifted to `:710-735`; claim unchanged.
+- `agent/sdlc_router.py:884-918` (`_rule_review_has_findings`) — drifted to `:837-871`; claim unchanged. Confirmed row 8 → `/do-patch` and row 8b (`_rule_patch_applied_after_review`, `:874-882`) → `/do-pr-review`.
+- Confirmed the REVIEW path has NO empty-verdict re-dispatch rule (no analogue to row 2c) — Gap A is real and structural.
+
+**Cited sibling issues/PRs re-checked:**
+- #1639, #1659, #1668, #1670 — all merged; rows 2b/2c on main, `TestCritiqueInProgressNoVerdictDeadEnd` present.
+- #1654 (non-persisted critique verdicts) — referenced as the likely Gap B root; still the linked tracking issue.
+- #1736 (issue-number resolution in forked critique/review skills) — merged per issue comment; removes "verdict written to wrong issue" as a Gap B confounder. Future Gap B investigation can assume issue-number diversion is no longer a cause.
+- #1710 (`631818b6`, G5 fast diagnostic) — merged per issue comment; G5 now defers to PR-stage rows once BUILD completes / a PR exists, removing one re-dispatch confounder.
+
+**Commits on main since issue was filed (touching `agent/sdlc_router.py`):**
+- `ec25e58e` (#1710) — granite startup fast diagnostic, bundled the G5 defer fix — *changed an adjacent guard, did not touch the REVIEW rule table or verdict persistence.*
+- `dd926192` (#1691) — bridge-role merge / SessionType collapse — *refactor that drifted line numbers; no rule-logic change.*
+
+**Active plans in `docs/plans/` overlapping this area:** none (`ls docs/plans/` shows no other sdlc-router plan in flight).
+
+**Notes:** Drift is purely line-number movement from two refactors. All cited symbols, rule rows, and behavioral claims still hold. Corrected line references are folded into Technical Approach below.
+
+## Prior Art
+
+- **#1639 / PR #1659**: CRITIQUE NEEDS-REVISION + revision-applied looped on `/do-plan`. Fixed via `_critique_verdict_is_stale` + dispatch row 2b. Succeeded — on main and green. This is the staleness pattern Gap A mirrors on the REVIEW side.
+- **#1668 / PR #1670**: CRITIQUE `in_progress` + empty/unrecorded verdict + no PR matched no rule → `Blocked`. Fixed via row 2c (`_rule_critique_in_progress_no_verdict`). Succeeded — on main and green. This is the EXACT pattern Gap A replicates for REVIEW; the new rule is a structural twin.
+- **#1654**: War-room critics complete but the verdict stays `in_progress`; supervisor aggregates inline without persisting. Open. This is the likely root of Gap B; Gap B's investigation links here rather than re-solving it.
+- **#1736**: Forked critique/review skills used a stale `$SDLC_ISSUE_NUMBER`, so verdict/marker writes could land on the wrong issue. Merged. Eliminates one Gap B confounder.
+- **PR #1657**: Introduced the REVIEW staleness pattern (`_review_verdict_is_stale`) that #1659 mirrored for CRITIQUE. The new Gap A rule is the second half of that symmetry restored.
+
+## Why Previous Fixes Failed
+
+The prior fixes did NOT fail — they fixed the CRITIQUE path correctly. The gap is that they fixed only one of two symmetric paths. The root cause pattern is **rule asymmetry**: each fix to the CRITIQUE side (rows 2b, 2c) was not mirrored to the REVIEW side at the same time, leaving the REVIEW path with one staleness escape (8b) but no empty-verdict escape (no 2c analogue).
+
+| Prior Fix | What It Did | Why It Left a Gap |
+|-----------|-------------|-------------------|
+| PR #1659 (row 2b) | CRITIQUE stale-verdict → re-critique | REVIEW already had its staleness twin (8b) — no gap here |
+| PR #1670 (row 2c) | CRITIQUE empty-verdict in_progress → re-critique | REVIEW path was NOT given the matching empty-verdict rule — this is Gap A |
+
+**Root cause pattern:** The CRITIQUE and REVIEW paths are structural twins, but rule additions were applied to one path at a time. Gap A is the missing mirror of row 2c.
+
+## Data Flow
+
+1. **Entry point**: SDLC supervisor (`/sdlc` router skill) or worker calls `decide_next_dispatch(stage_states, meta, context)`.
+2. **Guards G1–G7** (`evaluate_guards`): if any trips (oscillation G4, plan-hash cache G5, etc.), it short-circuits with a decision before rules run.
+3. **Rule table walk** (`DISPATCH_RULES`): rows tried in order; the first predicate returning True wins. The REVIEW-stage rows are 7 (`_rule_pr_exists_no_review`), 8 (`_rule_review_has_findings`), 8b (`_rule_patch_applied_after_review`), 9, 10, 10b.
+4. **State predicates** read `stage_states["REVIEW"]`, `stage_states["_verdicts"]["REVIEW"]`, `meta["latest_review_verdict"]`, `meta["pr_number"]`, and `stage_states["PATCH"]`.
+5. **Output**: a `Dispatch(skill, reason, row_id)` or `Blocked(reason)`.
+
+Gap A inserts a new rule (proposed `8c`) into step 3 so that REVIEW `in_progress` + empty verdict + no completed PATCH returns `Dispatch(/do-pr-review)` instead of falling through to `Blocked` or oscillating on row 8.
+
+## Spike Results
+
+### spike-1 (GATING): Confirm or refute the reported #1680 dead-ends
+- **Assumption**: "The reported CRITIQUE→`/do-plan` and REVIEW→`/do-patch` dead-ends in the #1680 run were phantom (router would have routed correctly)."
+- **Method**: code-read + replay (`decide_next_dispatch` invoked against reconstructed #1680 state, executed at plan time).
+- **Finding**: **REFUTED — the reported dead-ends are phantom.**
+  - The mid-run state the supervisor claimed looped on `/do-plan` (CRITIQUE `in_progress`, recorded `READY TO BUILD` verdict, no PR) routes to **`/do-build` via row 4a** — NOT a `/do-plan` loop. No completion-signal-present state returned `/do-plan` or `/do-patch`.
+  - The persisted counters (`critique_cycle_count=0`, `same_stage_dispatch_count=0`) are inconsistent with any actual loop — corroborating phantom.
+  - The recorded final all-completed state returns `Blocked('no matching dispatch rule')`, but that is a *terminal merged pipeline* (MERGE=completed), not a live dead-end — the router is never asked to route past merge. This is a benign artifact of Gap B (CRITIQUE marker never flipped), not the reported loop.
+- **Confidence**: high.
+- **Impact on plan**: The CRITIQUE-path fix work is dropped (confirmed unnecessary). The refute-branch narrows to a memory-hygiene check (spike-2). Gap A and Gap B proceed as the only real work.
+
+### spike-2: Does `project_sdlc_router_needs_revision_deadlock.md` still exist?
+- **Assumption**: "A stale memory note describing the obsolete `/do-plan-critique`-directly workaround exists and must be pruned."
+- **Method**: `memory_search` (project=valor) + repo-wide grep for the note name and its workaround text.
+- **Finding**: The note is **NOT present** — not in the agent memory store (`memory_search` returns nothing for multiple queries) and not anywhere in the repo as a `.md` file. The refute-branch "prune the note" task is therefore largely moot.
+- **Confidence**: high (negative result; a session-scoped memory could in principle reappear, hence the residual verify task).
+- **Impact on plan**: The refute task becomes "verify no stale sibling note exists; if one surfaces during build, prune/correct it" rather than "delete a known file."
+
+## Appetite
+
+**Size:** Small
+
+**Team:** Solo dev, code reviewer
+
+**Interactions:**
+- PM check-ins: 1 (Gap B disposition decision — fix-now vs. file-separate)
+- Review rounds: 1
+
+The gating spike is already resolved. Remaining work is one small router rule + its regression test (Gap A) plus a bounded read-only investigation with a written disposition (Gap B). This is a narrow, well-scoped change to a single file with an established test surface.
+
+## Prerequisites
+
+No prerequisites — this work has no external dependencies. The router is pure Python with no external services or API keys.
+
+## Solution
+
+### Key Elements
+
+- **spike-1 outcome (done)**: Reported #1680 dead-ends refuted. Recorded in this plan; no code change for the CRITIQUE path.
+- **Gap A rule (new row 8c)**: A REVIEW empty-verdict re-dispatch predicate `_rule_review_in_progress_no_verdict` — structural twin of `_rule_critique_in_progress_no_verdict` (row 2c). Fires when REVIEW is `in_progress`, no review verdict is recorded (neither `_verdicts.REVIEW` nor `meta.latest_review_verdict`), and PATCH is not completed → dispatch `/do-pr-review`.
+- **Gap A regression test**: `TestReviewInProgressNoVerdictDeadEnd`, mirroring `TestCritiqueInProgressNoVerdictDeadEnd` (re-dispatch case, defers-when-PATCH-completed case, recorded-verdict-unaffected case).
+- **Gap B investigation**: A read-only trace of why the CRITIQUE marker is not flipped to `completed` on the final verdict and why intermediate verdicts are not persisted. Output: a written disposition in the plan + (if fix-now) a marker-flip/verdict-record change, or (if separate) a link to #1654.
+
+### Flow
+
+Router asked to route → REVIEW marker `in_progress`, verdict empty, PATCH not completed → **new row 8c fires** → `Dispatch(/do-pr-review)` → review re-runs and records a verdict → normal REVIEW-stage routing resumes (rows 8 / 8b / 9 / 10).
+
+### Technical Approach
+
+- **Gap A predicate** — add `_rule_review_in_progress_no_verdict(stage_states, meta, context)` near the existing REVIEW rules (~`agent/sdlc_router.py:874`), modeled on `_rule_critique_in_progress_no_verdict` (`:791-820`):
+  - Return False if `not meta.get("pr_number")` — REVIEW only exists once a PR exists, so unlike row 2c this rule REQUIRES `meta.get("pr_number")`. (This is the one intentional asymmetry: CRITIQUE row 2c gates on *no* PR; REVIEW row 8c gates on *a* PR existing.)
+  - Return False if `stage_states.get("REVIEW") != STATUS_IN_PROGRESS`.
+  - Return False if a review verdict IS recorded (check both `meta.get("latest_review_verdict")` and `_verdict_text(stage_states["_verdicts"].get("REVIEW"))`) — let rows 8/8b own a recorded verdict.
+  - Return False if `stage_states.get("PATCH") == STATUS_COMPLETED` — let row 8b (`_rule_patch_applied_after_review`) re-review instead.
+  - Otherwise return True → `/do-pr-review`.
+- **Rule placement** — register as row `8c` in `DISPATCH_RULES` AFTER row 8b and BEFORE row 9 (`_rule_review_approved_docs_not_done`). Placement after 8b ensures a completed-PATCH state is owned by 8b (re-review), and before 9 ensures it pre-empts the docs/merge rows that require a completed REVIEW. Attach a `.__doc__` human-state string (the parity test cross-checks SKILL.md row cells — Gap A must add the matching SKILL.md row).
+- **Loop bound** — like row 2c, the new rule is bounded by G4 oscillation (it does not increment `critique_cycle_count`), not G2. Document this in the predicate docstring.
+- **Gap B** — trace the verdict-recording path: who writes `_verdicts.CRITIQUE` and flips the CRITIQUE marker to `completed`. Likely owners: the `/do-plan-critique` skill's verdict-record step and `tools/sdlc_*` stage-marker helpers. With #1736 merged (issue-number diversion ruled out), determine whether the final-verdict path fails to (a) flip the marker and (b) persist intermediate NEEDS REVISION verdicts. Produce a disposition: fix-now (small marker-flip + intermediate-verdict record) OR confirm it is fully owned by #1654 and link it. Do NOT expand scope into a war-room aggregation rewrite — that is #1654's job.
+
+## Failure Path Test Strategy
+
+### Exception Handling Coverage
+- [ ] The new `_rule_review_in_progress_no_verdict` must NOT contain a bare `except` — it reads dict keys with `.get()` and compares constants, no parsing. Mirror row 2c's exception-free style. The router's `decide_next_dispatch` already wraps every predicate in `try/except` and logs at debug (`agent/sdlc_router.py:1128-1131`); a regression test asserts the new predicate never raises on malformed `_verdicts`.
+- [ ] If Gap B adds a marker-flip/verdict-record write, any `except` around the Redis write must log (not swallow) and a test must assert observable behavior.
+
+### Empty/Invalid Input Handling
+- [ ] Test the new rule against `_verdicts={}`, `_verdicts={"REVIEW": None}`, `_verdicts={"REVIEW": {}}`, missing `REVIEW` marker (None), and whitespace-only `latest_review_verdict` — all must NOT spuriously fire or raise.
+- [ ] This is router state routing, not agent-output processing — no silent-loop risk beyond what G4 already bounds (and the test asserts the rule self-corrects via re-review rather than oscillating).
+
+### Error State Rendering
+- [ ] The router has no user-visible output directly; its `Blocked`/`Dispatch` is consumed by the `/sdlc` skill. Test asserts the previously-`Blocked` REVIEW empty-verdict state now returns a `Dispatch(/do-pr-review)` — i.e. the dead-end is observably gone.
+
+## Test Impact
+
+- [ ] `tests/unit/test_sdlc_router_decision.py::TestDispatchRulesTable` — UPDATE: the rule-count / row-id assertions and any SKILL.md parity check must include new row `8c`.
+- [ ] `tests/unit/test_sdlc_router_decision.py` — ADD: new class `TestReviewInProgressNoVerdictDeadEnd` mirroring `TestCritiqueInProgressNoVerdictDeadEnd` (re-dispatch, defers-on-completed-PATCH, recorded-verdict-unaffected).
+- [ ] Any SKILL.md ⇄ router parity test (the `_rule_*.__doc__` cross-check referenced at `agent/sdlc_router.py:910-911`) — UPDATE: add the row 8c state-string row to `.claude/skills/sdlc/SKILL.md` so parity holds.
+- [ ] Existing `TestRow8ReviewHasFindings`, `TestRow8bPatchAppliedAfterReview`, `TestRow9ReviewApprovedDocsNotDone` — verify (not modify) that inserting 8c between 8b and 9 does not change their outcomes; add an ordering assertion if absent.
+
+No existing test is deleted — the change is additive (one new rule + new tests). The only updates are to count/parity assertions that must learn about row 8c.
+
+## Rabbit Holes
+
+- **Rewriting war-room verdict aggregation** — Gap B's deep fix (persisting intermediate critique verdicts from the war room) belongs to #1654. This plan investigates and dispositions Gap B; it does NOT rewrite the aggregation pipeline.
+- **Fixing the CRITIQUE path** — spike-1 refuted the CRITIQUE dead-end and #1639/#1668 already cover it. Do not touch rows 2b/2c.
+- **Reconciling the terminal `Blocked('no matching rule')` on a fully-merged pipeline** — this is a benign artifact of a merged pipeline being re-queried; chasing a "route past merge" rule is scope creep. Note it, move on.
+- **Generalizing all CRITIQUE/REVIEW rules into a shared abstraction** — tempting given the twin structure, but a shared meta-rule generator would obscure the per-row reasoning the SKILL.md parity test depends on. Keep row 8c as an explicit twin of 2c.
+
+## Risks
+
+### Risk 1: New row 8c overlaps with row 8 or 8b, changing existing routing
+**Impact:** A state currently routed by row 8 (CHANGES REQUESTED) or 8b (patch-applied) gets stolen by 8c, breaking established flows.
+**Mitigation:** 8c's predicate explicitly returns False when a verdict is recorded (8 owns that) and when PATCH is completed (8b owns that), so it is disjoint by construction. The ordering test (8b before 8c before 9) and the verify-existing-rows tasks lock this in.
+
+### Risk 2: Gap B "fix-now" balloons into a #1654-sized change
+**Impact:** Scope creep; the small Gap A fix gets stuck behind an aggregation rewrite.
+**Mitigation:** Gap B is a read-only investigation with a written disposition. The PM check-in decides fix-now vs. file-separate. If the marker-flip turns out non-trivial, it is deferred to #1654 (tagged in No-Gos).
+
+## Race Conditions
+
+No race conditions identified — `decide_next_dispatch` and all dispatch-rule predicates are pure, synchronous functions over an immutable input dict. They perform no I/O and hold no shared mutable state. (Gap B's verdict-recording path, if a fix-now write is added, uses the existing `update_stage_states` cross-process-safe helper from `tools.stage_states_helpers` — no new concurrency surface is introduced.)
+
+## No-Gos (Out of Scope)
+
+- [SEPARATE-SLUG #1654] Persisting intermediate war-room critique verdicts and the deep aggregation fix — Gap B links here; only a bounded marker-flip is in scope if the PM elects fix-now.
+- Nothing else deferred — the CRITIQUE-path work is dropped (refuted/already-covered, not deferred), and the Gap A rule + test are fully in scope for this plan.
+
+## Update System
+
+No update system changes required — this is a pure-Python change to `agent/sdlc_router.py` and its unit tests plus a SKILL.md row. No new dependencies, config files, services, or migration steps. The router ships with the repo; `/update` propagates it via the normal git pull with no special handling.
+
+## Agent Integration
+
+No new agent integration required — `agent/sdlc_router.py::decide_next_dispatch` is already imported and called by the `/sdlc` router skill and the worker's supervision loop; it is not exposed via an MCP server or a CLI entry point and does not need to be. The new row 8c is reached through the existing call path. The bridge does not import the router directly. Integration coverage is the existing `/sdlc` skill exercising the rule table; the new behavior is verified by the unit regression tests in `tests/unit/test_sdlc_router_decision.py`.
+
+## Documentation
+
+### Feature Documentation
+- [ ] Update `docs/features/sdlc-router-oscillation-guard.md` to document the new REVIEW empty-verdict re-dispatch rule (row 8c) alongside the existing CRITIQUE row 2c, noting the restored CRITIQUE/REVIEW symmetry.
+- [ ] Update `docs/features/sdlc-pipeline-state.md` if it enumerates the dispatch rule rows, to add row 8c.
+- [ ] No new `docs/features/README.md` index entry needed — these are existing feature docs being updated, not a new feature page.
+
+### External Documentation Site
+- [ ] No external docs site — this repo does not use Sphinx/MkDocs/RTD for the router. N/A.
+
+### Inline Documentation
+- [ ] Add the `_rule_review_in_progress_no_verdict.__doc__` human-state string (parity-test requirement) and a thorough docstring mirroring row 2c's, citing #1687 and the loop-bound (G4).
+- [ ] Update `.claude/skills/sdlc/SKILL.md` rule table to add the row 8c state cell (required for the router⇄SKILL.md parity test).
+- [ ] Record the spike-1 refutation and the Gap B disposition in this plan (the durable investigation record).
+
+## Success Criteria
+
+- [ ] spike-1 outcome recorded: reported #1680 dead-ends confirmed/refuted (DONE — refuted, see Spike Results).
+- [ ] New rule `_rule_review_in_progress_no_verdict` added and registered as row 8c, disjoint from rows 8 and 8b.
+- [ ] `TestReviewInProgressNoVerdictDeadEnd` added, mirroring `TestCritiqueInProgressNoVerdictDeadEnd`, and passing.
+- [ ] A previously-`Blocked` REVIEW `in_progress`-empty-verdict-no-completed-PATCH state now returns `Dispatch(/do-pr-review)`.
+- [ ] SKILL.md row 8c added; router⇄SKILL.md parity test passes.
+- [ ] Gap B disposition written (fix-now marker-flip OR confirmed-owned-by-#1654 with link).
+- [ ] No stale `project_sdlc_router_needs_revision_deadlock.md` memory note exists (verified; prune if one surfaces).
+- [ ] Tests pass (`/do-test`).
+- [ ] Documentation updated (`/do-docs`).
+
+## Team Orchestration
+
+The lead agent orchestrates; it does not build directly.
+
+### Team Members
+
+- **Builder (router-rule)**
+  - Name: router-rule-builder
+  - Role: Add `_rule_review_in_progress_no_verdict` + row 8c registration + docstring; add SKILL.md row.
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (gap-b-investigator)**
+  - Name: gapb-investigator
+  - Role: Read-only trace of the verdict-recording / marker-flip path; produce written Gap B disposition.
+  - Agent Type: debugging-specialist
+  - Resume: true
+
+- **Test Engineer (router-tests)**
+  - Name: router-test-engineer
+  - Role: Add `TestReviewInProgressNoVerdictDeadEnd`; update count/parity/ordering assertions.
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Validator (router)**
+  - Name: router-validator
+  - Role: Verify rule disjointness, test pass, parity, and Gap B disposition completeness.
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: router-documentarian
+  - Role: Update `docs/features/sdlc-router-oscillation-guard.md` and `sdlc-pipeline-state.md`.
+  - Agent Type: documentarian
+  - Resume: true
+
+### Available Agent Types
+
+(Standard roster — builder, validator, test-engineer, debugging-specialist, documentarian used above.)
+
+## Step by Step Tasks
+
+### 1. Gap B investigation (read-only)
+- **Task ID**: investigate-gapb
+- **Depends On**: none
+- **Validates**: written disposition in this plan's Spike Results / a comment on #1687
+- **Informed By**: spike-1 (refuted CRITIQUE loop), #1654, #1736 (issue-number diversion ruled out)
+- **Assigned To**: gapb-investigator
+- **Agent Type**: debugging-specialist
+- **Parallel**: true
+- Trace who flips the CRITIQUE marker to `completed` and who writes `_verdicts.CRITIQUE`.
+- Identify the code path where the marker stays `in_progress` through merge and where intermediate verdicts fail to reach the verdict store.
+- Produce a disposition: fix-now (bounded marker-flip + intermediate-verdict record) OR confirmed-owned-by #1654 with a link. Surface to the PM for the fix-now-vs-defer decision.
+
+### 2. Add Gap A rule (row 8c)
+- **Task ID**: build-row-8c
+- **Depends On**: none
+- **Validates**: tests/unit/test_sdlc_router_decision.py (new class), router⇄SKILL.md parity test
+- **Informed By**: spike-1, row 2c (`_rule_critique_in_progress_no_verdict`) as the structural template
+- **Assigned To**: router-rule-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Add `_rule_review_in_progress_no_verdict` near `agent/sdlc_router.py:874`, modeled on row 2c but gating on `pr_number` PRESENT and `PATCH != completed`.
+- Register as row `8c` between 8b and 9 in `DISPATCH_RULES`; attach `.__doc__` human-state string.
+- Add the matching row to `.claude/skills/sdlc/SKILL.md`.
+
+### 3. Add Gap A regression tests
+- **Task ID**: test-row-8c
+- **Depends On**: build-row-8c
+- **Assigned To**: router-test-engineer
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Add `TestReviewInProgressNoVerdictDeadEnd` mirroring `TestCritiqueInProgressNoVerdictDeadEnd`: re-dispatch case, defers-when-PATCH-completed case, recorded-verdict-unaffected case, malformed-`_verdicts`-does-not-raise case.
+- Update `TestDispatchRulesTable` count/row-id assertions and the SKILL.md parity assertion to include row 8c.
+- Add/confirm an ordering assertion: 8b before 8c before 9.
+
+### 4. Validate
+- **Task ID**: validate-router
+- **Depends On**: investigate-gapb, build-row-8c, test-row-8c
+- **Assigned To**: router-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run `pytest tests/unit/test_sdlc_router_decision.py -q`.
+- Verify row 8c is disjoint from 8 and 8b (no existing test outcome changed).
+- Verify Gap B disposition is written and the PM decision is captured.
+
+### 5. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-router
+- **Assigned To**: router-documentarian
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Update `docs/features/sdlc-router-oscillation-guard.md` and `docs/features/sdlc-pipeline-state.md` for row 8c.
+
+### 6. Final Validation
+- **Task ID**: validate-all
+- **Depends On**: document-feature
+- **Assigned To**: router-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run full unit suite for the router, lint, and format checks.
+- Verify all success criteria including documentation and Gap B disposition.
+
+## Verification
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Router tests pass | `pytest tests/unit/test_sdlc_router_decision.py -q` | exit code 0 |
+| New rule present | `grep -c "_rule_review_in_progress_no_verdict" agent/sdlc_router.py` | output > 1 |
+| Row 8c registered | `grep -c 'row_id="8c"' agent/sdlc_router.py` | output contains 1 |
+| New test class present | `grep -c "class TestReviewInProgressNoVerdictDeadEnd" tests/unit/test_sdlc_router_decision.py` | output contains 1 |
+| Lint clean | `python -m ruff check agent/sdlc_router.py tests/unit/test_sdlc_router_decision.py` | exit code 0 |
+| Format clean | `python -m ruff format --check agent/sdlc_router.py tests/unit/test_sdlc_router_decision.py` | exit code 0 |
+
+## Critique Results
+
+<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+
+---
+
+## Open Questions
+
+1. **Gap B disposition (PM decision):** spike-1 showed the non-flipped CRITIQUE marker causes a benign terminal `Blocked` on a fully-merged pipeline, not a live dead-end. Should Gap B be a fix-now bounded marker-flip in this plan, or deferred entirely to #1654 (the war-room verdict-persistence issue)? Recommendation: investigate in task 1, then defer the deep fix to #1654 and keep this plan focused on Gap A.
+2. **Row 8c `pr_number` gate:** the proposed rule requires `pr_number` PRESENT (REVIEW only exists post-PR), inverting row 2c's no-PR gate. Confirm this is the intended asymmetry — a REVIEW empty-verdict state with no PR should be impossible, so the gate is a safety assertion, not a behavior change.
