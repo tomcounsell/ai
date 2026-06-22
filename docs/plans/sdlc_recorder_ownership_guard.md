@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-06-22
 tracking: https://github.com/tomcounsell/ai/issues/1735
 last_comment_id: 4767033280
+revision_applied: true
 ---
 
 # SDLC Recorder Ownership Guard (loud-fail on diverted artifact write)
@@ -44,7 +45,7 @@ resolution) are completely unaffected.
 **File:line references re-verified:**
 - `tools/sdlc_verdict.py::_cli_record` (line 324) — issue claims it resolves then records with no ownership check — still holds.
 - `tools/sdlc_stage_marker.py::write_marker` (line 145) — issue claims it resolves then writes with no ownership check — still holds.
-- `tools/_sdlc_utils.py::find_session_by_issue` (line 114) — issue claims it encodes `issue_url` suffix + `sdlc-local-{N}` ownership predicates — still holds (lines 170-203).
+- `tools/_sdlc_utils.py::find_session_by_issue` (line 114) — re-verified against baseline: it encodes **THREE** ownership predicates, not two — (1) `issue_url` endswith `/issues/{N}` (lines 170-175), (2) deterministic `sdlc-local-{N}` id (lines 180-190), (3) `message_text` regex `\bissue\s*#?\s*{N}\b` case-insensitive for bridge-originated sessions with no `issue_url` (lines 194-201). The guard's `session_owns_issue` must mirror ALL THREE to avoid falsely rejecting a legitimate bridge eng session that owns the issue via the third pass.
 - `tools/_sdlc_utils.py::find_session` precedence (lines 268-327) — issue-number lookup before env-var fallback (#1671/#1672) — still holds; the guard must not alter this order.
 
 **Cited sibling issues/PRs re-checked:**
@@ -109,7 +110,7 @@ No external prerequisites — internal Python change. #1736 (skill-side fix) is 
 
 ### Key Elements
 
-- **`session_owns_issue(session, issue_number)` helper** (`tools/_sdlc_utils.py`): returns True iff the session owns the issue by the two existing predicates — `session.issue_url` endswith `/issues/{issue_number}`, OR `session.session_id == f"sdlc-local-{issue_number}"`. Mirrors `find_session_by_issue`'s ownership semantics so there is a single source of truth for "ownership."
+- **`session_owns_issue(session, issue_number)` helper** (`tools/_sdlc_utils.py`): returns True iff the session owns the issue by the **three** predicates `find_session_by_issue` resolves on — (1) `session.issue_url` endswith `/issues/{issue_number}`, OR (2) `session.session_id == f"sdlc-local-{issue_number}"`, OR (3) `session.message_text` matches the case-insensitive regex `\bissue\s*#?\s*{issue_number}\b`. Mirrors `find_session_by_issue`'s **complete** ownership semantics so there is a single source of truth for "ownership." Omitting predicate (3) would falsely reject a bridge eng session that owns the issue only via its message text — the exact spurious exit-1 the guard must not produce (see Risk 4).
 - **Verdict CLI guard** (`tools/sdlc_verdict.py::_cli_record`): after resolution, if `args.issue_number is not None` and the resolved session does not own that issue, return a sentinel/raise so `main()` emits stderr and exits 1.
 - **Stage-marker CLI guard** (`tools/sdlc_stage_marker.py::write_marker`): after resolution, if `issue_number is not None` and the resolved session does not own that issue, return `({}, 1)` with a clear stderr diagnostic in `main()`.
 
@@ -121,7 +122,7 @@ Recorder run with no `--issue-number` → ownership gate skipped entirely → en
 
 ### Technical Approach
 
-- Add `session_owns_issue(session, issue_number) -> bool` to `tools/_sdlc_utils.py`. Guard against `None`/falsy issue_number (return False), read `issue_url`/`session_id` defensively via `getattr`, never raise (return False on any error) — consistent with the module's graceful-failure contract.
+- Add `session_owns_issue(session, issue_number) -> bool` to `tools/_sdlc_utils.py`. Guard against `None`/falsy issue_number (return False), read `issue_url`/`session_id`/`message_text` defensively via `getattr` (default `""`/`None`), never raise (wrap the whole body in `try/except Exception: return False`) — consistent with the module's graceful-failure contract. The three predicates are OR'd in the same order `find_session_by_issue` checks them: `issue_url.endswith(f"/issues/{N}")`, then `session_id == f"sdlc-local-{N}"`, then `re.search(rf"\bissue\s*#?\s*{N}\b", message_text, re.IGNORECASE)`. Reuse the identical regex so the helper and the resolver can never diverge. To keep that single-source-of-truth concrete, the builder should reference (or, if cheap, factor out) the exact pattern used in `find_session_by_issue` lines 194-201 rather than re-deriving it.
 - **Gate only when `issue_number is not None`.** This is the load-bearing distinction: an omitted `--issue-number` (the bridge PM case) must skip the gate entirely. Do NOT gate on the resolved session being None alone — that is the forbidden bare-`None` guard.
 - The gate runs **after** `find_session` returns, so the #1671/#1672/#1673 resolution precedence is untouched. The guard validates the *result*, it does not change *how* the result is chosen.
 - **`sdlc_verdict.py`**: `_cli_record` currently returns `{}` (exit 0) on `session is None`. Introduce a guarded path: when `issue_number is not None` and the session does not own it, surface a loud failure. Simplest mechanism that fits the existing `main()` shape: have `_cli_record` raise a dedicated exception (e.g. a module-level `OwnershipError`) that `main()`'s existing `except Exception` block already converts to stderr + exit 1 — OR return a `(result, failed)` signal. Builder picks the lower-churn option; the existing `main()` already does `sys.exit(1 if failed else 0)` and prints stderr on exception, so raising is the cleanest. The stderr message must name the issue number and the resolved session id.
@@ -138,6 +139,11 @@ Recorder run with no `--issue-number` → ownership gate skipped entirely → en
 - [ ] `session_owns_issue(None, N)` → False. `session_owns_issue(session, None)` → False. `session_owns_issue(session, 0)` → False.
 - [ ] Recorder with `--issue-number` omitted → gate skipped, write proceeds, exit 0 (the critical no-regression case for bridge PM sessions).
 
+### Ownership Predicate Parity (three predicates)
+- [ ] `session_owns_issue` returns True for a session owning issue N via predicate (3) `message_text` only — e.g. a bridge eng session with `issue_url=None`, `session_id` unrelated, and `message_text="SDLC issue #N: ..."`. This is the predicate the critique blocker flagged as missing.
+- [ ] Word-boundary correctness: `message_text="tissue N"` or `"issue N7"` must NOT match (mirrors the resolver's `\b...\b` guard); `"issue N"`, `"issue #N"`, `"SDLC issue N"` must match (case-insensitive).
+- [ ] **CLI-level no-regression**: recorder with `--issue-number N` whose resolved session owns N via `message_text` → exit 0, write performed. This proves the guard does not spuriously fail a legitimate bridge eng session that `find_session_by_issue` would have correctly returned.
+
 ### Error State Rendering
 - [ ] Divert case stderr must name the issue number and resolved session id so the operator/subagent report can diagnose. Assert the stderr text in a CLI-level test.
 - [ ] stdout still emits `{}` (or the degraded JSON) on the loud-fail path so JSON-parsing callers don't choke; the non-zero exit is the loud signal (mirrors the existing `sdlc_verdict.main()` contract).
@@ -147,14 +153,14 @@ Recorder run with no `--issue-number` → ownership gate skipped entirely → en
 - [ ] `tests/unit/test_sdlc_verdict.py::test_cli_record_passes_ensure_true` — UPDATE: confirm it still passes; the fixture session must own the issue it records for (or omit `--issue-number`) so the new gate doesn't trip it. Adjust fixture `issue_url`/`session_id` if needed.
 - [ ] `tests/unit/test_sdlc_verdict.py::TestVerdictLandsOnIssueSession::test_verdict_lands_on_issue_session_not_env` — UPDATE: this is the #1671/#1672 precedence test; verify the new gate does not change its outcome (the resolved session owns the issue, so the gate passes). Add an assertion that exit is success.
 - [ ] `tests/unit/test_sdlc_stage_marker.py` — UPDATE: existing degraded/no-session/idempotent tests must still pass; add coverage rather than rewrite. Verify the no-`issue_number` and owning-session paths stay exit 0.
-- [ ] `tests/unit/test_sdlc_utils.py` — UPDATE (additive): add a `TestSessionOwnsIssue` class alongside `TestFindSessionByIssue`; no existing test changes.
-- [ ] New cases to add (per acceptance criteria): explicit issue number + non-owning session → exit 1; explicit issue number + owning session (via `issue_url`) → exit 0; explicit issue number + owning session (via `sdlc-local-{N}`) → exit 0; no issue number + env session → exit 0; `find_session()` precedence tests pass unchanged.
+- [ ] `tests/unit/test_sdlc_utils.py` — UPDATE (additive): add a `TestSessionOwnsIssue` class alongside `TestFindSessionByIssue`; no existing test changes. Cover all three predicates (issue_url, sdlc-local-{N}, message_text) plus non-owner, None/0 inputs, malformed session (no raise), and word-boundary correctness for the message_text predicate.
+- [ ] New cases to add (per acceptance criteria): explicit issue number + non-owning session → exit 1; explicit issue number + owning session (via `issue_url`) → exit 0; explicit issue number + owning session (via `sdlc-local-{N}`) → exit 0; **explicit issue number + owning session (via `message_text` only) → exit 0** (the critique-blocker case); no issue number + env session → exit 0; `find_session()` precedence tests pass unchanged.
 
 ## Rabbit Holes
 
 - Do NOT refactor `find_session` / `find_session_by_issue` resolution order — the guard is strictly additive and runs after resolution. Touching precedence risks regressing #1671/#1672.
 - Do NOT add ownership gating to `sdlc_dispatch.py`, `sdlc_meta_set.py`, or the read paths (`get`, `stage-query`). The issue scopes the guard to the two named recorders (`sdlc_verdict record`, `sdlc_stage_marker`). Other writers are out of scope.
-- Do NOT introduce a new "ownership" abstraction beyond the two existing predicates. Reuse `find_session_by_issue`'s exact conditions.
+- Do NOT introduce a new "ownership" abstraction beyond the three existing predicates `find_session_by_issue` already uses. Reuse `find_session_by_issue`'s exact conditions (issue_url suffix, sdlc-local-{N} id, message_text regex) — no more, no less.
 - Do NOT make the no-`--issue-number` path noisy in any way — it must be byte-for-byte unchanged.
 
 ## Risks
@@ -170,6 +176,10 @@ Recorder run with no `--issue-number` → ownership gate skipped entirely → en
 ### Risk 3: Verdict `main()` loud-fail mechanism diverges from stage-marker's
 **Impact:** Inconsistent exit/stderr behavior between the two recorders confuses operators.
 **Mitigation:** Both must emit a clear stderr line naming issue + session id and exit 1, stdout `{}`. A parity test (or matching assertions in both test files) confirms the contract.
+
+### Risk 4: `session_owns_issue` under-mirrors `find_session_by_issue`, falsely rejecting a legitimate write (CRITIQUE BLOCKER)
+**Impact:** `find_session_by_issue` resolves ownership through THREE passes; the third matches `message_text` (`\bissue\s*#?\s*{N}\b`) for bridge-originated eng sessions that have no `issue_url`. If `session_owns_issue` mirrors only the first two predicates, a bridge eng session that legitimately owns issue N via the message_text pass is correctly *returned* by `find_session` but then *falsely rejected* by the gate — producing a spurious exit-1 on a legitimate write. This is the same Risk 1 breakage class (legitimate bridge sessions failing), reached through resolution-divergence rather than the omitted-`--issue-number` path.
+**Mitigation:** `session_owns_issue` mirrors **all three** `find_session_by_issue` predicates, reusing the identical regex, so the helper can never reject a session the resolver would return. A dedicated CLI-level test asserts `--issue-number N` + a session owning N via `message_text` only → exit 0 with the write performed (see Failure Path Test Strategy → Ownership Predicate Parity).
 
 ## Race Conditions
 
@@ -195,7 +205,7 @@ No new agent integration required. Both recorders are already reachable: `sdlc-t
 - [ ] Update `docs/features/sdlc-tool-resolver.md` § "Forked-skill issue-number passing" — add a subsection documenting the recorder-layer ownership guard: when it fires (explicit `--issue-number N` + non-owning resolved session), when it does not (omitted `--issue-number`), and how it complements the #1731 skill-layer and #1671/#1672 precedence layers. Extend the two-layer table to a three-layer table.
 
 ### Inline Documentation
-- [ ] Docstring for `session_owns_issue` in `tools/_sdlc_utils.py` stating the two ownership predicates and the never-raise contract.
+- [ ] Docstring for `session_owns_issue` in `tools/_sdlc_utils.py` stating the three ownership predicates (mirroring `find_session_by_issue`) and the never-raise contract.
 - [ ] Update `tools/sdlc_verdict.py` and `tools/sdlc_stage_marker.py` module/CLI docstrings to note the ownership gate and its exit-1 semantics.
 
 ## Success Criteria
@@ -203,9 +213,9 @@ No new agent integration required. Both recorders are already reachable: `sdlc-t
 - [ ] `tools/sdlc_verdict.py record` exits non-zero (1) when `--issue-number N` is passed but the resolved session does not own issue N; no write occurs.
 - [ ] `tools/sdlc_stage_marker.py` exits non-zero (1) under the same condition; no marker write occurs.
 - [ ] Calls omitting `--issue-number` are unaffected — exit 0, write performed (bridge PM session case).
-- [ ] `session_owns_issue` returns True for `issue_url` suffix match AND for `sdlc-local-{N}` id match; False otherwise; never raises.
+- [ ] `session_owns_issue` returns True for `issue_url` suffix match, for `sdlc-local-{N}` id match, AND for `message_text` regex match (`\bissue\s*#?\s*{N}\b`, case-insensitive); False otherwise; never raises. It mirrors all three `find_session_by_issue` predicates.
 - [ ] Existing `find_session()` / `find_session_by_issue` precedence tests pass unchanged.
-- [ ] Ownership-gate edge-case tests added: explicit N + non-owning → exit 1; explicit N + owning (issue_url) → exit 0; explicit N + owning (sdlc-local) → exit 0; no N + env session → exit 0.
+- [ ] Ownership-gate edge-case tests added: explicit N + non-owning → exit 1; explicit N + owning (issue_url) → exit 0; explicit N + owning (sdlc-local) → exit 0; explicit N + owning (message_text only) → exit 0; no N + env session → exit 0.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] grep confirms both recorders reference `session_owns_issue`.
@@ -251,7 +261,7 @@ No new agent integration required. Both recorders are already reachable: `sdlc-t
 - **Assigned To**: recorder-guard-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `session_owns_issue(session, issue_number) -> bool` to `tools/_sdlc_utils.py` (two predicates: `issue_url` endswith `/issues/{N}`, or `session_id == sdlc-local-{N}`; never raises; False on None/0/error).
+- Add `session_owns_issue(session, issue_number) -> bool` to `tools/_sdlc_utils.py` (THREE predicates mirroring `find_session_by_issue`: `issue_url` endswith `/issues/{N}`, OR `session_id == sdlc-local-{N}`, OR `message_text` matches `\bissue\s*#?\s*{N}\b` case-insensitive; reuse the resolver's exact regex; never raises; False on None/0/error).
 - Add ownership gate to `tools/sdlc_verdict.py::_cli_record`: when `args.issue_number is not None` and the resolved session does not own it, surface a loud failure routed through `main()` to exit 1 + stderr naming issue + session id.
 - Add ownership gate to `tools/sdlc_stage_marker.py::write_marker` after the `find_session` call: when `issue_number is not None and not session_owns_issue(...)`, return `({}, 1)`; extend `main()`'s stderr diagnostic to cover the divert case distinctly.
 - Update inline docstrings in all three files.
@@ -262,8 +272,8 @@ No new agent integration required. Both recorders are already reachable: `sdlc-t
 - **Assigned To**: recorder-guard-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- `tests/unit/test_sdlc_utils.py`: `TestSessionOwnsIssue` — issue_url match, sdlc-local match, non-owner, None session, None/0 issue, malformed session (no raise).
-- `tests/unit/test_sdlc_verdict.py`: explicit N + non-owning → exit 1 / no write; explicit N + owning → exit 0 / write; no N + env session → exit 0 / write. Update `test_cli_record_passes_ensure_true` fixture to own its issue.
+- `tests/unit/test_sdlc_utils.py`: `TestSessionOwnsIssue` — issue_url match, sdlc-local match, message_text match (incl. word-boundary negatives like "tissue N"/"issue N7" and case-insensitive positives), non-owner, None session, None/0 issue, malformed session (no raise).
+- `tests/unit/test_sdlc_verdict.py`: explicit N + non-owning → exit 1 / no write; explicit N + owning (issue_url) → exit 0 / write; explicit N + owning (message_text only) → exit 0 / write; no N + env session → exit 0 / write. Update `test_cli_record_passes_ensure_true` fixture to own its issue.
 - `tests/unit/test_sdlc_stage_marker.py`: same matrix for the marker path; preserve existing degraded/idempotent exit-0 behavior.
 
 ### 3. Validate
@@ -306,9 +316,9 @@ No new agent integration required. Both recorders are already reachable: `sdlc-t
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Critique (NEEDS REVISION) | `session_owns_issue` omitted the `message_text` ownership predicate that `find_session_by_issue` resolves on. The plan defined only two predicates (issue_url suffix, sdlc-local-{N} id), but `find_session_by_issue` resolves through THREE passes — the third being a `message_text` regex `\bissue\s*#?\s*{N}\b` for bridge-originated eng sessions with no `issue_url`. A bridge eng session that legitimately owns issue N via that third pass would be correctly returned by `find_session` but FALSELY REJECTED by the guard, producing a spurious exit-1 on a legitimate write (exactly the Risk 1 breakage). | Solution → Key Elements, Technical Approach, Failure Path Test Strategy, Test Impact, Success Criteria, Risks (new Risk 4), Step by Step Tasks | `session_owns_issue` extended to mirror ALL THREE predicates of `find_session_by_issue` (issue_url suffix OR sdlc-local-{N} id OR case-insensitive `message_text` regex `\bissue\s*#?\s*{N}\b`), preserving the never-raise contract via getattr defaults / try-except → False. New test case added: legitimate session owning issue N via message_text → exit 0. |
 
 ---
 
