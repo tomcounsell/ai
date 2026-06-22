@@ -263,3 +263,132 @@ class TestCLI:
             "stage": "PLAN",
             "status": "completed",
         }
+
+
+class TestOwnershipGateMarker:
+    """Tests for the ownership guard in write_marker.
+
+    When issue_number is passed, the resolved session must own that issue
+    or the write is refused with exit_code 1 and a stderr diagnostic.
+    A MagicMock() session passes the ownership check (endswith returns a
+    truthy Mock), so we use explicit session objects here to control ownership.
+    """
+
+    class _Session:
+        """Minimal session that controls ownership attributes explicitly."""
+
+        def __init__(self, *, issue_url=None, session_id="", message_text=""):
+            self.issue_url = issue_url
+            self.session_id = session_id
+            self.message_text = message_text
+
+    def _non_owning_session(self, issue_number=42):
+        """Session that does NOT own issue_number via any predicate."""
+        return self._Session(
+            issue_url=f"https://github.com/x/y/issues/99",
+            session_id="other-session",
+            message_text="working on issue 99",
+        )
+
+    def _owning_session(self, issue_number=42, via="issue_url"):
+        if via == "issue_url":
+            return self._Session(issue_url=f"https://github.com/x/y/issues/{issue_number}")
+        elif via == "message_text":
+            return self._Session(
+                issue_url=None,
+                session_id="other-session",
+                message_text=f"SDLC issue #{issue_number} needs fixing",
+            )
+        raise ValueError(via)
+
+    def test_explicit_issue_non_owning_exits_1_no_write(self):
+        """Non-owning session with issue_number → write refused, exit_code 1."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        session = self._non_owning_session(42)
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker.find_session", return_value=session),
+        ):
+            result, code = write_marker(stage="PLAN", status="completed", issue_number=42)
+
+        assert result == {}
+        assert code == 1
+
+    def test_explicit_issue_owning_via_issue_url_exits_0(self):
+        """Owning session via issue_url → write proceeds, exit_code 0."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        session = self._owning_session(42, via="issue_url")
+        mock_sm = MagicMock()
+        mock_sm.states = {}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker.find_session", return_value=session),
+            patch("agent.pipeline_state.PipelineStateMachine", return_value=mock_sm),
+        ):
+            result, code = write_marker(stage="PLAN", status="completed", issue_number=42)
+
+        assert code == 0
+        assert result == {"stage": "PLAN", "status": "completed"}
+
+    def test_explicit_issue_owning_via_message_text_exits_0(self):
+        """CRITICAL: predicate 3 (message_text) passes the ownership gate.
+
+        A session with no issue_url and session_id != 'sdlc-local-42' but
+        message_text containing 'issue #42' must be allowed to write (exit 0).
+        This proves the third predicate is actually evaluated by the gate.
+        """
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        session = self._owning_session(42, via="message_text")
+        mock_sm = MagicMock()
+        mock_sm.states = {}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker.find_session", return_value=session),
+            patch("agent.pipeline_state.PipelineStateMachine", return_value=mock_sm),
+        ):
+            result, code = write_marker(stage="PLAN", status="completed", issue_number=42)
+
+        assert code == 0
+        assert result == {"stage": "PLAN", "status": "completed"}
+
+    def test_no_issue_number_skips_gate(self):
+        """Without issue_number, the ownership guard is bypassed entirely.
+
+        A non-owning session is still allowed to write when no issue number
+        is passed — the gate only fires when issue_number is not None.
+        """
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        session = self._non_owning_session(42)
+        mock_sm = MagicMock()
+        mock_sm.states = {}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker.find_session", return_value=session),
+            patch("agent.pipeline_state.PipelineStateMachine", return_value=mock_sm),
+        ):
+            # No issue_number passed — gate must not fire.
+            result, code = write_marker(stage="PLAN", status="completed")
+
+        assert code == 0
+
+    def test_divert_stderr_message(self, capsys):
+        """When the ownership gate fires, stderr must contain 'ownership guard' and the issue number."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        session = self._non_owning_session(42)
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker.find_session", return_value=session),
+        ):
+            write_marker(stage="PLAN", status="completed", issue_number=42)
+
+        captured = capsys.readouterr()
+        assert "ownership guard" in captured.err.lower()
+        assert "42" in captured.err

@@ -646,3 +646,106 @@ class TestFindSessionEnsure:
                 result = _sdlc_utils.find_session(None, 1558, ensure=True)
 
         assert result is None
+
+
+class TestSessionOwnsIssue:
+    """Unit tests for session_owns_issue — all three predicates, edge cases, robustness."""
+
+    class _Session:
+        """Minimal session object with the three attributes session_owns_issue reads."""
+
+        def __init__(self, *, issue_url=None, session_id="", message_text=""):
+            self.issue_url = issue_url
+            self.session_id = session_id
+            self.message_text = message_text
+
+    def test_returns_false_for_none_session(self):
+        from tools._sdlc_utils import session_owns_issue
+
+        assert session_owns_issue(None, 42) is False
+
+    def test_returns_false_for_none_issue_number(self):
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(issue_url="https://github.com/x/y/issues/42")
+        assert session_owns_issue(session, None) is False
+
+    def test_returns_false_for_zero_issue_number(self):
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(issue_url="https://github.com/x/y/issues/42")
+        assert session_owns_issue(session, 0) is False
+
+    def test_predicate1_issue_url_match(self):
+        """Predicate 1: issue_url ends with /issues/{issue_number}."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(issue_url="https://github.com/x/y/issues/42")
+        assert session_owns_issue(session, 42) is True
+
+    def test_predicate1_issue_url_no_match(self):
+        """Predicate 1: issue_url ends with a different issue number."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(issue_url="https://github.com/x/y/issues/99")
+        assert session_owns_issue(session, 42) is False
+
+    def test_predicate2_sdlc_local_match(self):
+        """Predicate 2: session_id == 'sdlc-local-{issue_number}'."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(session_id="sdlc-local-42")
+        assert session_owns_issue(session, 42) is True
+
+    def test_predicate2_sdlc_local_no_match(self):
+        """Predicate 2: session_id is a different sdlc-local record."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(session_id="sdlc-local-99")
+        assert session_owns_issue(session, 42) is False
+
+    def test_predicate3_message_text_match_basic(self):
+        """Predicate 3: message_text contains 'issue #42'."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(message_text="SDLC issue #42: fix bug")
+        assert session_owns_issue(session, 42) is True
+
+    def test_predicate3_message_text_match_no_hash(self):
+        """Predicate 3: message_text contains 'issue 42' (no hash)."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(message_text="issue 42 is the one")
+        assert session_owns_issue(session, 42) is True
+
+    def test_predicate3_message_text_match_case_insensitive(self):
+        """Predicate 3: match is case-insensitive (uppercase 'Issue')."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(message_text="Issue #42")
+        assert session_owns_issue(session, 42) is True
+
+    def test_predicate3_word_boundary_tissue(self):
+        """Predicate 3: 'tissue 42' must NOT match — word boundary on left."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(message_text="tissue 42")
+        assert session_owns_issue(session, 42) is False
+
+    def test_predicate3_word_boundary_issue_with_suffix(self):
+        """Predicate 3: 'issue 427' must NOT match for issue 42 — word boundary on right."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(message_text="issue 427 other")
+        assert session_owns_issue(session, 42) is False
+
+    def test_no_raise_on_malformed_session(self):
+        """A session that raises on attribute access must return False, never propagate."""
+        from unittest.mock import Mock
+
+        from tools._sdlc_utils import session_owns_issue
+
+        bad_session = Mock(spec=[])  # no attributes — any getattr raises AttributeError
+        # Must not raise; graceful False return.
+        result = session_owns_issue(bad_session, 42)
+        assert result is False
