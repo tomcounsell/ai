@@ -826,6 +826,8 @@ async def process_outbox(telegram_client) -> int:
                             f"dead-lettering message"
                         )
                         await _dead_letter_message(message, reason="flood_backstop")
+                        # Do not fall through to generic retry; backstopped msgs are dead-lettered
+                        continue
                     else:
                         # Re-queue without burning _relay_attempts; carries _file_sent if set
                         await asyncio.to_thread(r.rpush, key, json.dumps(message))

@@ -1056,11 +1056,11 @@ class TestFloodWait:
         mock_dead_letter.assert_called_once()
         dead_msg = mock_dead_letter.call_args[0][0]
         assert dead_msg["_flood_waits"] == RELAY_FLOOD_WAIT_MAX
-        # The flood-backstop path does NOT use `continue`, so the normal retry
-        # counter runs after dead-lettering (success=False falls through).
-        # The key invariant: dead-letter IS called (message is not silently dropped
-        # or re-queued by the flood path alone).
         mock_dead_letter.assert_called_with(dead_msg, reason="flood_backstop")
+        # A backstopped message must NOT be re-queued after dead-lettering.
+        # The `continue` after _dead_letter_message skips the generic retry block,
+        # so rpush must never be called for this message.
+        mock_redis.rpush.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_floodwait_after_file_send_skips_file_on_retry(self):
