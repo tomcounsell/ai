@@ -382,7 +382,7 @@ No prior fixes — greenfield extension of the verification machinery.
 | Check | Command | Expected |
 |-------|---------|----------|
 | Parser unit tests pass | `python -m pytest tests/unit/test_verification_parser.py -q` | exit code 0 |
-| Inverse grammar implemented | `grep -c "does not contain\|match count\|exit code !=" agent/verification_parser.py` | output > 2 |
+| Inverse grammar implemented | `python -c "import agent.verification_parser as p; src=open('agent/verification_parser.py').read(); assert 'does not contain' in src and 'match count' in src and 'exit code !=' in src; print(3)"` | output > 2 |
 | Lint clean | `python -m ruff check agent/verification_parser.py` | exit code 0 |
 | Template documents anti-criteria | `grep -c "anti-criter" .claude/skills-global/do-plan/PLAN_TEMPLATE.md` | output > 0 |
 | Positive grammar not broken (anti-criterion: no removal of `output contains`) | `grep -c "output contains" agent/verification_parser.py` | output > 0 |
