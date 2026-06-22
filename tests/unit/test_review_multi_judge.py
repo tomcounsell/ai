@@ -458,6 +458,50 @@ class TestPRCommentOrderingRegression:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Cross-vendor judge integration with compute_consensus
+# ---------------------------------------------------------------------------
+
+
+class TestCrossVendorJudgeConsensus:
+    def test_cross_vendor_blocker_preserved_among_claude_approvals(self):
+        """Cross-vendor CHANGES REQUESTED with blockers overrides Claude approvals."""
+        from tools.cross_vendor_judge import CROSS_VENDOR_JUDGE_ID
+
+        judges = [
+            {
+                "judge_id": "code-quality",
+                "verdict": "APPROVED",
+                "blockers": 0,
+                "tech_debt": 0,
+                "confidence": 0.9,
+            },
+            {
+                "judge_id": "risk",
+                "verdict": "APPROVED",
+                "blockers": 0,
+                "tech_debt": 0,
+                "confidence": 0.85,
+            },
+            {
+                "judge_id": CROSS_VENDOR_JUDGE_ID,
+                "verdict": "CHANGES REQUESTED",
+                "blockers": 1,
+                "tech_debt": 0,
+                "confidence": 0.75,
+            },
+        ]
+        result = compute_consensus(judges, rule="any-blocker-wins")
+        assert result["verdict"] == "CHANGES REQUESTED"
+        assert result["blockers"] == 1
+
+    def test_cross_vendor_id_disjoint_from_claude_ids(self):
+        """CROSS_VENDOR_JUDGE_ID must not collide with existing Claude judge IDs."""
+        from tools.cross_vendor_judge import CROSS_VENDOR_JUDGE_ID
+
+        assert CROSS_VENDOR_JUDGE_ID not in {"code-quality", "risk"}
+
+
 class TestRecordVerdictCLIShape:
     def test_cli_record_help_advertises_judges_json(self, capsys):
         """Smoke test: `python -m tools.sdlc_verdict record --help` lists the

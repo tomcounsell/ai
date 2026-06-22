@@ -718,6 +718,81 @@ independent operator kill switches.
 `judges_run` (count) and `consensus_disagreement` (bool, true when any pair
 of judges disagreed). Operators can grep these from session state.
 
+### Cross-vendor judge (opt-in)
+
+After collecting all Claude judge dicts and BEFORE calling `compute_consensus`,
+optionally invoke a cross-vendor (non-Claude) LLM judge to get an independent
+opinion. This is an operator opt-in gate — default OFF.
+
+**Env vars:**
+- `SDLC_REVIEW_CROSS_VENDOR` — set to `1` to enable. Default: `0` (off).
+- `SDLC_REVIEW_CROSS_VENDOR_REQUIRED` — set to `1` to treat a skip as a
+  blocker (fail-closed). Default: `0` (skip is non-fatal).
+
+**Shape gate:** the cross-vendor judge ONLY fires when `shape == "feature"`.
+Trivial shapes (`docs-only`, `lockfile-only`, `small-patch`, `mixed`) are
+NEVER sent to the cross-vendor judge regardless of env vars — the cost is not
+justified and the shapes carry minimal review signal.
+
+**Orchestration (insert after Claude judge dicts are collected):**
+
+```bash
+CROSS_VENDOR_ENABLED="${SDLC_REVIEW_CROSS_VENDOR:-0}"
+CROSS_VENDOR_REQUIRED="${SDLC_REVIEW_CROSS_VENDOR_REQUIRED:-0}"
+CROSS_VENDOR_SKIP_REASON=""
+
+if [ "$CROSS_VENDOR_ENABLED" = "1" ] && [ "$SHAPE" = "feature" ]; then
+  echo "cross-vendor judge: invoking for PR $PR_NUMBER (shape=feature)"
+  CV_RAW=$(python -m tools.cross_vendor_judge --pr "$PR_NUMBER" 2>/dev/null)
+  CV_STATUS=$(echo "$CV_RAW" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null || echo "error")
+  if [ "$CV_STATUS" = "ok" ]; then
+    # Append the cross-vendor judge dict to the judges list before consensus
+    CV_JUDGE=$(echo "$CV_RAW" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['judge']))")
+    # (Implementation: append CV_JUDGE to the in-memory judges list / JSON array)
+    # Post per-judge comment — same pattern as Claude judges, different heading prefix
+    gh pr comment "$PR_NUMBER" --body "## Review (Judge cross-vendor):
+$(echo "$CV_RAW" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['judge'].get('reasoning_summary',''))")
+
+**Verdict:** $(echo "$CV_RAW" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['judge'].get('verdict',''))")"
+  elif [ "$CV_STATUS" = "skipped" ]; then
+    CROSS_VENDOR_SKIP_REASON=$(echo "$CV_RAW" | python3 -c "import json,sys; print(json.load(sys.stdin).get('reason','unknown'))" 2>/dev/null || echo "unknown")
+    echo "cross-vendor judge: skipped — $CROSS_VENDOR_SKIP_REASON"
+    if [ "$CROSS_VENDOR_REQUIRED" = "1" ]; then
+      # Fail-closed: inject a synthetic CHANGES REQUESTED dict so any-blocker-wins triggers
+      SYNTHETIC_JUDGE='{"judge_id":"cross-vendor","verdict":"CHANGES_REQUESTED","blockers":1,"tech_debt":0,"nits":0,"reasoning_summary":"Cross-vendor judge unavailable — required by SDLC_REVIEW_CROSS_VENDOR_REQUIRED=1."}'
+      # (Implementation: append SYNTHETIC_JUDGE to the in-memory judges list)
+    fi
+  else
+    echo "cross-vendor judge: error parsing response (status=$CV_STATUS) — skipping"
+    CROSS_VENDOR_SKIP_REASON="parse error: status=$CV_STATUS"
+  fi
+else
+  echo "cross-vendor judge: disabled (gate=off or shape=$SHAPE)"
+fi
+```
+
+**Aggregate comment note:** if the cross-vendor judge was skipped (`CV_STATUS = "skipped"`
+or gate was off), include a visible note in the aggregate summary comment:
+
+```
+Note: cross-vendor judge skipped — {CROSS_VENDOR_SKIP_REASON}
+```
+
+Omit the note entirely when the cross-vendor judge ran successfully and its
+dict was appended to the judges list.
+
+**Invocation fallback:** prefer `python -m tools.cross_vendor_judge --pr N`
+(always available in the repo Python environment). The `valor-cross-vendor-judge
+--pr N` entry point is equivalent if the CLI is on PATH — either form is
+acceptable, but `python -m tools.cross_vendor_judge` is the more reliable
+choice in skill context where PATH may not include project scripts.
+
+**Invariants:**
+- NEVER append a `"skipped"` envelope to the judges list — only `"ok"` judge dicts go in
+- NEVER modify the `compute_consensus(judges, rule="any-blocker-wins")` call signature
+- NEVER modify the `record_verdict` call — the cross-vendor judge dict flows through the same judges list, not a separate path
+- A failed cross-vendor invocation (non-zero exit, parse error) is treated as a skip — never crashes the review
+
 ### Record the verdict (mandatory)
 
 After emitting the OUTCOME block, record the review verdict on the PM session so the SDLC router's Legal Dispatch Guards (G3, G4) can consume it:

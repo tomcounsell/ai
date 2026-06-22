@@ -165,10 +165,99 @@ quality (disagreement rate) without a dedicated dashboard.
   the aggregate, by construction (per-judge headings have a different
   prefix).
 
+## Cross-vendor judge (issue #1626)
+
+An optional third judge (`judge_id="cross-vendor"`) runs a non-Claude model
+(default: `gpt-4o`) alongside the existing Claude judges. Because a different
+vendor's training distribution yields uncorrelated error patterns, a class of
+defect that Claude systematically misses has a structural chance of being
+caught by the cross-vendor judge.
+
+### Trigger gate
+
+Two conditions must both hold — if either is false the judge is silently
+skipped (logged as `disabled`):
+
+1. `SDLC_REVIEW_CROSS_VENDOR=1` is set in the vault `.env` (default `0`/off).
+2. The PR shape is `feature` (from `python -m scripts.pr_shape_classify`).
+   Trivial shapes (`docs-only`, `lockfile-only`, `small-patch`, `mixed`)
+   never pay the cost.
+
+### Consensus integration
+
+The cross-vendor judge returns a dict in exactly the same shape as the Claude
+judges. It is appended to the `judges` list before `compute_consensus` is
+called — `any-blocker-wins` therefore treats a cross-vendor blocker identically
+to a Claude judge blocker. A single cross-vendor CHANGES REQUESTED verdict
+forces the aggregate outcome to CHANGES REQUESTED regardless of how many Claude
+judges approved.
+
+The consensus layer (`agent/sdlc_review_consensus.py`) is **unchanged** — it is
+vendor-agnostic and consumes only `{judge_id, verdict, blockers, ...}` dicts.
+
+### Failure / degrade behavior
+
+Default (`SDLC_REVIEW_CROSS_VENDOR_REQUIRED=0`): if the cross-vendor judge
+fails for any reason (OpenAI API error, bad model id, rate limit, JSON parse
+failure, type coercion failure), the CLI emits a `{"status":"skipped",...}`
+envelope. The `/do-pr-review` parent does not append the skip envelope to the
+judges list. Consensus proceeds with the Claude judges only. The aggregate
+comment includes a visible "Note: cross-vendor judge skipped — {reason}".
+
+Fail-closed (`SDLC_REVIEW_CROSS_VENDOR_REQUIRED=1`): a skip injects a
+synthetic CHANGES REQUESTED judge dict citing the missing cross-vendor verdict,
+so the review fails if the cross-vendor judge could not run.
+
+### Observability
+
+Every CLI invocation emits exactly one `logger.info` tri-state line:
+- `ran`: judge returned a verdict; includes model id + raw `prompt_tokens` /
+  `completion_tokens` from the API `usage` (no dollar amounts — rates drift).
+- `skipped`: judge could not run; includes exception class and model id.
+- `disabled`: the gate was off or the shape was not `feature`; logged by the
+  parent, not the CLI.
+
+The same token counts are stored in the judge dict's `meta` field, so the
+recorded `_judges` entry is self-describing.
+
+### Env vars (all provisional/tunable)
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `SDLC_REVIEW_CROSS_VENDOR` | `0` | Enable the cross-vendor judge (operator kill switch). |
+| `SDLC_REVIEW_CROSS_VENDOR_MODEL` | `gpt-4o` | OpenAI model id. Env-overridable; bad ids degrade to skip. |
+| `SDLC_REVIEW_CROSS_VENDOR_MAX_DIFF_TOKENS` | `50000` | Token cap; diffs exceeding this are truncated with a marker. |
+| `SDLC_REVIEW_CROSS_VENDOR_REQUIRED` | `0` | Fail-closed: skip forces CHANGES REQUESTED. |
+
+### Key invariants
+
+- `CROSS_VENDOR_JUDGE_ID = "cross-vendor"` is defined once in
+  `tools/cross_vendor_judge.py` and is disjoint from `"code-quality"` and
+  `"risk"`. `_dedup_last_wins` in `compute_consensus` therefore never
+  collapses the cross-vendor entry onto a Claude judge.
+- A skip envelope (`{"status":"skipped",...}`) has no path to
+  `compute_consensus` or `record_verdict(judges=)` — the parent's
+  append-iff-ok guard makes it structurally impossible.
+- `agent/sdlc_review_consensus.py` and `tools/sdlc_verdict.py` are
+  **unchanged** — the cross-vendor judge is a new dict producer only.
+
+### Tests
+
+- `tests/unit/test_cross_vendor_judge.py` — envelope shape, failure paths,
+  type coercion, token cap, logging behavior.
+- `tests/unit/test_cross_vendor_orchestration.py` — parent append-iff-ok
+  contract, skip-envelope never reaches consensus or verdict recorder.
+- `tests/unit/test_review_multi_judge.py::TestCrossVendorJudgeConsensus` —
+  hard deterministic assertion: cross-vendor blocker among Claude approvals
+  forces CHANGES REQUESTED; constant disjointness check.
+- `tests/unit/test_sdlc_verdict.py::TestCrossVendorJudgeRoundTrip` —
+  cross-vendor dict round-trips into `_judges` via `record_verdict`.
+
 ## Related
 
 - `tools/sdlc_verdict.py` — the single writer.
 - `agent/sdlc_review_consensus.py` — pure consensus rule helper.
+- `tools/cross_vendor_judge.py` — cross-vendor judge CLI (issue #1626).
 - `.claude/skills-global/do-pr-review/SKILL.md` — orchestration site.
 - `.claude/commands/do-merge.md` — downstream consumer (unchanged).
 - `.claude/skills-global/sdlc/SKILL.md` G6 — downstream consumer

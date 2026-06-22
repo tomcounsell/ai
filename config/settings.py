@@ -393,6 +393,42 @@ class Settings(BaseSettings):
         description="GitHub PAT for SDLC bot account used by /do-pr-review in pipeline context",
     )
 
+    # Cross-vendor review judge (issue #1626).
+    # Provisional/tunable — default off; enable on the review machine via vault .env.
+    sdlc_review_cross_vendor: bool = Field(
+        default=False,
+        description=(
+            "Enable cross-vendor (non-Claude) reviewer in /do-pr-review. "
+            "Default OFF. Enable via SDLC_REVIEW_CROSS_VENDOR=1."
+        ),
+    )
+    # Provisional model id — gpt-4o is the safe default.
+    # Override via SDLC_REVIEW_CROSS_VENDOR_MODEL env var.
+    sdlc_review_cross_vendor_model: str = Field(
+        default="gpt-4o",
+        description=(
+            "OpenAI model id for the cross-vendor judge. "
+            "Provisional — env-overridable via SDLC_REVIEW_CROSS_VENDOR_MODEL."
+        ),
+    )
+    # Provisional token cap — tunable based on cost tolerance.
+    sdlc_review_cross_vendor_max_diff_tokens: int = Field(
+        default=50000,
+        ge=1000,
+        description=(
+            "Max diff tokens for the cross-vendor judge. "
+            "Provisional/tunable. Env: SDLC_REVIEW_CROSS_VENDOR_MAX_DIFF_TOKENS."
+        ),
+    )
+    sdlc_review_cross_vendor_required: bool = Field(
+        default=False,
+        description=(
+            "Fail-closed: if True and cross-vendor judge skips, consensus returns "
+            "CHANGES REQUESTED. Default OFF (degrade-to-Claude-only). "
+            "Env: SDLC_REVIEW_CROSS_VENDOR_REQUIRED=1."
+        ),
+    )
+
     # Component settings
     api: APISettings = Field(default_factory=APISettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
