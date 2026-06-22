@@ -287,11 +287,27 @@ def _build_env() -> dict[str, str]:
     The ollama substrate is the granite classifier only
     (`granite_classifier.py`); it is intentionally NOT inherited
     by the PTY child.
+
+    ``CLAUDE_CODE_OAUTH_TOKEN`` is the prevention credential for granite
+    PTY auth (a long-lived ~1-year token minted via ``claude setup-token``).
+    It is read directly from ``os.environ`` rather than from a settings
+    field because ``APISettings`` uses ``env_nested_delimiter="__"``, which
+    would require the env var to be named ``API__CLAUDE_CODE_OAUTH_TOKEN``
+    to bind to ``settings.api.claude_code_oauth_token``. Reading the bare
+    var directly sidesteps that naming mismatch. When present it is
+    forwarded into the child env; when absent the key is left out entirely
+    so the inherit-from-parent behavior is preserved. It is intentionally
+    NOT blanked like the ``ANTHROPIC_*`` vars.
     """
     env = os.environ.copy()
     env["ANTHROPIC_API_KEY"] = ""
     env["ANTHROPIC_BASE_URL"] = ""
     env["ANTHROPIC_AUTH_TOKEN"] = ""
+    token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if token:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    else:
+        env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     return env
 
 
