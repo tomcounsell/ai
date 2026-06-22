@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-06-22
 tracking: https://github.com/tomcounsell/ai/issues/1687
 last_comment_id: IC_kwDOEYGa088AAAABGqXoyg
+revision_applied: true
 ---
 
 # SDLC Router: Refute Phantom #1680 Dead-Ends + Close REVIEW Empty-Verdict Rule Gap
@@ -137,7 +138,8 @@ Router asked to route → REVIEW marker `in_progress`, verdict empty, PATCH not 
   - Return False if a review verdict IS recorded (check both `meta.get("latest_review_verdict")` and `_verdict_text(stage_states["_verdicts"].get("REVIEW"))`) — let rows 8/8b own a recorded verdict.
   - Return False if `stage_states.get("PATCH") == STATUS_COMPLETED` — let row 8b (`_rule_patch_applied_after_review`) re-review instead.
   - Otherwise return True → `/do-pr-review`.
-- **Rule placement** — register as row `8c` in `DISPATCH_RULES` AFTER row 8b and BEFORE row 9 (`_rule_review_approved_docs_not_done`). Placement after 8b ensures a completed-PATCH state is owned by 8b (re-review), and before 9 ensures it pre-empts the docs/merge rows that require a completed REVIEW. Attach a `.__doc__` human-state string (the parity test cross-checks SKILL.md row cells — Gap A must add the matching SKILL.md row).
+- **Rule placement** — register as row `8c` in `DISPATCH_RULES` AFTER row 8b and BEFORE row 9 (`_rule_review_approved_docs_not_done`). Placement after 8b ensures a completed-PATCH state is owned by 8b (re-review), and before 9 ensures it pre-empts the docs/merge rows that require a completed REVIEW. Attach a non-empty `.__doc__` docstring to the predicate — this is the ONLY SKILL.md⇄router parity gate (`test_every_dispatch_rule_has_documented_predicate` asserts every predicate's `__doc__` is non-empty; there is no per-row markdown table to update). Do NOT add a `| 8c | ... |` row to SKILL.md — the Step-4 table was removed in #1216 and `test_step4_has_no_hand_authored_dispatch_table` asserts no `| digit |` rows exist; re-adding one would fail.
+- **Parity-set update (required)** — `test_dispatch_rules_cover_expected_row_ids` (`tests/unit/test_sdlc_skill_md_parity.py:132-149`) hardcodes an `expected` row-id set and asserts no extras. Registering row `8c` without adding `"8c"` to that set fails on `extra={'8c'}`. Add `"8c",` to the `expected` set in that test.
 - **Loop bound** — like row 2c, the new rule is bounded by G4 oscillation (it does not increment `critique_cycle_count`), not G2. Document this in the predicate docstring.
 - **Gap B** — trace the verdict-recording path: who writes `_verdicts.CRITIQUE` and flips the CRITIQUE marker to `completed`. Likely owners: the `/do-plan-critique` skill's verdict-record step and `tools/sdlc_*` stage-marker helpers. With #1736 merged (issue-number diversion ruled out), determine whether the final-verdict path fails to (a) flip the marker and (b) persist intermediate NEEDS REVISION verdicts. Produce a disposition: fix-now (small marker-flip + intermediate-verdict record) OR confirm it is fully owned by #1654 and link it. Do NOT expand scope into a war-room aggregation rewrite — that is #1654's job.
 
@@ -156,9 +158,9 @@ Router asked to route → REVIEW marker `in_progress`, verdict empty, PATCH not 
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_router_decision.py::TestDispatchRulesTable` — UPDATE: the rule-count / row-id assertions and any SKILL.md parity check must include new row `8c`.
+- [ ] `tests/unit/test_sdlc_router_decision.py::TestDispatchRulesTable` — UPDATE: the rule-count / row-id assertions must include new row `8c`.
 - [ ] `tests/unit/test_sdlc_router_decision.py` — ADD: new class `TestReviewInProgressNoVerdictDeadEnd` mirroring `TestCritiqueInProgressNoVerdictDeadEnd` (re-dispatch, defers-on-completed-PATCH, recorded-verdict-unaffected).
-- [ ] Any SKILL.md ⇄ router parity test (the `_rule_*.__doc__` cross-check referenced at `agent/sdlc_router.py:910-911`) — UPDATE: add the row 8c state-string row to `.claude/skills/sdlc/SKILL.md` so parity holds.
+- [ ] `tests/unit/test_sdlc_skill_md_parity.py::test_dispatch_rules_cover_expected_row_ids` — UPDATE: add `"8c"` to the hardcoded `expected` row-id set (`:132-149`) or it fails on `extra={'8c'}`. The `__doc__`-non-empty parity gate (`test_every_dispatch_rule_has_documented_predicate`) is satisfied automatically by the new predicate's docstring — no SKILL.md edit. Do NOT add a `| 8c |` table row to `.claude/skills-global/sdlc/SKILL.md`: `test_step4_has_no_hand_authored_dispatch_table` asserts Step 4 has no `| digit |` rows (table removed in #1216), so adding one would FAIL.
 - [ ] Existing `TestRow8ReviewHasFindings`, `TestRow8bPatchAppliedAfterReview`, `TestRow9ReviewApprovedDocsNotDone` — verify (not modify) that inserting 8c between 8b and 9 does not change their outcomes; add an ordering assertion if absent.
 
 No existing test is deleted — the change is additive (one new rule + new tests). The only updates are to count/parity assertions that must learn about row 8c.
@@ -191,7 +193,7 @@ No race conditions identified — `decide_next_dispatch` and all dispatch-rule p
 
 ## Update System
 
-No update system changes required — this is a pure-Python change to `agent/sdlc_router.py` and its unit tests plus a SKILL.md row. No new dependencies, config files, services, or migration steps. The router ships with the repo; `/update` propagates it via the normal git pull with no special handling.
+No update system changes required — this is a pure-Python change to `agent/sdlc_router.py` and its unit tests (one new dispatch rule plus the `expected` row-id set in `tests/unit/test_sdlc_skill_md_parity.py`). No SKILL.md edit, no new dependencies, config files, services, or migration steps. The router ships with the repo; `/update` propagates it via the normal git pull with no special handling.
 
 ## Agent Integration
 
@@ -209,7 +211,8 @@ No new agent integration required — `agent/sdlc_router.py::decide_next_dispatc
 
 ### Inline Documentation
 - [ ] Add the `_rule_review_in_progress_no_verdict.__doc__` human-state string (parity-test requirement) and a thorough docstring mirroring row 2c's, citing #1687 and the loop-bound (G4).
-- [ ] Update `.claude/skills/sdlc/SKILL.md` rule table to add the row 8c state cell (required for the router⇄SKILL.md parity test).
+- [ ] Do NOT edit `.claude/skills-global/sdlc/SKILL.md` — the Step-4 dispatch table was removed in #1216, and `test_step4_has_no_hand_authored_dispatch_table` forbids re-adding any `| digit |` row. Router⇄SKILL.md parity is satisfied solely by the new predicate carrying a non-empty `__doc__`.
+- [ ] Add `"8c"` to the hardcoded `expected` row-id set in `tests/unit/test_sdlc_skill_md_parity.py:132-149` (otherwise `test_dispatch_rules_cover_expected_row_ids` fails on `extra={'8c'}`).
 - [ ] Record the spike-1 refutation and the Gap B disposition in this plan (the durable investigation record).
 
 ## Success Criteria
@@ -218,7 +221,7 @@ No new agent integration required — `agent/sdlc_router.py::decide_next_dispatc
 - [ ] New rule `_rule_review_in_progress_no_verdict` added and registered as row 8c, disjoint from rows 8 and 8b.
 - [ ] `TestReviewInProgressNoVerdictDeadEnd` added, mirroring `TestCritiqueInProgressNoVerdictDeadEnd`, and passing.
 - [ ] A previously-`Blocked` REVIEW `in_progress`-empty-verdict-no-completed-PATCH state now returns `Dispatch(/do-pr-review)`.
-- [ ] SKILL.md row 8c added; router⇄SKILL.md parity test passes.
+- [ ] `"8c"` added to the `expected` set in `tests/unit/test_sdlc_skill_md_parity.py`; both parity tests (`test_dispatch_rules_cover_expected_row_ids`, `test_every_dispatch_rule_has_documented_predicate`, `test_step4_has_no_hand_authored_dispatch_table`) pass. No `.claude/skills-global/sdlc/SKILL.md` edit (the Step-4 table was removed in #1216).
 - [ ] Gap B disposition written (fix-now marker-flip OR confirmed-owned-by-#1654 with link).
 - [ ] No stale `project_sdlc_router_needs_revision_deadlock.md` memory note exists (verified; prune if one surfaces).
 - [ ] Tests pass (`/do-test`).
@@ -232,7 +235,7 @@ The lead agent orchestrates; it does not build directly.
 
 - **Builder (router-rule)**
   - Name: router-rule-builder
-  - Role: Add `_rule_review_in_progress_no_verdict` + row 8c registration + docstring; add SKILL.md row.
+  - Role: Add `_rule_review_in_progress_no_verdict` + row 8c registration + non-empty docstring (no SKILL.md edit).
   - Agent Type: builder
   - Resume: true
 
@@ -287,8 +290,8 @@ The lead agent orchestrates; it does not build directly.
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `_rule_review_in_progress_no_verdict` near `agent/sdlc_router.py:874`, modeled on row 2c but gating on `pr_number` PRESENT and `PATCH != completed`.
-- Register as row `8c` between 8b and 9 in `DISPATCH_RULES`; attach `.__doc__` human-state string.
-- Add the matching row to `.claude/skills/sdlc/SKILL.md`.
+- Register as row `8c` between 8b and 9 in `DISPATCH_RULES`; attach a non-empty `.__doc__` docstring (this alone satisfies the `__doc__`-non-empty parity gate).
+- Do NOT edit `.claude/skills-global/sdlc/SKILL.md` — the Step-4 table was removed in #1216 and re-adding a `| 8c |` row fails `test_step4_has_no_hand_authored_dispatch_table`. The only parity update is adding `"8c"` to the `expected` set in `tests/unit/test_sdlc_skill_md_parity.py` (done by the test engineer in task 3).
 
 ### 3. Add Gap A regression tests
 - **Task ID**: test-row-8c
@@ -297,7 +300,8 @@ The lead agent orchestrates; it does not build directly.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Add `TestReviewInProgressNoVerdictDeadEnd` mirroring `TestCritiqueInProgressNoVerdictDeadEnd`: re-dispatch case, defers-when-PATCH-completed case, recorded-verdict-unaffected case, malformed-`_verdicts`-does-not-raise case.
-- Update `TestDispatchRulesTable` count/row-id assertions and the SKILL.md parity assertion to include row 8c.
+- Update `TestDispatchRulesTable` count/row-id assertions to include row 8c.
+- Add `"8c"` to the hardcoded `expected` row-id set in `tests/unit/test_sdlc_skill_md_parity.py:132-149` so `test_dispatch_rules_cover_expected_row_ids` does not fail on `extra={'8c'}`. Do NOT touch `.claude/skills-global/sdlc/SKILL.md`.
 - Add/confirm an ordering assertion: 8b before 8c before 9.
 
 ### 4. Validate
@@ -340,13 +344,15 @@ The lead agent orchestrates; it does not build directly.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | critique | Plan referenced non-existent `.claude/skills/sdlc/SKILL.md` (5×) | Plan revision 2026-06-22 | All occurrences corrected to `.claude/skills-global/sdlc/SKILL.md` (the path `test_sdlc_skill_md_parity.py:28` resolves); most SKILL.md-edit tasks removed as moot — see next row. |
+| BLOCKER | critique | "Add row 8c cell to SKILL.md" task was a false premise — `test_step4_has_no_hand_authored_dispatch_table` forbids `\| digit \|` rows (table removed #1216), and `test_dispatch_rules_cover_expected_row_ids` hardcodes the expected set and rejects extras | Plan revision 2026-06-22 | Removed all "add SKILL.md row 8c" tasks; the non-empty `__doc__` parity gate is the only SKILL parity requirement. Added a task to append `"8c"` to the `expected` set at `tests/unit/test_sdlc_skill_md_parity.py:132-149`. |
+| NIT | critique | Open Question 2 (REVIEW empty-verdict `pr_number` gate) is self-resolving but framed as pending | Plan revision 2026-06-22 | Marked RESOLVED inline in Open Questions; builder treats the `pr_number`-present gate as decided, with a no-PR regression case asserting non-firing. |
 
 ---
 
 ## Open Questions
 
 1. **Gap B disposition (PM decision):** spike-1 showed the non-flipped CRITIQUE marker causes a benign terminal `Blocked` on a fully-merged pipeline, not a live dead-end. Should Gap B be a fix-now bounded marker-flip in this plan, or deferred entirely to #1654 (the war-room verdict-persistence issue)? Recommendation: investigate in task 1, then defer the deep fix to #1654 and keep this plan focused on Gap A.
-2. **Row 8c `pr_number` gate:** the proposed rule requires `pr_number` PRESENT (REVIEW only exists post-PR), inverting row 2c's no-PR gate. Confirm this is the intended asymmetry — a REVIEW empty-verdict state with no PR should be impossible, so the gate is a safety assertion, not a behavior change.
+2. **Row 8c `pr_number` gate (RESOLVED — self-resolving, no human input needed):** the proposed rule requires `pr_number` PRESENT (REVIEW only exists post-PR), inverting row 2c's no-PR gate. This is the intended asymmetry — a REVIEW empty-verdict state with no PR is structurally impossible (REVIEW is reachable only after BUILD opens a PR), so the gate acts as a defensive safety assertion, not a behavior change. **Resolution:** implement the `pr_number`-present gate as specified in Technical Approach; the regression test includes a no-PR case asserting the rule does NOT fire (returns False). The builder should treat this as decided, not pending.
