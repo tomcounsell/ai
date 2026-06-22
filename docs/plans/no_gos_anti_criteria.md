@@ -246,7 +246,20 @@ No prior fixes — greenfield extension of the verification machinery.
    text. Implement `output does not contain X` with an **empty-stdout gate**: return
    `False` when stripped output is empty (an errored/no-output command must not
    false-pass by trivially "not containing" the substring); otherwise return
-   `substring not in output`. Implement `match count == 0` with the line-robust
+   `substring not in output`.
+   **Implementation Note (critique concern, branch ordering):** The inverse
+   `output does not contain X` branch MUST be ordered **above** the positive
+   `output contains (.+)` branch (the positive form lives around
+   `agent/verification_parser.py:103`). The positive regex `output contains (.+)` would
+   otherwise greedily match the inverse phrase — `"output does not contain X"` contains
+   the literal substring `contains X`, and a loosely-anchored positive matcher could
+   capture it and evaluate the wrong assertion. Place the `does not contain` branch
+   first so the inverse form is matched before the positive one ever sees the string.
+   Add a regression test (Task 2) that pins this ordering: feed
+   `"output does not contain FOO"` and assert it is evaluated as the inverse form
+   (passes when FOO is absent, fails when present), never as the positive
+   `output contains` form.
+   Implement `match count == 0` with the line-robust
    matcher from Q3, **including the same empty-stdout gate**: `if not output.strip():
    return False` BEFORE the line-parsing logic, so a command that errored / hit a
    missing tool / wrote only to stderr (empty stdout) cannot vacuously pass on
@@ -257,6 +270,12 @@ No prior fixes — greenfield extension of the verification machinery.
 2. Add unit tests to `tests/unit/test_verification_parser.py` covering each inverse
    form (pass and fail case for each), plus a regression test confirming the
    positive forms still parse and evaluate unchanged.
+   **Implementation Note (critique concern, branch-ordering regression):** Include an
+   explicit ordering regression test that `"output does not contain FOO"` is evaluated
+   as the inverse form (passes when FOO absent, fails when present) and is NEVER
+   captured by the positive `output contains (.+)` branch. This locks in the
+   above-ordering required in Task 1 so a future refactor cannot silently reintroduce
+   the positive-branch shadow.
 3. Update `.claude/skills-global/do-plan/PLAN_TEMPLATE.md` `## Verification` block:
    the supported-expectations line currently reads `"exit code N", "output > N",
    "output contains X"` (line ~428) — extend it to list all six, explicitly stating
@@ -274,6 +293,14 @@ No prior fixes — greenfield extension of the verification machinery.
    confirm the PR description contains the **pasted red-state FAIL output** for each
    authored anti-criterion (posture (a) paper trail — see Task 6); advisory
    `[EXTERNAL]`/`[ORDERED]` No-Gos remain human judgment.
+   **Implementation Note (critique concern, route adoption advisory as non-blocking):**
+   Wire the Task 7 adoption advisory (was every assertable No-Go converted to an
+   anti-criterion row?) through the **existing `do-pr-review` No-Go check as a
+   non-blocking advisory item**, NOT a hard gate. The reviewer is prompted to note any
+   assertable No-Go lacking a Verification row, but a missing optional anti-criterion
+   does not block the PR — anti-criteria are opt-in per Q1. Keep this as advisory
+   reviewer output, consistent with the opt-in design; do not add a code gate that
+   fails review when an assertable No-Go has no row.
 6. Update `docs/features/machine-readable-dod.md` to document inverse expectations
    and the No-Go → anti-criterion derivation. Include a **red-state authoring rule**
    with an explicit enforcement posture — **posture (a): paper-trail PR-checklist
@@ -286,9 +313,24 @@ No prior fixes — greenfield extension of the verification machinery.
    description** as the paper trail. Enforcement is the PR-review checklist item in
    Task 5 (reviewer confirms the pasted red-state output is present), not a code gate —
    this is stated as the deliberately-chosen posture, not a gap.
+   **Implementation Note (critique concern, binding vs. non-binding evidence):** Make
+   the doc explicit that the **green build-time run is the BINDING gate** — the
+   `do-build` Step 5.1 execution of the Verification table is what actually fails the
+   build (exit 1) when an anti-criterion is violated. The **pasted red-state FAIL blob
+   in the PR description is NON-binding** — it is a paper-trail / evidence artifact only
+   (proving the author exercised the row against a violating input), not a gate. Phrase
+   the authoring rule so a reader cannot mistake the pasted FAIL output for the
+   enforcement mechanism; the live green Step 5.1 run is the mechanism.
 7. **Adoption proof (docs-only by default).** The default and required deliverable
-   is a worked end-to-end example in `docs/features/machine-readable-dod.md`, run
-   **live against the repo** to prove both states: take a real assertable
+   is a worked end-to-end example in `docs/features/machine-readable-dod.md`. A copy-
+   pasteable worked example (both green and red command + output cited verbatim) is
+   sufficient.
+   **Implementation Note (critique concern, mild gold-plating):** A live execution
+   against the repo is **optional, not required** — a copy-pasteable worked example in
+   `machine-readable-dod.md` showing both the green and the red command and their
+   outputs is the binding deliverable. Do not block the build on a live run; the worked
+   example carries the proof.
+   To prove both states, use a real assertable
    `[DESTRUCTIVE]` No-Go pattern (e.g. "no raw `r.delete`/`r.srem` on Popoto keys" —
    assert `grep -rc "r\.delete\|r\.srem" <changed-paths>` → `match count == 0`),
    execute it against clean code (green) and against a deliberately-violating line
@@ -344,7 +386,15 @@ No prior fixes — greenfield extension of the verification machinery.
 | Lint clean | `python -m ruff check agent/verification_parser.py` | exit code 0 |
 | Template documents anti-criteria | `grep -c "anti-criter" .claude/skills-global/do-plan/PLAN_TEMPLATE.md` | output > 0 |
 | Positive grammar not broken (anti-criterion: no removal of `output contains`) | `grep -c "output contains" agent/verification_parser.py` | output > 0 |
-| No stray second Anti-Criteria section in template (anti-criterion) | `grep -c "^## Anti-Criteria" .claude/skills-global/do-plan/PLAN_TEMPLATE.md` | match count == 0 |
+| No stray second Anti-Criteria section in template (anti-criterion) | `! grep -q "^## Anti-Criteria" .claude/skills-global/do-plan/PLAN_TEMPLATE.md` | exit code 0 |
+
+> **Implementation Note (critique concern, nit-level robustness):** This self-check
+> row is deliberately written in **positive grammar** (`! grep -q ... ` → `exit code 0`)
+> rather than `match count == 0`. The plan must not dogfood its own unproven inverse
+> grammar in the very row that asserts "no stray `## Anti-Criteria` section." Using
+> `! grep -q` (shell-negated quiet grep: exits 0 when the pattern is absent) keeps this
+> assertion independent of the `match count == 0` feature this plan introduces, so a bug
+> in the new matcher cannot mask a regression in the template itself.
 
 ## No-Gos (Out of Scope)
 
