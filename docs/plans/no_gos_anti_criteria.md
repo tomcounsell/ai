@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-22
 tracking: https://github.com/tomcounsell/ai/issues/1627
 last_comment_id:
+revision_applied: true
 ---
 
 # Promote No-Gos to Testable Anti-Criteria
@@ -109,15 +110,41 @@ No-Go. This keeps one source of executable checks.
 **Q3 — Parser extension.** `evaluate_expectation()` gains three inverse forms,
 mirroring the three positive forms exactly:
 - `exit code != N` — passes when `exit_code != N` (e.g. command must fail).
-- `output does not contain X` — passes when substring X is absent from output.
-- `match count == 0` — passes when output (stripped) is the literal `0` or empty;
-  the canonical anti-criterion idiom is `grep -rc PATTERN path | ...` or
-  `grep -r PATTERN path | wc -l`.
+- `output does not contain X` — passes when substring X is absent from output
+  **AND the command produced real output** (see the empty-stdout gate below) so an
+  errored command cannot false-pass on trivially-absent substring.
+- `match count == 0` — passes when **every non-blank line** of the (stripped)
+  output is the literal `0` or ends with `:0` (the `grep -c`/`grep -rc` shape).
+  Empty output also passes (the `wc -l` shape strips to a single `0`).
+
+**`match count == 0` must be line-robust — this is the BLOCKER fix.** The naive
+"output stripped equals `0` or empty" matcher silently never passes for the very
+idioms the docstring will recommend. Verified `grep` shapes:
+- `grep -c PATTERN file` (single file) → emits literal `0`, exit 1. Strips to `0`. ✓
+- `grep -rc PATTERN dir` (directory) → emits **multiple** `path:0` lines, exit 1.
+  A whole-string `== "0"` check FAILS this; a per-line `endswith(":0")` check passes. ✓
+- `grep -rc PATTERN file` (recursive on a file) → emits `file:0`, exit 1. Same. ✓
+- `grep -r PATTERN dir | wc -l` → emits leading-whitespace `       0`, exit 0.
+  Strips to `0`. ✓
+
+Concretely, the matcher logic at `agent/verification_parser.py` is:
+```python
+lines = [ln.strip() for ln in output.strip().splitlines() if ln.strip()]
+return all(ln == "0" or ln.endswith(":0") for ln in lines)  # empty list → True
+```
+This passes for empty output, literal `0`, leading-whitespace `0`, a single
+`path:0`, and many `path:0` lines — covering every documented idiom. Any non-zero
+count (`3`, `path:3`) fails because that line is neither `0` nor `:0`-suffixed.
+The docstring + template pin these as the supported idioms and show one canonical
+example so authors do not invent a shape the matcher rejects.
 
 The grammar stays string-matched and additive — existing positive rows are
 untouched. (Note: `grep` exits 1 when no match is found, so `exit code != 0` and
 `match count == 0` are two valid spellings of the same "pattern absent" idea; both
-are supported so authors can pick the clearer one.)
+are supported so authors can pick the clearer one. The plan's own Verification
+table uses `match count == 0` with a `grep -c` single-file row, which strips to a
+bare `0` and passes — but the matcher above also handles the `-rc` multi-line
+shapes so authors are not silently misled.)
 
 **Q4 — Gate placement.** Anti-criteria run wherever the Verification table already
 runs — `do-build` Step 5.1 and `do-pr-review` — automatically, because they are
@@ -169,9 +196,21 @@ No prior fixes — greenfield extension of the verification machinery.
 ## Step by Step Tasks
 
 1. Extend `agent/verification_parser.py::evaluate_expectation()` with three inverse
-   forms (`exit code != N`, `output does not contain X`, `match count == 0`),
-   placed before the positive checks so `!=` is not shadowed by the `exit code N`
-   regex. Update the function docstring to list all six supported expectations.
+   forms (`exit code != N`, `output does not contain X`, `match count == 0`).
+   Match the `exit code != N` branch with an explicit `!=` regex
+   (`r"exit code\s*!=\s*(\d+)"`) ordered **before** the positive `exit code (\d+)`
+   branch. **Rationale (corrected):** the positive regex `r"exit code (\d+)"` does
+   NOT actually match `"exit code != 0"` — `!` is not a digit, so `re.match` returns
+   `None` and would fall through to the safety default `False`, silently failing a
+   valid inverse row. Ordering the `!=` branch first is what makes the inverse form
+   evaluate at all; it is not about preventing a (non-existent) shadow. Anchor the
+   inverse regex tightly (`exit code\s*!=\s*(\d+)`) so it cannot swallow unrelated
+   text. Implement `output does not contain X` with an **empty-stdout gate**: return
+   `False` when stripped output is empty (an errored/no-output command must not
+   false-pass by trivially "not containing" the substring); otherwise return
+   `substring not in output`. Implement `match count == 0` with the line-robust
+   matcher from Q3. Update the docstring to list all six supported expectations with
+   the canonical idiom for each inverse form.
 2. Add unit tests to `tests/unit/test_verification_parser.py` covering each inverse
    form (pass and fail case for each), plus a regression test confirming the
    positive forms still parse and evaluate unchanged.
@@ -183,11 +222,28 @@ No prior fixes — greenfield extension of the verification machinery.
    absence (an anti-criterion)."
 5. Upgrade the manual No-Go line in `.claude/skills-global/do-pr-review/SKILL.md`
    (line ~421) and the checklist item in `sub-skills/code-review.md` to: confirm
-   every assertable No-Go has a corresponding Verification anti-criterion row;
-   advisory `[EXTERNAL]`/`[ORDERED]` No-Gos remain human judgment.
+   every assertable No-Go has a corresponding Verification anti-criterion row, AND
+   confirm the author recorded a red-state proof (the row was shown to FAIL once
+   against a deliberately-violating input); advisory `[EXTERNAL]`/`[ORDERED]` No-Gos
+   remain human judgment.
 6. Update `docs/features/machine-readable-dod.md` to document inverse expectations
-   and the No-Go → anti-criterion derivation.
-7. Run `python -m ruff format . && python -m ruff check .` and the parser unit tests.
+   and the No-Go → anti-criterion derivation. Include a **red-state authoring rule**:
+   when an author adds an inverse Verification row, they must demonstrate it FAILS
+   once against a deliberately-violating input before trusting it (e.g. temporarily
+   point the `grep` at a file that DOES contain the forbidden pattern and confirm the
+   row reports FAIL). The doc states this rule and the PR-review check (Task 5)
+   enforces that the author recorded the red-state proof in the PR description.
+7. **Adoption proof:** convert one real existing `[DESTRUCTIVE]` No-Go from a current
+   plan in `docs/plans/` into a working inverse Verification row, demonstrating the
+   end-to-end path on real content (not a synthetic example). Pick an assertable
+   `[DESTRUCTIVE]` No-Go (e.g. "no raw `r.delete`/`r.srem` on Popoto keys" — assert
+   `grep -rc "r\.delete\|r\.srem" <changed-paths>` → `match count == 0`), add it as a
+   Verification row in that plan, and confirm it passes green on clean code and fails
+   red when pointed at a violating line. Record both states. If no current plan has a
+   suitable assertable `[DESTRUCTIVE]` No-Go, add the worked example to
+   `docs/features/machine-readable-dod.md` AND run it live against the repo to prove
+   green + red, citing the commands and outputs.
+8. Run `python -m ruff format . && python -m ruff check .` and the parser unit tests.
 
 ## Success Criteria
 
@@ -201,7 +257,16 @@ No prior fixes — greenfield extension of the verification machinery.
 - `do-pr-review` instructs the reviewer to confirm every assertable No-Go has a
   corresponding anti-criterion row.
 - `tests/unit/test_verification_parser.py` covers pass and fail cases for each
-  inverse form plus a grammar-collision regression for `exit code != 0`.
+  inverse form, a parametrized grep-shape suite for `match count == 0` (bare `0`,
+  whitespace `0`, `path:0`, multi-line `path:0`, empty — all pass; `3`, `path:3`,
+  mixed — all fail), an empty-stdout gate case for `output does not contain X`, and a
+  grammar-collision regression for `exit code != 0`.
+- **Red-state proof:** every authored anti-criterion in this PR (and the documented
+  authoring rule going forward) has been demonstrated to FAIL once against a
+  deliberately-violating input, with both green and red states recorded.
+- **Adoption proof:** at least one real `[DESTRUCTIVE]` No-Go has been converted into
+  a working inverse Verification row that passes green on clean code and fails red on
+  a violating line, proving the opt-in mechanism is actually invoked end-to-end.
 - No second `## Anti-Criteria` section exists anywhere; `validate_no_gos_justification.py`
   is unchanged.
 
@@ -251,19 +316,35 @@ automatically. Coverage is via the unit tests on `evaluate_expectation()`.
 
 ## Failure Path Test Strategy
 
-- **Inverse form, violation present:** assert `evaluate_expectation("output does
-  not contain X", exit_code=0, output="...X...")` returns `False`.
-- **Inverse form, clean:** assert it returns `True` when X is absent.
-- **`match count == 0` with non-zero count:** `evaluate_expectation("match count == 0",
-  exit_code=0, output="3")` returns `False`; with output `"0"` or empty returns `True`.
+- **`output does not contain X`, violation present:** assert it returns `False`
+  for `exit_code=0, output="...X..."`.
+- **`output does not contain X`, clean:** returns `True` when X is absent **and**
+  output is non-empty (e.g. `output="all clean, no matches"`).
+- **`output does not contain X`, empty-stdout gate:** `exit_code=1, output=""`
+  returns `False` — an errored command with no stdout must NOT false-pass as "safe"
+  just because the substring is trivially absent. (CONCERN fix.)
+- **`match count == 0` — all documented grep shapes pass:** parametrize over the
+  real `grep` output shapes and assert `True` for each:
+  - literal `"0"` (`grep -c PATTERN file`)
+  - leading-whitespace `"       0"` (`grep -r ... | wc -l`)
+  - single `"path/to/file:0"` (`grep -rc PATTERN file`)
+  - multi-line `"a.txt:0\nb.txt:0"` (`grep -rc PATTERN dir`)
+  - empty string `""`
+  This is the BLOCKER regression: the matcher must accept the `:0`-suffixed and
+  multi-line shapes, not only bare `0`.
+- **`match count == 0` with non-zero count:** assert `False` for `"3"`, for
+  `"path:3"`, and for a mixed `"a.txt:0\nb.txt:2"` (one non-zero line must fail).
 - **`exit code != N`:** returns `True` when exit code differs, `False` when equal —
   confirms a command that was supposed to fail but succeeded fails the check.
-- **Grammar collision regression:** assert `exit code != 0` is NOT mis-parsed by the
-  positive `exit code N` branch (the `!=` branch must be evaluated first).
+- **Grammar collision regression:** assert `evaluate_expectation("exit code != 0",
+  exit_code=0, ...)` returns `False` and `exit_code=1` returns `True` — i.e. the
+  `!=` branch is reached and evaluated. (Verified prerequisite: the positive
+  `r"exit code (\d+)"` regex returns `None` on `"exit code != 0"`, so without the
+  inverse branch this row would hit the safety default and silently fail.)
 - **Unrecognized expression still returns `False`** (existing safety default preserved).
 
 ## Test Impact
-- [ ] `tests/unit/test_verification_parser.py` — UPDATE: add inverse-form cases (pass/fail per form) and a positive-grammar regression case. No existing case changes behavior; the inverse forms are purely additive, so prior assertions remain valid.
+- [ ] `tests/unit/test_verification_parser.py` — UPDATE: add inverse-form cases (pass/fail per form), a parametrized `match count == 0` grep-shape suite (bare `0`, whitespace `0`, `path:0`, multi-line `path:0`, empty, plus non-zero/`path:3`/mixed failing cases), an empty-stdout gate case for `output does not contain X`, and the `exit code != 0` grammar-collision regression. No existing case changes behavior; the inverse forms are purely additive, so prior assertions remain valid.
 
 ## Rabbit Holes
 
@@ -279,12 +360,13 @@ automatically. Coverage is via the unit tests on `evaluate_expectation()`.
 
 ## Open Questions
 
-None remaining — the five open questions from the issue are resolved in the
+None remaining. The five open questions from the issue are resolved in the
 Solution section (Q1 scope split, Q2 format, Q3 parser grammar, Q4 gate placement,
-Q5 relationship to No-Gos). Flagging one design choice for confirmation: the
-decision to reuse `## Verification` rather than add a `## Anti-Criteria` section
-(Q2/Q5). If a reviewer prefers an explicitly-labeled section despite the drift
-risk, that would change the template and parser entry point.
+Q5 relationship to No-Gos). The central design choice is **settled, not hedged**:
+anti-criteria reuse the existing `## Verification` table as inverse-grammar rows;
+**no separate `## Anti-Criteria` section is added.** Critique confirmed this avoids
+the section-drift risk of two competing scope declarations. This decision is final
+for the plan — the template and parser entry point follow from it.
 
 ## Documentation
 - [ ] Update `docs/features/machine-readable-dod.md` to document the three inverse
