@@ -47,7 +47,13 @@ Do not proceed without an issue number.
 ## Step 2: Ensure the Tracking Session
 
 ```bash
+# SDLC_REPO: GitHub slug (org/repo) — used to build issue/PR URLs.
 SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || git remote get-url origin | sed 's/.*github.com[:/]//;s/.git$//')
+# SDLC_TARGET_REPO: filesystem path to the target repo (distinct from SDLC_REPO which is the
+# GitHub slug). sdlc-tool forces cwd to ~/src/ai; this env var tells it where the target
+# repo's plans live. Set once and exported for the lifetime of the supervision loop.
+SDLC_TARGET_REPO=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+export SDLC_TARGET_REPO
 sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}" 2>/dev/null || true
 ```
 

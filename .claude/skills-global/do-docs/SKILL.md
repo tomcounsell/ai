@@ -141,12 +141,12 @@ Run the semantic doc impact finder to identify conceptually related documentatio
 that may need updating, even if there are no shared keywords.
 
 1. First, ensure the doc index is current:
-   python3 -c "import sys; sys.path.insert(0, '.'); from tools.doc_impact_finder import index_docs; index_docs()"
+   python3 -c "import sys; sys.path.insert(0, '${AI_REPO_ROOT:-$HOME/src/ai}'); from tools.doc_impact_finder import index_docs; index_docs()"
 
 2. Then find affected docs using the change summary:
    python3 -c "
    import sys, json
-   sys.path.insert(0, '.')
+   sys.path.insert(0, '${AI_REPO_ROOT:-$HOME/src/ai}')
    from tools.doc_impact_finder import find_affected_docs
    results = find_affected_docs('''<CHANGE_SUMMARY>''')
    for r in results:

@@ -221,9 +221,9 @@ PLAN_PATH="docs/plans/${SLUG}.md"
 PLAN_MUTATED=false
 
 # For each criterion the rubric judged in Pre-Verdict item 1:
-#   - rubric=pass    => python -m tools.plan_checkbox_writer tick   "$PLAN_PATH" --criterion "$TEXT"
-#   - rubric=fail    => python -m tools.plan_checkbox_writer untick "$PLAN_PATH" --criterion "$TEXT"
-#   - rubric=ack.    => python -m tools.plan_checkbox_writer untick "$PLAN_PATH" --criterion "$TEXT"
+#   - rubric=pass    => "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.plan_checkbox_writer tick   "$PLAN_PATH" --criterion "$TEXT"
+#   - rubric=fail    => "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.plan_checkbox_writer untick "$PLAN_PATH" --criterion "$TEXT"
+#   - rubric=ack.    => "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.plan_checkbox_writer untick "$PLAN_PATH" --criterion "$TEXT"
 #   - rubric=n/a     => skip
 #
 # On exit 0 with a real mutation, set PLAN_MUTATED=true.

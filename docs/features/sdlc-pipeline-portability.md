@@ -117,6 +117,24 @@ a tri-state probe (`probe_substrate()`):
 (mirroring `/do-docs`) so a forked sub-skill announces "running in degraded
 mode (state not persisted)" at the top of its run instead of silently lagging.
 
+### D8 — Cross-repo plan resolution + revision_applied-stripped hash (issue #1761)
+
+Three complementary fixes close the PLAN↔CRITIQUE loop that occurred when running local `/do-sdlc` against a non-ai-repo issue (reproduced with cuttlefish issues #547, #550):
+
+**Root cause:** `sdlc-tool` forces cwd to `~/src/ai` (correct and load-bearing). Local `/do-sdlc` never exported `SDLC_TARGET_REPO`, so `find_plan_path` resolved from `~/src/ai/docs/plans` — the wrong repo. `revision_applied: true` was never read; router row 4c was unreachable; the PLAN→CRITIQUE→PLAN loop ran forever.
+
+**Fix 1 — SDLC_TARGET_REPO export:** `/do-sdlc` Step 2 now captures `git rev-parse --show-toplevel` in the supervision cwd (the target repo) and exports `SDLC_TARGET_REPO` for the lifetime of the supervision loop. `sdlc-tool` inherits it (bash `exec` propagates the env). Both the bridge/worker path (`agent/sdk_client.py:1590`) and the local `/do-sdlc` path now export the same env var shape (absolute filesystem path). See `sdlc-tool-resolver.md` for the `SDLC_TARGET_REPO` vs `SDLC_REPO` (GitHub slug) distinction.
+
+**Fix 2 — `find_plan_path` hardening:** When the `__file__`-fallback resolution path is taken (SDLC_TARGET_REPO unset AND not in a git repo), a bare-`#N` textual fallback now returns `None` instead of a foreign plan. The `tracking:` match remains authoritative on all paths. This scopes the rejection strictly to the ai-repo `__file__` fallback branch, so a same-repo issue without a `tracking:` match still works (the git-toplevel and SDLC_TARGET_REPO paths keep the fallback).
+
+**Fix 3 — `revision_applied`-stripped plan hash:** `compute_plan_body_hash` (new, in `tools/sdlc_verdict.py`) strips **only** the `revision_applied:` frontmatter key before hashing — all other frontmatter (`status:`, `type:`, `tracking:`, `last_comment_id:`) and the full body still contribute to the hash. G5's staleness input (`context["current_plan_hash"]` in `tools/sdlc_next_skill.py`) and the writer's `_compute_artifact_hash` both use `compute_plan_body_hash`, so a `/do-plan` revision write flipping `revision_applied: true` does NOT bust the G5 cache. A real body or other frontmatter edit still busts it. `compute_plan_hash` (full-bytes) is retained for callers that explicitly want the complete fingerprint.
+
+*Notes-only re-stale:* the frontmatter-inclusive hash that previously re-busted G5 after every `/do-plan` revision write is gone. The notes-only re-stale cycle (PLAN→CRITIQUE→PLAN driven by the hash mismatch) is now closed. G5 fires on the first `next-skill` call after a revision write and routes straight to `/do-build`.
+
+*Migration:* see "G5 transparent-rewrite migration" in `sdlc-tool-resolver.md` for how pre-#1761 stored `artifact_hash` values self-heal on the first router pass.
+
+**Skill portability:** all bare `from tools.X` / `python -m tools.X` / `cd ~/src/ai` invocations in global SDLC skills are now anchored to `${AI_REPO_ROOT:-$HOME/src/ai}`. This prevents a target repo that ships its own `tools/` package from shadowing the ai-repo's canonical `tools/` when a skill runs from a cross-repo cwd.
+
 ## Cross-Repo Smoke Test
 
 The integration smoke test that would have caught D1/D2/D3 originally runs
@@ -126,15 +144,21 @@ forward.
 
 ## Key Files
 
-- `tools/_sdlc_utils.py` — `find_plan_path` (D1, D2), `_git_toplevel` helper.
+- `tools/_sdlc_utils.py` — `find_plan_path` (D1, D2, D8), `_git_toplevel` helper.
 - `agent/sdlc_router.py` — row-4b/4c predicates (D3), `compute_same_stage_count`
-  reset (D5), `guard_g4_oscillation` docstring.
+  reset (D5), `guard_g4_oscillation` docstring, G5 transparent-rewrite migration (D8).
+- `tools/sdlc_verdict.py` — `compute_plan_hash` (full-bytes), `compute_plan_body_hash`
+  (revision_applied-stripped, used by G5 — D8).
+- `tools/sdlc_next_skill.py` — `current_plan_hash` context key uses `compute_plan_body_hash` (D8).
 - `tools/sdlc_stage_query.py` — `_compute_meta` pr_number resolution + live
   snapshot (D4, D5), `_lookup_pr_number` branch-head fallback (D4).
 - `tools/sdlc_meta_set.py` — `pr_number` whitelist + int coercion (D4).
 - `tools/sdlc_dispatch.py` — `dispatch reset` subcommand (D5).
 - `tools/sdlc_stage_marker.py` — tri-state degradation probe (D7).
 - `.claude/skills-global/do-merge/SKILL.md` — portable merge gate (D6).
+- `.claude/skills-global/do-sdlc/SKILL.md` — `SDLC_TARGET_REPO` export in Step 2 (D8).
+- `.claude/skills-global/do-{build,docs,patch,plan,plan-critique,pr-review}/` — all anchored
+  to `AI_REPO_ROOT` for cross-repo portability (D8).
 - `docs/sdlc/do-merge.md` — repo-specific merge-gate addenda.
 
 ## Race Conditions

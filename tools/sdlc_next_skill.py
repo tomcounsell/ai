@@ -95,13 +95,14 @@ def _build_context(proposed_skill: str | None, issue_number: int | None) -> dict
     if issue_number:
         try:
             from tools._sdlc_utils import find_plan_path
-            from tools.sdlc_verdict import compute_plan_hash
+            from tools.sdlc_verdict import compute_plan_body_hash
 
             plan_path = find_plan_path(issue_number)
             if plan_path is not None:
-                plan_hash = compute_plan_hash(plan_path)
+                plan_hash = compute_plan_body_hash(plan_path)
                 if plan_hash is not None:
                     context["current_plan_hash"] = plan_hash
+                    context["issue_number"] = issue_number
         except Exception:
             pass
 
