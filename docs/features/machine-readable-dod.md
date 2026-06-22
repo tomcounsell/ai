@@ -42,11 +42,108 @@ Each row defines:
 
 ### Supported Expectations
 
+**Positive expectations** (the command must succeed or produce the expected output):
+
 | Format | Meaning | Example |
 |--------|---------|---------|
-| `exit code N` | Command must exit with code N | `exit code 0` |
+| `exit code N` | Command must exit with code N (positive exact-match) | `exit code 0` |
 | `output > N` | Command output (as integer) must be greater than N | `output > 0` |
 | `output contains X` | Command stdout must contain substring X | `output contains ok` |
+
+**Inverse expectations / anti-criteria** (the command must NOT produce a forbidden result):
+
+| Format | Meaning | Example |
+|--------|---------|---------|
+| `exit code != N` | Command must NOT exit with code N (passes when `exit_code != N`) | `exit code != 0` |
+| `output does not contain X` | Stdout must NOT contain X, AND stdout must be non-empty | `output does not contain DROP TABLE` |
+| `match count == 0` | Every non-blank stdout line must be "0" or end with ":0" (grep shapes), AND stdout must be non-empty | `match count == 0` |
+
+**Important distinction:** `exit code N` is a positive exact-match — it passes when `exit_code == N`. `exit code != N` is the inverse — it passes when `exit_code != N`. The two are syntactically disjoint and unambiguous. The existing `exit code 1` check ("No stale xfails") is a positive exact-match: grep exits 1 when it finds no matches, so `exit code 1` asserts "no stale xfails found". It is NOT an inverse.
+
+**Empty-stdout gate:** Both `output does not contain X` and `match count == 0` reject truly-empty stdout. An errored command or one that writes only to stderr produces empty stdout; without the gate, a trivially-absent substring or `all(...)` over an empty list would silently pass. A legitimately-clean `grep -c` returns a literal `0` (one byte of non-empty stdout), so the gate fires only when the command produced no output at all.
+
+## Anti-Criteria: Verifying No-Gos
+
+### Concept
+
+No-Gos (from the `## No-Gos` plan section) declare what a plan explicitly excludes. Most No-Gos are advisory — they describe human/world actions (`[EXTERNAL]`, `[ORDERED]`) that cannot be mechanically checked. But some No-Gos describe a *forbidden code-level outcome*: a pattern that must NOT appear in the diff, a file that must NOT be modified, a symbol that must NOT be called.
+
+These assertable No-Gos (typically `[DESTRUCTIVE]` and `[SEPARATE-SLUG]` tagged entries) can become **anti-criteria** — inverse rows in the `## Verification` table that assert the forbidden outcome is absent. Anti-criteria are:
+
+- **Opt-in per No-Go**: only add an inverse row when you can write a command that mechanically detects the violation.
+- **Not required for advisory No-Gos**: `[EXTERNAL]` and `[ORDERED]` No-Gos describe human/world actions, not checkable code outcomes.
+- **Derived from, not replacing, No-Gos**: the `## No-Gos` section remains the human-readable declaration; the `## Verification` table holds the executable assertion. No second `## Anti-Criteria` section is introduced.
+
+### Relationship to No-Gos
+
+```
+## No-Gos (human-readable declaration)
+  [DESTRUCTIVE] Do not call r.delete() or r.srem() on Popoto-managed keys
+       |
+       | (opt-in derivation — only for assertable No-Gos)
+       v
+## Verification (machine-executable assertion)
+  | No raw Redis deletes | grep -c "r\.delete\|r\.srem" agent/verification_parser.py | match count == 0 |
+```
+
+### Authoring Rule: Red-State Proof (Posture: Paper-Trail PR Checklist)
+
+When you add an inverse Verification row, the build-time green pass is the **binding gate** (if the anti-criterion fails at `do-build` Step 5.1, the build fails). But a green pass alone does not prove the row actually detects violations — the pattern could be wrong, or the wrong file could be checked.
+
+Before trusting an anti-criterion, demonstrate it FAILS against a deliberately-violating input:
+
+1. Temporarily introduce the forbidden pattern (e.g., add a `r.delete(key)` call to a file covered by the grep).
+2. Run the command manually and confirm it reports FAIL (non-zero count or non-zero exit).
+3. Revert the temporary change.
+4. **Paste the FAIL output into the PR description** as a paper trail.
+
+The `do-pr-review` checklist confirms this paste is present. The paste is **non-binding evidence** — the live green Step 5.1 run is the enforcement mechanism, not the pasted blob.
+
+### Worked Example: No Raw Redis Deletes Anti-Criterion
+
+This project has a `[DESTRUCTIVE]` No-Go: "never use raw Redis on Popoto-managed keys". Here is how to convert it into a `match count == 0` anti-criterion.
+
+**The Verification row:**
+
+```markdown
+| No raw Redis deletes | `grep -c "r\.delete\|r\.srem" agent/verification_parser.py` | match count == 0 |
+```
+
+**Green-state run (clean code — no violations):**
+
+```
+$ grep -c "r\.delete\|r\.srem" agent/verification_parser.py
+0
+```
+
+Exit code: 1 (grep exits 1 when pattern is absent). Stdout: `0` (literal zero byte, non-empty).
+`match count == 0` evaluation: stdout is non-empty, line `"0"` matches the bare-zero case. **PASS**.
+
+**Red-state run (deliberately-violating input — for authoring proof only):**
+
+Temporarily add `r.delete(key)` to `agent/verification_parser.py`, then run:
+
+```
+$ grep -c "r\.delete\|r\.srem" agent/verification_parser.py
+1
+```
+
+Exit code: 0 (grep exits 0 when pattern is found). Stdout: `1`.
+`match count == 0` evaluation: line `"1"` is neither `"0"` nor `:0`-suffixed. **FAIL**.
+
+This FAIL output (`1`) is pasted into the PR description as the red-state proof. Revert the temporary change before committing.
+
+**Multi-file variant (grep -rc on a directory):**
+
+```
+$ grep -rc "r\.delete\|r\.srem" agent/
+agent/verification_parser.py:0
+agent/output_handler.py:0
+```
+
+Exit code: 1. Stdout: two `path:0` lines (multi-line, all `:0`-suffixed). **PASS**.
+
+All four canonical `grep` shapes (bare `0`, whitespace `0`, `path:0`, multi-line `path:0`) pass the `match count == 0` matcher. Truly-empty stdout (errored command) fails via the empty-stdout gate.
 
 ## Components
 
