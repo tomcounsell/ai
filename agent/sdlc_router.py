@@ -221,6 +221,18 @@ def _latest_critique_verdict(stage_states: dict, meta: dict) -> str:
     return _verdict_text(verdicts.get("CRITIQUE"))
 
 
+def _latest_review_verdict(stage_states: dict, meta: dict) -> str:
+    """Return the most recent review verdict text, or ``""``.
+
+    Prefers ``meta["latest_review_verdict"]`` when populated by
+    ``sdlc_stage_query``; falls back to reading ``_verdicts["REVIEW"]``.
+    """
+    if meta.get("latest_review_verdict"):
+        return meta["latest_review_verdict"]
+    verdicts = stage_states.get("_verdicts") or {}
+    return _verdict_text(verdicts.get("REVIEW"))
+
+
 def guard_g1_critique_loop(
     stage_states: dict, meta: dict, context: dict
 ) -> Dispatch | Blocked | None:
@@ -882,6 +894,42 @@ def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: di
     return last == SKILL_DO_PATCH
 
 
+def _rule_review_in_progress_no_verdict(stage_states: dict, meta: dict, context: dict) -> bool:
+    """REVIEW is in_progress but never recorded a verdict — re-dispatch review.
+
+    Mirrors the #1668 pattern fixed on the CRITIQUE side (row 2c): /do-pr-review
+    ran (REVIEW marker == "in_progress") but never persisted a verdict, so
+    _verdicts.REVIEW is empty and latest_review_verdict is None. With rows 7/8/8b
+    all requiring a verdict or completed PATCH, and G3 not matching, the router
+    falls through to Blocked('no matching dispatch rule'). Re-running the review
+    is the correct recovery.
+
+    Distinct from row 8b (#1641): 8b owns the patch-applied-then-re-review path
+    (it requires PATCH==completed AND last_dispatch==/do-patch); 8c owns the
+    *empty* verdict with no patch applied. Disjoint predicates.
+
+    Narrowly gated so it cannot fire when:
+      - no PR exists (REVIEW only happens after BUILD opens a PR)
+      - REVIEW is not in_progress (None/pending → row 7; completed → rows 9/10)
+      - any review verdict IS recorded (let rows 8/8b handle it)
+      - row 8b would own this state (PATCH completed after review — step aside)
+
+    Loop-bound by G4 (guard_g4_oscillation): same_stage_dispatch_count caps
+    re-dispatches and escalates to a human if the review keeps stalling.
+    """
+    if not meta.get("pr_number"):
+        return False
+    if stage_states.get("REVIEW") != STATUS_IN_PROGRESS:
+        return False
+    # A recorded verdict means another row owns this state.
+    if _latest_review_verdict(stage_states, meta).strip():
+        return False
+    # Step aside for row 8b when a patch has already been applied after review.
+    if _rule_patch_applied_after_review(stage_states, meta, context):
+        return False
+    return True
+
+
 def _rule_review_approved_docs_not_done(stage_states: dict, meta: dict, context: dict) -> bool:
     """Review APPROVED, zero findings, docs NOT done."""
     if not meta.get("pr_number"):
@@ -931,6 +979,9 @@ _rule_tests_failing.__doc__ = "Tests failing"
 _rule_pr_exists_no_review.__doc__ = "PR exists, no review"
 _rule_review_has_findings.__doc__ = "PR review has findings (blockers, nits, OR tech debt)"
 _rule_patch_applied_after_review.__doc__ = "Patch applied after review findings"
+_rule_review_in_progress_no_verdict.__doc__ = (
+    "Review in_progress, no verdict recorded (stalled) — re-review"
+)
 _rule_review_approved_docs_not_done.__doc__ = (
     "Review APPROVED with zero findings, docs NOT done (see Step 3)"
 )
@@ -1037,6 +1088,15 @@ DISPATCH_RULES: list[DispatchRule] = [
         state_predicate=_rule_patch_applied_after_review,
         skill=SKILL_DO_PR_REVIEW,
         reason="Re-review is REQUIRED after every patch",
+    ),
+    # Row 8c: REVIEW is in_progress with no recorded verdict and row 8b does not
+    # apply (no patch applied after review). Mirrors row 2c on the CRITIQUE side.
+    # Re-dispatch /do-pr-review to recover from a stalled review. Loop-bound by G4.
+    DispatchRule(
+        row_id="8c",
+        state_predicate=_rule_review_in_progress_no_verdict,
+        skill=SKILL_DO_PR_REVIEW,
+        reason="Review stalled with no recorded verdict — re-run review",
     ),
     DispatchRule(
         row_id="9",
