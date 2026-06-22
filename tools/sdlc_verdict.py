@@ -84,11 +84,18 @@ from pathlib import Path
 from tools._sdlc_utils import find_plan_path as _find_plan_path
 from tools._sdlc_utils import find_session as _find_session
 from tools._sdlc_utils import normalize_verdict
+from tools._sdlc_utils import session_owns_issue as _session_owns_issue
 
 logger = logging.getLogger(__name__)
 
 # Valid stages this module will write verdicts for.
 _VERDICT_STAGES = frozenset(["CRITIQUE", "REVIEW"])
+
+
+class OwnershipError(Exception):
+    """Raised when --issue-number N is passed but the resolved session does not
+    own issue N. Prevents a silent artifact divert to the wrong session.
+    """
 
 
 def compute_plan_hash(plan_path: Path | str) -> str | None:
@@ -324,6 +331,14 @@ def _cli_record(args) -> dict:
     session = _find_session(session_id=args.session_id, issue_number=args.issue_number, ensure=True)
     if session is None:
         return {}
+    # Ownership guard: when --issue-number N is passed, the resolved session must
+    # own issue N or we refuse the write to prevent a silent artifact divert.
+    if args.issue_number is not None and not _session_owns_issue(session, args.issue_number):
+        session_id_val = getattr(session, "session_id", "<unknown>")
+        raise OwnershipError(
+            f"Recorder ownership guard: session '{session_id_val}' does not own"
+            f" issue #{args.issue_number}; refusing write to prevent divert"
+        )
     judges = None
     consensus = None
     if getattr(args, "judges_json", None):
