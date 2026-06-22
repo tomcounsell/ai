@@ -57,7 +57,7 @@ import json
 import logging
 import sys
 
-from tools._sdlc_utils import find_session
+from tools._sdlc_utils import find_session, session_owns_issue
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +114,11 @@ def write_marker(
 ) -> tuple[dict, int]:
     """Write a stage marker to the PipelineStateMachine.
 
+    When ``issue_number`` is passed, the resolved session must own that issue
+    (via ``session_owns_issue``). If it does not, the write is refused with
+    exit_code 1 and a stderr diagnostic — preventing a silent artifact divert
+    to the wrong session.
+
     Args:
         stage: Pipeline stage name (e.g., "DOCS", "REVIEW").
         status: "in_progress" or "completed".
@@ -125,6 +130,7 @@ def write_marker(
         - success / degraded / idempotent no-op → exit_code 0
         - genuine write failure (substrate present, session resolved) →
           exit_code 1 (the only loud case)
+        - ownership guard refusal → exit_code 1 (write refused, stderr emitted)
     """
     if stage not in _VALID_STAGES:
         logger.debug(f"sdlc_stage_marker: invalid stage {stage!r}")
@@ -145,6 +151,16 @@ def write_marker(
     session = find_session(session_id, issue_number=issue_number, ensure=True)
     if not session:
         return _degraded(stage, "state not persisted — no PM session resolved"), 0
+
+    # Ownership guard: when issue_number is passed, the resolved session must own
+    # that issue or we refuse the write to prevent a silent artifact divert.
+    if issue_number is not None and not session_owns_issue(session, issue_number):
+        print(
+            f"[ERROR] Recorder ownership guard: resolved session does not own"
+            f" issue #{issue_number}; write refused to prevent artifact divert.",
+            file=sys.stderr,
+        )
+        return {}, 1
 
     # PRESENT_WRITE_FAILED is the ONLY loud case: the session resolved but the
     # state-machine write rejects or raises.
