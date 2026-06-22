@@ -285,7 +285,7 @@ class TestOwnershipGateMarker:
     def _non_owning_session(self, issue_number=42):
         """Session that does NOT own issue_number via any predicate."""
         return self._Session(
-            issue_url=f"https://github.com/x/y/issues/99",
+            issue_url="https://github.com/x/y/issues/99",
             session_id="other-session",
             message_text="working on issue 99",
         )
@@ -302,7 +302,11 @@ class TestOwnershipGateMarker:
         raise ValueError(via)
 
     def test_explicit_issue_non_owning_exits_1_no_write(self):
-        """Non-owning session with issue_number → write refused, exit_code 1."""
+        """Non-owning session with issue_number → write refused, exit_code 1.
+
+        write_marker returns {"error": "ownership_divert"} as a sentinel so
+        main() can suppress the generic write-failure message on this path.
+        """
         from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
 
         session = self._non_owning_session(42)
@@ -312,7 +316,7 @@ class TestOwnershipGateMarker:
         ):
             result, code = write_marker(stage="PLAN", status="completed", issue_number=42)
 
-        assert result == {}
+        assert result == {"error": "ownership_divert"}
         assert code == 1
 
     def test_explicit_issue_owning_via_issue_url_exits_0(self):
@@ -379,7 +383,7 @@ class TestOwnershipGateMarker:
         assert code == 0
 
     def test_divert_stderr_message(self, capsys):
-        """When the ownership gate fires, stderr must contain 'ownership guard' and the issue number."""
+        """Ownership gate fires: stderr must contain 'ownership guard' and the issue number."""
         from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
 
         session = self._non_owning_session(42)
@@ -392,3 +396,43 @@ class TestOwnershipGateMarker:
         captured = capsys.readouterr()
         assert "ownership guard" in captured.err.lower()
         assert "42" in captured.err
+
+    def test_main_divert_emits_only_ownership_message_not_generic(self, capsys):
+        """CLI-level: main() on ownership-divert emits ONLY the guard diagnostic.
+
+        Regression test for the finding that main() was unconditionally printing
+        a second contradictory 'state-machine write was rejected or raised' line
+        after write_marker had already printed the correct ownership diagnostic.
+        The ownership-divert path must suppress the generic write-failure message.
+        """
+        import pytest
+
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, main
+
+        session = self._non_owning_session(42)
+        test_args = [
+            "sdlc_stage_marker",
+            "--stage",
+            "PLAN",
+            "--status",
+            "completed",
+            "--issue-number",
+            "42",
+        ]
+        with (
+            patch("sys.argv", test_args),
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker.find_session", return_value=session),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        # The ownership guard message must be present
+        assert "ownership guard" in captured.err.lower()
+        assert "42" in captured.err
+        # The contradictory generic write-failure message must NOT be present
+        assert "state-machine write was rejected or raised" not in captured.err
+        # stdout must be clean JSON with no sentinel keys leaking out
+        assert json.loads(captured.out.strip()) == {}

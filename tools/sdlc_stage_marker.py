@@ -168,7 +168,7 @@ def write_marker(
             f" issue #{issue_number}; write refused to prevent artifact divert.",
             file=sys.stderr,
         )
-        return {}, 1
+        return {"error": "ownership_divert"}, 1
 
     # PRESENT_WRITE_FAILED is the ONLY loud case: the session resolved but the
     # state-machine write rejects or raises.
@@ -249,18 +249,27 @@ def main() -> None:
         session_id=args.session_id,
         issue_number=args.issue_number,
     )
-    print(json.dumps(result))
+    # Strip internal sentinel keys before printing to stdout so JSON-parsing
+    # callers always receive a clean dict (no "error" sentinel leaks out).
+    stdout_result = {k: v for k, v in result.items() if k != "error"}
+    print(json.dumps(stdout_result))
 
     if exit_code != 0:
-        # PRESENT_WRITE_FAILED — the only loud case. A clear stderr diagnostic
-        # so a forked sub-skill / operator sees the genuine writeback failure
-        # instead of a silent no-op (mirrors sdlc_dispatch's loud-failure path).
-        print(
-            f"sdlc_stage_marker: FAILED to write {stage}={args.status} "
-            "(substrate present, session resolved, but the state-machine write "
-            "was rejected or raised). State NOT persisted.",
-            file=sys.stderr,
-        )
+        if result.get("error") == "ownership_divert":
+            # Ownership guard already printed the diagnostic in write_marker;
+            # do not emit a second, contradictory "state-machine write rejected"
+            # message — no write was attempted on this path.
+            pass
+        else:
+            # PRESENT_WRITE_FAILED — the only loud case. A clear stderr diagnostic
+            # so a forked sub-skill / operator sees the genuine writeback failure
+            # instead of a silent no-op (mirrors sdlc_dispatch's loud-failure path).
+            print(
+                f"sdlc_stage_marker: FAILED to write {stage}={args.status} "
+                "(substrate present, session resolved, but the state-machine write "
+                "was rejected or raised). State NOT persisted.",
+                file=sys.stderr,
+            )
     elif result.get("status") == "degraded":
         # Visible degraded-mode marker (quiet on stderr, but the stdout JSON
         # carries status: degraded so the PM/operator can see it).
