@@ -212,8 +212,11 @@ class _DeckVideoHarness:
             pngs.append(p)
         return pngs
 
-    def _composite(self, work_dir, holds, audio_segments, has_audio, output_path, ffmpeg):
+    def _composite(
+        self, work_dir, holds, audio_segments, has_audio, output_path, ffmpeg, total_runtime
+    ):
         self.composited = True
+        self.composite_total_runtime = total_runtime
         Path(output_path).write_bytes(b"fakemp4")
 
     def _synthesize(self, text, output_path, **kwargs):
@@ -264,6 +267,22 @@ def test_mixed_deck_more_pngs_than_clips_passes(monkeypatch, tmp_path):
 
     assert harness.composited is True
     assert Path(out).exists()
+
+
+def test_composite_receives_total_runtime(monkeypatch, tmp_path):
+    """The compositor passes the summed per-slide total runtime to _composite.
+
+    One narrated slide (synthesize stub returns duration 1.5) + one silent
+    slide → total = 1.5 + DECK_VIDEO_DEFAULT_HOLD_SECS. This is the
+    authoritative cap that pass-2 ffmpeg trims to (regression guard for the
+    trailing-frame over-count A/V drift).
+    """
+    deck = _write_deck(tmp_path, ["narrated", ""])
+    harness = _DeckVideoHarness(monkeypatch, tmp_path, png_count=2)
+
+    build_deck_video(deck, output_path=tmp_path / "out.mp4")
+
+    assert harness.composite_total_runtime == pytest.approx(1.5 + DECK_VIDEO_DEFAULT_HOLD_SECS)
 
 
 # --- Ordering past index 9 ---------------------------------------------------
@@ -420,7 +439,9 @@ def test_temp_dir_cleaned_up_on_midpipeline_failure(monkeypatch, tmp_path):
     deck = _write_deck(tmp_path, ["narrated"])
     harness = _DeckVideoHarness(monkeypatch, tmp_path, png_count=1)
 
-    def failing_composite(work_dir, holds, audio_segments, has_audio, output_path, ffmpeg):
+    def failing_composite(
+        work_dir, holds, audio_segments, has_audio, output_path, ffmpeg, total_runtime
+    ):
         raise DeckVideoError("ffmpeg mux composite failed (exit 1)")
 
     monkeypatch.setattr(dv, "_composite", failing_composite)

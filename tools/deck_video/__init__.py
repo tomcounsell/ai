@@ -513,8 +513,28 @@ def _composite(
     has_audio: bool,
     output_path: Path,
     ffmpeg: str,
+    total_runtime: float,
 ) -> None:
     """Composite PNGs (+ optional audio) into the final MP4.
+
+    Two-pass video pipeline (see Risk 2 in the plan):
+      1. Concat the per-slide PNGs via the concat demuxer with explicit
+         per-image ``duration`` directives and a trailing final-frame repeat,
+         WITHOUT a framerate flag, into an intermediate MP4. Letting the concat
+         demuxer drive timing here yields a stream whose PTS exactly match the
+         summed per-slide holds.
+      2. Normalize that intermediate to a fixed ``_OUTPUT_FPS`` CFR stream (via
+         the ``fps`` filter) in the final encode/mux pass, capped to the
+         authoritative ``total_runtime`` via ``-t``.
+
+    Applying ``-r``/``fps`` directly to the concat demuxer's image stream makes
+    ffmpeg over-count the trailing repeated frame (the last slide's hold gets
+    counted twice), inflating the runtime and desyncing audio from video. The
+    two-pass split keeps the concat-demuxer timing correct in step 1; the
+    ``fps`` filter in step 2 still holds the final repeated frame for an extra
+    cycle, so step 2 is explicitly capped at ``total_runtime`` (the summed
+    per-slide holds the compositor already computed) to trim that tail. The
+    padded audio track is built to the same timeline, keeping A/V aligned.
 
     Branches on ``has_audio``:
       - No audio (all-silent deck): emit a VIDEO-ONLY MP4 (``-c:v libx264
@@ -527,20 +547,46 @@ def _composite(
     concat_list = work_dir / "video_concat.txt"
     _write_concat_list(concat_list, holds)
 
+    # Pass 1: concat images into an intermediate with concat-demuxer-driven
+    # timing (no framerate flag -> correct PTS, no trailing-frame over-count).
+    intermediate = work_dir / "video_intermediate.mp4"
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_list),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        str(intermediate),
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=600)
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="ignore")
+        raise DeckVideoError(
+            f"ffmpeg video concat (pass 1) failed (exit {result.returncode}): {stderr}"
+        )
+
     if not has_audio:
+        # Pass 2: normalize to CFR _OUTPUT_FPS, video-only.
         cmd = [
             ffmpeg,
             "-y",
             "-loglevel",
             "error",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
             "-i",
-            str(concat_list),
-            "-r",
-            str(_OUTPUT_FPS),
+            str(intermediate),
+            "-vf",
+            f"fps={_OUTPUT_FPS}",
+            "-t",
+            f"{total_runtime:.6f}",
             "-c:v",
             "libx264",
             "-pix_fmt",
@@ -556,21 +602,20 @@ def _composite(
         return
 
     combined_audio = _build_audio_track(work_dir, audio_segments, ffmpeg)
+    # Pass 2: normalize video to CFR _OUTPUT_FPS and mux the padded audio track.
     cmd = [
         ffmpeg,
         "-y",
         "-loglevel",
         "error",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
         "-i",
-        str(concat_list),
+        str(intermediate),
         "-i",
         str(combined_audio),
-        "-r",
-        str(_OUTPUT_FPS),
+        "-vf",
+        f"fps={_OUTPUT_FPS}",
+        "-t",
+        f"{total_runtime:.6f}",
         "-c:v",
         "libx264",
         "-pix_fmt",
@@ -671,7 +716,7 @@ def build_deck_video(deck_path: str | Path, output_path: str | Path | None = Non
         has_audio = any(clip is not None for clip, _ in audio_segments)
         total_runtime = narrated_total + silent_count * DECK_VIDEO_DEFAULT_HOLD_SECS
 
-        _composite(work_dir, holds, audio_segments, has_audio, output_path, ffmpeg)
+        _composite(work_dir, holds, audio_segments, has_audio, output_path, ffmpeg, total_runtime)
 
         logger.info(
             "deck_video.built slides=%d narrated=%d silent=%d runtime=%.2fs -> %s",
