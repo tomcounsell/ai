@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor Engels
