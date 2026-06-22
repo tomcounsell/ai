@@ -384,6 +384,14 @@ def guard_g5_artifact_hash_cache(
 
     G5 does NOT apply to REVIEW — a diff hash can match while CI status and
     human comments legitimately change. G4 covers REVIEW non-determinism.
+
+    Transparent migration (issue #1761 Layer 3):
+      If the cached hash is the OLD full-bytes hash (computed by
+      ``compute_plan_hash``) and the only diff is the ``revision_applied:``
+      frontmatter line, the guard transparently rewrites the stored
+      ``artifact_hash`` to the new ``compute_plan_body_hash`` value.  The
+      rewrite is idempotent — once written, subsequent calls use the new hash
+      directly.  A WARNING is emitted on every rewrite.
     """
     verdicts = stage_states.get("_verdicts") or {}
     record = verdicts.get("CRITIQUE")
@@ -395,7 +403,38 @@ def guard_g5_artifact_hash_cache(
     if not cached_hash or not current_hash:
         return None
     if cached_hash != current_hash:
-        return None
+        # Transparent migration: check if the stored hash is the legacy
+        # full-bytes hash and the only delta is the revision_applied: line.
+        issue_number = (context or {}).get("issue_number")
+        if cached_hash and current_hash and issue_number:
+            try:
+                from tools._sdlc_utils import find_plan_path as _find_plan_path
+                from tools.sdlc_verdict import compute_plan_hash as _legacy_hash
+
+                plan_path = _find_plan_path(issue_number)
+                if plan_path is not None:
+                    legacy_hash = _legacy_hash(plan_path)
+                    if legacy_hash == cached_hash:
+                        # Only delta is revision_applied — rewrite in-place.
+                        import logging
+
+                        logging.getLogger(__name__).warning(
+                            "G5 migration: rewriting artifact_hash from legacy "
+                            "full-bytes to revision_applied-stripped hash for "
+                            "issue %s (old=%s, new=%s)",
+                            issue_number,
+                            cached_hash,
+                            current_hash,
+                        )
+                        record["artifact_hash"] = current_hash
+                        cached_hash = current_hash
+                        # Fall through to normal cache-hit evaluation below.
+            except Exception as _e:
+                logging.getLogger(__name__).debug(
+                    "G5 migration: exception during legacy-hash check: %s", _e
+                )
+        if cached_hash != current_hash:
+            return None
 
     verdict_text = normalize_verdict(_verdict_text(record))
     if CRITIQUE_NEEDS_REVISION in verdict_text or CRITIQUE_MAJOR_REWORK in verdict_text:

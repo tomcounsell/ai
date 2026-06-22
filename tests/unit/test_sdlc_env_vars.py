@@ -122,6 +122,62 @@ class TestExtractSdlcEnvVars:
         assert "SDLC_REPO" not in result
 
 
+class TestSdlcTargetRepoEnvVar:
+    """Tests that SDLC_TARGET_REPO is respected by find_plan_path (issue #1761)."""
+
+    @staticmethod
+    def _write_plan(plans_dir, name, body):
+        plans_dir.mkdir(parents=True, exist_ok=True)
+        p = plans_dir / name
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_sdlc_target_repo_honored_when_cwd_is_ai_repo(self, tmp_path, monkeypatch):
+        """SDLC_TARGET_REPO is used by find_plan_path even when cwd is the ai-repo.
+
+        This is the core regression test for issue #1761: sdlc-tool forces
+        cwd to ~/src/ai, so without SDLC_TARGET_REPO the resolver finds plans
+        in the ai-repo instead of the target repo.
+        """
+        from pathlib import Path
+
+        from tools._sdlc_utils import find_plan_path
+
+        target_repo = tmp_path / "client-repo"
+        plans_dir = target_repo / "docs" / "plans"
+        plan = self._write_plan(
+            plans_dir,
+            "client-feature.md",
+            "tracking: https://github.com/client/repo/issues/42\n",
+        )
+
+        # SDLC_TARGET_REPO set to the target repo, cwd stays as ~/src/ai
+        monkeypatch.setenv("SDLC_TARGET_REPO", str(target_repo))
+        # Even though _git_toplevel would return the ai-repo root (ai-repo cwd),
+        # SDLC_TARGET_REPO takes priority.
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "tools._sdlc_utils._git_toplevel", return_value=Path("/Users/tomcounsell/src/ai")
+        ):
+            result = find_plan_path(42)
+
+        assert result == plan
+
+    def test_sdlc_target_repo_unset_uses_git_toplevel(self, tmp_path, monkeypatch):
+        """When SDLC_TARGET_REPO is not set, git-toplevel drives resolution."""
+        from tools._sdlc_utils import find_plan_path
+
+        plans_dir = tmp_path / "docs" / "plans"
+        plan = self._write_plan(plans_dir, "f.md", "tracking: #99\n")
+
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "tools._sdlc_utils._git_toplevel", return_value=tmp_path
+        ):
+            result = find_plan_path(99)
+
+        assert result == plan
+
+
 class TestObserverRemoved:
     """Verify bridge/observer.py no longer exists (SDLC Redesign Phase 2)."""
 
