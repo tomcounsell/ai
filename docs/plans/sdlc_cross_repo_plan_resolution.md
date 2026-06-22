@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-22
 tracking: https://github.com/tomcounsell/ai/issues/1761
 last_comment_id: 4770352989
+revision_applied: true
 ---
 
 # SDLC Cross-Repo Plan Resolution Fix (PLAN↔CRITIQUE never converges to BUILD)
@@ -117,7 +118,7 @@ no longer busts the G5 cache.
 ## Architectural Impact
 
 - **New dependencies**: none.
-- **Interface changes**: `find_plan_path` gains stricter resolution semantics (cross-repo bare-`#N` fallback rejected); `compute_plan_hash` (or a new sibling) hashes plan body excluding frontmatter for the G5 staleness input. `record_verdict`'s `_compute_artifact_hash` and `tools.sdlc_next_skill`'s `current_plan_hash` must use the **same** body-only hash so cached and current hashes are comparable.
+- **Interface changes**: `find_plan_path` gains stricter resolution semantics (cross-repo bare-`#N` fallback rejected); a new sibling `compute_plan_body_hash` hashes the plan with **only the `revision_applied:` frontmatter key stripped** (all other frontmatter — and the entire body — is still hashed) for the G5 staleness input. `record_verdict`'s `_compute_artifact_hash` and `tools.sdlc_next_skill`'s `current_plan_hash` must use the **same** `revision_applied`-stripped hash so cached and current hashes are comparable. This narrow strip (vs. excluding all frontmatter) preserves the existing G5 contract that *other* frontmatter edits (status, type, tracking) bust the cache.
 - **Coupling**: decreases — local `/do-sdlc` and the bridge/worker path converge on the same `SDLC_TARGET_REPO` contract instead of only the latter setting it.
 - **Data ownership**: unchanged. Plans still owned by their tracking issue; this fixes *which* plan the router reads.
 - **Reversibility**: high — env-var export and resolver-guard changes are small and isolated; the hash change is the only one with a stored-state interaction (see Risk 2).
@@ -153,9 +154,12 @@ local filesystem and `gh`/`git` CLIs already required by the SDLC pipeline.
   `cd ~/src/ai` invocations in the global SDLC skills with the cwd-independent `sdlc-tool` path or
   an `AI_REPO_ROOT`-anchored invocation, so they load the canonical ai-repo `tools/` even when run
   inside a target repo that ships its own `tools/`.
-- **Frontmatter-excluded plan hash for staleness**: the G5 staleness input hashes the plan *body
-  excluding frontmatter*, so a `revision_applied: true` frontmatter write does not bust the cache
-  and re-stale a clean verdict. Robustness layer that closes the "notes-only re-stale" feeder.
+- **`revision_applied`-stripped plan hash for staleness**: the G5 staleness input hashes the plan
+  with **only the `revision_applied:` frontmatter line removed** (the rest of the frontmatter and the
+  full body are still hashed), so a `revision_applied: true` write does not bust the cache and
+  re-stale a clean verdict — while any *other* edit (body prose, status, tracking) still busts it as
+  before. Robustness layer that closes the "notes-only re-stale" feeder without regressing G5's
+  sensitivity to real plan changes.
 
 ### Flow
 
@@ -192,15 +196,43 @@ local filesystem and `gh`/`git` CLIs already required by the SDLC pipeline.
     `do-pr-review/sub-skills/post-review.md:224-226`. For each, decide: (a) genuinely needs the ai-repo `tools/`
     → anchor to `AI_REPO_ROOT`; or (b) operates on the *target* repo's plan file → keep cwd-relative but ensure
     the path is absolute. Document the disposition per call in the PR.
-- **Layer 3 (robustness) — body-only plan hash:**
-  - Add `compute_plan_body_hash` (or a `frontmatter_excluded=True` param) in `tools/sdlc_verdict.py` that strips
-    the leading `---\n...\n---` frontmatter block before hashing, then hashes the body with the same CRLF
-    normalization. Both the **writer** (`_compute_artifact_hash` at `:120-133`, used by `record_verdict`) and the
-    **reader** (`tools/sdlc_next_skill.py:98-104` setting `context["current_plan_hash"]`) must switch together so
-    cached `artifact_hash` and `current_plan_hash` remain comparable.
-  - **Migration:** existing stored `artifact_hash` values are frontmatter-inclusive. On the first read after
-    deploy they will mismatch the new body-only `current_plan_hash` → G5 cache miss → one extra critique
-    dispatch, then the new body-only hash is stored. This self-heals in one cycle; document it (no backfill needed).
+- **Layer 3 (robustness) — `revision_applied`-stripped plan hash:**
+  - Add `compute_plan_body_hash` in `tools/sdlc_verdict.py` that removes **only the single
+    `revision_applied:` frontmatter line** (the leading `---...---` block is parsed, the
+    `revision_applied:` key is dropped, the frontmatter is re-serialized, and the body is left intact),
+    then hashes with the same CRLF normalization as `compute_plan_hash`. This is the narrow scope from
+    critique CONCERN 4 — **not** stripping all frontmatter. Every other frontmatter key (`status`,
+    `type`, `tracking`, `last_comment_id`) and the entire body still contribute to the hash, so any real
+    plan edit still busts G5's cache exactly as today. Implementation note: strip the line robustly
+    (match `^revision_applied:` after the opening `---`, tolerate leading/trailing whitespace and
+    `true`/`false` values) so a present-but-`false` and an absent key produce the **same** hash — the
+    only thing that must not bust the cache is the `/do-plan` revision write flipping the key.
+  - Both the **writer** (`_compute_artifact_hash` at `:120-133`, used by `record_verdict`) and the
+    **reader** (`tools/sdlc_next_skill.py:98-104` setting `context["current_plan_hash"]`) must switch to
+    `compute_plan_body_hash` together so cached `artifact_hash` and `current_plan_hash` remain comparable.
+  - **Update `compute_plan_hash`'s module docstring (BLOCKER 2):** the docstring at
+    `tools/sdlc_verdict.py:65-71` currently declares frontmatter edits (incl. `revision_applied: true`)
+    "are meaningful plan changes that MUST bust the cache." That contract is now scoped: with
+    `compute_plan_body_hash` driving G5, the **only** frontmatter key that does NOT bust the cache is
+    `revision_applied:`; all other frontmatter still busts it. Update the docstring (and the
+    "Artifact hash semantics" block) to state this precisely, and note that `compute_plan_hash` itself
+    is retained for any callers that genuinely want the full-bytes hash. Add a task in Step 1.
+  - **Migration / self-heal (BLOCKER 1):** with the narrow strip, a stored frontmatter-inclusive
+    `artifact_hash` only mismatches the new `revision_applied`-stripped `current_plan_hash` for plans
+    whose stored hash was computed *before* this deploy. For an issue that re-runs CRITIQUE or BUILD,
+    `record_verdict` re-writes the hash and self-heals. **But an already-build-ready in-flight issue
+    (cached READY-TO-BUILD verdict, no pending CRITIQUE/BUILD re-run) never re-fires the writer**, so
+    its old full-bytes hash would mismatch indefinitely and G5 would keep cache-missing. To close this:
+    inside `guard_g5_artifact_hash_cache` (`agent/sdlc_router.py:374`), when `cached_hash != current_hash`,
+    before returning None (no-match) **transparently re-compare against the cached hash recomputed under
+    the new scheme**: if the *stored plan file* hashed with the new `compute_plan_body_hash` equals
+    `current_hash` AND the only difference from the stored `artifact_hash` is the `revision_applied` line,
+    treat it as a match and **rewrite the stored `artifact_hash` to the new value via `record_verdict`'s
+    single-writer path** (never a raw write). This makes the migration self-heal for build-ready
+    in-flight issues on their first router pass, not only on a CRITIQUE/BUILD re-run. Document the
+    transparent-rewrite path; no separate backfill script (the rewrite is the migration). A
+    `sdlc-tool migrate-hashes` subcommand is the explicit fallback if the in-guard rewrite proves too
+    coupled — but the in-guard transparent rewrite is preferred (smaller surface, no operator step).
 
 ## Failure Path Test Strategy
 
@@ -211,10 +243,17 @@ local filesystem and `gh`/`git` CLIs already required by the SDLC pipeline.
       reached (and logged) when `gh` fails, and that callers degrade safely.
 - [ ] `compute_plan_body_hash` returns None on read failure (mirror `compute_plan_hash:107-112`) — assert G5 treats
       a None hash as "no cache" (cache miss), never a false match.
+- [ ] `compute_plan_body_hash` on a plan with malformed/unterminated frontmatter (no closing `---`) — assert it
+      degrades to hashing the file unchanged (or returns None) rather than crashing or stripping body lines.
+- [ ] `guard_g5_artifact_hash_cache` transparent-rewrite path: a stored full-bytes `artifact_hash` whose only
+      difference from the current plan is the `revision_applied:` line is treated as a match and rewritten via
+      `record_verdict` — assert the second router pass is a clean cache hit (no re-dispatch).
 
 ### Empty/Invalid Input Handling
 - [ ] `find_plan_path(0)` / `find_plan_path(None)` returns None (existing guard `:349-350`) — keep covered.
-- [ ] Plan file with no frontmatter (`compute_plan_body_hash`): hashes the whole body unchanged — add a test.
+- [ ] Plan file with no frontmatter (`compute_plan_body_hash`): hashes the whole file unchanged — add a test.
+- [ ] Plan file with `revision_applied: false` vs the same plan with the key **absent**: `compute_plan_body_hash`
+      yields the **same** hash (the strip tolerates present-false and absent equivalently) — add a test.
 - [ ] Plan file with frontmatter but no `revision_applied` key: `_parse_revision_applied` returns False — keep covered.
 - [ ] `SDLC_TARGET_REPO` set to a non-existent path: `find_plan_path` returns None (plans_dir `.is_dir()` is False) rather than falling back to the ai repo — add a test.
 
@@ -230,14 +269,20 @@ local filesystem and `gh`/`git` CLIs already required by the SDLC pipeline.
       foreign plan; (c) unset + non-existent `SDLC_TARGET_REPO` → None.
 - [ ] `tests/unit/test_sdlc_utils.py` — UPDATE: add `find_plan_path` cross-repo-fallback-rejection and
       precedence-order assertions; assert git-toplevel never overrides a set `SDLC_TARGET_REPO`.
-- [ ] `tests/unit/test_sdlc_verdict.py` — UPDATE: add `compute_plan_body_hash` cases (frontmatter stripped,
-      no-frontmatter passthrough, CRLF normalization, read-failure → None); assert a `revision_applied: true`-only
-      frontmatter edit yields an **unchanged** body hash.
+- [ ] `tests/unit/test_sdlc_verdict.py` — UPDATE: add `compute_plan_body_hash` cases (only `revision_applied:`
+      line stripped — other frontmatter keys still affect the hash; no-frontmatter passthrough; CRLF normalization;
+      read-failure → None; present-`false` ≡ absent key); assert a `revision_applied: true`-only frontmatter edit
+      yields an **unchanged** hash, while a `status:`/body edit yields a **changed** hash. Also assert the
+      `compute_plan_hash` docstring no longer claims `revision_applied` busts the cache (BLOCKER 2 — parity/doc check
+      if one exists, else covered by the behavioral test).
 - [ ] `tests/unit/test_sdlc_env_vars.py` — UPDATE: assert `SDLC_TARGET_REPO` propagation contract from local `/do-sdlc`.
 - [ ] `tests/unit/test_sdlc_next_skill.py` — UPDATE: assert `context["current_plan_hash"]` uses the body-only hash and
       that a frontmatter-only edit no longer busts G5 (cache hit → routes to build).
 - [ ] `tests/unit/test_sdlc_router.py` / `test_sdlc_router_decision.py` — UPDATE: add the end-to-end convergence case —
       with-concerns verdict + `revision_applied: true` read from the correct plan → row 4c → `/do-build` in one pass.
+      Also add the G5 transparent-rewrite migration case: cached full-bytes `artifact_hash` (pre-deploy) for a
+      build-ready issue + current `revision_applied`-stripped hash → guard recognizes the `revision_applied`-only delta,
+      rewrites the stored hash, and returns the cached READY-TO-BUILD dispatch (no spurious re-critique).
 - [ ] `tests/unit/test_sdlc_skill_md_parity.py` — UPDATE if it asserts specific skill-invocation strings that change
       when bare `tools.X` calls are converted.
 
@@ -248,8 +293,10 @@ local filesystem and `gh`/`git` CLIs already required by the SDLC pipeline.
   the path bug is fixed. Do NOT touch `do-plan-critique` classification logic in this plan.
 - **A general repo-resolution framework.** Resist building an abstraction over every cwd/env/git permutation. Fix the
   two concrete holes (unset `SDLC_TARGET_REPO` from local `/do-sdlc`; bare-`#N` cross-repo fallback) and stop.
-- **Backfilling stored `artifact_hash` values** to the new body-only scheme. The one-cycle self-heal (one extra
-  critique dispatch on first read post-deploy) is acceptable; a migration script is over-engineering.
+- **Writing a standalone backfill script** for stored `artifact_hash` values. The in-guard transparent rewrite
+  (Layer 3) self-heals build-ready in-flight issues on their first router pass, and CRITIQUE/BUILD re-runs self-heal
+  the rest via `record_verdict`. A separate migration script is the explicit fallback only if the in-guard rewrite
+  proves too coupled — do not build it pre-emptively.
 - **Rewriting `sdlc-tool`'s `uv run --directory` behavior.** Forcing cwd to `~/src/ai` is correct and load-bearing for
   `tools/` resolution; the fix is to feed it the right `SDLC_TARGET_REPO`, not to change the wrapper's cwd discipline.
 
@@ -263,11 +310,17 @@ to the wrong path, or vice versa.
 path). The `tools.X` *module code* always loads from the ai repo; only the *file argument* may be target-repo-relative.
 Cover with the cross-repo integration test.
 
-### Risk 2: Body-only hash migration causes a spurious one-time critique re-dispatch
-**Impact:** First `next-skill` read after deploy for any issue with a stored frontmatter-inclusive `artifact_hash`
-mismatches the new body-only `current_plan_hash` → G5 cache miss → one extra `/do-plan-critique`.
-**Mitigation:** This is self-healing within one cycle and strictly safer than the current loop. Document it explicitly;
-add a test asserting the *second* read (with the new hash stored) is a cache hit. No backfill.
+### Risk 2: `revision_applied`-stripped hash migration leaves build-ready in-flight issues stuck
+**Impact:** A stored full-bytes `artifact_hash` (pre-deploy) mismatches the new `revision_applied`-stripped
+`current_plan_hash`. For an issue that re-runs CRITIQUE/BUILD this self-heals via `record_verdict`. But an
+**already-build-ready in-flight issue** (cached READY-TO-BUILD, no pending re-run) never re-fires the writer, so the
+mismatch — and the G5 cache miss — would persist indefinitely (the original BLOCKER 1).
+**Mitigation:** The Layer-3 in-guard transparent rewrite closes this: when `cached_hash != current_hash`,
+`guard_g5_artifact_hash_cache` recomputes the stored plan under the new scheme and, if the only delta is the
+`revision_applied` line, treats it as a match and rewrites the stored hash via `record_verdict`'s single-writer path.
+This self-heals build-ready in-flight issues on their first router pass, not only on a CRITIQUE/BUILD re-run. The
+narrow strip (only `revision_applied`, not all frontmatter) also keeps the mismatch surface minimal. Add a router test
+asserting the build-ready migration case routes straight to build with no spurious re-critique. No backfill script.
 
 ### Risk 3: `SDLC_TARGET_REPO` export collides with the bridge/worker path
 **Impact:** Double-setting or conflicting values between `agent/sdk_client.py:1590` and the new `/do-sdlc` export.
@@ -314,11 +367,18 @@ covered by the cross-repo integration test (`tests/integration/test_sdlc_cross_r
       (slug) distinction, that local `/do-sdlc` now exports the path, and the resolver's refusal to fall back to a
       foreign plan for a target-repo issue.
 - [ ] Update `docs/features/sdlc-pipeline-portability.md` — note the bare-`#N` cross-repo fallback rejection and the
-      body-only plan hash for staleness (close the "notes-only re-stale" loop it previously described).
+      `revision_applied`-stripped plan hash for staleness (only the `revision_applied:` key is excluded; all other
+      frontmatter still busts G5), plus the in-guard transparent-rewrite migration for build-ready in-flight issues.
+      Close the "notes-only re-stale" loop it previously described.
 - [ ] No new `docs/features/README.md` index row — both target docs already have rows; update their summaries in place.
 
 ### Inline Documentation
-- [ ] Docstrings on `find_plan_path` (cross-repo fallback rejection rule) and `compute_plan_body_hash` (what is/isn't hashed).
+- [ ] Docstrings on `find_plan_path` (cross-repo fallback rejection rule) and `compute_plan_body_hash` (only the
+      `revision_applied:` key is stripped; everything else is hashed).
+- [ ] **Update `compute_plan_hash`'s module docstring + "Artifact hash semantics" block (`tools/sdlc_verdict.py:65-71`)**
+      so it no longer claims `revision_applied: true` MUST bust the cache — state that G5 now uses
+      `compute_plan_body_hash`, which excludes only `revision_applied:` (BLOCKER 2).
+- [ ] Comment in `guard_g5_artifact_hash_cache` explaining the transparent-rewrite migration path.
 - [ ] Comment in `/do-sdlc` Step 2 explaining the `SDLC_TARGET_REPO` (path) vs `SDLC_REPO` (slug) split.
 
 ## Success Criteria
@@ -326,7 +386,8 @@ covered by the cross-repo integration test (`tests/integration/test_sdlc_cross_r
 - [ ] With `SDLC_TARGET_REPO` set to a target repo, `find_plan_path(N)` resolves the *target-repo* plan (not the ai repo).
 - [ ] With `SDLC_TARGET_REPO` unset and only a bare-`#N` mention in the ai repo, `find_plan_path(N)` returns None (not the foreign plan).
 - [ ] Local `/do-sdlc` Step 2 exports `SDLC_TARGET_REPO` as the target repo's filesystem path; verified end-to-end through a `sdlc-tool` subprocess (cwd forced to `~/src/ai`).
-- [ ] A `revision_applied: true`-only frontmatter edit produces an **unchanged** body hash → G5 cache hit → routes to build (no re-stale).
+- [ ] A `revision_applied: true`-only frontmatter edit produces an **unchanged** `compute_plan_body_hash` → G5 cache hit → routes to build (no re-stale); a `status:`/body edit still **changes** it (G5 sensitivity preserved).
+- [ ] A build-ready in-flight issue with a pre-deploy full-bytes `artifact_hash` self-heals on its first router pass via the in-guard transparent rewrite — routes straight to build, no spurious re-critique (BLOCKER 1).
 - [ ] End-to-end: with-concerns critique verdict + `revision_applied: true` on the correct plan → router row 4c → `/do-build` in a single revision pass (the originally-stuck convergence case).
 - [ ] All converted global SDLC skills load the canonical ai-repo `tools/` when run inside a target repo shipping its own `tools/` (no bare `from tools.X` / `python -m tools.X` / `cd ~/src/ai` in the SDLC skill set).
 - [ ] Tests pass (`/do-test`)
@@ -370,16 +431,18 @@ The lead agent orchestrates; it never builds directly.
 
 ## Step by Step Tasks
 
-### 1. Body-only plan hash
+### 1. `revision_applied`-stripped plan hash + G5 migration
 - **Task ID**: build-hash
 - **Depends On**: none
-- **Validates**: tests/unit/test_sdlc_verdict.py, tests/unit/test_sdlc_next_skill.py
+- **Validates**: tests/unit/test_sdlc_verdict.py, tests/unit/test_sdlc_next_skill.py, tests/unit/test_sdlc_router.py
 - **Assigned To**: hash-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `compute_plan_body_hash` (strip leading `---...---` frontmatter, then hash body with CRLF normalization) in `tools/sdlc_verdict.py`.
-- Switch `_compute_artifact_hash` (writer) and `tools/sdlc_next_skill.py` `current_plan_hash` (reader) to the body-only hash together.
-- Add tests: frontmatter stripped, no-frontmatter passthrough, CRLF normalization, read-failure → None, `revision_applied`-only edit → unchanged hash.
+- Add `compute_plan_body_hash` in `tools/sdlc_verdict.py` that removes **only the `revision_applied:` frontmatter line** (not all frontmatter), re-serializes, then hashes with CRLF normalization. Tolerate present-`false` ≡ absent. Handle malformed/unterminated frontmatter gracefully.
+- Switch `_compute_artifact_hash` (writer) and `tools/sdlc_next_skill.py` `current_plan_hash` (reader) to `compute_plan_body_hash` together.
+- **Update `compute_plan_hash`'s module docstring + "Artifact hash semantics" block (`:65-71`)** so it no longer claims `revision_applied` busts the cache (BLOCKER 2); document that G5 now uses `compute_plan_body_hash`.
+- **Add the in-guard transparent-rewrite migration** to `guard_g5_artifact_hash_cache` (`agent/sdlc_router.py:374`): on `cached_hash != current_hash`, if the stored plan hashed under the new scheme matches `current_hash` and the only delta is the `revision_applied` line, treat as a match and rewrite the stored `artifact_hash` via `record_verdict`'s single-writer path (BLOCKER 1). Add a code comment.
+- Add tests: only `revision_applied:` stripped (other keys still affect hash); no-frontmatter passthrough; CRLF normalization; read-failure → None; present-`false` ≡ absent; `revision_applied`-only edit → unchanged hash; `status:`/body edit → changed hash; router transparent-rewrite migration → cache hit routes to build.
 
 ### 2. Resolver hardening + SDLC_TARGET_REPO export
 - **Task ID**: build-resolver
@@ -436,21 +499,37 @@ The lead agent orchestrates; it never builds directly.
 | Tests pass | `pytest tests/unit/test_sdlc_utils.py tests/unit/test_sdlc_verdict.py tests/unit/test_sdlc_next_skill.py tests/integration/test_sdlc_cross_repo_resolution.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check tools/_sdlc_utils.py tools/sdlc_verdict.py tools/sdlc_next_skill.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/_sdlc_utils.py tools/sdlc_verdict.py tools/sdlc_next_skill.py` | exit code 0 |
-| Body-only hash exists | `grep -c "def compute_plan_body_hash\|frontmatter" tools/sdlc_verdict.py` | output > 0 |
+| Body hash helper exists | `grep -c "def compute_plan_body_hash" tools/sdlc_verdict.py` | output > 0 |
+| Hash strips only revision_applied | `grep -c "revision_applied" tools/sdlc_verdict.py` | output > 0 |
+| G5 transparent-rewrite migration present | `grep -c "compute_plan_body_hash\|revision_applied" agent/sdlc_router.py` | output > 0 |
 | No bare `from tools.sdlc_verdict` in critique skill | `grep -c "from tools.sdlc_verdict import" .claude/skills-global/do-plan-critique/SKILL.md` | match count == 0 |
 | No bare `cd ~/src/ai` in build skill | `grep -c "cd ~/src/ai" .claude/skills-global/do-build/SKILL.md` | match count == 0 |
 | `/do-sdlc` exports SDLC_TARGET_REPO | `grep -c "SDLC_TARGET_REPO" .claude/skills-global/do-sdlc/SKILL.md` | output > 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). Revision pass addressing NEEDS REVISION (2026-06-22). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER 1 | doctrine | "Self-heals in one cycle" is false for already-build-ready in-flight issues — `record_verdict` never re-fires for them, so a cached full-bytes `artifact_hash` mismatches the new hash indefinitely. | Layer 3 (Tech Approach) + Step 1 + Risk 2 + Success Criteria | Added in-guard transparent rewrite in `guard_g5_artifact_hash_cache`: on hash mismatch, recompute stored plan under new scheme; if delta is only the `revision_applied` line, rewrite stored hash via `record_verdict` and treat as match. `sdlc-tool migrate-hashes` named as explicit fallback. |
+| BLOCKER 2 | doctrine | `compute_plan_hash` docstring (`:65-71`) declares frontmatter edits incl. `revision_applied` MUST bust the cache — Layer 3 reverses this. | Layer 3 + Step 1 + Inline Docs | Added explicit task to update the module docstring + "Artifact hash semantics" block to scope the contract: only `revision_applied:` is excluded (via `compute_plan_body_hash`); all other frontmatter still busts. |
+| CONCERN 4 | doctrine | Scope the hash helper to strip ONLY `revision_applied:` rather than all frontmatter — dissolves Blocker 2, narrows Blocker 1, removes G5 regression risk. | Layer 3 (redesigned) + Architectural Impact + Key Elements + all hash references | `compute_plan_body_hash` now strips only the single `revision_applied:` line; other frontmatter and the full body still hash. Tests assert `status:`/body edits still bust the cache. |
+| CONCERN (skill blast radius) | doctrine | Secondary skill-portability fix touches 6+ global SDLC skill files in one PR. | Open Question 2 + Rabbit Holes (no general framework) | Kept bundled per the binding-cause-cohesion argument; per-call disposition audit required (Risk 1). Confirmed acceptable as one PR. |
+| CONCERN (fallback strictness) | doctrine | When `find_plan_path` returns None (was a foreign plan), router UX must be informative, not a silent re-dispatch loop. | Error State Rendering test + Open Question 3 | Plan asserts the router surfaces a clear "plan not found / re-run /do-plan" reason; covered by a failure-path test. |
+| NIT | doctrine | Verification "Body-only hash exists" grep was loose (`def ...\|frontmatter`) and mislabeled "body-only". | Verification table | Replaced with precise greps: `def compute_plan_body_hash`, `revision_applied` presence, and the G5 migration marker; relabeled away from "body-only". |
 
 ---
 
-## Open Questions
+## Resolved Questions (settled during critique revision)
 
-1. **Body-only hash scope** — confirm hashing the plan *body excluding frontmatter* is the desired robustness fix (vs. the alternative the issue raises: treating `revision_applied: true` as a convergence signal in the router instead of touching the hash). The plan implements the hash approach; both reach the same outcome but the hash change is more general. Acceptable?
-2. **Skill-portability blast radius** — the secondary fix touches 6+ global SDLC skill files. Should all conversions land in this one PR (cohesive, larger diff), or is the resolver+env+hash fix (the binding cause) sufficient for a first PR with the skill cleanup as a fast-follow? The plan currently bundles them.
-3. **Fallback rejection strictness** — when `find_plan_path` returns None for a target-repo issue (previously a foreign plan), should the router emit a *blocked* signal ("plan not found, re-run /do-plan") or silently allow the loop to re-dispatch `/do-plan`? The plan assumes an informative router reason; confirm the desired UX.
+1. **Hash scope** — RESOLVED (critique CONCERN 4): scope the helper to strip **only the `revision_applied:`
+   frontmatter key** (`compute_plan_body_hash`), not all frontmatter. This dissolves the docstring-contract conflict
+   (BLOCKER 2), narrows the migration surface (BLOCKER 1), and removes the G5 regression risk that excluding all
+   frontmatter would introduce. The router-signal alternative was not chosen — the narrow hash strip is the
+   smallest robust change and keeps G5 sensitive to every real plan edit.
+2. **Skill-portability blast radius** — RESOLVED: keep all conversions in this one PR. The portability fix is
+   cohesive with the binding cause (both are cross-repo `tools/` resolution); splitting it risks a fast-follow that
+   never ships. Each converted call carries a per-call disposition note in the PR (Risk 1).
+3. **Fallback rejection strictness** — RESOLVED: when `find_plan_path` returns None for a target-repo issue, the
+   router surfaces an **informative** "plan not found / re-run /do-plan" dispatch reason (not a silent re-dispatch
+   loop). Covered by the Error State Rendering failure-path test.
