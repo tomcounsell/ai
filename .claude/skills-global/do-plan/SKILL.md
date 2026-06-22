@@ -129,7 +129,7 @@ Gather relevant external context before planning. This surfaces current document
 
 5. **Save valuable findings as memories** for future plan reuse:
    ```bash
-   python -m tools.memory_search save "Finding: [concise description with source URL]" --importance 5.0 --source agent
+   "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.memory_search save "Finding: [concise description with source URL]" --importance 5.0 --source agent
    ```
    Memory saves are fire-and-forget — if they fail, continue without error.
 
@@ -151,7 +151,7 @@ Gather relevant external context before planning. This surfaces current document
 2. **Narrow the problem** - Challenge vague requests (see `SCOPING.md` if needed)
 3. **Blast radius analysis** - If the change involves code modifications, run the code impact finder:
    ```bash
-   .venv/bin/python -m tools.code_impact_finder "PROBLEM_STATEMENT_HERE"
+   "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.code_impact_finder "PROBLEM_STATEMENT_HERE"
    ```
    Use results to inform plan sections:
    - `impact_type="modify"` -> **Solution** section
