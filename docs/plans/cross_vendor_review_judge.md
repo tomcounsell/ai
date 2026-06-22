@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-06-22
 tracking: https://github.com/tomcounsell/ai/issues/1626
 last_comment_id:
+revision_applied: true
 ---
 
 # Cross-Vendor Verification: Independent Non-Claude Reviewer
@@ -60,8 +61,8 @@ Our PR review is **all-Claude**. The author (Claude, in BUILD) writes the diff; 
 
 1. **Entry point**: `/do-pr-review` runs at the REVIEW stage on an open PR. It classifies the diff via `python -m scripts.pr_shape_classify --pr N` and reads the judge roster from `SDLC_REVIEW_JUDGES`.
 2. **Trigger evaluation**: the skill decides whether the cross-vendor judge is enabled (see Solution — gated by `SDLC_REVIEW_CROSS_VENDOR` env var AND a high-stakes shape/size predicate). If disabled, the existing Claude-only path runs unchanged.
-3. **Judge dispatch**: Claude judges (`code-quality`, `risk`) spawn as agent forks returning dicts via stdout (unchanged). The cross-vendor judge runs as a **separate code path**: a Python CLI (`tools/cross_vendor_judge.py`) invoked via Bash that calls the OpenAI Chat Completions API with the diff + a structured review rubric, and emits one judge dict (`{judge_id: "cross-vendor", verdict, blockers, tech_debt, confidence, reasoning_summary}`) as JSON to stdout.
-4. **Collection**: the `/do-pr-review` parent collects all judge dicts (Claude forks + the cross-vendor dict) into one list.
+3. **Judge dispatch**: Claude judges (`code-quality`, `risk`) spawn as agent forks returning dicts via stdout (unchanged). The cross-vendor judge runs as a **separate code path**: a Python CLI (`tools/cross_vendor_judge.py`) invoked via Bash that calls the OpenAI Chat Completions API with the diff + a structured review rubric, and emits one **envelope** as JSON to stdout. The envelope is ALWAYS `{"status": "ok"|"skipped", ...}` (see Solution → Output envelope contract). On `status="ok"` the envelope carries a complete `judge` dict (`{judge_id: "cross-vendor", verdict, blockers, tech_debt, confidence, reasoning_summary, meta}`); on `status="skipped"` it carries `{"status":"skipped","reason":...,"meta":...}` and NO judge dict. The envelope is the only contract the parent parses — it never passes the raw envelope to `compute_consensus`.
+4. **Collection**: the `/do-pr-review` parent parses the envelope. It appends the inner `judge` dict to the judge-dict list **only when `status=="ok"`**. On `status=="skipped"` it appends nothing and records the skip reason for the aggregate comment. This is the fix for the critique blocker: a skip envelope can never reach `compute_consensus` (which would `raise ValueError` on the missing `verdict`/`blockers`) or `record_verdict(judges=)` (whose `_validate_judges_payload` would return `False` and silently drop the ENTIRE verdict record, losing the Claude judges too).
 5. **Consensus**: parent calls `compute_consensus(dicts, rule="any-blocker-wins")` — **unchanged**. `blockers_max` already preserves a cross-vendor blocker.
 6. **Per-judge comments**: parent posts a `## Review (Judge cross-vendor):` comment (sequential, same pattern as Claude judges).
 7. **Verdict record**: parent makes ONE `record_verdict --stage REVIEW --judges-json ... --consensus-json ...` call. The cross-vendor dict is persisted in `_judges` for the SDLC verdict record. **Output:** the aggregate `## Review: Approved|Changes Requested` comment + the recorded verdict the SDLC router consumes.
@@ -99,12 +100,19 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/cross_vendor_r
 
 ### Key Elements
 
-- **`tools/cross_vendor_judge.py` CLI**: Standalone judge. Takes a PR number (or diff on stdin), fetches the diff, sends it to the OpenAI Chat Completions API with a structured review rubric, and emits exactly one judge dict as JSON to stdout — the same shape Claude judge forks return. Owns ALL vendor-specific knowledge (client, model, prompt, parsing). Never writes Redis, never posts comments.
-- **Trigger gate**: A two-part predicate — `SDLC_REVIEW_CROSS_VENDOR` env var (operator kill switch, default off) AND a high-stakes diff predicate. The predicate reuses `scripts/pr_shape_classify.py`: cross-vendor runs only when shape is `feature` (the full-gate, non-trivial shape) and the diff exceeds a configurable line threshold, OR when an explicit override label/env forces it. Trivial shapes (`docs-only`, `lockfile-only`, `small-patch`) never pay the cross-vendor cost.
+- **`tools/cross_vendor_judge.py` CLI**: Standalone judge. Takes a PR number (or diff on stdin), fetches the diff, sends it to the OpenAI Chat Completions API with a structured review rubric, and emits exactly one **envelope** as JSON to stdout (see Output envelope contract below). On success the envelope wraps a judge dict in the same shape Claude judge forks return. Owns ALL vendor-specific knowledge (client, model, prompt, parsing). Never writes Redis, never posts comments.
+
+- **Output envelope contract (the critique-blocker fix)**: The CLI's stdout is ALWAYS a JSON envelope with a top-level `status` discriminator — never a bare judge dict, never a partial dict:
+  - `status="ok"` → `{"status":"ok","judge":{"judge_id":"cross-vendor","verdict":<str>,"blockers":<int>,"tech_debt":<int>,"confidence":<float>,"reasoning_summary":<str>,"meta":{...}}}`. The `judge` sub-dict is guaranteed to contain all three `_REQUIRED_KEYS` (`judge_id`, `verdict`, `blockers`) with the right types, validated by the CLI before emission.
+  - `status="skipped"` → `{"status":"skipped","reason":<str>,"meta":{...}}`. NO `judge` key, NO `verdict`/`blockers`.
+  - The parent appends `envelope["judge"]` to the consensus-input list **iff `envelope["status"]=="ok"`**. A skip envelope contributes nothing to `compute_consensus` and nothing to `record_verdict(judges=)`. This is deliberate: the prior plan's flat `{"judge_id":"cross-vendor","skipped":true}` shape was runtime-fatal — it is missing `verdict`/`blockers`, so reaching `compute_consensus` raises `ValueError`, and reaching `record_verdict`'s `_validate_judges_payload` returns `False`, silently dropping the entire verdict record (Claude judges included). The status-discriminated envelope makes that impossible by construction: the skip branch has no path to either function.
+- **Trigger gate**: A two-part predicate — `SDLC_REVIEW_CROSS_VENDOR` env var (operator kill switch, default off) AND a high-stakes shape predicate. The predicate reuses `scripts/pr_shape_classify.py`'s emitted `shape`: cross-vendor runs only when `shape=="feature"` (the full-gate, non-trivial shape — everything that is not a trivial safe shape). Trivial shapes (`docs-only`, `lockfile-only`, `small-patch`, `mixed`) never pay the cross-vendor cost. NOTE (concern resolution): there is intentionally NO separate line-count threshold env var. The classifier's `to_dict()` emits only `shape` (not `net_lines`), so a `LINE_THRESHOLD` knob would require the parent to re-run `gh pr view --json additions,deletions` — redundant plumbing the classifier already does internally but does not expose. The `feature` shape is itself the high-stakes signal (the classifier already filters out the <=20-net-line `small-patch` tier), so the gate is `feature`-shape + kill switch, full stop.
 - **`/do-pr-review` wiring**: In the multi-judge orchestration block, after collecting Claude judge dicts, conditionally invoke `tools/cross_vendor_judge.py` and append its dict to the list before `compute_consensus`. Add a `## Review (Judge cross-vendor):` per-judge comment.
-- **Failure behavior**: degrade-to-Claude-only by default (the cross-vendor judge is an *additive* safety net, not a single point of failure). If the OpenAI call fails (timeout, auth, rate limit, malformed response), the CLI emits a dict with a `"skipped"` marker and the parent simply does not append it — consensus proceeds with the Claude judges. A `SDLC_REVIEW_CROSS_VENDOR_REQUIRED=1` opt-in flips this to fail-closed (CHANGES REQUESTED if the cross-vendor judge could not run).
+- **Failure behavior**: degrade-to-Claude-only by default (the cross-vendor judge is an *additive* safety net, not a single point of failure). If the OpenAI call fails (timeout, auth, rate limit, malformed response, **or an unsupported model id / unsupported request param**), the CLI emits a `status="skipped"` envelope and the parent simply does not append it — consensus proceeds with the Claude judges. A `SDLC_REVIEW_CROSS_VENDOR_REQUIRED=1` opt-in flips this to fail-closed (CHANGES REQUESTED if the cross-vendor judge could not run).
+- **Model-id / unsupported-param resilience (the second critique-blocker fix)**: The `gpt-5.5` model id and the `seed` / `response_format={"type":"json_object"}` Chat Completions params are taken from OpenAI's published docs, NOT verified against this repo's account — the only in-repo OpenAI call today is `images.generate` (`tools/image_gen/__init__.py`), so there is no proven `chat.completions` precedent here. A wrong model id raises `openai.NotFoundError`; an unsupported param raises `openai.BadRequestError`. The CLI MUST catch both `openai.BadRequestError` and `openai.NotFoundError` explicitly and route them through the **same skip path** (envelope `status="skipped"`, `reason` naming the model id and param, `logger.warning`). Combined with the env-overridable model id, this means a bad default never hard-fails the review gate — the operator retargets `SDLC_REVIEW_CROSS_VENDOR_MODEL` and the judge resumes. The model id is therefore both env-overridable AND fail-safe.
 - **Cost ceiling**: a configurable max-diff-token cap. If the diff exceeds the cap, the CLI truncates with a clear marker (and lowers its own `confidence`) rather than sending a 500K-line diff. Model + cap are env-overridable constants with grain-of-salt comments.
 - **Determinism**: the CLI calls the API with `temperature=0` and `seed` set to a fixed value (or the PR head SHA), and records the model id + request params in the judge dict's `reasoning_summary` / a `meta` field so the SDLC verdict record captures exactly what produced the verdict. Reproducibility is "same diff + same model + same seed → same structured verdict" within API determinism limits.
+- **Tri-state observability + cost logging (concern resolution)**: every invocation emits exactly one `logger.info` line capturing the tri-state outcome — `ran` (status=ok with a verdict), `skipped` (status=skipped + reason), or `disabled` (gate off / not `feature`-shape, so the CLI was never invoked — logged by the parent). On `ran`, the line also records `model`, `prompt_tokens`, `completion_tokens`, and an estimated USD cost derived from the model's published per-1M rates (a small env-overridable rate table with a grain-of-salt comment). These fields are also stored in the judge dict's `meta` so the recorded `_judges` entry is self-describing. This gives an operator a grep-able audit trail of how often the judge runs, skips, and what it costs — without standing up new infra.
 
 ### Flow
 
@@ -114,24 +122,25 @@ PR at REVIEW → `/do-pr-review` classifies shape → cross-vendor gate (`SDLC_R
 
 - **Reuse, don't rebuild.** The consensus layer (`agent/sdlc_review_consensus.py`) and verdict recorder (`tools/sdlc_verdict.py`) require **zero changes** — verified in recon. The cross-vendor judge is a new dict producer only.
 - **`judge_id = "cross-vendor"`** (stable string). `compute_consensus` dedups last-wins per `judge_id` and includes it in `n`. With Claude `code-quality` + `risk` + `cross-vendor`, K becomes 3; `SDLC_REVIEW_K` is auto-clamped to `min(K, len(enabled_judges))` per the existing skill logic.
-- **OpenAI client** mirrors `tools/image_gen/__init__.py`: `from openai import OpenAI; client = OpenAI(api_key=settings)`; `client.chat.completions.create(model=..., temperature=0, seed=..., response_format={"type":"json_object"})`. Parse the JSON into the judge dict; validate against the required keys (`judge_id`, `verdict`, `blockers`) before emitting.
+- **OpenAI client** mirrors `tools/image_gen/__init__.py`'s `OpenAI()` construction (`from openai import OpenAI; client = OpenAI(api_key=settings.openai_api_key)`), but the call is `client.chat.completions.create(model=..., temperature=0, seed=..., response_format={"type":"json_object"})`. NOTE: image_gen uses `images.generate`, so the `chat.completions` call shape, the `gpt-5.5` model id, and the `seed`/`response_format` params have NO verified in-repo precedent — treat them as unproven. Wrap the call so `openai.BadRequestError` (unsupported param) and `openai.NotFoundError` (bad model id) both route to the skip envelope (see Solution → Model-id resilience). On success, parse the JSON, validate it contains all three `_REQUIRED_KEYS` (`judge_id`, `verdict` str, `blockers` int) with correct types, and ONLY then wrap it as `{"status":"ok","judge":<dict>}`. A response that parses but is missing a required key is treated as a skip (degrade), never emitted as a partial judge dict.
 - **Rubric**: the CLI sends a system prompt instructing the model to output ONLY a JSON object matching the judge-dict schema, reusing the 10-item review rubric concepts from `do-pr-review/sub-skills/code-review.md` (correctness, regression risk, security, error handling) — adapted to a single structured response. No prose review; just the dict.
 - **Env config** (all in `config/settings.py`, env-overridable, with provisional grain-of-salt comments):
   - `SDLC_REVIEW_CROSS_VENDOR` (default `0` / off)
-  - `SDLC_REVIEW_CROSS_VENDOR_MODEL` (default `gpt-5.5`)
+  - `SDLC_REVIEW_CROSS_VENDOR_MODEL` (default `gpt-5.5`) — **env-overridable and fail-safe**: an invalid id raises `NotFoundError`, which routes to skip (degrade), never a hard crash. Grain-of-salt comment notes the id is provisional/unverified against the account.
   - `SDLC_REVIEW_CROSS_VENDOR_MAX_DIFF_TOKENS` (cost cap)
   - `SDLC_REVIEW_CROSS_VENDOR_REQUIRED` (default `0` — degrade-to-Claude-only)
-  - `SDLC_REVIEW_CROSS_VENDOR_LINE_THRESHOLD` (min changed lines to qualify as high-stakes)
+
+  (No `LINE_THRESHOLD` var — see Trigger gate: `feature`-shape is the high-stakes signal; a line threshold would be unowned redundant plumbing.)
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] In `tools/cross_vendor_judge.py`, the OpenAI call is wrapped; any exception (timeout, auth, rate limit, JSON parse failure) must emit a `{"judge_id":"cross-vendor","skipped":true,"reason":...}` dict AND log a `logger.warning` — not silently `pass`. Test asserts the warning fires and the skip marker is present.
-- [ ] No `except Exception: pass` anywhere in the new file — each handler has an observable effect (skip dict + log).
+- [ ] In `tools/cross_vendor_judge.py`, the OpenAI call is wrapped; any exception (timeout, auth, rate limit, `BadRequestError` unsupported param, `NotFoundError` bad model id, JSON parse failure) must emit a `{"status":"skipped","reason":...,"meta":...}` envelope (NO `judge` key) AND log a `logger.warning` — not silently `pass`. Test asserts the warning fires and `status=="skipped"`.
+- [ ] No `except Exception: pass` anywhere in the new file — each handler has an observable effect (skip envelope + log).
 
 ### Empty/Invalid Input Handling
-- [ ] Test: empty diff (no changed files) → CLI emits a low-confidence "nothing to review" dict, not a crash.
-- [ ] Test: OpenAI returns malformed/non-JSON or a dict missing required keys → CLI treats it as a skip (degrade), logs, does not emit a partial/invalid dict that would poison `compute_consensus`.
+- [ ] Test: empty diff (no changed files) → CLI emits a `status="ok"` envelope with a low-confidence "nothing to review" judge dict (verdict APPROVED, blockers 0), not a crash.
+- [ ] Test: OpenAI returns malformed/non-JSON or a dict missing a required key → CLI emits `status="skipped"` (degrade), logs, does NOT emit a partial `status="ok"` envelope that would poison `compute_consensus`.
 - [ ] Test: diff exceeds the token cap → CLI truncates with a marker and lowers confidence; does not send unbounded input.
 
 ### Error State Rendering
@@ -140,10 +149,11 @@ PR at REVIEW → `/do-pr-review` classifies shape → cross-vendor gate (`SDLC_R
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_review_consensus.py` — UPDATE: add a case proving a 3-judge mix (2 Claude approve, 1 cross-vendor blocker) yields CHANGES REQUESTED under `any-blocker-wins` (the cross-vendor-blocker-preserved invariant). Existing cases unchanged — `compute_consensus` is not modified, so this is additive coverage of an already-correct behavior.
-- [ ] `tests/unit/test_sdlc_verdict.py` (if present) — UPDATE: add a case that a judge dict with `judge_id="cross-vendor"` round-trips into the `_judges` side-field. If no such test file exists, this becomes a new test file `tests/unit/test_cross_vendor_judge.py`.
+- [ ] `tests/unit/test_review_multi_judge.py` — UPDATE: this is the REAL home of the `compute_consensus` any-blocker-wins coverage (verified at plan time; the prior plan named a nonexistent `tests/unit/test_sdlc_review_consensus.py`). It already contains `test_split_one_blocker_returns_changes_requested` (2-judge: 1 approve + 1 blocker → CHANGES REQUESTED) and `test_both_block_max_aggregates_blockers`. ADD a 3-judge case `test_cross_vendor_blocker_preserved_among_claude_approvals`: `[code-quality APPROVED/0, risk APPROVED/0, cross-vendor CHANGES REQUESTED/1]` → CHANGES REQUESTED with `blockers==1`. Existing cases unchanged — `compute_consensus` is NOT modified, so this is additive coverage of an already-correct behavior.
+- [ ] `tests/unit/test_sdlc_verdict.py` — UPDATE (file exists, verified at plan time): add a case that a judge dict with `judge_id="cross-vendor"` round-trips into the `_judges` side-field via `record_verdict(judges=[...])`, and that an envelope with `status="skipped"` (which carries NO judge dict) is never passed to `record_verdict` so `_validate_judges_payload` never sees a malformed entry.
+- [ ] `tests/unit/test_cross_vendor_judge.py` — CREATE (new module): the CLI's own coverage — envelope shape (`status="ok"` wraps a valid judge dict; `status="skipped"` carries no judge), `BadRequestError`/`NotFoundError` → skip, malformed/partial OpenAI response → skip, empty diff, token-cap truncation.
 
-No other existing tests are affected — the consensus math and verdict recorder are unchanged, and the cross-vendor judge is a net-new standalone CLI with its own new test module.
+No other existing tests are affected — the consensus math (`agent/sdlc_review_consensus.py`) and verdict recorder (`tools/sdlc_verdict.py`) are unchanged.
 
 ## Rabbit Holes
 
@@ -164,7 +174,7 @@ No other existing tests are affected — the consensus math and verdict recorder
 
 ### Risk 3: Cost blowout on large diffs
 **Impact:** A 100K-line diff at $5/1M input tokens could be expensive, and only fires on high-stakes shapes.
-**Mitigation:** `SDLC_REVIEW_CROSS_VENDOR_MAX_DIFF_TOKENS` cap with truncation + lowered confidence; trigger gated to `feature`-shape diffs above a line threshold; operator kill switch defaults off.
+**Mitigation:** `SDLC_REVIEW_CROSS_VENDOR_MAX_DIFF_TOKENS` cap with truncation + lowered confidence; trigger gated to `feature`-shape diffs only (trivial shapes excluded by the classifier); operator kill switch defaults off.
 
 ### Risk 4: Non-deterministic verdict undermines the SDLC verdict record
 **Impact:** A flaky verdict makes the recorded `_judges` entry untrustworthy.
@@ -182,7 +192,7 @@ No race conditions identified. The cross-vendor judge is a synchronous CLI invoc
 
 ## Update System
 
-- **`config/settings.py`**: add the five `SDLC_REVIEW_CROSS_VENDOR*` fields. No new secret — `OPENAI_API_KEY` already exists and is synced.
+- **`config/settings.py`**: add the four `SDLC_REVIEW_CROSS_VENDOR*` fields (`SDLC_REVIEW_CROSS_VENDOR`, `_MODEL`, `_MAX_DIFF_TOKENS`, `_REQUIRED`). No new secret — `OPENAI_API_KEY` already exists and is synced.
 - **`.env.example`**: add commented placeholders for the new env vars (with a comment line above each `KEY=`, required by the completeness check). These are behavior toggles, not secrets, defaulting off — the feature is inert until an operator enables it.
 - **`pyproject.toml`**: add the `valor-cross-vendor-judge` (or similar) entry point under `[project.scripts]`.
 - No `scripts/remote-update.sh` / update-skill changes required — no new system dependency, no new launchd job, no migration. The `openai` package is already installed everywhere.
@@ -202,15 +212,17 @@ No race conditions identified. The cross-vendor judge is a synchronous CLI invoc
 
 ### Inline Documentation
 - [ ] Docstring on `tools/cross_vendor_judge.py` describing the judge-dict contract it emits and that it owns all vendor knowledge.
-- [ ] Grain-of-salt comments on each provisional env-overridable constant (model, token cap, line threshold).
+- [ ] Grain-of-salt comments on each provisional env-overridable constant (model, token cap).
 
 ## Success Criteria
 
 - [ ] `tools/cross_vendor_judge.py` emits a valid judge dict (`judge_id="cross-vendor"`) that `compute_consensus` accepts.
-- [ ] With `SDLC_REVIEW_CROSS_VENDOR=1` on a high-stakes (`feature`-shape, above-threshold) PR, the cross-vendor judge runs, posts a `## Review (Judge cross-vendor):` comment, and its dict appears in the recorded `_judges` side-field.
+- [ ] With `SDLC_REVIEW_CROSS_VENDOR=1` on a high-stakes (`feature`-shape) PR, the cross-vendor judge runs, posts a `## Review (Judge cross-vendor):` comment, and its dict appears in the recorded `_judges` side-field.
 - [ ] A cross-vendor blocker forces CHANGES REQUESTED even when both Claude judges approve (test-proven under `any-blocker-wins`).
 - [ ] Default failure behavior degrades to Claude-only with a visible "cross-vendor skipped" note; `SDLC_REVIEW_CROSS_VENDOR_REQUIRED=1` flips to fail-closed (test-proven).
-- [ ] Trivial shapes (`docs-only`, `lockfile-only`, `small-patch`) never invoke the cross-vendor judge.
+- [ ] Trivial shapes (`docs-only`, `lockfile-only`, `small-patch`, `mixed`) never invoke the cross-vendor judge.
+- [ ] **Value-premise validation (concern resolution):** A fixture diff containing a defect-class Claude judges systematically miss (e.g., a subtle cross-language API misuse or a locale/encoding edge case seeded into the fixture) is reviewed; the cross-vendor judge returns a blocker on it while the Claude judges approve, and consensus is CHANGES REQUESTED. This is the criterion that proves the feature's *reason to exist* — not just that the plumbing works. Gated on `OPENAI_API_KEY` (real call); if the live model does not catch the seeded defect, the test records the miss as an explicit known-limitation note rather than silently passing.
+- [ ] **Observability (concern resolution):** Each invocation emits a tri-state `logger.info` (`ran` | `skipped` | `disabled`); on `ran` the line includes model id, token counts, and estimated USD cost; the same fields appear in the recorded `_judges` `meta`. Test asserts the log line and `meta` fields are present.
 - [ ] `agent/sdlc_review_consensus.py` and `tools/sdlc_verdict.py` are unchanged (grep confirms no diff to their logic).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -259,10 +271,10 @@ No race conditions identified. The cross-vendor judge is a synchronous CLI invoc
 - **Assigned To**: judge-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Implement `tools/cross_vendor_judge.py`: fetch PR diff, call OpenAI Chat Completions (`gpt-5.5`, `temperature=0`, `seed`, `response_format=json_object`), parse + validate into a judge dict, emit JSON to stdout.
-- Implement failure handling: any exception → `{"judge_id":"cross-vendor","skipped":true,"reason":...}` + `logger.warning`; never `except: pass`.
+- Implement `tools/cross_vendor_judge.py`: fetch PR diff, call OpenAI Chat Completions (`SDLC_REVIEW_CROSS_VENDOR_MODEL` default `gpt-5.5`, `temperature=0`, `seed`, `response_format=json_object`), parse + validate the response against `_REQUIRED_KEYS`, and emit a `{"status":"ok","judge":{...}}` envelope on success / `{"status":"skipped","reason":...}` on any failure. Never emit a bare or partial judge dict.
+- Implement failure handling: any exception incl. `openai.BadRequestError` / `openai.NotFoundError` → `{"status":"skipped","reason":...,"meta":...}` envelope + `logger.warning`; never `except: pass`.
 - Implement token cap with truncation + lowered confidence; empty-diff handling.
-- Add the five `SDLC_REVIEW_CROSS_VENDOR*` fields to `config/settings.py` with grain-of-salt comments; add `.env.example` placeholders; add `[project.scripts]` entry in `pyproject.toml`.
+- Add the four `SDLC_REVIEW_CROSS_VENDOR*` fields to `config/settings.py` with grain-of-salt comments; add `.env.example` placeholders; add `[project.scripts]` entry in `pyproject.toml`.
 
 ### 2. Wire the judge into /do-pr-review
 - **Task ID**: build-skill
@@ -270,7 +282,7 @@ No race conditions identified. The cross-vendor judge is a synchronous CLI invoc
 - **Assigned To**: skill-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In the multi-judge orchestration block of `.claude/skills-global/do-pr-review/SKILL.md`: add the trigger gate (`SDLC_REVIEW_CROSS_VENDOR=1` AND `feature`-shape above line threshold; skip trivial shapes), invoke the CLI, append its dict (unless skipped) before `compute_consensus`, post the `## Review (Judge cross-vendor):` comment, surface skips in the aggregate.
+- In the multi-judge orchestration block of `.claude/skills-global/do-pr-review/SKILL.md`: add the trigger gate (`SDLC_REVIEW_CROSS_VENDOR=1` AND `shape=="feature"`; skip trivial shapes), invoke the CLI, parse the envelope, append `envelope["judge"]` to the consensus-input list ONLY when `envelope["status"]=="ok"` (never append a skip envelope) before `compute_consensus`, post the `## Review (Judge cross-vendor):` comment, surface skips in the aggregate.
 - Do NOT modify `compute_consensus` call signature or `record_verdict` usage.
 
 ### 3. Tests
@@ -279,9 +291,10 @@ No race conditions identified. The cross-vendor judge is a synchronous CLI invoc
 - **Assigned To**: judge-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Unit: judge dict shape; failure/degrade and fail-closed paths; token-cap truncation; empty diff; malformed OpenAI response → skip not poison.
-- Consensus invariant: 2 Claude approve + 1 cross-vendor blocker → CHANGES REQUESTED (`tests/unit/test_sdlc_review_consensus.py`).
-- Integration: invoke the CLI on a fixture diff (real OpenAI gated on `OPENAI_API_KEY`); assert `compute_consensus` accepts the emitted dict.
+- Unit (`tests/unit/test_cross_vendor_judge.py`, new): envelope shape (`status="ok"` vs `status="skipped"`); `BadRequestError`/`NotFoundError` → skip envelope + `logger.warning`; token-cap truncation; empty diff; malformed/partial OpenAI response → skip not poison.
+- Consensus invariant (`tests/unit/test_review_multi_judge.py`, UPDATE): add `test_cross_vendor_blocker_preserved_among_claude_approvals` — 2 Claude approve + 1 cross-vendor blocker → CHANGES REQUESTED.
+- Verdict round-trip (`tests/unit/test_sdlc_verdict.py`, UPDATE): `judge_id="cross-vendor"` dict round-trips into `_judges`; a skip envelope is never handed to `record_verdict`.
+- Integration: invoke the CLI on a fixture diff (real OpenAI gated on `OPENAI_API_KEY`); assert the `status="ok"` envelope's `judge` dict is accepted by `compute_consensus` without raising.
 
 ### 4. Documentation
 - **Task ID**: document-feature
@@ -303,7 +316,7 @@ No race conditions identified. The cross-vendor judge is a synchronous CLI invoc
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `pytest tests/unit/test_cross_vendor_judge.py tests/unit/test_sdlc_review_consensus.py -q` | exit code 0 |
+| Tests pass | `pytest tests/unit/test_cross_vendor_judge.py tests/unit/test_review_multi_judge.py tests/unit/test_sdlc_verdict.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Consensus unchanged | `git diff --exit-code main -- agent/sdlc_review_consensus.py` | exit code 0 |
@@ -312,14 +325,21 @@ No race conditions identified. The cross-vendor judge is a synchronous CLI invoc
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
+Critique verdict: **NEEDS REVISION**. Revised 2026-06-22 to clear 3 blockers + 3 concerns.
+
+| Severity | Finding | Addressed By | Implementation Note |
+|----------|---------|--------------|---------------------|
+| BLOCKER | Skip-dict shape `{"judge_id":"cross-vendor","skipped":true}` is runtime-fatal — missing `verdict`/`blockers` (both in `_REQUIRED_KEYS`); reaching `compute_consensus` raises `ValueError`, reaching `record_verdict` fails `_validate_judges_payload` and silently drops the whole record. | Solution → Output envelope contract; Data Flow steps 3-4 | CLI now emits a status-discriminated envelope `{"status":"ok","judge":{...}}` / `{"status":"skipped","reason":...}`. Parent appends `envelope["judge"]` to consensus inputs ONLY when `status=="ok"`. A skip envelope has no path to `compute_consensus` or `record_verdict(judges=)`. |
+| BLOCKER | `gpt-5.5` + `chat.completions`/`seed`/`response_format` unverified (marketing URL); only in-repo OpenAI use is `images.generate`. Wrong model id / unsupported param raises on every call. | Solution → Model-id resilience; Technical Approach OpenAI bullet; `_MODEL` env var note | CLI catches `openai.BadRequestError` + `openai.NotFoundError` and routes both to the skip path; model id is env-overridable via `SDLC_REVIEW_CROSS_VENDOR_MODEL`. A bad default degrades, never hard-fails. |
+| BLOCKER | Test Impact named nonexistent `tests/unit/test_sdlc_review_consensus.py`. Real coverage is `tests/unit/test_review_multi_judge.py` (already has the any-blocker invariant). | Test Impact section; Step 3; Verification table | Retargeted to `tests/unit/test_review_multi_judge.py` (UPDATE: add 3-judge case), `tests/unit/test_sdlc_verdict.py` (UPDATE, file confirmed present), `tests/unit/test_cross_vendor_judge.py` (CREATE). |
+| CONCERN | `LINE_THRESHOLD` env var unowned/redundant (classifier emits `shape` only, not a threshold tier). | Trigger gate (removed); env-var list note | Removed the var entirely. Classifier's `to_dict()` exposes only `shape`; a threshold would force a redundant `gh pr view --json additions,deletions`. Gate is `feature`-shape + kill switch. |
+| CONCERN | No success criterion validates the value premise (judge catching a defect Claude misses). | Success Criteria → Value-premise validation | Added a fixture-seeded-defect criterion: cross-vendor blocks where Claude approves → CHANGES REQUESTED; live-call gated, records a miss as a known-limitation note. |
+| CONCERN | No tri-state observability or cost logging. | Solution → Tri-state observability; Success Criteria → Observability | Each invocation emits a tri-state `logger.info` (`ran`/`skipped`/`disabled`); `ran` includes model, token counts, estimated USD cost; same fields stored in `_judges` `meta`. |
 
 ---
 
 ## Open Questions
 
-1. **Trigger policy.** Default is `SDLC_REVIEW_CROSS_VENDOR=0` (opt-in) AND high-stakes (`feature`-shape above a line threshold). Is opt-in-off the right default, or should it auto-fire on every `feature`-shape PR once enabled per machine? (Cost vs. coverage call.)
+1. **Trigger policy.** Default is `SDLC_REVIEW_CROSS_VENDOR=0` (opt-in) AND high-stakes (`feature`-shape). Is opt-in-off the right default, or should it auto-fire on every `feature`-shape PR once enabled per machine? (Cost vs. coverage call.)
 2. **Cost ceiling.** What's the acceptable per-PR spend? This sets `SDLC_REVIEW_CROSS_VENDOR_MAX_DIFF_TOKENS` and whether to default to `gpt-5.5` ($5/$30) vs. a cheaper tier for routine high-stakes diffs.
 3. **Failure default.** Plan defaults to degrade-to-Claude-only (additive safety net). Confirm that's preferred over fail-closed as the default posture.
