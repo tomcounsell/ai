@@ -286,3 +286,64 @@ class TestCheckWrapperResilience:
             result = _check_telegram_session(quick=True)
 
         assert result.passed is True
+
+
+# ---------------------------------------------------------------------------
+# CLAUDE_CODE_OAUTH_TOKEN check
+# ---------------------------------------------------------------------------
+
+
+class TestCheckClaudeOauthToken:
+    """Tests for the CLAUDE_CODE_OAUTH_TOKEN presence+prefix health check.
+
+    The check is warning-only (passed=True with a fix message) for absent/malformed
+    tokens — it never hard-fails the run, because the token is optional on
+    non-interactive machines.
+    """
+
+    def test_valid_token_passes(self):
+        """Token present with correct prefix → check passes, no fix needed."""
+        from tools.doctor import _check_claude_oauth_token
+
+        with patch.dict(
+            "os.environ", {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-abc123"}, clear=False
+        ):
+            result = _check_claude_oauth_token()
+
+        assert result.passed is True
+        assert result.name == "claude_oauth_token"
+        assert result.category == "Auth"
+        assert result.fix is None
+
+    def test_token_absent_warns_with_remediation(self):
+        """Token absent → warning (passed=True) with 'claude setup-token' remediation."""
+        from tools.doctor import _check_claude_oauth_token
+
+        env_without_token = {
+            k: v for k, v in __import__("os").environ.items() if k != "CLAUDE_CODE_OAUTH_TOKEN"
+        }
+        with patch.dict("os.environ", env_without_token, clear=True):
+            result = _check_claude_oauth_token()
+
+        assert result.passed is True  # warning, not failure
+        assert result.fix is not None
+        assert "claude setup-token" in result.fix
+
+    def test_wrong_prefix_warns_with_remediation(self):
+        """Token present but wrong prefix → warning with prefix note and remediation."""
+        from tools.doctor import _check_claude_oauth_token
+
+        with patch.dict(
+            "os.environ", {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-api03-wrongformat"}, clear=False
+        ):
+            result = _check_claude_oauth_token()
+
+        assert result.passed is True  # warning, not failure
+        assert result.fix is not None
+        assert "claude setup-token" in result.fix
+        # Should mention the malformed prefix
+        assert (
+            "sk-ant-oat01-" in result.fix
+            or "prefix" in result.fix.lower()
+            or "malformed" in result.fix.lower()
+        )
