@@ -24,6 +24,12 @@ We can produce slides (static PDF/HTML/PPTX via `/do-presentation`) and we can p
 **Desired outcome:**
 A narrated **MP4** of a deck: each slide on screen for the duration of its narration, voiceover muxed in, exported as one file — invoked from `/do-presentation` with a `--video` mode.
 
+## Authorization
+
+Issue #1726 was filed as a **feasibility assessment** that "does not commit to an approach." The feasibility work is recorded in this plan: spike-1 (no html-video BYO-audio path), spike-2 (animation not required), and spike-3 (timing data already exists) together select **approach B (in-house ffmpeg slideshow)** over approach A.
+
+**The build is authorized out-of-band.** The operator invoked the full SDLC pipeline (`/do-sdlc`) on this issue end-to-end. Driving the issue through the complete pipeline (Plan → Critique → Build → … → Merge) rather than stopping at the assessment constitutes acceptance of the feasibility output (approach B) and explicit authorization to build it. This note records that the assessment → build transition is intentional and approved, not an unauthorized leap from "evaluate" to "implement."
+
 ## Freshness Check
 
 **Baseline commit:** `6b407cde4001b90654922a939d872896b20a132e`
@@ -102,7 +108,9 @@ End-to-end flow for `/do-presentation --video`:
 2. **Deck + notes authoring** (`/do-presentation`): Marp markdown is authored as today, **plus** a per-slide narration block (see schema below) carrying the speaker text for each slide.
 3. **Slide image export** (Marp): `npx --yes @marp-team/marp-cli deck.md --images png --allow-local-files` → one PNG per slide. **Ordering safeguard:** Marp's `--images` output uses zero-padded sequence suffixes (`deck.001.png`, `deck.002.png`, ...), so a 3-digit pad keeps lexicographic order correct through 999 slides. The compositor does **not** rely on shell glob/lexicographic sort as the source of truth — it pairs each PNG with its narration by **explicit document-order index** derived from the same slide-split of the Marp source (the index `i` that produced PNG `i` is the index that produced narration block `i`), and asserts the Marp-emitted filenames are zero-padded; if Marp ever emits non-padded names, the compositor sorts numerically by the parsed sequence number rather than lexicographically.
 4. **Per-slide narration synthesis** (`valor-tts`, one call per slide): each slide's narration text → one OGG/Opus clip. Each call returns `{path, duration}`. **`duration` is not trusted blindly** — `_compute_duration_opus` returns `0.0` (not an exception) when `ffprobe` is missing or the probe fails (`tools/tts/__init__.py:327-354`). The compositor floors every clip duration: if a narrated clip reports `duration <= 0.0`, the compositor re-probes the clip directly with `ffprobe` (the binary it already requires); if that still yields `<= 0.0` it raises a descriptive error rather than emitting a zero-length slide. Slides with empty narration get a default hold duration (configurable; provisional `DECK_VIDEO_DEFAULT_HOLD_SECS=4.0`).
-5. **Compositing** (new `tools/deck_video` module, ffmpeg): build a concat timeline pairing PNG *i* with audio clip *i* for `duration_i` seconds (where every `duration_i > 0.0` by the floor in step 4); concatenate audio clips into one track; encode video (libx264) and mux the combined audio (`-c:v libx264 -c:a aac`, `-pix_fmt yuv420p`) into a single MP4.
+5. **Compositing** (new `tools/deck_video` module, ffmpeg): the canonical unit is the **slide**, not the clip. Assert `len(pngs) == total_slide_count == len(narration_blocks)` (one narration block per slide; silent slides have an empty block). For each slide *i*: if its narration block is non-empty, hold PNG *i* for that clip's floored `duration_i` (`> 0.0` by the floor in step 4); if it is empty, hold PNG *i* for `DECK_VIDEO_DEFAULT_HOLD_SECS` with no audio. Concatenate the **narrated** clips into one audio track (silent slides contribute silence of their hold length so audio and video timelines stay aligned). Then branch on whether any audio clips exist:
+   - **At least one narrated slide:** encode video (libx264) and mux the combined audio (`-c:v libx264 -c:a aac`, `-pix_fmt yuv420p`) into a single MP4.
+   - **All slides silent (zero audio clips):** there is no audio track to mux — produce a **video-only MP4** (`-c:v libx264 -pix_fmt yuv420p`, **no `-c:a` / no `-shortest`**), each slide held for `DECK_VIDEO_DEFAULT_HOLD_SECS`. This avoids constructing an ffmpeg command that references a non-existent audio input (which would produce a broken stream / non-zero exit).
 6. **Output**: `deck.mp4` written next to the deck, reported to the user with total runtime and file path.
 
 ## Architectural Impact
@@ -166,7 +174,11 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/narrated_deck_
   ```
 
   where "floored" means each narrated duration has passed the zero-length-slide guard above. The end-to-end test asserts the MP4's measured duration matches this formula within tolerance, for a fixture deck that deliberately contains **both** a narrated and a silent slide.
-- **Compositing**: synthesize one audio clip per slide; measure each clip's `duration` (reuse `valor-tts`'s returned value, then **floor it** — see below). Build the video by holding each PNG for its clip's duration, concatenate the audio clips into one track, then mux: `ffmpeg ... -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest deck.mp4`. Prefer ffmpeg's `concat` demuxer with a per-image duration list for robustness over a single complex `filter_complex`.
+- **Compositing**: synthesize one audio clip per **narrated** slide; measure each clip's `duration` (reuse `valor-tts`'s returned value, then **floor it** — see below). Build the video by holding each PNG for its clip's duration (narrated) or `DECK_VIDEO_DEFAULT_HOLD_SECS` (silent), concatenate the narrated clips into one track. **Branch on audio presence:**
+  - **≥1 narrated slide:** mux audio + video: `ffmpeg ... -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest deck.mp4`.
+  - **All-silent deck (zero audio clips):** no audio track exists — emit a **video-only MP4**: `ffmpeg ... -c:v libx264 -pix_fmt yuv420p deck.mp4` with **no `-c:a` and no `-shortest`** (a `-c:a aac`/`-shortest` command with no audio input would yield a broken stream or non-zero exit). The code must explicitly check `if not audio_clips:` and take this branch rather than constructing the mux command unconditionally.
+
+  Prefer ffmpeg's `concat` demuxer with a per-image duration list for robustness over a single complex `filter_complex`.
 - **Duration floor (zero-length-slide guard)**: `valor-tts`'s `duration` is best-effort — `_compute_duration_opus` returns `0.0` (not an exception) when `ffprobe` is missing or fails (`tools/tts/__init__.py:327-354`). Deriving on-screen time straight from that value would silently produce a zero-length slide. The compositor therefore treats `duration <= 0.0` from a **narrated** clip as a probe failure, not a real zero: it re-probes the clip directly with `ffprobe` (already a required binary), and if the re-probe still yields `<= 0.0`, it raises a descriptive error (clip path + slide index) and aborts — never emitting a zero-length slide. Empty-narration slides do not go through this path; they use `DECK_VIDEO_DEFAULT_HOLD_SECS` (see below).
 - **Integration points**: `valor-tts` (synthesis + duration), `npx @marp-team/marp-cli --images png` (slide PNGs), `/do-presentation` SKILL (authoring + `--video` invocation), new `valor-deck-video` CLI in `pyproject.toml`.
 
@@ -178,6 +190,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/narrated_deck_
 
 ### Empty/Invalid Input Handling
 - [ ] Slide with empty/missing narration → uses the default hold duration, not a crash and not a zero-length clip. Test asserts the slide appears for the default duration with silence.
+- [ ] **All-silent deck (every slide has empty narration → zero audio clips)** → the compositor takes the video-only branch and produces a playable **video-only MP4** (no audio stream, no non-zero exit, no broken stream). Test: a fixture deck where every slide's narration block is empty; assert the output MP4 is playable, has no audio stream, and total duration ≈ `count_slides * DECK_VIDEO_DEFAULT_HOLD_SECS`.
 - [ ] Deck with zero slides, or a narration block but no slides → clear error, no partial MP4. Test asserts a non-zero exit and a descriptive message.
 - [ ] Narration text that is whitespace-only → treated as empty (default hold). Test covers this.
 
@@ -204,7 +217,7 @@ No existing tests affected — this is greenfield composition over existing tool
 
 ### Risk 1: Per-slide PNG ordering / count mismatch with narration blocks
 **Impact:** Audio clip *i* paired with the wrong slide image → narration desynced from slides.
-**Mitigation:** Derive both the PNG list and the narration list from the same slide-split of the Marp source, in document order; pair by explicit document-order index, not by lexicographic filename sort (which scrambles past 9 slides if Marp ever drops zero-padding). Sort PNGs numerically by parsed sequence number, assert filenames are zero-padded as Marp emits, and assert `len(pngs) == len(narration_blocks)` before compositing — fail loudly on mismatch. A failure-path test uses a 10+ slide deck to confirm slides past index 9 stay in order.
+**Mitigation:** Marp emits exactly **one PNG per slide** (narrated or silent), but `valor-tts` synthesizes one clip only per **narrated** slide — so for any deck containing a silent slide, `len(pngs) > len(narration_clips)`. The count invariant is therefore **slide-count parity, not clip parity**: derive the canonical slide count from the same `---`-delimited slide-split of the Marp source that produces the narration list (one narration block per slide, possibly empty), and assert `len(pngs) == total_slide_count == len(narration_blocks)` before compositing — where `narration_blocks` includes empty/silent entries (one per slide). Pair PNG *i* to narration block *i* by explicit document-order index, not by lexicographic filename sort (which scrambles past 9 slides if Marp ever drops zero-padding); a slide whose narration block is empty defaults to a silent hold (`DECK_VIDEO_DEFAULT_HOLD_SECS`) rather than expecting a clip. Sort PNGs numerically by parsed sequence number and assert filenames are zero-padded as Marp emits. Fail loudly on any `len(pngs) != total_slide_count` mismatch. A failure-path test uses a 10+ slide deck to confirm slides past index 9 stay in order, and the mixed-deck E2E fixture (narrated + silent slides) exercises the `len(pngs) > len(narration_clips)` case the old clip-parity assertion would have wrongly rejected.
 
 ### Risk 2: ffmpeg image-duration encoding quirks (variable frame timing)
 **Impact:** Slides flicker, wrong durations, or A/V drift in the output MP4.
@@ -266,6 +279,8 @@ The agent reaches new functionality via a CLI entry point in `pyproject.toml [pr
 - [ ] No new external speech dependency (MiniMax) is introduced — narration reuses `valor-tts`/Kokoro.
 - [ ] `valor-deck-video` produces a playable MP4 from a fixture deck containing **both a narrated and a silent slide**: each narrated slide held for its (floored) narration duration, each silent slide held for `DECK_VIDEO_DEFAULT_HOLD_SECS`, audio muxed, total runtime ≈ `sum(floored narrated durations) + (count_silent * DECK_VIDEO_DEFAULT_HOLD_SECS)`.
 - [ ] A narrated clip reporting `duration <= 0.0` (ffprobe-missing/failure simulation) is re-probed and, if still `<= 0.0`, raises — never produces a zero-length slide.
+- [ ] An **all-silent deck** (every slide's narration block empty, zero audio clips) produces a playable **video-only MP4** with no audio stream and total duration ≈ `count_slides * DECK_VIDEO_DEFAULT_HOLD_SECS` — the compositor takes the zero-audio branch, never constructing an audio-referencing ffmpeg command.
+- [ ] PNG-count parity is asserted as `len(pngs) == total_slide_count`, not clip parity; a mixed deck where `len(pngs) > len(narration_clips)` composites successfully.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 - [ ] grep confirms `/do-presentation` SKILL references `valor-deck-video` (or the Marp+tts+compositor chain) for the `--video` path.
@@ -320,8 +335,11 @@ The lead agent orchestrates; it never builds directly.
 - Use a named, env-overridable default-hold constant (`DECK_VIDEO_DEFAULT_HOLD_SECS`, provisional 4.0s) for empty-narration slides, with a grain-of-salt comment.
 - Floor every narrated clip's duration: re-probe via `ffprobe` if `valor-tts` returns `<= 0.0`; raise (clip path + slide index) if still `<= 0.0` — never emit a zero-length slide.
 - Compute total runtime as `sum(floored narrated durations) + (count_silent * DECK_VIDEO_DEFAULT_HOLD_SECS)`.
+- Assert PNG-count parity (`len(pngs) == total_slide_count == len(narration_blocks)`, one block per slide incl. empty) before compositing; pair PNG *i* to narration block *i* by document-order index; empty block → silent hold, not an expected clip.
+- Branch the ffmpeg mux on audio presence: `if not audio_clips:` emit a **video-only MP4** (`-c:v libx264 -pix_fmt yuv420p`, no `-c:a`, no `-shortest`); otherwise mux audio + video. Never construct an audio-referencing command when zero clips exist.
 - Write all intermediate artifacts (PNGs, audio clips, concat list) under one temp directory and clean it up in a `try/finally` on both success and failure, leaving only `deck.mp4`.
-- Implement `tools/deck_video/cli.py:main` (`valor-deck-video`), surfacing missing-binary errors with actionable messages and non-zero exits.
+- Implement `tools/deck_video/cli.py:main` (`valor-deck-video`), surfacing missing-binary errors with actionable messages and non-zero exits. **Guard prerequisites at the start of `main` (and the compositor entrypoint):** check `ffmpeg`, `ffprobe`, the Marp CLI (`npx --yes @marp-team/marp-cli --version`), and `valor-tts` are resolvable before doing any work; if any is missing, emit an actionable message naming the missing tool and exit non-zero — do not begin Marp export or synthesis only to fail mid-pipeline.
+- **Do NOT edit `pyproject.toml` in this task** — the `[project.scripts]` entry is owned solely by the skill-wiring task (step 2) to avoid a parallel-write conflict between the two `Parallel: true` builders. This task only creates files under `tools/deck_video/`.
 
 ### 2. Wire the skill + CLI registration
 - **Task ID**: build-skill-wiring
@@ -332,7 +350,7 @@ The lead agent orchestrates; it never builds directly.
 - **Parallel**: true
 - Add `--video` mode and the narration-block schema to `.claude/skills-global/do-presentation/SKILL.md`, plus a version-history entry.
 - **Amend the "Narration / voiceover" section of `do-presentation/SKILL.md` (lines 316-318)**: carve out an explicit exception stating that the `valor-deck-video` CLI is an approved direct consumer of `valor-tts` for the automated `--video` pipeline (it needs structured per-clip `duration`), while the "defer to `/do-voice-recording`" rule continues to govern the manual narration path. Removes the contradiction with the current "don't shell out to `valor-tts` here" wording.
-- Add `valor-deck-video = "tools.deck_video.cli:main"` to `pyproject.toml [project.scripts]`.
+- Add `valor-deck-video = "tools.deck_video.cli:main"` to `pyproject.toml [project.scripts]`. **This task is the sole writer of `pyproject.toml`** — the compositor task (step 1) deliberately does not touch it, so the two `Parallel: true` builders never write the file concurrently.
 - Add `valor-deck-video` to the CLAUDE.md Quick Commands table.
 
 ### 3. Write tests
@@ -343,7 +361,7 @@ The lead agent orchestrates; it never builds directly.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - E2E: 2-slide fixture deck → `valor-deck-video` → assert playable MP4, total duration ≈ sum of clip durations (within tolerance), audio stream present.
-- Failure paths: missing binary message+exit; empty/whitespace narration uses default hold; slide/audio count mismatch fails loudly; zero-slide deck errors; narrated clip with `duration <= 0.0` (ffprobe failure simulation) re-probes then raises; 10+ slide deck preserves order past index 9; partial-failure run leaves no temp files behind.
+- Failure paths: missing binary message+exit; empty/whitespace narration uses default hold; **all-silent deck (zero audio clips) → video-only MP4 with no audio stream, total duration ≈ `count_slides * DECK_VIDEO_DEFAULT_HOLD_SECS`**; PNG-count parity (`len(pngs) == total_slide_count`) mismatch fails loudly — a mixed deck (narrated + silent) where `len(pngs) > len(narration_clips)` must **pass**, not be rejected; zero-slide deck errors; narrated clip with `duration <= 0.0` (ffprobe failure simulation) re-probes then raises; 10+ slide deck preserves order past index 9; partial-failure run leaves no temp files behind.
 
 ### 4. Validate build + tests
 - **Task ID**: validate-impl
@@ -391,6 +409,11 @@ The lead agent orchestrates; it never builds directly.
 | CONCERN | critique | Marp PNG lexicographic sort scrambles order past 9 slides | Data Flow step 3; Risk 1 | Pair by explicit document-order index; sort numerically by parsed sequence; assert zero-padding; 10+ slide ordering test. |
 | CONCERN | critique | Two unresolved first-class surfaces in Open Question 1 (flag vs separate skill) | Resolved Decisions §1 | Resolved in favor of `--video` flag with rationale; no separate skill. Only the resolution/aspect preference remains deferred. |
 | NIT | critique | No temp cleanup on partial failure | Failure Path "Temp File Cleanup"; compositor task; Architectural Impact | Single temp dir, `try/finally` cleanup on success and failure; test forces mid-pipeline failure and asserts temp dir gone. |
+| BLOCKER (2nd pass) | critique | `assert len(pngs) == len(narration_blocks)` is wrong for mixed decks — Marp emits one PNG per slide, valor-tts one clip per *narrated* slide, so any silent slide makes the assertion always raise | Risk 1; Data Flow step 5; Technical Approach compositing; compositor task; Success Criteria | Changed invariant to slide-count parity: `len(pngs) == total_slide_count == len(narration_blocks)` (one block per slide, empty for silent); pair PNG↔slide by index; empty block → silent hold. Mixed-deck E2E fixture exercises `len(pngs) > len(narration_clips)`. |
+| BLOCKER (2nd pass) | critique | All-silent deck has no defined ffmpeg muxing path — zero audio clips → broken stream / non-zero exit | Data Flow step 5; Technical Approach compositing; Failure Path "Empty/Invalid Input"; compositor task; tests; Success Criteria | Added explicit `if not audio_clips:` branch → video-only MP4 (`-c:v libx264 -pix_fmt yuv420p`, no `-c:a`/`-shortest`). Added all-silent fixture test. |
+| BLOCKER (2nd pass) | critique | Plan jumps from feasibility assessment to full build with no authorization gate | New "## Authorization" section | Records that the operator invoked `/do-sdlc` end-to-end on #1726, which accepts the feasibility output (approach B) and authorizes the build; the assessment → build transition is explicit and approved. |
+| CONCERN (2nd pass) | critique | No CLI prerequisite guard (ffmpeg/marp present) | Compositor task; Error State Rendering | `main`/compositor entrypoint guards ffmpeg, ffprobe, Marp CLI, valor-tts before any work; actionable message + non-zero exit if missing. |
+| CONCERN (2nd pass) | critique | skill-builder over-split with pyproject.toml parallel-write conflict | Compositor task; skill-wiring task | Serialized: step 2 (skill-wiring) is the sole writer of `pyproject.toml`; step 1 (compositor) explicitly does not touch it. |
 
 ---
 
