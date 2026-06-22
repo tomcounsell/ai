@@ -98,14 +98,33 @@ symptom), it silently diverted the write to the wrong issue's session.
 6. `do-sdlc` §3c: confirmed args-only hand-off (no `export SDLC_ISSUE_NUMBER`) — the skill
    re-parses the number from `$ARGUMENTS` directly.
 
-**The two layers are distinct and complementary:**
+**The three layers are distinct and complementary:**
 
-| Layer | PR / Issue | What it fixes |
-|-------|-----------|---------------|
-| Recorder session resolution | #1671/#1672 (PR #1673) | Given a real `--issue-number N`, the write lands on the issue-scoped session, not the env-var session |
-| Skill arg/env passing | #1731 | Ensures the `--issue-number N` value is actually produced inside the forked skill (so the recorder layer has something to work with) |
+| Layer | Where | PR | What it does |
+|-------|-------|----|-------------|
+| Skill-arg | Forked skill invocations | #1736 (#1731) | Unconditionally passes `--issue-number N` to recorder CLI |
+| Precedence | `find_session()` resolution | #1673 (#1671/#1672) | Issue-based lookup beats env-var fallback when `N` is present |
+| Ownership guard | Recorder CLIs (`sdlc_verdict`, `sdlc_stage_marker`) | PR for #1735 | After resolution, verifies the resolved session owns `N`; exits 1 with stderr if not — prevents silent artifact divert |
 
-Neither layer can compensate for the other. Together they close the full divert path.
+No single layer can compensate for the others. Together they close the full divert path.
+
+### Recorder-layer ownership guard (issue #1735)
+
+After `find_session()` resolves a session, the recorder CLIs (`sdlc_verdict` and `sdlc_stage_marker`) apply a final ownership check via `session_owns_issue()` in `tools/_sdlc_utils.py`.
+
+**When it fires:** `--issue-number N` was explicitly passed as a CLI argument AND the resolved session does not own issue N. The recorder exits 1 and prints a stderr diagnostic naming both the issue number and the resolved session id. No write occurs.
+
+**When it does NOT fire:** `--issue-number` was omitted entirely. Bridge PM sessions that rely on env-var resolution (`VALOR_SESSION_ID` / `AGENT_SESSION_ID`) are completely unaffected — the guard is scoped to the explicit-arg path.
+
+**Three ownership predicates** checked by `session_owns_issue(session, N)`:
+1. `session.issue_url` ends with `/issues/{N}` — the standard bridge PM session ownership signal
+2. `session.session_id == "sdlc-local-{N}"` — the deterministic id assigned by `session-ensure` for sessionless-local runs
+3. `session.message_text` matches `\bissue\s*#?\s*{N}\b` (case-insensitive) — catches conversational session creation where neither of the above is set
+
+**How it complements the prior two layers:**
+- The skill-arg layer (PR #1736) guarantees a real N is always produced and passed to the recorder — so the ownership check always has something to evaluate.
+- The precedence layer (PR #1673) resolves the correct session when an `issue_url`-owning PM session or a `sdlc-local-{N}` record exists — so the ownership check usually passes immediately.
+- The ownership guard catches the residual case: a real N was passed, but `find_session()` resolved to a session that happens to be in scope (e.g. via env var) but does not own that issue. Without this guard, the verdict or marker would be silently written to the wrong session.
 
 ### Session resolution precedence (issue #1671/#1672)
 
