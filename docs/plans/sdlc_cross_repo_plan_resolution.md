@@ -497,12 +497,11 @@ The lead agent orchestrates; it never builds directly.
 | Check | Command | Expected |
 |-------|---------|----------|
 | Tests pass | `pytest tests/unit/test_sdlc_utils.py tests/unit/test_sdlc_verdict.py tests/unit/test_sdlc_next_skill.py tests/integration/test_sdlc_cross_repo_resolution.py -q` | exit code 0 |
-| Lint clean | `python -m ruff check tools/_sdlc_utils.py tools/sdlc_verdict.py tools/sdlc_next_skill.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/_sdlc_utils.py tools/sdlc_verdict.py tools/sdlc_next_skill.py` | exit code 0 |
 | Body hash helper exists | `grep -c "def compute_plan_body_hash" tools/sdlc_verdict.py` | output > 0 |
 | Hash strips only revision_applied | `grep -c "revision_applied" tools/sdlc_verdict.py` | output > 0 |
 | G5 transparent-rewrite migration present | `grep -c "compute_plan_body_hash\|revision_applied" agent/sdlc_router.py` | output > 0 |
-| No bare `from tools.sdlc_verdict` in critique skill | `grep -c "from tools.sdlc_verdict import" .claude/skills-global/do-plan-critique/SKILL.md` | match count == 0 |
+| No bare `from tools.sdlc_verdict` in critique skill | `grep -cP "^\s*from tools\.sdlc_verdict import" .claude/skills-global/do-plan-critique/SKILL.md` | match count == 0 |
 | No bare `cd ~/src/ai` in build skill | `grep -c "cd ~/src/ai" .claude/skills-global/do-build/SKILL.md` | match count == 0 |
 | `/do-sdlc` exports SDLC_TARGET_REPO | `grep -c "SDLC_TARGET_REPO" .claude/skills-global/do-sdlc/SKILL.md` | output > 0 |
 

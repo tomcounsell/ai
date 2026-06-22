@@ -416,9 +416,7 @@ def guard_g5_artifact_hash_cache(
                     legacy_hash = _legacy_hash(plan_path)
                     if legacy_hash == cached_hash:
                         # Only delta is revision_applied — rewrite in-place.
-                        import logging
-
-                        logging.getLogger(__name__).warning(
+                        logger.warning(
                             "G5 migration: rewriting artifact_hash from legacy "
                             "full-bytes to revision_applied-stripped hash for "
                             "issue %s (old=%s, new=%s)",
@@ -430,9 +428,7 @@ def guard_g5_artifact_hash_cache(
                         cached_hash = current_hash
                         # Fall through to normal cache-hit evaluation below.
             except Exception as _e:
-                logging.getLogger(__name__).debug(
-                    "G5 migration: exception during legacy-hash check: %s", _e
-                )
+                logger.debug("G5 migration: exception during legacy-hash check: %s", _e)
         if cached_hash != current_hash:
             return None
 
