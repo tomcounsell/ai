@@ -237,7 +237,8 @@ deferred until optimistic retry proves insufficient in production.
 ## Regression Coverage
 
 - `tests/unit/test_sdlc_router_decision.py` — pure-function tests for every
-  dispatch rule row (1 through 10b).
+  dispatch rule row (1 through 10b), including `TestReviewInProgressNoVerdictDeadEnd`
+  (row 8c, 7 cases mirroring `TestCritiqueInProgressNoVerdictDeadEnd`).
 - `tests/unit/test_sdlc_router_oscillation.py` — one test per guard (G1-G6),
   snapshot/counter helpers, guard ordering, the 12-step #1036 replay
   (`test_1036_replay_terminates`), and the 8-step #1043 PR #264 replay
@@ -268,4 +269,6 @@ deferred until optimistic retry proves insufficient in production.
   #941 (local session tracking), #1005 (PM-level pipeline completion guards),
   #1036 (the regression G1-G5 fix), #1043 (G6 terminal-state fast-path and
   self-authored PR review loop fix), #1638 (verdict normalization),
-  #1640 (plan existence evidence gate), #1641 (stale-verdict supersession).
+  #1640 (plan existence evidence gate), #1641 (stale-verdict supersession),
+  #1668 (CRITIQUE empty-verdict re-dispatch, row 2c), #1687 (REVIEW empty-verdict
+  re-dispatch, row 8c — this PR).
