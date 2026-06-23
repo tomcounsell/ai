@@ -50,13 +50,16 @@ async def replay_dead_letters(client) -> int:
 
         # Guard against invalid chat_id=0 (not a valid Telegram peer).
         # Clean up any stuck dead letters from previous relay bugs.
+        # Narrowed from <= 0 in lockstep with telegram_relay.py:_dead_letter_message —
+        # group/supergroup IDs are legitimately negative (#1749 defect 3).
         try:
             chat_id_int = int(chat_id)
         except (ValueError, TypeError):
             chat_id_int = 0
-        if chat_id_int <= 0:
+        if chat_id_int == 0:
             logger.warning(
-                f"Dead letter replay: discarding invalid chat_id={chat_id!r}, deleting record"
+                f"Dead letter replay: discarding record with chat_id=0 "
+                f"(not a valid Telegram peer): {chat_id!r}"
             )
             await letter.async_delete()
             continue

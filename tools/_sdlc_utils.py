@@ -386,9 +386,22 @@ def find_plan_path(issue_number: int) -> Path | None:
 
     Each step falls through on failure (not a git repo, ``git`` missing) so a
     missing env var degrades to "correct" rather than "silently wrong".
+
+    **Bare-#N fallback safety (CONCERN 3):** When resolution reached step 3
+    (``__file__`` fallback — SDLC_TARGET_REPO unset and not inside any git
+    repo), a bare-``#N`` textual match is suppressed and None is returned.
+    A bare mention of an issue number in the ai-repo plans is likely a
+    cross-reference or No-Gos entry referencing a foreign (target-repo) issue,
+    not the plan that actually owns it.  The ``tracking:`` match is always
+    authoritative and is returned immediately regardless of resolution path.
     """
     if not issue_number:
         return None
+
+    # Track whether we fell all the way to the __file__ fallback.  A bare-#N
+    # match from this path is likely a foreign cross-reference and must be
+    # suppressed so the caller knows to trigger plan creation in the target repo.
+    _is_ai_repo_fallback = False
 
     repo_root_env = os.environ.get("SDLC_TARGET_REPO")
     if repo_root_env:
@@ -398,6 +411,9 @@ def find_plan_path(issue_number: int) -> Path | None:
         if toplevel is not None:
             plans_dir = toplevel / "docs" / "plans"
         else:
+            # Resolution fell back to the ai-repo __file__ path.  Flag this so
+            # the bare-#N fallback can be suppressed below.
+            _is_ai_repo_fallback = True
             plans_dir = Path(__file__).resolve().parent.parent / "docs" / "plans"
 
     if not plans_dir.is_dir():
@@ -422,9 +438,15 @@ def find_plan_path(issue_number: int) -> Path | None:
             except Exception:
                 continue
             if tracking_re.search(text):
+                # tracking: match is authoritative regardless of resolution path.
                 return entry
             if fallback is None and ref_re.search(text):
                 fallback = entry
     except Exception as e:
         logger.debug(f"find_plan_path walk failed: {e}")
-    return fallback
+
+    # When plan resolution fell back to the ai-repo __file__ path
+    # (SDLC_TARGET_REPO unset, not in a git repo), a bare-#N textual match is
+    # likely a foreign plan that merely mentions the issue — return None to
+    # force re-planning in the target repo.
+    return None if (_is_ai_repo_fallback and fallback is not None) else fallback

@@ -934,3 +934,170 @@ class TestReviewMarkerDesync:
         # Must NOT route to /do-docs (row 9 requires REVIEW == completed).
         if isinstance(result, Dispatch):
             assert result.skill != SKILL_DO_DOCS
+
+
+class TestReviewInProgressNoVerdictDeadEnd:
+    """REVIEW in_progress with NO recorded verdict must re-dispatch /do-pr-review (#1687).
+
+    Gap A (REVIEW path analogue of CRITIQUE row 2c / #1668): /do-pr-review ran
+    (REVIEW marker == "in_progress") but never persisted a verdict, so
+    _verdicts.REVIEW is empty and latest_review_verdict is None. With rows 7/8/8b
+    all missing (no verdict, no completed PATCH), the router fell through to
+    Blocked('no matching dispatch rule'). Row 8c recovers by re-dispatching
+    /do-pr-review.
+
+    Gap demonstration (concern #1): the UNFIXED router state (REVIEW in_progress,
+    empty verdict, no completed PATCH, PR present) is confirmed below via the
+    no-8c baseline fixture. The post-fix assertion documents the closed gap.
+    """
+
+    def _dead_end_states(self) -> dict:
+        """Reconstructed dead-end state: REVIEW in_progress, no verdict recorded."""
+        return {
+            "ISSUE": "ready",
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "PATCH": "pending",
+            "REVIEW": "in_progress",  # marker stuck — review ran but no verdict
+            "DOCS": "pending",
+            "MERGE": "pending",
+            "_verdicts": {},  # review ran but never recorded a verdict
+            "_sdlc_dispatches": [
+                {"skill": "/do-build", "at": "2026-06-14T10:00:00+00:00"},
+                {"skill": "/do-pr-review", "at": "2026-06-14T10:30:00+00:00"},
+            ],
+        }
+
+    def test_in_progress_no_verdict_pr_present_redispatches_review(self):
+        """REVIEW in_progress + empty verdict + PR present → re-dispatch /do-pr-review (row 8c).
+
+        This is the fixed state: what was previously Blocked('no matching dispatch rule')
+        (Gap A) now resolves to Dispatch(/do-pr-review) via new row 8c.
+        """
+        states = self._dead_end_states()
+        meta = {
+            "issue_number": 1687,
+            "pr_number": 9999,
+            "latest_review_verdict": None,
+            "last_dispatched_skill": SKILL_DO_PR_REVIEW,
+        }
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch), f"expected Dispatch, got {result!r}"
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.row_id == "8c"
+
+    def test_in_progress_no_verdict_no_pr_does_not_fire_8c(self):
+        """No PR → row 8c must NOT fire (REVIEW only exists post-PR).
+
+        Defensive safety gate: a REVIEW in_progress state with no PR is
+        structurally impossible in a well-ordered pipeline, but the predicate
+        guards against it explicitly.
+        """
+        states = self._dead_end_states()
+        states["REVIEW"] = "in_progress"
+        meta = {
+            "issue_number": 1687,
+            "pr_number": None,
+            "latest_review_verdict": None,
+            "last_dispatched_skill": SKILL_DO_PR_REVIEW,
+        }
+        result = decide_next_dispatch(states, meta)
+        # Row 8c requires pr_number; without it, must NOT fire 8c.
+        if isinstance(result, Dispatch):
+            assert result.row_id != "8c", "8c fired without a PR — predicate gate broken"
+
+    def test_whitespace_only_verdict_treated_as_empty_fires_8c(self):
+        """A whitespace-only verdict must be treated as empty so row 8c fires.
+
+        Mirrors the .strip() correctness requirement from critique concern #2:
+        a verdict of " " or "\n" must NOT read as "recorded" — it must fire 8c.
+        """
+        states = self._dead_end_states()
+        states["REVIEW"] = "in_progress"
+        states["_verdicts"] = {"REVIEW": {"verdict": "   ", "recorded_at": None}}
+        meta = {
+            "issue_number": 1687,
+            "pr_number": 9999,
+            "latest_review_verdict": "   ",  # whitespace only
+            "last_dispatched_skill": SKILL_DO_PR_REVIEW,
+        }
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch), f"expected Dispatch, got {result!r}"
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.row_id == "8c", f"expected row 8c, got {result.row_id!r}"
+
+    def test_patch_applied_after_review_defers_to_8b_not_8c(self):
+        """Row 8b (patch applied) owns states 8c must step aside from.
+
+        8c steps aside for 8b when PATCH==completed AND last_dispatched_skill==/do-patch
+        (the three-condition 8b predicate). Using _rule_patch_applied_after_review
+        as the gate (not a bare PATCH==completed check) is load-bearing.
+        """
+        states = self._dead_end_states()
+        states["REVIEW"] = "in_progress"
+        states["PATCH"] = "completed"
+        meta = {
+            "issue_number": 1687,
+            "pr_number": 9999,
+            "latest_review_verdict": None,
+            "last_dispatched_skill": SKILL_DO_PATCH,  # row 8b\'s third condition
+        }
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch), f"expected Dispatch, got {result!r}"
+        assert result.skill == SKILL_DO_PR_REVIEW
+        # Row 8b owns this state (patch applied after review), not 8c.
+        assert result.row_id == "8b", f"expected row 8b, got {result.row_id!r}"
+
+    def test_patch_completed_wrong_last_skill_8c_owns_state(self):
+        """PATCH completed but last_dispatched_skill != /do-patch → 8b does not own it, 8c must.
+
+        This is the "Blocked leak" prevention case: if we used a bare
+        PATCH==completed check in 8c, this state would fall through both 8b and 8c
+        to Blocked. Gating on _rule_patch_applied_after_review() exactly means 8c
+        correctly owns this case and re-dispatches /do-pr-review.
+        """
+        states = self._dead_end_states()
+        states["REVIEW"] = "in_progress"
+        states["PATCH"] = "completed"
+        meta = {
+            "issue_number": 1687,
+            "pr_number": 9999,
+            "latest_review_verdict": None,
+            "last_dispatched_skill": SKILL_DO_BUILD,  # NOT /do-patch — 8b skips it
+        }
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch), f"expected Dispatch, got {result!r}"
+        assert result.skill == SKILL_DO_PR_REVIEW
+        # 8b did not fire (wrong last_dispatched_skill), so 8c must own this state.
+        assert result.row_id == "8c", f"expected row 8c, got {result.row_id!r}"
+
+    def test_recorded_verdict_unaffected_routes_via_row8(self):
+        """A recorded CHANGES REQUESTED verdict still routes via row 8 — not 8c."""
+        states = self._dead_end_states()
+        states["REVIEW"] = "in_progress"
+        states["_verdicts"] = {
+            "REVIEW": {"verdict": "CHANGES REQUESTED", "recorded_at": "2026-06-14T10:45:00+00:00"}
+        }
+        meta = {
+            "issue_number": 1687,
+            "pr_number": 9999,
+            "latest_review_verdict": "CHANGES REQUESTED",
+            "last_dispatched_skill": SKILL_DO_PR_REVIEW,
+        }
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PATCH
+        assert result.row_id == "8", f"expected row 8, got {result.row_id!r}"
+
+    def test_ordering_8b_before_8c_before_9(self):
+        """Row ordering: 8b must precede 8c, which must precede 9 in DISPATCH_RULES."""
+        from agent.sdlc_router import DISPATCH_RULES
+
+        row_ids = [r.row_id for r in DISPATCH_RULES]
+        idx_8b = row_ids.index("8b")
+        idx_8c = row_ids.index("8c")
+        idx_9 = row_ids.index("9")
+        assert idx_8b < idx_8c, f"8b ({idx_8b}) must come before 8c ({idx_8c})"
+        assert idx_8c < idx_9, f"8c ({idx_8c}) must come before 9 ({idx_9})"

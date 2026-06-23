@@ -55,6 +55,36 @@ The wrapper has a hard-coded allowlist of subcommands. Unknown subcommands exit 
 
 Adding a new subcommand: append to `ALLOWED_SUBCOMMANDS` in `scripts/sdlc-tool`. The kebab-case name maps to `tools.sdlc_<snake_case>` automatically.
 
+## Cross-Repo Plan Resolution (issue #1761)
+
+`sdlc-tool` forces cwd to `~/src/ai` so the correct `tools/` package loads. This is correct and load-bearing. The consequence: `find_plan_path` inside `sdlc-tool` previously resolved plans from the ai-repo's `docs/plans/`, not the target repo's — causing the PLAN↔CRITIQUE loop when running a local `/do-sdlc` against a non-ai-repo issue.
+
+### SDLC_TARGET_REPO vs SDLC_REPO (GH_REPO)
+
+Two distinct env vars now govern where things live:
+
+| Env var | Shape | Set by | Used for |
+|---------|-------|--------|----------|
+| `SDLC_REPO` | GitHub slug (`org/repo`) | `/do-sdlc` Step 2 via `gh repo view` | `gh` CLI calls (`gh issue view`, `gh pr create`, etc.) |
+| `SDLC_TARGET_REPO` | Filesystem path (absolute) | `/do-sdlc` Step 2 via `git rev-parse --show-toplevel`; bridge path via `agent/sdk_client.py:1590` | `find_plan_path` plans-dir resolution inside `sdlc-tool` |
+
+**Before #1761:** local `/do-sdlc` never set `SDLC_TARGET_REPO`. `find_plan_path` fell through to `_git_toplevel()` (which resolves `~/src/ai` because that is `sdlc-tool`'s forced cwd), then to the `__file__` fallback — also `~/src/ai`. A target-repo plan was never found; `revision_applied: true` was never read; router row 4c was unreachable.
+
+**After #1761:** `/do-sdlc` Step 2 runs `git rev-parse --show-toplevel` in the supervision cwd (the target repo) and exports the result as `SDLC_TARGET_REPO` before the loop starts. Every `sdlc-tool` subprocess (cwd forced to `~/src/ai`) inherits it and uses it as the plans-dir root.
+
+### `find_plan_path` hardening
+
+Three-level plan-dir resolution (unchanged precedence):
+1. `SDLC_TARGET_REPO` env var — explicit override.
+2. `_git_toplevel()` — cwd's git root (falls through on non-git cwd).
+3. `__file__`-relative fallback — `~/src/ai/docs/plans`.
+
+**New guard (level 3 only):** when resolution fell back to the `__file__` path (SDLC_TARGET_REPO unset AND not in a git repo), a bare-`#N` textual match is likely a foreign plan that merely *mentions* the issue number. `find_plan_path` now returns `None` instead of the foreign plan — a recoverable signal (router surfaces "plan not found / re-run /do-plan") rather than silent corruption. The `tracking:` match remains authoritative on all resolution levels and is never suppressed.
+
+### G5 transparent-rewrite migration
+
+With `revision_applied`-stripped plan hashing (see `sdlc-pipeline-portability.md` — D8), a stored pre-#1761 full-bytes `artifact_hash` may mismatch the new body-only `current_plan_hash` for build-ready in-flight issues. `guard_g5_artifact_hash_cache` transparently self-heals on its first router pass: when `cached_hash != current_hash`, it recomputes the legacy full-bytes hash of the current plan. If that legacy hash equals the stored `cached_hash` (only delta is the `revision_applied:` line), it rewrites `record["artifact_hash"]` in-place to the new hash and emits a WARNING log, then falls through to the normal cache-hit path. No operator step required; no backfill script.
+
 ## Session resolution and write-path auto-ensure (`find_session(..., ensure=True)`)
 
 All `sdlc-tool` subcommands store/read pipeline state on a **PM `AgentSession`'s `stage_states`** in Redis — not in the plan file or git. They resolve that session through the shared resolver `find_session(session_id=None, issue_number=None, ensure=False)` in `tools/_sdlc_utils.py`.

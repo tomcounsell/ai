@@ -91,3 +91,81 @@ def test_boundary_longer_issue_number_does_not_match(tmp_path):
 
     resolved = _resolve_plan_in(repo, 145)
     assert resolved == ""
+
+
+def _resolve_plan_with_env(env_repo: Path, issue_number: int) -> str:
+    """Run find_plan_path with SDLC_TARGET_REPO set, cwd forced to REPO_ROOT (ai-repo)."""
+    env = {k: v for k, v in os.environ.items() if k != "SDLC_TARGET_REPO"}
+    code = textwrap.dedent(
+        f"""
+        from tools._sdlc_utils import find_plan_path
+        p = find_plan_path({issue_number})
+        print(p if p else "")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(REPO_ROOT),  # force cwd to ai-repo (simulates sdlc-tool behaviour)
+        capture_output=True,
+        text=True,
+        env={
+            **env,
+            "PYTHONPATH": str(REPO_ROOT),
+            "SDLC_TARGET_REPO": str(env_repo),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_sdlc_target_repo_honored_even_when_cwd_is_ai_repo(tmp_path):
+    """SDLC_TARGET_REPO is used by find_plan_path even when cwd is the ai-repo.
+
+    This is the end-to-end regression test for issue #1761: sdlc-tool forces
+    cwd to ~/src/ai, so without SDLC_TARGET_REPO the resolver finds plans
+    in the ai-repo instead of the target repo.
+    """
+    target_repo = tmp_path / "client-repo"
+    plans_dir = target_repo / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    plan = plans_dir / "client-feature.md"
+    plan.write_text("tracking: https://github.com/client/repo/issues/6161\n")
+
+    resolved = _resolve_plan_with_env(target_repo, 6161)
+    assert resolved == str(plan)
+
+
+def test_file_fallback_bare_mention_suppressed(tmp_path):
+    """When only the __file__ fallback resolves and we're not in any git repo,
+    a bare-#N textual match returns None (suppressed per CONCERN 3, #1761).
+
+    This test runs a subprocess with cwd set to a non-git directory so that
+    _git_toplevel returns None, forcing the __file__ fallback.  The ai-repo
+    docs/plans directory contains no plan for issue 8888, so the result is None.
+    We plant a plan in a *non-git* tmp dir to simulate a foreign cross-reference
+    that must NOT be returned.
+    """
+    # Create a non-git temp directory to use as cwd (no git init).
+    non_git_dir = tmp_path / "not-a-repo"
+    non_git_dir.mkdir()
+
+    env = {k: v for k, v in os.environ.items() if k != "SDLC_TARGET_REPO"}
+    code = textwrap.dedent(
+        """
+        from tools._sdlc_utils import find_plan_path
+        # Issue 8888888 extremely unlikely to be in the real ai-repo plans dir.
+        p = find_plan_path(8888888)
+        print(p if p else "")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(non_git_dir),  # not a git repo — forces __file__ fallback
+        capture_output=True,
+        text=True,
+        env={**env, "PYTHONPATH": str(REPO_ROOT)},
+    )
+    assert result.returncode == 0, result.stderr
+    # When __file__ fallback is used and no tracking: match exists, bare-#N
+    # must return None (suppressed).
+    assert result.stdout.strip() == ""

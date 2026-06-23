@@ -267,7 +267,14 @@ Tag legend:
   `gh issue view NNN` to confirm; tracking-only promises with no issue fail.
 
 If nothing is genuinely out of scope, write: "Nothing deferred — every
-relevant item is in scope for this plan."]
+relevant item is in scope for this plan."
+
+**Anti-criteria tip:** For any No-Go describing a forbidden *code-level outcome*
+(especially `[DESTRUCTIVE]` and `[SEPARATE-SLUG]` entries), add a corresponding
+`## Verification` row asserting its absence — these inverse rows are anti-criteria.
+`[EXTERNAL]` and `[ORDERED]` No-Gos are genuinely advisory and are never required
+to have an anti-criterion (they describe human/world actions, not checkable code
+outcomes). See `docs/features/machine-readable-dod.md` for examples.]
 
 - [EXTERNAL] [Item that needs a real human/world action — explain why]
 - [ORDERED] [Item blocked by a human-gated event — name the event]
@@ -425,7 +432,28 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 [Machine-readable checks that `/do-build` executes automatically after the build.
 Each row is a named check with an executable command and expected result.
-Supported expectations: "exit code N", "output > N", "output contains X".]
+
+**Positive expectations** (the command must succeed or produce the expected output):
+- `exit code N` — passes when exit_code == N (positive exact-match; e.g. `exit code 0` for success, `exit code 1` for "grep found no matches")
+- `output > N` — passes when stdout (as integer) is greater than N
+- `output contains X` — passes when substring X appears in stdout
+
+**Inverse expectations / anti-criteria** (the command must NOT produce a forbidden result):
+- `exit code != N` — passes when exit_code != N (command must fail or exit differently than N)
+- `output does not contain X` — passes when X is absent from stdout AND stdout is non-empty (empty-stdout gate prevents false-passes from errored commands)
+- `match count == 0` — passes when every non-blank stdout line is "0" or ends with ":0" (supports `grep -c`, `grep -rc`, and `grep -r ... | wc -l` shapes) AND stdout is non-empty
+
+**Note:** `exit code N` is a positive exact-match (passes when `exit_code == N`).
+`exit code != N` is the inverse (passes when `exit_code != N`). The two are syntactically
+disjoint and unambiguous. The existing `exit code 1` sample row ("No stale xfails") is
+a positive exact-match — it stays as-is.
+
+**Anti-criteria** are inverse rows in this table that assert a forbidden code-level
+outcome from a No-Go cannot be detected in the PR. They are opt-in: only add an
+inverse row when you can write a command that mechanically detects the violation.
+When authoring an anti-criterion, demonstrate it FAILS against a deliberately-violating
+input first (red-state proof), then paste that FAIL output into the PR description as a
+paper trail. See `docs/features/machine-readable-dod.md` for a worked example.]
 
 | Check | Command | Expected |
 |-------|---------|----------|
@@ -433,6 +461,7 @@ Supported expectations: "exit code N", "output > N", "output contains X".]
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
+| [Anti-criterion example] | `grep -c "forbidden_pattern" changed/file.py` | match count == 0 |
 | [Feature-specific check] | `[command]` | [expected] |
 
 ## Critique Results
