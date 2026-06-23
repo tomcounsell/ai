@@ -59,6 +59,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import subprocess
 import time
 import uuid
@@ -95,6 +96,74 @@ _STARTUP_ALERT_REDIS_KEY_PREFIX = "granite:startup_alert_cooldown"
 # Process-local last-alert monotonic timestamps keyed by machine name.
 # Module-level so it persists across calls within the same worker process.
 _startup_alert_last_sent: dict[str, float] = {}
+
+
+# ---------------------------------------------------------------------------
+# PTY buffer normalization for the diff-gate (#1768)
+# ---------------------------------------------------------------------------
+
+# Spinner glyph cycle chars. The TUI cycles the leading glyph per animation
+# frame (·, •, ✻, ✶, ✳, ✢, ✽ on the live versions sampled in PR #1612).
+# These appear both as full `<glyph> Verb…` frames and as bare
+# cursor-positioned cell fragments (`✻i…`, `✽hg`) during animation.
+_SPINNER_GLYPHS = "·•✻✶✳✢✽"
+
+# Full spinner-verb frame plus the "esc to interrupt" processing hint. Reused
+# from pty_driver.SPINNER_EVIDENCE_RE so the two stay in lockstep; matches
+# `<glyph> <word>…` and "esc to interrupt".
+_SPINNER_VERB_RE = re.compile(
+    rf"[{_SPINNER_GLYPHS}]\s*[A-Za-z][A-Za-z\-']{{2,30}}\s*[…\.]{{1,3}}|esc to interrupt",
+    re.IGNORECASE,
+)
+
+# Bare spinner-glyph fragments (animation cell fragments with no verb, e.g.
+# `✻`, `✽hg`). Conservative: only strips the glyph and an immediately-
+# following short alnum fragment, not arbitrary surrounding text.
+_SPINNER_GLYPH_FRAGMENT_RE = re.compile(rf"[{_SPINNER_GLYPHS}][A-Za-z…\.]{{0,4}}")
+
+# Elapsed-seconds counter the TUI repaints each second in the status/spinner
+# bar (e.g. `· 12s ·`, `(12s)`, `12s ·`). Conservative: only strips a
+# standalone digits+`s` token that sits in a spinner/status-bar context
+# (bounded by `·`, parentheses, or whitespace), never arbitrary text that
+# merely contains digits followed by `s`.
+_ELAPSED_SECS_RE = re.compile(r"(?:(?<=[·(\s])|^)\d+s(?=[·)\s]|$)")
+
+# Trailing whitespace on each line plus runs of blank lines collapse so a
+# settled screen with a blinking cursor (which shifts trailing spaces around)
+# produces a stable string.
+_TRAILING_WS_RE = re.compile(r"[ \t]+$", re.MULTILINE)
+_BLANK_RUN_RE = re.compile(r"\n{2,}")
+
+
+def _normalize_pty_buffer(buffer: str) -> str:
+    """Strip animation-only noise so a quiescent-but-animating TUI is stable.
+
+    The diff-gate in `_on_pty_read` stamps `last_pty_activity_at` only when the
+    buffer differs from the prior read. A wedged-but-animating screen repaints
+    the spinner glyph/verb and the elapsed-seconds counter at >=1 Hz, which
+    would keep the raw buffer changing every tick and keep `last_pty_activity_at`
+    falsely fresh, defeating quiescence detection (#1768). This helper removes
+    that animation-only noise so two reads that differ ONLY by spinner/cursor/
+    elapsed repaint normalize to the SAME string, while a read with genuinely
+    new text content normalizes to a DIFFERENT string.
+
+    Fail-soft: if normalization raises for any reason, the original buffer is
+    returned (the diff-gate then behaves as it did before normalization).
+    """
+    try:
+        norm = buffer
+        # Strip full spinner-verb frames and the processing hint first.
+        norm = _SPINNER_VERB_RE.sub("", norm)
+        # Strip the elapsed-seconds counter token in spinner/status context.
+        norm = _ELAPSED_SECS_RE.sub("", norm)
+        # Strip bare spinner-glyph animation fragments.
+        norm = _SPINNER_GLYPH_FRAGMENT_RE.sub("", norm)
+        # Collapse trailing-whitespace and blank-line noise (cursor/blink).
+        norm = _TRAILING_WS_RE.sub("", norm)
+        norm = _BLANK_RUN_RE.sub("\n", norm)
+        return norm.strip()
+    except Exception:  # noqa: BLE001 — fail-soft: never break the read-loop
+        return buffer
 
 
 def _get_machine_name() -> str:
@@ -670,8 +739,8 @@ class BridgeAdapter:
 
         Returns a closure that:
         - Stamps ``last_pty_read_loop_at`` unconditionally on every call.
-        - Stamps ``last_pty_activity_at`` only when ``buffer`` differs from
-          the prior call's buffer (screen repainted).
+        - Stamps ``last_pty_activity_at`` only when the NORMALIZED ``buffer``
+          differs from the prior call's normalized buffer (genuine repaint).
         Both writes are fail-silent and use ``update_fields`` to avoid clobbering
         concurrent saves from the tailer task.
         """
@@ -684,19 +753,20 @@ class BridgeAdapter:
                 now = datetime.now(UTC)
                 update_fields = ["last_pty_read_loop_at"]
                 agent_session.last_pty_read_loop_at = now
-                # Diff-gate: only stamp activity when the buffer has changed.
-                # NOTE: this compares the ANSI-stripped (but not cursor/spinner-normalized)
-                # buffer from read_until_idle, not fully normalized bytes (per plan Key
-                # Element 3, normalized bytes were specified to also strip cursor/blink noise).
-                # The ANSI-stripped buffer is settled enough that this is safe for stage-1
-                # observe-only, but full normalization will matter in stage-2 recovery: a
-                # blinking cursor or spinner repaint that normalization would strip could keep
-                # last_pty_activity_at fresh on a wedged screen, defeating quiescence detection.
-                # Address this before wiring stage-2 recovery in the follow-up to #1724.
-                if buffer != self._prev_pty_buffer:
+                # Diff-gate: only stamp activity when the NORMALIZED buffer changed.
+                # Normalization (#1768) strips spinner glyph/verb frames, the
+                # elapsed-seconds counter, and cursor/blink/trailing-whitespace noise
+                # before the comparison, so an animating-but-wedged TUI (which repaints
+                # the spinner+elapsed counter at >=1 Hz) produces a STABLE normalized
+                # string and does NOT keep last_pty_activity_at falsely fresh. This is
+                # the normalization #1724's comment said had to land before recovery
+                # consumed last_pty_activity_at as a quiescence signal; it has now landed.
+                # last_pty_read_loop_at stays unconditional (proves the loop is cycling).
+                norm = _normalize_pty_buffer(buffer)
+                if norm != self._prev_pty_buffer:
                     agent_session.last_pty_activity_at = now
                     update_fields.append("last_pty_activity_at")
-                self._prev_pty_buffer = buffer
+                self._prev_pty_buffer = norm
                 save = getattr(agent_session, "save", None)
                 if callable(save):
                     save(update_fields=update_fields)
