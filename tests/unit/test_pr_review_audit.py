@@ -10,17 +10,17 @@ as part of issue #748. The helpers now live in reflections/auditing.py.
 
 from __future__ import annotations
 
-from reflections.auditing import (
+from reflections.audits.pr_review_audit import (
     SEVERITY_LABELS,
     SEVERITY_MAP,
 )
-from reflections.auditing import (
+from reflections.audits.pr_review_audit import (
     _check_finding_addressed as check_finding_addressed,
 )
-from reflections.auditing import (
+from reflections.audits.pr_review_audit import (
     _format_audit_issue_body as format_audit_issue_body,
 )
-from reflections.auditing import (
+from reflections.audits.pr_review_audit import (
     _parse_review_findings as parse_review_findings,
 )
 

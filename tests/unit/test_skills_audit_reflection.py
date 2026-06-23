@@ -15,7 +15,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from reflections import auditing
+# skills-audit internals moved to reflections/audits/skills_audit.py (#1028);
+# aliased to `auditing` so the existing auditing.* references resolve unchanged.
+from reflections.audits import skills_audit as auditing
 
 # ---------------------------------------------------------------------------
 # Test doubles
