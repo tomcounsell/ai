@@ -19,8 +19,11 @@ The granite container (`agent/granite_container/`) drives interactive `claude` T
 - `startup_parser.py:67-73` detects the login frame and emits `StartupEvent.LOGIN_PROMPT`.
 - `container.py:751-758` matches the event but its `response` is `None`, so the startup loop **passively waits up to `STARTUP_HARD_CEILING_S` (600s)**, then exits `startup_unresolved` and fires a Telegram alert. A human must manually complete OAuth for the session to proceed — the agent is dead in the water until then.
 
+**Frequency (C3 datum):** Token-expiry-mid-run is **rare but high-impact** — a single occurrence wedges a session for the full 600s ceiling and requires manual human OAuth. No `startup_unresolved`-attributable-to-`LOGIN_PROMPT` events are present in the current `logs/` window (effectively near-zero observed rate), but the cost-per-event (a fully dead session + a human in the loop) justifies a bounded, deterministic safety net rather than leaving the failure mode unhandled. The cheaper prevention track (#1751 `setup-token`) drives the rate further toward zero; this recovery is the unconditional fallback for whenever it still fires (see N1 / Risk 3).
+
 **Desired outcome:**
 - Granite **autonomously recovers** the login by driving the already-logged-in real Chrome (via BYOB) through the OAuth consent — a fixed, deterministic recipe with **no LLM intelligence in the loop**. The recipe is credential-independent (pure-Python MCP stdio client, no `claude` session), sidestepping the shared-credential bootstrap deadlock. On recovery failure it degrades to today's alert path (no new hang).
+- **Relationship to #1751 (N1):** the long-lived `CLAUDE_CODE_OAUTH_TOKEN` (`setup-token`) is the *preferred* prevention — fewer expiries. This BYOB recovery is the *no-token fallback*: it covers any machine that hasn't adopted #1751 and any expiry of the long-lived token itself. The two are complementary, not redundant.
 
 ## Freshness Check
 
@@ -76,7 +79,7 @@ All spikes were run empirically (live trial-and-error) during the issue-creation
 - **Method**: prototype (throwaway isolated `CLAUDE_CONFIG_DIR`, real `/login`)
 - **Finding**: Flow = theme picker → "Select login method" menu (option 1 = subscription, default `❯1`) → claude **auto-opens** Chrome to a `localhost`-callback authorize URL **and** prints a `platform.claude.com` paste-flow fallback URL under "Browser didn't open? Use the url below (c to copy)" + a `Paste code here if prompted >` prompt. After Authorize, paste flow lands on `platform.claude.com/oauth/code/callback?code=...&state=...`; the paste payload is `{code}#{state}` (in the callback URL query params **and** a `<pre>`).
 - **Confidence**: high
-- **Impact on plan**: Three runtime flows must be handled; happy path uses the auto-opened localhost tab and needs no paste.
+- **Impact on plan**: Two runtime flows are implemented — flow 1 (auto-opened localhost tab, happy path, no paste) and flow 2 (paste fallback). The logged-out case (what an earlier draft called "flow 3") is DEMOTED to a No-Go: the classifier returns an alert outcome with no Google-unlock handler. So the classifier has three branches (flow 1, flow 2, logged-out→alert) but only two implemented flows.
 
 ### spike-4: BYOB automation gotchas
 - **Assumption**: "Driving the consent page is straightforward."
@@ -89,7 +92,7 @@ All spikes were run empirically (live trial-and-error) during the issue-creation
 
 1. **Entry point**: A granite PTY (PM or Dev) paints an OAuth login frame mid-startup; `pty_driver` reads the buffer.
 2. **Detection** (`startup_parser.parse_startup_frame`): regex matches → `StartupEvent.LOGIN_PROMPT`.
-3. **Dispatch** (`container._handle_startup` → `run()` startup loop): the `LOGIN_PROMPT` branch (today `return None`) invokes `byob_relogin.recover_login(pty_driver, pty_buffer, ...)`.
+3. **Dispatch** (`container._handle_startup` → `run()` startup loop): the `LOGIN_PROMPT` branch (today `return None`) records `self._login_pty` (the PTY that matched — PM or Dev) and dispatches `byob_relogin.recover_login(login_pty, login_pty_buffer, deadline, ...)` on a `threading.Thread` (once, behind `_recovery_launched`). `_handle_startup` returns immediately; the loop applies the outcome once `_recovery_done` is set.
 4. **Recovery** (`byob_relogin`): spawns a pure-Python BYOB MCP stdio client → classifies flow (auto-opened localhost tab? platform paste URL? logged-out browser?) → drives Chrome (navigate/click/poll) → for paste flow, writes `{code}#{state}` into the PTY; for localhost flow, presses Enter; closes the MCP client.
 5. **Settle**: the PTY leaves the login frame; the startup loop detects idle → proceeds to steady-state.
 6. **Output / fallback**: on recovery success, the session runs normally. On failure (timeout/retries exhausted), `recover_login` returns a failure sentinel and the loop falls through to the existing `startup_unresolved` ceiling + Telegram alert.
@@ -97,7 +100,7 @@ All spikes were run empirically (live trial-and-error) during the issue-creation
 ## Architectural Impact
 
 - **New dependencies**: `pexpect` (already in the venv, used by `pty_driver`) for PTY interaction; no new third-party libs — the BYOB MCP client is hand-rolled stdio JSON-RPC over `subprocess`. Hard runtime dependency on the BYOB install (`~/.byob`) and a running Chrome bridge.
-- **Interface changes**: New module `agent/granite_container/byob_relogin.py` exposing a `recover_login(...)` entry + a small `BYOBClient` class. One call site changes in `container.py` (the `LOGIN_PROMPT` branch).
+- **Interface changes**: New module `agent/granite_container/byob_relogin.py` exposing a `recover_login(login_pty, login_pty_buffer, deadline, ...)` entry + a small `BYOBClient` class and a `ReloginOutcome` dataclass. `container.py` gains three instance fields initialized in `__init__` (`_recovery_launched: bool = False`, `_recovery_done: threading.Event`, `_recovery_outcome: ReloginOutcome | None = None`) and a `_login_pty` capture; the `LOGIN_PROMPT` branch + the plateau-bail guard are the only logic changes.
 - **Coupling**: Adds a granite→BYOB coupling that did not exist. Isolated behind `byob_relogin` so the container only sees `recover_login()`.
 - **Data ownership**: None changed. The keychain credential is owned/written by the `claude` PTY process itself (recovery just completes the browser side).
 - **Reversibility**: High — revert the `container.py` call site to `return None` and delete the module; no schema/state migration.
@@ -127,7 +130,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_byob_l
 ### Key Elements
 
 - **`BYOBClient` (pure-Python MCP stdio client)**: Spawns `tsx byob-mcp.ts` with `BYOB_ALLOW_EVAL=1`, does the `initialize`/`notifications/initialized` handshake, exposes `navigate`, `click`, `list_tabs`, `eval`, `read` helpers over newline-delimited JSON-RPC. No LLM, no `claude` session.
-- **Flow classifier**: Inspects `browser_list_tabs` + the PTY buffer to decide which of the two in-scope flows applies (auto-opened localhost authorize tab present → flow 1; only a printed `platform.claude.com` paste URL → flow 2). If the consent page renders logged-out (no live claude.ai session), recovery has no deterministic happy path — it degrades to the alert (see No-Gos / former flow 3).
+- **Flow classifier** (three branches; two implemented + one alert-only): Inspects `browser_list_tabs` + the login PTY buffer. (1) auto-opened localhost authorize tab present in the BYOB-controlled Chrome → flow 1 (primary). (2) no auto-opened tab within the ~15s budget but a printed `platform.claude.com` paste URL in the PTY buffer → flow 2 (paste fallback). (3) logged-out consent page → return the failure sentinel (degrade to alert; no handler — see No-Gos). Per C2: flow 1 is the proven primary; flow 2 covers the case where claude's auto-open lands in a browser BYOB does not control — if neither an auto-opened authorize tab nor a paste URL is recoverable within budget, the classifier returns failure rather than spinning.
 - **`recover_login(pty_driver, pty_buffer, deadline)` routine**: Orchestrates the recipe per flow against the PTY + `BYOBClient`, bounded by a hard deadline and per-flow retries; returns a `ReloginOutcome` (success / failed-degrade).
 - **Container wiring (non-blocking)**: Replaces the passive `return None` in the `LOGIN_PROMPT` branch with a **thread-dispatched, idempotent** `recover_login` attempt. `_handle_startup` MUST stay fast and non-blocking — it is called every startup cycle and a 120s blocking call would starve the *other* PTY (no reads/idle detection on the non-login PTY). On first `LOGIN_PROMPT` the branch sets `self._recovery_launched = True` synchronously, spawns `recover_login` on a `threading.Thread` (writing `self._recovery_outcome` on completion), and returns `None`. On later cycles it returns `None` while pending; on success it writes the PTY response (Enter / pasted code). On failure or timeout it leaves the loop to hit the existing ceiling/alert.
 
@@ -147,8 +150,12 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_byob_l
 - **Click discipline**: prefer `browser_click` (trusted CDP dispatch) targeting the Authorize button; fall back to IIFE-wrapped `eval` `.click()` only if needed. Poll for redirect; retry up to N (spike-4c/e).
 - **Account guard**: before clicking Authorize, read the consent page's "Logged in as <user>" and compare against an expected-identity config (e.g. `config/identity.json` email); abort recovery (degrade to alert) on mismatch rather than authorize the wrong account.
 - **Bounding**: a single overall deadline (120s, well under the existing 600s ceiling) plus per-step timeouts; always close the `BYOBClient` subprocess in `finally`.
-- **Non-blocking dispatch + idempotency guard** (critique blocker + concern): `_handle_startup` runs every startup cycle and must return fast. The `LOGIN_PROMPT` branch sets `self._recovery_launched = True` **synchronously before** spawning the recovery `threading.Thread`, so re-entry on the next cycle (the login frame persists across many cycles) never spawns a second `tsx byob-mcp.ts` subprocess. The fast path is: `if not self._recovery_launched: launch; elif self._recovery_outcome is ready: apply` — O(1), race-free, exactly one recovery attempt per session. The recovery thread owns the 120s `recover_login` and the `BYOBClient` lifecycle; the loop keeps polling both PTYs meanwhile.
+- **Non-blocking dispatch + idempotency guard** (critique blocker + concern): `_handle_startup` runs every startup cycle and must return fast. The `LOGIN_PROMPT` branch sets `self._recovery_launched = True` **synchronously before** spawning the recovery `threading.Thread`, so re-entry on the next cycle (the login frame persists across many cycles) never spawns a second `tsx byob-mcp.ts` subprocess. The fast path is: `if not self._recovery_launched: launch; elif self._recovery_done.is_set(): apply` — O(1), race-free, exactly one recovery attempt per session. The recovery thread owns the 120s `recover_login` and the `BYOBClient` lifecycle; the loop keeps polling both PTYs meanwhile.
+- **B1 — suppress the plateau early-bail while recovery is in flight** (critique blocker): the startup loop reaps a session as `startup_unresolved` after `STARTUP_PLATEAU_CYCLES` (=10, ~30s at the 3s cycle) of `response=None` + neither-PTY-idle (`_silent_start`, `container.py:1032`). A running recovery produces exactly that signature, so the plateau detector would kill it ~90s before the 120s recovery deadline. The bail MUST be gated: `if _plateau_count >= STARTUP_PLATEAU_CYCLES and _silent_start and not (self._recovery_launched and not self._recovery_done.is_set()):`. The 120s recovery deadline stays strictly under `STARTUP_HARD_CEILING_S` (600s) so the outer ceiling never reaps a pending recovery either.
+- **B2 — capture the login PTY; never hardcode PM** (critique blocker): `_handle_startup` inspects both `result_pm`/`result_dev` but discards which PTY matched and the loop hardcodes `self._pm_pty.write(response)` (`container.py:1073`, self-described as "a heuristic"). If the login frame is on the **Dev** PTY, recovery would press Enter / paste the OAuth code into the wrong PTY (silent no-op + possible state corruption). When `chosen == ("login", r)`, record `self._login_pty = self._pm_pty if r is result_pm else self._dev_pty` and pass `self._login_pty` (and ITS buffer — the URL/paste sentinel slice must come from the same PTY) into `recover_login` as the write target. Non-login startup events (trust/update) keep their existing PM-write heuristic; only the login path needs accurate attribution.
+- **C1 — thread-safety + no orphaned subprocess** (critique concern): build the complete immutable `ReloginOutcome` locally inside the thread, assign `self._recovery_outcome = outcome` as the final statement, then `self._recovery_done.set()` (a `threading.Event` created synchronously alongside `self._recovery_launched = True`). The loop checks `self._recovery_done.is_set()` before dereferencing `_recovery_outcome` — no torn/stale read. The thread's `finally` MUST close the `BYOBClient` (kill the `tsx byob-mcp.ts` subprocess) even if the loop already returned `startup_unresolved`, so a daemon thread cannot orphan the subprocess.
 - **Trigger surface + detection patterns (non-conditional)**: wire into the startup-phase `LOGIN_PROMPT` branch. The existing `_LOGIN_PATTERNS` only match `"Sign in to continue"` / `"paste.*url.*continue"`, which do NOT match the real claude 2.1.185 re-auth frame (theme picker → **"Select login method"** menu → auto-open / "Browser didn't open" frame). Task 2 MUST add (not "if needed") case-insensitive patterns for `"Select login method"` and `"Browser didn't open"` / `"Opening browser"` to `startup_parser._LOGIN_PATTERNS`, with a fixture frame in the dispatch test asserting `LOGIN_PROMPT` detection on the menu frame. Without these the recovery is inert in the real scenario.
+- **C4 — error-shadows-login precedence**: the parser prioritizes `_ERROR_PATTERNS` (incl. `"Login failed"` / `"Authentication failed"`) ABOVE `_LOGIN_PATTERNS` (`test_startup_parser.py` priority tests). If a real re-auth frame also carries an error-like substring, it would classify as `ERROR_MODAL` and recovery would never dispatch — silently regressing to today's alert. Task 2 MUST add a priority fixture feeding a captured re-auth frame (containing "Select login method") and assert `result.event == StartupEvent.LOGIN_PROMPT`; if a real frame legitimately carries both, codify the desired winner in the pattern/group ordering rather than leaving it to chance.
 
 ## Failure Path Test Strategy
 
@@ -166,12 +173,18 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_byob_l
 - [ ] On recovery failure the existing Telegram `startup_unresolved` alert must still fire — integration test asserts the fallback path is reached (BYOB client mocked to always fail).
 - [ ] Recovery success/failure emits a `session_events` observability entry (consistent with existing startup-event logging) — test asserts the event is recorded.
 
+### Concurrency / Dispatch (critique B1/B2/C1)
+- [ ] **B1**: while `_recovery_launched and not _recovery_done.is_set()`, the plateau detector must NOT bail — test drives ≥`STARTUP_PLATEAU_CYCLES` no-progress cycles with recovery "in flight" and asserts the loop keeps cycling (no premature `startup_unresolved`).
+- [ ] **B2**: a `LOGIN_PROMPT` on the **Dev** PTY routes the recovery write to `self._dev_pty`, not `self._pm_pty` — test asserts `_login_pty` attribution for both PM-side and Dev-side login frames.
+- [ ] **C1**: the recovery thread closes the `BYOBClient` subprocess in `finally` even when the loop already returned — test asserts no orphaned subprocess after an early loop exit (mocked client records `close()` called).
+
 ## Test Impact
 
 - [ ] `tests/unit/granite_container/test_startup_parser.py::test_login_prompt_response_is_none` — KEEP (stays green): it asserts the *parser-layer* contract that the `LOGIN_PROMPT` event carries `response=None`. That contract is unchanged — recovery is triggered by the *event*, not by a parser response string. No edit needed; cited directly here rather than discovered by a speculative grep.
 - [ ] `tests/unit/granite_container/test_startup_parser.py` — UPDATE: add fixtures + assertions for the new `_LOGIN_PATTERNS` entries (`"Select login method"`, `"Browser didn't open"` / `"Opening browser"`) → `LOGIN_PROMPT`.
 - [ ] `tests/unit/granite_container/test_granite_byob_relogin.py` — ADD: unit tests for `BYOBClient` (mocked subprocess) and the flow classifier / `recover_login` state machine (mocked BYOB client + fixture PTY frames).
-- [ ] `tests/unit/granite_container/test_granite_startup_login_dispatch.py` — ADD: container-level tests for the non-blocking thread dispatch, the `_recovery_launched` idempotency guard (no double-spawn), and the failure→`startup_unresolved`+alert degradation (BYOB mocked to fail).
+- [ ] `tests/unit/granite_container/test_granite_startup_login_dispatch.py` — ADD: container-level tests for the non-blocking thread dispatch, the `_recovery_launched` idempotency guard (no double-spawn), **B1** plateau-suppression-while-in-flight, **B2** PTY attribution (PM vs Dev login frame), **C1** finally-close of the subprocess, and the failure→`startup_unresolved`+alert degradation (BYOB mocked to fail).
+- [ ] `tests/unit/granite_container/test_startup_parser.py` — UPDATE: **C4** priority fixture asserting a re-auth frame (with "Select login method") classifies `LOGIN_PROMPT`, not `ERROR_MODAL`.
 
 No existing tests break — the change is additive (replaces an inert `return None` with a thread-dispatched call that defaults to the same fallback). New granite tests live under `tests/unit/granite_container/` (the established directory), not the `tests/unit/` root.
 
@@ -320,8 +333,11 @@ No agent-facing tool/MCP changes. This is a **bridge/worker-internal** change: t
 - **Assigned To**: container-wiring-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace `return None` in the `LOGIN_PROMPT` branch (`container.py` `_handle_startup`, ~line 752; verify against current source) with a **non-blocking, idempotent thread dispatch** of `recover_login`: set `self._recovery_launched` synchronously before spawning the `threading.Thread`, store the outcome on `self._recovery_outcome`, apply the PTY response when ready, and never block the per-cycle dispatch. Degrade to the existing ceiling/alert on failure or timeout.
-- Add `startup_parser._LOGIN_PATTERNS` entries for the real re-auth frame (`"Select login method"`, `"Browser didn't open"` / `"Opening browser"`) — **non-conditional**, with a fixture-frame detection test. Without these the branch never fires in production.
+- Replace `return None` in the `LOGIN_PROMPT` branch (`container.py` `_handle_startup`, ~line 752; verify against current source) with a **non-blocking, idempotent thread dispatch** of `recover_login`: set `self._recovery_launched` + create `self._recovery_done` (Event) synchronously before spawning the `threading.Thread`; the thread publishes an immutable `self._recovery_outcome` then sets `_recovery_done`; the loop applies the PTY response only after `_recovery_done.is_set()`. Never block the per-cycle dispatch. Degrade to the existing ceiling/alert on failure or timeout.
+- **B1**: gate the plateau early-bail (`container.py:1032`) with `and not (self._recovery_launched and not self._recovery_done.is_set())` so a running recovery is not reaped as `startup_unresolved`.
+- **B2**: capture `self._login_pty` at the `("login", r)` match site (`r is result_pm` → PM, else Dev) and pass it + its buffer into `recover_login`; do NOT hardcode `self._pm_pty` for the login write.
+- **C1**: thread's `finally` closes the `BYOBClient` subprocess even after an early loop return.
+- Add `startup_parser._LOGIN_PATTERNS` entries for the real re-auth frame (`"Select login method"`, `"Browser didn't open"` / `"Opening browser"`) — **non-conditional**, with a fixture-frame detection test AND a **C4** priority fixture asserting the re-auth frame classifies `LOGIN_PROMPT`, not `ERROR_MODAL`.
 - Emit a `session_events` entry for recovery attempt/outcome.
 
 ### 3. Tests (unit + integration, no real OAuth)
@@ -372,7 +388,47 @@ No agent-facing tool/MCP changes. This is a **bridge/worker-internal** change: t
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** NEEDS REVISION (2 blockers) — war room FULL depth (Risk & Robustness, Scope & Value, History & Consistency), critiqued 2026-06-23.
+
+### Blockers (must resolve before build)
+
+**B1 — Plateau early-bail kills recovery mid-flight.** While the threaded recovery runs (up to 120s), the `LOGIN_PROMPT` branch returns `response=None` and the persisting login frame keeps both PTYs non-idle, so `_silent_start` is true every cycle. With `STARTUP_PLATEAU_CYCLES` (container.py:114) the startup loop bails early to `startup_unresolved` (container.py:1032) long before the 120s recovery thread finishes — the recovery is reaped mid-flight and the "on success writes PTY response" path never fires.
+- *Implementation Note:* gate the bail — `if _plateau_count >= STARTUP_PLATEAU_CYCLES and _silent_start and not (self._recovery_launched and self._recovery_outcome is None):`. Ensure the 120s recovery deadline stays strictly under `STARTUP_HARD_CEILING_S` (600s) so the outer ceiling never reaps a pending recovery either.
+
+**B2 — PTY attribution lost; recovery writes to the wrong PTY.** `_handle_startup` (container.py:719) inspects both `result_pm` and `result_dev` but discards which PTY matched and returns only `r.response`; the loop hardcodes `self._pm_pty.write(response)` (container.py:1073, self-described as "a heuristic"). If the login frame is on the Dev PTY, `recover_login` presses Enter / pastes the OAuth code into the wrong PTY — silent no-op recovery (and possible corruption of the other PTY's state).
+- *Implementation Note:* when `chosen == ("login", r)`, record the source — `self._login_pty = self._pm_pty if r is result_pm else self._dev_pty` — and pass `self._login_pty` (and its buffer) into `recover_login` as the write target, not `self._pm_pty`. The URL/paste sentinel must be sliced from that same PTY's buffer.
+
+### Concerns (fold Implementation Notes into the plan during revision)
+
+**C1 — Thread-safety of `self._recovery_outcome` (Risk).** Background thread writes it; loop reads it every cycle with no described barrier — a torn/stale read could apply a half-populated `ReloginOutcome` and write garbage into the PTY.
+- *Implementation Note:* build the complete immutable `ReloginOutcome` locally in the thread, assign `self._recovery_outcome = outcome` as the final statement, then `self._recovery_done.set()` (a `threading.Event` created synchronously alongside `self._recovery_launched=True`). Loop checks `if self._recovery_done.is_set():` before dereferencing. Never mutate the outcome after publishing. Also: ensure `recover_login`'s `finally` BYOBClient close runs even if the loop has already returned `startup_unresolved`, or the daemon thread orphans the `tsx byob-mcp.ts` subprocess.
+
+**C2 — Flow 2 (paste fallback) may be dead weight (Scope).** Flow 2's justification rests on the unproven claim that the localhost auto-open "lands in the wrong browser." No spike evidences this; spike-3 shows claude auto-opens the localhost tab in the shared Chrome. The second flow doubles the state machine + test surface (URL de-wrap, callback poll, paste-back, Race 3) on an unproven premise.
+- *Implementation Note:* in the flow classifier, if no auto-opened authorize tab appears in the BYOB-controlled Chrome within the ~15s budget, return the failure sentinel (degrade to alert) rather than entering a paste path. Consider deferring flow-2 code (tasks 1/3) until a production trace shows the auto-open targeting a browser BYOB does not control — the same evidentiary bar that demoted Google-unlock to a No-Go.
+
+**C3 — Problem frequency unmeasured (Scope).** The plan never quantifies how often token-expiry-mid-run fires, and Research concedes #1751 (setup-token) "dramatically reduces how often recovery fires." A Medium-appetite multi-flow recovery may be solving a rare event already being driven toward zero by the cheaper prevention track.
+- *Implementation Note:* add a one-line frequency datum to the Problem section sourced from existing logs (count of `startup_unresolved` exits attributable to `LOGIN_PROMPT` over the last N weeks). If ~0, consider folding into #1751; if non-trivial, keep the safety net (reinforces the flow-1-only minimal version per C2).
+
+**C4 — New `_LOGIN_PATTERNS` vs error-shadows-login precedence (History).** The new patterns ("Select login method", "Browser didn't open") don't address the parser's documented error-shadows-login priority (`test_startup_parser.py:122-128`; `_ERROR_PATTERNS` includes "Login failed"/"Authentication failed"). If a new login pattern is shadowed by an ERROR_MODAL pattern on a real re-auth frame, recovery silently never dispatches and regresses to today's alert.
+- *Implementation Note:* Task 2 adds a priority fixture feeding a captured 2.1.185 re-auth frame (containing "Select login method") and asserts `result.event == StartupEvent.LOGIN_PROMPT`, mirroring the existing `TestParserPriority` pattern; if the frame also carries an error-like substring, codify the desired winner in `_PATTERN_GROUPS` ordering.
+
+**C5 — spike-3 "Three runtime flows" contradicts the two-flow Solution (History).** spike-3's retained text says "Three runtime flows" and the narrative still references a "former flow 3," while the Solution implements only Flow 1 + Flow 2 and demotes flow 3 to alert-only. A builder reading spike-3 may implement the forbidden flow-3 handler.
+- *Implementation Note:* annotate the spike-3 entry — "(flow 3 = logged-out → DEMOTED to No-Go, classifier returns alert outcome, no handler)" — so the classifier's three branches are (Flow 1 localhost, Flow 2 paste, logged-out→alert) and "three branches" / "two implemented flows" are both literally true.
+
+### Nits
+
+- **N1 (History):** Note the eventual relationship to #1751 in-plan (token path preferred, BYOB recovery is the no-token fallback) so a future reader does not treat them as redundant. Greenfield claim and #1751 sequencing are otherwise sound.
+
+### Structural checks
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
+| Task numbering | PASS | Tasks 1-6 sequential, no gaps |
+| Dependencies valid | PASS | build-byob-driver → build-container-wiring → build-tests → validate-recovery → document-feature → validate-all; no cycles |
+| File paths exist | PASS | All referenced source/test/doc paths exist; `byob_relogin.py` + 2 new test files correctly absent (to be created) |
+| Prerequisites met | PASS | BYOB ts present, byob registered in ~/.claude.json, pexpect importable (this machine) |
+| Cross-references | PASS | Success criteria map to tasks; No-Gos (Google-unlock, #1751) not present as planned work |
 
 ---
 
