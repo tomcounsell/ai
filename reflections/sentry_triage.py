@@ -40,7 +40,7 @@ from pathlib import Path
 
 import requests
 
-from reflections.utils import PROJECT_ROOT, load_local_projects
+from reflections.utilities import PROJECT_ROOT, load_local_projects
 
 logger = logging.getLogger("reflections.sentry_triage")
 

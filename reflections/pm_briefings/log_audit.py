@@ -15,7 +15,7 @@ This module owns the bounded log reader and Sentry helper that used to
 live in ``reflections/auditing.py`` (where they were called by
 ``run_log_review``). The helpers were inlined as part of issue #1292 (the
 legacy ``daily-log-review`` registry entry was retired in the same cutover).
-``extract_structured_errors`` stays in ``reflections.utils`` because
+``extract_structured_errors`` stays in ``reflections.utilities`` because
 ``run_hooks_audit`` still imports it from there.
 """
 
@@ -30,7 +30,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from reflections.utils import extract_structured_errors
+from reflections.utilities import extract_structured_errors
 
 logger = logging.getLogger("reflections.pm_briefings.log_audit")
 

@@ -32,7 +32,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from reflections.utils import load_local_projects
+from reflections.utilities import load_local_projects
 
 logger = logging.getLogger("reflections.pm_briefings.daily_log")
 

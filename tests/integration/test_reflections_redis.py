@@ -139,12 +139,12 @@ class TestAnalyzeSessionsFromRedis:
 
 
 class TestIgnoreLogRedis:
-    """Tests for Redis-backed ignore log via reflections.utils."""
+    """Tests for Redis-backed ignore log via reflections.utilities."""
 
     def test_load_ignore_entries_from_redis(self):
         """load_ignore_entries reads active entries from ReflectionIgnore model."""
         from models.reflections import ReflectionIgnore
-        from reflections.utils import load_ignore_entries
+        from reflections.utilities import load_ignore_entries
 
         ReflectionIgnore.add_ignore("test pattern", reason="testing", days=14)
 
