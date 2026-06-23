@@ -1843,14 +1843,19 @@ async def _apply_recovery_transition(
                         entry.agent_session_id,
                         _steer_err,
                     )
-            # Clear durable wedge fields so the stale signal does not re-trip
-            # _check_tool_timeout before the resumed session takes its first new
-            # turn. Each resume generates a fresh UUID/transcript
-            # (bridge_adapter.py:425-426) so the diff-gated tailer has no
+            # Clear durable wedge fields on tool_timeout requeue only (same gate
+            # as the steering injection above) so the stale signal does not
+            # re-trip _check_tool_timeout before the resumed session takes its
+            # first new turn.  Each resume generates a fresh UUID/transcript
+            # (bridge_adapter.py:993-995) so the diff-gated tailer has no
             # tool_use block to re-pin from; once cleared, _check_tool_timeout
-            # returns None until a genuinely new tool_use arrives. See issue #1762.
-            entry.current_tool_name = None
-            entry.last_tool_use_at = None
+            # returns None until a genuinely new tool_use arrives.
+            # Both fields must be cleared together: a fresh tool name paired with
+            # the frozen last_tool_use_at could still re-trip the budget check.
+            # See issue #1762.
+            if reason_kind == "tool_timeout":
+                entry.current_tool_name = None
+                entry.last_tool_use_at = None
             if (
                 getattr(entry, "exit_returncode", None) == -9
                 and pre_bump_attempts == 0
@@ -1858,14 +1863,10 @@ async def _apply_recovery_transition(
             ):
                 entry.scheduled_at = datetime.now(tz=UTC) + timedelta(seconds=120)
                 try:
-                    entry.save(
-                        update_fields=[
-                            "scheduled_at",
-                            "recovery_attempts",
-                            "current_tool_name",
-                            "last_tool_use_at",
-                        ]
-                    )
+                    _oom_fields = ["scheduled_at", "recovery_attempts"]
+                    if reason_kind == "tool_timeout":
+                        _oom_fields += ["current_tool_name", "last_tool_use_at"]
+                    entry.save(update_fields=_oom_fields)
                 except Exception as _sa_err:
                     logger.debug(
                         "[session-health] scheduled_at save failed: %s",
@@ -1880,13 +1881,10 @@ async def _apply_recovery_transition(
                 )
             else:
                 try:
-                    entry.save(
-                        update_fields=[
-                            "recovery_attempts",
-                            "current_tool_name",
-                            "last_tool_use_at",
-                        ]
-                    )
+                    _requeue_fields = ["recovery_attempts"]
+                    if reason_kind == "tool_timeout":
+                        _requeue_fields += ["current_tool_name", "last_tool_use_at"]
+                    entry.save(update_fields=_requeue_fields)
                 except Exception as _ra_err:
                     logger.debug(
                         "[session-health] recovery_attempts save failed: %s",
