@@ -75,6 +75,24 @@ TOOL_TIMEOUT_SUSPECT_COUNT: int = 3
 # Recovery attempt count that corroborates "suspect".
 RECOVERY_SUSPECT_COUNT: int = 2
 
+# How long last_pty_activity_at must be stale (beyond this) for a still-
+# heartbeating, never-turned session to count as granite-wedged. The PTY
+# diff-gate (now normalized — bridge_adapter._normalize_pty_buffer) only
+# stamps last_pty_activity_at on a genuine repaint, so a wedged-but-animating
+# TUI lets this go stale. Provisional/tunable starting value — adjust via the
+# GRANITE_WEDGED_PTY_STALE_SECS env var with no code change.
+GRANITE_WEDGED_PTY_STALE_SECS: int = int(os.environ.get("GRANITE_WEDGED_PTY_STALE_SECS", "600"))
+
+# Read-loop freshness window: last_pty_read_loop_at must be at least this fresh
+# for the read-loop to count as actively cycling (proving the container is not
+# merely dead). Local mirror of agent.session_health.HEARTBEAT_FRESHNESS_WINDOW
+# (90) — deliberately NOT imported, because this classifier must stay decoupled
+# from the kill/recovery machinery in session_health (enforced by the test
+# suite). Provisional/tunable — adjust via GRANITE_WEDGED_READLOOP_FRESH_SECS.
+GRANITE_WEDGED_READLOOP_FRESH_SECS: int = int(
+    os.environ.get("GRANITE_WEDGED_READLOOP_FRESH_SECS", "90")
+)
+
 # ---------------------------------------------------------------------------
 # Terminal statuses (mirror models/session_lifecycle.py — no circular import)
 # ---------------------------------------------------------------------------
@@ -206,6 +224,44 @@ def _classify(
 
     if session is not None and session_status in _RUNNING_PROBE_STATUSES:
         if not has_turn_start:
+            # ----------------------------------------------------------
+            # 1a. granite_wedged probe (fresh-heartbeat / stale-screen)
+            # ----------------------------------------------------------
+            # A granite PTY session that loops on `no-new-entry` (never
+            # advances a turn) keeps its read-loop and heartbeat fresh while
+            # the rendered screen goes quiet. The normalized PTY diff-gate
+            # (bridge_adapter._normalize_pty_buffer) stamps last_pty_activity_at
+            # only on a genuine repaint, so a wedged-but-animating TUI lets
+            # last_pty_activity_at go stale even as last_pty_read_loop_at stays
+            # fresh. We fire granite_wedged ONLY when the read-loop is fresh
+            # (container actively cycling, not dead) AND last_pty_activity_at is
+            # present but stale past the grace window. Fail-soft: any missing or
+            # unconvertible field => do NOT fire (fall through to never_started);
+            # in particular a None last_pty_activity_at (never stamped) never
+            # fires, so we don't fabricate a wedge from an empty signal.
+            read_loop_at = getattr(session, "last_pty_read_loop_at", None)
+            pty_activity_at = getattr(session, "last_pty_activity_at", None)
+            read_loop_ts = to_unix_ts(read_loop_at)
+            activity_ts = to_unix_ts(pty_activity_at)
+            if read_loop_ts is not None and activity_ts is not None:
+                now = time.time()
+                read_loop_age = now - read_loop_ts
+                activity_age = now - activity_ts
+                read_loop_fresh = read_loop_age <= GRANITE_WEDGED_READLOOP_FRESH_SECS
+                pty_stale = activity_age > GRANITE_WEDGED_PTY_STALE_SECS
+                if read_loop_fresh and pty_stale:
+                    return StallVerdict(
+                        "stalled",
+                        "granite_wedged",
+                        {
+                            "read_loop_age": read_loop_age,
+                            "activity_age": activity_age,
+                            "readloop_fresh_threshold": GRANITE_WEDGED_READLOOP_FRESH_SECS,
+                            "pty_stale_threshold": GRANITE_WEDGED_PTY_STALE_SECS,
+                            "session_status": session_status,
+                        },
+                    )
+
             # Session is in a probe status but has never emitted a turn_start.
             started_ref = getattr(session, "started_at", None) or getattr(
                 session, "created_at", None

@@ -287,6 +287,52 @@ class FeatureSettings(BaseModel):
         ),
     )
 
+    # --- Stall-recovery action-mode (issue #1768) ---
+    # Promotes the stall-advisory reflection from observe-only to an actor that
+    # kills demonstrably-wedged sessions and re-enqueues via valor-catchup.
+    # Off by default (dry-run); enabling is a reversible per-machine .env edit.
+    stall_recovery_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable the stall-advisory action-mode to kill wedged sessions and "
+            "re-enqueue their unanswered work via valor-catchup. Off by default "
+            "(dry-run/observe-only); enabling is a documented reversible "
+            "per-machine .env edit. "
+            "Env: FEATURES__STALL_RECOVERY_ENABLED. See issue #1768."
+        ),
+    )
+    stall_recovery_consecutive_observations: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description=(
+            "N consecutive stalled observations of the same session required "
+            "before a kill (at the 300s reflection cadence, 3 is roughly 15 "
+            "minutes). Provisional/tunable. "
+            "Env: FEATURES__STALL_RECOVERY_CONSECUTIVE_OBSERVATIONS."
+        ),
+    )
+    stall_recovery_run_budget: int = Field(
+        default=1,
+        ge=1,
+        le=20,
+        description=(
+            "K maximum sessions killed per reflection run (mirrors the "
+            "session-recovery-drip 1-per-tick shape). Provisional/tunable. "
+            "Env: FEATURES__STALL_RECOVERY_RUN_BUDGET."
+        ),
+    )
+    stall_recovery_per_session_budget: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description=(
+            "Per-session cap on kill attempts to prevent thrash on a session "
+            "that keeps re-wedging. Provisional/tunable. "
+            "Env: FEATURES__STALL_RECOVERY_PER_SESSION_BUDGET."
+        ),
+    )
+
 
 class GraniteSettings(BaseModel):
     """Granite PTY container configuration (plan #1572).
