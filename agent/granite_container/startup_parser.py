@@ -71,6 +71,16 @@ _LOGIN_PATTERNS = [
     # The Max subscription OAuth flow sometimes shows a paste-the-url
     # frame. We treat it as login too.
     (re.compile(r"paste.*url.*continue", re.IGNORECASE), "paste url to continue", None),
+    # The real claude 2.1.185 re-auth frame (token expiry mid-run): a theme
+    # picker → "Select login method" menu → an auto-open / "Browser didn't
+    # open?" / "Opening browser" frame. The earlier two patterns do NOT match
+    # this shape, so these are mandatory for BYOB recovery (issue #1750) to
+    # fire in production. None of these phrases contain an _ERROR_PATTERNS
+    # substring, so the error-shadows-login precedence (C4) classifies a real
+    # re-auth frame as LOGIN_PROMPT, not ERROR_MODAL.
+    (re.compile(r"Select login method", re.IGNORECASE), "select login method", None),
+    (re.compile(r"Browser didn't open", re.IGNORECASE), "browser didnt open", None),
+    (re.compile(r"Opening browser", re.IGNORECASE), "opening browser", None),
 ]
 
 # Update notice: "A new version of Claude Code is available" or
@@ -138,6 +148,9 @@ def _label_to_event(label: str) -> StartupEvent:
     label_to_event_map = {
         "Sign in to continue": StartupEvent.LOGIN_PROMPT,
         "paste url to continue": StartupEvent.LOGIN_PROMPT,
+        "select login method": StartupEvent.LOGIN_PROMPT,
+        "browser didnt open": StartupEvent.LOGIN_PROMPT,
+        "opening browser": StartupEvent.LOGIN_PROMPT,
         "new version available": StartupEvent.UPDATE_NOTICE,
         "update available": StartupEvent.UPDATE_NOTICE,
         "auth failed": StartupEvent.ERROR_MODAL,
