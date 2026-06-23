@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-23
 tracking: https://github.com/tomcounsell/ai/issues/1540
 last_comment_id:
+revision_applied: true
 ---
 
 # TUI Interaction Capture — Human-in-the-Loop Patterns as Learnable Reference Data
@@ -88,16 +89,16 @@ uses eng/granite throughout.
 
 - **PR #1699 / Issue #1536 pillar (V1 telemetry)**: shipped the append-only
   per-session JSONL recorder. Succeeded. This plan reuses it as the capture
-  substrate rather than building a new one — we add new event *types*
-  (`human_steering`, `slash_command`, `tool_decision`) to the same recorder.
+  substrate rather than building a new one — we add two new event *types*
+  (`slash_command`, `human_steering`) to the same recorder.
 - **Subconscious memory (`docs/features/subconscious-memory.md`, multiple PRs)**:
   the established path for turning session signal into retrievable observations
   via `Memory.safe_save` + BM25/RRF recall. Succeeded and in active use. This
   plan emits its captured patterns into that exact path.
 - **Claude Code memory bridge (`docs/features/claude-code-memory.md`)**: already
   extends memory ingest/recall/extract to CLI sessions through hooks. This plan
-  hangs the interaction capture off the same three hooks (`UserPromptSubmit`,
-  `PostToolUse`, `Stop`) — no new hook wiring, no new daemon.
+  hangs the interaction capture off two of the same hooks (`UserPromptSubmit`,
+  `Stop`) — no new hook wiring, no new daemon.
 
 No prior failed attempts to capture TUI *interaction shape* — this is greenfield
 within the established substrate.
@@ -143,22 +144,23 @@ are involved.
 - **Method**: code-read of `agent/session_telemetry.py`.
 - **Finding**: `record_telemetry_event(session_id, event)` accepts an **arbitrary
   JSON-serialisable dict** keyed by `type`. Unknown types are preserved verbatim
-  (the `_normalize_event` path). New event types (`human_steering`, `slash_command`,
-  `tool_decision`) require **zero recorder changes** — they ride the existing
+  (the `_normalize_event` path). New event types (`slash_command`, `human_steering`)
+  require **zero recorder changes** — they ride the existing
   append-only JSONL trace. `read_session_timeline()` returns them in order.
 - **Confidence**: high.
 - **Impact on plan**: Reuse the recorder as-is. The only recorder-adjacent change
-  is documenting the three new event types in the schema docstring (additive).
+  is documenting the two new event types in the schema docstring (additive).
 
 ## Data Flow
 
-1. **Entry point — human types in the Claude Code TUI**:
+1. **Entry point — human types a prompt in the Claude Code TUI**:
    - A prompt (steering message or `/slash-command`) → `UserPromptSubmit` hook.
-   - A tool runs and is approved → `PostToolUse` hook.
+   - (Tool approvals are already recorded as `tool_use` events by the V1 recorder
+     elsewhere — no new entry point needed.)
 2. **Capture (hook → recorder)**: a thin new module
-   `agent/tui_interaction_capture.py` classifies the hook payload into an
-   interaction event dict and calls `record_telemetry_event(session_id, event)`.
-   Fail-silent; never blocks the hook.
+   `agent/tui_interaction_capture.py` classifies the prompt into an interaction
+   event dict (deriving the ordinal from the existing timeline) and calls
+   `record_telemetry_event(session_id, event)`. Fail-silent; never blocks the hook.
 3. **Storage (recorder → JSONL)**: events append to
    `logs/session_telemetry/{session_id}.jsonl` interleaved with V1 machine events.
 4. **Summarize (Stop hook → memory)**: at `Stop`, a new function reads the
@@ -174,17 +176,17 @@ are involved.
 
 - **New dependencies**: none. Pure-internal Python; reuses the recorder and the
   Memory model.
-- **Interface changes**: additive only — three new telemetry event `type` values
+- **Interface changes**: additive only — two new telemetry event `type` values
   (documented, not enforced) and one new module
-  `agent/tui_interaction_capture.py` with public functions:
-  `capture_prompt_event(...)`, `capture_tool_decision(...)`, and
+  `agent/tui_interaction_capture.py` with two public functions:
+  `capture_prompt_event(session_id, prompt, cwd)` and
   `summarize_and_store(session_id, project_key)`.
 - **Coupling**: low. Hooks already import `memory_bridge`; this adds an import of
   the new capture module. The capture module imports the recorder and the Memory
   model — both already imported elsewhere in the same hooks.
 - **Data ownership**: the recorder still owns the JSONL trace; the Memory model
   still owns persisted observations. No new store, no new ownership boundary.
-- **Reversibility**: high. Remove the three hook call-sites + the module + the
+- **Reversibility**: high. Remove the two hook call-sites + the module + the
   doc; the recorder and memory substrate are untouched.
 
 ## Appetite
@@ -209,12 +211,17 @@ the local hook environment are already required by the running system.
 - **`agent/tui_interaction_capture.py` (new)**: the single home for interaction
   capture logic. Classifies hook payloads into interaction events and, at session
   end, distills the trace into one retrievable observation. Fail-silent throughout.
-- **Interaction event types (additive to the recorder)**:
+- **Interaction event types (additive to the recorder)** — two new types:
   - `slash_command` — a prompt starting with `/`; records the command name.
   - `human_steering` — a substantive non-slash prompt arriving after the first
-    turn (a mid-run redirect); records turn index + a truncated snippet.
-  - `tool_decision` — an approved tool (from `PostToolUse`); records tool name and,
-    if present in the payload, the permission/decision field.
+    turn (a mid-run redirect); records the timeline-derived ordinal + a truncated snippet.
+  - **Tool approvals** are NOT captured as a new event. The V1 recorder already
+    emits `tool_use` events for every executed tool; `summarize_and_store` reads
+    those at session end to tally approvals. No `tool_decision` event and no
+    `PostToolUse` call-site — the decision/permission field is unconfirmed in the
+    current payload and rejections are No-Go'd, so a dedicated capture there adds
+    near-zero signal (critique concern C1). This keeps capture to **two**
+    fail-silent call-sites: `UserPromptSubmit` and `Stop`.
 - **Reuse of `idle_gap`**: interrupt timing is read from the V1 recorder's
   existing synthetic `idle_gap` events at summarize time — no new event.
 - **Summarize-and-store at `Stop`**: reads the timeline, composes a compact
@@ -233,12 +240,13 @@ classifies as `slash_command` → `record_telemetry_event` appends to JSONL →
 
 ### Technical Approach
 
-- **Hang capture off the three existing hooks** — no new hook registration in
+- **Hang capture off two existing hooks** — no new hook registration in
   `settings.json`, no daemon. `user_prompt_submit.py` gains a fail-silent call to
-  `capture_prompt_event`; `post_tool_use.py` gains a fail-silent call to capture
-  the approved-tool event; `stop.py` gains a fail-silent call to `summarize_and_store`.
+  `capture_prompt_event`; `stop.py` gains a fail-silent call to `summarize_and_store`.
+  Tool approvals are read from the recorder's existing `tool_use` events at
+  summarize time — `post_tool_use.py` is NOT touched (critique C1).
 - **Reuse `record_telemetry_event` verbatim** (spike-2): new event types ride the
-  existing recorder. The only recorder file change is documenting the three new
+  existing recorder. The only recorder file change is documenting the two new
   types in the module docstring's event-schema list (additive comment).
 - **Signal-vs-noise gating** (the exploratory crux): apply the same triviality
   filter `memory_bridge` already uses (`TRIVIAL_PATTERNS`, `MIN_PROMPT_LENGTH`) so
@@ -247,11 +255,19 @@ classifies as `slash_command` → `record_telemetry_event` appends to JSONL →
   observation compact and recall-friendly.
 - **One observation per session, not per event** — the persisted Memory is a
   single distilled pattern string, keeping recall noise low and respecting the
-  WriteFilter importance gate. Use `category="pattern"` (importance 1.0 baseline
-  per `CATEGORY_IMPORTANCE`) so these don't crowd out corrections/decisions.
+  WriteFilter importance gate. Use `metadata.category="pattern"` (importance 1.0
+  baseline per `CATEGORY_IMPORTANCE`) so these don't crowd out corrections/decisions.
+- **Dedup boundary vs. the existing Stop Haiku extraction** (critique C2): the
+  existing `_run_memory_extraction` writes *content* observations (what the
+  session learned about the code). This writes one *interaction-shape* observation
+  tagged `tui-interaction` with `agent_id=f"tui-{session_id}"`. The distinct
+  `agent_id` namespace + tag keeps the two streams separable; the
+  `strip_private`'d structural string is unlikely to bigram-collide with Haiku's
+  content observations. The existing "memory-dedup" consolidation reflection
+  handles any residual near-duplicates across sessions.
 - **Local Claude Code TUI sessions are the capture surface** (answering the
-  issue's open question): the three hooks fire for local CLI sessions via the
-  established `memory_bridge` path. Bridge-driven eng/granite sessions are
+  issue's open question): the `UserPromptSubmit`/`Stop` hooks fire for local CLI
+  sessions via the established `memory_bridge` path. Bridge-driven eng/granite sessions are
   explicitly *out of scope* for this pillar (no human-in-the-TUI there).
 
 ## Failure Path Test Strategy
@@ -280,7 +296,7 @@ classifies as `slash_command` → `record_telemetry_event` appends to JSONL →
 ## Test Impact
 
 - [ ] `tests/unit/test_session_telemetry.py` — UPDATE: add cases asserting the
-  recorder accepts the three new event types verbatim (round-trips through
+  recorder accepts the two new event types verbatim (round-trips through
   `read_session_timeline`). No existing assertions change (additive).
 - [ ] No existing hook tests assert on the *absence* of these new calls, so no
   hook test breaks. New tests are added under
@@ -396,7 +412,7 @@ this is a capture path that feeds the substrate the agent already reads from.
   (the recorder it reuses).
 
 ### Inline Documentation
-- [ ] Document the three new event types in `agent/session_telemetry.py`'s
+- [ ] Document the two new event types in `agent/session_telemetry.py`'s
   module-docstring event-schema list (additive).
 - [ ] Docstrings on the public functions in `agent/tui_interaction_capture.py`.
 
@@ -404,8 +420,8 @@ this is a capture path that feeds the substrate the agent already reads from.
 
 - [ ] `agent/tui_interaction_capture.py` exists with `capture_prompt_event` and
   `summarize_and_store`, both fail-silent.
-- [ ] `UserPromptSubmit`, `PostToolUse`, and `Stop` hooks call the capture module
-  (grep confirms the three call-sites).
+- [ ] `UserPromptSubmit` and `Stop` hooks call the capture module
+  (grep confirms the two call-sites).
 - [ ] Slash-command starts and substantive steering messages are recorded as
   interaction events in the session JSONL.
 - [ ] At session end, one `pattern` Memory tagged `tui-interaction` is saved and
@@ -415,8 +431,8 @@ this is a capture path that feeds the substrate the agent already reads from.
 - [ ] All capture failures are swallowed and never block a hook or the TUI.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] grep confirms `user_prompt_submit.py`, `post_tool_use.py`, and `stop.py`
-  reference `tui_interaction_capture`.
+- [ ] grep confirms `user_prompt_submit.py` and `stop.py` reference
+  `tui_interaction_capture`.
 
 ## Team Orchestration
 
@@ -424,7 +440,7 @@ this is a capture path that feeds the substrate the agent already reads from.
 
 - **Builder (capture-module)**
   - Name: capture-builder
-  - Role: Implement `agent/tui_interaction_capture.py` + the three new event
+  - Role: Implement `agent/tui_interaction_capture.py` + the two new event
     types' documentation, fail-silent throughout.
   - Agent Type: builder
   - Resume: true
@@ -463,12 +479,12 @@ this is a capture path that feeds the substrate the agent already reads from.
 - **Assigned To**: capture-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `agent/tui_interaction_capture.py` with `capture_prompt_event(session_id, prompt, turn_index, cwd)` and `summarize_and_store(session_id, project_key)`.
-- `capture_prompt_event`: classify `/`-prefixed prompts as `slash_command`, substantive non-slash post-first-turn prompts as `human_steering` (apply `TRIVIAL_PATTERNS` + `MIN_PROMPT_LENGTH` gating, `strip_private` + truncate snippets), call `record_telemetry_event`.
-- Add a `capture_tool_decision(session_id, tool_name, payload)` helper for the PostToolUse approval stream (best-effort decision field).
-- `summarize_and_store`: read the timeline, distill slash sequence + steering count/positions + approval tally + idle-gap interrupts into one pattern string, save via `Memory.safe_save(category="pattern", source=SOURCE_HUMAN, metadata={"tags": ["tui-interaction"]})`.
+- Create `agent/tui_interaction_capture.py` with `capture_prompt_event(session_id, prompt, cwd)` and `summarize_and_store(session_id, project_key)`.
+- `capture_prompt_event`: classify `/`-prefixed prompts as `slash_command`, substantive non-slash prompts as `human_steering` (apply `TRIVIAL_PATTERNS` + `MIN_PROMPT_LENGTH` gating, `strip_private` + truncate snippets), call `record_telemetry_event`. **Derive the ordinal turn index internally** by counting existing prompt events in `read_session_timeline(session_id)` — do NOT accept a `turn_index` arg (the `UserPromptSubmit` payload does not carry one). A prompt classified as `human_steering` only when the derived ordinal > 0 (i.e. not the first prompt).
+- `summarize_and_store`: read the timeline, distill slash sequence + steering count/positions + approval tally + idle-gap interrupts into one pattern string, save via `Memory.safe_save`. **`category` and `tags` MUST go inside the `metadata` DictField** (verified against `agent/memory_extraction.py:444` and `models/memory.py:110-113`), exactly: `Memory.safe_save(agent_id=f"tui-{session_id}", project_key=project_key, content=pattern_str[:500], importance=1.0, source=SOURCE_HUMAN, metadata={"category": "pattern", "tags": ["tui-interaction"]})`.
+- **Guard `project_key is None`**: `_get_project_key` returns `str | None` (see `memory_bridge.py:198-203`). If it resolves to None, skip the Memory write entirely (log at DEBUG) — mirror the `ingest()`/`extract()` None-skip pattern.
 - Wrap every function body in fail-silent try/except.
-- Document the three new event types in `agent/session_telemetry.py` module docstring (additive comment only).
+- Document the two new event types in `agent/session_telemetry.py` module docstring (additive comment only).
 
 ### 2. Validate the capture module
 - **Task ID**: validate-capture-module
@@ -486,8 +502,8 @@ this is a capture path that feeds the substrate the agent already reads from.
 - **Agent Type**: builder
 - **Parallel**: false
 - Add a fail-silent `capture_prompt_event` call in `user_prompt_submit.py` (after the existing ingest/prefetch block, reusing `session_id`/`prompt`/`cwd`).
-- Add a fail-silent `capture_tool_decision` call in `post_tool_use.py` for executed tools.
 - Add a fail-silent `summarize_and_store` call in `stop.py` (alongside `_run_memory_extraction`, before sidecar cleanup).
+- Do NOT touch `post_tool_use.py` — tool approvals are read from the recorder's existing `tool_use` events at summarize time (critique C1).
 - Resolve `project_key` via the existing `memory_bridge._get_project_key`.
 
 ### 4. Build the tests
@@ -498,7 +514,7 @@ this is a capture path that feeds the substrate the agent already reads from.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Unit: classification (slash/steering/trivial-gated/empty), fail-silent on recorder/Memory raise, `strip_private` applied.
-- Unit: recorder round-trips the three new event types (extend test_session_telemetry.py).
+- Unit: recorder round-trips the two new event types (extend test_session_telemetry.py).
 - Integration: write a synthetic timeline → `summarize_and_store` → assert Memory retrievable via `tools.memory_search` for `valor` project. Use a `test-` project_key prefix and clean up via Popoto `instance.delete()`.
 
 ### 5. Documentation
@@ -516,7 +532,7 @@ this is a capture path that feeds the substrate the agent already reads from.
 - **Agent Type**: validator
 - **Parallel**: false
 - Run scoped tests (`pytest tests/unit/test_tui_interaction_capture.py tests/unit/test_session_telemetry.py -q`).
-- grep-confirm the three hook call-sites reference `tui_interaction_capture`.
+- grep-confirm the two hook call-sites reference `tui_interaction_capture`.
 - Verify all success criteria, including the recall round-trip. Generate final report.
 
 ## Verification
@@ -527,23 +543,32 @@ this is a capture path that feeds the substrate the agent already reads from.
 | Telemetry tests still pass | `pytest tests/unit/test_session_telemetry.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check agent/tui_interaction_capture.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/tui_interaction_capture.py` | exit code 0 |
-| Hooks wired | `grep -l tui_interaction_capture .claude/hooks/user_prompt_submit.py .claude/hooks/post_tool_use.py .claude/hooks/stop.py` | output contains all three |
+| Hooks wired | `grep -l tui_interaction_capture .claude/hooks/user_prompt_submit.py .claude/hooks/stop.py` | output contains both |
 | Module exists | `python -c "import agent.tui_interaction_capture as m; assert hasattr(m,'capture_prompt_event') and hasattr(m,'summarize_and_store')"` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room), verdict NEEDS REVISION → revised. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | all 3 | `turn_index` arg assumed but `UserPromptSubmit` payload carries no turn counter | Task 1 + event-types: signature is now `capture_prompt_event(session_id, prompt, cwd)`; ordinal derived internally from `read_session_timeline()` | `human_steering` only when derived ordinal > 0 |
+| BLOCKER | structural | `Memory.safe_save(category=..., metadata={tags})` wrong shape; `category`/`tags` must live inside `metadata` DictField; `project_key` None unguarded | Task 1: explicit `metadata={"category":"pattern","tags":["tui-interaction"]}` call verified against `memory_extraction.py:444` + `memory.py:110-113`; None-guard skips write | Mirrors `ingest()`/`extract()` None-skip |
+| CONCERN | C1 | `tool_decision`/`PostToolUse` call-site captures near-zero signal (approvals-only, decision field unconfirmed, rejection No-Go'd) | Cut to 2 call-sites; approvals tallied from the recorder's existing `tool_use` events at summarize time | `post_tool_use.py` untouched |
+| CONCERN | C2 | Second `category="pattern"` Memory alongside Stop Haiku extraction with no dedup boundary | Technical Approach: distinct `agent_id=f"tui-{session_id}"` + `tui-interaction` tag separates streams; memory-dedup reflection handles residual | Interaction-shape vs. content observation namespaces |
+| NIT | History | `.result.md.tmp` rename never landed (process artifact) | N/A — critique-process artifact, not a plan finding | — |
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Observation granularity** — one distilled `pattern` Memory per session is the
-   proposed default (keeps recall noise low). Acceptable, or do you want
-   finer-grained per-pattern records (e.g. a separate Memory per distinct
-   slash-sequence) at the cost of more recall volume?
-2. **Steering snippet length** — snippets are truncated + `strip_private`'d. Is a
-   short snippet (≤120 chars) acceptable, or should `human_steering` events store
-   structural metadata only (turn index + length) with no verbatim text at all?
+The two design questions raised at plan time are resolved with conservative
+defaults (revisit during review if the human prefers otherwise):
+
+1. **Observation granularity** — **one distilled `pattern` Memory per session**
+   (not per-pattern records). Keeps recall noise low and respects the WriteFilter
+   importance gate. Finer-grained per-slash-sequence records are deferred as a
+   tuning follow-up if recall proves too coarse.
+2. **Steering snippet length** — **short truncated snippet (≤120 chars), always
+   `strip_private`'d** before storage. Carries enough signal to be recallable
+   without storing verbatim multi-line steering text. Structural-only (no text)
+   is the fallback if the snippets prove noisy in practice.
