@@ -63,12 +63,21 @@ cap handles REVIEW non-determinism instead.
 
 ### G5 hash stability notes
 
-- Hash the full UTF-8-encoded plan file bytes **including frontmatter**.
-  Frontmatter edits (e.g. `revision_applied: true`) are meaningful plan changes
-  that SHOULD bust the cache.
+- G5 uses `compute_plan_body_hash` (in `tools/sdlc_verdict.py`), which hashes
+  the full UTF-8-encoded plan bytes **with only the `revision_applied:` frontmatter
+  key stripped**. All other frontmatter (`status:`, `type:`, `tracking:`,
+  `last_comment_id:`) and the full body still contribute to the hash.
+- **Exception — `revision_applied:` does NOT bust the cache.** A `/do-plan`
+  revision write flipping `revision_applied: false → true` changes only that key;
+  `compute_plan_body_hash` produces the same output before and after the write, so
+  G5 fires a cache hit and routes straight to `/do-build` (issue #1761).
+- Every other frontmatter or body edit still busts the cache and triggers a
+  fresh `/do-plan-critique` run.
 - Normalize line endings to `\n` before hashing (cross-platform safety).
 - Do NOT normalize internal whitespace — a reviewer reflowing a paragraph is
   editing the plan and the critique should re-run.
+- `compute_plan_hash` (full-bytes variant) is retained for callers that explicitly
+  need the complete fingerprint; it is no longer used by G5 itself.
 
 ### G4 state machine
 
@@ -207,7 +216,7 @@ All edge cases fail safe to "not stale" (missing/unparseable `recorded_at`, no p
 
 **G5 is the loop-breaker (NOT G4).** The row-2b (`/do-plan-critique`) ↔ row-3 (`/do-plan`) cycle alternates *two different* skills, so `guard_g4_oscillation` (which keys on the *same* skill repeated) never trips it, and `guard_g2_critique_cycle_cap` (which only increments via `fail_stage("CRITIQUE")`) is never reached. The terminating bound is **G5 (`guard_g5_artifact_hash_cache`)**: it runs before the dispatch rows and, when the current plan-file hash equals the cached CRITIQUE verdict's `artifact_hash`, short-circuits the re-critique to the cached verdict's downstream dispatch. Re-critique therefore cannot loop on an unchanged plan — row 2b only progresses when the plan hash genuinely changed.
 
-**G5 activation in the CLI path.** G5 only fires if `context["current_plan_hash"]` is populated. Previously `tools/sdlc_next_skill.py::_build_context` never set it, leaving G5 inert via `sdlc-tool next-skill` (a latent inertness that also affected nothing else, since G5 is CRITIQUE-only). `_build_context` now computes `current_plan_hash = compute_plan_hash(find_plan_path(issue_number))` (None-safe: no plan or unreadable file leaves the key unset), so G5's loop bound on row 2b is real in production.
+**G5 activation in the CLI path.** G5 only fires if `context["current_plan_hash"]` is populated. Previously `tools/sdlc_next_skill.py::_build_context` never set it, leaving G5 inert via `sdlc-tool next-skill` (a latent inertness that also affected nothing else, since G5 is CRITIQUE-only). `_build_context` now computes `current_plan_hash = compute_plan_body_hash(find_plan_path(issue_number))` (None-safe: no plan or unreadable file leaves the key unset), so G5's loop bound on row 2b is real in production. Using `compute_plan_body_hash` (not `compute_plan_hash`) ensures a `revision_applied: true` write does not bust the cache and send the router back to CRITIQUE (#1761).
 
 **Disjointness from G1.** G1 (`guard_g1_critique_loop`) fires only when `last_dispatched_skill == /do-plan-critique` (the critique just ran; plan unchanged) and routes to `/do-plan`. The #1639 dead-end has `last_dispatched_skill == /do-plan` (plan just revised). The two conditions are disjoint on `last_dispatched_skill`, so G1 and row 2b never fire each other's skill.
 

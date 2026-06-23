@@ -418,7 +418,17 @@ For each requirement/acceptance criterion in the plan:
 1. Locate the corresponding implementation in the PR diff
 2. Verify behavior matches the plan specification
 3. Check that edge cases mentioned in the plan are handled
-4. Verify any "No-Gos" from the plan are respected
+4. Verify any "No-Gos" from the plan are respected. For every `[DESTRUCTIVE]` or
+   `[SEPARATE-SLUG]` No-Go (assertable No-Gos — those describing a forbidden code-level
+   outcome), confirm that a corresponding `## Verification` anti-criterion row exists.
+   If a clearly assertable No-Go has no inverse Verification row, flag it as a
+   non-blocking advisory item (not a hard gate — anti-criteria are opt-in per author).
+   `[EXTERNAL]` and `[ORDERED]` No-Gos are genuinely advisory; no anti-criterion row
+   is required for them. Also confirm that the PR description contains the **pasted
+   red-state FAIL output** for each authored anti-criterion (evidence that the author
+   exercised the row against a deliberately-violating input before trusting it). A
+   missing red-state paste is a non-blocking advisory; the binding gate is the green
+   Step 4.5 Verification run.
 5. If the plan has an Agent Integration section, verify integration points exist in the codebase (e.g., grep for expected tool calls, imports, or MCP references)
 
 ### 4.5. Verification Checks (if plan has ## Verification table)

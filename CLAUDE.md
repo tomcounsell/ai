@@ -217,6 +217,7 @@ valor-email threads
 | `valor-tts --text "Hello." --output /tmp/out.ogg` | Synthesize text to OGG/Opus (Kokoro local primary, OpenAI tts-1 fallback). See `docs/features/tts.md`. |
 | `valor-tts --text "Hello." --output /tmp/out.ogg --voice af_bella` | Synthesize with a specific voice (catalog in `tools/tts/README.md`) |
 | `valor-tts --text "Hello." --output /tmp/out.ogg --force-cloud` | Force the cloud (OpenAI tts-1) backend even if Kokoro is available |
+| `valor-deck-video deck.md` | Render a narrated MP4 of a Marp deck (per-slide `<!-- narration: ... -->`, voiceover via valor-tts, slides held for each clip's duration). See `docs/features/narrated-deck-video.md`. |
 | `valor-ingest <path-or-url>` | Convert a PDF/DOCX/PPTX/XLSX/HTML/image/YouTube URL into a `.md` sidecar the knowledge indexer picks up (see `docs/features/markitdown-ingestion.md`) |
 | `valor-ingest --scan ~/work-vault/` | Backfill every convertible binary file in the vault recursively (audio formats deliberately excluded) |
 | `valor-computer list_apps` | List all visible macOS apps (requires bcu opt-in via `/setup`; macOS-only — exits 78 on other OSes) |
