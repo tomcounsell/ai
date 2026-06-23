@@ -119,6 +119,11 @@ def main():
     cwd = hook_input.get("cwd", "")
     _run_memory_extraction(session_id, transcript_path, cwd=cwd)
 
+    # TUI interaction capture -- distill the session's interaction shape
+    # (slash commands, steering, tool approvals, idle gaps) into one pattern
+    # Memory for subconscious recall (#1540, Pillar 3). Fails silently.
+    _run_tui_interaction_capture(session_id, cwd=cwd)
+
     # Post-merge learning extraction (if a PR was merged during this session)
     _run_post_merge_extraction(session_id, cwd=cwd)
 
@@ -233,6 +238,26 @@ def _run_memory_extraction(session_id: str, transcript_path: str | None, cwd: st
         from hook_utils.memory_bridge import extract
 
         extract(session_id, transcript_path, cwd=cwd)
+    except Exception:
+        pass  # Silent failure -- never block session stop
+
+
+def _run_tui_interaction_capture(session_id: str, cwd: str = "") -> None:
+    """Summarize the session's TUI interaction shape into one pattern Memory.
+
+    Reads the telemetry timeline and distills slash-command sequences,
+    steering positions, tool approvals, and idle-gap interrupts into one
+    retrievable subconscious-memory observation (#1540, Pillar 3).
+
+    Fails silently -- capture errors never block session stop.
+    """
+    try:
+        from hook_utils.memory_bridge import _get_project_key
+
+        from agent.tui_interaction_capture import summarize_and_store
+
+        project_key = _get_project_key(cwd)
+        summarize_and_store(session_id, project_key)
     except Exception:
         pass  # Silent failure -- never block session stop
 

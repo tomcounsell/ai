@@ -72,6 +72,16 @@ def main():
         except Exception:
             pass  # Silent failure -- never block prompt submission
 
+    # Capture TUI interaction patterns (slash commands, mid-run steering) for
+    # subconscious-memory recall (#1540, Pillar 3 of epic #1536). Fail-silent.
+    if session_id:
+        try:
+            from agent.tui_interaction_capture import capture_prompt_event
+
+            capture_prompt_event(session_id, prompt, cwd=cwd)
+        except Exception:
+            pass  # Silent failure -- never block prompt submission
+
     # Create AgentSession for local CLI session (one per session, idempotent)
     try:
         if session_id:
