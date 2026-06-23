@@ -26,6 +26,7 @@ from agent.reflection_scheduler import (
     ReflectionEntry,
     ReflectionScheduler,
     _get_memory_rss,
+    _resolve_callable,
     _resolve_registry_path,
     execute_function_reflection,
     is_reflection_due,
@@ -558,6 +559,33 @@ class TestRegistryIntegrity:
             assert "every" in entry, f"Entry {entry.get('name')} missing every"
             assert "priority" in entry, f"Entry {entry.get('name')} missing priority"
             assert "execution_type" in entry, f"Entry {entry.get('name')} missing execution_type"
+
+    def test_all_callables_resolve(self):
+        """Every function-type entry's `callable:` dotted path must resolve.
+
+        Guards the one-file-per-reflection refactor (#1028): the registry
+        references historical dotted paths (e.g. ``reflections.maintenance.run_*``,
+        ``agent.sustainability.*``) that now resolve through re-export shims to the
+        relocated per-reflection modules. A typo in any shim re-export, or a moved
+        module that forgot its shim, fails loudly here instead of silently halting
+        a reflection in production. Covers disabled entries too — a disabled
+        reflection's callable must still be importable.
+        """
+        registry_path = _registry_path()
+        with open(registry_path) as f:
+            data = yaml.safe_load(f)
+        failures = []
+        for entry in data["reflections"]:
+            if entry.get("execution_type") != "function":
+                continue
+            dotted = entry.get("callable")
+            assert dotted, f"function entry {entry.get('name')} missing callable"
+            try:
+                fn = _resolve_callable(dotted)
+                assert callable(fn), f"{dotted} resolved to a non-callable"
+            except Exception as exc:  # noqa: BLE001 — collect all, report together
+                failures.append(f"{entry.get('name')}: {dotted} -> {exc!r}")
+        assert not failures, "Unresolvable reflection callables:\n" + "\n".join(failures)
 
     def test_health_check_is_high_priority(self):
         """Health check must be high priority."""

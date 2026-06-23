@@ -335,7 +335,7 @@ class TestAuditingCallables:
         from reflections.auditing import run_pr_review_audit
 
         with (
-            patch("reflections.auditing.load_local_projects", return_value=[]),
+            patch("reflections.audits.pr_review_audit.load_local_projects", return_value=[]),
             patch("models.reflections.PRReviewAudit") as mock_pra,
         ):
             mock_pra.last_successful_run.return_value = None
@@ -355,7 +355,7 @@ class TestTaskManagementCallables:
         """run_task_management() returns valid dict with no projects."""
         from reflections.task_management import run_task_management
 
-        with patch("reflections.task_management.load_local_projects", return_value=[]):
+        with patch("reflections.audits.task_backlog_check.load_local_projects", return_value=[]):
             result = run_async(run_task_management())
         assert_valid_result(result)
 
@@ -363,7 +363,7 @@ class TestTaskManagementCallables:
         """run_principal_staleness() flags missing PRINCIPAL.md."""
         from reflections.task_management import run_principal_staleness
 
-        with patch("reflections.task_management.PROJECT_ROOT", tmp_path):
+        with patch("reflections.audits.principal_staleness.PROJECT_ROOT", tmp_path):
             result = run_async(run_principal_staleness())
         assert_valid_result(result)
         assert "does not exist" in result["summary"]
@@ -377,7 +377,7 @@ class TestTaskManagementCallables:
         principal = config_dir / "PRINCIPAL.md"
         principal.write_text("# Principal\n\nStrategic context.")
 
-        with patch("reflections.task_management.PROJECT_ROOT", tmp_path):
+        with patch("reflections.audits.principal_staleness.PROJECT_ROOT", tmp_path):
             result = run_async(run_principal_staleness())
         assert_valid_result(result)
         assert result["findings"] == []  # Fresh file, no warning

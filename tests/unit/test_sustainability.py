@@ -89,7 +89,7 @@ class TestCircuitHealthGate(unittest.TestCase):
         anthropic_present: bool = True,
     ):
         """Run circuit_health_gate with mocked dependencies, return the redis mock."""
-        from agent.sustainability import circuit_health_gate
+        from reflections.agents.circuit_health_gate import run as circuit_health_gate
 
         health_mod, resilience_mod, _cb = _build_health_stubs(circuit_state, anthropic_present)
 
@@ -98,9 +98,11 @@ class TestCircuitHealthGate(unittest.TestCase):
         r.exists.side_effect = [int(was_paused), int(was_hibernating)]
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
-            patch("agent.sustainability.send_hibernation_notification"),
+            patch("reflections.agents.circuit_health_gate._get_redis", return_value=r),
+            patch(
+                "reflections.agents.circuit_health_gate._get_project_key", return_value="testproj"
+            ),
+            patch("reflections.agents.circuit_health_gate.send_hibernation_notification"),
             patch.dict(
                 sys.modules,
                 {
@@ -130,7 +132,7 @@ class TestCircuitHealthGate(unittest.TestCase):
 
     def test_closed_circuit_deletes_both_flags_and_sets_recovery(self):
         """CLOSED circuit after OPEN → deletes both flags, sets both recovery keys."""
-        from agent.sustainability import circuit_health_gate
+        from reflections.agents.circuit_health_gate import run as circuit_health_gate
 
         health_mod, resilience_mod, _cb = _build_health_stubs("closed")
 
@@ -140,9 +142,13 @@ class TestCircuitHealthGate(unittest.TestCase):
         notif_mock = MagicMock()
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
-            patch("agent.sustainability.send_hibernation_notification", notif_mock),
+            patch("reflections.agents.circuit_health_gate._get_redis", return_value=r),
+            patch(
+                "reflections.agents.circuit_health_gate._get_project_key", return_value="testproj"
+            ),
+            patch(
+                "reflections.agents.circuit_health_gate.send_hibernation_notification", notif_mock
+            ),
             patch.dict(
                 sys.modules,
                 {
@@ -163,7 +169,7 @@ class TestCircuitHealthGate(unittest.TestCase):
 
     def test_closed_circuit_no_recovery_if_neither_flag_was_set(self):
         """CLOSED circuit when neither flag was set → no recovery keys, no notification."""
-        from agent.sustainability import circuit_health_gate
+        from reflections.agents.circuit_health_gate import run as circuit_health_gate
 
         health_mod, resilience_mod, _cb = _build_health_stubs("closed")
 
@@ -173,9 +179,13 @@ class TestCircuitHealthGate(unittest.TestCase):
         notif_mock = MagicMock()
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
-            patch("agent.sustainability.send_hibernation_notification", notif_mock),
+            patch("reflections.agents.circuit_health_gate._get_redis", return_value=r),
+            patch(
+                "reflections.agents.circuit_health_gate._get_project_key", return_value="testproj"
+            ),
+            patch(
+                "reflections.agents.circuit_health_gate.send_hibernation_notification", notif_mock
+            ),
             patch.dict(
                 sys.modules,
                 {
@@ -197,14 +207,17 @@ class TestCircuitHealthGate(unittest.TestCase):
 
     def test_exception_does_not_propagate(self):
         """Any unhandled exception is caught; function does not raise."""
-        from agent.sustainability import circuit_health_gate
+        from reflections.agents.circuit_health_gate import run as circuit_health_gate
 
-        with patch("agent.sustainability._get_redis", side_effect=RuntimeError("redis down")):
+        with patch(
+            "reflections.agents.circuit_health_gate._get_redis",
+            side_effect=RuntimeError("redis down"),
+        ):
             circuit_health_gate()  # Should not raise
 
     def test_closed_circuit_only_pause_flag_was_set(self):
         """CLOSED circuit: only queue_paused was set → still triggers recovery and notification."""
-        from agent.sustainability import circuit_health_gate
+        from reflections.agents.circuit_health_gate import run as circuit_health_gate
 
         health_mod, resilience_mod, _cb = _build_health_stubs("closed")
 
@@ -214,9 +227,13 @@ class TestCircuitHealthGate(unittest.TestCase):
         notif_mock = MagicMock()
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
-            patch("agent.sustainability.send_hibernation_notification", notif_mock),
+            patch("reflections.agents.circuit_health_gate._get_redis", return_value=r),
+            patch(
+                "reflections.agents.circuit_health_gate._get_project_key", return_value="testproj"
+            ),
+            patch(
+                "reflections.agents.circuit_health_gate.send_hibernation_notification", notif_mock
+            ),
             patch.dict(
                 sys.modules,
                 {
@@ -242,7 +259,7 @@ class TestSessionRecoveryDrip(unittest.TestCase):
         """paused_circuit session exists alongside paused session → paused_circuit dripped first."""
         import models.agent_session as asm
         import models.session_lifecycle as lm
-        from agent.sustainability import session_recovery_drip
+        from reflections.agents.session_recovery_drip import run as session_recovery_drip
 
         r = MagicMock()
         # recovery:active is set, worker:recovering is not
@@ -267,8 +284,10 @@ class TestSessionRecoveryDrip(unittest.TestCase):
             return []
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("reflections.agents.session_recovery_drip._get_redis", return_value=r),
+            patch(
+                "reflections.agents.session_recovery_drip._get_project_key", return_value="testproj"
+            ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
             patch.object(lm, "transition_status") as mock_transition,
         ):
@@ -285,7 +304,7 @@ class TestSessionRecoveryDrip(unittest.TestCase):
         """No paused_circuit sessions → drip the oldest paused session."""
         import models.agent_session as asm
         import models.session_lifecycle as lm
-        from agent.sustainability import session_recovery_drip
+        from reflections.agents.session_recovery_drip import run as session_recovery_drip
 
         r = MagicMock()
         r.exists.side_effect = [False, True]  # only worker:recovering set
@@ -304,8 +323,10 @@ class TestSessionRecoveryDrip(unittest.TestCase):
             return []
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("reflections.agents.session_recovery_drip._get_redis", return_value=r),
+            patch(
+                "reflections.agents.session_recovery_drip._get_project_key", return_value="testproj"
+            ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
             patch.object(lm, "transition_status") as mock_transition,
         ):
@@ -321,7 +342,7 @@ class TestSessionRecoveryDrip(unittest.TestCase):
     def test_clears_both_flags_when_both_queues_empty(self):
         """Both queues empty → clears recovery:active AND worker:recovering."""
         import models.agent_session as asm
-        from agent.sustainability import session_recovery_drip
+        from reflections.agents.session_recovery_drip import run as session_recovery_drip
 
         r = MagicMock()
         r.exists.side_effect = [True, True]
@@ -330,8 +351,10 @@ class TestSessionRecoveryDrip(unittest.TestCase):
             return []
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("reflections.agents.session_recovery_drip._get_redis", return_value=r),
+            patch(
+                "reflections.agents.session_recovery_drip._get_project_key", return_value="testproj"
+            ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
         ):
             mock_query.filter.side_effect = lambda **kw: mock_filter(**kw)
@@ -344,14 +367,16 @@ class TestSessionRecoveryDrip(unittest.TestCase):
     def test_no_op_when_neither_flag_set(self):
         """Neither recovery flag set → no sessions modified."""
         import models.session_lifecycle as lm
-        from agent.sustainability import session_recovery_drip
+        from reflections.agents.session_recovery_drip import run as session_recovery_drip
 
         r = MagicMock()
         r.exists.side_effect = [False, False]
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("reflections.agents.session_recovery_drip._get_redis", return_value=r),
+            patch(
+                "reflections.agents.session_recovery_drip._get_project_key", return_value="testproj"
+            ),
             patch.object(lm, "transition_status") as mock_transition,
         ):
             session_recovery_drip()
@@ -360,16 +385,19 @@ class TestSessionRecoveryDrip(unittest.TestCase):
 
     def test_exception_does_not_propagate(self):
         """Any unhandled exception is caught; function does not raise."""
-        from agent.sustainability import session_recovery_drip
+        from reflections.agents.session_recovery_drip import run as session_recovery_drip
 
-        with patch("agent.sustainability._get_redis", side_effect=RuntimeError("redis down")):
+        with patch(
+            "reflections.agents.session_recovery_drip._get_redis",
+            side_effect=RuntimeError("redis down"),
+        ):
             session_recovery_drip()  # Should not raise
 
     def test_only_one_session_dripped_per_tick(self):
         """Two paused_circuit sessions → only the oldest one is dripped per tick."""
         import models.agent_session as asm
         import models.session_lifecycle as lm
-        from agent.sustainability import session_recovery_drip
+        from reflections.agents.session_recovery_drip import run as session_recovery_drip
 
         r = MagicMock()
         r.exists.side_effect = [True, False]
@@ -391,8 +419,10 @@ class TestSessionRecoveryDrip(unittest.TestCase):
             return []
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("reflections.agents.session_recovery_drip._get_redis", return_value=r),
+            patch(
+                "reflections.agents.session_recovery_drip._get_project_key", return_value="testproj"
+            ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
             patch.object(lm, "transition_status") as mock_transition,
         ):
@@ -426,7 +456,7 @@ class TestSessionCountThrottle(unittest.TestCase):
     def _run_throttle(self, session_count: int, moderate: int = 20, suspended: int = 40):
         """Run session_count_throttle with `session_count` recent sessions."""
         import models.agent_session as asm
-        from agent.sustainability import session_count_throttle
+        from reflections.agents.session_count_throttle import run as session_count_throttle
 
         r = MagicMock()
         sessions = [self._make_session() for _ in range(session_count)]
@@ -438,8 +468,11 @@ class TestSessionCountThrottle(unittest.TestCase):
         }
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("reflections.agents.session_count_throttle._get_redis", return_value=r),
+            patch(
+                "reflections.agents.session_count_throttle._get_project_key",
+                return_value="testproj",
+            ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
             patch.dict(os.environ, env_patch),
         ):
@@ -531,11 +564,11 @@ class TestFailureLoopDetector(unittest.TestCase):
         s.failed_reason = error_msg
         return s
 
-    @patch("agent.sustainability.subprocess.run")
+    @patch("reflections.agents.failure_loop_detector.subprocess.run")
     def test_three_same_fingerprint_failures_files_issue(self, mock_subprocess):
         """Three sessions with same fingerprint → gh issue filed, fingerprint added to Redis."""
         import models.agent_session as asm
-        from agent.sustainability import failure_loop_detector
+        from reflections.agents.failure_loop_detector import run as failure_loop_detector
 
         r = MagicMock()
         r.exists.return_value = False  # queue not paused
@@ -549,8 +582,10 @@ class TestFailureLoopDetector(unittest.TestCase):
         sessions = [self._make_failed_session("conn_timeout", f"s{i}") for i in range(3)]
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("reflections.agents.failure_loop_detector._get_redis", return_value=r),
+            patch(
+                "reflections.agents.failure_loop_detector._get_project_key", return_value="testproj"
+            ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
         ):
             mock_query.filter.return_value = sessions
@@ -568,11 +603,11 @@ class TestFailureLoopDetector(unittest.TestCase):
         self.assertIn("issue", args)
         self.assertIn("create", args)
 
-    @patch("agent.sustainability.subprocess.run")
+    @patch("reflections.agents.failure_loop_detector.subprocess.run")
     def test_already_seen_fingerprint_does_not_file_duplicate(self, mock_subprocess):
         """Fingerprint already in Redis seen set → no duplicate issue filed."""
         import models.agent_session as asm
-        from agent.sustainability import failure_loop_detector
+        from reflections.agents.failure_loop_detector import run as failure_loop_detector
 
         r = MagicMock()
         r.exists.return_value = False  # queue not paused
@@ -581,8 +616,10 @@ class TestFailureLoopDetector(unittest.TestCase):
         sessions = [self._make_failed_session("conn_timeout", f"s{i}") for i in range(3)]
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("reflections.agents.failure_loop_detector._get_redis", return_value=r),
+            patch(
+                "reflections.agents.failure_loop_detector._get_project_key", return_value="testproj"
+            ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
         ):
             mock_query.filter.return_value = sessions
@@ -590,11 +627,11 @@ class TestFailureLoopDetector(unittest.TestCase):
 
         mock_subprocess.assert_not_called()
 
-    @patch("agent.sustainability.subprocess.run")
+    @patch("reflections.agents.failure_loop_detector.subprocess.run")
     def test_fewer_than_three_failures_no_issue(self, mock_subprocess):
         """Only two sessions with same fingerprint → no issue filed."""
         import models.agent_session as asm
-        from agent.sustainability import failure_loop_detector
+        from reflections.agents.failure_loop_detector import run as failure_loop_detector
 
         r = MagicMock()
         r.exists.return_value = False
@@ -603,8 +640,10 @@ class TestFailureLoopDetector(unittest.TestCase):
         sessions = [self._make_failed_session("conn_timeout", f"s{i}") for i in range(2)]
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("reflections.agents.failure_loop_detector._get_redis", return_value=r),
+            patch(
+                "reflections.agents.failure_loop_detector._get_project_key", return_value="testproj"
+            ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
         ):
             mock_query.filter.return_value = sessions
@@ -642,7 +681,10 @@ class TestFailureLoopDetector(unittest.TestCase):
         """
         import json as _json
 
-        from agent.sustainability import _compute_fingerprint, _file_github_issue
+        from reflections.agents.failure_loop_detector import (
+            _compute_fingerprint,
+            _file_github_issue,
+        )
 
         reason = "health check: 3 recovery attempts, never progressed (kind=foo)"
         session = self._make_reason_only_session(reason, "local-abc")
@@ -659,7 +701,7 @@ class TestFailureLoopDetector(unittest.TestCase):
         sessions = [self._make_reason_only_session(reason, f"local-{i}") for i in range(3)]
         session_ids = [s.agent_session_id for s in sessions]
 
-        with patch("agent.sustainability.subprocess.run") as mock_run:
+        with patch("reflections.agents.failure_loop_detector.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = _json.dumps(
                 {"number": 9999, "url": "https://example.com"}
@@ -678,7 +720,7 @@ class TestFailureLoopDetector(unittest.TestCase):
 
         Neither fingerprint should be the degenerate unknown hash.
         """
-        from agent.sustainability import _compute_fingerprint
+        from reflections.agents.failure_loop_detector import _compute_fingerprint
 
         s1 = self._make_reason_only_session("health check: no progress", "local-1")
         s2 = self._make_reason_only_session("granite CLI timeout", "local-2")
@@ -691,7 +733,7 @@ class TestFailureLoopDetector(unittest.TestCase):
 
     def test_empty_session_degrades_to_unknown_hash(self):
         """Session with empty reason AND empty session_events → degenerate hash preserved."""
-        from agent.sustainability import _compute_fingerprint
+        from reflections.agents.failure_loop_detector import _compute_fingerprint
 
         session = self._make_reason_only_session("", "local-empty")
         session.session_events = []  # explicitly empty
@@ -702,7 +744,7 @@ class TestFailureLoopDetector(unittest.TestCase):
 
     def test_latest_failure_reason_exception_safe(self):
         """_latest_failure_reason() handles all malformed inputs by returning ''."""
-        from agent.sustainability import _latest_failure_reason
+        from reflections.agents.failure_loop_detector import _latest_failure_reason
 
         session = MagicMock()
 
@@ -732,7 +774,7 @@ class TestFailureLoopDetector(unittest.TestCase):
 
     def test_same_reason_sessions_cluster_to_one_fingerprint(self):
         """Multiple sessions with the same lifecycle reason → same fingerprint, not degenerate."""
-        from agent.sustainability import _compute_fingerprint
+        from reflections.agents.failure_loop_detector import _compute_fingerprint
 
         reason = "health check: no progress"
         sessions = [self._make_reason_only_session(reason, f"local-{i}") for i in range(3)]
@@ -757,7 +799,7 @@ class TestDigestAnomalyPromptPlainLanguage(unittest.TestCase):
     def test_digest_anomaly_prompt_uses_plain_language(self):
         """sustainability_digest() must NOT use 'not CLOSED' and MUST include RECOVERING label."""
         import models.agent_session as asm
-        from agent.sustainability import sustainability_digest
+        from reflections.agents.system_health_digest import run as sustainability_digest
 
         # Use an OPEN circuit so circuits_ok=False, which triggers the anomaly path
         health_mod, resilience_mod, _cb = _build_health_stubs("open")
@@ -780,8 +822,10 @@ class TestDigestAnomalyPromptPlainLanguage(unittest.TestCase):
         fake_session_cls.query.filter.return_value = []  # no sessions → failed_24h = 0
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("reflections.agents.system_health_digest._get_redis", return_value=r),
+            patch(
+                "reflections.agents.system_health_digest._get_project_key", return_value="testproj"
+            ),
             patch.object(asm, "AgentSession", fake_session_cls),
             patch.dict(
                 sys.modules,
@@ -824,7 +868,7 @@ class TestDigestSilentWhenNominal(unittest.TestCase):
     def test_digest_nominal_stays_silent(self):
         """All signals nominal → no Telegram send, no agent session enqueued."""
         import models.agent_session as asm
-        from agent.sustainability import sustainability_digest
+        from reflections.agents.system_health_digest import run as sustainability_digest
 
         # Healthy: closed circuits, throttle none, queue not paused, no clusters.
         health_mod, resilience_mod, _cb = _build_health_stubs("closed")
@@ -838,8 +882,10 @@ class TestDigestSilentWhenNominal(unittest.TestCase):
         fake_session_cls.query.filter.return_value = []  # no sessions → failed_24h = 0
 
         with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("reflections.agents.system_health_digest._get_redis", return_value=r),
+            patch(
+                "reflections.agents.system_health_digest._get_project_key", return_value="testproj"
+            ),
             patch.object(asm, "AgentSession", fake_session_cls),
             patch.dict(
                 sys.modules,

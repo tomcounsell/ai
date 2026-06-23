@@ -62,7 +62,7 @@ class TestCircuitHealthGateValorNamespace(unittest.TestCase):
 
     def test_open_circuit_writes_valor_flags(self):
         """OPEN circuit + VALOR_PROJECT_KEY=valor → flags land under valor:*."""
-        from agent.sustainability import circuit_health_gate
+        from reflections.agents.circuit_health_gate import run as circuit_health_gate
 
         health_mod, resilience_mod = _build_health_stubs("open")
         r = MagicMock()
@@ -70,8 +70,8 @@ class TestCircuitHealthGateValorNamespace(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"VALOR_PROJECT_KEY": "valor"}, clear=False),
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability.send_hibernation_notification"),
+            patch("reflections.agents.circuit_health_gate._get_redis", return_value=r),
+            patch("reflections.agents.circuit_health_gate.send_hibernation_notification"),
             patch.dict(
                 sys.modules,
                 {
@@ -90,7 +90,7 @@ class TestCircuitHealthGateValorNamespace(unittest.TestCase):
 
     def test_closed_circuit_recovery_keys_use_valor_namespace(self):
         """CLOSED-after-OPEN + VALOR_PROJECT_KEY=valor → recovery keys land under valor:*."""
-        from agent.sustainability import circuit_health_gate
+        from reflections.agents.circuit_health_gate import run as circuit_health_gate
 
         health_mod, resilience_mod = _build_health_stubs("closed")
         r = MagicMock()
@@ -98,8 +98,10 @@ class TestCircuitHealthGateValorNamespace(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"VALOR_PROJECT_KEY": "valor"}, clear=False),
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability.send_hibernation_notification") as notif_mock,
+            patch("reflections.agents.circuit_health_gate._get_redis", return_value=r),
+            patch(
+                "reflections.agents.circuit_health_gate.send_hibernation_notification"
+            ) as notif_mock,
             patch.dict(
                 sys.modules,
                 {
@@ -131,8 +133,8 @@ class TestSessionRecoveryDripValorNamespace(unittest.TestCase):
     def test_filter_uses_valor_project_key(self):
         """With VALOR_PROJECT_KEY=valor, recovery_drip queries project_key="valor"."""
         # Patch AgentSession.query.filter so we can capture the call args.
-        from agent import sustainability as sust_mod
         from models import agent_session as agent_session_mod
+        from reflections.agents import session_recovery_drip as sust_mod
 
         captured_filter_kwargs = []
 
@@ -153,7 +155,7 @@ class TestSessionRecoveryDripValorNamespace(unittest.TestCase):
             patch.object(sust_mod, "_get_redis", return_value=r),
             patch.object(agent_session_mod, "AgentSession", _FakeAgentSession),
         ):
-            sust_mod.session_recovery_drip()
+            sust_mod.run()
 
         # We expect at least one filter call to have been made with
         # project_key="valor". The function may make multiple filter calls
@@ -163,6 +165,21 @@ class TestSessionRecoveryDripValorNamespace(unittest.TestCase):
             assert kwargs.get("project_key") == "valor", (
                 f"expected project_key='valor', got {kwargs!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Shim re-export guard: worker hibernation path imports from agent.sustainability
+# ---------------------------------------------------------------------------
+
+
+class TestShimReExports(unittest.TestCase):
+    """Guard the shim symbols the worker still imports from agent.sustainability."""
+
+    def test_send_hibernation_notification_importable(self):
+        """agent/agent_session_queue.py imports send_hibernation_notification from the shim."""
+        from agent.sustainability import send_hibernation_notification
+
+        assert callable(send_hibernation_notification)
 
 
 if __name__ == "__main__":
