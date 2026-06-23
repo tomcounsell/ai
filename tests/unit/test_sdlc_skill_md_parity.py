@@ -143,6 +143,7 @@ def test_dispatch_rules_cover_expected_row_ids():
         "7",
         "8",
         "8b",
+        "8c",
         "9",
         "10",
         "10b",

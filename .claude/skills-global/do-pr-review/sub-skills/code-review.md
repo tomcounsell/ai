@@ -200,7 +200,7 @@ For each requirement/acceptance criterion in the plan:
 1. Locate the corresponding implementation in the PR diff
 2. Verify behavior matches the plan specification
 3. Check that edge cases mentioned in the plan are handled
-4. Verify any "No-Gos" from the plan are respected. No-Gos override disclosures — a disclosed "deferral" that actually violates a plan No-Go is a `blocker`, not an `acknowledged` finding.
+4. Verify any "No-Gos" from the plan are respected. No-Gos override disclosures — a disclosed "deferral" that actually violates a plan No-Go is a `blocker`, not an `acknowledged` finding. Additionally, for every `[DESTRUCTIVE]` or `[SEPARATE-SLUG]` No-Go (assertable No-Gos describing a forbidden code-level outcome), check whether a corresponding `## Verification` anti-criterion row exists. If a clearly assertable No-Go has no inverse row, flag it as a non-blocking advisory item (anti-criteria are opt-in). `[EXTERNAL]` and `[ORDERED]` No-Gos are genuinely advisory; no anti-criterion is required. Also confirm the PR description contains the **pasted red-state FAIL output** for each authored anti-criterion (paper-trail evidence that the author exercised the row against a violating input). A missing red-state paste is advisory, not a hard gate.
 
 If a plan acceptance criterion is not addressed in the diff but matches a verified disclosure from Step 2.5, classify that criterion as `acknowledged` rather than as a blocker. Record it in the `Acknowledged Deferrals (verified)` section.
 

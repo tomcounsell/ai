@@ -38,10 +38,18 @@ Degradation contract (D7 — loud failure, quiet absence):
       Loud is reserved ONLY for this case. The idempotent already-completed
       path stays exit 0.
 
+Ownership gate (issue #1735): when ``--issue-number N`` is explicitly provided,
+the resolved session is verified to own issue N via ``session_owns_issue()`` in
+``tools._sdlc_utils``. If the check fails (the resolved session belongs to a
+different issue — the artifact-divert residual case), the tool prints a stderr
+diagnostic and returns exit code 1 with no marker write. The gate does not fire
+when ``--issue-number`` is omitted (bridge PM sessions using env-var resolution
+are unaffected).
+
 Exit codes:
     0 — success, degraded (substrate absent / no session), or idempotent no-op
     1 — substrate present, session resolved, but the marker write genuinely
-        failed (the only loud case)
+        failed (the only loud case; includes ownership-guard rejection)
 
 Output:
     {"status": "degraded", "stage": ..., "reason": ...} when the substrate is
@@ -57,7 +65,7 @@ import json
 import logging
 import sys
 
-from tools._sdlc_utils import find_session
+from tools._sdlc_utils import find_session, session_owns_issue
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +122,11 @@ def write_marker(
 ) -> tuple[dict, int]:
     """Write a stage marker to the PipelineStateMachine.
 
+    When ``issue_number`` is passed, the resolved session must own that issue
+    (via ``session_owns_issue``). If it does not, the write is refused with
+    exit_code 1 and a stderr diagnostic — preventing a silent artifact divert
+    to the wrong session.
+
     Args:
         stage: Pipeline stage name (e.g., "DOCS", "REVIEW").
         status: "in_progress" or "completed".
@@ -125,6 +138,7 @@ def write_marker(
         - success / degraded / idempotent no-op → exit_code 0
         - genuine write failure (substrate present, session resolved) →
           exit_code 1 (the only loud case)
+        - ownership guard refusal → exit_code 1 (write refused, stderr emitted)
     """
     if stage not in _VALID_STAGES:
         logger.debug(f"sdlc_stage_marker: invalid stage {stage!r}")
@@ -145,6 +159,16 @@ def write_marker(
     session = find_session(session_id, issue_number=issue_number, ensure=True)
     if not session:
         return _degraded(stage, "state not persisted — no PM session resolved"), 0
+
+    # Ownership guard: when issue_number is passed, the resolved session must own
+    # that issue or we refuse the write to prevent a silent artifact divert.
+    if issue_number is not None and not session_owns_issue(session, issue_number):
+        print(
+            f"[ERROR] Recorder ownership guard: resolved session does not own"
+            f" issue #{issue_number}; write refused to prevent artifact divert.",
+            file=sys.stderr,
+        )
+        return {"error": "ownership_divert"}, 1
 
     # PRESENT_WRITE_FAILED is the ONLY loud case: the session resolved but the
     # state-machine write rejects or raises.
@@ -225,18 +249,27 @@ def main() -> None:
         session_id=args.session_id,
         issue_number=args.issue_number,
     )
-    print(json.dumps(result))
+    # Strip internal sentinel keys before printing to stdout so JSON-parsing
+    # callers always receive a clean dict (no "error" sentinel leaks out).
+    stdout_result = {k: v for k, v in result.items() if k != "error"}
+    print(json.dumps(stdout_result))
 
     if exit_code != 0:
-        # PRESENT_WRITE_FAILED — the only loud case. A clear stderr diagnostic
-        # so a forked sub-skill / operator sees the genuine writeback failure
-        # instead of a silent no-op (mirrors sdlc_dispatch's loud-failure path).
-        print(
-            f"sdlc_stage_marker: FAILED to write {stage}={args.status} "
-            "(substrate present, session resolved, but the state-machine write "
-            "was rejected or raised). State NOT persisted.",
-            file=sys.stderr,
-        )
+        if result.get("error") == "ownership_divert":
+            # Ownership guard already printed the diagnostic in write_marker;
+            # do not emit a second, contradictory "state-machine write rejected"
+            # message — no write was attempted on this path.
+            pass
+        else:
+            # PRESENT_WRITE_FAILED — the only loud case. A clear stderr diagnostic
+            # so a forked sub-skill / operator sees the genuine writeback failure
+            # instead of a silent no-op (mirrors sdlc_dispatch's loud-failure path).
+            print(
+                f"sdlc_stage_marker: FAILED to write {stage}={args.status} "
+                "(substrate present, session resolved, but the state-machine write "
+                "was rejected or raised). State NOT persisted.",
+                file=sys.stderr,
+            )
     elif result.get("status") == "degraded":
         # Visible degraded-mode marker (quiet on stderr, but the stdout JSON
         # carries status: degraded so the PM/operator can see it).

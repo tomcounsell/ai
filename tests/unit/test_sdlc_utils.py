@@ -393,6 +393,118 @@ class TestFindPlanPath:
         result = _git_toplevel(cwd=tmp_path)
         assert result is None or isinstance(result, os.PathLike)
 
+    # ------------------------------------------------------------------
+    # Tests for the _is_ai_repo_fallback bare-#N suppression (CONCERN 3)
+    # ------------------------------------------------------------------
+
+    def test_file_fallback_bare_mention_returns_none(self, tmp_path, monkeypatch):
+        """CONCERN 3: bare-#N match from __file__ fallback path is suppressed.
+
+        When SDLC_TARGET_REPO is unset and git resolution fails (i.e. we
+        fall back to the __file__-relative ai-repo plans dir), a bare textual
+        mention of the issue number must return None — not a foreign plan.
+        """
+        import tools._sdlc_utils as _utils
+        from tools._sdlc_utils import find_plan_path
+
+        # Point the __file__ fallback at our tmp plans dir so we can plant a
+        # "foreign" plan that merely mentions the issue.
+        plans_dir = tmp_path / "docs" / "plans"
+        self._write_plan(plans_dir, "ai-plan.md", "No-Gos: see #9999 from other repo\n")
+
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        # Make git resolution fail so the __file__ fallback is used.
+        with patch("tools._sdlc_utils._git_toplevel", return_value=None):
+            # Redirect the __file__ fallback to tmp_path so the test is self-contained.
+            monkeypatch.setattr(
+                _utils,
+                "__file__",
+                str(tmp_path / "tools" / "_sdlc_utils.py"),
+            )
+            # Create the expected fallback path structure: __file__/../.. / docs/plans
+            (tmp_path / "docs" / "plans").mkdir(parents=True, exist_ok=True)
+            self._write_plan(
+                tmp_path / "docs" / "plans",
+                "ai-cross-ref.md",
+                "No-Gos: see #9999 from another repo\n",
+            )
+            result = find_plan_path(9999)
+
+        # The bare-#N fallback must be suppressed when using the __file__ path.
+        assert result is None
+
+    def test_file_fallback_tracking_match_still_returned(self, tmp_path, monkeypatch):
+        """CONCERN 3: tracking: match is always authoritative, even on __file__ fallback.
+
+        If somehow a plan in the ai-repo has a proper tracking: frontmatter
+        for this issue, it IS the right plan and must be returned.
+        """
+        import tools._sdlc_utils as _utils
+        from tools._sdlc_utils import find_plan_path
+
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        # Create a plan with a tracking: line in the fallback-path location.
+        monkeypatch.setattr(
+            _utils,
+            "__file__",
+            str(tmp_path / "tools" / "_sdlc_utils.py"),
+        )
+        plans_dir = tmp_path / "docs" / "plans"
+        plan = self._write_plan(
+            plans_dir,
+            "owned.md",
+            "tracking: https://github.com/org/ai/issues/9998\n",
+        )
+
+        with patch("tools._sdlc_utils._git_toplevel", return_value=None):
+            result = find_plan_path(9998)
+
+        # tracking: match is authoritative regardless of resolution path.
+        assert result == plan
+
+    def test_sdlc_target_repo_bare_fallback_not_suppressed(self, tmp_path, monkeypatch):
+        """CONCERN 3: when SDLC_TARGET_REPO is set, bare-#N fallback is kept.
+
+        The suppression is ONLY for the __file__ ai-repo fallback.  When
+        SDLC_TARGET_REPO points at the real target repo, a bare mention in
+        that repo's plans is a legitimate textual reference.
+        """
+        from tools._sdlc_utils import find_plan_path
+
+        plans_dir = tmp_path / "docs" / "plans"
+        plan = self._write_plan(plans_dir, "feature.md", "relates to #7777\n")
+
+        monkeypatch.setenv("SDLC_TARGET_REPO", str(tmp_path))
+        result = find_plan_path(7777)
+
+        assert result == plan
+
+    def test_sdlc_target_repo_nonexistent_path_returns_none(self, tmp_path, monkeypatch):
+        """When SDLC_TARGET_REPO points at a non-existent directory, return None."""
+        from tools._sdlc_utils import find_plan_path
+
+        monkeypatch.setenv("SDLC_TARGET_REPO", str(tmp_path / "does-not-exist"))
+        result = find_plan_path(1234)
+
+        assert result is None
+
+    def test_git_toplevel_bare_fallback_not_suppressed(self, tmp_path, monkeypatch):
+        """CONCERN 3: when git-toplevel resolves (path 2), bare-#N fallback is kept.
+
+        Only the __file__ fallback (path 3) suppresses the bare-#N match.
+        Path 2 (git toplevel) is the correct repo and the fallback is legitimate.
+        """
+        from tools._sdlc_utils import find_plan_path
+
+        plans_dir = tmp_path / "docs" / "plans"
+        plan = self._write_plan(plans_dir, "feature.md", "see #5555 for context\n")
+
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        with patch("tools._sdlc_utils._git_toplevel", return_value=tmp_path):
+            result = find_plan_path(5555)
+
+        assert result == plan
+
 
 class TestFindSessionEnsure:
     """Tests for the ensure=True auto-create branch of find_session (#1558).
@@ -646,3 +758,106 @@ class TestFindSessionEnsure:
                 result = _sdlc_utils.find_session(None, 1558, ensure=True)
 
         assert result is None
+
+
+class TestSessionOwnsIssue:
+    """Unit tests for session_owns_issue — all three predicates, edge cases, robustness."""
+
+    class _Session:
+        """Minimal session object with the three attributes session_owns_issue reads."""
+
+        def __init__(self, *, issue_url=None, session_id="", message_text=""):
+            self.issue_url = issue_url
+            self.session_id = session_id
+            self.message_text = message_text
+
+    def test_returns_false_for_none_session(self):
+        from tools._sdlc_utils import session_owns_issue
+
+        assert session_owns_issue(None, 42) is False
+
+    def test_returns_false_for_none_issue_number(self):
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(issue_url="https://github.com/x/y/issues/42")
+        assert session_owns_issue(session, None) is False
+
+    def test_returns_false_for_zero_issue_number(self):
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(issue_url="https://github.com/x/y/issues/42")
+        assert session_owns_issue(session, 0) is False
+
+    def test_predicate1_issue_url_match(self):
+        """Predicate 1: issue_url ends with /issues/{issue_number}."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(issue_url="https://github.com/x/y/issues/42")
+        assert session_owns_issue(session, 42) is True
+
+    def test_predicate1_issue_url_no_match(self):
+        """Predicate 1: issue_url ends with a different issue number."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(issue_url="https://github.com/x/y/issues/99")
+        assert session_owns_issue(session, 42) is False
+
+    def test_predicate2_sdlc_local_match(self):
+        """Predicate 2: session_id == 'sdlc-local-{issue_number}'."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(session_id="sdlc-local-42")
+        assert session_owns_issue(session, 42) is True
+
+    def test_predicate2_sdlc_local_no_match(self):
+        """Predicate 2: session_id is a different sdlc-local record."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(session_id="sdlc-local-99")
+        assert session_owns_issue(session, 42) is False
+
+    def test_predicate3_message_text_match_basic(self):
+        """Predicate 3: message_text contains 'issue #42'."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(message_text="SDLC issue #42: fix bug")
+        assert session_owns_issue(session, 42) is True
+
+    def test_predicate3_message_text_match_no_hash(self):
+        """Predicate 3: message_text contains 'issue 42' (no hash)."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(message_text="issue 42 is the one")
+        assert session_owns_issue(session, 42) is True
+
+    def test_predicate3_message_text_match_case_insensitive(self):
+        """Predicate 3: match is case-insensitive (uppercase 'Issue')."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(message_text="Issue #42")
+        assert session_owns_issue(session, 42) is True
+
+    def test_predicate3_word_boundary_tissue(self):
+        """Predicate 3: 'tissue 42' must NOT match — word boundary on left."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(message_text="tissue 42")
+        assert session_owns_issue(session, 42) is False
+
+    def test_predicate3_word_boundary_issue_with_suffix(self):
+        """Predicate 3: 'issue 427' must NOT match for issue 42 — word boundary on right."""
+        from tools._sdlc_utils import session_owns_issue
+
+        session = self._Session(message_text="issue 427 other")
+        assert session_owns_issue(session, 42) is False
+
+    def test_no_raise_on_malformed_session(self):
+        """A session that raises on attribute access must return False, never propagate."""
+        from unittest.mock import Mock
+
+        from tools._sdlc_utils import session_owns_issue
+
+        bad_session = Mock(spec=[])  # no attributes — any getattr raises AttributeError
+        # Must not raise; graceful False return.
+        result = session_owns_issue(bad_session, 42)
+        assert result is False

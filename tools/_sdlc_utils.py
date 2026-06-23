@@ -327,6 +327,47 @@ def find_session(
     return None
 
 
+def session_owns_issue(session, issue_number) -> bool:
+    """Return True iff the session owns the issue by one of the three predicates
+    that find_session_by_issue resolves on. Never raises.
+
+    The three predicates are checked in order (OR'd):
+    1. session.issue_url endswith ``/issues/{issue_number}``
+    2. session.session_id == ``sdlc-local-{issue_number}``
+    3. session.message_text matches ``\\bissue\\s*#?\\s*{issue_number}\\b``
+       (case-insensitive, same regex as find_session_by_issue)
+
+    Returns False immediately if issue_number is falsy or session is None.
+    Wrap the entire body in try/except so a bad attribute or unexpected session
+    shape never propagates out — callers gate on the bool.
+    """
+    if not issue_number:
+        return False
+    if session is None:
+        return False
+    try:
+        # Predicate 1: issue_url ownership
+        issue_url = getattr(session, "issue_url", "") or ""
+        if issue_url.endswith(f"/issues/{issue_number}"):
+            return True
+
+        # Predicate 2: deterministic sdlc-local-{N} id
+        session_id = getattr(session, "session_id", "") or ""
+        if session_id == f"sdlc-local-{issue_number}":
+            return True
+
+        # Predicate 3: message_text fallback — identical regex to find_session_by_issue
+        message_text = getattr(session, "message_text", "") or ""
+        if message_text and re.search(
+            rf"\bissue\s*#?\s*{issue_number}\b", message_text, re.IGNORECASE
+        ):
+            return True
+
+        return False
+    except Exception:
+        return False
+
+
 def find_plan_path(issue_number: int) -> Path | None:
     """Locate the plan file tracking this issue.
 
@@ -345,9 +386,22 @@ def find_plan_path(issue_number: int) -> Path | None:
 
     Each step falls through on failure (not a git repo, ``git`` missing) so a
     missing env var degrades to "correct" rather than "silently wrong".
+
+    **Bare-#N fallback safety (CONCERN 3):** When resolution reached step 3
+    (``__file__`` fallback — SDLC_TARGET_REPO unset and not inside any git
+    repo), a bare-``#N`` textual match is suppressed and None is returned.
+    A bare mention of an issue number in the ai-repo plans is likely a
+    cross-reference or No-Gos entry referencing a foreign (target-repo) issue,
+    not the plan that actually owns it.  The ``tracking:`` match is always
+    authoritative and is returned immediately regardless of resolution path.
     """
     if not issue_number:
         return None
+
+    # Track whether we fell all the way to the __file__ fallback.  A bare-#N
+    # match from this path is likely a foreign cross-reference and must be
+    # suppressed so the caller knows to trigger plan creation in the target repo.
+    _is_ai_repo_fallback = False
 
     repo_root_env = os.environ.get("SDLC_TARGET_REPO")
     if repo_root_env:
@@ -357,6 +411,9 @@ def find_plan_path(issue_number: int) -> Path | None:
         if toplevel is not None:
             plans_dir = toplevel / "docs" / "plans"
         else:
+            # Resolution fell back to the ai-repo __file__ path.  Flag this so
+            # the bare-#N fallback can be suppressed below.
+            _is_ai_repo_fallback = True
             plans_dir = Path(__file__).resolve().parent.parent / "docs" / "plans"
 
     if not plans_dir.is_dir():
@@ -370,9 +427,7 @@ def find_plan_path(issue_number: int) -> Path | None:
     # cross-reference in another plan's No-Gos) must never win over the plan that
     # actually tracks the issue. Prefer a tracking-field match; fall back to any
     # textual reference only when no plan claims ownership.
-    tracking_re = re.compile(
-        rf"^tracking:.*(?:#|issues/){issue_number}(?![0-9])", re.MULTILINE
-    )
+    tracking_re = re.compile(rf"^tracking:.*(?:#|issues/){issue_number}(?![0-9])", re.MULTILINE)
     fallback: Path | None = None
     try:
         for entry in plans_dir.iterdir():
@@ -383,9 +438,15 @@ def find_plan_path(issue_number: int) -> Path | None:
             except Exception:
                 continue
             if tracking_re.search(text):
+                # tracking: match is authoritative regardless of resolution path.
                 return entry
             if fallback is None and ref_re.search(text):
                 fallback = entry
     except Exception as e:
         logger.debug(f"find_plan_path walk failed: {e}")
-    return fallback
+
+    # When plan resolution fell back to the ai-repo __file__ path
+    # (SDLC_TARGET_REPO unset, not in a git repo), a bare-#N textual match is
+    # likely a foreign plan that merely mentions the issue — return None to
+    # force re-planning in the target repo.
+    return None if (_is_ai_repo_fallback and fallback is not None) else fallback
