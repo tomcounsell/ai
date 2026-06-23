@@ -155,6 +155,67 @@ class TestReadSessionTimeline:
 
 
 # ---------------------------------------------------------------------------
+# New TUI interaction event types (Pillar 3, #1540)
+#
+# The recorder is event-type-agnostic: it stamps session_id + ts and writes the
+# payload verbatim. These cases assert the two NEW event types emitted by
+# agent.tui_interaction_capture ride the existing recorder with their payloads
+# preserved on round-trip through read_session_timeline.
+# ---------------------------------------------------------------------------
+
+
+class TestTUIInteractionEventTypes:
+    def test_slash_command_event_round_trips(self, tmp_telemetry):
+        """A slash_command event preserves its type + command, plus session_id/ts."""
+        session_id = "test-tui-slash-001"
+        record_telemetry_event(session_id, {"type": "slash_command", "command": "do-test"})
+
+        events = read_session_timeline(session_id)
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["type"] == "slash_command"
+        assert ev["command"] == "do-test"
+        # Recorder auto-adds the envelope fields.
+        assert ev["session_id"] == session_id
+        assert "ts" in ev
+
+    def test_human_steering_event_round_trips(self, tmp_telemetry):
+        """A human_steering event preserves type + ordinal + snippet verbatim."""
+        session_id = "test-tui-steer-001"
+        snippet = "switch the storage backend to Postgres instead please"
+        record_telemetry_event(
+            session_id,
+            {"type": "human_steering", "ordinal": 2, "snippet": snippet},
+        )
+
+        events = read_session_timeline(session_id)
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["type"] == "human_steering"
+        assert ev["ordinal"] == 2
+        assert ev["snippet"] == snippet
+        assert ev["session_id"] == session_id
+        assert "ts" in ev
+
+    def test_mixed_tui_timeline_preserves_order_and_payloads(self, tmp_telemetry):
+        """A realistic interleaved timeline reads back in order with payloads intact."""
+        session_id = "test-tui-mixed-001"
+        record_telemetry_event(session_id, {"type": "slash_command", "command": "do-plan"})
+        record_telemetry_event(session_id, {"type": "slash_command", "command": "do-build"})
+        record_telemetry_event(
+            session_id,
+            {"type": "human_steering", "ordinal": 2, "snippet": "use the existing fixture"},
+        )
+
+        events = read_session_timeline(session_id)
+        types = [e["type"] for e in events]
+        assert types == ["slash_command", "slash_command", "human_steering"]
+        assert [e.get("command") for e in events[:2]] == ["do-plan", "do-build"]
+        assert events[2]["ordinal"] == 2
+        assert events[2]["snippet"] == "use the existing fixture"
+
+
+# ---------------------------------------------------------------------------
 # Idle gap detection
 # ---------------------------------------------------------------------------
 
@@ -381,8 +442,14 @@ class TestStatusTransitionTextRenderer:
         import json
         import subprocess
         import sys
+        from pathlib import Path
 
         from agent.session_telemetry import _get_telemetry_dir
+
+        # Run the subprocess from the repo root (two levels up from this test
+        # file: tests/unit/ -> tests/ -> repo root). A previously-hardcoded
+        # worktree path here went stale once that worktree was deleted.
+        repo_root = Path(__file__).resolve().parents[2]
 
         session_id = "unit-render-status-001"
         tdir = _get_telemetry_dir()
@@ -402,7 +469,7 @@ class TestStatusTransitionTextRenderer:
                 [sys.executable, "-m", "tools.valor_session", "telemetry", "--id", session_id],
                 capture_output=True,
                 text=True,
-                cwd="/Users/valorengels/src/ai/.claude/worktrees/agent-a3810b945a05c10e3",
+                cwd=str(repo_root),
             )
             assert result.returncode == 0, f"stderr: {result.stderr}"
             assert "running" in result.stdout, f"Got: {result.stdout!r}"

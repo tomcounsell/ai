@@ -20,6 +20,8 @@ Event schema (v1-internal contract):
     idle_gap            — synthetic; emitted when inter-event gap > IDLE_GAP_THRESHOLD
     status_transition   — session state machine transition
     telemetry_truncated — cap reached; no further events written for this session
+    slash_command       — a TUI prompt starting with '/'; records command name
+    human_steering      — substantive mid-run human prompt (ordinal > 0); records ordinal + snippet
     unknown             — event type was absent or unrecognised; raw payload preserved
 
 Usage:
