@@ -45,17 +45,32 @@ Claude Code CLI Session
         |                                         via additionalContext
         |
         +-- Stop hook --> memory_bridge.extract()
+        |                     |
+        |                     v
+        |               Read transcript --> Haiku extraction
+        |                     |                  |
+        |                     v                  v
+        |               Outcome detection   Categorized observations
+        |               (injected thoughts)  saved as Memory records
+        |                     |
+        |                     v
+        |               Sidecar cleanup
+        |
+        +-- Stop hook --> tui_interaction_capture.summarize_and_store()
                               |
                               v
-                        Read transcript --> Haiku extraction
-                              |                  |
-                              v                  v
-                        Outcome detection   Categorized observations
-                        (injected thoughts)  saved as Memory records
-                              |
-                              v
-                        Sidecar cleanup
+                        Distill the session's TUI interaction shape into one
+                        `pattern` Memory tagged `tui-interaction`
+                        (see docs/features/tui-interaction-capture.md)
 ```
+
+The Stop hook also drives **TUI interaction capture** (Pillar 3 of #1536): a
+separate, fail-silent `summarize_and_store()` call distills the session's
+human-in-the-loop interaction shape — slash-command sequence, mid-run steering,
+tool-approval tally, idle-gap interrupts — into one retrievable `pattern` Memory.
+This is an *interaction-shape* observation, distinct from the *content*
+observations Haiku extraction produces. See
+[`tui-interaction-capture.md`](tui-interaction-capture.md).
 
 ## How It Works
 
