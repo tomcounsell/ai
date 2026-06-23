@@ -103,7 +103,11 @@ valor-telegram send --chat "Eng: Valor" "Hello world"
 valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
 valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 valor-telegram send --chat "Eng: Valor" --voice-note --cleanup-after-send --audio /tmp/out.ogg
+valor-telegram send --chat 8837490628 --await-reply "deploy status?"      # E2E probe a registered bot; returns its settled reply
+valor-telegram send --chat 8837490628 --await-reply --json --timeout 900 "..."  # structured transcript for assertions
 ```
+
+`--await-reply` is only valid against a bot registered under `projects.<key>.telegram.bots[]`; it blocks until the bot's streamed reply settles (silence-based, edit-aware, two timers) and prints the settled prose (or `--json` transcript). A registered bot's inbound messages are recorded to history but never spawn a session (deterministic loop-guard) — see [`docs/features/bot-e2e-testing.md`](docs/features/bot-e2e-testing.md).
 
 `--chat`, `--chat-id`, `--user`, and `--project` on `read` are mutually exclusive. Every successful single-chat read prints a freshness header `[chat_name · chat_id=N · last activity: T]` before the messages; cross-chat `--project` reads print `[project=KEY · N chats: name1, name2, ... · last activity: T]` and tag each line with `[chat_name]` so you can see which chat each message came from — trust those headers over your intuition about which chat you asked for. `--project --json` enriches each message dict with `chat_id` and `chat_name`. If a `--chat` name is ambiguous, the **default** is to pick the most recently active candidate, log a warning listing all candidates to stderr, and proceed (exit 0); pass `--strict` to opt into a non-zero exit with a stderr candidate list instead (see [`docs/features/telegram-messaging.md`](docs/features/telegram-messaging.md) for the disambiguation and project-stitching UX).
 

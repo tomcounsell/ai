@@ -6,6 +6,7 @@
     "projects.machine": "Must match the machine's ComputerName exactly (case-insensitive). This is how each machine knows which projects to handle.",
     "projects.telegram.groups": "Dict mapping group name to persona. Eng: prefix = engineer (full permissions, SDLC work + conversational), no prefix = teammate (mention-only).",
     "projects.telegram.groups.chat_id": "Optional Telegram chat ID. Speeds up group resolution but not required.",
+    "projects.telegram.bots": "Optional (issue #1574). Registry of bot peers for E2E testing via 'valor-telegram send --await-reply'. A registered bot's inbound messages are recorded to history but NEVER spawn a session (deterministic loop-guard). Each id must NOT also appear in dms.whitelist (config validation rejects the overlap). settle_profile tunes the awaiter's debounce.",
     "dms": "Global DM config. All DMs use the specified persona regardless of project.",
     "defaults": "Fallback values for projects that don't specify a field."
   },
@@ -35,6 +36,20 @@
         "groups": {
           "Eng: My Project": {"chat_id": -1234567890, "persona": "engineer"}
         },
+        "bots": [
+          {
+            "id": 8837490628,
+            "username": "example_staff_bot",
+            "name": "Example Bot under test",
+            "under_test": true,
+            "settle_profile": {
+              "cleanup_progress": false,
+              "quiet_window_seconds": 5,
+              "default_timeout_seconds": 600,
+              "status_patterns": ["^⏳", "^(💻|🔎|🔧|📖|⚙️|📝) \\w+:"]
+            }
+          }
+        ],
         "respond_to_unaddressed": true,
         "respond_to_dms": true,
         "dm_persona": "teammate"
