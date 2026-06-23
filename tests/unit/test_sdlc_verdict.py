@@ -9,6 +9,7 @@ import pytest
 
 from tools._sdlc_utils import normalize_verdict
 from tools.sdlc_verdict import (
+    compute_plan_body_hash,
     compute_plan_hash,
     get_verdict,
     record_verdict,
@@ -280,3 +281,223 @@ class TestNormalizeVerdict:
         assert record["verdict"] == "CHANGES REQUESTED"
         data = json.loads(session.stage_states)
         assert data["_verdicts"]["REVIEW"]["verdict"] == "CHANGES REQUESTED"
+
+
+class TestComputePlanBodyHash:
+    """Unit tests for compute_plan_body_hash (#1761 Layer 3).
+
+    The body-hash strips ONLY the ``revision_applied:`` frontmatter line so that
+    writing ``revision_applied: true`` after a NEEDS REVISION round-trip does NOT
+    bust the G5 critique-verdict cache.
+    """
+
+    def test_returns_sha256_prefixed_hex(self, tmp_path):
+        f = tmp_path / "plan.md"
+        f.write_text("# hello\n", encoding="utf-8")
+        digest = compute_plan_body_hash(f)
+        assert digest is not None
+        assert digest.startswith("sha256:")
+        assert len(digest) == len("sha256:") + 64
+
+    def test_returns_none_on_missing_file(self, tmp_path):
+        assert compute_plan_body_hash(tmp_path / "missing.md") is None
+
+    def test_crlf_normalized(self, tmp_path):
+        a = tmp_path / "a.md"
+        a.write_bytes(b"line1\nline2\n")
+        b = tmp_path / "b.md"
+        b.write_bytes(b"line1\r\nline2\r\n")
+        assert compute_plan_body_hash(a) == compute_plan_body_hash(b)
+
+    def test_no_frontmatter_hashes_whole_file(self, tmp_path):
+        """Files with no YAML frontmatter are hashed unchanged."""
+        f = tmp_path / "plan.md"
+        f.write_text("# Title\n\nSome body text.\n", encoding="utf-8")
+        # Should return a deterministic hash (not None).
+        h = compute_plan_body_hash(f)
+        assert h is not None
+        assert h.startswith("sha256:")
+
+    def test_revision_applied_true_stripped(self, tmp_path):
+        """revision_applied: true is removed → same hash as if key were absent."""
+        with_key = tmp_path / "with.md"
+        without_key = tmp_path / "without.md"
+        with_key.write_text(
+            "---\nstatus: active\nrevision_applied: true\n---\n# body\n",
+            encoding="utf-8",
+        )
+        without_key.write_text(
+            "---\nstatus: active\n---\n# body\n",
+            encoding="utf-8",
+        )
+        assert compute_plan_body_hash(with_key) == compute_plan_body_hash(without_key)
+
+    def test_revision_applied_false_equiv_absent(self, tmp_path):
+        """present-false and absent key produce the SAME hash."""
+        with_false = tmp_path / "false.md"
+        without = tmp_path / "absent.md"
+        with_false.write_text(
+            "---\nstatus: active\nrevision_applied: false\n---\n# body\n",
+            encoding="utf-8",
+        )
+        without.write_text(
+            "---\nstatus: active\n---\n# body\n",
+            encoding="utf-8",
+        )
+        assert compute_plan_body_hash(with_false) == compute_plan_body_hash(without)
+
+    def test_revision_applied_only_delta_unchanged(self, tmp_path):
+        """Adding revision_applied: true to an otherwise unchanged plan must not change hash."""
+        original = tmp_path / "original.md"
+        after_apply = tmp_path / "after.md"
+        original.write_text("---\nstatus: planning\n---\n# Plan\n\nSome text.\n", encoding="utf-8")
+        after_apply.write_text(
+            "---\nstatus: planning\nrevision_applied: true\n---\n# Plan\n\nSome text.\n",
+            encoding="utf-8",
+        )
+        assert compute_plan_body_hash(original) == compute_plan_body_hash(after_apply)
+
+    def test_status_key_change_still_busts_hash(self, tmp_path):
+        """Other frontmatter keys (status:) must still produce different hashes."""
+        a = tmp_path / "a.md"
+        b = tmp_path / "b.md"
+        a.write_text("---\nstatus: planning\n---\n# body\n", encoding="utf-8")
+        b.write_text("---\nstatus: active\n---\n# body\n", encoding="utf-8")
+        assert compute_plan_body_hash(a) != compute_plan_body_hash(b)
+
+    def test_body_edit_busts_hash(self, tmp_path):
+        """A prose body change must produce a different hash (G5 sensitivity)."""
+        a = tmp_path / "a.md"
+        b = tmp_path / "b.md"
+        a.write_text(
+            "---\nstatus: planning\nrevision_applied: true\n---\n# Original body\n",
+            encoding="utf-8",
+        )
+        b.write_text(
+            "---\nstatus: planning\nrevision_applied: true\n---\n# Modified body\n",
+            encoding="utf-8",
+        )
+        assert compute_plan_body_hash(a) != compute_plan_body_hash(b)
+
+    def test_only_revision_applied_in_frontmatter(self, tmp_path):
+        """When revision_applied: is the only frontmatter key, the whole block is dropped."""
+        with_only_key = tmp_path / "only.md"
+        no_fm = tmp_path / "nofm.md"
+        with_only_key.write_text("---\nrevision_applied: true\n---\n# body\n", encoding="utf-8")
+        no_fm.write_text("# body\n", encoding="utf-8")
+        # Both should hash to the same value (frontmatter block dropped entirely).
+        assert compute_plan_body_hash(with_only_key) == compute_plan_body_hash(no_fm)
+
+    def test_unterminated_frontmatter_degrades_gracefully(self, tmp_path):
+        """Malformed frontmatter without closing --- hashes the whole file."""
+        f = tmp_path / "plan.md"
+        f.write_text("---\nstatus: active\nrevision_applied: true\n# body\n", encoding="utf-8")
+        h = compute_plan_body_hash(f)
+        # Should return a valid hash (not None).
+        assert h is not None
+        assert h.startswith("sha256:")
+
+
+class TestG5TransparentMigration:
+    """Guard G5 transparent migration: stored full-bytes hash rewritten to
+    revision_applied-stripped hash when the only delta is revision_applied:.
+    """
+
+    def _make_states(self, cached_hash: str, verdict: str = "READY TO BUILD (NO CONCERNS)") -> dict:
+        return {
+            "_verdicts": {
+                "CRITIQUE": {
+                    "verdict": verdict,
+                    "artifact_hash": cached_hash,
+                }
+            }
+        }
+
+    def test_migration_rewrites_in_place_and_treats_as_hit(self, tmp_path):
+        """When stored hash is legacy full-bytes and only revision_applied changed,
+        the guard rewrites artifact_hash in-place and returns a cache-hit dispatch."""
+        from agent.sdlc_router import guard_g5_artifact_hash_cache
+
+        plan = tmp_path / "plan.md"
+        # Write plan WITH revision_applied: true
+        plan.write_text(
+            "---\nstatus: active\nrevision_applied: true\n---\n# body\n", encoding="utf-8"
+        )
+
+        from tools.sdlc_verdict import compute_plan_body_hash, compute_plan_hash
+
+        legacy_hash = compute_plan_hash(plan)  # full-bytes (old)
+        body_hash = compute_plan_body_hash(plan)  # stripped (new)
+
+        # Simulate: stored hash is the OLD legacy hash; current hash is the new body hash.
+        assert legacy_hash != body_hash  # precondition: they differ
+        states = self._make_states(legacy_hash, verdict="READY TO BUILD (NO CONCERNS)")
+        meta = {}
+        context = {
+            "current_plan_hash": body_hash,
+            "issue_number": 1761,
+        }
+
+        from unittest.mock import patch
+
+        with patch("tools._sdlc_utils.find_plan_path", return_value=plan):
+            result = guard_g5_artifact_hash_cache(states, meta, context)
+
+        from agent.sdlc_router import SKILL_DO_BUILD, Dispatch
+
+        # After migration, G5 should treat it as a cache hit and dispatch /do-build.
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_BUILD
+        # The in-place rewrite should have updated the record.
+        assert states["_verdicts"]["CRITIQUE"]["artifact_hash"] == body_hash
+
+    def test_no_migration_on_genuine_body_change(self, tmp_path):
+        """When the plan body actually changed, G5 returns None (cache miss)."""
+        from agent.sdlc_router import guard_g5_artifact_hash_cache
+
+        original_plan = tmp_path / "original.md"
+        original_plan.write_text("---\nstatus: active\n---\n# Original body\n", encoding="utf-8")
+
+        modified_plan = tmp_path / "modified.md"
+        modified_plan.write_text("---\nstatus: active\n---\n# DIFFERENT body\n", encoding="utf-8")
+
+        from tools.sdlc_verdict import compute_plan_body_hash
+
+        old_hash = compute_plan_body_hash(original_plan)
+        new_hash = compute_plan_body_hash(modified_plan)
+        assert old_hash != new_hash  # genuine content change
+
+        states = self._make_states(old_hash)
+        meta = {}
+        context = {
+            "current_plan_hash": new_hash,
+            "issue_number": 1761,
+        }
+
+        with patch("tools._sdlc_utils.find_plan_path", return_value=modified_plan):
+            result = guard_g5_artifact_hash_cache(states, meta, context)
+
+        # No migration: genuine body change → cache miss → None.
+        assert result is None
+
+    def test_no_migration_when_issue_number_missing(self, tmp_path):
+        """When issue_number is absent from context, migration is skipped."""
+        from agent.sdlc_router import guard_g5_artifact_hash_cache
+
+        plan = tmp_path / "plan.md"
+        plan.write_text("---\nrevision_applied: true\n---\n# body\n", encoding="utf-8")
+
+        from tools.sdlc_verdict import compute_plan_body_hash, compute_plan_hash
+
+        legacy_hash = compute_plan_hash(plan)
+        body_hash = compute_plan_body_hash(plan)
+
+        states = self._make_states(legacy_hash)
+        meta = {}
+        # No issue_number in context → migration cannot run.
+        context = {"current_plan_hash": body_hash}
+
+        result = guard_g5_artifact_hash_cache(states, meta, context)
+
+        # Without issue_number, no plan path can be resolved, so it's a cache miss.
+        assert result is None

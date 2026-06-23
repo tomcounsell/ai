@@ -487,7 +487,7 @@ After pushing and creating the PR, return to the repo root and clean up the work
 
 ```bash
 # Return to repo root BEFORE cleanup (prevents CWD death)
-cd ~/src/ai
+cd "${AI_REPO_ROOT:-$HOME/src/ai}"
 
 python -c "
 from pathlib import Path

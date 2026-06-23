@@ -63,12 +63,21 @@ cap handles REVIEW non-determinism instead.
 
 ### G5 hash stability notes
 
-- Hash the full UTF-8-encoded plan file bytes **including frontmatter**.
-  Frontmatter edits (e.g. `revision_applied: true`) are meaningful plan changes
-  that SHOULD bust the cache.
+- G5 uses `compute_plan_body_hash` (in `tools/sdlc_verdict.py`), which hashes
+  the full UTF-8-encoded plan bytes **with only the `revision_applied:` frontmatter
+  key stripped**. All other frontmatter (`status:`, `type:`, `tracking:`,
+  `last_comment_id:`) and the full body still contribute to the hash.
+- **Exception — `revision_applied:` does NOT bust the cache.** A `/do-plan`
+  revision write flipping `revision_applied: false → true` changes only that key;
+  `compute_plan_body_hash` produces the same output before and after the write, so
+  G5 fires a cache hit and routes straight to `/do-build` (issue #1761).
+- Every other frontmatter or body edit still busts the cache and triggers a
+  fresh `/do-plan-critique` run.
 - Normalize line endings to `\n` before hashing (cross-platform safety).
 - Do NOT normalize internal whitespace — a reviewer reflowing a paragraph is
   editing the plan and the critique should re-run.
+- `compute_plan_hash` (full-bytes variant) is retained for callers that explicitly
+  need the complete fingerprint; it is no longer used by G5 itself.
 
 ### G4 state machine
 
@@ -203,9 +212,11 @@ All edge cases fail safe to "not stale" (missing/unparseable `recorded_at`, no p
 
 **Row 2c — the empty-verdict twin (#1668).** Row 2b requires a *recorded-but-stale* verdict (it gates on a `recorded_at` timestamp), so it deliberately does not fire when the critique skill ran but **never persisted any verdict at all** — `_verdicts.CRITIQUE` is `{}`, `latest_critique_verdict` is `None`, CRITIQUE marker is `in_progress`, and no PR exists yet. Before #1668 that state hit *every* rule and guard's gate and fell through to `Blocked('no matching dispatch rule')`. **Row 2c** (`_rule_critique_in_progress_no_verdict`, inserted after row 2b, before row 3) closes that hole: it re-dispatches `/do-plan-critique` when `CRITIQUE == in_progress` AND the critique verdict is absent AND no PR exists. It is narrowly gated so it cannot fire once a PR exists (defer to G3 / PR-stage rows), once any verdict is recorded (rows 2b/3/4a own it), or when CRITIQUE is not `in_progress`. Row 2b (stale verdict) and row 2c (empty verdict) are **disjoint** — 2b requires `recorded_at`, 2c requires the verdict be absent — so order between them is immaterial for correctness. Loop-bound: unlike row 2b's 2b↔3 alternation (bounded by G5), row 2c repeats the *same* skill (`/do-plan-critique`) against an unchanged snapshot, so it is bounded by **G4 (`guard_g4_oscillation`)** at `MAX_SAME_STAGE_DISPATCHES`, which escalates to a human — exactly mirroring the bounded manual recovery (re-run once; if it keeps failing, a human looks).
 
+**Row 8c — the REVIEW empty-verdict twin (#1687).** Row 8 requires a *recorded* review verdict (it gates on a non-empty `review_verdict`), and row 8b requires a *patch-applied* state (PATCH == completed AND last_dispatched_skill == /do-patch), so neither fires when the review skill ran but **never persisted any verdict at all** — `_verdicts.REVIEW` is `{}`, `latest_review_verdict` is `None`, REVIEW marker is `in_progress`, and row 8b's three-condition predicate does not match. Before #1687 that state fell through every REVIEW row (7, 8, 8b, 9, 10, 10b) to `Blocked('no matching dispatch rule')`. **Row 8c** (`_rule_review_in_progress_no_verdict`, inserted after row 8b, before row 9) closes that hole: it re-dispatches `/do-pr-review` when `REVIEW == in_progress` AND the review verdict is absent (`.strip()` falsy) AND a PR exists AND row 8b does not own the state. It is narrowly gated so it cannot fire without a PR (REVIEW only exists post-PR), once any verdict is recorded (rows 8/8b own it), or when REVIEW is not `in_progress`. The step-aside for 8b is gated on `_rule_patch_applied_after_review(...)` exactly (not a bare `PATCH == completed` check) — a PATCH-completed state whose `last_dispatched_skill != /do-patch` makes 8b return False, so a bare PATCH-completed check would create a Blocked leak; using the same three-condition predicate as 8b ensures proper disjointness. Loop-bound: unlike row 8 (which alternates `/do-patch` <=> `/do-pr-review`), row 8c repeats the *same* skill (`/do-pr-review`) against an unchanged snapshot, so it is bounded by **G4 (`guard_g4_oscillation`)** at `MAX_SAME_STAGE_DISPATCHES`, which escalates to a human — mirroring row 2c's bounding exactly.
+
 **G5 is the loop-breaker (NOT G4).** The row-2b (`/do-plan-critique`) ↔ row-3 (`/do-plan`) cycle alternates *two different* skills, so `guard_g4_oscillation` (which keys on the *same* skill repeated) never trips it, and `guard_g2_critique_cycle_cap` (which only increments via `fail_stage("CRITIQUE")`) is never reached. The terminating bound is **G5 (`guard_g5_artifact_hash_cache`)**: it runs before the dispatch rows and, when the current plan-file hash equals the cached CRITIQUE verdict's `artifact_hash`, short-circuits the re-critique to the cached verdict's downstream dispatch. Re-critique therefore cannot loop on an unchanged plan — row 2b only progresses when the plan hash genuinely changed.
 
-**G5 activation in the CLI path.** G5 only fires if `context["current_plan_hash"]` is populated. Previously `tools/sdlc_next_skill.py::_build_context` never set it, leaving G5 inert via `sdlc-tool next-skill` (a latent inertness that also affected nothing else, since G5 is CRITIQUE-only). `_build_context` now computes `current_plan_hash = compute_plan_hash(find_plan_path(issue_number))` (None-safe: no plan or unreadable file leaves the key unset), so G5's loop bound on row 2b is real in production.
+**G5 activation in the CLI path.** G5 only fires if `context["current_plan_hash"]` is populated. Previously `tools/sdlc_next_skill.py::_build_context` never set it, leaving G5 inert via `sdlc-tool next-skill` (a latent inertness that also affected nothing else, since G5 is CRITIQUE-only). `_build_context` now computes `current_plan_hash = compute_plan_body_hash(find_plan_path(issue_number))` (None-safe: no plan or unreadable file leaves the key unset), so G5's loop bound on row 2b is real in production. Using `compute_plan_body_hash` (not `compute_plan_hash`) ensures a `revision_applied: true` write does not bust the cache and send the router back to CRITIQUE (#1761).
 
 **Disjointness from G1.** G1 (`guard_g1_critique_loop`) fires only when `last_dispatched_skill == /do-plan-critique` (the critique just ran; plan unchanged) and routes to `/do-plan`. The #1639 dead-end has `last_dispatched_skill == /do-plan` (plan just revised). The two conditions are disjoint on `last_dispatched_skill`, so G1 and row 2b never fire each other's skill.
 
@@ -235,7 +246,8 @@ deferred until optimistic retry proves insufficient in production.
 ## Regression Coverage
 
 - `tests/unit/test_sdlc_router_decision.py` — pure-function tests for every
-  dispatch rule row (1 through 10b).
+  dispatch rule row (1 through 10b), including `TestReviewInProgressNoVerdictDeadEnd`
+  (row 8c, 7 cases mirroring `TestCritiqueInProgressNoVerdictDeadEnd`).
 - `tests/unit/test_sdlc_router_oscillation.py` — one test per guard (G1-G6),
   snapshot/counter helpers, guard ordering, the 12-step #1036 replay
   (`test_1036_replay_terminates`), and the 8-step #1043 PR #264 replay
@@ -266,4 +278,6 @@ deferred until optimistic retry proves insufficient in production.
   #941 (local session tracking), #1005 (PM-level pipeline completion guards),
   #1036 (the regression G1-G5 fix), #1043 (G6 terminal-state fast-path and
   self-authored PR review loop fix), #1638 (verdict normalization),
-  #1640 (plan existence evidence gate), #1641 (stale-verdict supersession).
+  #1640 (plan existence evidence gate), #1641 (stale-verdict supersession),
+  #1668 (CRITIQUE empty-verdict re-dispatch, row 2c), #1687 (REVIEW empty-verdict
+  re-dispatch, row 8c — this PR).

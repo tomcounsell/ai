@@ -208,7 +208,7 @@ Before dispatching ANY critic, freeze the expected critic roster to a manifest f
 
 1. **Compute the plan hash** for the stale-resume guard:
    ```bash
-   PLAN_HASH=$(python -c "from tools.sdlc_verdict import compute_plan_hash; print(compute_plan_hash('$PLAN_PATH') or '')")
+   PLAN_HASH=$(uv run --directory "${AI_REPO_ROOT:-$HOME/src/ai}" python -c "from tools.sdlc_verdict import compute_plan_hash; print(compute_plan_hash('$PLAN_PATH') or '')")
    ```
 
 2. **Create the per-run directory** `${CRITIQUE_RUN_DIR}`, defaulting to `.critique-runs/{issue-or-slug}-{timestamp}/`, where `{timestamp}` is a **high-resolution** timestamp (`date +%s%N`, nanoseconds). Create it with `mkdir` **WITHOUT** the `-p` flag so a collision **fails loudly** (non-zero exit) instead of silently reusing a stale run dir's result files:
