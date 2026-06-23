@@ -155,9 +155,11 @@ Idle gaps are purely observational. They identify where time was spent; they do 
 
 The live telemetry trace is read by the [Stall Advisory Classifier](stall-advisory-classifier.md) (Pillar 1 of #1536) to derive a per-session advisory verdict for running sessions. The classifier's `classify_session_stall()` function reads `turn_start`, `idle_gap`, and `status_transition` events from this JSONL file.
 
+The recorder also carries two interaction event types written by the [TUI Interaction Capture](tui-interaction-capture.md) feature (Pillar 3 of #1536): `slash_command` and `human_steering`. These are appended by `agent/tui_interaction_capture.py::capture_prompt_event()` via the existing `record_telemetry_event` path. At session end, `summarize_and_store()` reads the full timeline with `read_session_timeline()` and tallies `tool_use` events alongside the two new types to produce one `pattern` Memory per session.
+
 ## Related Issues
 
 - **Epic #1536** — Session Telemetry (this is v1)
 - **#1538** — Stall Advisory Classifier (Pillar 1) — reads this trace for live verdicts
 - **#1539** — Crash-Signature Auto-Resume (Pillar 2) — reads this trace for terminal session signatures
-- **#1540** — Crash-resume informed by telemetry
+- **#1540** — TUI Interaction Capture (Pillar 3) — writes `slash_command` / `human_steering` events; reads `tool_use` events at summarize time

@@ -261,6 +261,14 @@ The extraction prompt requests structured JSON output. If Haiku returns valid JS
 
 The function is designed to be called from the SDLC merge stage or a post-merge script. It returns None gracefully if no meaningful takeaway is found or if the API call fails.
 
+### Flow 8: TUI Interaction Capture
+
+Issue [#1540](https://github.com/tomcounsell/ai/issues/1540) (Pillar 3 of epic #1536) adds a complementary write path that captures human-in-the-loop interaction patterns from local Claude Code sessions. At session end, `agent/tui_interaction_capture.py::summarize_and_store()` composes one compact natural-language pattern string covering the slash-command sequence, mid-run steering count and ordinal positions, and tool approval tally, then persists it as a single `pattern` Memory tagged `tui-interaction` with `agent_id="tui-{session_id}"` (namespaced separately from the Haiku content observations) and importance 1.0.
+
+This Memory is recallable via the standard `memory_search` / `memory_get` MCP path. The `tui-interaction` tag can be used as a filter. Bridge-driven sessions are out of scope because there is no human in the TUI for those sessions.
+
+See [TUI Interaction Capture](tui-interaction-capture.md) for the full design including gating rules, documented gaps (tool rejections, true ESC-interrupts), and the JSONL event types.
+
 ## Claude Code Integration
 
 The memory system also runs in Claude Code CLI sessions via hooks. See [Claude Code Memory](claude-code-memory.md) for full details.
