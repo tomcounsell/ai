@@ -372,6 +372,8 @@ No agent-facing tool/MCP changes. This is a **bridge/worker-internal** change: t
 
 ## Open Questions
 
-1. **Flow-selection ordering & deadline.** Proposed: try flow 1 (auto-opened localhost tab) first, fall back to flow 2 (paste) if no auto-opened tab within ~15s, attempt flow 3 (Google) only if the consent page is logged-out; overall deadline ~90-120s. Does that ordering/budget match your intent, or should paste be the default given the "login opens the wrong browser" case in flow 2?
-2. **Account-mismatch policy.** On "Logged in as <wrong-account>", should recovery hard-abort to the alert (proposed, safest), or attempt "Switch account" automation? The latter risks a deeper, less-deterministic flow.
-3. **setup-token follow-up.** Do you want #1751 (long-lived `CLAUDE_CODE_OAUTH_TOKEN`) filed now as the durable fix, with this browser-drive recovery as the safety net — or keep browser-drive as the primary mechanism?
+_All three resolved at plan finalization (2026-06-23). Recorded here for traceability; the decisions are folded into the Solution / Technical Approach / Risks sections above._
+
+1. **Flow-selection ordering & deadline.** RESOLVED: try flow 1 (auto-opened localhost tab) first; fall back to flow 2 (paste) if no auto-opened authorize tab appears within ~15s; attempt flow 3 (Google-unlock) only when the consent page renders logged-out. Overall deadline 120s (well under the 600s ceiling), per-step timeouts inside that budget. This matches the issue's three-flow table ordering (happy path → paste fallback → browser-needs-auth).
+2. **Account-mismatch policy.** RESOLVED: hard-abort to the existing alert path on identity mismatch (safest, fully deterministic). No "Switch account" automation in scope — that is a deeper, less-deterministic flow and would risk authorizing under the wrong identity. Encoded as the account guard in Technical Approach + Risk 1.
+3. **setup-token follow-up.** RESOLVED: this browser-drive recovery is the safety net; the long-lived `CLAUDE_CODE_OAUTH_TOKEN` prevention track is filed separately as #1751 (see No-Gos). This issue ships the recovery; #1751 reduces how often it fires.
