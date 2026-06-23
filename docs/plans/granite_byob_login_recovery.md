@@ -6,7 +6,7 @@ owner: Valor Engels
 created: 2026-06-21
 tracking: https://github.com/tomcounsell/ai/issues/1750
 last_comment_id:
-revision_applied: false
+revision_applied: true
 ---
 
 # Deterministic Granite /login Re-Auth Recovery via Pure-Python BYOB Driver
@@ -127,16 +127,16 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_byob_l
 ### Key Elements
 
 - **`BYOBClient` (pure-Python MCP stdio client)**: Spawns `tsx byob-mcp.ts` with `BYOB_ALLOW_EVAL=1`, does the `initialize`/`notifications/initialized` handshake, exposes `navigate`, `click`, `list_tabs`, `eval`, `read` helpers over newline-delimited JSON-RPC. No LLM, no `claude` session.
-- **Flow classifier**: Inspects `browser_list_tabs` + the PTY buffer to decide which of the three flows applies (auto-opened localhost authorize tab present → flow 1; only a printed `platform.claude.com` paste URL → flow 2; consent page shows logged-out / no account → flow 3).
+- **Flow classifier**: Inspects `browser_list_tabs` + the PTY buffer to decide which of the two in-scope flows applies (auto-opened localhost authorize tab present → flow 1; only a printed `platform.claude.com` paste URL → flow 2). If the consent page renders logged-out (no live claude.ai session), recovery has no deterministic happy path — it degrades to the alert (see No-Gos / former flow 3).
 - **`recover_login(pty_driver, pty_buffer, deadline)` routine**: Orchestrates the recipe per flow against the PTY + `BYOBClient`, bounded by a hard deadline and per-flow retries; returns a `ReloginOutcome` (success / failed-degrade).
-- **Container wiring**: Replaces the passive `return None` in the `LOGIN_PROMPT` branch with a bounded `recover_login` attempt; on failure, falls through to the existing ceiling/alert.
+- **Container wiring (non-blocking)**: Replaces the passive `return None` in the `LOGIN_PROMPT` branch with a **thread-dispatched, idempotent** `recover_login` attempt. `_handle_startup` MUST stay fast and non-blocking — it is called every startup cycle and a 120s blocking call would starve the *other* PTY (no reads/idle detection on the non-login PTY). On first `LOGIN_PROMPT` the branch sets `self._recovery_launched = True` synchronously, spawns `recover_login` on a `threading.Thread` (writing `self._recovery_outcome` on completion), and returns `None`. On later cycles it returns `None` while pending; on success it writes the PTY response (Enter / pasted code). On failure or timeout it leaves the loop to hit the existing ceiling/alert.
 
 ### Flow
 
-**PTY shows login frame** → `LOGIN_PROMPT` detected → `recover_login` classifies flow →
+**PTY shows login frame** → `LOGIN_PROMPT` detected → recovery thread dispatched (once, behind `_recovery_launched`) → `recover_login` classifies flow →
 - **Flow 1 (localhost auto-complete):** find claude's auto-opened authorize tab → wait for hydration → `browser_click` Authorize (retry until tab leaves authorize URL) → localhost callback auto-completes → press **Enter** in PTY → **logged in**.
 - **Flow 2 (paste fallback):** reconstruct the wrapped authorize URL from the PTY buffer → `browser_navigate` → click Authorize → poll `browser_list_tabs` for the `oauth/code/callback` URL → parse `{code}#{state}` → write into PTY at `Paste code here >` → Enter → **logged in**.
-- **Flow 3 (browser needs auth):** detect logged-out consent → click **"Continue with Google"** (Google session usually live) → fall through to flow 1/2.
+- **Logged-out browser (formerly flow 3, now out of scope):** detected and short-circuited to failure → container falls back to `startup_unresolved` + Telegram alert (human completes OAuth). No automated Google-unlock — see No-Gos.
 - **Any flow fails within deadline** → return failure → container falls back to `startup_unresolved` + Telegram alert.
 
 ### Technical Approach
@@ -146,8 +146,9 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_byob_l
 - **Callback parse**: `urllib.parse` the callback URL's `code`/`state` from `browser_list_tabs` (NOT post-nav `eval` — spike-4b). Payload = `f"{code}#{state}"`.
 - **Click discipline**: prefer `browser_click` (trusted CDP dispatch) targeting the Authorize button; fall back to IIFE-wrapped `eval` `.click()` only if needed. Poll for redirect; retry up to N (spike-4c/e).
 - **Account guard**: before clicking Authorize, read the consent page's "Logged in as <user>" and compare against an expected-identity config (e.g. `config/identity.json` email); abort recovery (degrade to alert) on mismatch rather than authorize the wrong account.
-- **Bounding**: a single overall deadline (well under the existing 600s ceiling, e.g. 90-120s) plus per-step timeouts; always close the `BYOBClient` subprocess in `finally`.
-- **Trigger surface**: wire into the startup-phase `LOGIN_PROMPT` branch first. If `startup_parser` lacks patterns for the menu/auto-open frames, add them (the "Select login method" / "Opening browser" frames) so detection fires reliably.
+- **Bounding**: a single overall deadline (120s, well under the existing 600s ceiling) plus per-step timeouts; always close the `BYOBClient` subprocess in `finally`.
+- **Non-blocking dispatch + idempotency guard** (critique blocker + concern): `_handle_startup` runs every startup cycle and must return fast. The `LOGIN_PROMPT` branch sets `self._recovery_launched = True` **synchronously before** spawning the recovery `threading.Thread`, so re-entry on the next cycle (the login frame persists across many cycles) never spawns a second `tsx byob-mcp.ts` subprocess. The fast path is: `if not self._recovery_launched: launch; elif self._recovery_outcome is ready: apply` — O(1), race-free, exactly one recovery attempt per session. The recovery thread owns the 120s `recover_login` and the `BYOBClient` lifecycle; the loop keeps polling both PTYs meanwhile.
+- **Trigger surface + detection patterns (non-conditional)**: wire into the startup-phase `LOGIN_PROMPT` branch. The existing `_LOGIN_PATTERNS` only match `"Sign in to continue"` / `"paste.*url.*continue"`, which do NOT match the real claude 2.1.185 re-auth frame (theme picker → **"Select login method"** menu → auto-open / "Browser didn't open" frame). Task 2 MUST add (not "if needed") case-insensitive patterns for `"Select login method"` and `"Browser didn't open"` / `"Opening browser"` to `startup_parser._LOGIN_PATTERNS`, with a fixture frame in the dispatch test asserting `LOGIN_PROMPT` detection on the menu frame. Without these the recovery is inert in the real scenario.
 
 ## Failure Path Test Strategy
 
@@ -167,16 +168,18 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite_byob_l
 
 ## Test Impact
 
-- [ ] `tests/` — no existing granite-startup test asserts `LOGIN_PROMPT` returns `None`; grep at build time to confirm. If one exists (e.g. `tests/unit/test_granite_startup_parser.py` or a container startup test), UPDATE it to assert the new recovery dispatch.
-- [ ] `tests/unit/test_granite_*` — ADD new unit tests for `BYOBClient` (mocked subprocess) and the flow classifier / `recover_login` state machine (mocked BYOB client + fixture PTY frames).
+- [ ] `tests/unit/granite_container/test_startup_parser.py::test_login_prompt_response_is_none` — KEEP (stays green): it asserts the *parser-layer* contract that the `LOGIN_PROMPT` event carries `response=None`. That contract is unchanged — recovery is triggered by the *event*, not by a parser response string. No edit needed; cited directly here rather than discovered by a speculative grep.
+- [ ] `tests/unit/granite_container/test_startup_parser.py` — UPDATE: add fixtures + assertions for the new `_LOGIN_PATTERNS` entries (`"Select login method"`, `"Browser didn't open"` / `"Opening browser"`) → `LOGIN_PROMPT`.
+- [ ] `tests/unit/granite_container/test_granite_byob_relogin.py` — ADD: unit tests for `BYOBClient` (mocked subprocess) and the flow classifier / `recover_login` state machine (mocked BYOB client + fixture PTY frames).
+- [ ] `tests/unit/granite_container/test_granite_startup_login_dispatch.py` — ADD: container-level tests for the non-blocking thread dispatch, the `_recovery_launched` idempotency guard (no double-spawn), and the failure→`startup_unresolved`+alert degradation (BYOB mocked to fail).
 
-No existing tests are expected to break — the change is additive (replaces an inert `return None` with a bounded call that defaults to the same fallback). Confirm with a grep for `LOGIN_PROMPT` across `tests/` during build; UPDATE any that asserted the old passive behavior.
+No existing tests break — the change is additive (replaces an inert `return None` with a thread-dispatched call that defaults to the same fallback). New granite tests live under `tests/unit/granite_container/` (the established directory), not the `tests/unit/` root.
 
 ## Rabbit Holes
 
 - **Don't build a generic browser-OAuth framework.** Scope is exactly the Claude Code consent recipe (one client_id, known DOM). Generality is wasted time.
 - **Don't try to make `browser_eval` work post-navigation.** It detaches; poll `browser_list_tabs`. Spike-4b already settled this — don't re-litigate.
-- **Don't chase the localhost auto-complete as the *only* path.** The paste fallback and Google-unlock paths are required (per issue). A localhost-only implementation will strand real sessions.
+- **Don't chase the localhost auto-complete as the *only* path.** The paste fallback (flow 2) is required — a localhost-only implementation strands real sessions when the auto-open lands in the wrong browser. (The Google-unlock path was demoted to a No-Go after critique: no spike evidence, and it degrades safely to the alert.)
 - **Don't write/read the macOS Keychain directly.** The `claude` PTY owns the token exchange; recovery only completes the browser side and presses Enter / pastes the code.
 - **Don't make the driver async.** The container startup loop is synchronous; matching pexpect's sync style avoids an event-loop bridge for no benefit.
 
@@ -223,7 +226,8 @@ No existing tests are expected to break — the change is additive (replaces an 
 
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG #1751] Adopting `claude setup-token` / `CLAUDE_CODE_OAUTH_TOKEN` as a long-lived subscription credential to reduce relogin frequency — complementary to this recovery (the prevention track) but a distinct credential-management change, tracked in #1751.
+- [DEMOTED — was flow 3] Automated **Google-unlock** of a logged-out browser session ("Continue with Google" → fall through). No spike evidence exists for it (spikes 1-4 cover the MCP client, consent DOM, and gotchas only), it adds new DOM targets / a second click-retry round / a new failure mode (Google session also expired), and it contradicts the "no generic browser-OAuth framework" rabbit hole. When the consent page renders logged-out, recovery short-circuits to the existing `startup_unresolved` alert — a human completes OAuth. Re-scope as a follow-up only if logged-out browsers prove a real, recurring trigger in production.
+- [SEPARATE-SLUG #1751] Adopting `claude setup-token` / `CLAUDE_CODE_OAUTH_TOKEN` as a long-lived subscription credential to reduce relogin frequency — complementary to this recovery (the prevention track) but a distinct credential-management change, tracked in #1751. **Sequencing rationale:** recovery ships first as the *unconditional* safety net — `setup-token` needs a per-machine human OAuth step to mint, has its own ~1yr rotation, and may not be adopted on every machine; the browser-drive recovery covers expiry regardless of whether #1751 lands. The two are independent, not competing.
 - [EXTERNAL] Re-capturing the consent-page DOM / OAuth client_id if a future claude.ai release changes them — requires a human to observe the new flow on a machine with a live browser.
 
 ## Update System
@@ -237,7 +241,7 @@ No agent-facing tool/MCP changes. This is a **bridge/worker-internal** change: t
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/granite-login-recovery.md` describing the three-flow recovery, the BYOB dependency, the account guard, and the failure→alert fallback.
+- [ ] Create `docs/features/granite-login-recovery.md` describing the two-flow recovery (localhost auto-complete + paste fallback), the logged-out→alert degradation, the BYOB dependency, the account guard, and the failure→alert fallback.
 - [ ] Add an entry to `docs/features/README.md` index table.
 - [ ] Cross-link from `docs/features/granite-pty-production.md` (startup phase / login handling).
 
@@ -246,13 +250,15 @@ No agent-facing tool/MCP changes. This is a **bridge/worker-internal** change: t
 
 ### Inline Documentation
 - [ ] Module docstring on `byob_relogin.py` capturing the spike-4 gotchas (IIFE eval, list_tabs polling, hydration retry, trusted click).
-- [ ] Docstring on `recover_login` documenting the three flows and the `ReloginOutcome` contract.
+- [ ] Docstring on `recover_login` documenting the two in-scope flows (localhost auto-complete, paste fallback), the logged-out degradation, and the `ReloginOutcome` contract.
 
 ## Success Criteria
 
 - [ ] `agent/granite_container/byob_relogin.py` exists with a pure-Python `BYOBClient` (no LLM, no `claude` session) that completes `initialize` + `browser_navigate`/`browser_click`/`browser_list_tabs`.
-- [ ] The `LOGIN_PROMPT` branch in `container.py` invokes `recover_login` instead of returning `None`; grep confirms the call site references `byob_relogin`.
-- [ ] All three flows are implemented (localhost auto-complete, paste fallback, Google-unlock) with bounded retries and a hard deadline under 600s.
+- [ ] The `LOGIN_PROMPT` branch in `container.py` invokes `recover_login` (on a thread, behind `_recovery_launched`) instead of returning `None`; grep confirms the call site references `byob_relogin`.
+- [ ] Recovery dispatch is **non-blocking and idempotent**: `_handle_startup` returns fast every cycle, and the login frame persisting across cycles spawns exactly one `BYOBClient` subprocess (test asserts no double-spawn).
+- [ ] Flows 1 and 2 are implemented (localhost auto-complete, paste fallback) with bounded retries and a 120s hard deadline (< 600s ceiling). A logged-out browser degrades to the alert (no automated Google-unlock — see No-Gos).
+- [ ] `startup_parser._LOGIN_PATTERNS` matches the real re-auth frame ("Select login method" / "Browser didn't open") so the `LOGIN_PROMPT` branch actually fires in production (test asserts detection on the menu frame).
 - [ ] Account guard aborts recovery (→ alert) when the consent page's logged-in identity ≠ expected identity.
 - [ ] On recovery failure, behavior degrades to the existing `startup_unresolved` ceiling + Telegram alert (integration test with BYOB client mocked to fail).
 - [ ] Unit tests cover flow selection, URL extraction, callback parsing, and the failure paths — none complete a real OAuth (mocked BYOB + fixture PTY frames).
@@ -298,24 +304,24 @@ No agent-facing tool/MCP changes. This is a **bridge/worker-internal** change: t
 ### 1. Build the BYOB driver + flow state machine
 - **Task ID**: build-byob-driver
 - **Depends On**: none
-- **Validates**: tests/unit/test_granite_byob_relogin.py (create)
+- **Validates**: tests/unit/granite_container/test_granite_byob_relogin.py (create)
 - **Informed By**: spike-1 (stdio client works), spike-3 (flows), spike-4 (gotchas)
 - **Assigned To**: byob-driver-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Promote the spike `MCPStdioClient` into a `BYOBClient` (init handshake, navigate/click/list_tabs/eval/read, `finally`-close).
-- Implement flow classifier + `recover_login(pty_driver, pty_buffer, deadline) -> ReloginOutcome` for flows 1/2/3.
-- Implement URL extraction (de-wrap), callback parse via `list_tabs`, account guard, hydration-aware retrying `browser_click`.
+- Implement flow classifier + `recover_login(pty_driver, pty_buffer, deadline) -> ReloginOutcome` for **flows 1 and 2 only** (logged-out browser → short-circuit to failure; no Google-unlock — see No-Gos).
+- Implement URL extraction (de-wrap), callback parse via `list_tabs`, account guard, hydration-aware retrying `browser_click`. 120s overall deadline + per-step timeouts.
 
 ### 2. Wire recovery into the container
 - **Task ID**: build-container-wiring
 - **Depends On**: build-byob-driver
-- **Validates**: tests/unit/test_granite_startup_login_dispatch.py (create)
+- **Validates**: tests/unit/granite_container/test_granite_startup_login_dispatch.py (create)
 - **Assigned To**: container-wiring-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace `return None` in the `LOGIN_PROMPT` branch (`container.py:751-758`) with a bounded `recover_login` call; degrade to existing ceiling/alert on failure.
-- Add `startup_parser` patterns for the "Select login method" / "Opening browser" frames if detection needs them.
+- Replace `return None` in the `LOGIN_PROMPT` branch (`container.py` `_handle_startup`, ~line 752; verify against current source) with a **non-blocking, idempotent thread dispatch** of `recover_login`: set `self._recovery_launched` synchronously before spawning the `threading.Thread`, store the outcome on `self._recovery_outcome`, apply the PTY response when ready, and never block the per-cycle dispatch. Degrade to the existing ceiling/alert on failure or timeout.
+- Add `startup_parser._LOGIN_PATTERNS` entries for the real re-auth frame (`"Select login method"`, `"Browser didn't open"` / `"Opening browser"`) — **non-conditional**, with a fixture-frame detection test. Without these the branch never fires in production.
 - Emit a `session_events` entry for recovery attempt/outcome.
 
 ### 3. Tests (unit + integration, no real OAuth)
@@ -358,7 +364,7 @@ No agent-facing tool/MCP changes. This is a **bridge/worker-internal** change: t
 |-------|---------|----------|
 | New module present | `test -f agent/granite_container/byob_relogin.py && echo ok` | output contains ok |
 | Call site wired | `grep -rn "byob_relogin" agent/granite_container/container.py` | exit code 0 |
-| Unit tests pass | `pytest tests/unit/test_granite_byob_relogin.py tests/unit/test_granite_startup_login_dispatch.py -q` | exit code 0 |
+| Unit tests pass | `pytest tests/unit/granite_container/test_granite_byob_relogin.py tests/unit/granite_container/test_granite_startup_login_dispatch.py -q` | exit code 0 |
 | No real-OAuth in tests | `! grep -rn "claude.ai/oauth/authorize" tests/` | exit code 0 |
 | Lint clean | `python -m ruff check agent/granite_container/` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/granite_container/` | exit code 0 |
@@ -374,6 +380,6 @@ No agent-facing tool/MCP changes. This is a **bridge/worker-internal** change: t
 
 _All three resolved at plan finalization (2026-06-23). Recorded here for traceability; the decisions are folded into the Solution / Technical Approach / Risks sections above._
 
-1. **Flow-selection ordering & deadline.** RESOLVED: try flow 1 (auto-opened localhost tab) first; fall back to flow 2 (paste) if no auto-opened authorize tab appears within ~15s; attempt flow 3 (Google-unlock) only when the consent page renders logged-out. Overall deadline 120s (well under the 600s ceiling), per-step timeouts inside that budget. This matches the issue's three-flow table ordering (happy path → paste fallback → browser-needs-auth).
+1. **Flow-selection ordering & deadline.** RESOLVED: try flow 1 (auto-opened localhost tab) first; fall back to flow 2 (paste) if no auto-opened authorize tab appears within ~15s. (Former flow 3 / Google-unlock was demoted to a No-Go in the critique revision — a logged-out browser degrades to the alert.) Overall deadline 120s (well under the 600s ceiling), per-step timeouts inside that budget.
 2. **Account-mismatch policy.** RESOLVED: hard-abort to the existing alert path on identity mismatch (safest, fully deterministic). No "Switch account" automation in scope — that is a deeper, less-deterministic flow and would risk authorizing under the wrong identity. Encoded as the account guard in Technical Approach + Risk 1.
 3. **setup-token follow-up.** RESOLVED: this browser-drive recovery is the safety net; the long-lived `CLAUDE_CODE_OAUTH_TOKEN` prevention track is filed separately as #1751 (see No-Gos). This issue ships the recovery; #1751 reduces how often it fires.
