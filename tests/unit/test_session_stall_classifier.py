@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 from agent.session_stall_classifier import (
     _RUNNING_PROBE_STATUSES,
+    GRANITE_WEDGED_PTY_STALE_SECS,
+    GRANITE_WEDGED_READLOOP_FRESH_SECS,
     IDLE_STALL_SECS,
     IDLE_SUSPECT_SECS,
     NEVER_STARTED_GRACE_SECS,
@@ -461,3 +463,107 @@ class TestThresholdConstants:
 
     def test_recovery_suspect_count_pinned(self):
         assert RECOVERY_SUSPECT_COUNT == 2
+
+
+# ---------------------------------------------------------------------------
+# 9. granite_wedged rule (issue #1768)
+# ---------------------------------------------------------------------------
+
+
+def _dt(seconds_ago: float):
+    """tz-aware datetime `seconds_ago` in the past (UTC)."""
+    import datetime
+
+    return datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=seconds_ago)
+
+
+def _wedge_session(
+    *,
+    status: str = "running",
+    read_loop_ago: float = 0.0,
+    activity_ago: float | None = None,
+    created_ago: float = 700.0,
+) -> SimpleNamespace:
+    """Build a session stub for the granite_wedged probe.
+
+    read_loop_ago / activity_ago are seconds-in-the-past for the respective
+    PTY liveness fields (tz-aware datetimes). activity_ago=None leaves
+    last_pty_activity_at as None (never stamped).
+    """
+    now = time.time()
+    return SimpleNamespace(
+        status=status,
+        started_at=None,
+        created_at=now - created_ago,
+        last_pty_read_loop_at=_dt(read_loop_ago),
+        last_pty_activity_at=(None if activity_ago is None else _dt(activity_ago)),
+    )
+
+
+class TestGraniteWedgedRule:
+    def test_fires_fresh_readloop_stale_activity_no_turn_start(self):
+        # read-loop fresh (now), activity stale (700s ago > GRANITE_WEDGED_PTY_STALE_SECS).
+        session = _wedge_session(
+            read_loop_ago=0.0,
+            activity_ago=GRANITE_WEDGED_PTY_STALE_SECS + 100,
+        )
+        verdict = classify_session_stall([], session=session)
+        assert verdict.level == "stalled"
+        assert verdict.reason == "granite_wedged"
+        assert verdict.signals["pty_stale_threshold"] == GRANITE_WEDGED_PTY_STALE_SECS
+        assert verdict.signals["readloop_fresh_threshold"] == GRANITE_WEDGED_READLOOP_FRESH_SECS
+
+    def test_non_fire_pty_activity_fresh(self):
+        # activity recent (10s ago) — NOT stale; granite_wedged must not fire.
+        # created_ago old enough that it falls through to never_started instead.
+        session = _wedge_session(read_loop_ago=0.0, activity_ago=10.0)
+        verdict = classify_session_stall([], session=session)
+        assert verdict.reason != "granite_wedged"
+
+    def test_non_fire_turn_start_present(self):
+        # A turn_start event makes has_turn_start=True → the whole no-turn_start
+        # region (including granite_wedged) is skipped.
+        session = _wedge_session(
+            read_loop_ago=0.0,
+            activity_ago=GRANITE_WEDGED_PTY_STALE_SECS + 100,
+        )
+        events = [{"type": "turn_start", "ts": time.time() - 1500}]
+        verdict = classify_session_stall(events, session=session)
+        assert verdict.reason != "granite_wedged"
+
+    def test_non_fire_activity_none(self):
+        # last_pty_activity_at never stamped (None) → granite_wedged must not
+        # fabricate a wedge; falls through to never_started (created 700s ago).
+        session = _wedge_session(read_loop_ago=0.0, activity_ago=None)
+        verdict = classify_session_stall([], session=session)
+        assert verdict.reason != "granite_wedged"
+        assert verdict.level == "stalled"
+        assert verdict.reason == "never_started"
+
+    def test_non_fire_readloop_stale(self):
+        # read-loop stale (300s ago > GRANITE_WEDGED_READLOOP_FRESH_SECS) means the
+        # container may be dead → granite_wedged does not fire (handled by other
+        # reasons). activity is also stale.
+        assert 300 > GRANITE_WEDGED_READLOOP_FRESH_SECS
+        session = _wedge_session(
+            read_loop_ago=300.0,
+            activity_ago=GRANITE_WEDGED_PTY_STALE_SECS + 100,
+        )
+        verdict = classify_session_stall([], session=session)
+        assert verdict.reason != "granite_wedged"
+
+    def test_malformed_datetime_fields_no_raise_no_wedge(self):
+        # Junk non-datetime values for the PTY liveness fields must not raise and
+        # must not yield granite_wedged (outer try/except returns a safe verdict;
+        # to_unix_ts of junk → None → granite branch skipped).
+        now = time.time()
+        session = SimpleNamespace(
+            status="running",
+            started_at=None,
+            created_at=now - 700,
+            last_pty_read_loop_at="not-a-datetime",
+            last_pty_activity_at=object(),
+        )
+        verdict = classify_session_stall([], session=session)
+        assert verdict.reason != "granite_wedged"
+        assert verdict.level in {"healthy", "stalled", "suspect", "unclassifiable"}
