@@ -8,6 +8,7 @@ import pytest
 
 from bridge.config_validation import (
     ConfigValidationError,
+    validate_bot_live_flags,
     validate_dm_whitelist,
     validate_email_routing,
     validate_projects_config,
@@ -451,3 +452,98 @@ def test_validate_projects_config_runs_bots():
     with pytest.raises(ConfigValidationError) as exc:
         validate_projects_config(cfg)
     assert "id=7" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# validate_bot_live_flags — live User.bot probe (issue #1574, criterion 4)
+# ---------------------------------------------------------------------------
+
+
+class _Entity:
+    """Minimal stand-in for a resolved Telegram entity exposing the .bot flag."""
+
+    def __init__(self, bot: bool):
+        self.bot = bot
+
+
+def _bot_cfg(bot_id: int = 8837490628) -> dict:
+    return {
+        "projects": {
+            "valor": {
+                "machine": "Cowboy",
+                "telegram": {"bots": [{"id": bot_id, "username": "b"}]},
+            }
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_live_flag_bot_true_passes():
+    """A registered id resolving to User.bot=True passes silently."""
+
+    async def resolver(bot_id: int):
+        assert bot_id == 8837490628
+        return _Entity(bot=True)
+
+    # Must not raise.
+    await validate_bot_live_flags(_bot_cfg(), resolver)
+
+
+@pytest.mark.asyncio
+async def test_live_flag_human_account_surfaces_mismatch():
+    """A registered id resolving to a NON-bot (human) account is surfaced."""
+
+    async def resolver(bot_id: int):
+        return _Entity(bot=False)
+
+    with pytest.raises(ConfigValidationError) as exc:
+        await validate_bot_live_flags(_bot_cfg(), resolver)
+    msg = str(exc.value)
+    assert "id=8837490628" in msg
+    assert "NON-bot" in msg
+
+
+@pytest.mark.asyncio
+async def test_live_flag_unresolvable_id_surfaces_error():
+    """A resolver that raises (unresolvable id) is collected as a mismatch."""
+
+    async def resolver(bot_id: int):
+        raise ValueError("Cannot find any entity corresponding to that id")
+
+    with pytest.raises(ConfigValidationError) as exc:
+        await validate_bot_live_flags(_bot_cfg(), resolver)
+    msg = str(exc.value)
+    assert "id=8837490628" in msg
+    assert "failed to resolve" in msg
+
+
+@pytest.mark.asyncio
+async def test_live_flag_no_bots_makes_no_calls():
+    """With no registered bots, the resolver is never invoked and nothing raises."""
+    calls = []
+
+    async def resolver(bot_id: int):
+        calls.append(bot_id)
+        return _Entity(bot=True)
+
+    await validate_bot_live_flags({"projects": {"a": {"machine": "Cowboy"}}}, resolver)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_live_flag_deduplicates_repeated_ids():
+    """A bot id registered under two projects is probed once."""
+    cfg = {
+        "projects": {
+            "a": {"machine": "Cowboy", "telegram": {"bots": [{"id": 42}]}},
+            "b": {"machine": "Cowboy", "telegram": {"bots": [{"id": 42}]}},
+        }
+    }
+    calls = []
+
+    async def resolver(bot_id: int):
+        calls.append(bot_id)
+        return _Entity(bot=True)
+
+    await validate_bot_live_flags(cfg, resolver)
+    assert calls == [42]

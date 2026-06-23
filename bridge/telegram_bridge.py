@@ -2782,6 +2782,28 @@ async def main():
     except Exception as e:
         logger.error(f"Dead letter replay failed: {e}")
 
+    # Validate each registered bot id against the live Telegram User.bot flag
+    # (issue #1574, acceptance criterion 4). A swapped token or typo'd id that
+    # points at a HUMAN account would otherwise silently register, and the
+    # deterministic loop-guard would suppress that human's messages. We probe
+    # the live flag now that the client is connected+authorized and surface any
+    # mismatch loudly. This is a warn-not-crash gate: a misconfigured bot entry
+    # must not take down a running bridge, but it must be impossible to miss.
+    if BOT_ID_TO_PROJECT:
+        from bridge.config_validation import ConfigValidationError, validate_bot_live_flags
+
+        async def _resolve_bot_entity(bot_id: int):
+            return await client.get_entity(bot_id)
+
+        try:
+            await validate_bot_live_flags(CONFIG, _resolve_bot_entity)
+            logger.info(
+                "Registered bot live-flag validation passed (%d bot(s))",
+                len(BOT_ID_TO_PROJECT),
+            )
+        except ConfigValidationError as e:
+            logger.error("REGISTERED BOT MISCONFIGURATION (#1574): %s", e)
+
     # Register session queue callbacks for each project
     from agent.agent_session_queue import cleanup_stale_branches
     from agent.agent_session_queue import register_callbacks as register_queue_callbacks

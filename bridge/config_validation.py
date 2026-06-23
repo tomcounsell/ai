@@ -284,6 +284,83 @@ def validate_telegram_bots(config: dict) -> None:
         )
 
 
+def _iter_registered_bot_ids(config: dict) -> list[tuple[int, str]]:
+    """Yield ``(bot_id, project_key)`` for every well-formed registered bot.
+
+    Skips structurally-invalid entries (missing/non-integer id) — those are the
+    job of :func:`validate_telegram_bots`. This helper only enumerates the ids
+    that the live-flag probe should resolve.
+    """
+    out: list[tuple[int, str]] = []
+    for proj_key, proj_cfg in config.get("projects", {}).items():
+        if not isinstance(proj_cfg, dict):
+            continue
+        for entry in (proj_cfg.get("telegram") or {}).get("bots") or []:
+            if not isinstance(entry, dict) or "id" not in entry:
+                continue
+            try:
+                out.append((int(entry["id"]), proj_key))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+async def validate_bot_live_flags(config: dict, resolver) -> None:
+    """Validate each registered bot id against the live Telegram ``User.bot`` flag.
+
+    Acceptance criterion 4 of issue #1574 ("the bot registry validates each entry
+    against the live ``User.bot`` flag and surfaces mismatches"). The deterministic
+    loop-guard suppresses *every* inbound message from a registered bot id. If a
+    swapped token or typo'd id points at a **human** account, that human's messages
+    would be silently dropped — so we probe the live flag and fail loud.
+
+    The probe is decoupled from a live Telethon client via an injectable
+    ``resolver``: a coroutine ``resolver(bot_id: int) -> object`` returning the
+    resolved Telegram entity (anything exposing a ``.bot`` attribute, as the bridge
+    already reads via ``getattr(sender, "bot", False)``). Production passes a
+    closure over ``client.get_entity``; tests pass a fake. This keeps the function
+    runnable on machines with no Telegram session — the resolver is the only live
+    dependency.
+
+    Each registered bot id must resolve to an entity whose ``.bot`` flag is truthy.
+    A non-bot (human) account, a missing/false ``.bot`` attribute, or a resolver
+    that raises is collected as a mismatch; all mismatches are reported together.
+
+    Args:
+        config: The full projects.json config dict.
+        resolver: ``async def resolver(bot_id: int) -> entity``. May raise to
+            signal an unresolvable id.
+
+    Raises:
+        ConfigValidationError: if any registered bot id is not a live bot.
+    """
+    errors: list[str] = []
+    seen: set[int] = set()
+    for bot_id, proj_key in _iter_registered_bot_ids(config):
+        if bot_id in seen:
+            continue
+        seen.add(bot_id)
+        try:
+            entity = await resolver(bot_id)
+        except Exception as e:  # noqa: BLE001 — any resolver failure is a mismatch
+            errors.append(
+                f"bot id={bot_id} (project '{proj_key}') failed to resolve against Telegram: {e!r}"
+            )
+            continue
+        if not bool(getattr(entity, "bot", False)):
+            errors.append(
+                f"bot id={bot_id} (project '{proj_key}') resolves to a NON-bot "
+                f"(User.bot is false) — a swapped token or typo'd id pointing at a "
+                f"human account would silently suppress that human's messages"
+            )
+
+    if errors:
+        raise ConfigValidationError(
+            "projects.json telegram.bots failed live User.bot validation:\n  - "
+            + "\n  - ".join(errors)
+        )
+
+
 def validate_projects_config(config: dict) -> None:
     """Run the full bridge-contact ownership validation suite.
 
