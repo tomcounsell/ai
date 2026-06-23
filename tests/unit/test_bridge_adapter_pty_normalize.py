@@ -43,3 +43,13 @@ class TestNormalizePtyBuffer:
         # Fail-soft: a non-string (None) must not raise. The implementation's
         # try/except returns the original input on any normalization error.
         assert _normalize_pty_buffer(None) is None
+
+    def test_prose_elapsed_token_is_preserved(self):
+        # Regression for review CONCERN 1: an elapsed-time token inside ordinary
+        # content (NOT in the spinner/status bar, no middot/paren delimiter)
+        # must NOT be stripped. Otherwise two genuinely-progressing screens that
+        # differ only by such a token would normalize equal, masking real
+        # activity and risking a false granite_wedged kill.
+        a = _CONTENT + "  Ran 30 tests in 8s\n"
+        b = _CONTENT + "  Ran 30 tests in 14s\n"
+        assert _normalize_pty_buffer(a) != _normalize_pty_buffer(b)

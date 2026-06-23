@@ -469,6 +469,33 @@ class TestStallAdvisoryActionMode:
         sub.assert_not_called()
         assert "would-kill (dry-run)" in result["summary"]
 
+    # -- 1b. dry-run STILL emits the audit event (review CONCERN 2) ---------
+    def test_dry_run_emits_audit_event(self, trace_file, recovery_redis):
+        """Dry-run performs no kill/catchup, but it MUST still emit the
+        stall_recovery_action audit event (dry_run=True) so the dashboard feed
+        records the intended action. Pins the audit surface against regression."""
+        from config.settings import settings
+
+        sid = f"{_TEST_PREFIX}-act-dryrun-audit"
+        trace_file(sid, [])
+        sess = self._stalled_session(sid)
+
+        n = settings.features.stall_recovery_consecutive_observations
+        recovery_redis.r.set(recovery_redis.consec_key(sid), n - 1)
+
+        kill = MagicMock()
+        sub = MagicMock(return_value=SimpleNamespace(returncode=0))
+        emit = MagicMock()
+
+        with patch("reflections.stall_advisory._emit_recovery_event", emit):
+            self._run([sess], recovery_redis, enabled=False, kill_mock=kill, subprocess_mock=sub)
+
+        kill.assert_not_called()
+        sub.assert_not_called()
+        emit.assert_called_once()
+        assert emit.call_args.kwargs["dry_run"] is True
+        assert emit.call_args.kwargs["killed"] is False
+
     # -- 2. enforce kills + re-enqueues -------------------------------------
     def test_enforce_kills_and_recatches(self, trace_file, recovery_redis):
         from config.settings import settings

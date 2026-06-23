@@ -311,7 +311,10 @@ def _maybe_recover(session, verdict, settings, r, project_key, run_state) -> str
             )
             return "skipped_session_budget"
 
-        # 6. Dry-run (default): log intent, emit audit event, mutate nothing.
+        # 6. Dry-run (default): log intent and emit the audit event (a
+        #    deliberate session_events write for dashboard visibility), but
+        #    perform NO kill and NO catchup. The consec counter is the only
+        #    other state touched, identically to enforce mode.
         if not feat.stall_recovery_enabled:
             logger.warning(
                 "[stall-recovery] WOULD kill+recover session=%s reason=%s (dry-run)",

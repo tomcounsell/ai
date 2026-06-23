@@ -123,10 +123,14 @@ _SPINNER_GLYPH_FRAGMENT_RE = re.compile(rf"[{_SPINNER_GLYPHS}][A-Za-z…\.]{{0,4
 
 # Elapsed-seconds counter the TUI repaints each second in the status/spinner
 # bar (e.g. `· 12s ·`, `(12s)`, `12s ·`). Conservative: only strips a
-# standalone digits+`s` token that sits in a spinner/status-bar context
-# (bounded by `·`, parentheses, or whitespace), never arbitrary text that
-# merely contains digits followed by `s`.
-_ELAPSED_SECS_RE = re.compile(r"(?:(?<=[·(\s])|^)\d+s(?=[·)\s]|$)")
+# standalone digits+`s` token that sits in a genuine spinner/status-bar
+# context, i.e. it MUST be adjacent to a `·` middot or a parenthesis on at
+# least one side. A bare whitespace boundary is deliberately NOT enough:
+# that would also strip an elapsed-time token inside ordinary content (e.g.
+# `Ran 30 tests in 8s`), making two genuinely-progressing screens normalize
+# equal and risk a false granite_wedged verdict (a false kill). Requiring a
+# middot/paren delimiter keeps the strip scoped to the TUI status bar.
+_ELAPSED_SECS_RE = re.compile(r"(?:(?<=[·(])\s*\d+s\b|\b\d+s\s*(?=[·)]))")
 
 # Trailing whitespace on each line plus runs of blank lines collapse so a
 # settled screen with a blinking cursor (which shifts trailing spaces around)
