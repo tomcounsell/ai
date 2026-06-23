@@ -31,6 +31,25 @@ class TestParserKnownPatterns(unittest.TestCase):
         result = parse_startup_frame("Please paste the URL to continue")
         self.assertEqual(result.event, StartupEvent.LOGIN_PROMPT)
 
+    def test_select_login_method(self) -> None:
+        """The real claude 2.1.185 re-auth menu (issue #1750)."""
+        result = parse_startup_frame("Select login method")
+        self.assertEqual(result.event, StartupEvent.LOGIN_PROMPT)
+
+    def test_select_login_method_case_insensitive(self) -> None:
+        result = parse_startup_frame("SELECT LOGIN METHOD")
+        self.assertEqual(result.event, StartupEvent.LOGIN_PROMPT)
+
+    def test_browser_didnt_open(self) -> None:
+        """The auto-open fallback frame (issue #1750)."""
+        result = parse_startup_frame("Browser didn't open? Use the url below (c to copy)")
+        self.assertEqual(result.event, StartupEvent.LOGIN_PROMPT)
+
+    def test_opening_browser(self) -> None:
+        """The auto-open notice frame (issue #1750)."""
+        result = parse_startup_frame("Opening browser to complete login…")
+        self.assertEqual(result.event, StartupEvent.LOGIN_PROMPT)
+
     def test_update_notice(self) -> None:
         result = parse_startup_frame("A new version of Claude Code is available")
         self.assertEqual(result.event, StartupEvent.UPDATE_NOTICE)
@@ -126,6 +145,32 @@ class TestParserPriority(unittest.TestCase):
         buf = "Authentication failed. Sign in to continue."
         result = parse_startup_frame(buf)
         self.assertEqual(result.event, StartupEvent.ERROR_MODAL)
+
+    def test_reauth_frame_classifies_login_not_error(self) -> None:
+        """C4 (issue #1750): a captured claude 2.1.185 re-auth frame containing
+        "Select login method" must classify as LOGIN_PROMPT, NOT ERROR_MODAL.
+
+        The re-auth frame carries none of the _ERROR_PATTERNS substrings
+        ("Login failed"/"Authentication failed"/"Invalid API key"), so the
+        error-shadows-login precedence must leave it as LOGIN_PROMPT. If this
+        regresses to ERROR_MODAL the BYOB recovery never dispatches and the
+        session silently falls back to today's 600s-ceiling alert.
+        """
+        reauth_frame = (
+            "╭─────────────────────────────────────────────╮\n"
+            "│  Welcome to Claude Code                        │\n"
+            "│                                                │\n"
+            "│  Select login method                           │\n"
+            "│  ❯ 1. Claude account with subscription         │\n"
+            "│    2. Anthropic Console account                │\n"
+            "│                                                │\n"
+            "│  Opening browser to complete authentication…   │\n"
+            "│  Browser didn't open? Use the url below        │\n"
+            "│  Paste code here if prompted >                 │\n"
+            "╰─────────────────────────────────────────────╯\n"
+        )
+        result = parse_startup_frame(reauth_frame)
+        self.assertEqual(result.event, StartupEvent.LOGIN_PROMPT)
 
     def test_trust_folder_shadows_prime_ack(self) -> None:
         # Trust-folder and prime-ack can co-occur in the same buffer

@@ -142,10 +142,13 @@ Copy the resulting `sk-ant-oat01-...` value to `~/Desktop/Valor/.env` under the 
 
 ### Graceful degradation
 
-If absent or expired: the TUI eventually renders `/login`, the session exits as `pm_hang`/`dev_hang`,
-and issue #1750's recovery path fires as a backstop. The right fix is always token rotation.
+If absent or expired: the TUI eventually renders `/login`, and the deterministic BYOB re-auth
+recovery (#1750) fires as a backstop — driving the already-logged-in Chrome through the OAuth
+consent with no LLM in the loop, degrading to the `startup_unresolved` alert only if recovery
+fails. The right fix is always token rotation.
 
-Full reference: [`docs/infra/granite-oauth-token.md`](../infra/granite-oauth-token.md)
+Full reference: [`docs/infra/granite-oauth-token.md`](../infra/granite-oauth-token.md) ·
+recovery backstop: [`docs/features/granite-login-recovery.md`](granite-login-recovery.md)
 
 ## Configuration
 
