@@ -33,6 +33,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -41,6 +42,11 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from agent.granite_container.builder import PiSubprocessBuilder, PtyClaudeBuilder
+from agent.granite_container.byob_relogin import (
+    RECOVERY_HARD_DEADLINE_S,
+    ReloginOutcome,
+    recover_login,
+)
 from agent.granite_container.granite_classifier import (
     ClassificationResult,
     classify_pm_prefix,
@@ -630,6 +636,29 @@ class Container:
         # genuinely new PM output, not the stale prime buffer.
         self._prime_relayed: bool = False
         self._prime_pm_buf_hash: int | None = None
+        # --- BYOB /login re-auth recovery (issue #1750) ---
+        # Non-blocking, idempotent recovery dispatch state. When a LOGIN_PROMPT
+        # is detected mid-startup, exactly one recovery thread is spawned (guarded
+        # by _recovery_launched, set synchronously before spawn so the persisting
+        # login frame across cycles never double-spawns the BYOBClient subprocess).
+        # The thread builds the immutable ReloginOutcome locally, publishes it via
+        # the single _recovery_outcome assignment, then sets _recovery_done (C1:
+        # the loop checks _recovery_done.is_set() BEFORE dereferencing the outcome,
+        # avoiding a torn/stale read).
+        self._recovery_launched: bool = False
+        self._recovery_done: threading.Event = threading.Event()
+        self._recovery_outcome: ReloginOutcome | None = None
+        # The PTY whose buffer showed the login frame (PM or Dev). Captured in
+        # _handle_startup so recovery writes Enter/paste into the RIGHT PTY (B2 —
+        # never hardcode PM). Its companion buffer is the edge buffer that matched.
+        self._login_pty: PTYDriver | None = None
+        self._login_pty_buffer: str = ""
+        # One-shot guard so the session_events observability entry is recorded
+        # exactly once when the recovery completion is first observed.
+        self._recovery_event_recorded: bool = False
+        # Testability seam: tests inject a fake recover_login here to avoid
+        # spawning a real BYOBClient subprocess / driving a real browser.
+        self._recover_login = recover_login
 
     # -- Lifecycle --------------------------------------------------------
 
@@ -751,6 +780,19 @@ class Container:
             for r in (result_pm, result_dev):
                 if r.event == StartupEvent.LOGIN_PROMPT:
                     chosen = ("login", r)
+                    # B2 — capture WHICH PTY matched + its buffer so recovery
+                    # writes Enter/paste into the right PTY (never hardcode PM).
+                    # The login dispatch happens in the startup loop based on
+                    # _login_pty being set; _handle_startup stays fast and
+                    # returns None for the login event (its canned response is
+                    # None anyway). Trust/update/error paths are unaffected —
+                    # only the login branch sets _login_pty.
+                    if r is result_pm:
+                        self._login_pty = self._pm_pty
+                        self._login_pty_buffer = buffer_pm
+                    else:
+                        self._login_pty = self._dev_pty
+                        self._login_pty_buffer = buffer_dev
                     break
 
         if chosen is None:
@@ -758,6 +800,75 @@ class Container:
 
         _, r = chosen
         return r.response
+
+    @staticmethod
+    def _resolve_expected_identity() -> str | None:
+        """Read the expected login identity (email) from ``config/identity.json``.
+
+        Read defensively: a missing/unreadable file or absent ``email`` field
+        returns None, which the fail-closed account guard in ``recover_login``
+        treats as "cannot positively confirm identity" → abort to the alert
+        path. Per-instance overrides at ``~/Desktop/Valor/identity.json`` win
+        (shallow merge), mirroring the persona-segment loader.
+        """
+        email: str | None = None
+        for path in (
+            Path(__file__).resolve().parents[2] / "config" / "identity.json",
+            Path.home() / "Desktop" / "Valor" / "identity.json",
+        ):
+            try:
+                data = json.loads(path.read_text())
+            except Exception:  # noqa: BLE001 — missing/unreadable → degrade
+                continue
+            value = data.get("email")
+            if isinstance(value, str) and value.strip():
+                email = value.strip()
+        return email
+
+    def _dispatch_login_recovery(self, deadline: float) -> None:
+        """Spawn the non-blocking, idempotent BYOB recovery thread (issue #1750).
+
+        Called from the startup loop when a LOGIN_PROMPT is detected and
+        ``self._login_pty`` is set. The ``_recovery_launched`` guard is set
+        SYNCHRONOUSLY before spawning so the login frame persisting across many
+        startup cycles spawns exactly ONE BYOBClient subprocess (idempotency).
+
+        The thread is a daemon (round-3 concern): an early loop exit
+        (ceiling/exception) must not pin the worker waiting up to
+        ``RECOVERY_HARD_DEADLINE_S`` for a non-daemon join. ``recover_login``'s
+        own ``finally`` still closes the BYOBClient subprocess on the daemon
+        thread (C1 — no orphaned ``tsx byob-mcp.ts``).
+
+        Thread-safety (C1): the thread builds the complete immutable
+        ``ReloginOutcome`` locally, assigns ``self._recovery_outcome`` as its
+        FINAL data statement, then calls ``self._recovery_done.set()``. The loop
+        checks ``_recovery_done.is_set()`` before dereferencing the outcome.
+        """
+        self._recovery_launched = True  # set SYNCHRONOUSLY before spawn (idempotency)
+        login_pty = self._login_pty
+        login_pty_buffer = self._login_pty_buffer
+        expected_identity = self._resolve_expected_identity()
+        recover = self._recover_login
+
+        def _worker() -> None:
+            outcome: ReloginOutcome
+            try:
+                outcome = recover(
+                    login_pty,
+                    login_pty_buffer,
+                    deadline=time.monotonic() + RECOVERY_HARD_DEADLINE_S,
+                    expected_identity=expected_identity,
+                )
+            except Exception as exc:  # noqa: BLE001 — recovery must never crash the worker
+                logger.warning("container: login recovery thread errored: %s", exc)
+                outcome = ReloginOutcome(
+                    succeeded=False, flow=None, reason=f"recovery thread error: {exc}"
+                )
+            # C1: publish the fully-built immutable outcome, THEN set the event.
+            self._recovery_outcome = outcome
+            self._recovery_done.set()
+
+        threading.Thread(target=_worker, name="granite-login-recovery", daemon=True).start()
 
     # -- Steady-state loop ------------------------------------------------
 
@@ -1013,6 +1124,46 @@ class Container:
                     response,
                 )
 
+                # --- BYOB /login re-auth recovery dispatch (issue #1750) ---
+                # _handle_startup set self._login_pty when it matched a
+                # LOGIN_PROMPT (B2: PM or Dev, never hardcoded). Non-blocking,
+                # idempotent dispatch: spawn exactly one recovery thread the
+                # first time, then let it run in flight across subsequent
+                # cycles. On completion, recover_login has already written the
+                # PTY response (Enter / pasted code) itself for both flows, so
+                # success means: stop treating the persisting frame as a
+                # plateau and let idle detection settle. On failure, fall
+                # through to the existing ceiling/alert path.
+                if self._login_pty is not None and not self._recovery_launched:
+                    logger.info("container: LOGIN_PROMPT detected; dispatching BYOB login recovery")
+                    self._dispatch_login_recovery(startup_deadline)
+                # Record the observability event exactly once when the recovery
+                # completion is first observed (C1: check is_set() before
+                # dereferencing the outcome — no torn/stale read).
+                if (
+                    self._recovery_launched
+                    and self._recovery_done.is_set()
+                    and not self._recovery_event_recorded
+                ):
+                    outcome = self._recovery_outcome
+                    self._recovery_event_recorded = True
+                    result.startup_events.append(
+                        {
+                            "event": "login_recovery",
+                            "outcome": "success"
+                            if (outcome is not None and outcome.succeeded)
+                            else "failed",
+                            "flow": outcome.flow if outcome is not None else None,
+                            "reason": outcome.reason if outcome is not None else "no outcome",
+                        }
+                    )
+                    logger.info(
+                        "container: login recovery completed outcome=%s flow=%s reason=%s",
+                        "success" if (outcome is not None and outcome.succeeded) else "failed",
+                        outcome.flow if outcome is not None else None,
+                        outcome.reason if outcome is not None else "no outcome",
+                    )
+
                 # --- Plateau fingerprint (keyed on response ALONE) ---
                 # Accumulate consecutive identical response values.
                 # Reset on any change. This captures:
@@ -1029,7 +1180,22 @@ class Container:
                 # progress AND no recognized event.
                 _silent_start = response is None and not pm_saw_idle and not dev_saw_idle
 
-                if _plateau_count >= STARTUP_PLATEAU_CYCLES and _silent_start:
+                # B1 — suppress the plateau early-bail WHILE recovery is in
+                # flight (issue #1750). A running BYOB recovery produces exactly
+                # the plateau signature (response=None, neither PTY idle as the
+                # login frame persists), so the detector would reap it ~90s
+                # before the 120s recovery deadline. Gate on
+                # _recovery_done.is_set() (NOT _recovery_outcome is None, which
+                # would reintroduce the C1 torn-read race). RECOVERY_HARD_DEADLINE_S
+                # (120s) stays strictly under STARTUP_HARD_CEILING_S (600s), so
+                # the outer ceiling never reaps a pending recovery either.
+                _recovery_in_flight = self._recovery_launched and not self._recovery_done.is_set()
+
+                if (
+                    _plateau_count >= STARTUP_PLATEAU_CYCLES
+                    and _silent_start
+                    and not _recovery_in_flight
+                ):
                     # Confirmed plateau: N consecutive identical response=None
                     # cycles with no idle. Bail early.
                     frame = _capture_startup_frame(
