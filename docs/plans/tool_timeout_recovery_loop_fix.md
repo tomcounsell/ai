@@ -254,19 +254,33 @@ wedge → recovered/finalized only after real, post-recovery non-progress.
 
 The core fix lives in the requeue branch of `_apply_recovery_transition`
 (`agent/session_health.py:1811-1895`), specifically alongside the existing
-tool_timeout steering injection at lines 1824-1845 (~line 1812).
+tool_timeout steering injection at lines 1824-1845.
 
-- **Clear both wedge fields on tool_timeout requeue.** In the
-  `reason_kind == "tool_timeout"` block, set `entry.current_tool_name = None`
-  **and** `entry.last_tool_use_at = None`. Clearing only `current_tool_name`
-  leaves the frozen timestamp live: a fresh tool name emitted by the resumed
-  model would pair with the stale `last_tool_use_at` and could re-trip the
-  budget immediately. Both fields must be cleared together.
-- **Persist the cleared fields.** Add `current_tool_name` and `last_tool_use_at`
-  to the `update_fields` of the existing requeue-branch `entry.save(...)` (or a
-  dedicated best-effort save) so the cleared values are durable before the
-  resumed worker reads them. The save must be best-effort (log on failure, never
-  block the transition), mirroring the existing steering-injection try/except.
+- **Clear both wedge fields on tool_timeout requeue, BEFORE the OOM-defer
+  conditional.** In the `else` requeue branch, after the existing
+  `entry.priority`/`entry.started_at` assignments and the steering injection but
+  **before** the `if ... exit_returncode == -9 ...` OOM-defer conditional
+  (~line 1813/1846), set `entry.current_tool_name = None` **and**
+  `entry.last_tool_use_at = None`. Setting the fields above the conditional is
+  required because the requeue branch has **two distinct `entry.save(...)` sites**
+  and both must persist the cleared values (see next bullet) — clearing the
+  in-memory fields once, above the fork, guarantees both save paths write the
+  reset. Clearing only `current_tool_name` leaves the frozen timestamp live: a
+  fresh tool name emitted by the resumed model would pair with the stale
+  `last_tool_use_at` and could re-trip the budget immediately. Both fields must
+  be cleared together.
+- **Persist the cleared fields at BOTH save sites.** The requeue branch saves the
+  entry in two mutually-exclusive places:
+  - the **OOM-defer path** (~line 1853):
+    `entry.save(update_fields=["scheduled_at", "recovery_attempts"])`
+  - the **normal path** (~line 1868):
+    `entry.save(update_fields=["recovery_attempts"])`
+
+  Add **both** `current_tool_name` and `last_tool_use_at` to the `update_fields`
+  list at **both** save sites so the cleared values are durable before the resumed
+  worker reads them, regardless of which path the requeue takes. Both saves are
+  already best-effort (wrapped in try/except, log on failure, never block the
+  transition) — preserve that pattern; do not add a third save.
 - **No anti-re-pin guard needed.** The resumed session writes a fresh empty
   transcript (new UUID per `run()`, `bridge_adapter.py:425-426`), so there is no
   dangling `tool_use` block for the tailer to re-pin from, and `byte_offset` is
@@ -527,14 +541,24 @@ The lead NEVER builds directly.
 - **Assigned To**: recovery-reset-builder
 - **Agent Type**: debugging-specialist
 - **Parallel**: false
-- In `_apply_recovery_transition` requeue branch (`agent/session_health.py`
-  ~1811-1895, alongside the steering injection at ~line 1812/1824), for
-  `reason_kind == "tool_timeout"`, set **both** `entry.current_tool_name = None`
-  and `entry.last_tool_use_at = None` before `transition_status(..., "pending")`.
-- Add both fields to the requeue-branch `entry.save(update_fields=[...])` so the
-  cleared values persist before the resumed worker reads them. Keep the save
-  best-effort (log on failure, never block the transition), mirroring the
-  existing steering-injection try/except.
+- In `_apply_recovery_transition` requeue (`else`) branch
+  (`agent/session_health.py` ~1811-1895), set **both**
+  `entry.current_tool_name = None` and `entry.last_tool_use_at = None`
+  **before the OOM-defer conditional** (~line 1813/1846, after the existing
+  `priority`/`started_at` assignments and the steering injection) so both save
+  paths below see the cleared in-memory values. (No need to gate on
+  `reason_kind == "tool_timeout"` for the field clear — the requeue branch is
+  only reached on a recoverable timeout/wedge; clearing the wedge fields is
+  harmless when they are already `None`.)
+- Add **both** `current_tool_name` and `last_tool_use_at` to the `update_fields`
+  at **BOTH** `entry.save(...)` sites in the requeue branch:
+  - OOM-defer path (~line 1853):
+    `entry.save(update_fields=["scheduled_at", "recovery_attempts", "current_tool_name", "last_tool_use_at"])`
+  - normal path (~line 1868):
+    `entry.save(update_fields=["recovery_attempts", "current_tool_name", "last_tool_use_at"])`
+
+  Keep both saves best-effort (log on failure, never block the transition) —
+  they already are; do not add a third save.
 - Add an inline comment explaining the double-count root cause (stale durable
   fields re-counted because the fresh-transcript tailer never overwrites them).
 - Do NOT change `MAX_RECOVERY_ATTEMPTS` or the tier budget constants.
@@ -549,6 +573,16 @@ The lead NEVER builds directly.
 - Add a unit test that simulates a tool_timeout recovery and asserts **both**
   `current_tool_name` and `last_tool_use_at` are reset to `None` so a second
   sub-loop tick does NOT re-trigger recovery from the stale wedge values.
+- **Test factory must use a STALE timestamp, not `None`.** The `_recovery_entry`
+  (or equivalent) fixture used to build the wedged session must set
+  `last_tool_use_at` to a stale value (e.g. `datetime.now(tz=UTC) - timedelta(seconds=400)`,
+  comfortably past the 300s default budget) — **not** the default `None`. A
+  `None` timestamp short-circuits `_check_tool_timeout` to return `None`
+  (lines 372-374), so the test would never reproduce the double-count loop and
+  would pass vacuously against the unfixed code. The fixture must construct a
+  pre-recovery wedge that actually trips the budget on the first tick, then
+  assert the fields are cleared after recovery so the *second* tick no longer
+  trips.
 - Add a fail-fast test: a session that wedges a genuinely-new tool after a clean
   recovery is still finalized as failed at the cap.
 - Add a best-effort test: requeue still proceeds (and logs) if the reset save
@@ -591,6 +625,9 @@ The lead NEVER builds directly.
 | Tier budget defaults unchanged (anti-criterion) | `grep -c "TOOL_TIMEOUT_INTERNAL_SEC\", 30)\|TOOL_TIMEOUT_MCP_SEC\", 120)\|TOOL_TIMEOUT_DEFAULT_SEC\", 300)" agent/session_health.py` | output contains 3 |
 | Wedge reset (tool name) present on requeue | `grep -n "current_tool_name = None" agent/session_health.py` | exit code 0 |
 | Wedge reset (timestamp) present on requeue | `grep -n "last_tool_use_at = None" agent/session_health.py` | exit code 0 |
+| Cleared fields persisted at OOM-defer save site (~1853) | `grep -n '"scheduled_at", "recovery_attempts", "current_tool_name", "last_tool_use_at"' agent/session_health.py` | exit code 0 |
+| Cleared fields persisted at normal save site (~1868) | `grep -n '"recovery_attempts", "current_tool_name", "last_tool_use_at"' agent/session_health.py` | exit code 0 |
+| Both requeue save sites persist the wedge-field reset | `grep -c '"current_tool_name", "last_tool_use_at"\]' agent/session_health.py` | output contains 2 |
 | Degraded notice still wired on terminal failure | `grep -n "_deliver_tool_timeout_degraded_notice" agent/session_health.py` | exit code 0 |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
 
