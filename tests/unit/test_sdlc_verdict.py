@@ -22,9 +22,11 @@ class _FakeSession:
     Stores stage_states as a JSON string like the real model.
     """
 
-    def __init__(self, session_id="fake-1", stage_states=None):
+    def __init__(self, session_id="fake-1", stage_states=None, issue_url=None, message_text=""):
         self.session_id = session_id
         self.session_type = "eng"
+        self.issue_url = issue_url
+        self.message_text = message_text
         if stage_states is None:
             self.stage_states = "{}"
         elif isinstance(stage_states, dict):
@@ -183,6 +185,8 @@ class TestCliRecordEnsure:
         from tools.sdlc_verdict import _cli_record
 
         session = fake_session_reload_patched
+        # Ownership guard: the session must own issue 1558 for the write to proceed.
+        session.issue_url = "https://github.com/x/y/issues/1558"
         with patch("tools.sdlc_verdict._find_session", return_value=session) as find_mock:
             result = _cli_record(self._args())
 
@@ -193,6 +197,8 @@ class TestCliRecordEnsure:
         from tools.sdlc_verdict import _cli_get, _cli_record
 
         session = fake_session_reload_patched
+        # Ownership guard: the session must own issue 1558 for the write to proceed.
+        session.issue_url = "https://github.com/x/y/issues/1558"
         # Record first so the get round-trips against the same in-memory session.
         with patch("tools.sdlc_verdict._find_session", return_value=session):
             _cli_record(self._args())
@@ -235,6 +241,8 @@ class TestConvergenceUnderDivergentEnv:
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
         issue_session = fake_session_reload_patched  # the sdlc-local-1672 session
+        # Ownership guard: give the session an issue_url that passes predicate 1.
+        issue_session.issue_url = "https://github.com/x/y/issues/1672"
 
         # The REAL _find_session runs (not mocked). Its issue-first pass resolves
         # find_session_by_issue, which returns the issue session — NOT the env one.
@@ -326,6 +334,146 @@ class TestNormalizeVerdict:
         assert record["verdict"] == "CHANGES REQUESTED"
         data = json.loads(session.stage_states)
         assert data["_verdicts"]["REVIEW"]["verdict"] == "CHANGES REQUESTED"
+
+
+class TestOwnershipGate:
+    """Tests for the ownership guard in _cli_record / main().
+
+    The guard fires when --issue-number N is passed but the resolved session
+    does not own issue N (via any of the three predicates). It raises
+    OwnershipError, which main() catches, writes to stderr, and exits 1.
+    """
+
+    def _args(self, issue_number=42, **kw):
+        from types import SimpleNamespace
+
+        base = dict(
+            session_id=None,
+            issue_number=issue_number,
+            stage="CRITIQUE",
+            verdict="READY TO BUILD",
+            blockers=None,
+            tech_debt=None,
+            judges_json=None,
+            consensus_json=None,
+        )
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def _owning_session(self, issue_number=42, via="issue_url"):
+        """Build a _FakeSession that owns the given issue number."""
+        if via == "issue_url":
+            return _FakeSession(
+                session_id="other-session",
+                issue_url=f"https://github.com/x/y/issues/{issue_number}",
+            )
+        elif via == "session_id":
+            return _FakeSession(session_id=f"sdlc-local-{issue_number}")
+        elif via == "message_text":
+            return _FakeSession(
+                session_id="other-session",
+                issue_url=None,
+                message_text=f"SDLC issue #{issue_number} needs fixing",
+            )
+        raise ValueError(via)
+
+    def _non_owning_session(self):
+        """Build a _FakeSession that does NOT own issue 42."""
+        return _FakeSession(
+            session_id="different-session",
+            issue_url="https://github.com/x/y/issues/99",
+            message_text="working on issue 99",
+        )
+
+    def test_explicit_issue_non_owning_session_raises_ownership_error(self):
+        """Non-owning session with --issue-number N raises OwnershipError."""
+        from tools.sdlc_verdict import OwnershipError, _cli_record
+
+        session = self._non_owning_session()
+        with patch("tools.sdlc_verdict._find_session", return_value=session):
+            with pytest.raises(OwnershipError) as exc_info:
+                _cli_record(self._args(issue_number=42))
+
+        err = str(exc_info.value)
+        assert "42" in err
+        assert "different-session" in err
+
+    def test_explicit_issue_non_owning_session_main_exits_1(self, capsys):
+        """main() with non-owning session exits 1 and writes issue + session to stderr."""
+        import sys
+
+        from tools.sdlc_verdict import main
+
+        session = self._non_owning_session()
+        with patch("tools.sdlc_verdict._find_session", return_value=session):
+            with pytest.raises(SystemExit) as exc_info:
+                sys.argv = [
+                    "sdlc-verdict",
+                    "record",
+                    "--stage",
+                    "CRITIQUE",
+                    "--verdict",
+                    "READY TO BUILD",
+                    "--issue-number",
+                    "42",
+                ]
+                main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "42" in captured.err
+        assert "different-session" in captured.err
+
+    def test_explicit_issue_owning_via_issue_url_succeeds(self, fake_session_reload_patched):
+        """Session owning via issue_url → _cli_record returns the verdict record."""
+        from tools.sdlc_verdict import _cli_record
+
+        # Override with an owning session (predicate 1).
+        session = self._owning_session(42, via="issue_url")
+        # Patch _reload_session so verification passes in-memory.
+        with (
+            patch("tools.sdlc_verdict._find_session", return_value=session),
+            patch("tools.stage_states_helpers._reload_session", return_value=session),
+        ):
+            result = _cli_record(self._args(issue_number=42))
+
+        assert result.get("verdict") == "READY TO BUILD"
+
+    def test_explicit_issue_owning_via_message_text_succeeds(self):
+        """CRITICAL: predicate 3 (message_text) passes the ownership gate.
+
+        This proves the third predicate is evaluated — a session with no issue_url
+        and a non-matching session_id but a message_text containing 'issue #42'
+        is permitted to write.
+        """
+        from tools.sdlc_verdict import _cli_record
+
+        session = self._owning_session(42, via="message_text")
+        # Predicate 3: session_id doesn't match sdlc-local-42, issue_url=None,
+        # but message_text contains 'issue #42' — must NOT raise OwnershipError.
+        with (
+            patch("tools.sdlc_verdict._find_session", return_value=session),
+            patch("tools.stage_states_helpers._reload_session", return_value=session),
+        ):
+            result = _cli_record(self._args(issue_number=42))
+
+        assert result.get("verdict") == "READY TO BUILD"
+
+    def test_no_issue_number_gate_not_triggered(self, fake_session_reload_patched):
+        """Without --issue-number, the ownership gate is not triggered.
+
+        A non-owning session is still allowed to write when no issue number is passed.
+        """
+        from tools.sdlc_verdict import _cli_record
+
+        session = fake_session_reload_patched  # session_id="fake-1", no issue_url
+        # Pass issue_number=None — gate must be bypassed entirely.
+        args = self._args(issue_number=None)
+        with patch("tools.sdlc_verdict._find_session", return_value=session):
+            result = _cli_record(args)
+
+        # Without an issue_number, the gate is skipped, write succeeds.
+        assert result.get("verdict") == "READY TO BUILD"
 
 
 class TestComputePlanBodyHash:

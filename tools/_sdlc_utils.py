@@ -327,6 +327,47 @@ def find_session(
     return None
 
 
+def session_owns_issue(session, issue_number) -> bool:
+    """Return True iff the session owns the issue by one of the three predicates
+    that find_session_by_issue resolves on. Never raises.
+
+    The three predicates are checked in order (OR'd):
+    1. session.issue_url endswith ``/issues/{issue_number}``
+    2. session.session_id == ``sdlc-local-{issue_number}``
+    3. session.message_text matches ``\\bissue\\s*#?\\s*{issue_number}\\b``
+       (case-insensitive, same regex as find_session_by_issue)
+
+    Returns False immediately if issue_number is falsy or session is None.
+    Wrap the entire body in try/except so a bad attribute or unexpected session
+    shape never propagates out — callers gate on the bool.
+    """
+    if not issue_number:
+        return False
+    if session is None:
+        return False
+    try:
+        # Predicate 1: issue_url ownership
+        issue_url = getattr(session, "issue_url", "") or ""
+        if issue_url.endswith(f"/issues/{issue_number}"):
+            return True
+
+        # Predicate 2: deterministic sdlc-local-{N} id
+        session_id = getattr(session, "session_id", "") or ""
+        if session_id == f"sdlc-local-{issue_number}":
+            return True
+
+        # Predicate 3: message_text fallback — identical regex to find_session_by_issue
+        message_text = getattr(session, "message_text", "") or ""
+        if message_text and re.search(
+            rf"\bissue\s*#?\s*{issue_number}\b", message_text, re.IGNORECASE
+        ):
+            return True
+
+        return False
+    except Exception:
+        return False
+
+
 def find_plan_path(issue_number: int) -> Path | None:
     """Locate the plan file tracking this issue.
 
