@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor
 created: 2026-06-23
 tracking: https://github.com/tomcounsell/ai/issues/1768
 last_comment_id:
+revision_applied: true
 ---
 
 # Stall-advisory: promote to actor + granite_wedged signal
@@ -118,16 +119,43 @@ reflections/worker change with no external libraries, APIs, or ecosystem pattern
 - **Assumption**: "A granite session looping on `no-new-entry` leaves `last_pty_activity_at` stale
   while `last_pty_read_loop_at` and the heartbeat stay fresh."
 - **Method**: code-read (`agent/granite_container/bridge_adapter.py:680` `_on_pty_read`).
-- **Finding**: Confirmed. `_on_pty_read` stamps `last_pty_read_loop_at` unconditionally on every
-  `_cycle_idle` return, but stamps `last_pty_activity_at` **only when `buffer != prev_buffer`**
-  (screen repainted). A no-new-entry loop paints an unchanging screen ⇒ `last_pty_activity_at`
-  goes stale, `last_pty_read_loop_at` + heartbeat stay fresh. This is exactly the
-  fresh-heartbeat / stale-screen signature.
-- **Confidence**: high
-- **Impact on plan**: The `granite_wedged` verdict can be computed entirely from existing
-  `AgentSession` fields (`last_heartbeat_at`, `last_pty_read_loop_at`, `last_pty_activity_at`,
-  `status`, plus zero `turn_start` events). **No new container instrumentation required** — keeps
-  the diff confined and avoids overlap with #1724/#1028.
+- **Finding**: PARTIALLY confirmed, with a **material caveat** the critique surfaced. `_on_pty_read`
+  stamps `last_pty_read_loop_at` unconditionally on every `_cycle_idle` return, but stamps
+  `last_pty_activity_at` **only when `buffer != prev_buffer`**. HOWEVER the diff-gate compares an
+  ANSI-stripped but **not cursor/spinner/elapsed-counter-normalized** buffer
+  (`bridge_adapter.py:687-695`). The in-repo comment authored by the #1724 work explicitly warns:
+  "a blinking cursor or spinner repaint that normalization would strip could keep
+  `last_pty_activity_at` fresh on a wedged screen, defeating quiescence detection. Address this
+  before wiring stage-2 recovery." A wedged TUI whose spinner/elapsed-counter keeps animating at
+  ≥1 Hz would therefore keep `last_pty_activity_at` FRESH — and `granite_wedged` would never fire
+  for the exact incident it targets.
+- **Confidence**: medium (the mechanism is real; the spinner-defeat risk is unresolved by code-read
+  alone — needs empirical confirmation against a real wedged session, OR a normalization
+  prerequisite, OR a non-screen corroborating signal).
+- **Impact on plan**: **REVISED.** The diff-gate must be normalized (strip spinner/cursor/elapsed
+  noise) so a quiescent-but-animating screen produces a stable buffer and `last_pty_activity_at`
+  genuinely goes stale on a wedge. This normalization is precisely the work #1724's own comment
+  says must precede stage-2 recovery, and this plan is that consumer — so it is in-scope, not a
+  rabbit hole. Additionally, `granite_wedged` does NOT rely on stale `last_pty_activity_at` ALONE:
+  see spike-3 and the revised Technical Approach for the corroborating `no-new-entry` evidence.
+
+### spike-3: Is there a screen-animation-immune corroborating signal for the wedge?
+- **Assumption**: "The `no-new-entry` transcript-read branch (`container.py:454-469`) is immune to
+  spinner animation because it inspects the PM *transcript file*, not the rendered screen."
+- **Method**: code-read (`agent/granite_container/container.py:454-487`).
+- **Finding**: Confirmed at the source level: `_transcript_read_branch` returns
+  `transcript read: no-new-entry` based on whether the transcript file has a new text-bearing entry
+  past baseline — independent of any spinner repaint on screen. This is a true second signal.
+  BUT there is no durable per-session counter of consecutive `no-new-entry` cycles today (verified:
+  `AgentSession` has no such field; the branch is computed and logged, not persisted).
+- **Confidence**: high (signal exists and is screen-immune) / the *durable counter* would be new
+  instrumentation.
+- **Impact on plan**: The revised `granite_wedged` design uses a **two-of-two** gate where feasible:
+  (a) normalized-buffer staleness of `last_pty_activity_at`, AND (b) the corroborating evidence that
+  the read-loop is fresh (proving the container is actively cycling, i.e. not just dead). The
+  durable no-new-entry counter is explicitly KEPT OUT of scope to avoid #1028 overlap — instead the
+  normalization fix (spike-1 revision) makes signal (a) trustworthy on its own, and the empirical
+  test (see Test Impact) confirms staleness actually accrues on a real animating wedge.
 
 ### spike-2: What is the canonical "kill a running session" path the action should reuse?
 - **Assumption**: "There is a single helper that terminates the session PID and sets status=killed."
@@ -167,6 +195,8 @@ reflections/worker change with no external libraries, APIs, or ecosystem pattern
   `tools.agent_session_scheduler._kill_agent_session`, `config.settings`, and `subprocess`
   (already imported). The classifier gains no new imports (stays zero-write, no
   `agent.session_health` coupling — enforced by existing tests).
+  `agent/granite_container/bridge_adapter.py` gains a small `_normalize_pty_buffer` helper (and may
+  import a spinner-verb regex from `pty_driver.py` if exposed) — a prerequisite fix, additive.
 - **Interface changes**: `StallVerdict` gains a new `reason` value `granite_wedged` (additive, no
   signature change). `run_stall_advisory` return contract is unchanged (summary string extended).
 - **Coupling**: `stall_advisory` now couples to the kill path and `valor-catchup`. The detection
@@ -201,9 +231,20 @@ CLI entry point (`pyproject.toml:79`); the liveness fields already exist on `Age
 
 ### Key Elements
 
+- **Normalized PTY diff-gate** (`agent/granite_container/bridge_adapter.py`): a prerequisite fix.
+  The `_on_pty_read` diff-gate currently compares an ANSI-stripped but NOT spinner/cursor/elapsed-
+  normalized buffer, so an animating-but-wedged TUI keeps `last_pty_activity_at` fresh and defeats
+  detection. Add a `_normalize_pty_buffer()` helper (reusing the spinner-verb knowledge already in
+  `pty_driver.py`) that strips the spinner glyph/verb, the elapsed-seconds counter, and cursor/blink
+  noise before the `buffer != prev_buffer` comparison. This makes `last_pty_activity_at` a
+  trustworthy quiescence signal — exactly the work #1724's in-repo comment says must precede wiring
+  recovery. (Detection consumer == this plan, so in-scope.)
 - **`granite_wedged` verdict** (`agent/session_stall_classifier.py`): a new stalled reason for a
-  running session with zero `turn_start` events, a fresh read-loop/heartbeat, and a stale
-  `last_pty_activity_at` (beyond a grace window). Computed from existing session fields; zero writes.
+  running session with zero `turn_start` events, a fresh read-loop (`last_pty_read_loop_at`, proving
+  the container is actively cycling — not merely dead), a fresh heartbeat, and a stale
+  *normalized* `last_pty_activity_at` (beyond a grace window). Computed from existing session fields;
+  zero writes. The fresh-read-loop requirement is the corroborator that distinguishes a genuine
+  wedge (cycling but not repainting) from an abandoned/dead session (caught by other reasons).
 - **Action-mode in `stall-advisory`** (`reflections/stall_advisory.py`): consumes the existing
   verdicts (no new detection); for actionable `stalled` reasons it records a consecutive-observation
   count, and once gates pass, kills the session and triggers `valor-catchup`. Dry-run by default.
@@ -237,8 +278,16 @@ For any session that classifies healthy/suspect this tick → reset its consecut
   ⇒ fall through to the existing `never_started` path (don't fabricate a wedge). Use
   `bridge.utc.to_unix_ts` for all datetime math.
 - **Constants** live as module-level named values with a "provisional/tunable" comment and env
-  overrides, mirroring the existing `NEVER_STARTED_CONFIRM_MARGIN_SECS` style:
+  overrides, mirroring the existing `NEVER_STARTED_GRACE_SECS` style (the live grace constant the
+  verdict at `session_stall_classifier.py:216` actually compares against — NOT
+  `NEVER_STARTED_CONFIRM_MARGIN_SECS`, which the critique confirmed is dead in the hot path; do not
+  model the new constant as a base+margin pair):
   `GRANITE_WEDGED_PTY_STALE_SECS` (default e.g. 600, env `GRANITE_WEDGED_PTY_STALE_SECS`).
+- **Prerequisite — normalize the diff-gate**: add `_normalize_pty_buffer(buffer)` in
+  `bridge_adapter.py` (or a small shared helper if `pty_driver.py` already exposes the spinner-verb
+  regex) and apply it to BOTH sides of the `buffer != self._prev_pty_buffer` comparison and to the
+  stored `self._prev_pty_buffer`. Remove/refresh the stale "address before stage-2" comment block
+  to reflect that normalization has landed. Keep `last_pty_read_loop_at` stamping unconditional.
 - **Action path** is a new internal function `_maybe_recover(session, verdict, settings, r)` in
   `stall_advisory.py`, called only for `stalled` findings. It:
   1. Returns early if `verdict.reason` not in the actionable set
@@ -255,6 +304,12 @@ For any session that classifies healthy/suspect this tick → reset its consecut
      success `subprocess.run(["valor-catchup"], …)`; increment per-session budget; increment per-run
      counter; log the kill with the triggering verdict. All wrapped fail-soft (never raise; a
      recovery error must not crash the reflection).
+  8. **Audit surface (concern 1)**: append a typed session-event (e.g. `stall_recovery_action` with
+     fields `verdict_reason`, `killed: bool`, `catchup_invoked: bool`, `catchup_ok: bool`,
+     `dry_run: bool`) so a kill-succeeds-but-catchup-fails outcome is durably visible on the
+     dashboard feed and queryable — not merely a single WARNING log line that scrolls away. Use the
+     existing `_append_session_event` pattern (see `bridge_adapter.py` `granite_user_routed`). On
+     catchup failure, also surface it in the reflection summary count (e.g. "1 killed, 1 catchup-failed").
 - **Reset on recovery**: when a session classifies healthy/suspect this tick, delete its
   `consec` key so a single slow-but-live turn doesn't accumulate toward a kill.
 - **Suspect is never actioned** — only `stalled`, and only the actionable reason subset.
@@ -298,9 +353,19 @@ For any session that classifies healthy/suspect this tick → reset its consecut
 - [ ] `tests/integration/test_agent_catchup_recovery.py` — REVIEW: confirm the new subprocess
   invocation of `valor-catchup` from the reflection doesn't conflict with existing catchup tests
   (it shells out; tests mock subprocess). No change expected unless it asserts catchup callers.
+- [ ] `tests/unit/` granite-container PTY tests (locate the existing bridge_adapter/`_on_pty_read`
+  test, e.g. `tests/unit/test_*bridge_adapter*` / `test_*pty*`) — UPDATE/ADD: a focused unit test
+  for `_normalize_pty_buffer` asserting that two buffers differing ONLY by spinner glyph/verb,
+  elapsed-seconds counter, or cursor/blink noise normalize to the SAME string (so the diff-gate does
+  NOT stamp `last_pty_activity_at`), while a buffer with genuinely new text content normalizes to a
+  DIFFERENT string (does stamp). This is the empirical-confirmation test the critique required —
+  it pins the spinner-defeat fix and the diff-gated semantics dependency together.
 
-No other existing tests are affected — the feature ships behind a default-off flag, so all
-advisory-only behavior is preserved verbatim when `FEATURES__STALL_RECOVERY_ENABLED` is unset.
+No other existing tests are affected — the action feature ships behind a default-off flag, so all
+advisory-only behavior is preserved verbatim when `FEATURES__STALL_RECOVERY_ENABLED` is unset. The
+normalization prerequisite is additive (stricter diff-gate) and only changes WHICH buffers count as
+"repainted"; any existing bridge_adapter test asserting unconditional `last_pty_read_loop_at`
+stamping remains valid.
 
 ## Rabbit Holes
 
@@ -308,10 +373,12 @@ advisory-only behavior is preserved verbatim when `FEATURES__STALL_RECOVERY_ENAB
   *tool-wedge* case; this issue is the *turn-0/never-progressed* case. Reuse the liveness fields,
   do not touch `_evaluate_mid_run_quiescence`.
 - **Adding a durable no-new-entry cycle counter to the container/AgentSession**: tempting (the issue
-  mentions "≥M consecutive no-new-entry cycles") but it requires new container instrumentation that
-  overlaps with #1028's reflections reorg and #1724's PTY plumbing. The `last_pty_activity_at`
-  staleness signal already captures the same failure with zero new instrumentation. Use it; defer
-  the cycle-counter approach.
+  mentions "≥M consecutive no-new-entry cycles") but it requires new persisted container state that
+  overlaps with #1028's reflections reorg and #1724's PTY plumbing. The *normalized*
+  `last_pty_activity_at` staleness signal (after the prerequisite normalization fix) captures the
+  same failure without a new persisted counter. Use it; defer the cycle-counter approach. NOTE: the
+  diff-gate normalization itself IS in scope (it is the consumer fix #1724's comment mandates) — do
+  not confuse it with the deferred durable counter.
 - **Building a new `stall-recovery` reflection**: the issue's open question. Resolved in favour of
   action-mode (avoids a second full classification pass). Do not create a new reflection callable.
 - **Recovering a fully-hung worker**: explicitly out of scope (the reflection scheduler is
@@ -328,7 +395,18 @@ stalled observations across ticks; the `granite_wedged` check requires *zero tur
 session that has ever turned is ineligible for granite_wedged) AND a stale screen well past the
 grace window. Per-session and per-run budgets cap blast radius. All thresholds env-tunable.
 
-### Risk 2: `last_pty_activity_at` semantics change under #1724/#1028 follow-ups
+### Risk 2: Spinner/cursor animation keeps `last_pty_activity_at` fresh on a wedged screen
+**Impact:** This is the BLOCKER the critique surfaced. Without normalization, an animating-but-wedged
+TUI repaints the spinner/elapsed-counter at ≥1 Hz, the un-normalized diff-gate sees a changed
+buffer every tick, `last_pty_activity_at` stays fresh, and `granite_wedged` NEVER fires for the
+exact incident it targets.
+**Mitigation:** The prerequisite normalization fix (strip spinner/cursor/elapsed noise before the
+diff comparison) makes a quiescent-but-animating screen produce a stable normalized buffer, so
+`last_pty_activity_at` genuinely goes stale on a wedge. The `_normalize_pty_buffer` unit test
+(Test Impact) empirically pins this: spinner-only deltas normalize equal, real-content deltas
+normalize unequal. This converts spike-1 from code-read-only to test-confirmed.
+
+### Risk 4: `last_pty_activity_at` semantics change under #1724/#1028 follow-ups
 **Impact:** If a future change makes `last_pty_activity_at` stamp unconditionally, the
 `granite_wedged` signal silently stops firing.
 **Mitigation:** A unit test pins the diff-gated semantics expectation (stale-activity ⇒ wedged) and
@@ -424,9 +502,12 @@ e2e test asserting the reflection invokes `valor-catchup` (mocked subprocess) in
 
 ## Success Criteria
 
+- [ ] The PTY diff-gate is normalized (`_normalize_pty_buffer`) so spinner/cursor/elapsed-only
+  repaints do NOT stamp `last_pty_activity_at`; the empirical unit test confirms spinner-only deltas
+  normalize equal and real-content deltas normalize unequal.
 - [ ] `classify_session_stall()` emits a `granite_wedged` verdict for a running session with zero
-  `turn_start` events, a fresh read-loop/heartbeat, and stale `last_pty_activity_at`; unit tests
-  cover fire + the three non-fire cases.
+  `turn_start` events, a fresh read-loop/heartbeat, and stale (normalized) `last_pty_activity_at`;
+  unit tests cover fire + the three non-fire cases.
 - [ ] `stall-advisory` action-mode kills `stalled` sessions (actionable reasons only) and triggers
   `valor-catchup`, gated by N-consecutive-observations, K-per-run cap, and per-session budget.
 - [ ] Ships dry-run by default behind `FEATURES__STALL_RECOVERY_ENABLED`; enabling it is documented
@@ -484,14 +565,30 @@ builds directly — they deploy team members and coordinate.
 
 ## Step by Step Tasks
 
-### 1. Add `granite_wedged` verdict to the classifier
-- **Task ID**: build-classifier
+### 0. Normalize the PTY diff-gate (BLOCKER prerequisite)
+- **Task ID**: build-normalize
 - **Depends On**: none
-- **Validates**: tests/unit/test_session_stall_classifier.py
-- **Informed By**: spike-1 (confirmed: last_pty_activity_at diff-gated ⇒ stale on no-new-entry loop)
+- **Validates**: the new `_normalize_pty_buffer` unit test (see Test Impact)
+- **Informed By**: critique blocker; spike-1 revision; spike-3
 - **Assigned To**: classifier-builder
 - **Agent Type**: builder
 - **Parallel**: true
+- Add `_normalize_pty_buffer(buffer)` to `agent/granite_container/bridge_adapter.py` (reuse
+  `pty_driver.py` spinner-verb knowledge if exposed; otherwise a small local regex set for spinner
+  glyph/verb + elapsed-seconds counter + cursor/blink noise).
+- Apply normalization to both sides of the `buffer != self._prev_pty_buffer` diff and to the stored
+  `_prev_pty_buffer`. Keep `last_pty_read_loop_at` stamping unconditional. Refresh the stale
+  "address before stage-2" comment block.
+- Add the focused unit test: spinner-only delta ⇒ no activity stamp; real-content delta ⇒ stamp.
+
+### 1. Add `granite_wedged` verdict to the classifier
+- **Task ID**: build-classifier
+- **Depends On**: build-normalize
+- **Validates**: tests/unit/test_session_stall_classifier.py
+- **Informed By**: spike-1 revision (normalized last_pty_activity_at staleness), spike-3 (fresh-read-loop corroborator)
+- **Assigned To**: classifier-builder
+- **Agent Type**: builder
+- **Parallel**: false
 - Add module constants `GRANITE_WEDGED_PTY_STALE_SECS` (env-overridable, provisional/tunable comment)
   and a local `HEARTBEAT_FRESHNESS_WINDOW` mirror (avoid importing session_health).
 - In `_classify`, in the no-turn_start / running-status region, add a `granite_wedged` branch BEFORE
@@ -563,28 +660,36 @@ builds directly — they deploy team members and coordinate.
 | Flag defined | `python -c "from config.settings import Settings; assert hasattr(Settings().features, 'stall_recovery_enabled')"` | exit code 0 |
 | Flag defaults off | `python -c "from config.settings import Settings; assert Settings().features.stall_recovery_enabled is False"` | exit code 0 |
 | granite_wedged emitted | `grep -q granite_wedged agent/session_stall_classifier.py` | exit code 0 |
+| Diff-gate normalized | `grep -q _normalize_pty_buffer agent/granite_container/bridge_adapter.py` | exit code 0 |
 | Action references kill+catchup | `grep -q _kill_agent_session reflections/stall_advisory.py && grep -q valor-catchup reflections/stall_advisory.py` | exit code 0 |
 | Lint clean | `python -m ruff check agent/session_stall_classifier.py reflections/stall_advisory.py config/settings.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/session_stall_classifier.py reflections/stall_advisory.py config/settings.py` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). FULL run, 3 critics, 2026-06-23. Verdict: NEEDS REVISION → revised. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | all 3 (cross-validated) | `last_pty_activity_at` diff-gate compares an ANSI-stripped but NOT spinner/cursor/elapsed-normalized buffer; an animating-but-wedged TUI keeps it fresh, so `granite_wedged` may never fire. #1724's own in-repo comment (`bridge_adapter.py:687-695`) warns this must be fixed before wiring recovery. | spike-1 revised + new Key Element "Normalized PTY diff-gate" + task build-normalize (prerequisite) + Risk 2 + `_normalize_pty_buffer` empirical unit test in Test Impact | Normalize BOTH sides of the diff and the stored `_prev_pty_buffer`; keep `last_pty_read_loop_at` unconditional. spike-1 was code-read-only — the new unit test is the empirical confirmation. |
+| CONCERN | critic | kill-succeeds-but-catchup-fails has no audit surface beyond one WARNING log. | Technical Approach step 8: typed `stall_recovery_action` session-event (verdict_reason, killed, catchup_invoked, catchup_ok, dry_run) via `_append_session_event` + "catchup-failed" count in summary. | Mirrors the `granite_user_routed` event pattern in `bridge_adapter.py`. |
+| CONCERN | critic | Plan cited `NEVER_STARTED_CONFIRM_MARGIN_SECS` as a constant precedent, but it is dead in the hot path (verdict at `session_stall_classifier.py:216` uses `NEVER_STARTED_GRACE_SECS`). Could misdirect the builder toward a base+margin constant. | Technical Approach: precedent corrected to `NEVER_STARTED_GRACE_SECS`; explicit "do not model as base+margin pair" note. | `GRANITE_WEDGED_PTY_STALE_SECS` is a single flat env-overridable grace. |
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Action-mode vs new reflection** — this plan resolves the issue's open question in favour of an
-   action-mode inside `stall-advisory` (avoids a second classification pass). Confirm this is the
-   desired shape, or should it be a separate `stall-recovery` reflection callable?
-2. **Threshold defaults** — proposed: `GRANITE_WEDGED_PTY_STALE_SECS=600`,
-   `stall_recovery_consecutive_observations=3` (≈15 min at 300s cadence),
-   `stall_recovery_run_budget=1` (mirror recovery-drip's 1/tick),
-   `stall_recovery_per_session_budget=2`. Are these conservative enough, or tighter still?
-3. **Catchup scope** — `valor-catchup` sweeps *all* owned chats, not just the killed session's
-   thread. Acceptable (it's idempotent + biased-not-to-reply), or should the action target only the
-   killed session's chat? Targeting one chat would need a new `valor-catchup --chat`/`--session`
-   flag (wider scope).
+(These were the plan's open questions; resolved at finalization so the build can proceed. Each is
+reversible via the env-overridable constants.)
+
+1. **Action-mode vs new reflection** — RESOLVED: action-mode inside `stall-advisory`. It already
+   iterates running sessions and computes verdicts; a separate reflection would re-run
+   classification and double the query load. This answers the issue's explicit open question.
+2. **Threshold defaults** — RESOLVED (conservative, all env-overridable, "provisional/tunable"):
+   `GRANITE_WEDGED_PTY_STALE_SECS=600`, `stall_recovery_consecutive_observations=3` (≈15 min at the
+   300s cadence), `stall_recovery_run_budget=1` (mirrors recovery-drip's 1/tick),
+   `stall_recovery_per_session_budget=2`. Biased toward NOT killing; tune up/down via env with no
+   code change. Combined with dry-run-by-default, false-kill risk is minimal at rollout.
+3. **Catchup scope** — RESOLVED: invoke `valor-catchup` with no extra flags (sweeps all owned
+   chats). It is idempotent and strongly biased toward NOT replying, so a broad sweep is safe and
+   avoids adding a new `--chat`/`--session` flag (wider scope, out of this plan). If a future
+   incident shows over-broad re-enqueue, a targeted flag can be added then.
