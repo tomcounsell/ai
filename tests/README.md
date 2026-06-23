@@ -164,6 +164,7 @@ tests/
 | integration | `test_agent_session_lifecycle.py` | 58 | Session lifecycle, history, summarizer |
 | integration | `test_lifecycle_transition.py` | 16 | Session state transitions |
 | integration | `test_session_heartbeat_progress.py` | 12 | Two-tier no-progress detector: dual heartbeat freshness, Tier 2 reprieve gates, recovery_attempts/reprieve_count fields, DISABLE_PROGRESS_KILL kill-switch |
+| unit | `test_session_health_tool_timeout.py` | 4 | Wedge-signal reset on tool_timeout requeue: regression for issue #1762 double-count loop, genuine post-recovery exhaustion, save-error resilience, degraded notice on terminal failure |
 | e2e | `test_session_continuity.py` | 11 | Session creation, resume, transcript |
 
 ### `summarizer` — Response processing
