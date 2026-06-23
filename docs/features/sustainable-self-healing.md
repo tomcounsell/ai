@@ -86,7 +86,17 @@ A new non-terminal status `paused_circuit` was added to `models/session_lifecycl
 
 ## Registered Reflections
 
-In `config/reflections.yaml`:
+In `config/reflections.yaml`. The `agent.sustainability.*` callable paths shown below still resolve via the compatibility shim in `agent/sustainability.py`. The canonical source for each reflection now lives one-file-each under `reflections/agents/`:
+
+| Registry callable | Canonical source |
+|-------------------|-----------------|
+| `agent.sustainability.circuit_health_gate` | `reflections/agents/circuit_health_gate.py::run` |
+| `agent.sustainability.session_count_throttle` | `reflections/agents/session_count_throttle.py::run` |
+| `agent.sustainability.failure_loop_detector` | `reflections/agents/failure_loop_detector.py::run` |
+| `agent.sustainability.session_recovery_drip` | `reflections/agents/session_recovery_drip.py::run` |
+| `agent.sustainability.sustainability_digest` | `reflections/agents/system_health_digest.py::run` |
+
+`send_hibernation_notification`, `_get_project_key`, and `_get_redis` remain defined in `agent/sustainability.py` (non-reflection helpers used by `agent/agent_session_queue.py`).
 
 ```yaml
 - name: circuit-health-gate
@@ -139,6 +149,12 @@ python scripts/reflections.py  # runs all registered reflections
 
 **Run a specific reflection:**
 ```python
+# Canonical path (preferred):
+import asyncio
+from reflections.agents.circuit_health_gate import run
+asyncio.run(run())
+
+# Compat shim path (also works):
 from agent.sustainability import circuit_health_gate
 circuit_health_gate()
 ```

@@ -39,7 +39,7 @@ Fetches Anthropic's official skill documentation and compares against our templa
 
 ### Reflections Integration
 
-Registered as the `skills-audit` reflection (`reflections.auditing.run_skills_audit`). The wrapper iterates `load_local_projects()` and invokes each project's local copy of `.claude/skills/do-skills-audit/scripts/audit_skills.py` via `--no-sync --json` mode. Projects without that script are skipped silently. Each project's FAIL findings are prefixed with `[{slug}]` and aggregated into a single run record with a per-project breakdown — see [reflections.md → Per-Project Audit Iteration](reflections.md#per-project-audit-iteration).
+Registered as the `skills-audit` reflection (`reflections.audits.skills_audit.run`). The wrapper iterates `load_local_projects()` and invokes each project's local copy of `.claude/skills/do-skills-audit/scripts/audit_skills.py` via `--no-sync --json` mode. Projects without that script are skipped silently. Each project's FAIL findings are prefixed with `[{slug}]` and aggregated into a single run record with a per-project breakdown — see [reflections.md → Per-Project Audit Iteration](reflections.md#per-project-audit-iteration).
 
 ## Usage
 
@@ -78,7 +78,7 @@ python .claude/skills/do-skills-audit/scripts/audit_skills.py --json
 
 ## Reflection Issue Filing
 
-The `skills-audit` reflection (`reflections.auditing.run_skills_audit`, registered in `config/reflections.yaml`) runs the audit nightly across every local project. As of issue #1395 Phase 2, it also **files a GitHub issue** for each FAIL finding that persists across two consecutive runs, so structural problems can no longer accumulate silently in reflection telemetry.
+The `skills-audit` reflection (`reflections.audits.skills_audit.run`, registered in `config/reflections.yaml`) runs the audit nightly across every local project. As of issue #1395 Phase 2, it also **files a GitHub issue** for each FAIL finding that persists across two consecutive runs, so structural problems can no longer accumulate silently in reflection telemetry.
 
 ### Streak gate
 

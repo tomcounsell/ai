@@ -617,7 +617,7 @@ Pruning of superseded records is delegated to the future `memory-decay-prune` re
 
 ### Memory Health Audit (3-layer reflection)
 
-The `memory-quality-audit` reflection (`reflections/memory_management.py::run_memory_quality_audit`, registered at `config/reflections.yaml:298`) runs on a daily cadence and performs three layers of work in a single invocation. It performs continuous detection of memory-extraction misconfiguration symptoms (issue #1231).
+The `memory-quality-audit` reflection (`reflections/memory/memory_quality_audit.py::run`, registered at `config/reflections.yaml`) runs on a daily cadence and performs three layers of work in a single invocation. It performs continuous detection of memory-extraction misconfiguration symptoms (issue #1231).
 
 **Layer 0 — legacy zero-access + low-confidence flag (read-only).** Preserves the prior audit behavior verbatim: walks the full `Memory` corpus, flags records with `access_count == 0 AND age > 30d` and `confidence < 0.2`, appends summaries to `findings`. Files no issues. Operates on all memories (not just extractions) so it provides orthogonal observability for human-saved, post-merge, and Telegram memories.
 
@@ -649,7 +649,7 @@ Both `_find_open_audit_issue` and `_file_anomaly_issue` use `asyncio.create_subp
 **Verification.**
 
 ```bash
-python -c "import asyncio; from reflections.memory_management import run_memory_quality_audit; print(asyncio.run(run_memory_quality_audit()))"
+python -c "import asyncio; from reflections.memory.memory_quality_audit import run; print(asyncio.run(run()))"
 ```
 
 Returns `{"status": "ok", "findings": [...], "summary": "Memory health audit: N superseded, M anomalies, K issues filed"}`.
