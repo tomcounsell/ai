@@ -6,7 +6,7 @@ owner: Valor
 created: 2026-04-17
 tracking: https://github.com/tomcounsell/ai/issues/1028
 last_comment_id:
-revision_applied: false
+revision_applied: true
 ---
 
 # Reflections Modularization: One File per Reflection
@@ -149,7 +149,7 @@ from reflections.housekeeping.redis_ttl_cleanup import run as run_redis_ttl_clea
 # ... etc
 ```
 
-`agent/sustainability.py` becomes a re-export shim too: `from reflections.agents.circuit_health_gate import run as circuit_health_gate`, etc., and **keeps** `send_hibernation_notification` defined in-place (its non-reflection consumer at `agent/agent_session_queue.py:1476`) — OR moves `send_hibernation_notification` to a clearly non-reflection home (`agent/notifications.py`) and updates the one importer. Decision deferred to build recon (Open Question 2).
+`agent/sustainability.py` becomes a re-export shim too: `from reflections.agents.circuit_health_gate import run as circuit_health_gate`, etc. **RESOLVED (critique blocker):** `send_hibernation_notification` stays **defined in-place** in the `sustainability.py` shim module (not re-exported — its real body remains there), because `agent/agent_session_queue.py:1476` does `from agent.sustainability import send_hibernation_notification`. The shim file is therefore: the 5 reflection re-exports + the verbatim `send_hibernation_notification` definition (and any private helper it alone uses). A test in `test_sustainability_namespace.py` MUST assert `agent.sustainability.send_hibernation_notification` is importable and callable to guard the worker's hibernation path against an ImportError at module load.
 
 ### File shape (standard)
 
@@ -170,12 +170,12 @@ Single public `run()` (sync or async — preserve the existing signature; per co
 
 ### Utilities consolidation
 
-Rename `reflections/utils.py` → `reflections/utilities.py`. Keep all currently-shared helpers there (`load_local_projects` — 5+ callers, `run_per_project_audit`, `run_llm_reflection`, `PROJECT_ROOT`, ignore/confidence helpers used across modules). Update the ~11 internal importers and ~5 test importers. **Single-use** helpers (e.g. `extract_structured_errors`, `CORRECTION_PATTERNS`) inline into their owning per-reflection file. (Lower-churn alternative if `utilities.py` rename proves noisy: keep the filename `utils.py` and only split bundles — see Open Question 3.)
+**RESOLVED (OQ3): take the rename.** `reflections/utils.py` → `reflections/utilities.py` (hard-delete `utils.py`, no shim — it is internal-only, never referenced by the vault YAML registry). Keep all currently-shared helpers in `utilities.py` (`load_local_projects` — 5+ callers, `run_per_project_audit`, `run_llm_reflection`, `PROJECT_ROOT`, ignore/confidence helpers used across modules). Update the ~11 internal importers and ~5 test importers. **Single-use** helpers (e.g. `extract_structured_errors`, `CORRECTION_PATTERNS`) inline into their owning per-reflection file. **Disposition is explicit:** `reflections/utils.py` is DELETED (not shimmed); a grep gate (`grep -rn 'reflections.utils\b\|from reflections import utils\|from \.utils' --include='*.py'` → no matches outside the new `utilities.py` itself) is added to Verification to catch any stale import the test suite misses.
 
 ### Flow
 
 - **Phase A:** Scaffold `reflections/{agents,housekeeping,audits,memory}/__init__.py` (empty) and `reflections/utilities.py`.
-- **Phase B (parallel per group):** Move each bundle-owned reflection into its per-file home with standardized docstring; behavior byte-identical.
+- **Phase B (parallel per group):** Move each bundle-owned reflection into its per-file home with the standardized docstring. **Logic-identical** — the module docstring is the *only* permitted addition; function bodies, signatures, and private helpers move verbatim.
 - **Phase C:** Replace each old bundle module + `agent/sustainability.py` with a re-export shim (or, per OQ1, hard-cutover). Run `ruff`.
 - **Phase D:** Update tests' import paths; add `test_all_callables_resolve` (iterate the loaded registry, assert `_resolve_callable` succeeds for every entry).
 - **Phase E:** Docs (`docs/features/reflections.md` layout section; grep `docs/` + `CLAUDE.md` for stale bundle paths).
@@ -194,7 +194,7 @@ Rename `reflections/utils.py` → `reflections/utilities.py`. Keep all currently
 ## Test Impact
 - [ ] `tests/unit/test_reflections_package.py` — UPDATE: imports from `reflections.maintenance`/`reflections.auditing`/etc. either keep resolving through shims (no change) or, for tests that import private helpers directly, repoint to the new per-file module. Logic stays.
 - [ ] `tests/unit/test_sustainability.py` — UPDATE: 23 tests import from `agent.sustainability`. If shims are kept, imports still resolve; tests asserting module location repoint to `reflections.agents.*`.
-- [ ] `tests/unit/test_sustainability_namespace.py` — UPDATE: asserts the `agent.sustainability` namespace shape; update to reflect the shim re-exports.
+- [ ] `tests/unit/test_sustainability_namespace.py` — UPDATE: asserts the `agent.sustainability` namespace shape; update to reflect the shim re-exports AND add an explicit assertion that `agent.sustainability.send_hibernation_notification` is importable and callable (guards the worker hibernation path — critique blocker).
 - [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE/EXTEND: add `test_all_callables_resolve`; existing tests mostly generic, minimal change.
 - [ ] `tests/integration/test_reflections_redis.py` — UPDATE: import paths; Redis persistence assertions unchanged.
 - [ ] `tests/unit/test_reflections_multi_repo.py`, `test_run_per_project_audit_helper.py`, `test_per_project_two_repos_aggregation.py` — UPDATE: import `reflections.utils` → `reflections.utilities` (only if the rename is taken per OQ3).
@@ -250,7 +250,9 @@ No agent integration required — reflections are scheduled background jobs run 
 - [ ] All existing reflection tests pass after import-path updates; no behavior regression.
 - [ ] `python -m ruff check .` and `python -m ruff format --check .` clean.
 - [ ] `docs/features/reflections.md` updated; no stale bundle-path references remain in `docs/`.
-- [ ] PR body states the merge-order dependency on #1773 and requests rebase onto post-#1773 main.
+- [ ] `reflections/utils.py` deleted; no stale `reflections.utils` import anywhere (grep gate).
+- [ ] `agent.sustainability.send_hibernation_notification` still importable and callable.
+- [ ] **PR-merge gate:** PR body contains an explicit checklist item — "[ ] Rebased onto post-#1773 main; must merge AFTER #1773 (#1768)" — and the PR is not merged until #1773 has merged.
 
 ## Verification
 
@@ -260,13 +262,24 @@ No agent integration required — reflections are scheduled background jobs run 
 | Reflection package tests | `pytest tests/unit/test_reflections_package.py tests/unit/test_sustainability.py tests/unit/test_sustainability_namespace.py -q` | exit 0 |
 | Dashboard data tests still green | `pytest tests/unit/test_ui_reflections_data.py -q` | exit 0 |
 | Per-file reflections exist | `find reflections/agents reflections/housekeeping reflections/audits reflections/memory -name '*.py' ! -name '__init__.py' \| wc -l` | ≥ 19 |
+| No stale `reflections.utils` imports | `grep -rn 'reflections\.utils\b\|from reflections import utils\|from \.utils import' --include='*.py' reflections tests agent ui scripts tools` | exit 1 (no matches) |
+| Hibernation helper still importable | `python -c "from agent.sustainability import send_hibernation_notification"` | exit 0 |
 | Lint clean | `python -m ruff check .` | exit 0 |
 | Format clean | `python -m ruff format --check .` | exit 0 |
 
 ## Open Questions
 
-1. **Shim vs. hard cutover for the vault-referenced callable paths.** `config/reflections.yaml` is the vault file (gitignored, live, also edited by open PR #1773). Default plan = keep documented re-export shims at the old dotted paths so **zero vault edit** is needed and there's **no #1773 conflict**. Alternative = edit the vault YAML to point at the new paths and delete the old modules (a hard cutover that touches live, un-versioned state outside git and must be sequenced after #1773). **Recommend the shim approach.** Confirm?
+All resolved during critique revision:
 
-2. **`send_hibernation_notification`** (the one non-reflection export of `agent/sustainability.py`, imported by `agent_session_queue.py:1476`): leave it defined in the `sustainability.py` shim, or relocate to `agent/notifications.py`? Recommend leaving it in place to minimize blast radius.
+1. **Shim vs. hard cutover** — RESOLVED: **shim approach.** Documented re-export shims at the old dotted paths; zero vault YAML edit; no #1773 conflict.
+2. **`send_hibernation_notification`** — RESOLVED: **leave defined in-place** in the `sustainability.py` shim; guarded by an explicit importability assertion in `test_sustainability_namespace.py`.
+3. **`reflections/utils.py` → `utilities.py`** — RESOLVED: **take the rename**, hard-delete `utils.py` (internal-only, not registry-referenced), guarded by a grep gate in Verification.
 
-3. **`reflections/utils.py` → `utilities.py` rename:** the issue asks for `utilities.py`, but the rename ripples through ~16 importers (incl. `pm_briefings/`). Take the rename, or keep `utils.py` and only split the bundles? Recommend taking the rename for issue-fidelity, guarded by grep + tests.
+## Critique Results
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | War room | `send_hibernation_notification` must stay importable at `agent.sustainability` or worker hibernation path ImportErrors at load | OQ2 resolved; Solution shim shape | Define it verbatim in the shim (not re-export); add importability assertion in `test_sustainability_namespace.py` |
+| CONCERN | War room | "byte-identical" contradicts docstring mandate | Phase B reworded | "Logic-identical; docstring is the only permitted addition" |
+| CONCERN | War room | `utils.py` disposition unspecified; no gate for stale imports | OQ3 resolved; Verification grep gate | Delete `utils.py`; grep gate asserts no `reflections.utils` imports remain |
+| NIT | War room | Merge-after-#1773 documented but not gated | Success Criteria PR-merge gate | PR-body checklist item + don't-merge-until-#1773 rule |
