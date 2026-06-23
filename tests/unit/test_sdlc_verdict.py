@@ -247,6 +247,51 @@ class TestConvergenceUnderDivergentEnv:
         assert got["verdict"] == "NEEDS REVISION"
 
 
+class TestCrossVendorJudgeRoundTrip:
+    """Verifies that a cross-vendor judge dict round-trips correctly through record_verdict."""
+
+    def test_cross_vendor_judge_dict_round_trips_into_judges_field(
+        self, fake_session_reload_patched
+    ):
+        from tools.cross_vendor_judge import CROSS_VENDOR_JUDGE_ID
+
+        session = fake_session_reload_patched
+        judge_dict = {
+            "judge_id": CROSS_VENDOR_JUDGE_ID,
+            "verdict": "CHANGES REQUESTED",
+            "blockers": 1,
+            "tech_debt": 0,
+            "confidence": 0.8,
+        }
+        consensus = {
+            "rule": "any-blocker-wins",
+            "k": 1,
+            "n": 1,
+            "mean_confidence": 0.8,
+            "blocker_aggregation": "max",
+            "tied": False,
+            "decided_at": "2026-01-01T00:00:00+00:00",
+        }
+        record_verdict(
+            session,
+            "REVIEW",
+            "CHANGES REQUESTED",
+            blockers=1,
+            tech_debt=0,
+            judges=[judge_dict],
+            consensus=consensus,
+        )
+        data = json.loads(session.stage_states)
+        stored_judges = data["_verdicts"]["REVIEW"]["_judges"]
+        # The cross-vendor judge dict must be present.
+        cross_vendor_entries = [
+            j for j in stored_judges if j.get("judge_id") == CROSS_VENDOR_JUDGE_ID
+        ]
+        assert len(cross_vendor_entries) == 1
+        assert cross_vendor_entries[0]["verdict"] == "CHANGES REQUESTED"
+        assert cross_vendor_entries[0]["blockers"] == 1
+
+
 class TestNormalizeVerdict:
     """Unit tests for normalize_verdict helper (#1638)."""
 
