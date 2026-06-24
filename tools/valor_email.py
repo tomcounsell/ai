@@ -353,26 +353,39 @@ def _build_session_id() -> str:
     return f"{_SESSION_ID_PREFIX}-{int(time.time())}-{os.getpid()}-{secrets.token_hex(4)}"
 
 
-def _validate_attachment_files(files: list[str]) -> list[str] | None:
+def _validate_attachment_files(
+    files: list[str], *, read_bytes: bool = False
+) -> list[str] | dict[str, bytes] | None:
     """Validate a list of file paths for attachment.
 
-    Returns a list of resolved absolute path strings if all files are valid.
-    Prints an error to stderr and returns None if any file is invalid.
+    When ``read_bytes=False`` (default): returns a list of resolved absolute path
+    strings if all files are valid.  This is the path used by ``cmd_send``.
+
+    When ``read_bytes=True``: reads each file and returns ``{resolved_path: bytes}``.
+    This closes the TOCTOU window (file deleted between validation and MIME build)
+    and is the path used by ``cmd_draft``.
+
+    Prints an error to stderr and returns None if any file is invalid or unreadable.
     """
-    resolved = []
+    resolved_paths: list[str] = []
+    byte_map: dict[str, bytes] = {}
     for file_path in files:
         p = Path(file_path)
         if not p.is_file():
             print(f"Error: File not found: {file_path}", file=sys.stderr)
             return None
+        resolved = str(p.resolve())
         try:
-            with p.open("rb"):
-                pass
+            if read_bytes:
+                byte_map[resolved] = Path(resolved).read_bytes()
+            else:
+                with p.open("rb"):
+                    pass
         except OSError as e:
             print(f"Error: Cannot read file {file_path}: {e}", file=sys.stderr)
             return None
-        resolved.append(str(p.resolve()))
-    return resolved
+        resolved_paths.append(resolved)
+    return byte_map if read_bytes else resolved_paths
 
 
 def cmd_send(args: argparse.Namespace) -> int:
@@ -517,16 +530,10 @@ def cmd_draft(args: argparse.Namespace) -> int:
     # the TOCTOU window (file deleted between validation and MIME build).
     file_bytes: dict[str, bytes] = {}
     if files:
-        for file_path in files:
-            p = Path(file_path).resolve()
-            if not p.is_file():
-                print(f"Error: File not found: {file_path}", file=sys.stderr)
-                return 1
-            try:
-                file_bytes[str(p)] = p.read_bytes()
-            except OSError as e:
-                print(f"Error: Cannot read file {file_path}: {e}", file=sys.stderr)
-                return 1
+        result = _validate_attachment_files(files, read_bytes=True)
+        if result is None:
+            return 1
+        file_bytes = result  # type: ignore[assignment]  # read_bytes=True → dict
 
     session_id = _build_session_id()
     smtp_user = os.environ.get("SMTP_USER", "")

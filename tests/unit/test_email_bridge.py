@@ -1326,7 +1326,15 @@ class TestBodyReferencesAttachments:
 
 
 class TestWedgeGuardExtraContext:
-    """Truth-table tests for the attachments_unrecoverable tagging in _process_inbound_email."""
+    """Truth-table tests for the attachments_unrecoverable tagging in _process_inbound_email.
+
+    Each test drives the real _process_inbound_email() function (not a copy of its logic)
+    and inspects the extra_context_overrides passed to the mocked enqueue_agent_session.
+    Deleting the production wedge guard would fail these tests.
+    """
+
+    _PROJECT_KEY = "wedge-test-project"
+    _FROM_ADDR = "sender@example.com"
 
     def _make_parsed(
         self,
@@ -1335,8 +1343,8 @@ class TestWedgeGuardExtraContext:
         attachments_truncated: bool = False,
     ) -> dict:
         return {
-            "from_addr": "sender@example.com",
-            "from_raw": "Sender <sender@example.com>",
+            "from_addr": self._FROM_ADDR,
+            "from_raw": f"Sender <{self._FROM_ADDR}>",
             "to_addrs": ["valor@example.com"],
             "cc_addrs": [],
             "subject": "Reports",
@@ -1348,40 +1356,62 @@ class TestWedgeGuardExtraContext:
             "timestamp": 1700000000.0,
         }
 
-    def _call_guard(self, parsed: dict, monkeypatch) -> dict:
-        """Run just the wedge-guard slice of _process_inbound_email logic."""
+    def _project_config(self) -> dict:
+        return {
+            "_key": self._PROJECT_KEY,
+            "name": self._PROJECT_KEY,
+            "working_directory": "/tmp/wedge-test",
+            "email": {
+                "contacts": {
+                    self._FROM_ADDR: {"name": "Sender"},
+                }
+            },
+        }
 
-        from bridge.email_bridge import _body_references_attachments, _public_attachment
+    def _projects_json(self) -> dict:
+        return {"projects": {self._PROJECT_KEY: self._project_config()}}
 
-        body = parsed.get("body") or ""
-        _email_attachments = [
-            _public_attachment(a) for a in (parsed.get("attachments") or []) if a.get("path")
-        ]
-        extra_context: dict = {}
+    async def _run(self, parsed: dict, monkeypatch) -> dict:
+        """Route parsed dict through real _process_inbound_email; return extra_context_overrides."""
+        import bridge.routing as routing
+        from bridge.email_bridge import _process_inbound_email
 
-        if _body_references_attachments(body) and (
-            not _email_attachments or parsed.get("attachments_truncated")
-        ):
-            extra_context["attachments_unrecoverable"] = True
-            extra_context["attachments_truncated"] = bool(parsed.get("attachments_truncated"))
-            extra_context["attachments_recovered_count"] = len(_email_attachments)
-            extra_context["attachments_referenced_count"] = 1
+        original_email_map = routing.EMAIL_TO_PROJECT.copy()
+        original_active = routing.ACTIVE_PROJECTS[:]
+        try:
+            routing.EMAIL_TO_PROJECT[self._FROM_ADDR] = self._project_config()
+            if self._PROJECT_KEY not in routing.ACTIVE_PROJECTS:
+                routing.ACTIVE_PROJECTS.append(self._PROJECT_KEY)
 
-        if _email_attachments:
-            extra_context["email_attachments"] = _email_attachments
+            mock_enqueue = AsyncMock()
+            import redis
 
-        return extra_context
+            test_r = redis.Redis(db=1, decode_responses=True)
+            with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
+                with patch("bridge.email_bridge._get_redis", return_value=test_r):
+                    await _process_inbound_email(parsed, self._projects_json())
+            test_r.close()
+        finally:
+            routing.EMAIL_TO_PROJECT.clear()
+            routing.EMAIL_TO_PROJECT.update(original_email_map)
+            routing.ACTIVE_PROJECTS[:] = original_active
 
-    def test_case_a_references_empty_list_tagged(self, monkeypatch):
-        """(a) referenced + empty list → tagged, recovered_count=0."""
+        assert mock_enqueue.called, "enqueue_agent_session should have been called"
+        return mock_enqueue.call_args.kwargs.get("extra_context_overrides", {})
+
+    @pytest.mark.asyncio
+    async def test_case_a_references_empty_list_tagged(self, monkeypatch):
+        """(a) body references attachments + empty list → tagged, recovered_count=0."""
         parsed = self._make_parsed(attachments=[], attachments_truncated=False)
-        ctx = self._call_guard(parsed, monkeypatch)
+        ctx = await self._run(parsed, monkeypatch)
         assert ctx.get("attachments_unrecoverable") is True
         assert ctx.get("attachments_recovered_count") == 0
         assert ctx.get("attachments_truncated") is False
+        assert ctx.get("attachments_referenced") is True
 
-    def test_case_b_references_truncated_non_empty_tagged(self, monkeypatch):
-        """(b) referenced + non-empty + truncated=True → tagged. Blocker regression fix."""
+    @pytest.mark.asyncio
+    async def test_case_b_references_truncated_non_empty_tagged(self, monkeypatch):
+        """(b) body references attachments + non-empty + truncated=True → tagged."""
         att = {
             "filename": "r1.pdf",
             "content_type": "application/pdf",
@@ -1389,13 +1419,15 @@ class TestWedgeGuardExtraContext:
             "path": "/tmp/r1.pdf",
         }
         parsed = self._make_parsed(attachments=[att], attachments_truncated=True)
-        ctx = self._call_guard(parsed, monkeypatch)
+        ctx = await self._run(parsed, monkeypatch)
         assert ctx.get("attachments_unrecoverable") is True
         assert ctx.get("attachments_truncated") is True
         assert ctx.get("attachments_recovered_count") == 1
+        assert ctx.get("attachments_referenced") is True
 
-    def test_case_c_references_non_empty_not_truncated_not_tagged(self, monkeypatch):
-        """(c) referenced + non-empty + not truncated → no tag (no false positive)."""
+    @pytest.mark.asyncio
+    async def test_case_c_references_non_empty_not_truncated_not_tagged(self, monkeypatch):
+        """(c) body references attachments + non-empty + not truncated → no guard tag."""
         att = {
             "filename": "r1.pdf",
             "content_type": "application/pdf",
@@ -1403,13 +1435,14 @@ class TestWedgeGuardExtraContext:
             "path": "/tmp/r1.pdf",
         }
         parsed = self._make_parsed(attachments=[att], attachments_truncated=False)
-        ctx = self._call_guard(parsed, monkeypatch)
+        ctx = await self._run(parsed, monkeypatch)
         assert "attachments_unrecoverable" not in ctx
 
-    def test_case_d_no_reference_not_tagged(self, monkeypatch):
-        """(d) no reference in body → not tagged, no false positive."""
+    @pytest.mark.asyncio
+    async def test_case_d_no_reference_not_tagged(self, monkeypatch):
+        """(d) body has no attachment reference → not tagged, no false positive."""
         parsed = self._make_parsed(
             body="Let's schedule a call.", attachments=[], attachments_truncated=False
         )
-        ctx = self._call_guard(parsed, monkeypatch)
+        ctx = await self._run(parsed, monkeypatch)
         assert "attachments_unrecoverable" not in ctx

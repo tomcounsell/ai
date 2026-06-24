@@ -1315,7 +1315,9 @@ async def _process_inbound_email(
         extra_context["attachments_unrecoverable"] = True
         extra_context["attachments_truncated"] = bool(parsed.get("attachments_truncated"))
         extra_context["attachments_recovered_count"] = len(_email_attachments)
-        extra_context["attachments_referenced_count"] = 1  # conservative estimate
+        # attachments_referenced (bool) signals body references attachments without a precise count.
+        # A real referenced-count is deferred to when parse-time extraction is implemented (#1630).
+        extra_context["attachments_referenced"] = True
 
     if _email_attachments:
         extra_context["email_attachments"] = _email_attachments

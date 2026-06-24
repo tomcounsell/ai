@@ -574,6 +574,118 @@ class TestInboundAttachmentsEndToEnd:
         names = [a["filename"] for a in extra.get("email_attachments", [])]
         assert names == ["a.pdf", "b.csv"]
 
+    @pytest.mark.asyncio
+    async def test_wedge_guard_zero_recovery(self, tmp_path, monkeypatch):
+        """Wedge guard: body references attachments, no files recovered → unrecoverable tagged."""
+        import bridge.email_bridge as eb
+        import bridge.routing as routing
+        from bridge.email_bridge import _process_inbound_email
+
+        store = tmp_path / "store"
+        vault = tmp_path / "vault"
+        monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_DIR", store)
+        monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_VAULT_SUBDIR", vault)
+
+        # Body references attachments but parsed dict has no attachments (zero recovery).
+        parsed = _parsed_email(
+            body="Please see the attached report for details.",
+            message_id="<wedge-zero@x>",
+        )
+        # attachments key absent — equivalent to email with no MIME parts persisted.
+        parsed.setdefault("attachments", [])
+
+        project_key = "test-project"
+        project = _project_config(project_key)
+        config = _projects_json(project_key)
+        original_email_map = routing.EMAIL_TO_PROJECT.copy()
+        original_active = routing.ACTIVE_PROJECTS[:]
+        try:
+            routing.EMAIL_TO_PROJECT["alice@example.com"] = project
+            if project_key not in routing.ACTIVE_PROJECTS:
+                routing.ACTIVE_PROJECTS.append(project_key)
+
+            mock_enqueue = AsyncMock()
+            test_r = _test_redis()
+            with patch("bridge.email_bridge._get_redis", return_value=test_r):
+                with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
+                    await _process_inbound_email(parsed, config)
+            test_r.close()
+        finally:
+            routing.EMAIL_TO_PROJECT.clear()
+            routing.EMAIL_TO_PROJECT.update(original_email_map)
+            routing.ACTIVE_PROJECTS[:] = original_active
+
+        mock_enqueue.assert_called_once()
+        extra = mock_enqueue.call_args.kwargs.get("extra_context_overrides", {})
+        assert extra.get("attachments_unrecoverable") is True, (
+            "Wedge guard must tag attachments_unrecoverable when body references attachments "
+            "but no files were recovered"
+        )
+        assert extra.get("attachments_recovered_count") == 0
+        assert extra.get("attachments_referenced") is True
+
+    @pytest.mark.asyncio
+    async def test_wedge_guard_truncated_partial(self, tmp_path, monkeypatch):
+        """Wedge guard: one file recovered but truncated=True → unrecoverable + truncated tagged."""
+        import bridge.email_bridge as eb
+        import bridge.routing as routing
+        from bridge.email_bridge import (
+            _persist_attachments,
+            _process_inbound_email,
+            parse_email_message,
+        )
+
+        store = tmp_path / "store"
+        vault = tmp_path / "vault"
+        monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_DIR", store)
+        monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_VAULT_SUBDIR", vault)
+
+        # Parse a real multipart email so we get one attachment with a path.
+        raw = _raw_email_with_attachments(
+            [("summary.pdf", "application", "pdf", b"PDF-bytes")],
+            body="Please review the attached summary.",
+            message_id="<wedge-trunc@x>",
+        )
+        parsed = parse_email_message(raw)
+        assert parsed is not None
+        _persist_attachments(parsed)
+        assert parsed["attachments"][0]["path"] is not None
+
+        # Simulate IMAP truncation: more attachments existed but weren't fetched.
+        parsed["attachments_truncated"] = True
+
+        project_key = "test-project"
+        project = _project_config(project_key)
+        config = _projects_json(project_key)
+        original_email_map = routing.EMAIL_TO_PROJECT.copy()
+        original_active = routing.ACTIVE_PROJECTS[:]
+        try:
+            routing.EMAIL_TO_PROJECT["alice@example.com"] = project
+            if project_key not in routing.ACTIVE_PROJECTS:
+                routing.ACTIVE_PROJECTS.append(project_key)
+
+            mock_enqueue = AsyncMock()
+            test_r = _test_redis()
+            with patch("bridge.email_bridge._get_redis", return_value=test_r):
+                with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
+                    await _process_inbound_email(parsed, config)
+            test_r.close()
+        finally:
+            routing.EMAIL_TO_PROJECT.clear()
+            routing.EMAIL_TO_PROJECT.update(original_email_map)
+            routing.ACTIVE_PROJECTS[:] = original_active
+
+        mock_enqueue.assert_called_once()
+        extra = mock_enqueue.call_args.kwargs.get("extra_context_overrides", {})
+        assert extra.get("attachments_unrecoverable") is True, (
+            "Wedge guard must tag attachments_unrecoverable when attachments_truncated=True"
+        )
+        assert extra.get("attachments_truncated") is True
+        assert extra.get("attachments_recovered_count") == 1, (
+            "One file was successfully persisted, so recovered_count must be 1"
+        )
+        assert extra.get("attachments_referenced") is True
+
 
 # ---------------------------------------------------------------------------
 # Tests: health timestamp in _email_inbox_loop
