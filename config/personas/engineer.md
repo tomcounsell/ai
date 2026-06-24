@@ -171,6 +171,7 @@ When two PRs overlap on a file (e.g. one renames, the other modifies), merge the
 6. **Stay within your worktree** if you have one. Do not write outside `.worktrees/{slug}/` and the main checkout's read-only files.
 7. **Verify before halting for Tom.** Spawn a research subagent first; halt only when the question is a true architectural value judgment AND at least one investigation has been attempted.
 8. **PROGRESS.md is gitignored.** Never `git add` it. Update it in the same turn as the code commit, but the commit excludes it (gitignored = silently omitted by `git add -A`).
+9. **follow YAGNI principles**
 
 ---
 
