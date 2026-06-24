@@ -21,12 +21,14 @@ import email.mime.base
 import email.mime.multipart
 import email.mime.text
 import email.utils
+import hashlib
 import imaplib
 import json
 import logging
 import mimetypes
 import os
 import re
+import shutil
 import smtplib
 import time
 from email import encoders
@@ -57,6 +59,27 @@ REDIS_LAST_POLL_KEY = "email:last_poll_ts"
 
 # TTL for email:msgid reverse-mapping keys (48 hours)
 EMAIL_MSGID_TTL = 48 * 3600
+
+# --- Inbound attachment storage (mirrors the Telegram inbound-media pattern) ---
+# Take these with a grain of salt: provisional, tunable defaults. Both are
+# env-overridable so a machine can loosen/tighten without a code change.
+# Cumulative cap on decoded attachment bytes persisted per inbound email (25 MiB).
+# A SINGLE cumulative knob (no per-file cap) — once exceeded, remaining parts are
+# skipped and the message is marked truncated (critique C4).
+EMAIL_ATTACHMENT_MAX_TOTAL_BYTES = int(
+    os.environ.get("EMAIL_ATTACHMENT_MAX_TOTAL_BYTES", str(25 * 1024 * 1024))
+)
+# Cheap multipart-bomb guard: cap the number of attachment parts decoded per email.
+EMAIL_ATTACHMENT_MAX_PARTS = int(os.environ.get("EMAIL_ATTACHMENT_MAX_PARTS", "50"))
+
+# On-disk location for persisted inbound attachment bytes — parallel to the
+# Telegram media path (bridge/media.py MEDIA_DIR). Redis carries metadata/paths
+# only, never bytes. Created on first use.
+EMAIL_ATTACHMENT_DIR = Path(__file__).parent.parent / "data" / "media" / "email-attachments"
+
+# Fire-and-forget vault mirror so the KnowledgeWatcher indexes inbound files,
+# mirroring bridge/telegram_bridge.py:_ingest_attachments.
+EMAIL_ATTACHMENT_VAULT_SUBDIR = Path.home() / "work-vault" / "email-attachments"
 
 
 def _get_imap_config() -> dict | None:
@@ -172,12 +195,276 @@ def _extract_body(msg: email_lib.message.Message) -> str:
         return ""
 
 
+# =============================================================================
+# Inbound attachment extraction + persistence
+#
+# Split into two phases to keep the read path side-effect-free (critique C1):
+#   1. _extract_attachment_metadata(msg) — PURE. Walks the MIME tree, decodes
+#      payloads into memory, returns metadata dicts. Called inside
+#      parse_email_message, which is ALSO invoked by the read-only
+#      `valor-email read` IMAP fallback — so it must never touch disk.
+#   2. _persist_attachments(parsed) — writes the decoded bytes to disk and
+#      fire-and-forget mirrors them to the work-vault. Called ONLY from the
+#      IMAP poll loop (_email_inbox_loop), never from the read path.
+#
+# An attachment metadata dict has the public keys
+# {filename, content_type, size, path} plus a transient private "_payload"
+# (the decoded bytes) that _persist_attachments consumes and strips. _payload
+# is NEVER serialized — use _public_attachment() at every serialization point.
+# On the read/fallback path bytes are never persisted, so `path` stays None.
+# =============================================================================
+
+# Public (JSON-safe) attachment metadata fields, in canonical order.
+_ATTACHMENT_PUBLIC_FIELDS = ("filename", "content_type", "size", "path")
+
+
+def _public_attachment(att: dict) -> dict:
+    """Project an attachment dict down to its JSON-safe public fields.
+
+    Strips the transient ``_payload`` bytes so the result is always
+    ``json.dumps``-able. Used by every serialization point (history blob,
+    read output, session context).
+    """
+    return {k: att.get(k) for k in _ATTACHMENT_PUBLIC_FIELDS}
+
+
+def _sanitize_attachment_filename(raw: str | None, index: int, content_type: str) -> str:
+    """Reduce an attachment filename to a safe basename (no path traversal).
+
+    Strategy (matches the plan's sanitization contract):
+      - Reduce to ``Path(raw).name`` so any directory components / ``..`` /
+        absolute paths collapse to a bare basename.
+      - Allow only ``[A-Za-z0-9._-]``; replace every other char with ``_``.
+      - Strip leading/trailing dots and underscores so ``.`` / ``..`` / hidden
+        dotfiles cannot survive as a traversal or empty name.
+      - If nothing usable remains, fall back to
+        ``attachment_{index}{guessed_ext}``.
+    The ``{msgid_hash}`` subdir created by _persist_attachments contains the
+    result to a single directory regardless.
+    """
+    base = Path(raw or "").name
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", base).strip("._")
+    if not cleaned or cleaned in (".", ".."):
+        ext = mimetypes.guess_extension(content_type or "") or ""
+        cleaned = f"attachment_{index}{ext}"
+    return cleaned
+
+
+def _is_attachment_part(part: email_lib.message.Message) -> bool:
+    """True if a MIME part should be treated as a downloadable attachment.
+
+    Captures parts with an ``attachment`` Content-Disposition, plus any
+    filename-bearing leaf part (e.g. an ``inline`` CID image) — the plan treats
+    inline/CID parts as ordinary attachments at most. Multipart containers and
+    bare text body parts (no filename, no attachment disposition) are skipped.
+    """
+    if part.is_multipart():
+        return False
+    disposition = str(part.get("Content-Disposition", "")).lower()
+    if "attachment" in disposition:
+        return True
+    try:
+        return bool(part.get_filename())
+    except Exception:
+        return False
+
+
+def _extract_attachment_metadata(
+    msg: email_lib.message.Message,
+) -> tuple[list[dict], bool]:
+    """Walk a parsed message and return (attachments, truncated). PURE — no disk.
+
+    Each attachment dict has public keys ``filename`` (sanitized),
+    ``content_type``, ``size`` (decoded byte length), ``path`` (always ``None``
+    here — set later by _persist_attachments), plus a transient ``_payload``
+    holding the decoded bytes.
+
+    Guardrails (critique C4):
+      - A running cumulative-byte total short-circuits the walk: a part whose
+        ENCODED length already pushes the total over
+        ``EMAIL_ATTACHMENT_MAX_TOTAL_BYTES`` is rejected pre-decode (estimated
+        from the base64 string length), so a multipart bomb never forces a full
+        decode of every part. ``truncated`` is set and the walk stops.
+      - ``EMAIL_ATTACHMENT_MAX_PARTS`` caps the number of parts decoded.
+    Each part is wrapped in its own try/except so one malformed/undecodable part
+    never aborts the rest — it is logged and skipped.
+    """
+    attachments: list[dict] = []
+    truncated = False
+    if not msg.is_multipart():
+        return attachments, truncated
+
+    running_total = 0
+    index = 0
+    for part in msg.walk():
+        if not _is_attachment_part(part):
+            continue
+        if len(attachments) >= EMAIL_ATTACHMENT_MAX_PARTS:
+            truncated = True
+            break
+        try:
+            ctype = part.get_content_type() or "application/octet-stream"
+            # Pre-decode size estimate from the encoded payload string so an
+            # oversized part is rejected BEFORE base64-decoding it into RAM.
+            raw_payload = part.get_payload(decode=False)
+            est = (len(raw_payload) * 3) // 4 if isinstance(raw_payload, str) else 0
+            if running_total + est > EMAIL_ATTACHMENT_MAX_TOTAL_BYTES:
+                truncated = True
+                break
+            payload = part.get_payload(decode=True)
+            if payload is None:
+                logger.warning("[email] Attachment part had no decodable payload, skipping")
+                continue
+            size = len(payload)
+            if running_total + size > EMAIL_ATTACHMENT_MAX_TOTAL_BYTES:
+                # True size exceeded the cap (estimate was low) — skip and stop.
+                truncated = True
+                break
+            running_total += size
+            filename = _sanitize_attachment_filename(part.get_filename(), index, ctype)
+            attachments.append(
+                {
+                    "filename": filename,
+                    "content_type": ctype,
+                    "size": size,
+                    "path": None,
+                    "_payload": payload,
+                }
+            )
+            index += 1
+        except Exception as e:
+            logger.warning(f"[email] Skipping malformed attachment part: {e}")
+            continue
+
+    return attachments, truncated
+
+
+def _attachment_storage_key(parsed: dict) -> str:
+    """Derive a stable, collision-resistant subdir key for an email's attachments.
+
+    Hashes the Message-ID. When the Message-ID is empty (some providers omit it),
+    falls back to ``from_addr:subject:timestamp`` so attachments from different
+    Message-ID-less emails do NOT collide into one shared subdir (critique C3).
+    """
+    mid = (parsed.get("message_id") or "").strip()
+    if not mid:
+        ts = int(parsed.get("timestamp") or time.time())
+        mid = f"{parsed.get('from_addr', '')}:{parsed.get('subject', '')}:{ts}"
+    return hashlib.sha256(mid.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _persist_attachments(parsed: dict) -> list[dict]:
+    """Write decoded attachment bytes to disk + mirror to the vault. NOT pure.
+
+    Called ONLY from the IMAP poll loop (never the read path). Mutates each
+    attachment dict in place: pops the transient ``_payload``, sets ``path`` to
+    the on-disk location. Files land under
+    ``data/media/email-attachments/{msgid_hash}/{sanitized_name}``; same-email
+    filename collisions are disambiguated with an index suffix (critique Risk 3).
+    Every failure is logged and never propagates — the poll loop must not break.
+    """
+    attachments = parsed.get("attachments") or []
+    if not attachments:
+        return attachments
+
+    key = _attachment_storage_key(parsed)
+    dest_dir = EMAIL_ATTACHMENT_DIR / key
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"[email] Could not create attachment dir {dest_dir}: {e}")
+        for att in attachments:
+            att.pop("_payload", None)
+        return attachments
+
+    dest_root = str(dest_dir.resolve())
+    used_names: set[str] = set()
+    for att in attachments:
+        payload = att.pop("_payload", None)
+        if payload is None:
+            continue
+        try:
+            name = att.get("filename") or "attachment"
+            stem, suffix = Path(name).stem, Path(name).suffix
+            final = name
+            n = 1
+            while final in used_names or (dest_dir / final).exists():
+                final = f"{stem}_{n}{suffix}"
+                n += 1
+            target = dest_dir / final
+            # Defense in depth: confirm the resolved path stays inside dest_dir.
+            if not str(target.resolve()).startswith(dest_root):
+                logger.warning(f"[email] Blocked attachment path traversal: {name!r}")
+                continue
+            target.write_bytes(payload)
+            used_names.add(final)
+            att["filename"] = final
+            att["path"] = str(target)
+        except Exception as e:
+            logger.warning(f"[email] Failed to persist attachment {att.get('filename')!r}: {e}")
+            continue
+
+    _mirror_attachments_to_vault(parsed)
+    return attachments
+
+
+def _mirror_attachments_to_vault(parsed: dict) -> None:
+    """Fire-and-forget copy of persisted attachments into the work-vault.
+
+    Mirrors bridge/telegram_bridge.py:_ingest_attachments — the KnowledgeWatcher
+    indexes anything dropped under ``~/work-vault/`` recursively, so no further
+    wiring is needed. Target names reuse the Telegram joint-key formula
+    ``{date}_{sender}_{msgid}_{filename}``, substituting the C3 storage key when
+    the Message-ID is empty. Never blocks, never raises — every failure logged.
+    """
+    try:
+        attachments = [a for a in (parsed.get("attachments") or []) if a.get("path")]
+        if not attachments:
+            return
+        EMAIL_ATTACHMENT_VAULT_SUBDIR.mkdir(parents=True, exist_ok=True)
+        ts = float(parsed.get("timestamp") or time.time())
+        date_part = time.strftime("%Y%m%d_%H%M%S", time.localtime(ts))
+        safe_sender = (
+            "".join(
+                c if (c.isalnum() or c in ("-", "_")) else "_"
+                for c in (parsed.get("from_addr") or "unknown")
+            ).strip("_")
+            or "unknown"
+        )
+        mid = (parsed.get("message_id") or "").strip() or _attachment_storage_key(parsed)
+        safe_mid = re.sub(r"[^A-Za-z0-9]", "", mid)[:24] or "nomsgid"
+        for att in attachments:
+            try:
+                src = Path(att["path"])
+                if not src.exists():
+                    continue
+                target = (
+                    EMAIL_ATTACHMENT_VAULT_SUBDIR
+                    / f"{date_part}_{safe_sender}_{safe_mid}_{src.name}"
+                )
+                shutil.copy2(src, target)
+                logger.info(f"[email] Mirrored {src.name} -> {target} (watcher will index)")
+            except Exception as inner_e:
+                logger.warning(
+                    f"[email] Failed to mirror attachment {att.get('path')!r}: {inner_e}"
+                )
+    except Exception as e:
+        logger.warning(f"[email] Vault mirror task failed: {e}")
+
+
 def parse_email_message(raw_bytes: bytes) -> dict | None:
     """Parse raw email bytes into a structured dict.
 
     Returns a dict with keys: from_addr, to_addrs, cc_addrs, subject, body,
-    message_id, in_reply_to.  Returns None if the email cannot be parsed or
-    has no usable body.
+    message_id, in_reply_to, attachments, attachments_truncated.  Returns None
+    if the email cannot be parsed or has neither a usable body nor attachments.
+
+    The ``attachments`` list holds metadata dicts
+    ``{filename, content_type, size, path}`` (plus a transient ``_payload``).
+    Extraction is PURE here — bytes are decoded into memory but NOT written to
+    disk; ``path`` is ``None`` until the poll loop calls _persist_attachments.
+    This keeps the read-only `valor-email read` IMAP fallback side-effect-free
+    (critique C1).
     """
     try:
         msg = email_lib.message_from_bytes(raw_bytes)
@@ -193,9 +480,13 @@ def parse_email_message(raw_bytes: bytes) -> dict | None:
 
     subject = _decode_header_value(msg.get("Subject", ""))
     body = _extract_body(msg)
+    attachments, attachments_truncated = _extract_attachment_metadata(msg)
 
-    if not body or not body.strip():
-        logger.debug(f"Email from {from_addr} has empty body, skipping")
+    # Empty-body guard, relaxed for attachment-only emails: a message whose body
+    # is empty but which carries attachments is legitimate (sender just sent a
+    # file) and must NOT be dropped here.
+    if (not body or not body.strip()) and not attachments:
+        logger.debug(f"Email from {from_addr} has empty body and no attachments, skipping")
         return None
 
     message_id = msg.get("Message-ID", "").strip()
@@ -212,6 +503,8 @@ def parse_email_message(raw_bytes: bytes) -> dict | None:
         "body": body.strip(),
         "message_id": message_id,
         "in_reply_to": in_reply_to,
+        "attachments": attachments,
+        "attachments_truncated": attachments_truncated,
     }
 
 
@@ -362,6 +655,11 @@ def _record_history(parsed: dict, mailbox: str = "INBOX") -> None:
                 "timestamp": ts,
                 "message_id": message_id,
                 "in_reply_to": parsed.get("in_reply_to", ""),
+                # Metadata only — never bytes. Projected through _public_attachment
+                # so a stray transient _payload can never reach the blob. Old blobs
+                # written before this field hydrate as [] on read (back-compat).
+                "attachments": [_public_attachment(a) for a in (parsed.get("attachments") or [])],
+                "attachments_truncated": bool(parsed.get("attachments_truncated")),
             }
         )
 
@@ -974,6 +1272,16 @@ async def _process_inbound_email(
     if customer_id is not None:
         extra_context["customer_id"] = customer_id
 
+    # Inbound attachments: hand the agent readable on-disk paths (plus metadata)
+    # so it can open the files. Only include attachments that were actually
+    # persisted (path set by _persist_attachments); the read/fallback path never
+    # populates this since it doesn't run through _process_inbound_email.
+    _email_attachments = [
+        _public_attachment(a) for a in (parsed.get("attachments") or []) if a.get("path")
+    ]
+    if _email_attachments:
+        extra_context["email_attachments"] = _email_attachments
+
     # Enqueue the session with email transport metadata
     try:
         await enqueue_agent_session(
@@ -1113,6 +1421,16 @@ async def _email_inbox_loop(imap_config: dict, config: dict) -> None:
                     parsed = parse_email_message(raw_bytes)
                     if parsed is None:
                         continue
+                    # Persist attachment bytes to disk + vault BEFORE recording
+                    # history or enqueueing — this is the ONLY write side-effect
+                    # path (the read-only CLI fallback never reaches here, so it
+                    # never writes; critique C1). After this call each attachment
+                    # dict has a real `path` and its transient `_payload` stripped.
+                    if parsed.get("attachments"):
+                        try:
+                            _persist_attachments(parsed)
+                        except Exception as e:
+                            logger.warning(f"[email] Attachment persistence failed: {e}")
                     # Write-through to the history cache BEFORE enqueueing the
                     # AgentSession so the CLI can observe the message even when
                     # routing skips session creation. Failures are logged only.

@@ -91,6 +91,50 @@ class TestGetRecentEmails:
         assert "error" in result
         assert "INBOX" in result["error"]
 
+    def test_old_blob_without_attachments_hydrates_as_empty_list(self, r):
+        """Back-compat: a blob written before the attachments field reads as []."""
+        from tools.email_history import get_recent_emails
+
+        # _seed_message writes a blob with NO attachments key (the old shape).
+        _seed_message(r, "<legacy@x>", time.time() - 5, subject="legacy")
+        result = get_recent_emails(limit=5)
+        assert result["messages"][0]["attachments"] == []
+
+    def test_attachments_metadata_projected(self, r):
+        from tools.email_history import get_recent_emails
+
+        set_key = HISTORY_SET_KEY.format(mailbox="INBOX")
+        msg_key = HISTORY_MSG_KEY.format(message_id="<att@x>")
+        ts = time.time()
+        r.set(
+            msg_key,
+            json.dumps(
+                {
+                    "from_addr": "a@x.com",
+                    "subject": "with file",
+                    "body": "see attached",
+                    "timestamp": ts,
+                    "message_id": "<att@x>",
+                    "in_reply_to": "",
+                    "attachments": [
+                        {
+                            "filename": "r.pdf",
+                            "content_type": "application/pdf",
+                            "size": 12,
+                            "path": "/data/media/email-attachments/ab/r.pdf",
+                        }
+                    ],
+                }
+            ),
+        )
+        r.zadd(set_key, {"<att@x>": ts})
+
+        result = get_recent_emails(limit=5)
+        atts = result["messages"][0]["attachments"]
+        assert len(atts) == 1
+        assert atts[0]["filename"] == "r.pdf"
+        assert atts[0]["content_type"] == "application/pdf"
+
     def test_since_ts_filter(self, r):
         from tools.email_history import get_recent_emails
 

@@ -207,6 +207,14 @@ def _imap_fallback_fetch(limit: int, search: str | None, since_ts: float | None)
                     "body": body,
                     "timestamp": datetime.fromtimestamp(ts).isoformat(),
                     "in_reply_to": parsed.get("in_reply_to", ""),
+                    # Attachment metadata (critique C2: the cache-miss IMAP
+                    # fallback must project attachments too). Drop the transient
+                    # _payload; on this read-only path bytes are never persisted,
+                    # so each `path` is None.
+                    "attachments": [
+                        {k: a.get(k) for k in ("filename", "content_type", "size", "path")}
+                        for a in parsed.get("attachments", [])
+                    ],
                 }
             )
             if len(results) >= limit:
@@ -308,6 +316,10 @@ def cmd_read(args: argparse.Namespace) -> int:
         print(f"[{ts}] {sender}")
         print(f"  Subject: {subject}")
         print(f"  {body}")
+        attachments = msg.get("attachments") or []
+        if attachments:
+            names = ", ".join(a.get("filename", "?") for a in attachments)
+            print(f"  Attachments ({len(attachments)}): {names}")
         print()
 
     return 0
@@ -340,13 +352,16 @@ def cmd_send(args: argparse.Namespace) -> int:
         1 on validation failure, missing file, or Redis push error.
     """
     body = args.message or ""
-    file_path = args.file
+    # ``--file`` uses argparse ``action="append"`` — the runtime shape is
+    # ``None`` (flag absent) or ``list[str]`` (one entry per ``--file``).
+    files = args.file or []
 
-    if not body and not file_path:
+    if not body and not files:
         print("Error: Must provide a message or --file", file=sys.stderr)
         return 1
 
-    if file_path:
+    attachments = []
+    for file_path in files:
         p = Path(file_path)
         if not p.is_file():
             print(f"Error: File not found: {file_path}", file=sys.stderr)
@@ -358,8 +373,7 @@ def cmd_send(args: argparse.Namespace) -> int:
         except OSError as e:
             print(f"Error: Cannot read file {file_path}: {e}", file=sys.stderr)
             return 1
-
-    attachments = [str(Path(file_path).resolve())] if file_path else []
+        attachments.append(str(p.resolve()))
 
     in_reply_to = None
     references = None
@@ -519,7 +533,14 @@ def main() -> int:
         help="Subject (default: '(no subject)')",
     )
     send_parser.add_argument("message", nargs="?", default="", help="Body text")
-    send_parser.add_argument("--file", "-f", help="File to attach (absolute or relative path)")
+    send_parser.add_argument(
+        "--file",
+        "-f",
+        action="append",
+        dest="file",
+        metavar="PATH",
+        help="File to attach; repeat --file for multiple files (absolute or relative path)",
+    )
     send_parser.add_argument(
         "--reply-to",
         type=_normalize_msgid,

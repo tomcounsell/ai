@@ -414,6 +414,168 @@ class TestDomainRoutedEmailHandlerDirect:
 
 
 # ---------------------------------------------------------------------------
+# Tests: inbound attachments end-to-end (parse → persist → history → context)
+# ---------------------------------------------------------------------------
+
+
+def _raw_email_with_attachments(attachments, *, body="See attached.", message_id="<att-e2e@x>"):
+    """Build raw multipart email bytes carrying ``(filename, maintype, subtype, data)``."""
+    import email.message
+
+    msg = email.message.EmailMessage()
+    msg["From"] = "alice@example.com"
+    msg["To"] = "valor@example.com"
+    msg["Subject"] = "Docs attached"
+    if message_id:
+        msg["Message-ID"] = message_id
+    if body is not None:
+        msg.set_content(body)
+    for filename, maintype, subtype, data in attachments:
+        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
+    return msg.as_bytes()
+
+
+class TestInboundAttachmentsEndToEnd:
+    """Full inbound flow: a multipart email's attachments are persisted to disk,
+    exposed in read output, and carried into the session extra_context."""
+
+    @pytest.mark.asyncio
+    async def test_single_attachment_full_flow(self, tmp_path, monkeypatch):
+        import os
+
+        import bridge.email_bridge as eb
+        import bridge.routing as routing
+        from bridge.email_bridge import (
+            _persist_attachments,
+            _process_inbound_email,
+            _record_history,
+            parse_email_message,
+        )
+        from tools.email_history import get_recent_emails
+
+        # Redirect attachment storage + vault to tmp (no repo pollution).
+        store = tmp_path / "data" / "media" / "email-attachments"
+        vault = tmp_path / "work-vault" / "email-attachments"
+        monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_DIR", store)
+        monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_VAULT_SUBDIR", vault)
+
+        # Align the history reader's Redis db with the bridge writer's test db.
+        worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
+        test_db = int(worker_id[2:]) + 1 if worker_id.startswith("gw") else 1
+        monkeypatch.setenv("REDIS_URL", f"redis://localhost:6379/{test_db}")
+
+        raw = _raw_email_with_attachments(
+            [("invoice.pdf", "application", "pdf", b"%PDF-1.4 invoice bytes")]
+        )
+        parsed = parse_email_message(raw)
+        assert parsed is not None
+        assert len(parsed["attachments"]) == 1
+
+        # 1. Persist bytes to disk (poll-loop side-effect).
+        _persist_attachments(parsed)
+        stored_path = parsed["attachments"][0]["path"]
+        assert stored_path is not None
+        from pathlib import Path
+
+        assert Path(stored_path).read_bytes() == b"%PDF-1.4 invoice bytes"
+        # Vault mirror happened too.
+        assert any(vault.rglob("*invoice.pdf"))
+
+        project_key = "test-project"
+        project = _project_config(project_key)
+        config = _projects_json(project_key)
+        original_email_map = routing.EMAIL_TO_PROJECT.copy()
+        original_active = routing.ACTIVE_PROJECTS[:]
+        try:
+            routing.EMAIL_TO_PROJECT["alice@example.com"] = project
+            if project_key not in routing.ACTIVE_PROJECTS:
+                routing.ACTIVE_PROJECTS.append(project_key)
+
+            test_r = _test_redis()
+            with patch("bridge.email_bridge._get_redis", return_value=test_r):
+                # 2. Record history blob (read-output source).
+                _record_history(parsed)
+
+                # 3. Process inbound → extra_context carries readable paths.
+                mock_enqueue = AsyncMock()
+                with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
+                    await _process_inbound_email(parsed, config)
+            test_r.close()
+        finally:
+            routing.EMAIL_TO_PROJECT.clear()
+            routing.EMAIL_TO_PROJECT.update(original_email_map)
+            routing.ACTIVE_PROJECTS[:] = original_active
+
+        # extra_context exposes the readable stored path + metadata.
+        extra = mock_enqueue.call_args.kwargs.get("extra_context_overrides", {})
+        email_atts = extra.get("email_attachments")
+        assert email_atts and len(email_atts) == 1
+        assert email_atts[0]["filename"] == "invoice.pdf"
+        assert email_atts[0]["path"] == stored_path
+
+        # read output (cache hit) exposes attachment metadata.
+        read = get_recent_emails(limit=5)
+        msgs = [m for m in read["messages"] if m["message_id"] == "<att-e2e@x>"]
+        assert msgs, "recorded message should appear in read output"
+        assert msgs[0]["attachments"][0]["filename"] == "invoice.pdf"
+
+    @pytest.mark.asyncio
+    async def test_multiple_attachments_full_flow(self, tmp_path, monkeypatch):
+        import bridge.email_bridge as eb
+        import bridge.routing as routing
+        from bridge.email_bridge import (
+            _persist_attachments,
+            _process_inbound_email,
+            parse_email_message,
+        )
+
+        store = tmp_path / "store"
+        vault = tmp_path / "vault"
+        monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_DIR", store)
+        monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_VAULT_SUBDIR", vault)
+
+        raw = _raw_email_with_attachments(
+            [
+                ("a.pdf", "application", "pdf", b"alpha"),
+                ("b.csv", "text", "csv", b"col1,col2"),
+            ],
+            message_id="<multi-e2e@x>",
+        )
+        parsed = parse_email_message(raw)
+        _persist_attachments(parsed)
+
+        from pathlib import Path
+
+        for att, expected in zip(parsed["attachments"], (b"alpha", b"col1,col2")):
+            assert Path(att["path"]).read_bytes() == expected
+
+        project_key = "test-project"
+        project = _project_config(project_key)
+        config = _projects_json(project_key)
+        original_email_map = routing.EMAIL_TO_PROJECT.copy()
+        original_active = routing.ACTIVE_PROJECTS[:]
+        try:
+            routing.EMAIL_TO_PROJECT["alice@example.com"] = project
+            if project_key not in routing.ACTIVE_PROJECTS:
+                routing.ACTIVE_PROJECTS.append(project_key)
+
+            test_r = _test_redis()
+            mock_enqueue = AsyncMock()
+            with patch("bridge.email_bridge._get_redis", return_value=test_r):
+                with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
+                    await _process_inbound_email(parsed, config)
+            test_r.close()
+        finally:
+            routing.EMAIL_TO_PROJECT.clear()
+            routing.EMAIL_TO_PROJECT.update(original_email_map)
+            routing.ACTIVE_PROJECTS[:] = original_active
+
+        extra = mock_enqueue.call_args.kwargs.get("extra_context_overrides", {})
+        names = [a["filename"] for a in extra.get("email_attachments", [])]
+        assert names == ["a.pdf", "b.csv"]
+
+
+# ---------------------------------------------------------------------------
 # Tests: health timestamp in _email_inbox_loop
 # ---------------------------------------------------------------------------
 

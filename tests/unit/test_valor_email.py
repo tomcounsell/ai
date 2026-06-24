@@ -17,7 +17,14 @@ import time
 import pytest
 import redis
 
-from tools.valor_email import _build_session_id, _normalize_msgid, cmd_read, cmd_send, cmd_threads
+from tools.valor_email import (
+    _build_session_id,
+    _imap_fallback_fetch,
+    _normalize_msgid,
+    cmd_read,
+    cmd_send,
+    cmd_threads,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +62,58 @@ class TestNormalizeMsgid:
     def test_whitespace_only_rejected(self):
         with pytest.raises(argparse.ArgumentTypeError):
             _normalize_msgid("   ")
+
+
+class TestImapFallbackFetchAttachments:
+    """Critique C2: the cache-miss IMAP fallback read path must project attachments."""
+
+    def test_fallback_projects_attachment_metadata(self, monkeypatch):
+        import email.message
+
+        # Build a raw multipart email with an attachment.
+        msg = email.message.EmailMessage()
+        msg["From"] = "tom@yuda.me"
+        msg["To"] = "valor@example.com"
+        msg["Subject"] = "report"
+        msg["Message-ID"] = "<fb-1@x>"
+        msg["Date"] = "Mon, 01 Jan 2026 00:00:00 +0000"
+        msg.set_content("see attached")
+        msg.add_attachment(b"%PDF data", maintype="application", subtype="pdf", filename="r.pdf")
+        raw_bytes = msg.as_bytes()
+
+        class FakeConn:
+            def login(self, *a, **k):
+                return ("OK", [b""])
+
+            def select(self, *a, **k):
+                return ("OK", [b"1"])
+
+            def uid(self, cmd, *args):
+                if cmd == "search":
+                    return ("OK", [b"1"])
+                if cmd == "fetch":
+                    return ("OK", [(b"1 (RFC822 {%d}" % len(raw_bytes), raw_bytes)])
+                return ("NO", [b""])
+
+            def logout(self):
+                return ("OK", [b""])
+
+        monkeypatch.setattr("tools.valor_email.imaplib.IMAP4_SSL", lambda *a, **k: FakeConn())
+        monkeypatch.setattr(
+            "bridge.email_bridge._get_imap_config",
+            lambda: {"host": "imap.test", "port": 993, "user": "u", "password": "p", "ssl": True},
+        )
+        monkeypatch.setattr("bridge.routing.ensure_email_routing_loaded", lambda: True)
+        monkeypatch.setattr("bridge.routing.get_known_email_search_terms", lambda: ["tom@yuda.me"])
+
+        results = _imap_fallback_fetch(limit=5, search=None, since_ts=None)
+        assert len(results) == 1
+        atts = results[0]["attachments"]
+        assert len(atts) == 1
+        assert atts[0]["filename"] == "r.pdf"
+        assert atts[0]["content_type"] == "application/pdf"
+        # Read-only path never persists bytes, so path stays None (critique C1).
+        assert atts[0]["path"] is None
 
 
 class TestBuildSessionId:
@@ -118,7 +177,8 @@ class TestCmdSend:
         assert payload["references"] == "<abc@host>"
 
     def test_rejects_missing_file(self, r, tmp_path, capsys):
-        rc = cmd_send(self._args(message="hi", file=str(tmp_path / "not-here.pdf")))
+        # ``--file`` is action="append" → runtime shape is list[str].
+        rc = cmd_send(self._args(message="hi", file=[str(tmp_path / "not-here.pdf")]))
         assert rc == 1
         captured = capsys.readouterr()
         assert "File not found" in captured.err
@@ -126,11 +186,34 @@ class TestCmdSend:
     def test_attachment_path_absolute(self, r, tmp_path):
         f = tmp_path / "payload.txt"
         f.write_text("contents")
-        rc = cmd_send(self._args(message="see attached", file=str(f)))
+        rc = cmd_send(self._args(message="see attached", file=[str(f)]))
         assert rc == 0
         keys = list(r.scan_iter(match="email:outbox:cli-*"))
         payload = json.loads(r.lpop(keys[0]))
         assert payload["attachments"] == [str(f.resolve())]
+
+    def test_multiple_files_all_land_in_payload_in_order(self, r, tmp_path):
+        # Two ``--file`` flags must collect BOTH absolute paths into the
+        # outbox ``attachments`` list, preserving CLI order (the multi-file
+        # bug: a single string arg kept only the last file).
+        a = tmp_path / "a.pdf"
+        b = tmp_path / "b.pdf"
+        a.write_text("aaa")
+        b.write_text("bbb")
+        rc = cmd_send(self._args(message="see both", file=[str(a), str(b)]))
+        assert rc == 0
+        keys = list(r.scan_iter(match="email:outbox:cli-*"))
+        assert len(keys) == 1
+        payload = json.loads(r.lpop(keys[0]))
+        assert payload["attachments"] == [str(a.resolve()), str(b.resolve())]
+
+    def test_rejects_second_invalid_file_without_skipping(self, r, tmp_path, capsys):
+        good = tmp_path / "good.txt"
+        good.write_text("ok")
+        rc = cmd_send(self._args(message="hi", file=[str(good), str(tmp_path / "missing.pdf")]))
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "File not found" in captured.err
 
     def test_ttl_set_on_queue_key(self, r):
         cmd_send(self._args(message="hi"))
