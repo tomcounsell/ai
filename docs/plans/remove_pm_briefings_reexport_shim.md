@@ -85,8 +85,7 @@ No prerequisites — this work has no external dependencies. The deploy-window p
 
 - **Delete the shim**: remove `reflections/pm_audio_briefing.py`.
 - **Delete the guard test**: remove `tests/unit/reflections/test_pm_audio_briefing_reexport_shim.py` (it tests only the shim; with the shim gone it would import-error).
-- **Fix the stale docstring path**: edit `models/reflection.py:10` so its docstring names the canonical `reflections/pm_briefings/__init__.py` instead of the old `reflections/pm_audio_briefing/__init__.py`. This is the one remaining live `pm_audio_briefing` token outside `docs/plans/`/pycache; left unfixed it would trip the verification grep gate.
-- **Verify no live references remain**: confirm nothing outside historical plan docs references `reflections.pm_audio_briefing` (after the docstring fix and the two deletions).
+- **Verify no live references remain**: confirm nothing outside historical plan docs references `reflections.pm_audio_briefing` (after the two deletions). `models/reflection.py` already names the canonical `reflections/pm_briefings/__init__.py` path — no edit needed there.
 
 ### Flow
 
@@ -95,6 +94,7 @@ Current state (shim present, unreferenced) → delete shim + guard test → grep
 ### Technical Approach
 
 - `git rm reflections/pm_audio_briefing.py tests/unit/reflections/test_pm_audio_briefing_reexport_shim.py`.
+- No source edits: `models/reflection.py` already references the canonical `reflections/pm_briefings/__init__.py` path (`grep pm_audio_briefing models/reflection.py` returns exit 1). The build is a clean two-file `git rm` plus the grep verification gate.
 - Run the reflections unit tests plus a repo-wide grep to confirm the canonical path (`reflections.pm_briefings`) is the only one in use.
 - No code edits to `reflections/pm_briefings/` — it is already the sole canonical module and the vault registry already targets it.
 - The local untracked `reflections/pm_audio_briefing/` directory (pycache-only, not in git) is out of scope for the PR; optional local `rm -rf` is a housekeeping nicety, not a deliverable.
@@ -130,7 +130,7 @@ No other existing tests reference `pm_audio_briefing` (verified by `grep -rln pm
 
 ### Risk 2: Some unscanned code path imports the shim
 **Impact:** Deletion would break that import.
-**Mitigation:** Repo-wide grep (`grep -rn pm_audio_briefing --include=*.py --include=*.yaml --include=*.json`) confirms the only non-historical references are (a) the guard test being deleted and (b) a stale docstring path in `models/reflection.py:10`. The docstring is not an import — it is a comment naming the legacy package path — but it IS a live (non-plan-doc, non-pycache) match that the Verification grep gate would catch, so Task 1 edits it to the canonical `reflections/pm_briefings/__init__.py`. After that edit plus the two deletions, the gate grep returns zero live matches and passes. The Verification table re-runs this grep as a gate.
+**Mitigation:** Repo-wide grep (`grep -rn pm_audio_briefing --include=*.py --include=*.yaml --include=*.json`) confirms the only non-historical reference is the guard test being deleted. `models/reflection.py` already names the canonical `reflections/pm_briefings/__init__.py` path (`grep pm_audio_briefing models/reflection.py` returns exit 1), so no source edit is required. After the two deletions, the gate grep returns zero live matches and passes. The Verification table re-runs this grep as a gate.
 
 ## Race Conditions
 
@@ -161,8 +161,7 @@ No documentation changes needed. The shim is undocumented transient deploy-windo
 
 - [ ] `reflections/pm_audio_briefing.py` no longer exists (`git rm`'d).
 - [ ] `tests/unit/reflections/test_pm_audio_briefing_reexport_shim.py` no longer exists (`git rm`'d).
-- [ ] `models/reflection.py:10` docstring references the canonical `reflections/pm_briefings/__init__.py` (stale `pm_audio_briefing` path fixed).
-- [ ] Repo-wide grep finds zero live (non-plan-doc, non-pycache) references to `pm_audio_briefing`.
+- [ ] Repo-wide grep for `pm_audio_briefing`, excluding `docs/plans/` and `__pycache__`, returns zero live matches (verification-only check — `models/reflection.py` already names the canonical path).
 - [ ] `import reflections.pm_briefings` still resolves and `run` is callable.
 - [ ] Tests pass (`/do-test`).
 - [ ] Lint and format clean.
@@ -190,7 +189,7 @@ Single-builder chore. No validator pairing needed beyond the lead's own verifica
 - **Parallel**: false
 - `git rm reflections/pm_audio_briefing.py`
 - `git rm tests/unit/reflections/test_pm_audio_briefing_reexport_shim.py`
-- Edit `models/reflection.py` line 10: change the stale docstring path `reflections/pm_audio_briefing/__init__.py` → `reflections/pm_briefings/__init__.py`. This docstring comment names the legacy package path; left unchanged it is a live (non-plan-doc, non-pycache) match for `pm_audio_briefing` that would make the verification grep gate exit 0 (match found) and falsely report a correct build as FAILING. (Touch only the path token — leave the rest of the docstring, including its em-dash, intact; that punctuation is pre-existing and out of scope.)
+- No source edits required: `models/reflection.py` already names the canonical `reflections/pm_briefings/__init__.py` path (`grep pm_audio_briefing models/reflection.py` returns exit 1). The build is a clean two-file `git rm` plus the grep verification gate below.
 - Run `grep -rn "pm_audio_briefing" --include="*.py" --include="*.yaml" --include="*.json" .` and confirm the only matches are historical plan docs under `docs/plans/` (zero live code/config references).
 - Confirm `python -c "import reflections.pm_briefings as c; assert callable(c.run)"` succeeds.
 - Run `pytest tests/unit/reflections/ -q`, `python -m ruff check .`, `python -m ruff format --check .`.
@@ -222,7 +221,7 @@ Single-builder chore. No validator pairing needed beyond the lead's own verifica
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | NEEDS REVISION | `models/reflection.py:10` has a stale docstring naming `reflections/pm_audio_briefing/__init__.py`. That `.py` file is outside the gate grep's `docs/plans/`/pycache exclusions, so after `git rm` of the two target files the gate still matches and exits 0 — a correct build would be reported FAILING. | Task 1 (added sub-task), Risk 2, Solution Key Elements, Success Criteria | Task 1 now edits `models/reflection.py:10` (`pm_audio_briefing/__init__.py` → `pm_briefings/__init__.py`); confirmed `grep pm_audio_briefing models/reflection.py` returns exit 1 after the edit, so the gate grep returns zero live matches and passes. |
+| BLOCKER (RESOLVED) | NEEDS REVISION | `models/reflection.py:10` had a stale docstring naming `reflections/pm_audio_briefing/__init__.py`, which would have made the gate grep falsely report a correct build as FAILING. | Already fixed on disk (committed) — docstring now names the canonical path | `grep pm_audio_briefing models/reflection.py` returns exit 1: the canonical path is already in place. The plan's build is now a clean two-file `git rm` plus the grep gate; the phantom docstring-edit sub-task has been removed from Task 1, Risk 2, Solution Key Elements, and Success Criteria so the builder produces no confusing no-op. |
 
 ---
 
