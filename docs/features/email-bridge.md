@@ -370,7 +370,7 @@ If the email body references attachments (contains phrases like "attached", "att
 extra_context["attachments_unrecoverable"] = True     # always set when guard fires
 extra_context["attachments_truncated"] = True/False    # True = partial recovery (cap hit)
 extra_context["attachments_recovered_count"] = M       # how many files did arrive
-extra_context["attachments_referenced_count"] = 1      # conservative estimate
+extra_context["attachments_referenced"] = True         # body contains attachment-reference phrases
 ```
 
 **Policy: inform, not block.** The session is always enqueued — the email is preserved and the agent uses the context to respond gracefully (e.g. "your attachments didn't arrive; please resend") rather than wedging silently with no output. The alternative (hard-block / auto-reply) was rejected as too aggressive — a body that says "attached" colloquially but carries no real attachment would be dropped entirely.
