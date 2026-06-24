@@ -135,6 +135,7 @@ from bridge.routing import (  # noqa: E402
     classify_needs_response,  # noqa: F401
     classify_needs_response_async,  # noqa: F401
     extract_at_mentions,  # noqa: F401
+    find_project_for_bot,
     find_project_for_chat,
     find_project_for_dm,
     get_valor_usernames,  # noqa: F401
@@ -159,6 +160,7 @@ from tools.telegram_history import (  # noqa: E402
     register_chat,
     store_link,
     store_message,
+    update_message_text,
 )
 
 # In-memory coalescing guard: bridges the Redis visibility gap for rapid-fire messages.
@@ -623,6 +625,22 @@ if set(DM_WHITELIST) != set(DM_USER_TO_PROJECT.keys()):
         "Every dms.whitelist[] entry must reference an active project."
     )
 
+# Registered bot peers (issue #1574). Built from projects.<key>.telegram.bots[]
+# for projects owned by this machine. A registered bot is recorded to history
+# but NEVER spawns a session (deterministic loop-guard). Kept separate from
+# DM_USER_TO_PROJECT / GROUP_TO_PROJECT so a bot can never resolve a project on
+# the spawn path. Mutual exclusion with dms.whitelist ids / group chat_ids is
+# enforced at config-validation time (bridge/config_validation.py).
+BOT_ID_TO_PROJECT: dict[int, dict] = {}
+for _bot_proj_key in ACTIVE_PROJECTS:
+    _bot_proj = CONFIG.get("projects", {}).get(_bot_proj_key, {})
+    for _bot_entry in _bot_proj.get("telegram", {}).get("bots", []):
+        if not (isinstance(_bot_entry, dict) and "id" in _bot_entry):
+            continue
+        _bot_cfg = dict(_bot_proj)
+        _bot_cfg["_key"] = _bot_proj_key
+        BOT_ID_TO_PROJECT[int(_bot_entry["id"])] = _bot_cfg
+
 # Propagate config to routing module so imported functions work correctly
 _routing_module.CONFIG = CONFIG
 _routing_module.DEFAULTS = DEFAULTS
@@ -631,6 +649,7 @@ _routing_module.ALL_MONITORED_GROUPS = ALL_MONITORED_GROUPS
 _routing_module.RESPOND_TO_DMS = RESPOND_TO_DMS
 _routing_module.DM_WHITELIST = DM_WHITELIST
 _routing_module.DM_USER_TO_PROJECT = DM_USER_TO_PROJECT
+_routing_module.BOT_ID_TO_PROJECT = BOT_ID_TO_PROJECT
 _routing_module.DEFAULT_MENTIONS = DEFAULTS.get("telegram", {}).get(
     "mention_triggers", ["@valor", "valor", "valorengels", "hey valor"]
 )
@@ -1212,6 +1231,25 @@ async def main():
                 logger.warning(f"Failed to store message: {store_result['error']}")
         except Exception as e:
             logger.error(f"Error storing message: {e}")
+
+        # Deterministic registered-bot loop-guard (issue #1574). A message from a
+        # registered bot peer is recorded to history (above) but MUST NEVER spawn a
+        # session: bot replies carry no reply_to, so each would look like a cold
+        # inbound and the bot↔bridge pair would loop forever. The synchronous
+        # `valor-telegram send --await-reply` awaiter polls the recorded history;
+        # it does not depend on a session. This guard is deterministic and applies
+        # regardless of reply-to or question-content, unlike the heuristic
+        # classify_conversation_terminus path. It covers both DM and group flows
+        # (the handler is reached for both). Belt-and-suspenders over the existing
+        # "unowned peer → no project → no spawn" behavior, and config-time mutual
+        # exclusion (validate_telegram_bots) guarantees a bot id can't also be a
+        # whitelisted DM / monitored group that would resolve a project.
+        if sender_id and find_project_for_bot(sender_id):
+            logger.info(
+                f"[routing] Registered bot peer {sender_name} (id={sender_id}) — "
+                "recorded to history, no session spawned (loop-guard #1574)"
+            )
+            return
 
         # Save to subconscious memory (non-fatal, never crashes bridge).
         # Gated on a resolved project_key — unowned messages don't belong to any
@@ -2457,6 +2495,24 @@ async def main():
         else:
             project = find_project_for_chat(chat_title) if chat_title else None
 
+        # Registered-bot edit capture (issue #1574). A Hermes bot streams its
+        # answer via repeated in-place edits on a stable message_id. The awaiter
+        # settles on silence, so it MUST see the latest edited body — otherwise it
+        # would settle on the first partial. This branch sits BEFORE the
+        # `if not project: return` discard because a registered bot deliberately
+        # does NOT resolve a project (see find_project_for_bot). We upsert the
+        # edited content onto the existing history record (same message_id) and
+        # return — never steering, never spawning. Fail-open: any error is logged
+        # and swallowed so a bot edit can never crash the bridge.
+        if sender_id and find_project_for_bot(sender_id):
+            _bot_edited = (message.text or "").strip()
+            if _bot_edited:
+                try:
+                    update_message_text(str(event.chat_id), message.id, _bot_edited)
+                except Exception as e:
+                    logger.warning(f"[edit] Registered-bot edit upsert failed (non-fatal): {e}")
+            return
+
         if not project:
             return
 
@@ -2725,6 +2781,28 @@ async def main():
             logger.info(f"Replayed {replayed} dead-lettered message(s)")
     except Exception as e:
         logger.error(f"Dead letter replay failed: {e}")
+
+    # Validate each registered bot id against the live Telegram User.bot flag
+    # (issue #1574, acceptance criterion 4). A swapped token or typo'd id that
+    # points at a HUMAN account would otherwise silently register, and the
+    # deterministic loop-guard would suppress that human's messages. We probe
+    # the live flag now that the client is connected+authorized and surface any
+    # mismatch loudly. This is a warn-not-crash gate: a misconfigured bot entry
+    # must not take down a running bridge, but it must be impossible to miss.
+    if BOT_ID_TO_PROJECT:
+        from bridge.config_validation import ConfigValidationError, validate_bot_live_flags
+
+        async def _resolve_bot_entity(bot_id: int):
+            return await client.get_entity(bot_id)
+
+        try:
+            await validate_bot_live_flags(CONFIG, _resolve_bot_entity)
+            logger.info(
+                "Registered bot live-flag validation passed (%d bot(s))",
+                len(BOT_ID_TO_PROJECT),
+            )
+        except ConfigValidationError as e:
+            logger.error("REGISTERED BOT MISCONFIGURATION (#1574): %s", e)
 
     # Register session queue callbacks for each project
     from agent.agent_session_queue import cleanup_stale_branches

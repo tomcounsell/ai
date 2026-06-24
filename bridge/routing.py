@@ -23,6 +23,14 @@ GROUP_TO_PROJECT = {}
 EMAIL_TO_PROJECT: dict[str, dict] = {}
 EMAIL_DOMAIN_TO_PROJECT: dict[str, dict] = {}  # domain -> project config
 DM_USER_TO_PROJECT: dict[int, dict] = {}  # sender_id -> project config
+# Registered bot peers (issue #1574): bot user-id -> project config. Populated
+# from projects.<key>.telegram.bots[]. A registered bot is DELIBERATELY kept
+# OUT of DM_USER_TO_PROJECT / GROUP_TO_PROJECT so its inbound messages never
+# resolve a project on the spawn path — they are recorded to history only and
+# the synchronous awaiter polls that history. This is the deterministic
+# loop-guard: a bot reply (which carries no reply_to) must never spawn a
+# session, or the bot↔bridge pair would loop forever.
+BOT_ID_TO_PROJECT: dict[int, dict] = {}  # bot sender_id -> project config
 ALL_MONITORED_GROUPS = []
 ACTIVE_PROJECTS = []
 RESPOND_TO_DMS = True
@@ -277,6 +285,27 @@ def find_project_for_dm(sender_id: int | None) -> dict | None:
     if not sender_id:
         return None
     return DM_USER_TO_PROJECT.get(sender_id)
+
+
+def find_project_for_bot(sender_id: int | None) -> dict | None:
+    """Find which project a registered bot peer belongs to (issue #1574).
+
+    Looks up the bot's Telegram user-id in ``BOT_ID_TO_PROJECT``, built from
+    ``projects.<key>.telegram.bots[]`` entries owned by this machine.
+
+    This is intentionally a SEPARATE map from ``DM_USER_TO_PROJECT`` /
+    ``GROUP_TO_PROJECT``. A registered bot must NOT resolve a project on the
+    session-spawn path: a hit here means "this is a known bot — record its
+    message to history and never spawn a session" (the deterministic
+    loop-guard). The synchronous ``valor-telegram send --await-reply`` awaiter
+    polls the recorded history; it never relies on a session being spawned.
+
+    Returns the project config dict with '_key' set, or None if the sender is
+    not a registered bot.
+    """
+    if not sender_id:
+        return None
+    return BOT_ID_TO_PROJECT.get(sender_id)
 
 
 def get_known_email_search_terms() -> list[str]:
@@ -1089,6 +1118,14 @@ def should_respond_sync(
     Synchronous check for basic response conditions.
     Used for DMs and groups without respond_to_unaddressed.
     """
+    # Deterministic registered-bot loop-guard (issue #1574): a registered bot
+    # peer never triggers a response, in both DM and group paths. This is the
+    # secondary defense layer — the primary guard short-circuits in the bridge
+    # NewMessage handler before this is reached — but keeping it here means any
+    # future caller of should_respond_sync also inherits the invariant.
+    if sender_id and find_project_for_bot(sender_id):
+        return False
+
     if is_dm:
         if not RESPOND_TO_DMS:
             return False

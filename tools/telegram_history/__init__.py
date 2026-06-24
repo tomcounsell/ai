@@ -416,6 +416,52 @@ def store_message(
         return {"error": str(e)}
 
 
+def update_message_text(chat_id: str, message_id: int, new_text: str) -> bool:
+    """Upsert the text of an existing inbound message record (issue #1574).
+
+    A streamed bot answer arrives as repeated in-place Telegram edits on a
+    stable ``message_id``. The bridge edit_handler calls this on each
+    ``MessageEdited`` for a registered bot so the awaiter sees the latest body
+    on the SAME record instead of accumulating duplicate rows. ``content`` is a
+    non-KeyField, so it is updated in place via ``.save()``.
+
+    Fail-open by contract: this never raises. A missing record (the edit's
+    insert hasn't committed yet, Race 2 in the plan) returns ``False`` and logs
+    at debug — Hermes edits repeatedly, so the next edit upserts successfully.
+
+    Args:
+        chat_id: Telegram chat ID (string form, matching store_message).
+        message_id: Telegram message ID of the record to update.
+        new_text: The latest edited body.
+
+    Returns:
+        True if a record was found and updated; False otherwise.
+    """
+    from models.telegram import TelegramMessage
+    from tools.field_utils import log_large_field
+
+    try:
+        records = list(TelegramMessage.query.filter(chat_id=str(chat_id), message_id=message_id))
+    except Exception as e:
+        logger.debug(f"update_message_text query failed for {chat_id}/{message_id}: {e}")
+        return False
+
+    if not records:
+        logger.debug(f"update_message_text: no record for chat={chat_id} message_id={message_id}")
+        return False
+
+    log_large_field("TelegramMessage.content", new_text)
+    updated = False
+    for msg in records:
+        try:
+            msg.content = new_text or ""
+            msg.save()
+            updated = True
+        except Exception as e:
+            logger.debug(f"update_message_text save failed for {chat_id}/{message_id}: {e}")
+    return updated
+
+
 def search_history(
     query: str,
     chat_id: str,

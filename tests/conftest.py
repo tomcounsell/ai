@@ -465,12 +465,32 @@ def sample_config():
             "valor": {
                 "name": "Valor AI",
                 "description": "AI coworker system",
+                "machine": "TestMachine",
                 "telegram": {
                     "groups": ["Dev: Valor"],
                     "respond_to_all": False,
                     "respond_to_mentions": True,
                     "respond_to_dms": True,
                     "mention_triggers": ["@valor", "valor", "hey valor"],
+                    # Registered bot peer (issue #1574): recorded to history,
+                    # never spawns a session; home of the settle_profile.
+                    "bots": [
+                        {
+                            "id": 8837490628,
+                            "username": "cyndra_staff_bot",
+                            "name": "Bruce @ Internal Staff",
+                            "under_test": True,
+                            "settle_profile": {
+                                "cleanup_progress": False,
+                                "quiet_window_seconds": 5,
+                                "default_timeout_seconds": 600,
+                                "status_patterns": [
+                                    "^⏳",
+                                    "^(💻|🔎|🔧|📖|⚙️|📝) \\w+:",
+                                ],
+                            },
+                        }
+                    ],
                 },
                 "github": {"org": "tomcounsell", "repo": "ai"},
                 "context": {

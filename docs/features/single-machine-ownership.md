@@ -14,6 +14,9 @@ Every shape that can route an incoming bridge message to a session:
 | Telegram group name | `projects.<key>.telegram.groups.<name>` | `"Eng: Valor"` |
 | Email contact (explicit address) | `projects.<key>.email.contacts[]` | `alice@example.com` |
 | Email domain (wildcard) | `projects.<key>.email.domains[]` | `psyoptimal.com` |
+| Registered bot peer id | `projects.<key>.telegram.bots[].id` | `8837490628` (Bruce) |
+
+Registered bot ids carry an extra rule on top of single-machine ownership: a bot id must **not** also appear in `dms.whitelist[].id` (mutual exclusion), or the bot would resolve a project on the spawn path and its no-`reply_to` replies would loop. See [Bot End-to-End Testing](bot-e2e-testing.md).
 
 For each shape, the validator verifies the identifier resolves to exactly one machine across the *entire* config — not just the per-machine subset. Misconfiguration is caught the same way on every machine, even if the conflicting projects are owned by different machines.
 
