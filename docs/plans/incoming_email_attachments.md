@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-06-04
 tracking: https://github.com/tomcounsell/ai/issues/1567
 last_comment_id:
+revision_applied: true
 ---
 
 # Incoming Email Attachment Support
@@ -126,24 +127,41 @@ existing in-repo pattern (Telegram media). Proceeding with codebase context.
 
 ## Data Flow
 
+The pipeline deliberately separates **pure metadata extraction** (safe on any read)
+from **byte persistence** (a write side-effect that only the poll loop may trigger).
+This is the C1 split: `parse_email_message` never writes to disk, so a read-only
+`valor-email read` cache-miss (which re-calls `parse_email_message` via
+`_imap_fallback_fetch`) produces attachment metadata with `path: None` and never
+touches the filesystem.
+
 1. **Entry point**: `_poll_imap()` fetches raw RFC822 bytes for an unseen email.
-2. **Parse + extract**: `_email_inbox_loop` calls `parse_email_message(raw_bytes)`.
-   Within it, a new `_extract_attachments(msg, message_id)` walks the MIME tree,
-   and for each `attachment`-disposition part: sanitizes the filename, enforces
-   the cumulative size cap, writes the decoded bytes to
-   `data/media/email-attachments/{msgid_hash}/{sanitized_name}`, and collects a
-   metadata dict `{filename, content_type, size, path}`. The list is attached to
-   the parsed dict as `parsed["attachments"]`.
-3. **History cache**: `_record_history(parsed)` includes `attachments` (metadata
-   only — no bytes) in the JSON blob at `email:history:msg:{message_id}`.
-4. **Vault mirror (consistency with Telegram)**: a fire-and-forget copy of each
-   stored file into `~/work-vault/email-attachments/` so the KnowledgeWatcher
-   indexes it, mirroring `_ingest_attachments`. Failures are logged, never fatal.
+2. **Parse + extract metadata (pure, no disk write)**: `_email_inbox_loop` calls
+   `parse_email_message(raw_bytes)`. Within it, a new
+   `_extract_attachment_metadata(msg)` walks the MIME tree, and for each
+   `attachment`-disposition part collects a metadata dict
+   `{filename, content_type, size, path}` — where `filename` is sanitized,
+   `size` is computed without persisting, and **`path` is `None`** at this stage.
+   The list is attached to the parsed dict as `parsed["attachments"]`. **No bytes
+   are written to disk and no vault mirror fires here** — `parse_email_message`
+   stays pure so the IMAP-fallback read path has no write side-effect.
+3. **Persist bytes (write side-effect, poll-loop only)**: back in
+   `_email_inbox_loop`, gated on `if parsed and parsed.get("attachments")`, a new
+   `_persist_attachments(parsed)` re-walks the message, sanitizes filenames,
+   enforces the cumulative size cap, writes the decoded bytes to
+   `data/media/email-attachments/{key_hash}/{sanitized_name}`, and **mutates each
+   metadata dict's `path` in place** to the stored location. It also fires the
+   fire-and-forget vault mirror. This runs **before** `_record_history` so the
+   history blob records the real `path`, not `None`.
+4. **History cache**: `_record_history(parsed)` includes `attachments` (metadata
+   only — no bytes, but `path` now populated) in the JSON blob at
+   `email:history:msg:{message_id}`.
 5. **Session context**: `_process_inbound_email(parsed, ...)` reads
    `parsed["attachments"]` and sets `extra_context["email_attachments"]` to the
    list of readable stored paths (plus metadata).
 6. **Output**: `valor-email read --json` surfaces the `attachments` metadata array
    per message; the agent session opens the files via the paths in `extra_context`.
+   On the cache-miss fallback path, the array is present with `path: None` (metadata
+   only — bytes were never persisted because no poll-loop ingest occurred).
 
 ## Architectural Impact
 
@@ -183,61 +201,111 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/incoming_email
 
 ### Key Elements
 
-- **`_extract_attachments(msg, message_id)`** (new, `bridge/email_bridge.py`):
-  Walks the MIME tree, sanitizes filenames, enforces the size cap, decodes and
-  writes attachment bytes to the filesystem, returns a metadata list. Each part
-  is wrapped in its own try/except so one malformed part never aborts the rest.
-- **`parse_email_message()`** (modified): Calls the extractor and adds
-  `attachments` to the returned dict. An email with attachments but an empty body
-  must NOT be dropped (the current empty-body guard at line 197 would discard it).
+- **`_extract_attachment_metadata(msg)`** (new, pure, `bridge/email_bridge.py`):
+  Walks the MIME tree and, for each `attachment`-disposition part, returns a
+  metadata dict `{filename, content_type, size, path}` with the filename
+  sanitized and `path` set to `None` (no disk write). Each part is wrapped in its
+  own try/except so one malformed part never aborts the rest. **This is called
+  inside `parse_email_message` and has no write side-effect**, so the IMAP read
+  fallback can call it safely.
+- **`_persist_attachments(parsed)`** (new, side-effecting, `bridge/email_bridge.py`):
+  Re-walks the message, enforces the size cap, writes decoded bytes to
+  `data/media/email-attachments/{key_hash}/{sanitized_name}`, mutates each
+  metadata dict's `path` in place to the stored location, and fires the
+  fire-and-forget vault mirror. **Called ONLY from `_email_inbox_loop`** (the
+  poll loop), gated on `if parsed and parsed.get("attachments")`, and **before**
+  `_record_history` so the recorded blob carries the real `path`.
+- **`parse_email_message()`** (modified): Calls `_extract_attachment_metadata` and
+  adds `attachments` (metadata-only, `path=None`) to the returned dict. Stays
+  pure — it never writes bytes or fires the vault mirror. An email with
+  attachments but an empty body must NOT be dropped (the current empty-body guard
+  at lines 197-199 would discard it).
 - **`_record_history()`** (modified): Adds the `attachments` metadata array to the
-  JSON blob — metadata only, never bytes.
+  JSON blob — metadata only, never bytes. Runs after `_persist_attachments`, so
+  `path` is populated for poll-loop-ingested messages.
 - **`get_recent_emails()` / `search_history()` / `_hydrate()`** (modified,
   `tools/email_history/`): Project `attachments` into read output.
+- **`_imap_fallback_fetch()`** (modified, `tools/valor_email.py`): Add
+  `"attachments": parsed.get("attachments", [])` to its hand-shaped result dicts
+  so the cache-miss read path also surfaces attachment metadata (with `path=None`,
+  since bytes were never persisted on a read).
 - **`_process_inbound_email()`** (modified): Sets
   `extra_context["email_attachments"]` to the readable stored paths.
-- **Vault mirror** (new, fire-and-forget): Copies stored files into
-  `~/work-vault/email-attachments/` for KnowledgeWatcher indexing, mirroring
-  `_ingest_attachments`.
+- **Vault mirror** (new, fire-and-forget, inside `_persist_attachments`): Copies
+  stored files into `~/work-vault/email-attachments/` for KnowledgeWatcher
+  indexing, mirroring `_ingest_attachments`.
 - **Outgoing `--file`** (modified, `tools/valor_email.py`): `action="append"` +
   per-file validation, so multiple `--file` flags attach multiple files.
 
 ### Flow
 
-Email with PDF arrives → IMAP poll fetches it → `parse_email_message` extracts +
-persists the PDF to `data/media/email-attachments/{hash}/report.pdf` → metadata
-recorded in history cache + mirrored to vault → session `extra_context` carries
-`email_attachments=[".../report.pdf"]` → agent opens the file and acts on it →
-`valor-email read --json` shows the attachment metadata.
+Email with PDF arrives → IMAP poll fetches it → `parse_email_message` extracts
+attachment **metadata** (pure, `path=None`) → poll loop calls
+`_persist_attachments`, which writes the PDF to
+`data/media/email-attachments/{key_hash}/report.pdf`, sets `path`, and mirrors to
+vault → `_record_history` records the metadata (with real `path`) → session
+`extra_context` carries `email_attachments=[".../report.pdf"]` → agent opens the
+file and acts on it → `valor-email read --json` shows the attachment metadata.
+(On a cache-miss `valor-email read`, `_imap_fallback_fetch` calls
+`parse_email_message` only — metadata appears with `path=None`, no bytes written.)
 
 ### Technical Approach
 
 - **Storage decision: filesystem, matching Telegram.** Inbound bytes are written
-  to `data/media/email-attachments/{msgid_hash}/{sanitized_name}` (parallel to
-  Telegram's `data/media/`). Redis carries metadata + paths only, never bytes.
+  by `_persist_attachments` to
+  `data/media/email-attachments/{key_hash}/{sanitized_name}` (parallel to
+  Telegram's `data/media/`). `{key_hash}` is the hash of the **stable storage key**
+  (`key = message_id or f"{from_addr}:{subject}:{int(timestamp)}"`, falling back to
+  `uuid4().hex` if even those are empty — see C3), not the raw Message-ID, so
+  Message-ID-less emails never collide into a single subdir. Redis carries metadata
+  + paths only, never bytes.
   Rationale: (1) consistency with the established Telegram inbound pattern; (2)
   the history blob has a 7-day TTL and a 500-entry cap — base64-encoding
   multi-megabyte files into it would blow the cap and bloat Redis; (3)
   filesystem paths are directly readable by the agent, which is exactly what
   `extra_context` needs to hand off.
-- **Single extraction point.** Extraction + persistence happens once, inside
-  `parse_email_message`, before either `_record_history` or
-  `_process_inbound_email` runs. Both consumers read the same `parsed["attachments"]`
-  list — no double-read, no ordering hazard.
+- **Metadata/persist split (C1).** Metadata extraction
+  (`_extract_attachment_metadata`) happens once inside `parse_email_message` and is
+  **pure** — no disk write, no vault mirror — so the IMAP read fallback can call it
+  with zero side-effects. Byte persistence (`_persist_attachments`) is a separate,
+  side-effecting helper called **only** from the poll loop (`_email_inbox_loop`),
+  gated on `if parsed and parsed.get("attachments")`, **before** `_record_history`.
+  It mutates the same `parsed["attachments"]` dicts in place (filling `path`), so all
+  downstream consumers (`_record_history`, `_process_inbound_email`) read one
+  list — no double-read, no ordering hazard. On the read path, `path` stays `None`.
 - **Filename sanitization.** Reduce to `Path(raw).name`, then allow only
   `[alnum, -, _, .]`, collapse the rest to `_`; empty/`.`/`..` results fall back
-  to `attachment_{index}{guessed_ext}`. The `{msgid_hash}` subdir guarantees
+  to `attachment_{index}{guessed_ext}`. The `{key_hash}` subdir guarantees
   uniqueness across messages and contains traversal to a single directory.
-- **Size cap.** A module constant (env-overridable,
-  `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES`) bounds the cumulative bytes persisted per
-  email. Once exceeded, remaining parts are skipped and a `truncated: true`
-  marker is recorded in the metadata so the agent knows files were dropped.
-- **Empty-body emails with attachments.** Adjust the line-197 guard so an email
+- **Size cap (enforced in `_persist_attachments`).** A module constant
+  (env-overridable, `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES`) bounds the cumulative bytes
+  persisted per email. The cap lives in `_persist_attachments` (the only place bytes
+  are decoded), short-circuits the `walk()` loop once the running total would exceed
+  the cap (C4 — stop decoding rather than decode-then-skip), and records a
+  `truncated: true` marker in the metadata so the agent knows files were dropped.
+  `_extract_attachment_metadata` reports declared `size` without decoding, so the
+  pure read path never inflates RAM.
+- **Empty-body emails with attachments.** Adjust the lines-197-199 guard so an email
   with attachments but no text body is still processed (body may legitimately be
-  empty when the message is just a file).
+  empty when the message is just a file). Because `_extract_attachment_metadata`
+  runs inside `parse_email_message` before the guard, the guard can check
+  `if (not body or not body.strip()) and not parsed_attachments` and only drop the
+  email when there is neither body nor attachment.
+- **Empty-`Message-ID` history visibility (carried concern).** `_record_history`
+  hard-returns at line 353 when `message_id` is empty (`if not message_id: return`),
+  so an attachment-only email from a provider that omits `Message-ID` would be
+  persisted to disk and handed to the session but never surface in
+  `valor-email read --json`. `_record_history` must synthesize the **same stable
+  storage key** the persistence path uses
+  (`message_id or f"{from_addr}:{subject}:{int(timestamp)}"`, then `uuid4().hex`)
+  as the history blob/sorted-set key when `message_id` is falsy, so the message is
+  observable in read output. The blob still records the real (possibly empty)
+  `message_id` field for reply threading; only the Redis key is synthesized. This
+  keeps the storage subdir key (C3) and the history key consistent.
 - **Vault mirror.** Reuse the `_ingest_attachments` shape: fire-and-forget copy,
-  sanitized target name keyed by `(timestamp, sender, message_id, filename)`,
-  every failure caught and logged.
+  sanitized target name keyed by `(timestamp, sender, key, filename)` where `key` is
+  the same C3 stable key (substituted for `message_id` when Message-ID is empty —
+  see C5), every failure caught and logged.
 - **Outgoing multi-file.** `_build_reply_mime` and the relay already iterate an
   attachments list — only the CLI arg parsing needs `action="append"` plus a
   per-file existence/readability loop.
@@ -245,18 +313,23 @@ recorded in history cache + mirrored to vault → session `extra_context` carrie
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_extract_attachments` wraps each part in try/except — add a test feeding a
-  part with undecodable payload / missing filename and assert the function logs a
-  warning, skips that part, and returns the remaining valid attachments.
-- [ ] The vault-mirror copy is fire-and-forget with a top-level catch — add a test
-  that points the vault dir at an unwritable path and asserts the inbound flow
-  still completes (attachment still persisted to `data/media/`, session enqueued).
+- [ ] `_extract_attachment_metadata` and `_persist_attachments` each wrap every part
+  in try/except — add a test feeding a part with undecodable payload / missing
+  filename and assert the function logs a warning, skips that part, and returns (or
+  persists) the remaining valid attachments.
+- [ ] The vault-mirror copy (inside `_persist_attachments`) is fire-and-forget with a
+  top-level catch — add a test that points the vault dir at an unwritable path and
+  asserts the inbound flow still completes (attachment still persisted to
+  `data/media/`, session enqueued).
 - [ ] `_record_history` already swallows-and-logs; assert the attachments field is
   present on success and its absence (old blob) hydrates as `[]`.
 
 ### Empty/Invalid Input Handling
 - [ ] Email with attachments but empty text body → still parsed and processed
-  (not dropped by the line-197 guard).
+  (not dropped by the lines-197-199 guard).
+- [ ] Attachment-only email with an empty `Message-ID` → persisted, processed, AND
+  visible in `valor-email read --json` (history recorded under the synthesized
+  stable key).
 - [ ] Attachment part with no `filename` → falls back to `attachment_{i}{ext}`.
 - [ ] Filename containing `../` or absolute path → sanitized to a safe basename
   written inside the message subdir (assert no escape).
@@ -270,23 +343,32 @@ recorded in history cache + mirrored to vault → session `extra_context` carrie
 ## Test Impact
 
 - [ ] `tests/unit/test_email_bridge.py` — UPDATE: add cases for
-  `parse_email_message` returning attachments (single + multiple), filename
-  sanitization, size cap, malformed part, empty-body-with-attachment.
+  `parse_email_message` returning attachment metadata with `path=None` and writing
+  NO files (C1 purity), `_persist_attachments` writing bytes + filling `path`,
+  filename sanitization, size-cap decode short-circuit, malformed part,
+  empty-body-with-attachment, and empty-`Message-ID` stable-key.
 - [ ] `tests/unit/test_email_history.py` — UPDATE: assert `_record_history` blob
   and `get_recent_emails`/`search_history` projections include `attachments`;
-  back-compat blob without the field hydrates as `[]`.
+  back-compat blob without the field hydrates as `[]`; **add a case asserting an
+  attachment-only email with an empty `Message-ID` is recorded and retrievable**
+  (synthesized-key fix).
 - [ ] `tests/integration/test_email_bridge.py` — UPDATE/REPLACE relevant inbound
-  cases: full multipart email → attachments parsed, persisted to disk, exposed in
-  read output and `extra_context["email_attachments"]`.
+  cases: full multipart email → metadata parsed, persisted to disk by the poll
+  loop, exposed in read output and `extra_context["email_attachments"]`; **add the
+  outcome test** that reads the persisted file's bytes from the context path and
+  asserts a known marker string is present; assert the cache-miss
+  `_imap_fallback_fetch` read path surfaces `attachments` with `path=None` and
+  writes no files.
 - [ ] `tests/unit/test_email_relay.py` — no change needed for inbound; existing
   `TestProcessOutboxAttachment` cases stay green (outgoing list path unchanged).
 - [ ] `tests/unit/test_valor_email.py` (or the send test module) — UPDATE: add a
   multi-`--file` outgoing case asserting both files land in the outbox payload's
-  `attachments` list.
+  `attachments` list; assert `_imap_fallback_fetch` projects the `attachments` key.
 
 No existing inbound-attachment tests exist to break — the inbound work is purely
-additive. The only existing-behavior change is the line-197 empty-body guard,
-covered by an updated unit test.
+additive. The two existing-behavior changes are (1) the lines-197-199 empty-body
+guard and (2) the `_record_history` empty-`Message-ID` synthesized-key fix, both
+covered by updated unit tests.
 
 ## Rabbit Holes
 
@@ -328,15 +410,21 @@ suffixes an index before writing.
 
 ## Race Conditions
 
-### Race 1: Metadata and session-context reads of the same attachment list
-**Location:** `bridge/email_bridge.py` `_email_inbox_loop` → `_record_history`
-then `_process_inbound_email`.
-**Trigger:** Both functions need the attachment data for the same email.
-**Data prerequisite:** `parsed["attachments"]` must be populated before either runs.
+### Race 1: Persistence vs. history/context reads of the same attachment list
+**Location:** `bridge/email_bridge.py` `_email_inbox_loop` →
+`_persist_attachments` → `_record_history` then `_process_inbound_email`.
+**Trigger:** `_record_history` and `_process_inbound_email` both read the attachment
+metadata (including the on-disk `path`) for the same email.
+**Data prerequisite:** `parsed["attachments"]` `path` fields must be populated
+before either consumer runs.
 **State prerequisite:** Files must be on disk before paths are handed to the agent.
-**Mitigation:** Extraction + disk persistence happens synchronously inside
-`parse_email_message`, which returns before the loop calls either consumer. Single
-producer, sequential consumers, same in-memory list — no race.
+**Mitigation:** The poll loop runs strictly sequentially:
+`parse_email_message` (pure metadata) → `_persist_attachments` (writes bytes,
+fills `path` in the same in-memory list) → `_record_history` → `_process_inbound_email`.
+All three later steps read the one list that `_persist_attachments` already mutated.
+Single producer, sequential consumers, no concurrency — no race. (`_record_history`'s
+internal blob+ZADD atomicity is provided by its existing `r.pipeline()` MULTI/EXEC,
+already in place — not introduced here; see N1.)
 
 ### Race 2: Vault mirror vs. session start
 **Location:** Fire-and-forget vault copy vs. `enqueue_agent_session`.
@@ -358,6 +446,18 @@ completion is not on the session's critical path.
 Risk 1 and as future work under Rabbit Holes — not deferred scope here. Inline/CID
 rendering and synchronous markitdown conversion are also covered under Rabbit
 Holes — they are deliberately never built.)
+
+**Vault mirror scope note (carried concern):** The vault mirror to
+`~/work-vault/email-attachments/` is **not required by the issue's acceptance
+criteria** — the issue only asks that the agent can read incoming attachments,
+which the `data/media/` persistence + `extra_context` paths fully satisfy. The
+mirror is an **intentional in-scope extension**, decided by the PM in Open Q2
+(✅ YES) for consistency with the Telegram inbound-media path and durable
+KnowledgeWatcher indexing. It is decoupled and fire-and-forget, so it can be
+dropped without affecting any AC item if review prefers a tighter first cut. It is
+explicitly labeled here so the scope boundary is unambiguous: AC-critical work is
+the persistence + read-output + context exposure; the vault mirror is the
+consistency-with-Telegram bonus.
 
 ## Update System
 
@@ -397,21 +497,39 @@ bridge module itself.
   document multi-`--file` support.
 
 ### Inline Documentation
-- [ ] Docstrings on `_extract_attachments` (sanitization + size-cap contract) and
-  the updated `parse_email_message` / `_record_history` describing the
-  `attachments` field shape.
+- [ ] Docstrings on `_extract_attachment_metadata` (pure, no-disk-write contract +
+  `path=None`) and `_persist_attachments` (poll-loop-only side-effect, sanitization +
+  size-cap contract, runs before `_record_history`), plus the updated
+  `parse_email_message` / `_record_history` describing the `attachments` field shape.
 
 ## Success Criteria
 
-- [ ] `parse_email_message()` returns an `attachments` list with
-  `{filename, content_type, size, path}` for each inbound attachment part.
-- [ ] Attachment bytes are persisted under `data/media/email-attachments/` with
-  sanitized, collision-safe filenames; no path traversal possible.
+- [ ] `parse_email_message()` is **pure** — it returns an `attachments` metadata
+  list with `{filename, content_type, size, path}` (with `path=None`) for each
+  inbound attachment part and writes **nothing** to disk. A unit test asserts that
+  calling `parse_email_message` on a multipart email creates no files under
+  `data/media/email-attachments/` and leaves every `path` as `None` (proves the C1
+  read-path side-effect is gone).
+- [ ] `_persist_attachments()` (called only from the poll loop) writes attachment
+  bytes under `data/media/email-attachments/` with sanitized, collision-safe
+  filenames, populates each `path` in place, and runs **before** `_record_history`;
+  no path traversal possible. A test asserts the cache-miss `valor-email read`
+  fallback (`_imap_fallback_fetch`) surfaces attachment metadata with `path=None`
+  and writes no files.
 - [ ] The history cache blob and `valor-email read --json` expose attachment
-  metadata; messages without attachments render `attachments: []`.
+  metadata (with populated `path` for poll-loop messages); messages without
+  attachments render `attachments: []`. **Attachment-only emails with an empty
+  `Message-ID` still surface in `valor-email read --json`** (history records under a
+  synthesized stable key — carried concern).
 - [ ] Inbound session `extra_context["email_attachments"]` carries readable paths.
-- [ ] Size cap, filename sanitization, and per-part malformed-input handling are
-  enforced and tested.
+- [ ] **Outcome: the agent can act on the attached file's content.** An integration
+  test delivers a multipart email carrying a small text/CSV attachment with a known
+  marker string, runs the inbound flow, and asserts that the persisted file at the
+  `extra_context["email_attachments"]` path is readable and its bytes contain the
+  marker — proving the end-to-end path (persist → context → readable content), not
+  just the plumbing.
+- [ ] Size cap (short-circuits the decode loop), filename sanitization, and per-part
+  malformed-input handling are enforced and tested.
 - [ ] Empty-body emails that carry attachments are processed, not dropped.
 - [ ] Outgoing multiple `--file` flags attach multiple files (CLI fix + test).
 - [ ] Tests pass (`/do-test`).
@@ -423,7 +541,7 @@ bridge module itself.
 
 - **Builder (inbound-parse)**
   - Name: `inbound-parse-builder`
-  - Role: `_extract_attachments`, `parse_email_message` changes, empty-body guard, persistence + vault mirror
+  - Role: `_extract_attachment_metadata` (pure) + `_persist_attachments` (poll-loop-only), `parse_email_message` changes, empty-body guard, vault mirror
   - Agent Type: builder
   - Resume: true
 
@@ -451,16 +569,18 @@ bridge module itself.
   - Agent Type: documentarian
   - Resume: true
 
-### 1. Inbound extraction + persistence
+### 1. Inbound metadata extraction (pure) + persistence (poll-loop-only)
 - **Task ID**: build-inbound-parse
 - **Depends On**: none
 - **Validates**: tests/unit/test_email_bridge.py, tests/integration/test_email_bridge.py
 - **Assigned To**: inbound-parse-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `_extract_attachments(msg, message_id)`: walk MIME, sanitize filenames, enforce `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES`, write bytes to `data/media/email-attachments/{msgid_hash}/`, per-part try/except.
-- Wire it into `parse_email_message`; add `attachments` to the returned dict; relax the empty-body guard for attachment-only emails.
-- Add the fire-and-forget vault mirror to `~/work-vault/email-attachments/`.
+- Add `_extract_attachment_metadata(msg)` (PURE — no disk write): walk MIME, sanitize filenames, report declared `size`, return metadata dicts `{filename, content_type, size, path=None}`, per-part try/except. Call it inside `parse_email_message` and add `attachments` to the returned dict.
+- Add `_persist_attachments(parsed)` (SIDE-EFFECTING): re-walk the message, compute the stable storage key (`message_id or f"{from_addr}:{subject}:{int(timestamp)}"`, else `uuid4().hex`), enforce `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES` by short-circuiting the decode loop (+`EMAIL_ATTACHMENT_MAX_PARTS`), write bytes to `data/media/email-attachments/{key_hash}/`, and mutate each metadata dict's `path` in place. Include the fire-and-forget vault mirror to `~/work-vault/email-attachments/` (keyed with the same stable key).
+- Wire `_persist_attachments(parsed)` into `_email_inbox_loop` gated on `if parsed and parsed.get("attachments")`, placed **after** `parse_email_message` and **before** `_record_history` (so the recorded blob carries the real `path`). Do NOT call `_persist_attachments` from `parse_email_message` or any read path.
+- Relax the lines-197-199 empty-body guard so an email with attachments but no text body is still returned (drop only when there is neither body nor attachment).
+- Test that `parse_email_message` writes no files (paths stay `None`) — the C1 read-safety assertion.
 
 ### 2. History cache + read output + session context
 - **Task ID**: build-history-context
@@ -469,8 +589,10 @@ bridge module itself.
 - **Assigned To**: history-context-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `attachments` to the `_record_history` blob (metadata only); back-compat read as `[]`.
+- Add `attachments` to the `_record_history` blob (metadata only, `path` populated by Task 1's `_persist_attachments` which already ran); back-compat read as `[]`.
+- Fix the empty-`Message-ID` history gap: when `message_id` is falsy, synthesize the same stable key (`message_id or f"{from_addr}:{subject}:{int(timestamp)}"`, else `uuid4().hex`) as the Redis blob/sorted-set key so attachment-only emails surface in read output (the blob still stores the real `message_id` field).
 - Project `attachments` in `get_recent_emails`/`search_history`/`_hydrate`.
+- Add `"attachments": parsed.get("attachments", [])` to `_imap_fallback_fetch`'s result dicts (C2 — cache-miss read path), so `path=None` metadata still appears.
 - Set `extra_context["email_attachments"]` in `_process_inbound_email`.
 
 ### 3. Outgoing multi-file CLI fix
@@ -515,7 +637,10 @@ bridge module itself.
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Attachments wired into context | `grep -n "email_attachments" bridge/email_bridge.py` | output contains email_attachments |
-| Extractor exists | `grep -n "_extract_attachments" bridge/email_bridge.py` | output contains _extract_attachments |
+| Metadata extractor exists (pure) | `grep -n "_extract_attachment_metadata" bridge/email_bridge.py` | output contains _extract_attachment_metadata |
+| Persist helper exists + poll-loop-gated | `grep -n "_persist_attachments" bridge/email_bridge.py` | appears in both the def and the `_email_inbox_loop` call site |
+| parse_email_message stays pure | `grep -n "_persist_attachments\|vault" bridge/email_bridge.py` | no `_persist_attachments` / vault-mirror call inside `parse_email_message` (manual confirm of the C1 split) |
+| Fallback read projects attachments | `grep -n "attachments" tools/valor_email.py` | `_imap_fallback_fetch` result dict includes attachments |
 | Multi-file outgoing | `grep -n "action=\"append\"" tools/valor_email.py` | output contains action="append" |
 
 ## Critique Results
