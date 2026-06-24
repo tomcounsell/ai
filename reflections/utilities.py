@@ -1,7 +1,11 @@
 """
-reflections/utils.py — Shared helpers for all reflection callables.
+reflections/utilities.py — Shared helpers for all reflection callables.
 
-All helpers are pure functions with no shared mutable state.
+Genuinely shared logic only: ``load_local_projects`` (5+ callers),
+``run_per_project_audit`` (the per-project audit harness), ``run_llm_reflection``
+(wraps the Anthropic SDK + model config), and the ignore/confidence/log-parsing
+helpers used across audit reflections. All helpers are pure functions with no
+shared mutable state.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("reflections.utils")
+logger = logging.getLogger("reflections.utilities")
 
 PROJECT_ROOT = Path(__file__).parent.parent
 AI_ROOT = PROJECT_ROOT

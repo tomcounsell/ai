@@ -30,7 +30,7 @@ def test_legacy_code_scan_aggregates_two_repos(tmp_path):
     projects = _two_projects(tmp_path)
 
     with (
-        patch("reflections.utils.load_local_projects", return_value=projects),
+        patch("reflections.utilities.load_local_projects", return_value=projects),
         patch("subprocess.run") as mock_run,
     ):
         mock_run.return_value = MagicMock(returncode=0, stdout="file.py:1:TODO: x\n", stderr="")
@@ -62,7 +62,7 @@ def test_skills_audit_aggregates_two_repos(tmp_path):
     import json
 
     with (
-        patch("reflections.utils.load_local_projects", return_value=projects),
+        patch("reflections.utilities.load_local_projects", return_value=projects),
         patch("subprocess.run") as mock_run,
     ):
         mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(fake_audit_data))
@@ -92,5 +92,5 @@ def test_hooks_audit_aggregates_two_repos(tmp_path):
 def run_hooks_audit_with_mock(projects):
     from reflections.auditing import run_hooks_audit
 
-    with patch("reflections.utils.load_local_projects", return_value=projects):
+    with patch("reflections.utilities.load_local_projects", return_value=projects):
         return run_hooks_audit()

@@ -48,7 +48,7 @@ def assert_valid_result(result: dict, expected_status: str = "ok") -> None:
 
 
 # ============================================================
-# reflections.utils
+# reflections.utilities
 # ============================================================
 
 
@@ -57,7 +57,7 @@ class TestReflectionsUtils:
 
     def test_load_local_projects_returns_list(self, tmp_path):
         """load_local_projects() returns a list (possibly empty)."""
-        from reflections.utils import load_local_projects
+        from reflections.utilities import load_local_projects
 
         config = {"projects": {"test": {"working_directory": str(tmp_path)}}}
         import json
@@ -69,7 +69,7 @@ class TestReflectionsUtils:
             return str(config_file) if k == "PROJECTS_CONFIG_PATH" else d
 
         with (
-            patch("reflections.utils.AI_ROOT", tmp_path),
+            patch("reflections.utilities.AI_ROOT", tmp_path),
             patch("os.environ.get", side_effect=_env_get),
         ):
             projects = load_local_projects()
@@ -77,14 +77,14 @@ class TestReflectionsUtils:
 
     def test_is_ignored_match(self):
         """is_ignored() returns True when pattern matches an ignore entry."""
-        from reflections.utils import is_ignored
+        from reflections.utilities import is_ignored
 
         entries = [{"pattern": "redis connection", "ignored_until": "", "reason": ""}]
         assert is_ignored("redis connection timeout", entries) is True
 
     def test_is_ignored_no_match(self):
         """is_ignored() returns False when pattern doesn't match."""
-        from reflections.utils import is_ignored
+        from reflections.utilities import is_ignored
 
         entries = [{"pattern": "redis connection", "ignored_until": "", "reason": ""}]
         assert is_ignored("unrelated bug pattern", entries) is False
@@ -119,15 +119,15 @@ class TestReflectionsUtils:
     )
     def test_is_high_confidence_gate(self, reflection, expected):
         """Gate requires category == 'code_bug' AND (prevention OR pattern>=10)."""
-        from reflections.utils import is_high_confidence
+        from reflections.utilities import is_high_confidence
 
         assert is_high_confidence(reflection) is expected
 
     def test_load_ignore_entries_empty_redis(self):
         """load_ignore_entries() returns empty list when model unavailable."""
-        from reflections.utils import load_ignore_entries
+        from reflections.utilities import load_ignore_entries
 
-        with patch("reflections.utils.logger"):
+        with patch("reflections.utilities.logger"):
             with patch("models.reflections.ReflectionIgnore") as mock_ri:
                 mock_ri.get_active.side_effect = Exception("redis down")
                 result = load_ignore_entries()
@@ -148,7 +148,7 @@ class TestMaintenanceCallables:
 
         with (
             patch(
-                "reflections.utils.load_local_projects",
+                "reflections.utilities.load_local_projects",
                 return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
             ),
             patch("subprocess.run") as mock_run,
@@ -166,7 +166,7 @@ class TestMaintenanceCallables:
 
         with (
             patch(
-                "reflections.utils.load_local_projects",
+                "reflections.utilities.load_local_projects",
                 return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
             ),
             patch("subprocess.run") as mock_run,
@@ -280,7 +280,7 @@ class TestAuditingCallables:
 
         # tmp_path has no .claude/skills/.../audit_skills.py — skip_if hits, no findings
         with patch(
-            "reflections.utils.load_local_projects",
+            "reflections.utilities.load_local_projects",
             return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
         ):
             result = run_async(run_skills_audit())
@@ -293,7 +293,7 @@ class TestAuditingCallables:
         from reflections.auditing import run_hooks_audit
 
         with patch(
-            "reflections.utils.load_local_projects",
+            "reflections.utilities.load_local_projects",
             return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
         ):
             result = run_async(run_hooks_audit())
@@ -335,7 +335,7 @@ class TestAuditingCallables:
         from reflections.auditing import run_pr_review_audit
 
         with (
-            patch("reflections.auditing.load_local_projects", return_value=[]),
+            patch("reflections.audits.pr_review_audit.load_local_projects", return_value=[]),
             patch("models.reflections.PRReviewAudit") as mock_pra,
         ):
             mock_pra.last_successful_run.return_value = None
@@ -355,7 +355,7 @@ class TestTaskManagementCallables:
         """run_task_management() returns valid dict with no projects."""
         from reflections.task_management import run_task_management
 
-        with patch("reflections.task_management.load_local_projects", return_value=[]):
+        with patch("reflections.audits.task_backlog_check.load_local_projects", return_value=[]):
             result = run_async(run_task_management())
         assert_valid_result(result)
 
@@ -363,7 +363,7 @@ class TestTaskManagementCallables:
         """run_principal_staleness() flags missing PRINCIPAL.md."""
         from reflections.task_management import run_principal_staleness
 
-        with patch("reflections.task_management.PROJECT_ROOT", tmp_path):
+        with patch("reflections.audits.principal_staleness.PROJECT_ROOT", tmp_path):
             result = run_async(run_principal_staleness())
         assert_valid_result(result)
         assert "does not exist" in result["summary"]
@@ -377,7 +377,7 @@ class TestTaskManagementCallables:
         principal = config_dir / "PRINCIPAL.md"
         principal.write_text("# Principal\n\nStrategic context.")
 
-        with patch("reflections.task_management.PROJECT_ROOT", tmp_path):
+        with patch("reflections.audits.principal_staleness.PROJECT_ROOT", tmp_path):
             result = run_async(run_principal_staleness())
         assert_valid_result(result)
         assert result["findings"] == []  # Fresh file, no warning

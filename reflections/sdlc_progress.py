@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from reflections.utils import run_per_project_audit
+from reflections.utilities import run_per_project_audit
 
 logger = logging.getLogger("reflections.sdlc_progress")
 

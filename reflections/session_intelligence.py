@@ -17,7 +17,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from reflections.utils import (
+from reflections.utilities import (
     CORRECTION_PATTERNS,
     has_existing_github_work,
     is_high_confidence,
