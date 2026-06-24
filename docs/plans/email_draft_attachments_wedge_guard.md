@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-06-24
 tracking: https://github.com/tomcounsell/ai/issues/1775
-last_comment_id:
+last_comment_id: 4787902324
 ---
 
 # Email Draft Attachments + Attachment-Wedge Hardening (gws adoption decision)
