@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -42,32 +42,63 @@ is lopsided: the agent can send files but cannot receive them.
 
 ## Freshness Check
 
-**Baseline commit:** `ce1c852d` (`git rev-parse HEAD`)
+**Original baseline commit:** `ce1c852d`
+**Refresh baseline commit:** `b045c361` (re-verified 2026-06-24)
 **Issue filed at:** 2026-06-04T14:35:22Z
-**Disposition:** Unchanged
+**Disposition:** Minor drift — line numbers moved; all claims still hold.
 
-**File:line references re-verified:**
-- `bridge/email_bridge.py:139-172` — `_extract_body()` skips `attachment` parts — still holds.
-- `bridge/email_bridge.py:175-215` — `parse_email_message()` returns no attachments field — still holds.
-- `bridge/email_bridge.py:334-392` — `_record_history()` blob has a fixed field set, no attachments — still holds.
-- `bridge/email_bridge.py:937-948` — inbound `extra_context` has no `email_attachments` — still holds.
-- `tools/email_history/__init__.py:135-150` — `get_recent_emails()` projects a fixed field set — still holds.
-- `tools/valor_email.py:343-362` — outgoing `--file` is a single arg (multi-file does NOT work today) — still holds.
-- `bridge/media.py:285-322` / `bridge/telegram_bridge.py:799-843` — Telegram persists inbound files to the filesystem (`data/media/`, then `~/work-vault/telegram-attachments/`) — still holds; this is the storage precedent.
+**File:line references re-verified (current line numbers at `b045c361`):**
+- `bridge/email_bridge.py:139-172` — `_extract_body()` walks the MIME tree and at
+  line 149 skips any non-`text/plain` part / `attachment`-disposition part — still
+  holds. Inbound attachment bytes are still read and discarded.
+- `bridge/email_bridge.py:175-216` — `parse_email_message()` returns no attachments
+  field — still holds. The empty-body guard that would drop attachment-only emails
+  is now at **lines 197-199** (was "line 197"); update task references accordingly.
+- `bridge/email_bridge.py:334` — `_record_history()` blob has a fixed field set, no
+  attachments — still holds (function start drifted from 334 region; signature
+  unchanged).
+- `bridge/email_bridge.py:965-975` — inbound `extra_context` build (was cited
+  `937-948`). The customer-service auto-reply layer (#1575) added `customer_id` and
+  a few `email_*` fields to this dict, but the insertion point for
+  `email_attachments` is unchanged and the addition remains purely additive.
+- `bridge/email_bridge.py:1112-1119` — `_email_inbox_loop` calls
+  `parse_email_message` then `_record_history`/`_record_thread` then
+  `_process_inbound_email` (critique C1's `_persist_attachments` insertion point; was
+  cited `~1085`). Structure intact.
+- `tools/email_history/__init__.py:55-216` — `_hydrate` / `get_recent_emails` (94) /
+  `search_history` (155) project a fixed field set — still holds.
+- `tools/valor_email.py:522` — outgoing `--file` is a single arg `add_argument`
+  (multi-file does NOT work today) — still holds.
+- `tools/valor_email.py:106` — `_imap_fallback_fetch` re-parses raw IMAP and
+  hand-shapes result dicts (critique C1/C2 concern) — still holds; the fallback path
+  still bypasses the `email_history` projections.
+- `bridge/media.py` / `bridge/telegram_bridge.py` — Telegram persists inbound files
+  to the filesystem (`data/media/`, then `~/work-vault/telegram-attachments/`) — still
+  holds; this is the storage precedent.
 
 **Cited sibling issues/PRs re-checked:**
 - #1067 (valor-email CLI) — closed/merged; established the outbox + history-cache architecture this plan extends.
 - #1297 (Telegram media enrichment) — closed; confirms the filesystem-storage + work-vault-ingest pattern for inbound media.
 - #1161 (markitdown ingestion) — closed; `valor-ingest` + KnowledgeWatcher auto-index anything dropped under `~/work-vault/`, which the vault-mirror step reuses.
 
-**Commits on main since issue was filed (touching referenced files):** None. The
-most recent email-bridge commits (`#1093` customer resolver, `bfa0b09c` IMAP
-timeout, `#1095/#1144` relay shim removal) all predate the issue.
+**Commits on main since the original baseline (touching referenced files):** Two,
+both additive and non-conflicting:
+- `0065527c` — Email customer-service auto-reply layer (#1575, shadow-mode Phase 1).
+  Added the `customer_id` resolver and extra `email_*` fields to the inbound
+  `extra_context` block (now lines 965-975) and BYOB-inference branches before it.
+  Does NOT touch the attachment-discard behavior, the parse/record/context shape, or
+  the storage strategy. The plan's `email_attachments` addition slots in cleanly
+  alongside `customer_id`.
+- `dd926192` — PM/Dev → Eng role merge (#1633/#1691). Mechanical `session_type`
+  refactor; no change to attachment-relevant code paths.
 
 **Active plans in `docs/plans/` overlapping this area:** None touching the email
 attachment path.
 
-**Notes:** All premises hold against `ce1c852d`. No drift.
+**Notes:** All premises hold. The only material change since the original critique
+is line-number drift from the customer-service layer; the design, integration points,
+and all seven critique concerns (C1-C5, N1-N2) remain valid and unaddressed-by-others.
+No major drift; no scope change; the issue is NOT already fixed.
 
 ## Prior Art
 
@@ -496,7 +527,7 @@ notes that BUILD must honor. Nits N1–N2 are optional polish.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Operator, Adversary | **C1: `read`-time disk writes.** Persistence + vault mirror live inside `parse_email_message`, which is also called by `tools/valor_email.py:_imap_fallback_fetch` on a cache-miss `valor-email read`. A read-only CLI read would write bytes to disk and fire the vault mirror — a write side-effect on a read path, possibly double-persisting. | Task 1 (inbound-parse) | Split into `_extract_attachment_metadata(msg)` (pure: filename/content-type/size, called inside `parse_email_message`) and `_persist_attachments(parsed, message_id)` (writes bytes + vault mirror). Call `_persist_attachments` ONLY from `_email_inbox_loop` (~`bridge/email_bridge.py:1085`) after parse returns, gated on `if parsed and parsed.get("attachments")`. On the fallback read path, `path` is `None` (bytes never persisted) — document that `path` is populated only for poll-loop-ingested messages. |
+| CONCERN | Operator, Adversary | **C1: `read`-time disk writes.** Persistence + vault mirror live inside `parse_email_message`, which is also called by `tools/valor_email.py:_imap_fallback_fetch` on a cache-miss `valor-email read`. A read-only CLI read would write bytes to disk and fire the vault mirror — a write side-effect on a read path, possibly double-persisting. | Task 1 (inbound-parse) | Split into `_extract_attachment_metadata(msg)` (pure: filename/content-type/size, called inside `parse_email_message`) and `_persist_attachments(parsed, message_id)` (writes bytes + vault mirror). Call `_persist_attachments` ONLY from `_email_inbox_loop` (~`bridge/email_bridge.py:1113-1119`, the `parse_email_message` → `_record_history` block) after parse returns, gated on `if parsed and parsed.get("attachments")`. On the fallback read path, `path` is `None` (bytes never persisted) — document that `path` is populated only for poll-loop-ingested messages. |
 | CONCERN | Skeptic, User | **C2: Read-output misses the IMAP fallback path.** Attachment exposure is scoped to `tools/email_history/` projections, but `valor-email read` falls back to `_imap_fallback_fetch` (re-parsing raw IMAP) when the cache is empty. Its result dicts are hand-shaped in the CLI, so attachments would be absent there. | Task 2 (history-context) | In `_imap_fallback_fetch`, the `results.append({...})` block must add `"attachments": parsed.get("attachments", [])`. Test BOTH cache-hit (`get_recent_emails`) and cache-miss (`_imap_fallback_fetch`) read paths project the field. |
 | CONCERN | Adversary | **C3: Empty/missing `Message-ID` breaks the storage subdir key.** `message_id` can be empty (providers omit it; `_record_history` guards `if not message_id`). With an empty Message-ID, `{msgid_hash}` collapses to a constant, so attachments from ALL Message-ID-less emails collide into one subdir and overwrite across messages. | Task 1 (inbound-parse) | Compute `key = message_id or f"{from_addr}:{subject}:{int(timestamp)}"` before hashing, OR generate a `uuid4().hex` subdir when `message_id` is falsy. Distinct from Risk 3 (same-message dupes via index-suffix); this is cross-message collision. Apply the same fallback to the vault target name (see C5). |
 | CONCERN | Adversary, Operator | **C4: Size cap is post-decode only.** `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES` bounds persisted bytes, but each part is `get_payload(decode=True)`'d into RAM before the cap rejects it. A multipart bomb forces full base64-decode of every part; `IMAP_MAX_BATCH=20` compounds it. | Task 1 (inbound-parse) | Keep the SINGLE cumulative knob (per PM Open Q1 — no per-file cap). But make the cap short-circuit the `walk()` loop: maintain a running total, and once it would exceed `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES`, stop decoding further parts (mark `truncated: true`) rather than decoding-then-skipping. Estimate from encoded `len(part.get_payload())` before `decode=True` where possible so an oversized part is rejected pre-decode. Add `EMAIL_ATTACHMENT_MAX_PARTS` count cap as a cheap bomb guard (default generous). |
