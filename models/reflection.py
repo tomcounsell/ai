@@ -7,7 +7,7 @@ are gone.
 
 The class exposes the legacy ``mark_started`` / ``mark_completed`` / ``mark_skipped``
 API surface so existing callers (``agent/reflection_scheduler.py``,
-``reflections/pm_audio_briefing/__init__.py``) keep working — but ``mark_completed``
+``reflections/pm_briefings/__init__.py``) keep working — but ``mark_completed``
 now writes a ``ReflectionRun`` row in addition to updating ``last_run_summary``,
 ``failure_count_consecutive`` (with dead-letter escalation), and the rolling
 cost / token totals.
