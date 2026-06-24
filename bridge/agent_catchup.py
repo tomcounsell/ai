@@ -94,6 +94,8 @@ class ThreadMessage:
     sender_name: str
     sender_id: int | None
     date: datetime
+    reply_to_msg_id: int | None = None  # threaded reply target, None if top-level
+    reply_to_sender: str | None = None  # sender name of the replied-to message, if known
 
 
 @dataclass
@@ -132,9 +134,11 @@ def _build_judge_prompt(transcript: str, inbound_text: str, inbound_id: int) -> 
     """Render the judge prompt for one inbound message against the thread."""
     return (
         "You are judging whether a specific inbound human message in a Telegram "
-        "thread has been ANSWERED by Valor (an AI agent).\n\n"
+        "GROUP CHAT has been ANSWERED by Valor (an AI agent).\n\n"
         "Valor's own messages are tagged 'Valor:'. They are the ground truth for "
         "what has actually been said in the chat.\n\n"
+        "Messages tagged '[replying to X]' are threaded replies TO that person, "
+        "NOT to Valor.\n\n"
         "Recent thread (oldest first):\n"
         f"{transcript}\n\n"
         f"The message in question (id={inbound_id}):\n"
@@ -142,13 +146,17 @@ def _build_judge_prompt(transcript: str, inbound_text: str, inbound_id: int) -> 
         "Classify with EXACTLY one of these labels:\n"
         "- ANSWERED = Valor already replied to this message in the thread, OR the "
         "message needs no reply.\n"
-        "- UNANSWERED_NEEDS_REPLY = this is a genuine question/request that Valor "
-        "has NOT yet replied to and clearly should.\n"
-        "- UNANSWERED_NO_REPLY_NEEDED = no Valor reply yet, but none is warranted "
-        "(acknowledgment, social chatter, directed at someone else).\n\n"
-        "Be CONSERVATIVE: only choose UNANSWERED_NEEDS_REPLY when you are confident "
-        "a reply is genuinely missing and genuinely needed. When in doubt, choose "
-        "ANSWERED.\n\n"
+        "- UNANSWERED_NEEDS_REPLY = this is a direct question or request addressed "
+        "TO Valor (e.g. @valorengels, a reply to Valor's own message, or a general "
+        "group question Valor should clearly answer) that Valor has NOT yet replied to.\n"
+        "- UNANSWERED_NO_REPLY_NEEDED = no Valor reply yet, but none is warranted. "
+        "Use this for: reactions/acknowledgments ('nice!', 'interesting'), messages "
+        "between other participants, messages replying to someone other than Valor, "
+        "or side conversations Valor was not part of.\n\n"
+        "IMPORTANT: This is a group chat. Most messages are between human participants "
+        "and do NOT require Valor to respond. Only choose UNANSWERED_NEEDS_REPLY when "
+        "the message is clearly directed at Valor specifically.\n"
+        "Be CONSERVATIVE: when in doubt, choose ANSWERED.\n\n"
         "Reply with ONLY one of: ANSWERED, UNANSWERED_NEEDS_REPLY, "
         "UNANSWERED_NO_REPLY_NEEDED."
     )
@@ -320,6 +328,8 @@ async def read_thread(client, entity, lookback: timedelta | None = None) -> list
     raw = await client.get_messages(entity, limit=MAX_MESSAGES_PER_CHAT)
 
     out: list[ThreadMessage] = []
+    # Build an id→sender index as we go so reply_to_sender can be filled cheaply.
+    id_to_sender: dict[int, str] = {}
     for m in raw:
         if m.date < cutoff:
             break  # get_messages returns newest-first; older than cutoff → stop.
@@ -334,6 +344,20 @@ async def read_thread(client, entity, lookback: timedelta | None = None) -> list
                 sender = None
             sender_name = getattr(sender, "first_name", None) or "Unknown"
             sender_id = getattr(sender, "id", None)
+
+        # Threaded reply context: Telethon stores reply_to as a MessageReplyHeader.
+        reply_to_msg_id: int | None = None
+        reply_to_sender: str | None = None
+        try:
+            reply_header = getattr(m, "reply_to", None)
+            if reply_header is not None:
+                reply_to_msg_id = getattr(reply_header, "reply_to_msg_id", None)
+                if reply_to_msg_id is not None:
+                    reply_to_sender = id_to_sender.get(reply_to_msg_id)
+        except Exception:
+            pass
+
+        id_to_sender[m.id] = sender_name
         out.append(
             ThreadMessage(
                 message_id=m.id,
@@ -342,18 +366,34 @@ async def read_thread(client, entity, lookback: timedelta | None = None) -> list
                 sender_name=sender_name,
                 sender_id=sender_id,
                 date=m.date,
+                reply_to_msg_id=reply_to_msg_id,
+                reply_to_sender=reply_to_sender,
             )
         )
 
     out.reverse()  # oldest-first
+    # Second pass: fill reply_to_sender for any reply_to_msg_id not yet resolved
+    # (the raw list is newest-first so earlier messages appear later in iteration).
+    full_index = {m.message_id: m.sender_name for m in out}
+    for m in out:
+        if m.reply_to_msg_id is not None and m.reply_to_sender is None:
+            m.reply_to_sender = full_index.get(m.reply_to_msg_id)
     return out
 
 
 def _render_transcript(thread: list[ThreadMessage]) -> str:
-    """Render a thread as a 'Sender: text' transcript for the judge prompt."""
+    """Render a thread as a 'Sender: text' transcript for the judge prompt.
+
+    When a message is a threaded reply to another participant, the prefix is
+    annotated with ``[replying to X]`` so the judge can see cross-participant
+    side conversations clearly.
+    """
     lines = []
     for m in thread:
         who = _SENDER_VALOR if m.is_valor else m.sender_name
+        if m.reply_to_msg_id is not None and not m.is_valor:
+            reply_target = m.reply_to_sender or f"msg#{m.reply_to_msg_id}"
+            who = f"{who} [replying to {reply_target}]"
         lines.append(f"{who}: {m.text[:_MAX_MSG_CHARS]}")
     return "\n".join(lines)
 
