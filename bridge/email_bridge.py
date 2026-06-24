@@ -269,6 +269,28 @@ def _is_attachment_part(part: email_lib.message.Message) -> bool:
         return False
 
 
+def _body_references_attachments(text: str | None) -> bool:
+    """Return True if the email body appears to reference attachments.
+
+    Uses a conservative regex over common attachment-reference phrases.
+    Total function: returns False for empty string or None, never raises.
+    """
+    import re
+
+    if not text:
+        return False
+    try:
+        return bool(
+            re.search(
+                r"\b(attach(ed|ment|ments)?|see attached|enclosed|find attached)\b",
+                text,
+                re.IGNORECASE,
+            )
+        )
+    except Exception:
+        return False
+
+
 def _extract_attachment_metadata(
     msg: email_lib.message.Message,
 ) -> tuple[list[dict], bool]:
@@ -334,6 +356,7 @@ def _extract_attachment_metadata(
             index += 1
         except Exception as e:
             logger.warning(f"[email] Skipping malformed attachment part: {e}")
+            truncated = True
             continue
 
     return attachments, truncated
@@ -1279,6 +1302,23 @@ async def _process_inbound_email(
     _email_attachments = [
         _public_attachment(a) for a in (parsed.get("attachments") or []) if a.get("path")
     ]
+
+    # Wedge guard: if the body references attachments but none (or only some) were
+    # recovered, surface that explicitly so the agent can ask the sender to resend.
+    # Inform-not-block policy (see #1775); full injection inspection deferred to #1630.
+    if _body_references_attachments(body) and (
+        not _email_attachments or parsed.get("attachments_truncated")
+    ):
+        # Inform the agent of unrecoverable/truncated attachments — agent uses context
+        # to ask sender to resend.
+        # Policy: inform-not-block (see #1775); full injection inspection deferred to #1630.
+        extra_context["attachments_unrecoverable"] = True
+        extra_context["attachments_truncated"] = bool(parsed.get("attachments_truncated"))
+        extra_context["attachments_recovered_count"] = len(_email_attachments)
+        # attachments_referenced (bool) signals body references attachments without a precise count.
+        # A real referenced-count is deferred to when parse-time extraction is implemented (#1630).
+        extra_context["attachments_referenced"] = True
+
     if _email_attachments:
         extra_context["email_attachments"] = _email_attachments
 

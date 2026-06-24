@@ -24,7 +24,7 @@ IMAP inbox (valor@yuda.me)
 | `bridge/email_relay.py` | Async drain of `email:outbox:*` payloads via SMTP; atomic LPOP + requeue-with-counter + DLQ after `MAX_EMAIL_RELAY_RETRIES`; heartbeat key `email:relay:last_poll_ts` for liveness probing. Runs inside `run_email_bridge()` via `asyncio.gather`. |
 | `bridge/email_dead_letter.py` | Dead letter queue for failed SMTP sends |
 | `bridge/routing.py` | `find_project_for_email()`, `build_email_to_project_map()`, `get_known_email_search_terms()` |
-| `tools/valor_email.py` | CLI entry point (`valor-email read / send / threads`) |
+| `tools/valor_email.py` | CLI entry point (`valor-email read / send / draft / threads`) |
 | `tools/email_history/` | Pure-Redis readers for the history cache (`get_recent_emails`, `search_history`, `list_threads`) |
 | `agent/agent_session_queue.py` | Transport-keyed callbacks via `register_callbacks(transport=...)` and `_resolve_callbacks()`; `extra_context_overrides` parameter |
 
@@ -299,7 +299,9 @@ Or via the service script:
 
 ## Design Decisions
 
-**stdlib only.** `imaplib`, `smtplib`, and `email` from the Python standard library — no third-party dependencies. This keeps the email bridge installable anywhere Python runs.
+**gws adoption decision (issue #1775).** `gws` (Google Workspace CLI) is adopted only for the **agent/operator-invoked outbound draft path** (`valor-email draft`). Inbound email stays on the IMAP walk (`imaplib`, stdlib only). Routing inbound through `gws` was considered and rejected: it would duplicate the IMAP poll loop, fight the Redis history cache, and is impossible headless (gws requires interactive OAuth that the bridge process cannot perform). The outbound draft path is invoked by the agent/operator (Bash tool), so it runs in a context where `gws auth login` can have been done once interactively. See "Auth requirement" under "Draft with attachment" above.
+
+**stdlib only (inbound + SMTP outbound).** `imaplib`, `smtplib`, and `email` from the Python standard library — no third-party dependencies for the bridge itself. This keeps the email bridge installable anywhere Python runs.
 
 **Single inbox, sender-based routing.** All projects share one inbox (`valor@yuda.me`). The sender address determines which project the message is routed to — either by exact contact match or by domain wildcard. This avoids per-project mailboxes while keeping routing deterministic.
 
@@ -358,9 +360,53 @@ When an inbound email carries attachments, the bridge extracts, persists, and su
 - **Filename sanitization** — every filename is reduced to its basename and restricted to `[A-Za-z0-9._-]`; `..`, absolute paths, and traversal sequences collapse to a safe name (with an `attachment_{i}{ext}` fallback). The `{message_id_hash}` subdir contains the result regardless.
 - **Size cap** — `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES` (default 25 MiB) bounds the cumulative decoded bytes per email. The cap short-circuits the decode loop (an oversized part is rejected from its *encoded* length before being base64-decoded into RAM), so a multipart bomb never forces a full decode. Once exceeded, remaining parts are skipped and the message is marked `attachments_truncated: true`.
 - **Parts cap** — `EMAIL_ATTACHMENT_MAX_PARTS` (default 50) caps the number of attachment parts decoded per email as a cheap bomb guard.
-- **Malformed parts** — each part is wrapped in its own try/except: one undecodable part is logged and skipped, never aborting the rest.
+- **Malformed parts** — each part is wrapped in its own try/except: one undecodable part is logged and skipped, never aborting the rest. When a part is skipped (whether from an exception or the cap), `attachments_truncated` is set to `true` so the truncation is observable.
+
+### Attachment-wedge guard
+
+If the email body references attachments (contains phrases like "attached", "attachment", "enclosed", "find attached") but **no files were recoverable** (empty `email_attachments` list) **or only some were recovered** (cap hit, malformed parts — `attachments_truncated: true`), the bridge sets additional keys in `extra_context` before enqueuing the session:
+
+```python
+extra_context["attachments_unrecoverable"] = True     # always set when guard fires
+extra_context["attachments_truncated"] = True/False    # True = partial recovery (cap hit)
+extra_context["attachments_recovered_count"] = M       # how many files did arrive
+extra_context["attachments_referenced"] = True         # body contains attachment-reference phrases
+```
+
+**Policy: inform, not block.** The session is always enqueued — the email is preserved and the agent uses the context to respond gracefully (e.g. "your attachments didn't arrive; please resend") rather than wedging silently with no output. The alternative (hard-block / auto-reply) was rejected as too aggressive — a body that says "attached" colloquially but carries no real attachment would be dropped entirely.
+
+The agent distinguishes:
+- `attachments_unrecoverable=True`, `attachments_recovered_count=0` — zero files arrived; ask sender to resend.
+- `attachments_unrecoverable=True`, `attachments_truncated=True`, `recovered_count=M` — M files arrived but more were referenced; partial recovery, ask for the missing files.
+
+Security: the injected context is a static template (integer counts, boolean flags) — no untrusted body text is echoed. Full pre-execution inspection is tracked under issue #1630.
 
 No on-disk reaper ships with this feature — retention matches the existing Telegram `data/media/` behavior (accepted residual; the vault copy is the durable, indexed record).
+
+### Draft with attachment (`valor-email draft`)
+
+Creates a **real Gmail draft** (visible in the Drafts folder, never sent automatically) with optional file attachments. This is the correct path for the draft-first outbound composition rule — when Valor composes an email with an attachment for human review before sending.
+
+```bash
+valor-email draft --to alice@example.com --subject "Q4 Report" --file ./report.pdf "Please review."
+valor-email draft --to alice@example.com --to bob@example.com --subject "Analysis" --file ./analysis.docx "See attached."
+valor-email draft --to alice@example.com --reply-to "<abc@host>" --file ./reply.pdf "In reply."
+valor-email draft --to alice@example.com --subject "Slides" --file ./deck.pptx --json
+```
+
+**Size routing:**
+- Files whose combined size is ≤ `EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES` (default: 25 MiB, env-overridable) are attached inline to the MIME body.
+- Files above the threshold are uploaded to Google Drive first (`gws drive files create --upload`) and a `webViewLink` is appended to the draft body. Upload-first ordering ensures no draft is created that references a file that failed to upload; on draft-create failure after a successful Drive upload, best-effort cleanup is attempted (`gws drive files delete`) and any orphaned `fileId` is named in the error.
+
+**Implementation:**
+- Uses `gws gmail users drafts create` with a locally-built RFC822 MIME message (`message.raw` = base64url-encoded bytes).
+- The MIME body is built by the single shared `_build_reply_mime()` builder (same builder used by `EmailOutputHandler` and the relay) — there is no second MIME encoder in the codebase.
+- `force_reply_prefix=False` when `--reply-to` is absent (fresh drafts do not get a spurious "Re:" subject prefix); `force_reply_prefix=True` when replying.
+- Passes through the same promise-gate (`cli_check_or_exit`) as `valor-email send` — draft composition is outbound and subject to the same audit surface.
+
+**Auth requirement:** `gws` must be authenticated on the machine running the command (`gws auth login`). If unauthenticated, the command exits non-zero with an actionable error naming the remedy and suggesting `valor-email send --file` as the no-auth alternative for immediate sends.
+
+**Separate constant:** `EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES` is intentionally separate from the inbound `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES`. The inbound constant is a security/DoS knob (how many untrusted bytes to decode into RAM); the outbound constant is Gmail's product limit. Tying them would cause a security-driven reduction of the inbound cap to silently redirect outbound attachments to Drive — a wrong coupling.
 
 ### Send path — always via the relay
 

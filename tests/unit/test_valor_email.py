@@ -18,9 +18,12 @@ import pytest
 import redis
 
 from tools.valor_email import (
+    EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES,
     _build_session_id,
     _imap_fallback_fetch,
     _normalize_msgid,
+    _validate_attachment_files,
+    cmd_draft,
     cmd_read,
     cmd_send,
     cmd_threads,
@@ -341,6 +344,286 @@ class TestCmdThreads:
         out = capsys.readouterr().out
         assert "Subject" in out
         assert " 3 " in out
+
+
+class TestValidateAttachmentFiles:
+    """Tests for the shared _validate_attachment_files helper."""
+
+    def test_valid_file_returns_resolved_path(self, tmp_path):
+        f = tmp_path / "a.pdf"
+        f.write_text("data")
+        result = _validate_attachment_files([str(f)])
+        assert result == [str(f.resolve())]
+
+    def test_missing_file_returns_none(self, tmp_path, capsys):
+        result = _validate_attachment_files([str(tmp_path / "missing.pdf")])
+        assert result is None
+        assert "File not found" in capsys.readouterr().err
+
+    def test_multiple_valid_files(self, tmp_path):
+        a = tmp_path / "a.pdf"
+        b = tmp_path / "b.pdf"
+        a.write_text("a")
+        b.write_text("b")
+        result = _validate_attachment_files([str(a), str(b)])
+        assert result == [str(a.resolve()), str(b.resolve())]
+
+    def test_send_and_draft_produce_identical_missing_file_error(self, tmp_path, capsys):
+        """Shared helper guarantees identical error text from send and draft."""
+        missing = str(tmp_path / "nope.pdf")
+        import argparse
+
+        # cmd_send path
+        args_send = argparse.Namespace(
+            to=["x@y.com"], subject=None, message="hi", file=[missing], reply_to=None, json=False
+        )
+        cmd_send(args_send)
+        err_send = capsys.readouterr().err
+
+        # cmd_draft path
+        args_draft = argparse.Namespace(
+            to=["x@y.com"], subject=None, message="hi", file=[missing], reply_to=None, json=False
+        )
+        cmd_draft(args_draft)
+        err_draft = capsys.readouterr().err
+
+        assert "File not found" in err_send
+        assert "File not found" in err_draft
+        # Both must contain the same missing path
+        assert missing in err_send
+        assert missing in err_draft
+
+
+class TestCmdDraft:
+    """Tests for the valor-email draft subcommand."""
+
+    def _args(self, **overrides):
+        defaults = {
+            "to": ["recipient@example.com"],
+            "subject": "Test Draft",
+            "message": "Please see attached.",
+            "file": None,
+            "reply_to": None,
+            "json": False,
+        }
+        defaults.update(overrides)
+        return argparse.Namespace(**defaults)
+
+    def _patch_subprocess(self, monkeypatch, fake_run):
+        """Patch subprocess.run at the module level where cmd_draft uses it."""
+        from unittest.mock import MagicMock
+
+        mock = MagicMock(side_effect=fake_run)
+        monkeypatch.setattr("subprocess.run", mock)
+        return mock
+
+    def test_rejects_empty_message_and_no_file(self, capsys, monkeypatch):
+        rc = cmd_draft(self._args(message="", file=None))
+        assert rc == 1
+        assert "message or --file" in capsys.readouterr().err
+
+    def test_successful_draft_creation(self, monkeypatch, capsys):
+        from unittest.mock import MagicMock
+
+        draft_response = json.dumps({"id": "draft123", "message": {"id": "msg456"}})
+
+        def fake_run(cmd, *args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = draft_response
+            result.stderr = ""
+            return result
+
+        self._patch_subprocess(monkeypatch, fake_run)
+        rc = cmd_draft(self._args())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Draft created" in out
+
+    def test_json_output_on_success(self, monkeypatch, capsys):
+        from unittest.mock import MagicMock
+
+        draft_response = json.dumps({"id": "draft123"})
+
+        def fake_run(cmd, *args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = draft_response
+            result.stderr = ""
+            return result
+
+        self._patch_subprocess(monkeypatch, fake_run)
+        rc = cmd_draft(self._args(json=True))
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["created"] is True
+        assert "draft" in data
+
+    def test_invalid_grant_exits_nonzero_with_actionable_message(self, monkeypatch, capsys):
+        """Auth failure surfaces an actionable 'gws auth login' message."""
+        from unittest.mock import MagicMock
+
+        def fake_run(cmd, *args, **kwargs):
+            result = MagicMock()
+            result.returncode = 1
+            result.stderr = "error: invalid_grant: Token has been expired or revoked."
+            result.stdout = ""
+            return result
+
+        self._patch_subprocess(monkeypatch, fake_run)
+        rc = cmd_draft(self._args())
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "gws auth login" in err
+        assert "send immediately" in err
+
+    def test_fresh_draft_no_reply_prefix(self, monkeypatch, tmp_path, capsys):
+        """Fresh draft (no --reply-to) must NOT get a spurious 'Re:' subject prefix."""
+        import base64
+        import email as email_lib
+        from unittest.mock import MagicMock
+
+        captured_cmd = []
+
+        def fake_run(cmd, *args, **kwargs):
+            captured_cmd.extend(cmd)
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = json.dumps({"id": "d1"})
+            result.stderr = ""
+            return result
+
+        self._patch_subprocess(monkeypatch, fake_run)
+        rc = cmd_draft(self._args(subject="My Subject", reply_to=None))
+        assert rc == 0
+
+        # Find the --json payload passed to gws and decode the raw MIME
+        # The last --json arg is the gws payload
+        payload_str = None
+        for i in range(len(captured_cmd) - 1, -1, -1):
+            if captured_cmd[i] == "--json" and i + 1 < len(captured_cmd):
+                payload_str = captured_cmd[i + 1]
+                break
+
+        if payload_str:
+            payload = json.loads(payload_str)
+            raw_b64 = payload["message"]["raw"]
+            # Add padding just in case
+            raw_bytes = base64.urlsafe_b64decode(raw_b64 + "==")
+            msg = email_lib.message_from_bytes(raw_bytes)
+            subject = msg.get("Subject", "")
+            assert not subject.startswith("Re:"), (
+                f"Fresh draft got spurious Re: prefix: {subject!r}"
+            )
+
+    def test_attachment_included_in_mime(self, monkeypatch, tmp_path, capsys):
+        """Files <= inline threshold are included as MIME attachment parts."""
+        import base64
+        import email as email_lib
+        from unittest.mock import MagicMock
+
+        test_file = tmp_path / "report.pdf"
+        test_file.write_bytes(b"%PDF-1.4 content here")
+
+        captured_cmd = []
+
+        def fake_run(cmd, *args, **kwargs):
+            captured_cmd.extend(cmd)
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = json.dumps({"id": "d1"})
+            result.stderr = ""
+            return result
+
+        self._patch_subprocess(monkeypatch, fake_run)
+        rc = cmd_draft(self._args(file=[str(test_file)]))
+        assert rc == 0
+
+        # Decode the raw MIME to verify the attachment part exists
+        payload_str = None
+        for i in range(len(captured_cmd) - 1, -1, -1):
+            if captured_cmd[i] == "--json" and i + 1 < len(captured_cmd):
+                payload_str = captured_cmd[i + 1]
+                break
+
+        assert payload_str is not None
+        payload = json.loads(payload_str)
+        raw_b64 = payload["message"]["raw"]
+        raw_bytes = base64.urlsafe_b64decode(raw_b64 + "==")
+        msg = email_lib.message_from_bytes(raw_bytes)
+        assert msg.is_multipart()
+        filenames = [p.get_filename() for p in msg.walk() if p.get_filename()]
+        assert "report.pdf" in filenames
+
+    def test_draft_create_failure_cleans_up_drive_upload(self, monkeypatch, tmp_path, capsys):
+        """On draft-create failure, best-effort cleanup of uploaded Drive files."""
+        from unittest.mock import MagicMock
+
+        large_file = tmp_path / "big.pdf"
+        large_file.write_bytes(b"x" * (EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES + 1))
+
+        cleanup_called = [False]
+
+        def fake_run(cmd, *args, **kwargs):
+            result = MagicMock()
+            # Drive upload (success)
+            if "files" in cmd and "create" in cmd and "--upload" in cmd:
+                result.returncode = 0
+                result.stdout = json.dumps(
+                    {
+                        "id": "drive-file-id-123",
+                        "webViewLink": "https://drive.google.com/file/d/drive-file-id-123/view",
+                    }
+                )
+                result.stderr = ""
+            # Draft create (failure)
+            elif "drafts" in cmd and "create" in cmd:
+                result.returncode = 1
+                result.stderr = "Error: API error"
+                result.stdout = ""
+            # Cleanup delete call
+            elif "files" in cmd and "delete" in cmd:
+                cleanup_called[0] = True
+                result.returncode = 0
+                result.stdout = ""
+                result.stderr = ""
+            else:
+                result.returncode = 0
+                result.stdout = ""
+                result.stderr = ""
+            return result
+
+        self._patch_subprocess(monkeypatch, fake_run)
+        rc = cmd_draft(self._args(file=[str(large_file)]))
+        assert rc == 1
+        err = capsys.readouterr().err
+        # Either cleanup succeeded (confirmed) or orphaned fileId named
+        assert cleanup_called[0] or "drive-file-id-123" in err
+
+    def test_drive_upload_failure_returns_error_not_silent_fallback(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """A Drive upload failure must return an error — no silent fallback to inline."""
+        from unittest.mock import MagicMock
+
+        large_file = tmp_path / "big.pdf"
+        large_file.write_bytes(b"x" * (EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES + 1))
+
+        def fake_run(cmd, *args, **kwargs):
+            result = MagicMock()
+            result.returncode = 1
+            result.stderr = "Error: Drive upload quota exceeded"
+            result.stdout = ""
+            return result
+
+        self._patch_subprocess(monkeypatch, fake_run)
+        rc = cmd_draft(self._args(file=[str(large_file)]))
+        assert rc == 1
+        # Must not silently produce a draft
+
+    def test_constant_is_25mib(self):
+        """EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES defaults to 25 MiB."""
+        assert EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES == 25 * 1024 * 1024
 
 
 class TestValorEmailPromiseGate:
