@@ -20,7 +20,7 @@ IMAP inbox (valor@yuda.me)
 
 | File | Role |
 |------|------|
-| `bridge/email_bridge.py` | IMAP polling loop, email parsing (`parse_email_message` returns `from_addr`, `to_addrs`, `cc_addrs`, `subject`, `body`, `message_id`, `in_reply_to`), sender filtering, `EmailOutputHandler` (reply-all by default), history cache write-through (`_record_history`, `_record_thread`), module-level `_build_reply_mime` with attachment support |
+| `bridge/email_bridge.py` | IMAP polling loop, email parsing (`parse_email_message` returns `from_addr`, `to_addrs`, `cc_addrs`, `subject`, `body`, `message_id`, `in_reply_to`, `attachments`, `attachments_truncated`), inbound attachment extraction + persistence (`_extract_attachment_metadata`, `_persist_attachments`, `_mirror_attachments_to_vault`), sender filtering, `EmailOutputHandler` (reply-all by default), history cache write-through (`_record_history`, `_record_thread`), module-level `_build_reply_mime` with attachment support |
 | `bridge/email_relay.py` | Async drain of `email:outbox:*` payloads via SMTP; atomic LPOP + requeue-with-counter + DLQ after `MAX_EMAIL_RELAY_RETRIES`; heartbeat key `email:relay:last_poll_ts` for liveness probing. Runs inside `run_email_bridge()` via `asyncio.gather`. |
 | `bridge/email_dead_letter.py` | Dead letter queue for failed SMTP sends |
 | `bridge/routing.py` | `find_project_for_email()`, `build_email_to_project_map()`, `get_known_email_search_terms()` |
@@ -211,6 +211,10 @@ IMAP_USER=valor@yuda.me
 IMAP_PASSWORD=<gmail-app-password>
 IMAP_MAX_BATCH=20        # max unseen messages fetched per poll cycle (default: 20)
 
+# Inbound attachments (optional — sane defaults; see "Incoming attachments")
+EMAIL_ATTACHMENT_MAX_TOTAL_BYTES=26214400   # cumulative cap per email (default: 25 MiB)
+EMAIL_ATTACHMENT_MAX_PARTS=50               # max attachment parts decoded per email
+
 # SMTP (outbound)
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
@@ -319,11 +323,12 @@ valor-email read --search "deployment" --since "2 hours ago"
 valor-email send --to alice@example.com --subject "Re: Deploy" "Looks good"
 valor-email send --to alice@example.com --to bob@example.com "CC both"
 valor-email send --to alice@example.com --file ./report.pdf "See attached"
+valor-email send --to alice@example.com --file ./a.pdf --file ./b.csv "Two files"
 valor-email send --to alice@example.com --reply-to "<abc@host>" "Body"
 valor-email threads
 ```
 
-`--to` accepts multiple flags (repeat for each recipient) and comma-separated values (`--to "alice@example.com,bob@example.com"`). All three subcommands accept `--json` for machine-readable output.
+`--to` accepts multiple flags (repeat for each recipient) and comma-separated values (`--to "alice@example.com,bob@example.com"`). `--file` is **repeatable** — pass it once per file to attach multiple files (`--file a.pdf --file b.csv`); each path is validated for existence and readability before enqueue, and the first invalid path fails the send. All three subcommands accept `--json` for machine-readable output.
 
 ### Read path
 
@@ -334,6 +339,28 @@ valor-email threads
 - `--search "term"` — case-insensitive substring match over subject + body.
 
 On cache miss (e.g. daemon hasn't populated the cache yet), the CLI opens a **read-only** IMAP session filtered by known senders (from `get_known_email_search_terms()`) so cross-machine SEEN semantics are preserved and no messages are leaked from another project's policy boundary.
+
+### Incoming attachments
+
+When an inbound email carries attachments, the bridge extracts, persists, and surfaces them so the agent processing the email can open the files — mirroring the Telegram inbound-media pattern (filesystem for bytes, Redis for metadata/paths only).
+
+**Pipeline (`bridge/email_bridge.py`):**
+
+1. **Pure extraction** — `parse_email_message()` calls `_extract_attachment_metadata(msg)`, which walks the MIME tree and returns a metadata dict per attachment part: `{filename, content_type, size, path}` (plus a transient in-memory payload). This step is **side-effect-free** — it never writes to disk, so the read-only `valor-email read` IMAP fallback (which also calls `parse_email_message`) never persists anything (`path` stays `null` on that path).
+2. **Persistence** — the IMAP poll loop (`_email_inbox_loop`) calls `_persist_attachments(parsed)` **only on the poll path**. Bytes are written to `data/media/email-attachments/{message_id_hash}/{sanitized_filename}`. The subdir is keyed by a SHA-256 of the Message-ID; when the Message-ID is empty it falls back to `from_addr:subject:timestamp` so attachments from different Message-ID-less emails never collide. Same-name files within one email are disambiguated with an index suffix (`image.png`, `image_1.png`).
+3. **Vault mirror** — each persisted file is fire-and-forget copied into `~/work-vault/email-attachments/` (target name `{date}_{sender}_{msgid}_{filename}`) so the KnowledgeWatcher indexes it. Every failure is logged and never fatal — a broken vault dir does not prevent disk persistence or session enqueue.
+4. **History + read output** — `_record_history()` stores the attachment **metadata only** (never bytes) in the per-message JSON blob; `valor-email read --json` surfaces the `attachments` array per message. Blobs written before this feature hydrate as `attachments: []` (back-compat).
+5. **Session context** — `_process_inbound_email()` sets `extra_context["email_attachments"]` to the list of readable stored paths + metadata, so the agent sees the files in its prompt context and can open them.
+
+**Empty-body emails** that carry attachments are processed, not dropped (the empty-body guard is relaxed when attachments are present — a file with no text is a legitimate message).
+
+**Guardrails:**
+- **Filename sanitization** — every filename is reduced to its basename and restricted to `[A-Za-z0-9._-]`; `..`, absolute paths, and traversal sequences collapse to a safe name (with an `attachment_{i}{ext}` fallback). The `{message_id_hash}` subdir contains the result regardless.
+- **Size cap** — `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES` (default 25 MiB) bounds the cumulative decoded bytes per email. The cap short-circuits the decode loop (an oversized part is rejected from its *encoded* length before being base64-decoded into RAM), so a multipart bomb never forces a full decode. Once exceeded, remaining parts are skipped and the message is marked `attachments_truncated: true`.
+- **Parts cap** — `EMAIL_ATTACHMENT_MAX_PARTS` (default 50) caps the number of attachment parts decoded per email as a cheap bomb guard.
+- **Malformed parts** — each part is wrapped in its own try/except: one undecodable part is logged and skipped, never aborting the rest.
+
+No on-disk reaper ships with this feature — retention matches the existing Telegram `data/media/` behavior (accepted residual; the vault copy is the durable, indexed record).
 
 ### Send path — always via the relay
 

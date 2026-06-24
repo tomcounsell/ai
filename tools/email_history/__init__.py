@@ -140,6 +140,9 @@ def get_recent_emails(
                     "body": data.get("body", ""),
                     "timestamp": _ts_to_iso(data.get("timestamp")),
                     "in_reply_to": data.get("in_reply_to", ""),
+                    # Attachment metadata (filename/content_type/size/path); old
+                    # blobs written before this field hydrate as [] (back-compat).
+                    "attachments": data.get("attachments", []),
                 }
             )
     except Exception as e:
@@ -211,6 +214,8 @@ def search_history(
                 "body": body,
                 "timestamp": _ts_to_iso(ts),
                 "in_reply_to": data.get("in_reply_to", ""),
+                # Attachment metadata; back-compat blobs hydrate as [].
+                "attachments": data.get("attachments", []),
             }
         )
         if len(results) >= max_results:
