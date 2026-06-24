@@ -33,6 +33,7 @@ import imaplib
 import json
 import os
 import secrets
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -40,6 +41,19 @@ from pathlib import Path
 
 # Shared helper from the Telegram CLI (only piece of shared code, per plan).
 from tools.valor_telegram import parse_since
+
+# Take this with a grain of salt: provisional, tunable default.
+# Maximum total size for inline attachments in a Gmail draft.
+# Gmail's inline cap is 25 MiB; files above this threshold are uploaded to Drive
+# and referenced as a link instead. This is INTENTIONALLY separate from
+# EMAIL_ATTACHMENT_MAX_TOTAL_BYTES (the inbound cap in bridge/email_bridge.py):
+# the inbound cap is a defensive ceiling on untrusted bytes we decode into RAM
+# (a security/DoS knob); the outbound threshold is a Gmail product limit.
+# Tying them would cause a security-driven inbound reduction to silently push
+# outbound files to Drive — a wrong coupling.
+EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES = int(
+    os.environ.get("EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES", str(25 * 1024 * 1024))
+)
 
 _SESSION_ID_PREFIX = "cli"
 
@@ -339,6 +353,28 @@ def _build_session_id() -> str:
     return f"{_SESSION_ID_PREFIX}-{int(time.time())}-{os.getpid()}-{secrets.token_hex(4)}"
 
 
+def _validate_attachment_files(files: list[str]) -> list[str] | None:
+    """Validate a list of file paths for attachment.
+
+    Returns a list of resolved absolute path strings if all files are valid.
+    Prints an error to stderr and returns None if any file is invalid.
+    """
+    resolved = []
+    for file_path in files:
+        p = Path(file_path)
+        if not p.is_file():
+            print(f"Error: File not found: {file_path}", file=sys.stderr)
+            return None
+        try:
+            with p.open("rb"):
+                pass
+        except OSError as e:
+            print(f"Error: Cannot read file {file_path}: {e}", file=sys.stderr)
+            return None
+        resolved.append(str(p.resolve()))
+    return resolved
+
+
 def cmd_send(args: argparse.Namespace) -> int:
     """Enqueue an outbound email payload to the Redis relay.
 
@@ -360,20 +396,10 @@ def cmd_send(args: argparse.Namespace) -> int:
         print("Error: Must provide a message or --file", file=sys.stderr)
         return 1
 
-    attachments = []
-    for file_path in files:
-        p = Path(file_path)
-        if not p.is_file():
-            print(f"Error: File not found: {file_path}", file=sys.stderr)
-            return 1
-        try:
-            # Readability check — fail fast before enqueue
-            with p.open("rb"):
-                pass
-        except OSError as e:
-            print(f"Error: Cannot read file {file_path}: {e}", file=sys.stderr)
-            return 1
-        attachments.append(str(p.resolve()))
+    attachments_result = _validate_attachment_files(files)
+    if attachments_result is None:
+        return 1
+    attachments = attachments_result
 
     in_reply_to = None
     references = None
@@ -434,9 +460,251 @@ def cmd_send(args: argparse.Namespace) -> int:
     else:
         parts = [f"{len(body)} chars"]
         if attachments:
-            parts.append(f"file: {Path(file_path).name}")
+            names = ", ".join(Path(p).name for p in attachments)
+            parts.append(f"file: {names}")
         print(f"Queued ({', '.join(parts)}).")
         print("Check delivery via ./scripts/valor-service.sh email-status (relay heartbeat + DLQ).")
+    return 0
+
+
+# =============================================================================
+# draft
+# =============================================================================
+
+
+def cmd_draft(args: argparse.Namespace) -> int:
+    """Create a Gmail draft with optional attachments via gws.
+
+    Unlike cmd_send (which enqueues to the Redis relay for immediate send),
+    cmd_draft creates a real draft in the user's Gmail Drafts folder for
+    human review before sending. The draft-first rule for outbound composition
+    mandates this path for any email with attachments.
+
+    Size routing:
+        - Files whose combined size <= EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES are
+          attached inline to the draft MIME body.
+        - Files above the threshold are uploaded to Google Drive first (gws
+          drive files create --upload) and the webViewLink is appended to the
+          body. Upload-first ordering: the Drive file is uploaded before the
+          draft is created so that a draft-create failure can attempt cleanup.
+
+    Degradation:
+        When gws is unauthenticated (invalid_grant) or unavailable, the command
+        exits non-zero with an actionable error message. It does NOT silently
+        fall back to immediate send.
+
+    Exit codes:
+        0 on success (draft created).
+        1 on validation failure, gws error, or Drive upload failure.
+    """
+    import base64
+
+    from bridge.email_bridge import _build_reply_mime
+
+    body = args.message or ""
+    files = args.file or []
+
+    if not body and not files:
+        print("Error: Must provide a message or --file", file=sys.stderr)
+        return 1
+
+    # args.to is a list (action="append") — flatten comma-separated entries
+    to_addrs = []
+    for entry in args.to:
+        to_addrs.extend(a.strip() for a in entry.split(",") if a.strip())
+
+    # Validate all attachment files up front — read bytes immediately to close
+    # the TOCTOU window (file deleted between validation and MIME build).
+    file_bytes: dict[str, bytes] = {}
+    if files:
+        for file_path in files:
+            p = Path(file_path).resolve()
+            if not p.is_file():
+                print(f"Error: File not found: {file_path}", file=sys.stderr)
+                return 1
+            try:
+                file_bytes[str(p)] = p.read_bytes()
+            except OSError as e:
+                print(f"Error: Cannot read file {file_path}: {e}", file=sys.stderr)
+                return 1
+
+    session_id = _build_session_id()
+    smtp_user = os.environ.get("SMTP_USER", "")
+
+    # Promise gate — outbound draft is outbound composition; route to audit JSONL.
+    # See docs/features/promise-gate.md
+    from bridge.promise_gate import cli_check_or_exit
+
+    cli_check_or_exit(body, transport="email", session_id=session_id)
+
+    in_reply_to = getattr(args, "reply_to", None)
+    references = in_reply_to
+
+    # Size routing: inline vs Drive-link
+    total_bytes = sum(len(b) for b in file_bytes.values())
+    inline_paths: list[Path] = []
+    drive_paths: list[str] = []
+    drive_file_ids: list[str] = []
+
+    if total_bytes <= EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES:
+        # All files inline
+        inline_paths = [Path(p) for p in file_bytes]
+    else:
+        # Upload oversized files to Drive; inline the rest
+        running = 0
+        for p_str, b in file_bytes.items():
+            if running + len(b) <= EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES:
+                inline_paths.append(Path(p_str))
+                running += len(b)
+            else:
+                drive_paths.append(p_str)
+
+    # Upload Drive files first (upload-first ordering prevents dangling links)
+    drive_links: list[str] = []
+    for drive_path in drive_paths:
+        p = Path(drive_path)
+        result = subprocess.run(
+            [
+                "gws",
+                "drive",
+                "files",
+                "create",
+                "--upload",
+                drive_path,
+                "--json",
+                f'{{"name": "{p.name}"}}',
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            err = result.stderr.strip() or result.stdout.strip()
+            if "invalid_grant" in err or "invalid_grant" in result.stdout:
+                print(
+                    "Error: gws is not authenticated. Run 'gws auth login' to authorize, "
+                    "or use 'valor-email send --file' to send immediately.",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"Error: Drive upload failed for {p.name}: {err}", file=sys.stderr)
+            return 1
+        try:
+            drive_data = json.loads(result.stdout)
+            file_id = drive_data.get("id") or drive_data.get("fileId")
+            link = drive_data.get("webViewLink") or drive_data.get("alternateLink", "")
+            if not file_id:
+                print(
+                    f"Error: Drive upload for {p.name} did not return a file ID.",
+                    file=sys.stderr,
+                )
+                return 1
+            drive_file_ids.append(file_id)
+            drive_links.append(link or f"https://drive.google.com/file/d/{file_id}/view")
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"Error: Could not parse Drive upload response: {e}", file=sys.stderr)
+            return 1
+
+    # Append Drive links to the body
+    full_body = body
+    if drive_links:
+        link_block = "\n\n-- Attachments (too large to embed, stored in Drive) --\n"
+        link_block += "\n".join(drive_links)
+        full_body = full_body + link_block
+
+    # Build MIME via the single shared builder — force_reply_prefix=False for
+    # fresh drafts (no in_reply_to) so subject is preserved verbatim.
+    mime_msg = _build_reply_mime(
+        to_addrs=to_addrs,
+        subject=args.subject or "(no subject)",
+        body=full_body,
+        in_reply_to=in_reply_to,
+        references=references,
+        from_addr=smtp_user,
+        attachments=inline_paths if inline_paths else None,
+        force_reply_prefix=bool(in_reply_to),  # False for fresh drafts
+    )
+
+    # Serialize to base64url for the Gmail API raw field
+    raw_bytes = mime_msg.as_bytes()
+    raw_b64 = base64.urlsafe_b64encode(raw_bytes).decode("ascii")
+    payload_json = json.dumps({"message": {"raw": raw_b64}})
+
+    # Create the draft via gws
+    result = subprocess.run(
+        [
+            "gws",
+            "gmail",
+            "users",
+            "drafts",
+            "create",
+            "--params",
+            '{"userId": "me"}',
+            "--json",
+            payload_json,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        err = result.stderr.strip() or result.stdout.strip()
+        # Best-effort cleanup of any uploaded Drive files
+        cleanup_failures = []
+        for fid in drive_file_ids:
+            cleanup_result = subprocess.run(
+                ["gws", "drive", "files", "delete", "--params", f'{{"fileId": "{fid}"}}'],
+                capture_output=True,
+                text=True,
+            )
+            if cleanup_result.returncode != 0:
+                cleanup_failures.append(fid)
+
+        if "invalid_grant" in err or "invalid_grant" in (result.stdout or ""):
+            print(
+                "Error: gws is not authenticated. Run 'gws auth login' to authorize, "
+                "or use 'valor-email send --file' to send immediately.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Error: Failed to create Gmail draft: {err}", file=sys.stderr)
+
+        if cleanup_failures:
+            print(
+                f"Warning: Could not delete orphaned Drive file(s): {', '.join(cleanup_failures)}. "
+                "Remove them manually at https://drive.google.com",
+                file=sys.stderr,
+            )
+        elif drive_file_ids:
+            print("Drive file(s) cleaned up successfully.", file=sys.stderr)
+
+        return 1
+
+    if args.json:
+        try:
+            draft_data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            draft_data = {"raw": result.stdout}
+        print(
+            json.dumps(
+                {
+                    "created": True,
+                    "draft": draft_data,
+                    "to": to_addrs,
+                    "subject": args.subject or "(no subject)",
+                    "inline_attachments": [str(p) for p in inline_paths],
+                    "drive_links": drive_links,
+                }
+            )
+        )
+    else:
+        parts = []
+        if inline_paths:
+            parts.append(f"{len(inline_paths)} inline attachment(s)")
+        if drive_links:
+            parts.append(f"{len(drive_links)} Drive link(s)")
+        detail = f" ({', '.join(parts)})" if parts else ""
+        print(f"Draft created{detail}. Review it in Gmail before sending.")
+
     return 0
 
 
@@ -557,6 +825,43 @@ def main() -> int:
     threads_parser = subparsers.add_parser("threads", help="List known email threads")
     threads_parser.add_argument("--json", action="store_true", help="JSON output")
 
+    # draft
+    draft_parser = subparsers.add_parser(
+        "draft", help="Create a Gmail draft with optional attachments (review before send)"
+    )
+    draft_parser.add_argument(
+        "--to",
+        required=True,
+        action="append",
+        dest="to",
+        metavar="ADDRESS",
+        help="Recipient email address (repeat for multiple)",
+    )
+    draft_parser.add_argument(
+        "--subject",
+        default=None,
+        help="Subject (default: '(no subject)')",
+    )
+    draft_parser.add_argument("message", nargs="?", default="", help="Body text")
+    draft_parser.add_argument(
+        "--file",
+        "-f",
+        action="append",
+        dest="file",
+        metavar="PATH",
+        help="File to attach; repeat --file for multiple files (absolute or relative path)",
+    )
+    draft_parser.add_argument(
+        "--reply-to",
+        type=_normalize_msgid,
+        default=None,
+        help=(
+            "RFC-2822 Message-ID of the message being replied to "
+            "(e.g. '<abc@host>'; angle brackets optional)."
+        ),
+    )
+    draft_parser.add_argument("--json", action="store_true", help="JSON output")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -567,6 +872,7 @@ def main() -> int:
         "read": cmd_read,
         "send": cmd_send,
         "threads": cmd_threads,
+        "draft": cmd_draft,
     }
     handler = handlers.get(args.command)
     if not handler:

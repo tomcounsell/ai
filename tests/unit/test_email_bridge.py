@@ -1265,3 +1265,151 @@ class TestRecordThread:
         data = _json.loads(raw)
         assert data["message_count"] == 2
         assert set(data["participants"]) == {"alice@x", "bob@x"}
+
+
+# ---------------------------------------------------------------------------
+# Wedge guard: _body_references_attachments + extra_context tagging (#1775)
+# ---------------------------------------------------------------------------
+
+
+class TestBodyReferencesAttachments:
+    """Unit tests for the pure attachment-reference detector."""
+
+    from bridge.email_bridge import _body_references_attachments as _bra
+
+    def test_returns_false_for_none(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments(None) is False
+
+    def test_returns_false_for_empty(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("") is False
+
+    def test_detects_attached(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("Please see the attached report.") is True
+
+    def test_detects_attachment(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("I'm sending the attachment now.") is True
+
+    def test_detects_enclosed(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("Please find enclosed the contract.") is True
+
+    def test_detects_find_attached(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("Find attached the invoice.") is True
+
+    def test_case_insensitive(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("PLEASE SEE ATTACHED.") is True
+
+    def test_no_false_positive_plain_body(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("Let's schedule a meeting for Monday.") is False
+
+    def test_no_crash_on_odd_characters(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        # Must not raise on unusual input
+        result = _body_references_attachments("\x00\xff\n\t" * 100)
+        assert isinstance(result, bool)
+
+
+class TestWedgeGuardExtraContext:
+    """Truth-table tests for the attachments_unrecoverable tagging in _process_inbound_email."""
+
+    def _make_parsed(
+        self,
+        body: str = "Please see attached reports.",
+        attachments: list | None = None,
+        attachments_truncated: bool = False,
+    ) -> dict:
+        return {
+            "from_addr": "sender@example.com",
+            "from_raw": "Sender <sender@example.com>",
+            "to_addrs": ["valor@example.com"],
+            "cc_addrs": [],
+            "subject": "Reports",
+            "body": body,
+            "message_id": "<test@example.com>",
+            "in_reply_to": "",
+            "attachments": attachments if attachments is not None else [],
+            "attachments_truncated": attachments_truncated,
+            "timestamp": 1700000000.0,
+        }
+
+    def _call_guard(self, parsed: dict, monkeypatch) -> dict:
+        """Run just the wedge-guard slice of _process_inbound_email logic."""
+
+        from bridge.email_bridge import _body_references_attachments, _public_attachment
+
+        body = parsed.get("body") or ""
+        _email_attachments = [
+            _public_attachment(a) for a in (parsed.get("attachments") or []) if a.get("path")
+        ]
+        extra_context: dict = {}
+
+        if _body_references_attachments(body) and (
+            not _email_attachments or parsed.get("attachments_truncated")
+        ):
+            extra_context["attachments_unrecoverable"] = True
+            extra_context["attachments_truncated"] = bool(parsed.get("attachments_truncated"))
+            extra_context["attachments_recovered_count"] = len(_email_attachments)
+            extra_context["attachments_referenced_count"] = 1
+
+        if _email_attachments:
+            extra_context["email_attachments"] = _email_attachments
+
+        return extra_context
+
+    def test_case_a_references_empty_list_tagged(self, monkeypatch):
+        """(a) referenced + empty list → tagged, recovered_count=0."""
+        parsed = self._make_parsed(attachments=[], attachments_truncated=False)
+        ctx = self._call_guard(parsed, monkeypatch)
+        assert ctx.get("attachments_unrecoverable") is True
+        assert ctx.get("attachments_recovered_count") == 0
+        assert ctx.get("attachments_truncated") is False
+
+    def test_case_b_references_truncated_non_empty_tagged(self, monkeypatch):
+        """(b) referenced + non-empty + truncated=True → tagged. Blocker regression fix."""
+        att = {
+            "filename": "r1.pdf",
+            "content_type": "application/pdf",
+            "size": 100,
+            "path": "/tmp/r1.pdf",
+        }
+        parsed = self._make_parsed(attachments=[att], attachments_truncated=True)
+        ctx = self._call_guard(parsed, monkeypatch)
+        assert ctx.get("attachments_unrecoverable") is True
+        assert ctx.get("attachments_truncated") is True
+        assert ctx.get("attachments_recovered_count") == 1
+
+    def test_case_c_references_non_empty_not_truncated_not_tagged(self, monkeypatch):
+        """(c) referenced + non-empty + not truncated → no tag (no false positive)."""
+        att = {
+            "filename": "r1.pdf",
+            "content_type": "application/pdf",
+            "size": 100,
+            "path": "/tmp/r1.pdf",
+        }
+        parsed = self._make_parsed(attachments=[att], attachments_truncated=False)
+        ctx = self._call_guard(parsed, monkeypatch)
+        assert "attachments_unrecoverable" not in ctx
+
+    def test_case_d_no_reference_not_tagged(self, monkeypatch):
+        """(d) no reference in body → not tagged, no false positive."""
+        parsed = self._make_parsed(
+            body="Let's schedule a call.", attachments=[], attachments_truncated=False
+        )
+        ctx = self._call_guard(parsed, monkeypatch)
+        assert "attachments_unrecoverable" not in ctx

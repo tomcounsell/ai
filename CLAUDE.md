@@ -122,10 +122,14 @@ valor-email send --to alice@example.com --subject "Re: Deploy" "Looks good"
 valor-email send --to alice@example.com --to bob@example.com "Message to both"
 valor-email send --to alice@example.com --file ./report.pdf "See attached"
 valor-email send --to alice@example.com --reply-to "<abc@host>" "Body"
+valor-email draft --to alice@example.com --subject "Q4 Report" --file ./report.pdf "Please review."
+valor-email draft --to alice@example.com --reply-to "<abc@host>" --file ./reply.pdf "In reply."
 valor-email threads
 ```
 
 `--to` accepts multiple flags (repeat per recipient) and comma-separated values. To reply to a specific message, first run `valor-email read --json` and copy the `message_id` field — pass it verbatim to `--reply-to` (angle brackets optional; the CLI normalizes). Sends confirm with a queue notice; if delivery seems stuck, check `./scripts/valor-service.sh email-status` (extends to read the relay heartbeat under `email:relay:last_poll_ts`).
+
+`valor-email draft` creates a **real Gmail draft** (visible in the Drafts folder) with optional file attachments for human review before sending. Files up to 25 MiB are attached inline; larger files are uploaded to Google Drive and linked. Requires `gws auth login` on the machine; falls back to an actionable error if unauthenticated. See `docs/features/email-bridge.md` for details.
 
 ## Quick Commands
 
