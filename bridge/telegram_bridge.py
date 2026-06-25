@@ -1445,10 +1445,10 @@ async def main():
         # this turn to reason about wrapped content. `safe_clean_text`
         # (built from `safe_text`) flows into AgentSession.message_text and
         # any other persisted derivative.
-        clean_text = clean_message(text, project)
+        clean_text = clean_message(text)
         if not clean_text:
             clean_text = "--file attachment only--" if message.media else "--empty message--"
-        safe_clean_text = clean_message(safe_text, project)
+        safe_clean_text = clean_message(safe_text)
         if not safe_clean_text:
             safe_clean_text = "--file attachment only--" if message.media else "--empty message--"
 

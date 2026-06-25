@@ -4,7 +4,6 @@ Unit tests for Telegram bridge logic.
 Tests the core decision-making functions without requiring Telegram connectivity.
 """
 
-import re
 
 # Import the functions we're testing (we'll test them in isolation)
 # These are re-implemented here to test the logic without importing the module
@@ -75,17 +74,14 @@ def should_respond(
     return False
 
 
-def clean_message(text: str, project: dict | None, default_mentions: list[str]) -> str:
-    """Remove mention triggers from message for cleaner processing."""
-    mentions = default_mentions
-    if project:
-        telegram_config = project.get("telegram", {})
-        mentions = telegram_config.get("mention_triggers", default_mentions)
+def clean_message(text: str) -> str:
+    """Normalize surrounding whitespace; pass the body through verbatim.
 
-    result = text
-    for mention in mentions:
-        result = re.sub(re.escape(mention), "", result, flags=re.IGNORECASE)
-    return result.strip()
+    Mirrors ``bridge.response.clean_message``: mention triggers are NOT
+    removed — the agent sees the user's message exactly as typed, including
+    its own name. Routing's @-mention detection is independent.
+    """
+    return text.strip()
 
 
 def build_context_prefix(
@@ -352,51 +348,41 @@ class TestShouldRespond:
 
 
 class TestCleanMessage:
-    """Tests for message cleaning (mention removal)."""
+    """Tests for message cleaning.
 
-    DEFAULT_MENTIONS = ["@valor", "valor", "hey valor"]
+    The agent must see inbound text verbatim — mention triggers (``@valor``,
+    the bare name "Valor", "hey valor") are NOT stripped. Only surrounding
+    whitespace is normalized. Routing decides addressing via independent
+    @-mention detection, never by mutating the body.
+    """
 
-    def test_removes_at_mention(self, valor_project):
-        """Should remove @valor mention."""
-        result = clean_message("@valor please help me", valor_project, self.DEFAULT_MENTIONS)
-        assert result == "please help me"
+    def test_preserves_at_mention(self):
+        """A leading @valor is left intact in the body."""
+        result = clean_message("@valor please help me")
+        assert result == "@valor please help me"
 
-    def test_removes_hey_mention(self, valor_project):
-        """Should remove 'hey valor' mention."""
-        result = clean_message("hey valor can you help?", valor_project, self.DEFAULT_MENTIONS)
-        # "valor" gets removed first, leaving "hey  can you help?"
-        # This is expected - the important thing is "valor" is gone
-        assert "valor" not in result.lower()
+    def test_preserves_name_in_salutation(self):
+        """The bot's own name in a greeting is preserved (the original bug)."""
+        result = clean_message("Hi Valor, I physically moved the STAK Studio Mac")
+        assert result == "Hi Valor, I physically moved the STAK Studio Mac"
 
-    def test_removes_plain_mention(self, valor_project):
-        """Should remove plain 'valor' mention."""
-        result = clean_message("valor, what is this?", valor_project, self.DEFAULT_MENTIONS)
-        assert result == ", what is this?"
+    def test_preserves_leading_name_address(self):
+        """A leading 'Valor,' address is preserved, comma and all."""
+        result = clean_message("Valor, here is a chat between me and Bruce")
+        assert result == "Valor, here is a chat between me and Bruce"
 
-    def test_case_insensitive_removal(self, valor_project):
-        """Mention removal should be case-insensitive."""
-        result = clean_message("HEY VALOR can you help?", valor_project, self.DEFAULT_MENTIONS)
-        # "VALOR" gets removed (case-insensitive), the important thing is it's gone
-        assert "valor" not in result.lower()
+    def test_preserves_name_case(self):
+        """Casing is untouched."""
+        result = clean_message("HEY VALOR can you help?")
+        assert result == "HEY VALOR can you help?"
 
-    def test_removes_multiple_mentions(self, valor_project):
-        """Should remove multiple mentions in one message."""
-        result = clean_message(
-            "@valor hey valor please valor help", valor_project, self.DEFAULT_MENTIONS
-        )
-        assert "valor" not in result.lower()
+    def test_normalizes_surrounding_whitespace(self):
+        """Leading/trailing whitespace is stripped so empty checks work."""
+        assert clean_message("  hello  ") == "hello"
 
-    def test_preserves_non_mention_text(self, valor_project):
-        """Should preserve text that isn't a mention."""
-        result = clean_message(
-            "@valor fix the evaluation code", valor_project, self.DEFAULT_MENTIONS
-        )
-        assert "fix the evaluation code" in result
-
-    def test_no_project_uses_defaults(self):
-        """Without project, should use default mentions."""
-        result = clean_message("@valor help me", None, self.DEFAULT_MENTIONS)
-        assert result == "help me"
+    def test_empty_message(self):
+        """Whitespace-only message normalizes to empty (placeholder trigger)."""
+        assert clean_message("   ") == ""
 
 
 # ============================================================================

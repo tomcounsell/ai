@@ -252,16 +252,12 @@ class TestResponseCleaning:
         # File won't exist in test env so files list is empty
         assert isinstance(files, list)
 
-    def test_clean_message_strips_mentions(self, valor_project):
-        import bridge.routing as routing_mod
-
-        old_mentions = routing_mod.DEFAULT_MENTIONS
-        try:
-            routing_mod.DEFAULT_MENTIONS = ["@valor", "valor"]
-            result = clean_message("@valor what is Python?", valor_project)
-            assert "what is Python?" in result
-        finally:
-            routing_mod.DEFAULT_MENTIONS = old_mentions
+    def test_clean_message_passes_body_verbatim(self):
+        """clean_message normalizes whitespace only — mentions and the bot's
+        own name are preserved so the agent sees the message as typed."""
+        assert clean_message("@valor what is Python?") == "@valor what is Python?"
+        assert clean_message("Hi Valor, I moved the Mac") == "Hi Valor, I moved the Mac"
+        assert clean_message("  trim me  ") == "trim me"
 
 
 @pytest.mark.e2e
