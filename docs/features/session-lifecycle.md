@@ -410,7 +410,7 @@ ran on the health-checker's `failed`/`abandoned` branches, never on the `complet
 **Known gap:** an EMAIL-transport deferred self-draft that reaches `completed` (not
 `failed`/`abandoned`) is NOT flushed by this build.  Synchronously replicating the email outbox
 payload was out of appetite for issue #1794.  Email coverage on the `completed` path is tracked as
-a follow-up issue.
+follow-up issue #1797.
 
 **Cross-reference:** `_deliver_tool_timeout_degraded_notice` (added in PR #1738, issue #1711) is
 the delivery primitive this fallback is modelled after.  New precedence: self-draft fallback
