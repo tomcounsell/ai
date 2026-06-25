@@ -430,3 +430,54 @@ def test_imperative_line_re_does_not_match_mid_sentence():
     falls through to the LLM for full classification.
     """
     assert routing._IMPERATIVE_LINE_RE.search("I would just continue this automatically") is None
+
+
+# ============================================================================
+# Config path resolution — launchd Desktop-hang guard (June 2026 outage)
+# ============================================================================
+
+
+class TestResolveConfigPathLaunchdGuard:
+    """Under launchd, a ~/Desktop PROJECTS_CONFIG_PATH must never be opened.
+
+    macOS TCC and iCloud file eviction make open()/stat() on ~/Desktop block
+    indefinitely from a launchd agent, silently wedging the bridge/worker at
+    import. The VALOR_LAUNCHD guard is authoritative even when the Desktop
+    path was set explicitly via PROJECTS_CONFIG_PATH.
+    """
+
+    def test_desktop_env_path_overridden_under_launchd(self, monkeypatch, tmp_path):
+        local = routing.Path(routing.__file__).parent.parent / "config" / "projects.json"
+        if not local.exists():
+            pytest.skip("local config/projects.json not present in this checkout")
+
+        desktop = routing.Path.home() / "Desktop" / "Valor" / "projects.json"
+        monkeypatch.setenv("VALOR_LAUNCHD", "1")
+        monkeypatch.setenv("PROJECTS_CONFIG_PATH", str(desktop))
+
+        resolved = routing._resolve_config_path()
+        assert resolved == local, "launchd must avoid the Desktop path, using the local copy"
+
+    def test_desktop_env_path_honored_without_launchd(self, monkeypatch):
+        """Outside launchd, an explicit Desktop path is honored as-is."""
+        desktop = routing.Path.home() / "Desktop" / "Valor" / "projects.json"
+        monkeypatch.delenv("VALOR_LAUNCHD", raising=False)
+        monkeypatch.setenv("PROJECTS_CONFIG_PATH", str(desktop))
+
+        assert routing._resolve_config_path() == desktop
+
+    def test_non_desktop_env_path_honored_under_launchd(self, monkeypatch, tmp_path):
+        """A non-Desktop explicit path is honored even under launchd."""
+        custom = tmp_path / "projects.json"
+        custom.write_text("{}")
+        monkeypatch.setenv("VALOR_LAUNCHD", "1")
+        monkeypatch.setenv("PROJECTS_CONFIG_PATH", str(custom))
+
+        assert routing._resolve_config_path() == custom
+
+    def test_is_under_desktop(self):
+        home = routing.Path.home()
+        assert routing._is_under_desktop(home / "Desktop" / "Valor" / "projects.json")
+        assert routing._is_under_desktop(home / "Desktop" / "x.json")
+        assert not routing._is_under_desktop(home / "src" / "ai" / "config" / "projects.json")
+        assert not routing._is_under_desktop(routing.Path("/etc/projects.json"))

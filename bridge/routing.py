@@ -60,24 +60,59 @@ def _resolve_config_path() -> Path:
     1. PROJECTS_CONFIG_PATH env var (explicit override)
     2. ~/Desktop/Valor/projects.json (iCloud-synced default) — skipped under launchd
     3. config/projects.json (local copy, updated by install_worker.sh)
+
+    The launchd guard (VALOR_LAUNCHD) is authoritative: under launchd we NEVER
+    open a ~/Desktop path, even when PROJECTS_CONFIG_PATH points at one. macOS
+    TCC and iCloud file eviction both make open()/stat() on ~/Desktop block
+    indefinitely from a launchd agent, which silently wedges the bridge/worker
+    at import time (the process is alive but never connects — see the June 2026
+    outage where a Desktop PROJECTS_CONFIG_PATH hung both services for 17h).
     """
     import os
 
+    local_path = Path(__file__).parent.parent / "config" / "projects.json"
+    under_launchd = bool(os.environ.get("VALOR_LAUNCHD"))
+
     env_path = os.environ.get("PROJECTS_CONFIG_PATH")
     if env_path:
-        return Path(env_path).expanduser()
+        resolved = Path(env_path).expanduser()
+        # Under launchd, a ~/Desktop path is a hang risk — prefer the local
+        # copy if it exists; only fall back to the Desktop path when there is
+        # no local copy to use.
+        if under_launchd and _is_under_desktop(resolved) and local_path.exists():
+            logger.warning(
+                "[config] Ignoring Desktop PROJECTS_CONFIG_PATH (%s) under launchd "
+                "to avoid a TCC/iCloud open() hang; using local copy %s",
+                resolved,
+                local_path,
+            )
+            return local_path
+        return resolved
 
     # When running under launchd (VALOR_LAUNCHD=1), skip the iCloud-synced
-    # Desktop path entirely. macOS TCC blocks open() and even stat() on
-    # ~/Desktop files from launchd agents, causing indefinite hangs.
+    # Desktop path entirely.
     # install_worker.sh copies projects.json → config/projects.json at install time.
-    if not os.environ.get("VALOR_LAUNCHD"):
+    if not under_launchd:
         desktop_path = Path.home() / "Desktop" / "Valor" / "projects.json"
         if desktop_path.exists():
             return desktop_path
 
     # Local copy (updated by install_worker.sh) or legacy in-repo fallback
-    return Path(__file__).parent.parent / "config" / "projects.json"
+    return local_path
+
+
+def _is_under_desktop(path: Path) -> bool:
+    """True if ``path`` resolves to somewhere under ``~/Desktop``.
+
+    Used to detect launchd-unsafe config paths. Compares expanded, absolute
+    paths textually (no filesystem access — we must not stat a possibly-hung
+    Desktop path just to decide whether to avoid it).
+    """
+    try:
+        desktop = (Path.home() / "Desktop").expanduser()
+        return desktop in path.expanduser().parents
+    except (OSError, RuntimeError):
+        return False
 
 
 def load_config() -> dict:
