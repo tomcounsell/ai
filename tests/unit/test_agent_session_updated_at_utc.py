@@ -9,6 +9,8 @@ import logging
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
+import pytest
+
 from models.agent_session import AgentSession
 
 # ---------------------------------------------------------------------------
@@ -178,6 +180,89 @@ class TestSaveUpdateFieldsGuard:
             AgentSession.save(s)  # update_fields defaults to None
 
         assert s.updated_at > old_ts, "Full save (update_fields=None) must stamp updated_at"
+
+
+# ---------------------------------------------------------------------------
+# Tests: save() liveness-field omission allowlist (DEBUG vs WARNING)
+# ---------------------------------------------------------------------------
+
+
+class TestSaveUpdatedAtOmissionAllowlist:
+    """Liveness/detector-state partial saves log DEBUG; genuine omissions WARN.
+
+    The allowlist (``_UPDATED_AT_OMISSION_OK_FIELDS``) downgrades the
+    "missing 'updated_at'" log to DEBUG for high-frequency liveness/PID/wedge-
+    detector fields whose freshness is carried elsewhere — eliminating the
+    worker-log flood (especially from granite-container sessions) while keeping
+    the WARNING for genuine accidental omissions.
+    """
+
+    @staticmethod
+    def _save_and_capture(update_fields, caplog):
+        """Run save() with super() stubbed; return captured records at DEBUG+."""
+        s = _make_session_no_save()
+        sentinel = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+        s.updated_at = sentinel
+
+        with caplog.at_level(logging.DEBUG, logger="models.agent_session"):
+            with patch.object(AgentSession.__bases__[0], "save", lambda self, *a, **kw: None):
+                AgentSession.save(s, update_fields=update_fields)
+
+        # The guard must never advance updated_at when the stamp is omitted —
+        # the memory/Redis desync guarantee holds regardless of log level.
+        assert s.updated_at == sentinel, (
+            "updated_at must NOT be mutated when update_fields omits it "
+            f"(update_fields={update_fields!r})"
+        )
+        return caplog.records
+
+    @pytest.mark.parametrize(
+        "update_fields",
+        [
+            ["last_turn_at"],
+            ["last_stdout_at"],
+            ["last_heartbeat_at"],
+            ["last_sdk_heartbeat_at"],
+            ["claude_pid"],
+            ["harness_pid"],
+            ["current_tool_name", "last_tool_use_at"],
+            ["last_pty_read_loop_at", "last_pty_activity_at"],
+            ["mid_run_quiescent_since", "mid_run_pty_snapshot"],
+            ["mid_run_quiescent_since"],
+        ],
+    )
+    def test_allowlisted_liveness_fields_log_debug_not_warning(self, update_fields, caplog):
+        """An all-allowlisted partial save logs at DEBUG, never WARNING."""
+        records = self._save_and_capture(update_fields, caplog)
+
+        assert not any(r.levelno >= logging.WARNING for r in records), (
+            f"update_fields={update_fields!r} (all-allowlisted) must NOT emit a WARNING; "
+            f"got {[(r.levelname, r.message) for r in records]}"
+        )
+        assert any(r.levelno == logging.DEBUG and "updated_at" in r.message for r in records), (
+            f"Expected a DEBUG log about the omitted 'updated_at' for {update_fields!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "update_fields",
+        [
+            ["status"],
+            ["nudge_deferred_count"],
+            ["reprieve_count"],
+            ["exit_returncode"],
+            # Mixed: one allowlisted + one not → still a genuine omission, WARN.
+            ["last_turn_at", "status"],
+            ["mid_run_quiescent_since", "status"],
+        ],
+    )
+    def test_non_allowlisted_omission_still_warns(self, update_fields, caplog):
+        """A non-allowlisted (or mixed) omission keeps the WARNING."""
+        records = self._save_and_capture(update_fields, caplog)
+
+        assert any(r.levelno == logging.WARNING and "updated_at" in r.message for r in records), (
+            f"update_fields={update_fields!r} must still emit a WARNING about missing "
+            f"'updated_at'; got {[(r.levelname, r.message) for r in records]}"
+        )
 
 
 # ---------------------------------------------------------------------------
