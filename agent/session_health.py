@@ -776,10 +776,11 @@ def _sweep_dead_worker_sessions() -> int:
 
     Guards against double-drop races:
     - Only sweeps sessions with dead claude_pid (os.kill(pid, 0) raises OSError)
-    - Applies the AGENT_SESSION_HEALTH_MIN_RUNNING_SECS recency guard (300s)
+    - Applies the AGENT_SESSION_HEALTH_MIN_RUNNING recency guard (300s)
       so brand-new sessions from the fresh worker cannot be touched
-    - Uses finalize_session(expected_status='running') CAS so a concurrent
-      fresh-worker pickup wins and the session is skipped
+    - Relies on finalize_session's implicit status re-check: it re-reads the
+      session status and raises StatusConflictError if the status has already
+      changed, so a concurrent fresh-worker pickup wins and the session is skipped
 
     Returns the count of sessions swept to 'killed'.
     """
