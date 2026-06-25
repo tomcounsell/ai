@@ -1516,31 +1516,149 @@ async def _deliver_tool_timeout_degraded_notice(
         )
 
 
+def flush_deferred_self_draft_sync(session: "AgentSession") -> None:
+    """TELEGRAM chokepoint flush for a never-redrafted deferred self-draft.
+
+    This is the synchronous flush invoked from the ``finalize_session``
+    chokepoint (``models/session_lifecycle.py``) so a held self-draft reply is
+    delivered on **every** terminal status (``completed``, ``failed``,
+    ``abandoned``) — closing the gap where a cleanly-``completed`` session that
+    deferred a reply for self-draft and never redrafted silently swallowed it.
+
+    Fully synchronous: it writes the payload directly to the Telegram outbox via
+    ``rpush`` with no event loop involvement (no ``await``, no
+    ``asyncio.create_task``, no ``run_until_complete``). The ``completed`` path
+    has no running event loop, so the async ``_deliver_deferred_self_draft_fallback``
+    cannot be used here.
+
+    TELEGRAM ONLY: early-returns for ``transport == "email"`` (resolved from
+    ``extra_context``, NOT a top-level field — ``AgentSession`` has no top-level
+    ``transport``). Email coverage stays on the retained async helper.
+
+    Reads the deferral flag from a FRESH authoritative session via
+    ``get_authoritative_session`` — never the caller's possibly-stale
+    ``extra_context`` (the defer-time persist may post-date the caller's
+    in-memory copy).
+
+    Dedups on its OWN key ``self_draft_completed_flush_sent:{session_id}``
+    (SETNX, 1 h TTL) — DISTINCT from the async helper's
+    ``self_draft_fallback_sent:{session_id}``. Never raises; failures are logged
+    at WARNING and swallowed.
+    """
+    try:
+        session_id = getattr(session, "session_id", None)
+        if not session_id:
+            return
+
+        # Authoritative read: the defer-time persist may post-date the caller's
+        # in-memory copy, so read extra_context from a fresh re-read.
+        fresh = get_authoritative_session(session_id)
+        source = fresh if fresh is not None else session
+        extra_ctx = getattr(source, "extra_context", None) or {}
+
+        if not extra_ctx.get("deferred_self_draft_pending"):
+            return
+
+        # Transport gate: telegram only. Email stays on the async helper.
+        transport = extra_ctx.get("transport")
+        if transport == "email":
+            return
+
+        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+        # Atomic dedup on the NEW completed-path key (distinct from the async
+        # helper's dedup key). First caller wins.
+        lock_key = f"self_draft_completed_flush_sent:{session_id}"
+        acquired = _R.set(lock_key, "1", nx=True, ex=3600)
+        if not acquired:
+            logger.debug(
+                "[session-health] self-draft completed flush already sent for %s — skipping",
+                session_id,
+            )
+            return
+
+        # Recover the deferred text; apply the narration gate and the empty-text
+        # canned notice (parity with the async helper — kept inline, not shared).
+        deferred_text = extra_ctx.get("deferred_self_draft_text") or ""
+        if deferred_text and deferred_text.strip():
+            try:
+                from bridge.message_quality import (  # noqa: PLC0415
+                    NARRATION_FALLBACK_MESSAGE,
+                    is_narration_only,
+                )
+
+                if is_narration_only(deferred_text[:500]):
+                    message = NARRATION_FALLBACK_MESSAGE
+                else:
+                    message = deferred_text
+            except Exception:
+                message = deferred_text
+        else:
+            message = "I couldn't finish responding to that — please try again."
+
+        # Build the telegram outbox payload (mirrors output_handler's recipe).
+        import json  # noqa: PLC0415
+
+        from agent.output_handler import TelegramRelayOutputHandler  # noqa: PLC0415
+
+        chat_id = getattr(source, "chat_id", None) or ""
+        reply_to = int(getattr(source, "telegram_message_id", None) or 0) or None
+        payload = {
+            "chat_id": chat_id,
+            "reply_to": reply_to,
+            "text": message,
+            "session_id": session_id,
+            "timestamp": time.time(),
+        }
+        queue_key = f"telegram:outbox:{session_id}"
+        _R.rpush(queue_key, json.dumps(payload))
+        _R.expire(queue_key, TelegramRelayOutputHandler.OUTBOX_TTL)
+
+        logger.info(
+            "[session-health] flushed deferred self-draft on terminal path for %s (%d chars)",
+            session_id,
+            len(message),
+        )
+
+        # Best-effort telemetry counter.
+        try:
+            project_key = getattr(source, "project_key", None) or "unknown"
+            _R.incr(f"{project_key}:session-health:deferred_self_draft_completed_flush")
+        except Exception:
+            pass
+
+    except Exception as _err:
+        logger.warning(
+            "[session-health] flush_deferred_self_draft_sync failed for %s: %s",
+            getattr(session, "session_id", "?"),
+            _err,
+        )
+
+
 async def _deliver_deferred_self_draft_fallback(
     entry: "AgentSession",
 ) -> None:
-    """Deliver a fallback message when a deferred self-draft was never completed.
+    """Deliver an EMAIL-transport fallback when a deferred self-draft was never completed.
 
-    Called on every terminal recovery branch (``failed`` and ``abandoned``) when
-    ``entry.extra_context["deferred_self_draft_pending"]`` is truthy.  This flag
-    is written at defer time by ``TelegramRelayOutputHandler.send()`` — the
-    steering queue cannot be used because the agent drains it at turn start,
-    leaving it empty by finalization time.
+    Handles the EMAIL transport specifically: it early-returns for telegram via
+    ``if transport in (None, "telegram"): return`` (telegram is covered by the
+    synchronous ``flush_deferred_self_draft_sync`` chokepoint flush invoked from
+    ``finalize_session``). The deferral flag is written at defer time by
+    ``TelegramRelayOutputHandler.send()`` — the steering queue cannot be used
+    because the agent drains it at turn start, leaving it empty by finalization
+    time.
 
     Precedence over the generic degraded notice: callers invoke this helper
     *before* ``_deliver_tool_timeout_degraded_notice``; if the deferred flag is
     set, only the self-draft fallback fires (not the generic notice).
 
     Idempotent: the first caller wins via Redis SETNX on
-    ``self_draft_fallback_sent:{session_id}`` (1 h TTL).  The TTL is intentionally
-    NOT per-run — for legitimate resume scenarios, scope it per-run by including
-    ``started_at`` in the key if that becomes necessary.
+    ``self_draft_fallback_sent:{session_id}`` (1 h TTL) — DISTINCT from the sync
+    flush's ``self_draft_completed_flush_sent:{session_id}`` key. The TTL is
+    intentionally NOT per-run — for legitimate resume scenarios, scope it per-run
+    by including ``started_at`` in the key if that becomes necessary.
 
     Never raises; failures are logged at WARNING and swallowed.
-
-    Terminal-branch-only precondition: must only be called from the ``abandoned``
-    or ``failed`` finalization branches, never from the requeue (``else``) branch
-    where the session will run again and the agent may still deliver.
     """
     try:
         # Check the persisted detection signal — NOT the steering queue.
@@ -1590,6 +1708,12 @@ async def _deliver_deferred_self_draft_fallback(
 
         # Resolve transport from extra_context (no top-level transport field).
         transport = extra_ctx.get("transport")
+
+        # EMAIL-only: telegram is covered by the synchronous chokepoint flush
+        # (flush_deferred_self_draft_sync via finalize_session). Skip telegram here
+        # to avoid a double-send; the sync flush owns telegram delivery.
+        if transport in (None, "telegram"):
+            return
 
         # Resolve send callback — fall back to FileOutputHandler when none registered.
         from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
