@@ -26,12 +26,14 @@ import pytest
 
 import agent.session_health as session_health
 from agent.session_health import (
+    MID_RUN_QUIESCENCE_SECS,
     TOOL_TIMEOUT_DEFAULT_SEC,
     TOOL_TIMEOUT_INTERNAL_SEC,
     TOOL_TIMEOUT_MCP_SEC,
     _agent_session_tool_timeout_check,
     _check_tool_timeout,
     _classify_tool_tier,
+    _pty_quiescent_long_enough,
     _tool_tier_budget,
 )
 
@@ -902,3 +904,154 @@ async def test_degraded_notice_fires_on_genuine_post_recovery_exhaustion_issue17
         "``_deliver_tool_timeout_degraded_notice`` must fire on the genuine "
         "post-recovery exhaustion path (issue #1762 fix must not suppress it)"
     )
+
+
+# ---------------------------------------------------------------------------
+# _pty_quiescent_long_enough (issue #1784 PTY liveness gate)
+# ---------------------------------------------------------------------------
+
+
+def _pty_entry(
+    *,
+    last_pty_read_loop_at=None,
+    mid_run_quiescent_since=None,
+):
+    """Build a minimal fake entry for _pty_quiescent_long_enough tests."""
+    return SimpleNamespace(
+        last_pty_read_loop_at=last_pty_read_loop_at,
+        mid_run_quiescent_since=mid_run_quiescent_since,
+    )
+
+
+def test_pty_gate_kill_switch_overrides_all(monkeypatch):
+    """Branch 1: MID_RUN_QUIESCENCE_SECS <= 0 disables the gate (always True)."""
+    monkeypatch.setattr(session_health, "MID_RUN_QUIESCENCE_SECS", 0)
+    now = datetime.now(tz=UTC)
+    # Even a PTY that is currently painting (mid_run_quiescent_since=None,
+    # last_pty_read_loop_at set) should be kill-eligible when gate is disabled.
+    entry = _pty_entry(
+        last_pty_read_loop_at=now - timedelta(seconds=10),
+        mid_run_quiescent_since=None,
+    )
+    assert _pty_quiescent_long_enough(entry, now) is True
+
+
+def test_pty_gate_sdk_session_no_pty_field_returns_true():
+    """Branch 2: SDK/non-granite sessions (last_pty_read_loop_at=None) are age-only killed."""
+    now = datetime.now(tz=UTC)
+    entry = _pty_entry(last_pty_read_loop_at=None, mid_run_quiescent_since=None)
+    assert _pty_quiescent_long_enough(entry, now) is True
+
+
+def test_pty_gate_pty_painting_defers_kill():
+    """Branch 3: PTY read loop running but screen painting (mid_run_quiescent_since=None)."""
+    now = datetime.now(tz=UTC)
+    entry = _pty_entry(
+        last_pty_read_loop_at=now - timedelta(seconds=5),
+        mid_run_quiescent_since=None,
+    )
+    assert _pty_quiescent_long_enough(entry, now) is False
+
+
+def test_pty_gate_quiescent_below_window_defers_kill():
+    """Branch 4 (insufficient quiescence): quiescent but not long enough yet."""
+    now = datetime.now(tz=UTC)
+    quiescent_for = MID_RUN_QUIESCENCE_SECS - 10  # still within grace
+    entry = _pty_entry(
+        last_pty_read_loop_at=now - timedelta(seconds=quiescent_for + 30),
+        mid_run_quiescent_since=now - timedelta(seconds=quiescent_for),
+    )
+    assert _pty_quiescent_long_enough(entry, now) is False
+
+
+def test_pty_gate_quiescent_past_window_allows_kill():
+    """Branch 4 (sufficient quiescence): quiescent past MID_RUN_QUIESCENCE_SECS."""
+    now = datetime.now(tz=UTC)
+    quiescent_for = MID_RUN_QUIESCENCE_SECS + 10  # past the window
+    entry = _pty_entry(
+        last_pty_read_loop_at=now - timedelta(seconds=quiescent_for + 30),
+        mid_run_quiescent_since=now - timedelta(seconds=quiescent_for),
+    )
+    assert _pty_quiescent_long_enough(entry, now) is True
+
+
+def test_pty_gate_naive_quiescent_since_treated_as_utc():
+    """Branch 4: a naive mid_run_quiescent_since is localized to UTC before comparison."""
+    now = datetime.now(tz=UTC)
+    quiescent_for = MID_RUN_QUIESCENCE_SECS + 5
+    naive_ts = (now - timedelta(seconds=quiescent_for)).replace(tzinfo=None)
+    entry = _pty_entry(
+        last_pty_read_loop_at=now - timedelta(seconds=quiescent_for + 30),
+        mid_run_quiescent_since=naive_ts,
+    )
+    # Must not raise and must return True (sufficient quiescence)
+    assert _pty_quiescent_long_enough(entry, now) is True
+
+
+@pytest.mark.asyncio
+async def test_subloop_defers_default_tier_when_pty_painting(monkeypatch, clean_active_sessions):
+    """PTY liveness gate (issue #1784): default-tier kill is deferred when PTY is painting.
+
+    The entry looks wedged by age (Bash > 300s) but last_pty_read_loop_at is
+    set and mid_run_quiescent_since is None (PTY actively painting). The sub-loop
+    must NOT fire the recovery transition for this tick.
+    """
+    monkeypatch.delenv("TOOL_TIMEOUT_TIERS_DISABLED", raising=False)
+    now = datetime.now(tz=UTC)
+    entry = _fake_running_entry(tool_name="Bash", age_seconds=TOOL_TIMEOUT_DEFAULT_SEC + 5)
+    # Mark as a granite PTY session that is currently painting.
+    entry.last_pty_read_loop_at = now - timedelta(seconds=5)
+    entry.mid_run_quiescent_since = None
+
+    async def _should_not_be_called(*_a, **_kw):
+        raise AssertionError("recovery transition called while PTY is painting")
+
+    with (
+        patch.object(session_health.AgentSession.query, "filter", return_value=[entry]),
+        patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+        patch.object(session_health.AgentSession, "get_by_id", classmethod(lambda cls, sid: entry)),
+        patch.object(session_health, "_apply_recovery_transition", _should_not_be_called),
+        patch.object(session_health, "_eval_mid_run_pty_stage1", lambda *a, **kw: None),
+    ):
+        await _agent_session_tool_timeout_check()
+
+
+@pytest.mark.asyncio
+async def test_subloop_kills_default_tier_when_pty_quiescent_long_enough(
+    monkeypatch, clean_active_sessions
+):
+    """PTY liveness gate (issue #1784): kill fires when PTY quiescent >= MID_RUN_QUIESCENCE_SECS."""
+    monkeypatch.delenv("TOOL_TIMEOUT_TIERS_DISABLED", raising=False)
+    now = datetime.now(tz=UTC)
+    quiescent_for = MID_RUN_QUIESCENCE_SECS + 10
+    entry = _fake_running_entry(tool_name="Bash", age_seconds=TOOL_TIMEOUT_DEFAULT_SEC + 5)
+    entry.last_pty_read_loop_at = now - timedelta(seconds=quiescent_for + 30)
+    entry.mid_run_quiescent_since = now - timedelta(seconds=quiescent_for)
+
+    redis_calls: list[str] = []
+
+    class _FakeRedis:
+        def incr(self, key):
+            redis_calls.append(key)
+            return 1
+
+    fake_redis_module = SimpleNamespace(POPOTO_REDIS_DB=_FakeRedis())
+    transition_called = []
+
+    async def _capture(*_a, **kwargs):
+        transition_called.append(kwargs)
+        return True
+
+    with (
+        patch.object(session_health.AgentSession.query, "filter", return_value=[entry]),
+        patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+        patch.object(session_health.AgentSession, "get_by_id", classmethod(lambda cls, sid: entry)),
+        patch.dict("sys.modules", {"popoto.redis_db": fake_redis_module}),
+        patch.object(session_health, "_apply_recovery_transition", _capture),
+        patch.object(session_health, "_eval_mid_run_pty_stage1", lambda *a, **kw: None),
+    ):
+        await _agent_session_tool_timeout_check()
+
+    assert len(transition_called) == 1, "Recovery must fire when PTY is quiescent long enough"
+    reason = transition_called[0].get("reason", "")
+    assert "pty quiescent" in reason, f"Reason must note quiescence context; got: {reason!r}"

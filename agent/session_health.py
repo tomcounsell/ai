@@ -385,6 +385,42 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
     return tier, reason
 
 
+def _pty_quiescent_long_enough(entry: "AgentSession", now: datetime) -> bool:
+    """Return True when a default-tier tool is wedge-eligible (OK to kill).
+
+    Four branches in load-bearing order (first match wins):
+
+    1. Kill-switch: if MID_RUN_QUIESCENCE_SECS <= 0, age-only kill (disable gate).
+       Must be FIRST before any field reads so the escape hatch is never silently
+       defeated by a None-field short-circuit below it.
+    2. SDK/non-PTY escape: if last_pty_read_loop_at is None, age-only kill.
+       Non-granite SDK sessions never set this field and never accumulate
+       mid_run_quiescent_since -- without this branch every SDK default tool would
+       fall through to branch 3 and never be killed (critique-blocker regression).
+    3. Painting / freshly-active PTY: if mid_run_quiescent_since is None, defer kill.
+       The PTY read loop exists but screen is currently painting -- the tool is alive.
+    4. Quiescent long enough: compare quiescent duration vs MID_RUN_QUIESCENCE_SECS.
+       Returns True (wedge-eligible) once granite PTY has been quiescent past window.
+
+    References: issue #1784, PR #1728 (stage-1 quiescence signal).
+    """
+    # Branch 1: kill-switch (MUST be first, before field reads)
+    if MID_RUN_QUIESCENCE_SECS <= 0:
+        return True
+    # Branch 2: non-PTY (SDK) session -- age-only kill preserved
+    last_pty_read_loop_at = getattr(entry, "last_pty_read_loop_at", None)
+    if last_pty_read_loop_at is None:
+        return True
+    # Branch 3: PTY present but currently painting (alive, defer kill)
+    mid_run_quiescent_since = getattr(entry, "mid_run_quiescent_since", None)
+    if mid_run_quiescent_since is None:
+        return False
+    # Branch 4: quiescent -- check if long enough
+    if mid_run_quiescent_since.tzinfo is None:
+        mid_run_quiescent_since = mid_run_quiescent_since.replace(tzinfo=UTC)
+    return (now - mid_run_quiescent_since).total_seconds() >= MID_RUN_QUIESCENCE_SECS
+
+
 # In-process cache for ``_is_memory_tight()`` (issue #1099 Mode 4). Tuple of
 # ``(checked_at_monotonic, result)``. The cache amortizes psutil syscalls when
 # many sessions enter the recovery branch within the same health-check tick.
@@ -2851,6 +2887,15 @@ async def _agent_session_tool_timeout_check() -> None:
                 continue
             tier, reason = check
 
+            # PTY liveness gate (issue #1784): for default-tier tools on granite
+            # sessions, require PTY quiescence before killing. Internal and MCP
+            # tiers are short-lived by design (30s/120s) and have no granite PTY
+            # association -- they always get age-only kill. Default tier (Bash,
+            # Task, Skill, WebFetch) can legitimately run for many minutes (e.g.
+            # a test suite); only kill when both overdue AND PTY has been silent.
+            if tier == "default" and not _pty_quiescent_long_enough(entry, now):
+                continue  # PTY still painting -- tool is alive, defer kill
+
             # Race mitigation (issue #1270 Risk 2): re-read both fields from a
             # fresh query before we transition. PostToolUse may have fired
             # between the iterator's read and this point. If the second read
@@ -2877,6 +2922,14 @@ async def _agent_session_tool_timeout_check() -> None:
                 )
                 continue
             tier, reason = recheck
+            # Also apply liveness gate on the fresh re-read (PTY may have
+            # resumed painting between the first and second reads).
+            if tier == "default" and not _pty_quiescent_long_enough(fresh, now):
+                continue  # PTY resumed painting, abort recovery
+
+            # Extend reason to note quiescence context when gate passed.
+            if tier == "default":
+                reason = f"{reason} (pty quiescent >= {MID_RUN_QUIESCENCE_SECS:.0f}s)"
 
             # Bump per-tier counter on the session row. Best-effort; failure
             # must not block the recovery transition (matches the
