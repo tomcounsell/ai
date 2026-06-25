@@ -478,12 +478,43 @@ This is a one-time injection at install time; updating `.env` secrets requires r
 
 | Heartbeat age | Status | Action |
 |--------------|--------|--------|
-| < 600s | `ok` | Log debug, exit. Reset down-tick counter if present. |
+| < threshold | `ok` | Log debug, exit. Reset down-tick counter if present. |
 | Missing (file absent) | `starting` | Skip — worker may be initializing |
 | Worker PID absent | `down` | **Active recovery via 4-level escalation (issue #1311)** — see below |
-| ≥ 600s (10 min) | `stale` | Kill worker (SIGTERM → SIGKILL if needed) so launchd restarts |
+| ≥ threshold | `stale` | **Verified-kill escalation ladder W1→W5 (issue #1767)** — see below |
 
-The threshold (600s = 2× health-loop interval of 300s) gives a healthy worker plenty of slack while catching genuine hangs within two watchdog ticks (240s).
+**Stale-heartbeat threshold (issue #1767):** `HEARTBEAT_THRESHOLD` defaults to `180` seconds (= 6× the 30-second heartbeat write interval) and is env-tunable for conservative rollout (e.g. `HEARTBEAT_THRESHOLD=300` on first deploy). The ≥6× multiplier is the new false-positive guard: because the heartbeat is now written by a **dedicated daemon thread** (`worker-heartbeat`, started in `worker/__main__.py`) that runs outside the asyncio event loop, PTY saturation or thread-pool exhaustion can no longer starve heartbeat writes. A stale heartbeat therefore reliably means the worker process is genuinely wedged (not just loop-busy), justifying a lower threshold and an aggressive kill ladder.
+
+**Heartbeat thread isolation (issue #1767):** `_heartbeat_thread_main()` in `worker/__main__.py` runs as a `threading.Thread(name="worker-heartbeat", daemon=True)` — outside the asyncio event loop. It wakes every `WORKER_HEARTBEAT_INTERVAL` seconds (default 30, env-tunable) and calls `_write_worker_heartbeat()`. The thread is started immediately after the granite PTY pool initializes and is stopped via `_heartbeat_stop_event` on worker shutdown. Prior to issue #1767 the heartbeat write happened inside `_agent_session_health_loop()` (inside the event loop), so PTY or thread-pool saturation could delay or skip writes entirely — the stale-heartbeat signal was unreliable. The dedicated thread removes that dependency: the only way the heartbeat can go stale now is if the worker process itself is hung.
+
+**Verified-kill escalation ladder** (when heartbeat is stale — issue #1767):
+
+When the watchdog detects `status == "stale"`, it calls `recover(status)`, which runs a five-rung escalation ladder. Every rung verifies the kill via `_poll_pid_dead(pid, timeout, interval=0.5)`, which loops `os.kill(pid, 0)` and treats `ProcessLookupError` or `PermissionError` as confirmed dead — the kill is never assumed.
+
+| Rung | Action | Poll timeout | Disposition |
+|------|--------|-------------|-------------|
+| W1 | `SIGTERM` | 5.0 s | If dead → done (launchd respawns) |
+| W2 | `SIGKILL` | 10.0 s | May queue against a U-state process; if dead → done |
+| W3 | `launchctl bootout gui/<uid>/com.valor.worker` | 10.0 s | Removes the launchd job so the kernel cleans the fd table on exit, allowing a PTY-master `read()` blocked in U-state to return EOF and the process to exit; if dead → done |
+| W4 | Write `worker:watchdog:critical:{host}` (TTL 1 h) + `worker:watchdog:pty_close_required:{host}` (unless `WORKER_WATCHDOG_PTY_CLOSE_DISABLED` is set) | — | CRITICAL log; operator alert. Cross-process PTY fd close is not feasible on macOS (`os.close` only owns own fds; `/proc` is Linux-only; `psutil.open_files` does not surface PTY devices — spike result, issue #1767). |
+| W5 | Final CRITICAL log; no further automated action | — | launchd will respawn the worker once the U-state process exits (the blocking syscall returns). Session sweep runs at next startup. |
+
+**Check U-state critical signal:**
+```bash
+redis-cli GET worker:watchdog:critical:$(hostname)
+redis-cli GET worker:watchdog:pty_close_required:$(hostname)
+```
+
+**Post-restart dead-worker session sweep (issue #1767):** When the worker restarts after a hung-worker incident, `_sweep_dead_worker_sessions()` in `agent/session_health.py` runs during startup recovery (Step 3b in `worker/__main__.py`, after `_recover_interrupted_agent_sessions_startup`). It:
+
+1. Enumerates all sessions with `status="running"`.
+2. Skips sessions with no `claude_pid` (not yet assigned a subprocess).
+3. Skips sessions started within the last `AGENT_SESSION_HEALTH_MIN_RUNNING` seconds (300 s) — the recency guard preventing the fresh worker's own new sessions from being swept.
+4. Checks `os.kill(pid, 0)` liveness for each remaining session; treats `OSError` as dead.
+5. Calls `finalize_session(entry, "killed", reason="dead-worker-sweep: ...")` (CAS via `expected_status='running'` — a concurrent fresh-worker pickup wins and the session is skipped via `StatusConflictError`).
+6. When any sessions are swept, triggers `bridge.agent_catchup` as a subprocess so unanswered human messages re-enqueue as fresh sessions — no silently dropped messages.
+
+Returns the count of sessions swept. A non-zero result is logged at INFO.
 
 **Active recovery escalation** (when worker process is missing — issue #1311):
 
