@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-06-25
 tracking: https://github.com/tomcounsell/ai/issues/1792
 last_comment_id:
+revision_applied: true
 ---
 
 # session-health: gate the never_started kill on PTY liveness (sibling of #1784)
@@ -81,8 +82,9 @@ Genuinely dead sessions (PTY exited, no repaints) are still failed within a boun
 on the never-started path.
 
 **Notes:** The reusable liveness primitive is `last_pty_activity_at` (diff-gated by
-`bridge_adapter._on_pty_read`, `:771`), NOT `_pty_quiescent_long_enough` (which keys off
-`mid_run_quiescent_since`, unset during prime). See Technical Approach.
+`_on_pty_read` in `agent/granite_container/bridge_adapter.py:771`), NOT
+`_pty_quiescent_long_enough` (which keys off `mid_run_quiescent_since`, unset during prime).
+See Technical Approach.
 
 ## Prior Art
 
@@ -124,7 +126,8 @@ during prime (`last_pty_activity_at`), since the tool_timeout path's primitive
   `_prime_pty_alive(entry, now) -> bool`). No signature changes to public functions.
 - **Coupling:** Unchanged. The health monitor already reads these PTY fields elsewhere
   (`_eval_mid_run_pty_stage1`, `:2976`); this adds one more reader.
-- **Data ownership:** Unchanged. `last_pty_activity_at` is owned by `bridge_adapter._on_pty_read`.
+- **Data ownership:** Unchanged. `last_pty_activity_at` is owned by `_on_pty_read` in
+  `agent/granite_container/bridge_adapter.py`.
 - **Reversibility:** Trivially reversible — the gate is a single guarded `continue`/branch and
   carries a kill-switch (env constant `<= 0` restores age-only never-started kill).
 
@@ -132,14 +135,15 @@ during prime (`last_pty_activity_at`), since the tool_timeout path's primitive
 
 **Size:** Small
 
-**Team:** Solo dev (builder + validator pair), plus a one-shot measurement agent.
+**Team:** Solo dev (builder writes gate + tests) → validator → documentarian. An advisory
+prime-latency measurement is an optional, non-blocking side-task (bridge-machine only).
 
 **Interactions:**
-- PM check-ins: 1 (review the measurement findings before the threshold is fixed)
+- PM check-ins: 0 required (the 90s default ships without waiting on measurement)
 - Review rounds: 1
 
-The change is small and surgical (one helper + one gate at one call-site + tests). The bottleneck
-is the measurement step that justifies the threshold, and the war-room critique.
+The change is small and surgical (one helper + one gate at one call-site + tests). It ships on a
+safe 90s default + env override; the war-room critique is the main gate, not measurement.
 
 ## Prerequisites
 
@@ -157,8 +161,10 @@ existing production logs / telemetry counters; no new services or secrets.
 - **Prime-liveness helper**: A pure predicate `_prime_pty_alive(entry, now)` returning True
   when the granite PTY is alive-and-advancing during prime — i.e. `last_pty_activity_at` is
   fresher than a liveness window — and False (kill-eligible) for SDK/non-granite sessions or
-  when the PTY has gone quiet/stale. Mirrors `_pty_quiescent_long_enough`'s branch discipline
-  (kill-switch first, then non-PTY escape, then staleness escape, then the alive case).
+  when the PTY has gone quiet/stale. It mirrors `_pty_quiescent_long_enough`'s **branch
+  *structure*** (kill-switch first, then non-PTY escape, then staleness escape, then the final
+  case) but its **return polarity is INVERTED** — see the bold polarity warning in Technical
+  Approach. Do NOT copy `_pty_quiescent_long_enough`'s return values verbatim.
 - **Gate at the never-started call-site**: Before `_apply_recovery_transition(...,
   reason_kind="no_progress")` at `:3111`, defer the kill when `_prime_pty_alive()` is True,
   incrementing a `…:never_started_pty_deferred` observability counter (mirroring the existing
@@ -170,9 +176,10 @@ existing production logs / telemetry counters; no new services or secrets.
 ### Flow
 
 Health tick (`_agent_session_health_check`, 30s loop) → running granite session in prime,
-`sdk_ever_output=False`, running 150s+ → `_never_started_past_grace()` True → **new gate**:
-`_prime_pty_alive()` → True (PTY repainting) ⇒ `continue` (defer, INCR deferred counter) /
-False (PTY quiet or non-granite) ⇒ existing `_apply_recovery_transition` recovery.
+`sdk_ever_output=False`, running 150s+ → `_never_started_past_grace()` True → **new gate**
+`if _prime_pty_alive(fresh_ns, now):` (no `not`) → True (PTY repainting, alive) ⇒ `continue`
+(defer, INCR deferred counter) / False (PTY quiet, stale loop, or non-granite ⇒ kill-eligible)
+⇒ existing `_apply_recovery_transition` recovery.
 
 ### Technical Approach
 
@@ -180,29 +187,54 @@ False (PTY quiet or non-granite) ⇒ existing `_apply_recovery_transition` recov
   The tool_timeout gate keys off `mid_run_quiescent_since`, which is only set by stage-1
   (`_eval_mid_run_pty_stage1`) for sessions that have produced output and have a tool in flight
   — it is None during prime. The signal that *is* live during prime is `last_pty_activity_at`
-  (`models/agent_session.py:392`), stamped by `bridge_adapter._on_pty_read` (`:771`) only when
+  (`models/agent_session.py:392`), stamped by `_on_pty_read` in
+  `agent/granite_container/bridge_adapter.py:771` only when
   the **normalized** PTY buffer changes (genuine repaint; #1768 normalization strips spinner/
   elapsed-counter frames so an animating-but-wedged TUI does NOT keep it fresh). This is exactly
   AC1's "transcript file growing / pty bytes flowing" signal, available before any transcript
   entry.
-- **Helper branch order (load-bearing, mirrors `_pty_quiescent_long_enough` `:425`):**
+- **⚠️ POLARITY WARNING (load-bearing — read before writing the helper):**
+  `_prime_pty_alive` and `_pty_quiescent_long_enough` have **OPPOSITE return polarity**. The
+  sibling `_pty_quiescent_long_enough` (`agent/session_health.py:390`) returns
+  **`True = wedge-eligible / OK-to-kill`, `False = alive / defer`** (see its docstring,
+  verified `:391`). `_prime_pty_alive` is named for the *positive* sense and returns the
+  **inverse: `True = alive / defer-the-kill`, `False = kill-eligible`**. The builder must
+  mirror the sibling's *branch ordering* (kill-switch → non-PTY → staleness → final case)
+  but **must NOT copy its return values** — every branch that returns `True` in the sibling
+  returns `False` in `_prime_pty_alive`, and vice-versa. A literal copy ships a gate that
+  **kills live sessions and protects dead ones.** This is the single highest-risk line in the
+  build; the paired alive-defers / dead-recovers unit test (Step 3) exists to catch a polarity
+  inversion immediately.
+- **Helper branch order (load-bearing; branch *structure* mirrors `_pty_quiescent_long_enough`
+  `:425`, return values are INVERTED per the polarity warning above):**
   1. Kill-switch escape FIRST: an env constant (`NEVER_STARTED_PTY_LIVENESS_SECS <= 0`) restores
-     age-only never-started kill for every session. Must be first so it is never silently
-     defeated by a None-field short-circuit.
+     age-only never-started kill for every session ⇒ return **False (kill-eligible)**. Must be
+     first so it is never silently defeated by a None-field short-circuit. (Sibling returns
+     `True` here; we return `False` because our polarity is inverted.)
   2. Non-PTY/SDK escape: `last_pty_read_loop_at is None` ⇒ no granite PTY read loop ⇒ return
-     False (kill-eligible) so the SDK path keeps its 150s never-started kill. (Omitting this
+     **False (kill-eligible)** so the SDK path keeps its 150s never-started kill. (Omitting this
      would let SDK sessions with a null activity field fall through and never be killed.)
   3. Staleness escape: `last_pty_read_loop_at` older than `HEARTBEAT_FRESHNESS_WINDOW` (90s) ⇒
-     the read loop itself has died ⇒ return False (kill-eligible). A dead read loop cannot stamp
-     `last_pty_activity_at`, so its staleness must not be mistaken for "quiet but alive."
-  4. Alive case: return `last_pty_activity_at` is fresher than the liveness window. The window
-     should be `HEARTBEAT_FRESHNESS_WINDOW` (90s) unless Step 1's measurement shows prime
-     repaint gaps legitimately exceed it (then justify a larger constant). This is the
-     "alive, defer the kill" case.
-- **Gate placement:** Insert the gate inside the D0 branch at `:3111`, after the fresh re-read
-  / re-confirm of `_never_started_past_grace(fresh_ns, now)` and BEFORE
-  `_apply_recovery_transition`. Re-evaluate `_prime_pty_alive(fresh_ns, now)` on the fresh row
-  (race-mitigation, matching the tool_timeout path's fresh-row re-check at `:3222`).
+     the read loop itself has died ⇒ return **False (kill-eligible)**. A dead read loop cannot
+     stamp `last_pty_activity_at`, so its staleness must not be mistaken for "quiet but alive."
+  4. Alive case: read `last_pty_activity_at`; **guard with `isinstance(last_activity, datetime)`
+     — if it is None or any non-datetime value, return False (kill-eligible) rather than
+     attempting arithmetic** (defends the "NEVER raises" contract against a malformed/half-saved
+     row). Otherwise tz-normalize it and return **True iff it is fresher than the liveness
+     window** (`(now - last_activity).total_seconds() <= NEVER_STARTED_PTY_LIVENESS_SECS`).
+     The window should be `HEARTBEAT_FRESHNESS_WINDOW` (90s) unless Step 1's advisory measurement
+     shows prime repaint gaps legitimately exceed it (then justify a larger constant). This is
+     the "alive, defer the kill" case (`True`).
+- **Gate placement (note the call-site direction — NO `not`):** Insert the gate inside the D0
+  branch at `:3111`, after the fresh re-read / re-confirm of
+  `_never_started_past_grace(fresh_ns, now)` and BEFORE `_apply_recovery_transition`. Because
+  `_prime_pty_alive` returns `True` for *alive* sessions, the defer is a **bare positive**:
+  `if _prime_pty_alive(fresh_ns, now): INCR …:never_started_pty_deferred; continue` — **no
+  `not`**. (Contrast the tool_timeout path, where the kill proceeds *when*
+  `_pty_quiescent_long_enough` returns `True`; the two call-sites read in opposite directions
+  precisely because the two helpers have opposite polarity.) Re-evaluate
+  `_prime_pty_alive(fresh_ns, now)` on the fresh row (race-mitigation, matching the tool_timeout
+  path's fresh-row re-check at `:3222`).
 - **Two-classification reconciliation (AC2):** The tool_timeout path already gates on PTY
   liveness via `_pty_quiescent_long_enough` (#1784). This plan does NOT touch that path; it adds
   the parallel gate to the never-started path so the same slow prime cannot fail under whichever
@@ -218,10 +250,18 @@ False (PTY quiet or non-granite) ⇒ existing `_apply_recovery_transition` recov
 
 ### Exception Handling Coverage
 - [ ] The new helper `_prime_pty_alive` must NEVER raise (mirrors `_never_started_past_grace`'s
-      "this predicate NEVER raises" contract). Wrap field reads defensively; on any unexpected
-      exception return False (kill-eligible — fail toward the existing safe behavior). Add a test
-      that passes a malformed entry (non-datetime fields) and asserts the helper returns False
-      without raising.
+      "this predicate NEVER raises" contract). The branch-4 `isinstance(last_activity, datetime)`
+      guard (Technical Approach) handles None / non-datetime `last_pty_activity_at` without
+      arithmetic; wrap the remaining field reads defensively and, on any unexpected exception,
+      return False (kill-eligible — fail toward the existing safe behavior). Add a test that
+      passes a malformed entry (`last_pty_activity_at` set to a string / int, then to None) and
+      asserts the helper returns False without raising.
+- [ ] **Polarity guard test (catches the inversion trap):** A single paired test asserting both
+      directions in one place — given an otherwise-identical priming granite row,
+      `_prime_pty_alive` returns **True** when `last_pty_activity_at` is fresh (alive ⇒ defer)
+      and **False** when it is stale/None (dead ⇒ recover). If a builder copies the sibling's
+      return values verbatim, BOTH assertions flip and this test fails loudly. This is the
+      dedicated guard the polarity warning calls for.
 - [ ] The deferred-counter INCR is best-effort (`try/except` with `logger.debug`), matching the
       `tool_timeouts:default_deferred` precedent at `:3185`. Test asserts a counter-INCR failure
       does not block the defer.
@@ -315,11 +355,13 @@ AND re-evaluate `_prime_pty_alive(fresh_ns, now)` on the same fresh row before t
 identical to the tool_timeout path's fresh-row liveness re-check at `:3222`.
 
 ### Race 2: Concurrent saves to the PTY fields from the tailer task
-**Location:** `bridge_adapter._on_pty_read` (`:776`) saves with `update_fields=[...]`.
+**Location:** `_on_pty_read` in `agent/granite_container/bridge_adapter.py:776` saves with
+`update_fields=[...]`.
 **Trigger:** The read-loop closure and the transcript tailer both `save()` the same row.
 **Data prerequisite:** Neither write should clobber the other's fields.
 **Mitigation:** Existing — both writers already use `update_fields=` to scope their writes
-(`:776`). The health monitor only reads these fields; it never writes them. No new write contention.
+(`agent/granite_container/bridge_adapter.py:776`). The health monitor only reads these fields;
+it never writes them. No new write contention.
 
 ## No-Gos (Out of Scope)
 
@@ -371,9 +413,13 @@ which existing tooling (dashboard, `valor-session telemetry`) already surfaces.
       the never-started path — proven by a regression test.
 - [ ] The same protection covers the `tool_timeout` path during prime (non-regression assertion
       in `test_session_health_tool_timeout.py`), so a slow prime cannot fail under either label.
-- [ ] First-transcript-entry (and first-`last_pty_activity_at`-stamp) latency for granite SDLC
-      prime is measured and recorded in this plan's Spike/measurement notes, with the chosen
-      liveness window justified against it.
+- [ ] The liveness window is set to a safe shipping default of `HEARTBEAT_FRESHNESS_WINDOW`
+      (90s) and is env-overridable via `NEVER_STARTED_PTY_LIVENESS_SECS`. **Measurement is
+      advisory, not a merge gate** (see Step 1): if prime-latency telemetry is available on a
+      bridge machine, record the first-`last_pty_activity_at`-stamp latency and repaint-gap
+      distribution in this plan's measurement notes and, *only if* the data shows prime repaint
+      gaps p99 > 90s, raise the default in a follow-up. The build ships on the 90s default + env
+      override regardless of whether measurement runs — it does NOT block the build.
 - [ ] A genuinely dead session (stale/absent PTY signals) IS still recovered within
       `HEARTBEAT_FRESHNESS_WINDOW` of the read loop dying — proven by a test.
 - [ ] SDK / non-granite never-started sessions are unaffected (still recovered past grace) —
@@ -387,119 +433,100 @@ which existing tooling (dashboard, `valor-session telemetry`) already surfaces.
 When this plan is executed, the lead agent orchestrates work using Task tools. The lead NEVER
 builds directly.
 
+This is a Small, single-file-pair change (one helper + one gate + tests). The orchestration is
+deliberately minimal — three sequential members, no parallel fan-out. The builder writes the
+gate AND its regression tests in one task (they share the same fixture file and a split adds
+hand-off overhead disproportionate to the scope). Measurement is an optional advisory side-task,
+not a team member on the critical path.
+
 ### Team Members
 
-- **Measurement (prime latency)**
-  - Name: prime-measurer
-  - Role: Measure granite SDLC prime first-output and first-PTY-activity latency from logs /
-    telemetry; recommend the liveness window.
-  - Agent Type: debugging-specialist
-  - Resume: true
-
-- **Builder (session-health gate)**
+- **Builder + Tests (session-health gate)**
   - Name: gate-builder
-  - Role: Implement `_prime_pty_alive`, the constant, and the gate at `:3111`.
+  - Role: Implement `_prime_pty_alive` (heeding the polarity warning), the constant, the gate at
+    `:3111`, AND the regression tests (Step 1).
   - Agent Type: builder
-  - Resume: true
-
-- **Test Engineer (regression tests)**
-  - Name: gate-tester
-  - Role: Add the alive/dead/SDK/kill-switch tests + the tool_timeout non-regression assertion.
-  - Agent Type: test-engineer
   - Resume: true
 
 - **Validator (session-health gate)**
   - Name: gate-validator
-  - Role: Verify all success criteria + Verification rows pass.
+  - Role: Verify all Success Criteria + Verification rows pass (Step 2). May opportunistically run
+    the advisory measurement if on a bridge machine.
   - Agent Type: validator
   - Resume: true
 
 - **Documentarian**
   - Name: gate-documentarian
-  - Role: Update `docs/features/pm-session-liveness.md` and cross-refs.
+  - Role: Update `docs/features/pm-session-liveness.md` and cross-refs (Step 3).
   - Agent Type: documentarian
   - Resume: true
 
 ### Available Agent Types
 
-(See repo defaults — debugging-specialist, builder, test-engineer, validator, documentarian.)
+(See repo defaults — builder, validator, documentarian; debugging-specialist for the optional
+advisory measurement only.)
 
 ## Step by Step Tasks
 
-### 1. Measure granite SDLC prime latency (gates the threshold)
-- **Task ID**: measure-prime-latency
-- **Depends On**: none
-- **Validates**: produces a written latency finding appended to this plan's "Spike Results"
-- **Assigned To**: prime-measurer
-- **Agent Type**: debugging-specialist
-- **Parallel**: false
-- Read recent granite SDLC sessions' logs and the `last_pty_activity_at` / `last_pty_read_loop_at`
-  / `started_at` / first `last_turn_at` timestamps (via `valor-session telemetry` / dashboard /
-  Redis counters `tier1_falloff:never_started_grace_exceeded`).
-- Measure: (a) time from `started_at` to first `last_pty_activity_at` stamp; (b) repaint gap
-  distribution during prime; (c) time from `started_at` to first transcript entry / first
-  `last_turn_at`.
-- Recommend `NEVER_STARTED_PTY_LIVENESS_SECS`: default to `HEARTBEAT_FRESHNESS_WINDOW` (90s)
-  unless repaint gaps p99 exceed it; if so recommend p99 + margin with the data.
-- Report whether a small grace bump is also needed (only if first `last_pty_activity_at` stamp
-  itself routinely exceeds 90s after `started_at`).
-
-### 2. Implement the prime-liveness gate
+### 1. Implement the prime-liveness gate (+ constant + tests)
 - **Task ID**: build-gate
-- **Depends On**: measure-prime-latency
-- **Validates**: tests/unit/test_never_started_recovery.py, tests/unit/test_session_stall_classifier.py
-- **Informed By**: measure-prime-latency (sets the liveness window)
+- **Depends On**: none
+- **Validates**: tests/unit/test_never_started_recovery.py, tests/unit/test_session_health_tool_timeout.py, tests/unit/test_session_stall_classifier.py
 - **Assigned To**: gate-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `NEVER_STARTED_PTY_LIVENESS_SECS` to `agent/session_stall_classifier.py` (env-overridable),
-  import into `session_health.py`.
+- Add `NEVER_STARTED_PTY_LIVENESS_SECS` to `agent/session_stall_classifier.py` (env-overridable,
+  **default `HEARTBEAT_FRESHNESS_WINDOW` = 90s** — no measurement dependency), import into
+  `session_health.py`.
 - Add pure helper `_prime_pty_alive(entry, now) -> bool` with the four-branch order (kill-switch
-  → non-PTY escape → staleness escape → fresh-activity), NEVER raises.
+  → non-PTY escape → staleness escape → fresh-activity-with-`isinstance(datetime)`-guard), NEVER
+  raises. **Heed the bold POLARITY WARNING in Technical Approach: `True = alive/defer`,
+  `False = kill-eligible` — the INVERSE of `_pty_quiescent_long_enough`. Do NOT copy the
+  sibling's return values.**
 - Gate the D0 never-started call-site (`:3111`): after the fresh re-read + re-confirm and before
   `_apply_recovery_transition`, `if _prime_pty_alive(fresh_ns, now): INCR
-  …:never_started_pty_deferred; continue`.
+  …:never_started_pty_deferred; continue` — **bare positive, NO `not`**.
+- Add the regression tests in the same task: `TestPrimePtyAlive` (alive ⇒ **True/defer**, non-PTY
+  `last_pty_read_loop_at=None` ⇒ False, stale read loop ⇒ False, quiet/None activity ⇒ False,
+  kill-switch `<=0` ⇒ False, malformed string/int activity ⇒ False/no-raise); the **paired
+  polarity-guard test** (fresh ⇒ True, stale ⇒ False on an identical row — catches a verbatim
+  copy of the sibling's polarity); the recovery-path test (D0 defers + INCRs when alive, recovers
+  when dead); the tool_timeout non-regression assertion (priming granite session with
+  `current_tool_name` set + fresh PTY is NOT killed); and the constant default + env-override test.
 
-### 3. Regression tests
-- **Task ID**: build-tests
-- **Depends On**: build-gate
-- **Validates**: tests/unit/test_never_started_recovery.py, tests/unit/test_session_health_tool_timeout.py, tests/unit/test_session_stall_classifier.py
-- **Assigned To**: gate-tester
-- **Agent Type**: test-engineer
-- **Parallel**: false
-- `TestPrimePtyAlive`: alive (fresh activity ⇒ True), non-PTY (`last_pty_read_loop_at=None` ⇒
-  False), stale read loop (⇒ False), quiet/None activity (⇒ False), kill-switch (`<=0` ⇒ False),
-  malformed fields (⇒ False, no raise).
-- Recovery-path test: D0 branch defers (INCR deferred counter, no transition) when alive;
-  recovers when dead.
-- tool_timeout non-regression: priming granite session with `current_tool_name` set + fresh PTY
-  is NOT killed.
-- Constant test: `NEVER_STARTED_PTY_LIVENESS_SECS` default + env override.
-
-### 4. Validation
+### 2. Validation
 - **Task ID**: validate-gate
-- **Depends On**: build-gate, build-tests
+- **Depends On**: build-gate
 - **Assigned To**: gate-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the Verification table commands; confirm all Success Criteria.
+- Run the Verification table commands (including the "no inverted polarity" call-site grep);
+  confirm every Success Criterion.
 
-### 5. Documentation
+### 3. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-gate
 - **Assigned To**: gate-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Update `docs/features/pm-session-liveness.md` (and granite cross-ref) per the Documentation
-  section. Record the measured latency + chosen window.
+  section: document the two parallel gates, the opposite polarity of the two helpers, and the 90s
+  default window.
 
-### 6. Final Validation
-- **Task ID**: validate-all
-- **Depends On**: validate-gate, document-feature
-- **Assigned To**: gate-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Run all Verification commands; verify every Success Criterion including docs.
+### Advisory (non-blocking, bridge-machine only): measure prime latency
+- **Task ID**: measure-prime-latency
+- **Depends On**: none — **does NOT block any build/validation step; ship without it**
+- **Assigned To**: gate-validator (opportunistic) or skip on a skills-only machine
+- **Agent Type**: debugging-specialist
+- **Parallel**: true (independent of the gate build)
+- **Advisory only.** This step cannot run on a skills-only machine (no granite/bridge, no prime
+  logs) and is **explicitly NOT a merge gate**. If run on a bridge machine with prime telemetry:
+  read recent granite SDLC sessions' `started_at` / first `last_pty_activity_at` stamp /
+  `last_pty_read_loop_at` timestamps (via `valor-session telemetry` / dashboard / Redis counters
+  `tier1_falloff:never_started_grace_exceeded`); measure the first-stamp latency and the
+  repaint-gap distribution during prime; record findings in the measurement notes below. **Only
+  if** repaint gaps p99 > 90s, file a follow-up to raise `NEVER_STARTED_PTY_LIVENESS_SECS` (env
+  override needs no code change). The shipped default is 90s and stands on its own.
 
 ## Verification
 
@@ -513,12 +540,27 @@ builds directly.
 | Constant defined | `grep -c "NEVER_STARTED_PTY_LIVENESS_SECS" agent/session_stall_classifier.py` | output > 0 |
 | No blanket grace bump (anti-criterion) | `git diff main -- agent/session_stall_classifier.py \| grep -E '^\+NEVER_STARTED_GRACE_SECS'` | match count == 0 |
 | New deferred counter present | `grep -c "never_started_pty_deferred" agent/session_health.py` | output > 0 |
+| Gate call-site is a bare positive (no inverted polarity) | `grep -n "if not _prime_pty_alive" agent/session_health.py` | no match (the defer must be `if _prime_pty_alive(...)`, NOT `if not …`) |
+
+## Measurement Notes (advisory — bridge-machine only)
+
+<!-- Optional, non-blocking. The gate ships on a 90s default regardless of whether this is filled.
+Populate ONLY if the advisory measurement (measure-prime-latency) runs on a bridge machine with
+prime telemetry. Record: time from started_at to first last_pty_activity_at stamp; repaint-gap
+distribution during prime; whether p99 > 90s (if so, file a follow-up to raise the env override). -->
+
+_Not yet measured — the gate ships on the `HEARTBEAT_FRESHNESS_WINDOW` (90s) default + env override._
 
 ## Critique Results
 
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | war-room | Polarity-inversion trap: `_prime_pty_alive` (True=alive) vs `_pty_quiescent_long_enough` (True=kill-eligible). "Mirror branch discipline" would ship an inverted gate killing live sessions. | Technical Approach ⚠️ POLARITY WARNING + inverted per-branch returns + `isinstance(datetime)` branch-4 guard; call-site fixed to `if _prime_pty_alive(...): continue` (no `not`); Verification grep for `if not _prime_pty_alive`; paired polarity-guard unit test. | Verified `agent/session_health.py:390-433`: sibling returns True=wedge-eligible. |
+| BLOCKER | war-room | Unsatisfiable measurement criterion: SC3 required measured latency; Step 2 `Depends On: measure-prime-latency` blocked the build on an unrunnable step (skills-only machine). | SC3 rewritten to ship on 90s default + env override (measurement advisory); Step 1 measurement degraded to non-blocking advisory side-task; dependency dropped from the build step. | Measurement Notes section added as optional placeholder. |
+| BLOCKER | war-room | Wrong file path: `bridge_adapter._on_pty_read` omitted the dir; file is `agent/granite_container/bridge_adapter.py`. | All references prefixed with `agent/granite_container/`. | Verified path exists; `_on_pty_read` at `:753`, stamp `:771`, save `:776`. |
+| CONCERN | war-room | Missing `isinstance(datetime)` guard on the alive branch of the helper. | Branch 4 now reads `last_pty_activity_at` behind `isinstance(last_activity, datetime)`, returning False on None/non-datetime before any arithmetic; malformed-field test extended to string/int. | — |
+| CONCERN | war-room | 6-step / 5-agent orchestration disproportionate for a focused one-helper gate. | Collapsed to 3 sequential members (builder+tests → validator → documentarian); measurement is an optional advisory side-task; test-engineer merged into builder. | Appetite/Interactions updated to 0 required PM check-ins. |
 
 ---
 
