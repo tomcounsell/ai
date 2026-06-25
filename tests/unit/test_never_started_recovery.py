@@ -357,3 +357,210 @@ class TestNeverStartedConstantsPresent:
 
         assert hasattr(sh, "MID_RUN_QUIESCENCE_SECS")
         assert sh.MID_RUN_QUIESCENCE_SECS >= 0
+
+
+class TestPrimePtyAlive:
+    """Tests for _prime_pty_alive (issue #1792 — D0 never-started PTY-liveness gate).
+
+    POLARITY: _prime_pty_alive returns True=alive/defer, False=kill-eligible.
+    This is the INVERSE of _pty_quiescent_long_enough (True=kill-eligible).
+    """
+
+    def test_alive_case_fresh_loop_and_fresh_activity(self):
+        """Fresh last_pty_read_loop_at + fresh last_pty_activity_at → True (alive, defer)."""
+        from agent.session_health import _prime_pty_alive
+
+        now = datetime.now(UTC)
+        session = _make_session(
+            last_pty_read_loop_at=now - timedelta(seconds=5),
+            last_pty_activity_at=now - timedelta(seconds=10),
+        )
+        assert _prime_pty_alive(session, now) is True
+
+    def test_non_pty_escape_no_read_loop(self):
+        """last_pty_read_loop_at=None → False (SDK session, no PTY deferral)."""
+        from agent.session_health import _prime_pty_alive
+
+        now = datetime.now(UTC)
+        session = _make_session(
+            last_pty_read_loop_at=None,
+            last_pty_activity_at=now - timedelta(seconds=5),
+        )
+        assert _prime_pty_alive(session, now) is False
+
+    def test_stale_read_loop_returns_false(self):
+        """last_pty_read_loop_at older than HEARTBEAT_FRESHNESS_WINDOW → False (dead loop)."""
+        from agent.session_health import HEARTBEAT_FRESHNESS_WINDOW, _prime_pty_alive
+
+        now = datetime.now(UTC)
+        session = _make_session(
+            last_pty_read_loop_at=now - timedelta(seconds=HEARTBEAT_FRESHNESS_WINDOW + 5),
+            last_pty_activity_at=now - timedelta(seconds=10),
+        )
+        assert _prime_pty_alive(session, now) is False
+
+    def test_none_activity_returns_false(self):
+        """last_pty_activity_at=None → False (no screen activity, can't prove alive)."""
+        from agent.session_health import _prime_pty_alive
+
+        now = datetime.now(UTC)
+        session = _make_session(
+            last_pty_read_loop_at=now - timedelta(seconds=5),
+            last_pty_activity_at=None,
+        )
+        assert _prime_pty_alive(session, now) is False
+
+    def test_kill_switch_zero_disables_deferral(self):
+        """NEVER_STARTED_PTY_LIVENESS_SECS=0 → False for all sessions (kill-switch)."""
+        import agent.session_stall_classifier as sc
+        from agent.session_health import _prime_pty_alive
+
+        now = datetime.now(UTC)
+        session = _make_session(
+            last_pty_read_loop_at=now - timedelta(seconds=5),
+            last_pty_activity_at=now - timedelta(seconds=5),
+        )
+        original = sc.NEVER_STARTED_PTY_LIVENESS_SECS
+        try:
+            sc.NEVER_STARTED_PTY_LIVENESS_SECS = 0
+            result = _prime_pty_alive(session, now)
+        finally:
+            sc.NEVER_STARTED_PTY_LIVENESS_SECS = original
+        assert result is False
+
+    def test_kill_switch_negative_disables_deferral(self):
+        """NEVER_STARTED_PTY_LIVENESS_SECS=-1 → False (kill-switch with negative value)."""
+        import agent.session_stall_classifier as sc
+        from agent.session_health import _prime_pty_alive
+
+        now = datetime.now(UTC)
+        session = _make_session(
+            last_pty_read_loop_at=now - timedelta(seconds=5),
+            last_pty_activity_at=now - timedelta(seconds=5),
+        )
+        original = sc.NEVER_STARTED_PTY_LIVENESS_SECS
+        try:
+            sc.NEVER_STARTED_PTY_LIVENESS_SECS = -1
+            result = _prime_pty_alive(session, now)
+        finally:
+            sc.NEVER_STARTED_PTY_LIVENESS_SECS = original
+        assert result is False
+
+    def test_malformed_activity_string_returns_false_no_exception(self):
+        """String instead of datetime for last_pty_activity_at → False, no exception raised."""
+        from agent.session_health import _prime_pty_alive
+
+        now = datetime.now(UTC)
+        session = _make_session(
+            last_pty_read_loop_at=now - timedelta(seconds=5),
+        )
+        session.last_pty_activity_at = "not-a-datetime"
+        result = _prime_pty_alive(session, now)
+        assert result is False
+
+    def test_malformed_activity_int_returns_false_no_exception(self):
+        """Int instead of datetime for last_pty_activity_at → False, no exception raised."""
+        from agent.session_health import _prime_pty_alive
+
+        now = datetime.now(UTC)
+        session = _make_session(
+            last_pty_read_loop_at=now - timedelta(seconds=5),
+        )
+        session.last_pty_activity_at = 12345
+        result = _prime_pty_alive(session, now)
+        assert result is False
+
+    def test_polarity_guard_fresh_activity_defers_stale_activity_kills(self):
+        """POLARITY GUARD: _prime_pty_alive is the INVERSE of _pty_quiescent_long_enough.
+
+        Given identical priming granite rows:
+        - Fresh last_pty_activity_at → _prime_pty_alive returns True (alive, defer).
+        - Stale last_pty_activity_at → _prime_pty_alive returns False (dead, recover).
+
+        If a builder copies _pty_quiescent_long_enough's return values verbatim,
+        BOTH assertions here fail loudly.
+        """
+        from agent.session_health import _prime_pty_alive
+        from agent.session_stall_classifier import NEVER_STARTED_PTY_LIVENESS_SECS
+
+        now = datetime.now(UTC)
+        fresh_loop = now - timedelta(seconds=5)
+
+        # Fresh activity (within NEVER_STARTED_PTY_LIVENESS_SECS) → must defer (True).
+        session_fresh = _make_session(
+            last_pty_read_loop_at=fresh_loop,
+            last_pty_activity_at=now - timedelta(seconds=NEVER_STARTED_PTY_LIVENESS_SECS - 10),
+        )
+        assert _prime_pty_alive(session_fresh, now) is True, (
+            "Fresh PTY activity must return True (alive — defer the kill). "
+            "If this is False, the polarity was copied verbatim from _pty_quiescent_long_enough."
+        )
+
+        # Stale activity (beyond NEVER_STARTED_PTY_LIVENESS_SECS) → must kill (False).
+        session_stale = _make_session(
+            last_pty_read_loop_at=fresh_loop,
+            last_pty_activity_at=now - timedelta(seconds=NEVER_STARTED_PTY_LIVENESS_SECS + 10),
+        )
+        assert _prime_pty_alive(session_stale, now) is False, (
+            "Stale PTY activity must return False (dead — proceed with kill). "
+            "If this is True, the polarity was copied verbatim from _pty_quiescent_long_enough."
+        )
+
+
+class TestPrimePtyAliveRecoveryPath:
+    """Integration tests for the D0 branch gate: fresh PTY defers, stale PTY recovers."""
+
+    def test_fresh_pty_defers_d0_kill(self):
+        """D0 branch: fresh PTY activity must NOT call _apply_recovery_transition."""
+
+        import agent.session_health as session_health
+        from agent.session_stall_classifier import (
+            NEVER_STARTED_CONFIRM_MARGIN_SECS,
+            NEVER_STARTED_GRACE_SECS,
+        )
+
+        now = datetime.now(UTC)
+        past_grace = now - timedelta(
+            seconds=NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS + 10
+        )
+
+        # Priming session: no SDK output, past grace, but fresh PTY.
+        session = _make_session(
+            created_at=past_grace,
+            last_tool_use_at=None,
+            last_turn_at=None,
+            last_pty_read_loop_at=now - timedelta(seconds=5),
+            last_pty_activity_at=now - timedelta(seconds=10),
+        )
+        session.last_tool_use_at = None
+        session.last_turn_at = None
+
+        # _prime_pty_alive with this session must return True (alive).
+        result = session_health._prime_pty_alive(session, now)
+        assert result is True, "Fixture must model a live priming session"
+
+    def test_stale_pty_proceeds_to_recover(self):
+        """D0 branch: a priming session with stale PTY activity is kill-eligible."""
+        import agent.session_health as session_health
+        from agent.session_stall_classifier import (
+            NEVER_STARTED_CONFIRM_MARGIN_SECS,
+            NEVER_STARTED_GRACE_SECS,
+            NEVER_STARTED_PTY_LIVENESS_SECS,
+        )
+
+        now = datetime.now(UTC)
+        past_grace = now - timedelta(
+            seconds=NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS + 10
+        )
+
+        # Priming session: no SDK output, past grace, stale PTY.
+        session = _make_session(
+            created_at=past_grace,
+            last_pty_read_loop_at=now - timedelta(seconds=5),
+            last_pty_activity_at=now - timedelta(seconds=NEVER_STARTED_PTY_LIVENESS_SECS + 20),
+        )
+        session.last_tool_use_at = None
+        session.last_turn_at = None
+
+        result = session_health._prime_pty_alive(session, now)
+        assert result is False, "Stale PTY session must be kill-eligible"

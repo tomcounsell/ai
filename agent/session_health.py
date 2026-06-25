@@ -464,6 +464,72 @@ def _pty_quiescent_long_enough(entry: "AgentSession", now: datetime) -> bool:
     return (now - quiescent_aware).total_seconds() >= MID_RUN_QUIESCENCE_SECS
 
 
+def _prime_pty_alive(entry: "AgentSession", now: datetime) -> bool:
+    """Return True if the PTY is alive during priming (defer D0 kill); False if kill-eligible.
+
+    **INVERTED POLARITY vs ``_pty_quiescent_long_enough``**: this helper returns
+    ``True = session is alive, defer the kill`` and ``False = kill-eligible``.
+    ``_pty_quiescent_long_enough`` is the exact opposite (True = proceed to kill).
+    Do NOT copy its return values verbatim — a literal copy kills live sessions.
+
+    This is the PTY-liveness gate for the D0 never-started kill path (issue #1792).
+    Granite SDLC sessions can be killed during priming because the inner ``claude``
+    TUI is still booting when the ``NEVER_STARTED_GRACE_SECS + CONFIRM_MARGIN`` window
+    expires. If the PTY read loop is alive and the screen has shown recent activity,
+    the session is still booting and the kill should be deferred.
+
+    Branch order is load-bearing — first matching branch wins:
+
+    1. **Kill-switch first** (before any field reads): ``NEVER_STARTED_PTY_LIVENESS_SECS <= 0``
+       → return ``False`` (kill-eligible — disables deferral for all sessions).
+       Must be first so the kill-switch is never defeated by None-field short-circuits below.
+
+    2. **Non-PTY escape**: ``last_pty_read_loop_at is None`` → return ``False``
+       (SDK/non-granite sessions have no PTY loop; age-only kill is preserved).
+
+    3. **Stale read loop**: ``last_pty_read_loop_at`` older than ``HEARTBEAT_FRESHNESS_WINDOW``
+       (90s) → return ``False`` (dead read loop cannot prove liveness).
+
+    4. **Alive case**: read ``last_pty_activity_at``; if None or not a datetime → ``False``;
+       otherwise tz-normalize and return ``True`` iff activity is within
+       ``NEVER_STARTED_PTY_LIVENESS_SECS``.
+
+    This helper NEVER raises — all unexpected exceptions return ``False`` (kill-eligible).
+    """
+    try:
+        # Branch 1: kill-switch — disable PTY deferral, revert to age-only kill.
+        from agent.session_stall_classifier import NEVER_STARTED_PTY_LIVENESS_SECS
+
+        if NEVER_STARTED_PTY_LIVENESS_SECS <= 0:
+            return False
+
+        # Branch 2: non-PTY (SDK) session — no granite PTY, age-only kill preserved.
+        last_pty_read_loop_at = getattr(entry, "last_pty_read_loop_at", None)
+        if last_pty_read_loop_at is None:
+            return False
+
+        # Branch 3: stale read loop — a dead read loop cannot prove liveness.
+        if isinstance(last_pty_read_loop_at, datetime):
+            loop_at_aware = (
+                last_pty_read_loop_at
+                if last_pty_read_loop_at.tzinfo
+                else last_pty_read_loop_at.replace(tzinfo=UTC)
+            )
+            if (now - loop_at_aware).total_seconds() > HEARTBEAT_FRESHNESS_WINDOW:
+                return False
+
+        # Branch 4: alive case — PTY has a fresh read loop; check screen activity.
+        last_activity = getattr(entry, "last_pty_activity_at", None)
+        if not isinstance(last_activity, datetime):
+            return False
+        activity_aware = (
+            last_activity if last_activity.tzinfo else last_activity.replace(tzinfo=UTC)
+        )
+        return (now - activity_aware).total_seconds() <= NEVER_STARTED_PTY_LIVENESS_SECS
+    except Exception:
+        return False
+
+
 # In-process cache for ``_is_memory_tight()`` (issue #1099 Mode 4). Tuple of
 # ``(checked_at_monotonic, result)``. The cache amortizes psutil syscalls when
 # many sessions enter the recovery branch within the same health-check tick.
@@ -3136,6 +3202,21 @@ async def _agent_session_tool_timeout_check() -> None:
                                 "increment failed: %s",
                                 _ns_ctr_err,
                             )
+                        # PTY-liveness gate (#1792): defer the D0 kill when the granite
+                        # PTY is demonstrably alive (screen activity within the window).
+                        # SDK/non-PTY sessions fall through (helper returns False).
+                        if _prime_pty_alive(fresh_ns, now):
+                            try:
+                                from popoto.redis_db import POPOTO_REDIS_DB as _R_PTY_DEFER
+
+                                _R_PTY_DEFER.incr(
+                                    f"{fresh_ns.project_key}:session-health:"
+                                    f"never_started_pty_deferred"
+                                )
+                            except Exception:
+                                logger.debug("Failed to incr never_started_pty_deferred counter")
+                            continue
+
                         handle_ns = _active_sessions.get(fresh_ns.agent_session_id)
                         await _apply_recovery_transition(
                             fresh_ns,
