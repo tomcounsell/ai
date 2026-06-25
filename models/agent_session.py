@@ -907,18 +907,34 @@ class AgentSession(Model):
         return await super().async_create(**kwargs)
 
     # Fields whose partial saves intentionally omit ``updated_at`` at high
-    # frequency (liveness heartbeats and PID bookkeeping). Omitting the stamp
-    # here is by-design — the dedicated heartbeat fields carry freshness — so a
-    # WARNING per write is pure log noise (2 lines per 60s heartbeat per
-    # session) that buries genuine warnings. We downgrade these to DEBUG; any
-    # other omission (e.g. ``status``) still warns.
+    # frequency (liveness heartbeats, PID bookkeeping, and the granite
+    # wedge-detector's cross-tick state). Omitting the stamp here is by-design —
+    # the dedicated heartbeat/freshness fields ARE the freshness signal, so
+    # advancing ``updated_at`` would be redundant — and a WARNING per write is
+    # pure log noise (several lines per heartbeat per session, far worse for
+    # granite-container sessions whose PTY read-loop and per-tool boundaries
+    # fire at >=1 Hz) that buries genuine warnings. We downgrade these to DEBUG;
+    # any other omission (e.g. ``status``) still warns. A combined partial save
+    # is only downgraded when EVERY field in it is on this allowlist.
     _UPDATED_AT_OMISSION_OK_FIELDS = frozenset(
         {
+            # SDK / worker liveness heartbeats and PID bookkeeping
             "last_heartbeat_at",
             "last_sdk_heartbeat_at",
             "last_stdout_at",
             "claude_pid",
             "harness_pid",
+            # Turn-boundary liveness (sdk_client result handler + granite on_turn)
+            "last_turn_at",
+            # Tool-boundary liveness (Pre/PostToolUse hooks, fires per tool call)
+            "current_tool_name",
+            "last_tool_use_at",
+            # Granite PTY read-loop liveness stamps (#1724; fire at >=1 Hz)
+            "last_pty_read_loop_at",
+            "last_pty_activity_at",
+            # Granite stage-1 wedge-detector cross-tick state (per health tick)
+            "mid_run_quiescent_since",
+            "mid_run_pty_snapshot",
         }
     )
 
