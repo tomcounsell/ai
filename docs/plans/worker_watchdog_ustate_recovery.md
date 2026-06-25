@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-25
 tracking: https://github.com/tomcounsell/ai/issues/1767
 last_comment_id: 
+revision_applied: true
 ---
 
 # Worker Watchdog: Deterministic Recovery of a U-State Hung Worker
@@ -115,8 +116,11 @@ confirms the split-of-concerns this plan assumes. `reflection_scheduler` line co
   precedent for the "heartbeat must not share fate with blocking work" element of this plan.
 - **#1311 / PR #1315**: *Worker watchdog active recovery via launchctl kickstart* — added the
   L1→L4 escalation ladder for the **missing-worker** path (`_handle_missing_worker`). This plan
-  extends the *stale-heartbeat* path (`recover()`) with an analogous verified ladder; reuses the
-  existing `_verify_worker_alive` poll-primitive pattern.
+  extends the *stale-heartbeat* path (`recover()`) with an analogous verified ladder. NOTE: that
+  path's `_verify_worker_alive` is a pgrep-style *liveness* check (is any worker running) and is
+  the **wrong** primitive for confirming a specific PID is dead. This plan introduces a by-PID
+  poll (`_poll_until_pid_gone`, modeled on #1537's `_confirm_subprocess_dead`) as the verify-dead
+  primitive for every kill rung.
 - **#1407 / closed**: *L2/L3 broken: launchctl load vs bootstrap mismatch* — established the
   `launchctl bootout`/`bootstrap` semantics this plan's `bootout` escalation step relies on.
 - **#1331 / closed**: *Watchdog kills healthy worker: pgrep case-sensitivity* — cautionary prior
@@ -142,11 +146,12 @@ The recovery path crosses three processes (watchdog, dying worker, fresh worker)
 1. **Entry point**: launchd fires `worker_watchdog.py` every 120s (`StartInterval`).
 2. **Detect**: `check()` stat()s `data/last_worker_connected`. If the heartbeat age exceeds the
    (tightened) threshold AND a worker PID is found → `status="stale"`.
-3. **Verified kill (new ladder)**: `recover()` sends SIGTERM→SIGKILL, then **polls
-   `os.kill(pid, 0)`** for a grace window. If the PID survives (true `U`-state), escalate:
-   `launchctl bootout` the job → if still alive, **close the worker's PTY master fds** (the only
-   thing that frees a blocked `os.read`) → re-verify → if still alive, write a CRITICAL Redis key
-   and alert.
+3. **Verified kill (new ladder)**: `recover()` sends SIGTERM→SIGKILL, confirming death after each
+   signal with a **by-PID poll** `_poll_until_pid_gone(pid)` (`os.kill(pid, 0)` until `ESRCH` or
+   timeout — NOT the pgrep-style `_verify_worker_alive`). If the PID survives (true `U`-state),
+   escalate: `launchctl bootout` the job → poll-gone → if still alive, attempt to **close the
+   worker's PTY master fds** (the only thing that frees a blocked `os.read`, per spike-1) →
+   poll-gone → if still alive, write a CRITICAL Redis key and alert.
 4. **launchd respawn**: once the worker actually exits, `KeepAlive=true` respawns it.
 5. **Post-restart sweep (new)**: the fresh worker's startup recovery enumerates the dead worker's
    `running` sessions, checks each `claude_pid` for liveness (`os.kill(pid, 0)`), flips
@@ -173,9 +178,12 @@ trusts an unverified kill against a process that ignores it.
 - **New dependencies**: none. Reuses `os.kill`, `launchctl`, `psutil` (already a dep), Redis via
   Popoto.
 - **Interface changes**: `recover()` gains a verified escalation ladder (internal refactor; same
-  call site). A new pure helper `_worker_pty_master_fds(pid)` discovers the wedged worker's PTY
-  master fds (via `psutil.Process(pid).open_files()` / `/dev/fd`). A new
-  `_sweep_dead_worker_sessions()` runs in worker startup recovery.
+  call site). A new helper `_poll_until_pid_gone(pid, timeout)` polls `os.kill(pid, 0)` until
+  `ESRCH` or timeout — the verify-dead primitive for every rung (distinct from the existing
+  pgrep-style `_verify_worker_alive`). A new pure helper `_worker_pty_master_fds(pid)` discovers the
+  wedged worker's PTY master fds (via `psutil.Process(pid).open_files()` / `/dev/fd`). A new
+  `_sweep_dead_worker_sessions()` runs in worker startup recovery (before
+  `_recover_interrupted_agent_sessions_startup`).
 - **Coupling**: the watchdog becomes aware of *which* fds to close — a deliberate, narrow coupling
   to the granite PTY mechanism, justified because closing the blocking fd is the only OS-level
   remedy for a U-state read. Documented as such.
@@ -214,33 +222,56 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/worker_watchdo
   own short loop (independent of the asyncio health loop), so saturation of the default thread
   pool by `container.run` can never delay it. After this, a stale heartbeat is an *unambiguous*
   "worker loop is wedged" signal — the precondition for tightening the threshold.
-- **Tightened detection threshold**: Lower `HEARTBEAT_THRESHOLD` from 600s toward ~180s. Safe
-  *only because* of the heartbeat-isolation element: the dedicated thread writes every ~30s, so a
-  180s age means ~6 missed writes — far beyond any legitimate stall of a thread that does nothing
-  but a file write. With `StartInterval=120s`, worst-case detection is ~180s + one tick ≈ 5 min;
-  add the verified-kill ladder and recovery completes within the issue's ~2-3 min *detection*
-  target plus a bounded kill grace.
-- **Verified-kill escalation ladder** in `recover()`:
-  - **W1**: SIGTERM → poll `os.kill(pid,0)` for a grace window.
-  - **W2**: SIGKILL → poll again. (Matches `_confirm_subprocess_dead` semantics from #1537.)
+- **Tightened detection threshold**: Lower `HEARTBEAT_THRESHOLD` from 600s toward ~180s. With
+  `StartInterval=120s`, worst-case detection is ~180s + one tick ≈ 5 min; add the verified-kill
+  ladder and recovery completes within the issue's ~2-3 min *detection* target plus a bounded kill
+  grace.
+  - **Implementation Note — ordering/independence:** the threshold change is a one-line constant
+    edit and is *technically independent* of heartbeat isolation — it can ship **before**, after,
+    or alongside it, and is NOT blocked on the heartbeat-isolation task. The two are sequenced by
+    *risk*, not by code dependency: shipping the tighter threshold while the heartbeat still shares
+    fate with the default thread pool re-introduces the false-positive risk #1331 warns about
+    (a saturated pool delays the heartbeat, the tighter threshold trips a healthy worker). The
+    recommended rollout is therefore: land heartbeat isolation first, then tighten the threshold —
+    but if heartbeat isolation slips, the threshold can be shipped at a conservative value
+    (~240-300s, see Open Question 1) that is safe even without isolation. The plan keeps both in
+    Task 1 for cohesion but the *threshold constant itself has no build-time dependency* on the
+    thread move.
+- **Verified-kill escalation ladder** in `recover()`. Every rung confirms the kill via a **by-PID
+  poll**, `_poll_until_pid_gone(pid, timeout)` — loop `os.kill(pid, 0)` until it raises `ESRCH`
+  (process gone) or the bounded timeout elapses. This is **not** `_verify_worker_alive`, which is a
+  pgrep-style *liveness* check (the wrong primitive: it answers "is a worker running?", not "is
+  *this* PID dead?"). The ladder is verified-dead at each rung:
+  - **W1**: SIGTERM → `_poll_until_pid_gone` for a grace window.
+  - **W2**: SIGKILL → `_poll_until_pid_gone` again. (Matches `_confirm_subprocess_dead` semantics
+    from #1537, which polls the specific PID for death.)
   - **W3** (still alive = true U-state): `launchctl bootout gui/<uid>/com.valor.worker` to detach
-    the job, then re-verify.
-  - **W4** (still alive): **close the worker's PTY master fds** to force the blocked `os.read()`
-    to return EOF — the only OS remedy for a U-state read. Gated by
-    `WORKER_WATCHDOG_PTY_CLOSE_DISABLED` kill-switch.
-  - **W5** (still alive after grace): write `worker:watchdog:critical:{host}` Redis key + log
-    CRITICAL (alert-only; matches the existing missing-worker L4).
+    the job, then `_poll_until_pid_gone`.
+  - **W4** (still alive): per spike-1's chosen mechanism, attempt to force the blocked `os.read()`
+    to return EOF (close the worker's PTY master fds if feasible) — the only OS remedy for a
+    U-state read — then `_poll_until_pid_gone`. Gated by `WORKER_WATCHDOG_PTY_CLOSE_DISABLED`
+    kill-switch. See the honest success-criterion note in Risk 2 and Success Criteria.
+  - **W5** (still alive after grace, confirmed via `_poll_until_pid_gone`): write
+    `worker:watchdog:critical:{host}` Redis key + log CRITICAL (alert-only; matches the existing
+    missing-worker L4).
 - **Post-restart session sweep** in worker startup recovery: for each `running` session belonging
   to the dead worker, if `claude_pid` is not alive, transition `running → killed` (via Popoto
-  `finalize_session`), then trigger `valor-catchup` so unanswered human messages re-enqueue. Idempotent
-  and gated on `claude_pid` liveness so a session a *live* new worker already picked up is never swept.
+  `finalize_session`), then trigger `valor-catchup` so unanswered human messages re-enqueue.
+  Idempotent and double-gated: (a) `claude_pid` liveness (`os.kill(pid, 0)`), and (b) the existing
+  `AGENT_SESSION_HEALTH_MIN_RUNNING` (300s) **recency guard** — a session whose `started_at` is
+  more recent than the guard window is skipped. The recency guard (NOT a compare-and-swap) is what
+  protects a session a *live* new worker already picked up: a freshly-repicked session has a recent
+  `started_at` and a live `claude_pid`, so both gates exclude it. This mirrors
+  `_recover_interrupted_agent_sessions_startup`, which uses the same recency guard rather than CAS.
 
 ### Flow
 
 launchd tick → `check()` reads isolated heartbeat → stale → `recover()` W1 SIGTERM → poll →
 W2 SIGKILL → poll → (U-state) W3 bootout → poll → W4 close-PTY-master-fds → poll → worker exits →
-launchd respawns worker → startup recovery sweeps dead-worker `running` sessions → flips dead-PID
-sessions to `killed` → triggers `valor-catchup` → unanswered messages re-enqueue → queue drains.
+launchd respawns worker → startup recovery runs `_sweep_dead_worker_sessions()` **first** (flips
+dead-PID `running` sessions to `killed`, triggers `valor-catchup`) → **then**
+`_recover_interrupted_agent_sessions_startup()` (pending-only re-queue) → unanswered messages
+re-enqueue → queue drains.
 
 ### Technical Approach
 
@@ -260,11 +291,25 @@ sessions to `killed` → triggers `valor-catchup` → unanswered messages re-enq
   custom signal handler that closes its own PTY fds, OR to `bootout`+`SIGKILL` and rely on kernel
   fd teardown when the process is finally reaped. **Spike-1 resolves which W4 mechanism is real
   before build commits to it.**
-- **Reconcile with #1789**: the sweep's "is this session genuinely dead" decision uses
-  `claude_pid` liveness (process-level), NOT the `mid_run_quiescent_since` PTY-liveness gate (that
-  gate decides whether to *kill a running tool inside a live worker* — a different question). A
-  session whose worker is dead is dead regardless of PTY paint state. Do not invoke
-  `_pty_quiescent_long_enough` in the sweep.
+- **Sweep ordering (critical)**: `_sweep_dead_worker_sessions()` MUST run **before**
+  `_recover_interrupted_agent_sessions_startup()` in the worker startup recovery sequence
+  (`worker/__main__.py:339-345`). Rationale: the existing startup recovery only re-queues
+  `status="running"` sessions and never triggers `valor-catchup`. If recovery ran first, it would
+  either re-queue dead-worker `running` sessions (resuming work whose subprocess is gone) or leave
+  them, and in neither case would catchup fire. The sweep must therefore flip dead-PID `running`
+  sessions to `killed` AND trigger catchup **first**, so by the time the pending-only recovery
+  runs, the dead sessions are already swept and their unanswered messages re-enqueued — no silently
+  dropped catchup. Order: `_sweep_dead_worker_sessions()` → `_recover_interrupted_agent_sessions_startup()`.
+- **Reconcile with #1789 / PR #1789 (#1784)**: keep the DEAD-worker vs LIVE-worker distinction
+  explicit. The sweep decides on sessions belonging to a **dead worker**, so its "is this session
+  genuinely dead" decision uses `claude_pid` liveness (process-level), NOT #1789's
+  `_pty_quiescent_long_enough` / `mid_run_quiescent_since` PTY-liveness gate. That gate exists to
+  decide whether to *kill a running tool inside a **live** worker* (the default-tier tool-timeout
+  question) — a fundamentally different situation. When the worker itself is dead, the session is
+  dead regardless of PTY paint/quiescence state, so the PTY-quiescence gate is both irrelevant and
+  wrong here. **Do not invoke `_pty_quiescent_long_enough` in the sweep.** The two liveness oracles
+  must stay separated: `_pty_quiescent_long_enough` for tool-kills under a live worker;
+  `claude_pid` + recency guard for sweeping a dead worker's sessions.
 - **Threshold + interval as env-tunable constants**: `HEARTBEAT_THRESHOLD` (default lowered),
   `WORKER_HEARTBEAT_INTERVAL`, `WORKER_WATCHDOG_PTY_CLOSE_DISABLED`.
 
@@ -336,17 +381,22 @@ saturation. Keep `HEARTBEAT_THRESHOLD` env-tunable and conservatively above the 
 
 ### Risk 2: W4 (closing PTY master fds) is not actually possible from the watchdog process
 **Impact:** The most-aggressive step is a no-op and a true U-state never frees.
-**Mitigation:** Spike-1 resolves the real W4 mechanism *before* build. If cross-process fd close is
-infeasible, W4 falls back to repeated `bootout` + `SIGKILL` and the CRITICAL alert fires sooner —
-the verified-kill + sweep + tightened-threshold elements still deliver the bulk of the fix.
-Kill-switch `WORKER_WATCHDOG_PTY_CLOSE_DISABLED` lets ops disable W4 independently.
+**Mitigation:** Spike-1 resolves the real W4 mechanism *before* build. The plan does **not** assert
+the watchdog can close another process's fd cross-process — that may be infeasible. W4's success
+criterion is honestly "process confirmed gone via `_poll_until_pid_gone`," not "fd closed." If
+cross-process fd close is infeasible, W4 falls back to repeated `bootout` + `SIGKILL` (relying on
+kernel fd teardown at reap) and the CRITICAL alert fires sooner — the verified-kill + sweep +
+tightened-threshold elements still deliver the bulk of the fix. Kill-switch
+`WORKER_WATCHDOG_PTY_CLOSE_DISABLED` lets ops disable W4 independently.
 
 ### Risk 3: Post-restart sweep races a live new worker that already picked up a session
 **Impact:** The sweep kills a session a healthy worker is actively running → double-drop.
 **Mitigation:** Gate every transition on `os.kill(claude_pid, 0)` liveness AND the existing
-`AGENT_SESSION_HEALTH_MIN_RUNNING` (300s) recency guard, and use CAS via
-`finalize_session(expected_status="running")` so a concurrent pickup loses the race safely (same
-pattern as `_recover_interrupted_agent_sessions_startup`).
+`AGENT_SESSION_HEALTH_MIN_RUNNING` (300s) **recency guard** — the same guard
+`_recover_interrupted_agent_sessions_startup` already relies on. A session a live worker just
+re-picked-up has a recent `started_at` and a live `claude_pid`, so both gates exclude it. This is a
+recency guard, **not** a compare-and-swap: the sweep does not depend on a `finalize_session`
+CAS/`expected_status` argument for correctness; the freshness gate is the real protection.
 
 ### Risk 4: Heartbeat thread and asyncio loop both writing Redis registered-PID key
 **Impact:** Redis connection contention or duplicate writes.
@@ -364,9 +414,11 @@ session and transitions it `pending → running` with a fresh `claude_pid`.
 reads it.
 **State prerequisite:** Only sessions whose `claude_pid` is dead AND whose `started_at` predates
 the recency guard may be swept.
-**Mitigation:** Liveness check (`os.kill(pid,0)`) + recency guard + CAS
-`finalize_session(expected_status="running")`. A session re-picked-up between read and transition
-fails CAS and is skipped.
+**Mitigation:** Liveness check (`os.kill(pid,0)`) + the `AGENT_SESSION_HEALTH_MIN_RUNNING` recency
+guard (the same guard `_recover_interrupted_agent_sessions_startup` uses). A session re-picked-up by
+a live worker has a recent `started_at` and a live `claude_pid`, so the recency + liveness gates
+skip it. This is a recency guard, **not** a compare-and-swap — correctness comes from the freshness
+gate, not from a `finalize_session(expected_status=...)` CAS.
 
 ### Race 2: Watchdog kill vs. worker exiting on its own during the grace poll
 **Location:** `recover()` verify-poll loop
@@ -412,10 +464,11 @@ tick. The thread is a daemon so it cannot outlive the process or block shutdown.
   (idempotent bootout+bootstrap) and restarts the worker, which starts the new heartbeat thread —
   no manual migration step. Document in the update skill notes that the watchdog logic changed so
   operators know to expect verified-kill log lines.
-- **Optional `/update` quiesce** (issue open question): a complementary mitigation would have
-  `scripts/update/run.py` await in-flight granite PTY sessions before `launchctl bootout` of the
-  worker (`scripts/update/run.py:1278-1310` currently bootout→bootstrap with no drain). Deferred to
-  an open question — the watchdog backstop makes it optional, not required.
+- **Optional `/update` quiesce** `[SEPARATE-SLUG TBD]` (issue open question): a complementary
+  mitigation would have `scripts/update/run.py` await in-flight granite PTY sessions before
+  `launchctl bootout` of the worker (`scripts/update/run.py:1278-1310` currently bootout→bootstrap
+  with no drain). This is a **separately-tracked** complementary mitigation, NOT part of this
+  slug — the watchdog backstop makes it optional, not required. Tracked under a TBD follow-up slug.
 
 ## Agent Integration
 
@@ -449,6 +502,12 @@ are swept.
 - [ ] A worker in `U`-state with a stale heartbeat is recovered without human intervention, with
       the kill **verified dead** (or escalated through the ladder) — proven by an integration test
       simulating a PID that survives SIGKILL until the fd-close/bootout rung.
+- [ ] **W4 honest success criterion:** spike-1 picks the real W4 mechanism. The W4 success
+      criterion is **"the process is confirmed gone via `_poll_until_pid_gone`"** — NOT "the PTY fd
+      was closed." If spike-1 finds cross-process fd-close is infeasible, W4 falls back to
+      `bootout` + repeated `SIGKILL` (relying on kernel fd teardown at reap) and the criterion is
+      still process-gone-by-poll. The plan does not assert the watchdog can close another process's
+      fd; it asserts the rung either frees the read or escalates to W5/CRITICAL.
 - [ ] Detection-to-recovery window reduced from ~10 min toward ~2-3 min detection, with the
       documented false-positive guard (heartbeat isolation + ≥6× interval threshold).
 - [ ] Worker heartbeat writes survive default-thread-pool / PTY saturation — proven by a test that
@@ -542,10 +601,16 @@ The lead agent orchestrates; it never builds directly.
 - **Informed By**: spike-pty-fd-close (W4 mechanism), #1537 `_confirm_subprocess_dead` pattern
 - **Assigned To**: watchdog-builder
 - **Agent Type**: builder
-- **Parallel**: true
-- Replace `recover()`'s unverified kill with W1→W5: SIGTERM→poll, SIGKILL→poll, bootout→poll,
-  PTY-fd-close (gated by `WORKER_WATCHDOG_PTY_CLOSE_DISABLED`)→poll, CRITICAL key+log.
+- **Parallel**: false (must wait for `spike-pty-fd-close` to settle the W4 mechanism — a task
+  consuming spike-1's result cannot run concurrently with it)
+- Replace `recover()`'s unverified kill with W1→W5, each rung verified-dead via a **by-PID poll**
+  (`_poll_until_pid_gone`: loop `os.kill(pid, 0)` until `ESRCH` or a bounded timeout — NOT
+  `_verify_worker_alive`, which is a pgrep-style liveness check, the wrong primitive for confirming
+  death): SIGTERM→poll-gone, SIGKILL→poll-gone, bootout→poll-gone, PTY-fd-close
+  (gated by `WORKER_WATCHDOG_PTY_CLOSE_DISABLED`)→poll-gone, CRITICAL key+log.
 - Add `_worker_pty_master_fds(pid)` per spike-1's chosen mechanism.
+- Add `_poll_until_pid_gone(pid, timeout)` (by-PID `os.kill(pid, 0)` poll) as the shared
+  verify-dead primitive used by every rung.
 
 ### 3. Post-restart session sweep
 - **Task ID**: build-session-sweep
@@ -555,8 +620,11 @@ The lead agent orchestrates; it never builds directly.
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `_sweep_dead_worker_sessions`: enumerate `running` sessions, `claude_pid`-liveness gate +
-  recency guard + CAS, transition dead-PID sessions `running → killed`, trigger `valor-catchup`.
-- Wire it into the worker startup recovery sequence (`worker/__main__.py:339-345` region).
+  `AGENT_SESSION_HEALTH_MIN_RUNNING` recency guard (NOT a CAS), transition dead-PID sessions
+  `running → killed`, trigger `valor-catchup`.
+- Wire it into the worker startup recovery sequence **before**
+  `_recover_interrupted_agent_sessions_startup` (see ordering note below) at the
+  `worker/__main__.py:339-345` region.
 
 ### 4. Process-safety review
 - **Task ID**: review-process-safety
@@ -590,7 +658,7 @@ The lead agent orchestrates; it never builds directly.
 | Tests pass | `pytest tests/unit/test_worker_watchdog.py tests/integration/test_watchdog_recovery.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check monitoring/ agent/ worker/` | exit code 0 |
 | Format clean | `python -m ruff format --check monitoring/ agent/ worker/` | exit code 0 |
-| Recover re-verifies kill | `grep -n "os.kill(.*, 0)" monitoring/worker_watchdog.py` | output > 1 |
+| Recover re-verifies kill (by-PID poll) | `grep -n "_poll_until_pid_gone\|os.kill(.*, 0)" monitoring/worker_watchdog.py` | output contains `_poll_until_pid_gone` |
 | Ladder escalation present | `grep -n "bootout" monitoring/worker_watchdog.py` | output contains bootout |
 | Heartbeat off event loop | `grep -n "Thread" worker/__main__.py` | output contains Thread |
 | Sweep triggers catchup | `grep -rn "agent_catchup\|valor-catchup" agent/session_health.py worker/__main__.py` | output contains catchup |
@@ -599,9 +667,17 @@ The lead agent orchestrates; it never builds directly.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) and the revision pass that resolves findings. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | critique | Task 2 declared both `Parallel: true` and `Depends On: spike-pty-fd-close` — a task consuming the spike's result cannot run in parallel with it. | Task 2 | Set `Parallel: false`; kept `Depends On: spike-pty-fd-close` with rationale. |
+| CONCERN | critique | Threshold tightening (600→~180s) framed as blocked on heartbeat isolation. | Solution Key Elements | Added ordering/independence note: threshold constant has no build-time dependency on the thread move; sequenced by risk, not code. Can ship at a conservative value if isolation slips. |
+| CONCERN | critique | Sweep "CAS protection" claim over-stated — actual guard is the `AGENT_SESSION_HEALTH_MIN_RUNNING` recency guard, not compare-and-swap. | Solution, Risk 3, Race 1, Task 3 | Replaced every CAS claim with the recency-guard description, matching `_recover_interrupted_agent_sessions_startup`. |
+| CONCERN | critique | Sweep ordering vs. existing startup recovery unspecified — can silently drop catchup. | Technical Approach, Flow, Data Flow, Task 3 | Specified `_sweep_dead_worker_sessions()` MUST run BEFORE `_recover_interrupted_agent_sessions_startup()`. |
+| CONCERN | critique | "Reuse `_verify_worker_alive`" is wrong for kill-verification (pgrep-style liveness). | Solution ladder, Prior Art, Architectural Impact, Data Flow, Task 2, Verification | Introduced by-PID poll `_poll_until_pid_gone` (`os.kill(pid,0)` until ESRCH/timeout) for every rung W1–W5. |
+| CONCERN | critique | W4 success criterion asserts cross-process PTY fd close, which the plan can't guarantee. | Success Criteria, Risk 2 | Made W4 honest: spike-1 picks the mechanism; criterion is "process confirmed gone via by-PID poll," fall back to bootout+SIGKILL if fd-close infeasible. |
+| NIT | critique | `/update` quiesce-in-flight-PTY-sessions trigger lacked a tracking marker. | Update System, Open Question 3 | Added `[SEPARATE-SLUG TBD]` marker — complementary mitigation tracked separately. |
+| CONCERN | critique | Reconcile liveness reasoning with PR #1789 (#1784) — sweep must not use the `_pty_quiescent_long_enough` gate (that gate is for tool-kills inside a LIVE worker). | Technical Approach (#1789 reconcile bullet) | Made DEAD-worker vs LIVE-worker distinction explicit; sweep uses `claude_pid` + recency guard, never `_pty_quiescent_long_enough`. |
 
 ---
 
@@ -614,7 +690,7 @@ The lead agent orchestrates; it never builds directly.
    mechanism: should W4 (the aggressive fd-close) run **automatically**, or should the ladder stop
    at W3 (bootout) + CRITICAL alert and leave the fd-close as an operator-confirmed step? The
    issue lists this as deliberately open.
-3. **`/update` quiesce.** Should `scripts/update/run.py` await in-flight granite PTY sessions
-   before restarting the worker (the incident trigger), as a complementary mitigation — or is the
-   watchdog backstop + sweep sufficient and quiesce a separate follow-up? Currently scoped as a
-   No-Go / open question, not built.
+3. **`/update` quiesce** `[SEPARATE-SLUG TBD]`. Should `scripts/update/run.py` await in-flight
+   granite PTY sessions before restarting the worker (the incident trigger), as a complementary
+   mitigation — or is the watchdog backstop + sweep sufficient and quiesce a separate follow-up?
+   Currently scoped **out of this slug** as a separately-tracked follow-up, not built here.
