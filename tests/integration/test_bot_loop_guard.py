@@ -95,3 +95,44 @@ def test_non_bot_sender_unaffected(registered_bot_map):
         )
         is True
     )
+
+
+def test_quarantined_id_is_not_suppressed(registered_bot_map):
+    """After quarantine (pop from BOT_ID_TO_PROJECT), the id is no longer suppressed.
+
+    This proves the dict-aliasing invariant: popping from the bridge's
+    BOT_ID_TO_PROJECT dict clears it from routing.BOT_ID_TO_PROJECT too (same
+    object), so find_project_for_bot returns None and should_respond_sync treats
+    the sender as a normal human.
+    """
+    bot_id = registered_bot_map
+
+    # Precondition: the id is currently registered and suppressed.
+    assert routing.find_project_for_bot(bot_id) is not None
+    assert (
+        routing.should_respond_sync(
+            text="hello",
+            is_dm=True,
+            project={"_key": "valor"},
+            sender_id=bot_id,
+        )
+        is False
+    )
+
+    # Simulate the quarantine: pop the id from the registry (as the bridge
+    # caller does after validate_bot_live_flags returns confirmed non-bot ids).
+    routing.BOT_ID_TO_PROJECT.pop(bot_id, None)
+
+    # After quarantine, the id is no longer registered.
+    assert routing.find_project_for_bot(bot_id) is None
+
+    # And the message is no longer suppressed — the sender is treated as human.
+    assert (
+        routing.should_respond_sync(
+            text="hello",
+            is_dm=True,
+            project=None,
+            sender_id=bot_id,
+        )
+        is True
+    )

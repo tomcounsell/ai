@@ -30,6 +30,9 @@ DM_USER_TO_PROJECT: dict[int, dict] = {}  # sender_id -> project config
 # the synchronous awaiter polls that history. This is the deterministic
 # loop-guard: a bot reply (which carries no reply_to) must never spawn a
 # session, or the bot↔bridge pair would loop forever.
+# This dict is overwritten at bridge startup by telegram_bridge.py (see line ~652).
+# The bridge's copy and this module's name point to the same object after startup —
+# a pop on the bridge's dict clears this name too. See validate_bot_live_flags quarantine wiring.
 BOT_ID_TO_PROJECT: dict[int, dict] = {}  # bot sender_id -> project config
 ALL_MONITORED_GROUPS = []
 ACTIVE_PROJECTS = []
