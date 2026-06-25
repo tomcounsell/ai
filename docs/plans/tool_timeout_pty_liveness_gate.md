@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-06-25
 tracking: https://github.com/tomcounsell/ai/issues/1784
 last_comment_id:
+revision_applied: true
 ---
 
 # Gate default-tier tool-wedge kill on PTY liveness
@@ -83,8 +84,10 @@ already computed one line above but never consulted.
 1. **Entry point:** `_agent_session_tool_timeout_check` tick (30s sub-loop) iterates every `running` `AgentSession`.
 2. **PTY liveness update:** `_eval_mid_run_pty_stage1(entry, now)` reads `last_pty_read_loop_at` / `last_pty_activity_at`, and sets/clears `entry.mid_run_quiescent_since` (the time the screen first went quiescent; cleared when paint resumes). Persisted via `save(update_fields=...)`.
 3. **Wedge decision:** `_check_tool_timeout(entry)` returns `(tier, reason)` if `current_tool_name` is set AND `last_tool_use_at` age > tier budget.
-4. **New gate (this fix):** for the **default** tier only, the wedge is suppressed unless the PTY has also been quiescent for `>= MID_RUN_QUIESCENCE_SECS`. Internal/mcp tiers keep the age-only predicate.
+4. **New gate (this fix):** for the **default** tier only, on a **granite PTY session** the wedge is suppressed unless the PTY has also been quiescent for `>= MID_RUN_QUIESCENCE_SECS`. **Non-PTY (SDK) sessions** — which never set `last_pty_read_loop_at` and so never accumulate `mid_run_quiescent_since` — are NOT gated; they keep the existing age-only default-tier kill. Internal/mcp tiers keep the age-only predicate on every session.
 5. **Recovery:** on a confirmed wedge, the existing race re-read + counter bump + `_apply_recovery_transition` (running -> pending) path runs unchanged.
+
+> **Critical:** the same `_agent_session_tool_timeout_check` loop processes BOTH granite PTY sessions and non-granite SDK sessions. `agent/hooks/liveness_writers.py` (the SDK path) writes `current_tool_name` / `last_tool_use_at` but **never** writes `last_pty_read_loop_at` or `mid_run_quiescent_since`. For those rows `_eval_mid_run_pty_stage1` ABSTAINs immediately (`last_pty_read_loop_at is None`, session_health.py:2626-2629), so `mid_run_quiescent_since` stays None forever. The liveness gate MUST therefore distinguish "no PTY at all" (SDK → age-only kill) from "PTY present and currently painting" (granite → alive, defer). Conflating the two would permanently disable the 300s default-tier kill for the entire SDK path — a real regression. The `last_pty_read_loop_at is None → return True` escape in the helper (Technical Approach) is what prevents that.
 
 ## Architectural Impact
 
@@ -116,20 +119,39 @@ constants it reads (`mid_run_quiescent_since`, `last_pty_activity_at`,
 
 ### Key Elements
 
-- **PTY-liveness gate on the default tier**: a default-tier tool is only declared wedged when it is BOTH overdue (`age > TOOL_TIMEOUT_DEFAULT_SEC`) AND the PTY has been quiescent for `>= MID_RUN_QUIESCENCE_SECS`. A screen still painting = alive = never killed.
-- **Unchanged internal/mcp tiers**: those tools never produce independent PTY paint signals the way a granite dev TUI does and keep the existing age-only predicate. Only the `default` branch gains the conjunct.
-- **Bounded-window guarantee for real hangs**: a genuinely wedged default tool (no paint) accumulates quiescence and is still recovered — worst case at `max(TOOL_TIMEOUT_DEFAULT_SEC, MID_RUN_QUIESCENCE_SECS)` plus one tick (both are ≤300s, so the bound is ≈300s + 30s).
+- **PTY-liveness gate on the default tier (granite PTY sessions only)**: on a granite PTY session, a default-tier tool is only declared wedged when it is BOTH overdue (`age > TOOL_TIMEOUT_DEFAULT_SEC`) AND the PTY has been quiescent for `>= MID_RUN_QUIESCENCE_SECS`. A screen still painting = alive = never killed.
+- **Non-PTY (SDK) sessions are NOT gated**: SDK / non-granite sessions have no PTY read loop (`last_pty_read_loop_at is None`) and never accumulate `mid_run_quiescent_since`. They keep the existing age-only default-tier kill — the gate must explicitly escape this case (`last_pty_read_loop_at is None → treat as wedge-eligible`) so the 300s ceiling still protects the SDK path.
+- **Unchanged internal/mcp tiers**: those tools keep the existing age-only predicate on every session. Only the `default` branch on a granite PTY session gains the conjunct.
+- **Bounded-window guarantee for real hangs**: a genuinely wedged default tool on a granite session (no paint) accumulates quiescence and is still recovered — worst case at `max(TOOL_TIMEOUT_DEFAULT_SEC, MID_RUN_QUIESCENCE_SECS)` plus one tick (both are ≤300s, so the bound is ≈300s + 30s). An SDK default tool is recovered at the age ceiling (≈300s + one tick) exactly as today.
+- **Decision on tuning constant (resolves Open Question 1):** the gate **reuses the existing `MID_RUN_QUIESCENCE_SECS` (180s)** constant rather than introducing a new `TOOL_TIMEOUT_DEFAULT_QUIESCENCE_SECS`. Rationale: the gate consumes the *same* `mid_run_quiescent_since` field that `_eval_mid_run_pty_stage1` maintains against that exact threshold, so a single source of truth keeps the "quiescent long enough" predicate identical between stage-1's CONFIRMED log and the kill gate. A second env var would let the two drift and silently re-introduce false kills. If future operational data shows they need to decouple, that is a follow-up tuning change, not part of this fix.
 
 ### Flow
 
-Tool in flight past 300s → check tier → if internal/mcp: kill on age (unchanged) → if default: is PTY quiescent ≥180s? → **yes** → wedged, recover → **no (still painting)** → alive, skip.
+Tool in flight past 300s → check tier → if internal/mcp: kill on age (unchanged) → if default:
+- **no PTY read loop** (`last_pty_read_loop_at is None`, i.e. SDK session) → kill on age (unchanged) →
+- **PTY present**: is `mid_run_quiescent_since` set AND ≥180s old? → **yes** → wedged, recover → **no (None / still painting)** → alive, skip.
 
 ### Technical Approach
 
 - **Where the gate lives:** add the conjunct in `_agent_session_tool_timeout_check` (the consumer at ~line 2849), NOT by adding hidden I/O inside the pure `_check_tool_timeout`. Concretely: keep `_check_tool_timeout` returning the age-based `(tier, reason)` as today, then in the consumer, when `tier == "default"`, evaluate a new helper `_pty_quiescent_long_enough(entry, now)` and `continue` (skip the kill) if it returns False.
-- **`_pty_quiescent_long_enough(entry, now) -> bool`:** a new pure helper that returns True when `mid_run_quiescent_since` is set AND `(now - mid_run_quiescent_since) >= MID_RUN_QUIESCENCE_SECS`. Returns False when `mid_run_quiescent_since` is None (screen is painting / freshly active — alive). This mirrors the exact predicate stage-1 already uses at line ~2713, so there is a single definition of "quiescent long enough."
+- **`_pty_quiescent_long_enough(entry, now) -> bool`:** a new pure helper whose return value means "**this default-tier tool is wedge-eligible (OK to kill)**." It returns True in any of three cases and False only for a live-painting PTY. **The branch order is load-bearing and MUST be implemented exactly as listed — the first matching branch wins:**
+
+  1. **Kill-switch escape (FIRST, before any field reads):** `if MID_RUN_QUIESCENCE_SECS <= 0: return True`. This restores age-only default-tier kill when an operator zeroes the constant. It must run before reading `last_pty_read_loop_at` / `mid_run_quiescent_since` so the escape hatch is never silently defeated by a None-field short-circuit below it.
+  2. **Non-PTY (SDK) escape:** `if last_pty_read_loop_at is None: return True`. A session with no PTY read loop is a non-granite SDK session — it never accumulates `mid_run_quiescent_since`, so the *only* liveness signal available is age. Returning True keeps the existing 300s default-tier kill for the entire SDK path. **Omitting this branch is the critique BLOCKER** — without it, every SDK default-tier tool would fall through to the `mid_run_quiescent_since is None → False` branch and never be killed.
+  3. **Painting / freshly-active PTY:** `if mid_run_quiescent_since is None: return False`. The PTY read loop exists (branch 2 didn't fire) but the screen is currently painting (stage-1 cleared `mid_run_quiescent_since`, or it was never quiescent). This is the "alive, defer the kill" case — the whole point of the fix.
+  4. **Quiescent long enough:** otherwise tz-normalize `mid_run_quiescent_since` and `return (now - it) >= MID_RUN_QUIESCENCE_SECS`. True once the granite PTY has been quiescent past the window (mirrors the exact predicate stage-1 uses at session_health.py:~2713, so there is a single definition of "quiescent long enough").
+
+  Summary truth table (default tier only):
+
+  | `MID_RUN_QUIESCENCE_SECS` | `last_pty_read_loop_at` | `mid_run_quiescent_since` | quiescent age | returns | meaning |
+  |---|---|---|---|---|---|
+  | `<= 0` | (any) | (any) | (any) | **True** | kill-switch → age-only kill |
+  | `> 0` | None | (any) | (any) | **True** | SDK session → age-only kill |
+  | `> 0` | set | None | — | **False** | granite, painting → alive, defer |
+  | `> 0` | set | set | `< window` | **False** | granite, quiescent but not long enough → defer |
+  | `> 0` | set | set | `>= window` | **True** | granite, quiescent long enough → wedged, recover |
 - **Why gate in the consumer, not the predicate:** `_check_tool_timeout` has a documented "pure function, no side effects, safe to call from any tick" contract and an established unit-test surface (10+ tests). Keeping its signature and return contract intact means internal/mcp tier tests and the race re-read logic (which calls `_check_tool_timeout` twice) need no churn. The default-tier liveness gate is layered on top at the one call site that decides recovery.
-- **Disable/escape hatch:** because the gate reuses `MID_RUN_QUIESCENCE_SECS`, setting it to 0 already short-circuits stage-1's quiescence accumulation (`mid_run_quiescent_since` is still set on first quiescent tick, but the `> 0` guard governs the CONFIRMED log). The new helper must treat `MID_RUN_QUIESCENCE_SECS <= 0` as "gate disabled → fall back to age-only kill" so operators retain a kill switch identical to today's behavior. This keeps the stopgap (raise `TOOL_TIMEOUT_DEFAULT_SEC`) and the new gate independently tunable.
+- **Disable/escape hatch:** `MID_RUN_QUIESCENCE_SECS <= 0` disables the gate entirely (helper branch 1 above), restoring age-only default-tier kill for *every* session — granite and SDK alike — identical to today's behavior. This is the kill switch. It must be the FIRST branch in the helper, before any field reads, so a None-field short-circuit can never silently defeat it. Operators retain two independent levers: raise `TOOL_TIMEOUT_DEFAULT_SEC` (the age ceiling) and/or zero `MID_RUN_QUIESCENCE_SECS` (the liveness gate).
 - **Re-read race parity:** the existing fresh re-read (`AgentSession.get_by_id`) before the transition must also re-evaluate the liveness gate on the fresh row — a tool that resumed painting between the iterator read and the transition must abort the recovery. Apply `_pty_quiescent_long_enough(fresh, now)` in the recheck block alongside the existing `recheck = _check_tool_timeout(fresh)`.
 
 ## Failure Path Test Strategy
@@ -139,16 +161,18 @@ Tool in flight past 300s → check tier → if internal/mcp: kill on age (unchan
 - [ ] The consumer's existing `except Exception` blocks (counter bump, Redis incr) are unchanged by this work — no new swallow points introduced. State: "No new exception handlers in scope; existing ones unchanged."
 
 ### Empty/Invalid Input Handling
-- [ ] `mid_run_quiescent_since = None` → helper returns False (tool treated as alive, NOT killed). Test.
+- [ ] `last_pty_read_loop_at = None` (SDK / non-granite session) → helper returns True (age-only kill preserved, tool IS killed at the 300s ceiling). **This is the critique-blocker regression test** — without the escape, SDK default tools would never be killed. Test.
+- [ ] `last_pty_read_loop_at` set BUT `mid_run_quiescent_since = None` (granite, painting) → helper returns False (tool treated as alive, NOT killed). Test.
 - [ ] Naive (`tzinfo`-less) `mid_run_quiescent_since` → normalized to UTC, no crash. Test (mirrors `test_check_tool_timeout_handles_naive_datetime`).
-- [ ] `MID_RUN_QUIESCENCE_SECS <= 0` → gate disabled, age-only kill restored. Test.
+- [ ] `MID_RUN_QUIESCENCE_SECS <= 0` → gate disabled (FIRST branch), age-only kill restored even when `last_pty_read_loop_at` and `mid_run_quiescent_since` are both set. Test that the kill-switch branch wins ahead of the field reads. Test.
 
 ### Error State Rendering
 - No user-visible output. The recovery transition emits the existing `(kind=tool_timeout)` log/reason; the reason string is extended to note the quiescence window so logs explain *why* a default-tier kill fired. Verify the reason string includes quiescence context.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_session_health_tool_timeout.py::test_subloop_recovers_wedged_session_default_tier` — UPDATE: the fixture must now also set `mid_run_quiescent_since` old enough to satisfy the gate, else the (correctly) live tool is no longer recovered. Assert recovery still fires when quiescent.
+- [ ] `tests/unit/test_session_health_tool_timeout.py::test_subloop_recovers_wedged_session_default_tier` — UPDATE: the fixture must now set BOTH `last_pty_read_loop_at` (so the row looks like a granite PTY session) AND `mid_run_quiescent_since` old enough to satisfy the gate, else the (correctly) live tool is no longer recovered. Assert recovery still fires when quiescent. **Note:** if the existing fixture leaves `last_pty_read_loop_at` unset, recovery would *also* still fire via the SDK escape branch — so add a sibling test that explicitly sets `last_pty_read_loop_at` and a recent (painting) `mid_run_quiescent_since=None` to prove the granite-painting case is NOT recovered.
+- [ ] `tests/unit/test_session_health_tool_timeout.py` — ADD: SDK default-tier session (`last_pty_read_loop_at=None`, `current_tool_name` set, overdue) IS recovered via the age-only escape. This is the regression guard for the critique blocker. REPLACE-or-ADD as a new test case.
 - [ ] `tests/unit/test_session_health_tool_timeout.py::test_check_tool_timeout_fires_over_default_budget` — KEEP as-is: `_check_tool_timeout` itself is unchanged (still age-only). This test continues to assert the predicate's age behavior. Add a sibling test for the new consumer-level gate rather than mutating this one.
 - [ ] `tests/unit/test_session_health_tool_timeout.py::test_subloop_internal_tier_classification` / `test_subloop_mcp_tier_classification` — VERIFY-UNCHANGED: internal/mcp tiers must still kill on age with no quiescence requirement. Add an explicit assertion that the gate does NOT apply to these tiers.
 - [ ] `tests/unit/test_session_health_tool_timeout.py::test_subloop_aborts_recovery_when_re_read_shows_fresh_state` — VERIFY-UNCHANGED: confirm the new liveness recheck does not break the existing fresh-state abort path.
@@ -166,9 +190,13 @@ Tool in flight past 300s → check tier → if internal/mcp: kill on age (unchan
 **Impact:** A tool stuck in a loop that repaints the screen (e.g., a spinner) never accumulates `MID_RUN_QUIESCENCE_SECS` of quiescence and is never recovered.
 **Mitigation:** Accepted and bounded. `mid_run_quiescent_since` is set on the first quiescent tick and only cleared on *new* paint; a true hang produces no new paint and trips within ~180s past the 300s budget. A spinner-style live-but-useless loop is a separate, rarer failure mode that the existing main health loop's no-progress / heartbeat checks still cover (turn-count / SDK heartbeat are independent signals). Documented as a known limit.
 
-### Risk 2: `mid_run_quiescent_since` is stale/ABSTAIN due to a dead PTY read loop
-**Impact:** If `last_pty_read_loop_at` is stale, stage-1 ABSTAINs and clears `mid_run_quiescent_since` to None — which under the new gate means "not quiescent → don't kill," potentially leaving a session that lost its read loop un-recovered by *this* path.
-**Mitigation:** A dead read loop is exactly what the main health loop's `last_pty_read_loop_at` / heartbeat freshness checks already catch and recover via the no_progress path. The tool-timeout path deferring in that case is correct (it lacks a trustworthy liveness signal), not a gap. Add a unit test asserting the gate returns False (defer) when `mid_run_quiescent_since` is None, and document that heartbeat staleness is owned by the main loop.
+### Risk 2: `mid_run_quiescent_since` is stale/ABSTAIN due to a dead PTY read loop (granite only)
+**Impact:** On a granite session whose `last_pty_read_loop_at` is set but has gone *stale*, stage-1 ABSTAINs and clears `mid_run_quiescent_since` to None — which under the new gate means "painting → don't kill" (branch 3), potentially leaving a granite session that lost its read loop un-recovered by *this* path. (Note: this is distinct from the SDK case, where `last_pty_read_loop_at` is `None` outright and branch 2 keeps the age-only kill.)
+**Mitigation:** A dead read loop is exactly what the main health loop's `last_pty_read_loop_at` / heartbeat freshness checks already catch and recover via the no_progress path. The tool-timeout path deferring in that case is correct (it lacks a trustworthy liveness signal for a *granite* session), not a gap. Add a unit test asserting the gate returns False (defer) when `last_pty_read_loop_at` is set but `mid_run_quiescent_since` is None, and document that granite heartbeat staleness is owned by the main loop.
+
+### Risk 3: A non-PTY default-tier tool slips the kill because the gate mistook it for "painting"
+**Impact:** If the helper's SDK escape (branch 2) were omitted or ordered after the `mid_run_quiescent_since is None → False` branch, every SDK default tool — which never sets `mid_run_quiescent_since` — would be treated as "painting" and never killed, permanently disabling the 300s ceiling for the entire non-granite path. This is the critique blocker.
+**Mitigation:** The helper checks `last_pty_read_loop_at is None → return True` (branch 2) *before* the `mid_run_quiescent_since is None → return False` branch. The branch order in the truth table is mandatory and is covered by the SDK-escape regression test in Test Impact / Success Criteria.
 
 ## Race Conditions
 
@@ -205,15 +233,16 @@ exposes no new tool, MCP server, or bridge entry point. The agent never invokes
 - [ ] If no such doc exists, add a short section to the nearest session-lifecycle / bridge-self-healing doc rather than creating a new file.
 
 ### Inline Documentation
-- [ ] Docstring on `_pty_quiescent_long_enough` stating the predicate, the None-means-alive semantics, and the `<= 0` disable behavior.
+- [ ] Docstring on `_pty_quiescent_long_enough` stating the four-branch predicate in order: the `<= 0` kill-switch, the `last_pty_read_loop_at is None` SDK escape (age-only), the `mid_run_quiescent_since is None` painting-means-alive case, and the quiescent-long-enough comparison. Call out that return True = "wedge-eligible / OK to kill."
 - [ ] Comment at the consumer gate explaining why the default tier requires quiescence while internal/mcp do not, referencing issue #1784.
 
 ## Success Criteria
 
-- [ ] A default-tier tool emitting PTY output past 300s (`mid_run_quiescent_since` None or recent) is NOT recovered/killed. (unit)
-- [ ] A default-tier tool overdue AND quiescent ≥ `MID_RUN_QUIESCENCE_SECS` IS recovered within ≈ one tick. (unit)
-- [ ] Internal (30s) and mcp (120s) tiers still kill on age alone, with no quiescence requirement. (unit)
-- [ ] `MID_RUN_QUIESCENCE_SECS <= 0` restores age-only default-tier kill (disable switch). (unit)
+- [ ] A granite default-tier tool emitting PTY output past 300s (`last_pty_read_loop_at` set, `mid_run_quiescent_since` None or recent) is NOT recovered/killed. (unit)
+- [ ] A granite default-tier tool overdue AND quiescent ≥ `MID_RUN_QUIESCENCE_SECS` IS recovered within ≈ one tick. (unit)
+- [ ] An **SDK / non-granite default-tier tool** (`last_pty_read_loop_at is None`) overdue past 300s IS recovered via the age-only escape — the gate does NOT disable the kill for the SDK path. (unit, **critique-blocker regression guard**)
+- [ ] Internal (30s) and mcp (120s) tiers still kill on age alone, with no quiescence requirement, on both granite and SDK sessions. (unit)
+- [ ] `MID_RUN_QUIESCENCE_SECS <= 0` restores age-only default-tier kill for both granite and SDK sessions (disable switch, first branch). (unit)
 - [ ] The fresh re-read race path aborts recovery when the tool resumed painting. (unit)
 - [ ] No regression to the `tool_timeout` recovery/requeue path or the wedge-field clearing (the #1762 / `15f01deb` family of tests still pass).
 - [ ] Tests pass (`/do-test`)
@@ -250,7 +279,11 @@ exposes no new tool, MCP server, or bridge entry point. The agent never invokes
 - **Assigned To**: gate-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add pure helper `_pty_quiescent_long_enough(entry, now) -> bool` near `_check_tool_timeout`: returns True iff `mid_run_quiescent_since` is set, tz-normalized, and `(now - it) >= MID_RUN_QUIESCENCE_SECS`; returns False when `mid_run_quiescent_since` is None; when `MID_RUN_QUIESCENCE_SECS <= 0` return True (gate disabled → age-only kill restored).
+- Add pure helper `_pty_quiescent_long_enough(entry, now) -> bool` near `_check_tool_timeout`, returning True = "wedge-eligible (OK to kill)". Implement the branches **in this exact order** (first match wins):
+  1. `if MID_RUN_QUIESCENCE_SECS <= 0: return True` — kill-switch escape, BEFORE any field reads (CONCERN: must be first or the disable hatch is silently defeated).
+  2. `if getattr(entry, "last_pty_read_loop_at", None) is None: return True` — non-PTY/SDK escape, age-only kill (BLOCKER fix; without this SDK default tools never die).
+  3. `if mid_run_quiescent_since is None: return False` — granite PTY present but painting → alive, defer.
+  4. else tz-normalize `mid_run_quiescent_since` and `return (now - it) >= MID_RUN_QUIESCENCE_SECS`.
 - In `_agent_session_tool_timeout_check`, after `tier, reason = check` and when `tier == "default"`, `continue` (skip kill) if `not _pty_quiescent_long_enough(entry, now)`.
 - In the fresh re-read block, after `recheck = _check_tool_timeout(fresh)`, also `continue` if `tier == "default"` and `not _pty_quiescent_long_enough(fresh, now)`.
 - Extend the default-tier reason string to note quiescence context (e.g. append `+ pty quiescent ≥ {MID_RUN_QUIESCENCE_SECS}s`).
@@ -263,12 +296,13 @@ exposes no new tool, MCP server, or bridge entry point. The agent never invokes
 - **Assigned To**: gate-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Add: live-but-slow default tool survives (`mid_run_quiescent_since` None/recent → not recovered).
-- Add: overdue + quiescent default tool recovered.
-- Add: `MID_RUN_QUIESCENCE_SECS <= 0` → age-only kill restored.
+- Add: granite live-but-slow default tool survives (`last_pty_read_loop_at` set, `mid_run_quiescent_since` None/recent → not recovered).
+- Add: granite overdue + quiescent default tool recovered.
+- Add: **SDK default tool (`last_pty_read_loop_at is None`) overdue → recovered via age-only escape** (critique-blocker regression guard).
+- Add: `MID_RUN_QUIESCENCE_SECS <= 0` → age-only kill restored even with `last_pty_read_loop_at` + `mid_run_quiescent_since` both set (kill-switch branch wins first).
 - Add: naive-datetime `mid_run_quiescent_since` handled without crash.
-- Update `test_subloop_recovers_wedged_session_default_tier` fixture to set quiescence so it still recovers.
-- Add explicit assertions that internal/mcp tiers ignore the gate.
+- Update `test_subloop_recovers_wedged_session_default_tier` fixture to set `last_pty_read_loop_at` + quiescence so it still recovers via the granite path.
+- Add explicit assertions that internal/mcp tiers ignore the gate (on both granite and SDK rows).
 
 ### 3. Validate
 - **Task ID**: validate-gate
@@ -318,7 +352,9 @@ exposes no new tool, MCP server, or bridge entry point. The agent never invokes
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. The fix reuses `MID_RUN_QUIESCENCE_SECS` (180s) as the default-tier liveness window. Is reusing the existing #1724 constant acceptable, or should the default-tier gate get its own independently-tunable env var (e.g. `TOOL_TIMEOUT_DEFAULT_QUIESCENCE_SECS`) to decouple it from the stage-1 detector's tuning?
-2. Should the documentation land in an existing session-health feature doc, or is there a preferred doc for the tool-timeout tier family that I should target?
+These were Open Questions in the prior draft; both are now decided so the plan is build-ready.
+
+1. **Tuning constant — RESOLVED: reuse `MID_RUN_QUIESCENCE_SECS` (180s).** The gate consumes the same `mid_run_quiescent_since` field that `_eval_mid_run_pty_stage1` maintains against this exact threshold; a single source of truth keeps the "quiescent long enough" predicate identical between stage-1's CONFIRMED log and the kill gate, and prevents drift that would silently re-introduce false kills. No new `TOOL_TIMEOUT_DEFAULT_QUIESCENCE_SECS` env var is added. Decoupling, if ever warranted by ops data, is a follow-up tuning change — out of scope here. (See Solution → Key Elements.)
+2. **Documentation target — RESOLVED:** the builder updates the nearest existing session-health / tool-timeout feature doc (the doc covering the #1270/#1724 tier + mid-run-wedge work) with the default-tier PTY-liveness gate, the SDK-escape behavior, and the `MID_RUN_QUIESCENCE_SECS` disable switch. Only if no such doc exists does it add a short section to the nearest session-lifecycle / bridge-self-healing doc rather than creating a new file. (See Documentation section.)
