@@ -130,7 +130,8 @@ The worker's startup sequence is deterministic:
 |------|----------|---------|
 | 1 | `AgentSession.rebuild_indexes()` | Repair stale/corrupt Redis index entries |
 | 2 | `cleanup_corrupted_agent_sessions()` | Remove malformed session records and reap cross-process orphan `claude`/MCP processes; phantom-filter guarded and calls `repair_indexes()` to clear orphan `$IndexF` members (issues #1069, #1271). Returns `{"corrupted": int, "orphans": int}`. Also prunes JSONL telemetry files under `logs/session_telemetry/` older than 14 days (see [Session Telemetry](session-telemetry.md)). |
-| 3 | `_recover_interrupted_agent_sessions_startup()` | Reset running sessions to pending (orphaned from prior process) |
+| 3a | `_sweep_dead_worker_sessions()` | Finalize `running` sessions whose `claude_pid` is dead (`os.kill(pid, 0)` raises `OSError`) to `killed`, then trigger `bridge.agent_catchup` so unanswered messages re-enqueue (issue #1767). **Must run before Step 3b** — once 3b resets all `running` sessions to `pending`, there are no `running` sessions left to inspect by PID. |
+| 3b | `_recover_interrupted_agent_sessions_startup()` | Reset remaining `running` sessions to `pending` (orphaned from prior process with a live or absent PID) |
 | 3.5 | `register_worker_pid()` | Write `worker:registered_pid:{hostname}:{pid}` (TTL 24h) so the cross-process reaper's skip-set excludes this worker (issue #1271 self-suicide guard) |
 | 4 | `_cleanup_orphaned_claude_processes()` | Backward-compat shim — delegates to `_reap_orphan_session_processes()`. The hourly `agent-session-cleanup` reflection now covers the same OS-table scan, so startup is no longer the only call site (issue #1271). |
 | 4.5 | `verify_harness_health()` | Verify CLI harness binary (`claude`) is available and healthy; fatal if missing (see [Harness Abstraction](harness-abstraction.md)) |
@@ -426,7 +427,10 @@ Worker restarts (SIGTERM, crash, or explicit `verify command exists or correct s
 
 ### Interrupted `running` sessions are re-queued on next startup
 
-When the worker process is killed mid-execution, the `asyncio.CancelledError` handler does **not** finalize the session. The session remains in `running` state in Redis. On the next worker startup, step 3 of the startup sequence (`_recover_interrupted_agent_sessions_startup()`) detects stale `running` sessions and transitions them back to `pending` so they are retried by the new worker.
+When the worker process is killed mid-execution, the `asyncio.CancelledError` handler does **not** finalize the session. The session remains in `running` state in Redis. On the next worker startup, two steps handle stale `running` sessions in order:
+
+1. **Step 3a — `_sweep_dead_worker_sessions()`** (issue #1767): checks `claude_pid` liveness via `os.kill(pid, 0)`. Sessions whose subprocess is provably dead are finalized to `killed` and `bridge.agent_catchup` is triggered so the user's unanswered message re-enqueues. This step must run first — otherwise Step 3b would reset all `running` sessions to `pending` before PID liveness can be checked.
+2. **Step 3b — `_recover_interrupted_agent_sessions_startup()`**: handles the remaining `running` sessions (those with a live PID or no PID yet) and transitions them back to `pending` so they are retried by the new worker.
 
 ### Local session recovery is `session_type`-aware (#1092)
 

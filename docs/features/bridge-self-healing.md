@@ -505,7 +505,7 @@ redis-cli GET worker:watchdog:critical:$(hostname)
 redis-cli GET worker:watchdog:pty_close_required:$(hostname)
 ```
 
-**Post-restart dead-worker session sweep (issue #1767):** When the worker restarts after a hung-worker incident, `_sweep_dead_worker_sessions()` in `agent/session_health.py` runs during startup recovery (Step 3b in `worker/__main__.py`, after `_recover_interrupted_agent_sessions_startup`). It:
+**Post-restart dead-worker session sweep (issue #1767):** When the worker restarts after a hung-worker incident, `_sweep_dead_worker_sessions()` in `agent/session_health.py` runs as **Step 3a** in `worker/__main__.py`, **before** `_recover_interrupted_agent_sessions_startup` (Step 3b). The ordering is critical: Step 3b transitions all remaining `running` sessions → `pending` without checking PID liveness; if the sweep ran after, there would be no `running` sessions left to inspect. The sweep handles the dead-worker subset (dead `claude_pid`) first, finalizing those sessions to `killed`; Step 3b then re-queues the remaining genuinely-interruptible sessions (alive PID or no PID yet). The sweep:
 
 1. Enumerates all sessions with `status="running"`.
 2. Skips sessions with no `claude_pid` (not yet assigned a subprocess).

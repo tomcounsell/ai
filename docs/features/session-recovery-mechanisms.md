@@ -12,11 +12,13 @@ The session system has 10 mechanisms that can revive, recover, or re-enqueue ses
 
 ### 1. Startup Recovery (`_recover_interrupted_agent_sessions_startup`)
 
+**Note**: As of issue #1767, a prerequisite sweep (`_sweep_dead_worker_sessions`, Step 3a) runs **before** this mechanism (Step 3b). The sweep first finalizes `running` sessions whose `claude_pid` is dead to `killed`; this mechanism then handles the remaining `running` sessions (live or no PID) by re-queuing them to `pending`.
+
 | Property | Value |
 |----------|-------|
 | Location | `agent/session_health.py` (re-exported from `agent/agent_session_queue.py`) |
-| Trigger | Worker process startup (`worker/__main__.py`) |
-| What it does | Resets stale `running` bridge sessions to `pending` (orphaned from previous process); for local CLI sessions, re-queues eng sessions but abandons teammate/granite sessions |
+| Trigger | Worker process startup (`worker/__main__.py`, Step 3b — after Step 3a dead-worker sweep) |
+| What it does | Resets stale `running` bridge sessions to `pending` (orphaned from previous process, with live or absent PID); for local CLI sessions, re-queues eng sessions but abandons teammate/granite sessions |
 | Terminal safety | **Safe by query scope** -- only queries `status="running"`, never touches terminal sessions |
 | Guard | Query filter (`status="running"`) + timing guard (`AGENT_SESSION_HEALTH_MIN_RUNNING`, 300s) + session_type-aware local session guard |
 | Timing guard | Sessions with `started_at` within the last 300s are skipped -- they were likely started by a worker in the current process, not orphaned from the previous one. Sessions with `started_at=None` are always recovered. Matches the same guard used by the periodic health check (mechanism 2). Added by issue #727 to fix a race where a worker picks up a session before startup recovery fires. |
@@ -153,7 +155,7 @@ The authoritative registry is `RECOVERY_OWNERSHIP` in `models/session_lifecycle.
 | Status | Owner | Recovery Mechanism |
 |--------|-------|--------------------|
 | `pending` | worker | `_agent_session_health_check` starts a worker for stalled pending sessions |
-| `running` | worker | `_agent_session_health_check` + `_recover_interrupted_agent_sessions_startup` reset to pending |
+| `running` | worker | `_agent_session_health_check` + `_sweep_dead_worker_sessions` (Step 3a startup, dead-PID → killed, issue #1767) + `_recover_interrupted_agent_sessions_startup` (Step 3b startup, live/no PID → pending) |
 | `waiting_for_children` | worker | `_agent_session_hierarchy_health_check` finalizes stuck parents |
 | `active` | bridge-watchdog | `monitoring/session_watchdog.py` `check_all_sessions` + `check_stalled_sessions` |
 | `dormant` | bridge-watchdog | `monitoring/session_watchdog.py` via `check_stalled_sessions` activity check |

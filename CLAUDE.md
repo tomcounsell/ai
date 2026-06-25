@@ -343,7 +343,7 @@ Telegram → Python Bridge (Telethon) → Enqueues AgentSession to Redis (I/O on
                                               → Registers output callbacks for delivery
 
 Standalone Worker (python -m worker) → Sole session execution engine
-              (worker/__main__.py)         → Startup: index rebuild → corrupted+orphan cleanup → recovery → register_worker_pid (self-suicide guard)
+              (worker/__main__.py)         → Startup: index rebuild → corrupted+orphan cleanup → dead-worker sweep (Step 3a, issue #1767) → recovery (Step 3b) → register_worker_pid (self-suicide guard)
                                            → Hourly `agent-session-cleanup` reflection: corrupted records + cross-process orphan reap (claude/MCP, PPID==1, heartbeat-gated; issue #1271)
                                            → Executes Eng session (AgentSession session_type=eng)
                                                → Eng session handles SDLC work via granite PTY container (interactive claude TUI, PTYPool-bounded)
