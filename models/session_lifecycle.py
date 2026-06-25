@@ -383,6 +383,33 @@ def finalize_session(
         except Exception as e:
             logger.debug(f"[lifecycle-cas] CAS re-read failed (non-fatal, proceeding): {e}")
 
+    # 0. Deferred self-draft chokepoint flush (telegram).
+    # A reply deferred for self-draft that is never redrafted must be delivered on
+    # EVERY terminal path. This is the single chokepoint that all terminal writes
+    # funnel through, so wiring the flush here covers completed, failed, abandoned,
+    # and any future terminal status by construction — replacing the fragile
+    # per-branch wiring in session_health.py.
+    #
+    # Placement invariant: this runs ONLY on a legitimate first-time terminal
+    # transition. It sits AFTER the idempotency early-return (already-terminal
+    # sessions returned above) AND AFTER the reject_from_terminal guard (illegal
+    # terminal->terminal re-transitions raised above), so a rejected re-transition
+    # never triggers a flush. The flush reads the FRESH authoritative session
+    # internally, so it is unaffected by the caller's possibly-stale extra_context.
+    #
+    # Synchronous by necessity: the completed path has no running event loop, so
+    # the async _deliver_deferred_self_draft_fallback cannot be awaited here.
+    # Exception-isolated: a flush failure (even an import error) must NEVER prevent
+    # the status write below — losing a reply is bad, but failing to finalize the
+    # session is worse. Lazy import avoids an import cycle (session_lifecycle is
+    # imported very early).
+    try:
+        from agent.session_health import flush_deferred_self_draft_sync
+
+        flush_deferred_self_draft_sync(session)
+    except Exception as e:
+        logger.warning(f"[lifecycle] Deferred self-draft flush failed (non-fatal): {e}")
+
     # 1. Lifecycle transition log
     try:
         session.log_lifecycle_transition(status, reason)
