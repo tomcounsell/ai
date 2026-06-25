@@ -368,25 +368,28 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"_heal_future_updated_at non-fatal: {e}")
 
-    # Step 3: Recover any sessions that were running when the previous process died
-    try:
-        recovered = _recover_interrupted_agent_sessions_startup()
-        if recovered:
-            logger.info(f"Recovered {recovered} interrupted session(s)")
-    except Exception as e:
-        logger.warning(f"Session recovery failed (non-fatal): {e}")
-
-    # Step 3b: Sweep running sessions whose claude_pid is dead (issue #1767).
-    # _recover_interrupted_agent_sessions_startup re-queues all running→pending,
-    # but doesn't check if the PID is actually alive. This sweep finds sessions
-    # that remained running with a dead PID (hung-worker orphans) and marks them
-    # killed so catchup can re-enqueue the unanswered human messages.
+    # Step 3a: Sweep running sessions whose claude_pid is dead (issue #1767).
+    # MUST run BEFORE _recover_interrupted_agent_sessions_startup (Step 3b) — that
+    # function transitions all running→pending without checking PID liveness. If the
+    # sweep runs after, there are no running sessions left to inspect.
+    # This sweep finds sessions orphaned from a dead/U-state worker (dead claude_pid)
+    # and marks them killed so catchup can re-enqueue the unanswered human messages.
+    # Contrast: Step 3b re-queues sessions that are genuinely interruptible (alive PID
+    # or no PID yet) — the sweep handles the dead-worker subset first.
     try:
         swept = _sweep_dead_worker_sessions()
         if swept:
             logger.info("Startup recovery: swept %d dead-worker running session(s) → killed", swept)
     except Exception as e:
         logger.warning(f"Dead-worker session sweep failed (non-fatal): {e}")
+
+    # Step 3b: Recover any sessions that were running when the previous process died
+    try:
+        recovered = _recover_interrupted_agent_sessions_startup()
+        if recovered:
+            logger.info(f"Recovered {recovered} interrupted session(s)")
+    except Exception as e:
+        logger.warning(f"Session recovery failed (non-fatal): {e}")
 
     # Step 4: Kill orphaned Claude Code CLI subprocesses from prior runs
     try:
