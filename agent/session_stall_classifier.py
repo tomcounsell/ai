@@ -211,6 +211,42 @@ def read_project_health_counters(project_key: str) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
+def _has_demonstrable_progress(session) -> bool:
+    """Return True if the session's own fields prove it has started and is working.
+
+    The ``never_started`` probe keys off telemetry ``turn_start`` events, but
+    granite PTY sessions emit their turns to a private transcript rather than
+    the telemetry timeline this classifier reads. A healthy granite session can
+    therefore show zero ``turn_start`` events while ``turn_count`` climbs and
+    tools fire — yielding a ``never_started`` false positive. This helper
+    consults the AgentSession's own progress fields as ground truth:
+
+      * ``turn_count > 0``           → the session has taken at least one turn.
+      * ``last_tool_use_at`` fresh   → a tool fired within the suspect window.
+      * ``last_pty_activity_at`` fresh → the PTY screen painted recently.
+
+    "Fresh" means within :data:`IDLE_SUSPECT_SECS`. Missing attributes count as
+    no-progress (``getattr`` defaults), so legacy/stub sessions are unaffected.
+    Fail-soft: any error returns False, falling through to the elapsed-grace
+    check rather than masking a genuine never-started session.
+    """
+    try:
+        from bridge.utc import to_unix_ts  # local import: mirror _classify
+
+        turn_count = getattr(session, "turn_count", None)
+        if isinstance(turn_count, int) and turn_count > 0:
+            return True
+
+        now = time.time()
+        for attr in ("last_tool_use_at", "last_pty_activity_at"):
+            ts = to_unix_ts(getattr(session, attr, None))
+            if ts is not None and (now - ts) < IDLE_SUSPECT_SECS:
+                return True
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("_has_demonstrable_progress swallowed exception: %r", exc)
+    return False
+
+
 def _classify(
     events: list[dict],
     *,
@@ -269,6 +305,25 @@ def _classify(
                         },
                     )
 
+            # ----------------------------------------------------------
+            # 1b. demonstrable-progress probe (never_started false-positive guard)
+            # ----------------------------------------------------------
+            # A granite PTY session emits turns to its private transcript, not
+            # this telemetry timeline — so "no turn_start event" does not imply
+            # "never started". Trust the session's own progress fields to avoid a
+            # false positive on a session that is demonstrably working. This runs
+            # AFTER the granite_wedged probe so a session that progressed
+            # (turn_count > 0) and then wedged is still caught as wedged, not
+            # masked as healthy here.
+            if _has_demonstrable_progress(session):
+                return StallVerdict(
+                    "healthy",
+                    "progress_fields_fresh",
+                    {
+                        "turn_count": getattr(session, "turn_count", None),
+                        "session_status": session_status,
+                    },
+                )
             # Session is in a probe status but has never emitted a turn_start.
             started_ref = getattr(session, "started_at", None) or getattr(
                 session, "created_at", None
@@ -276,13 +331,18 @@ def _classify(
             ts = to_unix_ts(started_ref)
             if ts is not None:
                 elapsed = time.time() - ts
-                if elapsed > NEVER_STARTED_GRACE_SECS:
+                # Grace + confirmation margin: the margin covers worst-case
+                # granite cold-start latency (container spin-up + TUI boot +
+                # priming) before we are willing to call a session stalled.
+                confirm_threshold = NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS
+                if elapsed > confirm_threshold:
                     return StallVerdict(
                         "stalled",
                         "never_started",
                         {
                             "elapsed_secs": elapsed,
                             "grace_secs": NEVER_STARTED_GRACE_SECS,
+                            "confirm_margin_secs": NEVER_STARTED_CONFIRM_MARGIN_SECS,
                             "session_status": session_status,
                         },
                     )
