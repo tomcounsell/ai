@@ -749,6 +749,21 @@ handles generic field addition per issues #1099/#1172).
   startup reads `data/granite_pty_pids.json` and PID-kills them. The kill is
   PID-targeted, so an operator's personal interactive `claude` session on
   another project is never touched.
+- **PTY-master U-state block (issue #1767)**: when the worker's main thread
+  is blocking inside `os.read()` on the PTY master fd (e.g. waiting for the
+  granite Dev PTY to produce output), the kernel places it in uninterruptible
+  sleep (U-state). In this state `SIGKILL` is queued but not delivered until
+  the blocking syscall returns — the process cannot be killed by signal alone.
+  The worker watchdog's W3 rung (`launchctl bootout gui/<uid>/com.valor.worker`)
+  is the external backstop: removing the launchd job causes the kernel to clean
+  the process's fd table on exit, which makes the PTY-master `read()` return
+  EOF and unblocks the syscall so the process can exit and launchd can respawn.
+  Cross-process PTY fd close is not feasible on macOS (`os.close` only owns
+  the calling process's fds; `/proc` is Linux-only; `psutil.open_files` does
+  not surface PTY devices), so W3 bootout is the highest-leverage automated
+  action. If W3 does not free the process within 10 s, the watchdog escalates
+  to W4/W5 CRITICAL alerts requiring operator intervention. See
+  [Bridge Self-Healing §18](bridge-self-healing.md) for the full W1→W5 ladder.
 
 ## Dev relay and `BuilderHarness`
 

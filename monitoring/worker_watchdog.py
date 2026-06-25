@@ -7,9 +7,18 @@ from a missing worker (process gone, launchd KeepAlive failed to restart).
 
 Two recovery paths:
 
-1. Stale-heartbeat recovery (existing): when the worker process is alive but
-   `data/last_worker_connected` is older than HEARTBEAT_THRESHOLD, kill it so
-   launchd respawns it cleanly via KeepAlive.
+1. Stale-heartbeat recovery (issue #1767): when the worker process is alive but
+   `data/last_worker_connected` is older than HEARTBEAT_THRESHOLD, escalate via
+   a verified-kill ladder:
+     W1: SIGTERM → poll 5s
+     W2: SIGKILL → poll 10s  (queued against U-state; may not deliver immediately)
+     W3: launchctl bootout → poll 10s  (removes launchd job; cleans fd table on exit)
+     W4: Write CRITICAL Redis key + pty_close_required hint for operator
+     W5: Final alert — stop; launchd will respawn once U-state frees
+
+   Cross-process PTY fd close is NOT feasible on macOS (os.close only owns own fds,
+   /proc is Linux-only, psutil.open_files does not surface PTY devices).
+   Cite: spike result, issue #1767.
 
 2. Missing-worker active recovery (new, issue #1311): when the worker process
    is gone for >2 consecutive ticks, escalate via:
@@ -61,7 +70,11 @@ PROJECT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
 HEARTBEAT_FILE = PROJECT_DIR / "data" / "last_worker_connected"
-HEARTBEAT_THRESHOLD = 600  # 10 min — 2× health-loop interval (300s) with buffer
+# 180s = 6× the 30s heartbeat write interval (plan: ≥6× guard).
+# Safe to tighten because the heartbeat is now on its own thread (issue #1767)
+# and cannot be starved by PTY/thread-pool saturation. Env-tunable for
+# conservative rollout (e.g. HEARTBEAT_THRESHOLD=300 on initial deploy).
+HEARTBEAT_THRESHOLD = int(os.environ.get("HEARTBEAT_THRESHOLD", "180"))
 LOG_FILE = PROJECT_DIR / "logs" / "worker_watchdog.log"
 
 # launchd service label (mirrors scripts/install_worker.sh)
@@ -181,29 +194,120 @@ def check() -> dict:
     }
 
 
+def _poll_pid_dead(pid: int, timeout_sec: float, interval: float = 0.5) -> bool:
+    """Poll until PID is gone or timeout expires. Returns True if dead.
+
+    Uses os.kill(pid, 0) to probe liveness. A ProcessLookupError or
+    PermissionError both indicate the process is gone (or unmonitorable),
+    so either counts as dead for recovery purposes.
+    """
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return True
+        time.sleep(interval)
+    # One final check after the deadline
+    try:
+        os.kill(pid, 0)
+        return False
+    except (ProcessLookupError, PermissionError):
+        return True
+
+
 def recover(status: dict) -> None:
-    """Kill a stale worker so launchd restarts it."""
-    pid = status["pid"]
+    """Verified-kill escalation ladder for a stale-heartbeat worker (issue #1767).
+
+    W1: SIGTERM → poll 5s
+    W2: SIGKILL → poll 10s  (queued against U-state; may not deliver immediately)
+    W3: launchctl bootout → poll 10s  (removes launchd job; cleans fd table on exit)
+    W4: Write CRITICAL Redis key; set pty_close_required hint for operator
+    W5: Final structured alert — stop; launchd will respawn once U-state frees
+
+    Guard: PID-reuse window (~5 min on macOS). Each rung re-checks
+    os.kill(pid, 0) immediately before acting to avoid acting on a recycled PID.
+    Cross-process PTY fd close is NOT feasible on macOS (os.close only owns own fds,
+    /proc is Linux-only, psutil.open_files does not surface PTY devices).
+    Cite: spike result, issue #1767.
+
+    Note: against a genuine U-state process, SIGKILL is queued until the blocking
+    syscall (os.read on PTY master) returns. W3 (bootout) removes the launchd job;
+    once the kernel cleans up the process's fd table on exit, the PTY read returns
+    EOF and the process can exit naturally, allowing launchd to respawn.
+    """
+    pid = status.get("pid")
+    if not pid:
+        logger.error("recover(): no PID in status — cannot kill")
+        return
+
+    host = socket.gethostname()
     logger.warning(
-        "Worker hung (PID %s, heartbeat %ss old) — killing so launchd restarts",
+        "Worker hung (PID %d, heartbeat %ss old) — starting verified-kill escalation ladder",
         pid,
-        f"{status['heartbeat_age']:.0f}",
+        f"{status.get('heartbeat_age', 0):.0f}",
     )
+
+    # W1: SIGTERM → poll 5s
+    logger.info("Watchdog W1: sending SIGTERM to worker PID %d", pid)
     try:
         os.kill(pid, signal.SIGTERM)
-        time.sleep(3)
-        # If still alive after SIGTERM, force kill
-        try:
-            os.kill(pid, 0)  # check if alive
-            os.kill(pid, signal.SIGKILL)
-            logger.warning("Worker did not exit after SIGTERM — sent SIGKILL")
-        except ProcessLookupError:
-            pass  # Already gone
-        logger.info("Worker killed — launchd will restart within ThrottleInterval")
-    except ProcessLookupError:
-        logger.info("Worker PID %s already gone", pid)
-    except Exception as e:
-        logger.error("Failed to kill worker PID %s: %s", pid, e)
+    except (ProcessLookupError, PermissionError):
+        logger.info("Watchdog W1: PID %d already gone — recovery complete", pid)
+        return
+    if _poll_pid_dead(pid, timeout_sec=5.0):
+        logger.info("Watchdog W1: worker PID %d exited after SIGTERM", pid)
+        return
+
+    # W2: SIGKILL → poll 10s
+    logger.warning(
+        "Watchdog W2: PID %d survived SIGTERM — sending SIGKILL (may queue in U-state)", pid
+    )
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        logger.info("Watchdog W2: PID %d gone — recovery complete", pid)
+        return
+    if _poll_pid_dead(pid, timeout_sec=10.0):
+        logger.info("Watchdog W2: worker PID %d exited after SIGKILL", pid)
+        return
+
+    # W3: launchctl bootout → poll 10s
+    logger.warning("Watchdog W3: PID %d survived SIGKILL — attempting launchctl bootout", pid)
+    try:
+        _bootout_worker()
+    except Exception as exc:
+        logger.warning("Watchdog W3: bootout raised %s — continuing", exc)
+    if _poll_pid_dead(pid, timeout_sec=10.0):
+        logger.info("Watchdog W3: worker PID %d exited after bootout", pid)
+        return
+
+    # W4: CRITICAL alert + operator hint
+    pty_close_disabled = os.environ.get("WORKER_WATCHDOG_PTY_CLOSE_DISABLED", "").strip()
+    logger.critical(
+        "Watchdog W4: worker PID %d is STILL ALIVE after SIGTERM+SIGKILL+bootout — "
+        "process is in U-state (uninterruptible sleep). Cross-process PTY fd close "
+        "is not feasible on macOS. Operator intervention required: manually kill the "
+        "PTY master fds or reboot the machine. Redis CRITICAL key written.",
+        pid,
+    )
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        _R.set(f"worker:watchdog:critical:{host}", f"U-state hung PID {pid}", ex=CRITICAL_KEY_TTL)
+        if not pty_close_disabled:
+            _R.set(f"worker:watchdog:pty_close_required:{host}", str(pid), ex=CRITICAL_KEY_TTL)
+        logger.info("Watchdog W4: wrote critical Redis keys for host %s", host)
+    except Exception as exc:
+        logger.error("Watchdog W4: failed to write critical Redis keys: %s", exc)
+
+    # W5: Final log — launchd will respawn once U-state frees
+    logger.critical(
+        "Watchdog W5: no further automated action. launchd will restart the worker "
+        "once PID %d exits (U-state will free when the blocking syscall returns). "
+        "Session sweep will run at next startup.",
+        pid,
+    )
 
 
 # --- Active-recovery helpers (issue #1311) -------------------------------
@@ -212,6 +316,39 @@ def recover(status: dict) -> None:
 def _service_target() -> str:
     """Return the launchctl service target string for the worker."""
     return f"gui/{os.getuid()}/{WORKER_LAUNCHD_LABEL}"
+
+
+def _bootout_worker() -> bool:
+    """Run `launchctl bootout gui/<uid>/<label>` to evict the worker job.
+
+    Used by W3 recovery (issue #1767) — removes the launchd job entry so the
+    kernel cleans up the process's fd table on exit, allowing a PTY master
+    read() blocking in U-state to return EOF and the process to exit.
+    Returns True on returncode 0.
+    """
+    target = _service_target()
+    try:
+        result = subprocess.run(
+            ["launchctl", "bootout", target],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            logger.info("launchctl bootout succeeded for %s", target)
+            return True
+        logger.warning(
+            "launchctl bootout failed (rc=%s, stderr=%s)",
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return False
+    except subprocess.TimeoutExpired:
+        logger.warning("launchctl bootout timed out for %s", target)
+        return False
+    except Exception as e:
+        logger.warning("launchctl bootout raised: %s", e)
+        return False
 
 
 def _down_ticks_key() -> str:
@@ -531,7 +668,7 @@ def main() -> None:
         logger.info("Worker starting (no heartbeat yet) — skipping")
         return
 
-    # status == "stale" — preserve existing recover() behavior.
+    # status == "stale" — verified-kill escalation ladder (issue #1767).
     logger.warning(status["message"])
     recover(status)
 
